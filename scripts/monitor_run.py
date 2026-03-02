@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
+import shlex
 import pandas as pd
 from monitor_core import (
     fetch_binance_klines, resample_ohlcv, add_indicators,
@@ -67,6 +68,13 @@ def run_btc_trendpullback(stage: str, cfg: dict):
     save_state(cfg['state_file'], state)
 
 
+def run_shioaji_legacy_adapter(stage: str, cfg: dict):
+    script = cfg['setup_script'] if stage == 'setup' else cfg['trigger_script']
+    env_file = cfg['env_file']
+    cmd = f"source {shlex.quote(env_file)} && /home/jasonpan_subscribe/.openclaw/workspace/.venv/bin/python {shlex.quote(script)}"
+    subprocess.run(['bash', '-lc', cmd], check=False)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--profile', required=True)
@@ -76,6 +84,8 @@ def main():
     cfg = json.loads(Path(args.profile).read_text(encoding='utf-8'))
     if cfg['kind'] == 'binance_trendpullback':
         run_btc_trendpullback(args.stage, cfg)
+    elif cfg['kind'] == 'shioaji_mxf_legacy_adapter':
+        run_shioaji_legacy_adapter(args.stage, cfg)
     else:
         raise SystemExit(f"unsupported kind: {cfg['kind']}")
 

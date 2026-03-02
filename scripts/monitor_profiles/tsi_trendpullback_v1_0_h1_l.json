@@ -1,0 +1,11 @@
+{
+  "kind": "shioaji_mxf_legacy_adapter",
+  "strategy": "TrendPullback_v1.0-H1-L-TSI",
+  "env_file": "/home/jasonpan_subscribe/.openclaw/workspace/.openclaw/mxf_env.sh",
+  "setup_script": "/home/jasonpan_subscribe/.openclaw/workspace/scripts/mxf_setup_scan.py",
+  "trigger_script": "/home/jasonpan_subscribe/.openclaw/workspace/scripts/mxf_trigger_watch.py",
+  "logs": {
+    "setup": "/home/jasonpan_subscribe/.openclaw/workspace/data/shioaji/mxf_setup_scan.log",
+    "trigger": "/home/jasonpan_subscribe/.openclaw/workspace/data/shioaji/mxf_trigger_watch.log"
+  }
+}
