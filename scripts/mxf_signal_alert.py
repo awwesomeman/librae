@@ -85,7 +85,7 @@ def main():
     setup_time = h1.index[-2]
     next_time = h1.index[-1]
 
-    day = setup_time.floor('D')
+    day = setup_time.floor('D') - pd.Timedelta(days=1)
     if day not in d1.index:
         api.logout()
         return 0

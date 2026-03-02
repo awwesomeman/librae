@@ -52,7 +52,7 @@ def backtest_v2(h1, d1, m1):
         cur_time = h1.index[i]
         next_time = h1.index[i + 1]
 
-        day = cur_time.floor("D")
+        day = cur_time.floor("D") - pd.Timedelta(days=1)
         if day not in d1.index:
             continue
         d = d1.loc[day]

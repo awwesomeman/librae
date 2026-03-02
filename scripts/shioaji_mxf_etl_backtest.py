@@ -73,7 +73,7 @@ def backtest_conservative(h1, d1):
         row = h1.iloc[i]
         prev = h1.iloc[i-1]
 
-        day = row.name.floor("D")
+        day = row.name.floor("D") - pd.Timedelta(days=1)
         if day not in daily.index:
             continue
         d = daily.loc[day]

@@ -82,7 +82,7 @@ def backtest_v1(h1, d1):
     for i in range(30, len(h1)):
         row = h1.iloc[i]
         prev = h1.iloc[i - 1]
-        day = row.name.floor("D")
+        day = row.name.floor("D") - pd.Timedelta(days=1)
         if day not in d1.index:
             continue
         d = d1.loc[day]
@@ -140,7 +140,7 @@ def backtest_v2_intra(h1, d1, m1):
         next_bar_time = h1.index[i + 1]
         cur_time = h1.index[i]
 
-        day = cur.name.floor("D")
+        day = cur.name.floor("D") - pd.Timedelta(days=1)
         if day not in d1.index:
             continue
         d = d1.loc[day]
