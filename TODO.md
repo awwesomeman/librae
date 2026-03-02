@@ -11,7 +11,7 @@
   - 說明：Walk-forward、參數穩定區、成本壓測（2/3/4點）、市場狀態拆解。
   - 進度：已完成第一輪 WF + 穩定區 + 成本壓測腳本與結果（`scripts/tsi_multifactorscore_robust.py`）。待做市場狀態拆解與報告定稿。
 
-- [ ] BTCF-M1.0-M1 穩健化
+- [ ] MultiFactorScore_v1.0-H1-LS-BTCF 穩健化
   - 狀態：進行中
   - 說明：Walk-forward、成本壓測、參數穩定區，確認 OOS 穩定性。
 

@@ -142,7 +142,7 @@ def main():
     d1['ema20']=d1['close'].ewm(span=20,adjust=False).mean(); d1['ema20_prev']=d1['ema20'].shift(1)
     train = run_bt(m1,h1,d1,'2025-01-01','2025-09-30',70)
     oos = run_bt(m1,h1,d1,'2025-10-01',pd.Timestamp.utcnow().strftime('%Y-%m-%d'),70)
-    print(json.dumps({'strategy':'BTCF-M1.0-M1','data':'Binance USDS-M Futures','train':train,'oos':oos},ensure_ascii=False,indent=2))
+    print(json.dumps({'strategy':'MultiFactorScore_v1.0-H1-LS-BTCF','data':'Binance USDS-M Futures','train':train,'oos':oos},ensure_ascii=False,indent=2))
 
 if __name__=='__main__':
     main()
