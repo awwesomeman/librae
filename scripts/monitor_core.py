@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import requests
+from datetime import datetime, timezone
 
 BASE = "https://api.binance.com"
 
@@ -80,3 +81,37 @@ def trendpullback_trigger(m1_window: pd.DataFrame, breakout_n=5, trigger_ema=20)
         if r['close'] > r['hh'] and r['close'] > r['ema']:
             return ts, float(r['close'])
     return None
+
+
+def append_signal_log(
+    log_file: str,
+    strategy: str,
+    stage: str,
+    status: str,
+    signal_key: str | None = None,
+    setup_time: str | None = None,
+    trigger_time: str | None = None,
+    entry: float | None = None,
+    stop: float | None = None,
+    take_profit_1: float | None = None,
+    take_profit_2: float | None = None,
+    message: str | None = None,
+):
+    row = {
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'strategy': strategy,
+        'stage': stage,
+        'status': status,
+        'signal_key': signal_key,
+        'setup_time': setup_time,
+        'trigger_time': trigger_time,
+        'entry': entry,
+        'stop': stop,
+        'take_profit_1': take_profit_1,
+        'take_profit_2': take_profit_2,
+        'message': message,
+    }
+    path = Path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as f:
+        f.write(json.dumps(row, ensure_ascii=False) + '\n')

@@ -7,6 +7,11 @@
   - 分派時間：2026-03-02 17:42 UTC
   - 完成時間：-
   - 狀態描述：BTC 已完成兩階段遷移；TSI 已切入統一 runner/profile（legacy adapter），下一步把 TSI 內部邏輯改為 core 原生並封存舊腳本。
+
+- [ ] 監控日誌標準化（統一 log schema for signal tracking）
+  - 分派時間：2026-03-02 17:54 UTC
+  - 完成時間：-
+  - 狀態描述：已落地統一 JSONL 欄位（timestamp/strategy/stage/signal_key/setup_time/trigger_time/entry/stop/take_profit_1/take_profit_2/status/message）到 BTC 與 TSI adapter；下一步補齊 TSI 原生訊號細節欄位。
 - [ ] 建立「單一資產策略研究規劃清單」（可跨標的套用、參數再優化）
   - 分派時間：2026-03-02 14:05 UTC
   - 完成時間：-

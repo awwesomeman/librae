@@ -8,7 +8,8 @@ import shlex
 import pandas as pd
 from monitor_core import (
     fetch_binance_klines, resample_ohlcv, add_indicators,
-    load_state, save_state, trendpullback_setup_ok, trendpullback_trigger
+    load_state, save_state, trendpullback_setup_ok, trendpullback_trigger,
+    append_signal_log,
 )
 
 
@@ -33,30 +34,86 @@ def run_btc_trendpullback(stage: str, cfg: dict):
         state['setup_ready'] = bool(ok)
         state['setup_time'] = setup_time.isoformat() if ok else None
         save_state(cfg['state_file'], state)
+        append_signal_log(
+            log_file=cfg['log_file'],
+            strategy=cfg['strategy'],
+            stage='setup',
+            status='setup_ready' if ok else 'setup_not_ready',
+            setup_time=setup_time.isoformat(),
+            message='setup scan completed',
+        )
         return
 
     # trigger stage
     if not state.get('setup_ready'):
+        append_signal_log(
+            log_file=cfg['log_file'],
+            strategy=cfg['strategy'],
+            stage='trigger',
+            status='skip',
+            setup_time=setup_time.isoformat(),
+            message='setup not ready',
+        )
         return
     if state.get('setup_time') != setup_time.isoformat():
+        append_signal_log(
+            log_file=cfg['log_file'],
+            strategy=cfg['strategy'],
+            stage='trigger',
+            status='skip',
+            setup_time=setup_time.isoformat(),
+            message='setup time mismatch',
+        )
         return
 
     ew = m1[(m1.index > setup_time) & (m1.index <= next_time)]
     trg = trendpullback_trigger(ew, cfg['params']['breakout_n'], cfg['params']['trigger_ema'])
     if trg is None:
+        append_signal_log(
+            log_file=cfg['log_file'],
+            strategy=cfg['strategy'],
+            stage='trigger',
+            status='no_trigger',
+            setup_time=setup_time.isoformat(),
+            message='no trigger in current window',
+        )
         return
     ts, entry = trg
     stop = float(setup['low'] - 0.2 * setup['atr14'])
     risk = entry - stop
     if risk <= 0:
-        return
-
-    key = f"{setup_time.isoformat()}::{ts.isoformat()}"
-    if state.get('last_signal_key') == key:
+        append_signal_log(
+            log_file=cfg['log_file'],
+            strategy=cfg['strategy'],
+            stage='trigger',
+            status='invalid',
+            setup_time=setup_time.isoformat(),
+            trigger_time=ts.isoformat(),
+            entry=entry,
+            stop=stop,
+            message='risk <= 0',
+        )
         return
 
     t1 = entry + 1.5 * risk
     t2 = entry + 2.2 * risk
+    key = f"{setup_time.isoformat()}::{ts.isoformat()}"
+    if state.get('last_signal_key') == key:
+        append_signal_log(
+            log_file=cfg['log_file'],
+            strategy=cfg['strategy'],
+            stage='trigger',
+            status='duplicate',
+            signal_key=key,
+            setup_time=setup_time.isoformat(),
+            trigger_time=ts.isoformat(),
+            entry=entry,
+            stop=stop,
+            take_profit_1=t1,
+            take_profit_2=t2,
+            message='duplicate signal ignored',
+        )
+        return
     text = (
         f"{cfg['strategy']} 訊號\n"
         f"Setup: {setup_time.isoformat()}\n"
@@ -64,6 +121,20 @@ def run_btc_trendpullback(stage: str, cfg: dict):
         f"進場: {entry:.2f}\n停損: {stop:.2f}\n停利1: {t1:.2f}\n停利2: {t2:.2f}"
     )
     subprocess.run(['openclaw', 'system', 'event', '--text', text, '--mode', 'now'], check=False)
+    append_signal_log(
+        log_file=cfg['log_file'],
+        strategy=cfg['strategy'],
+        stage='trigger',
+        status='signal_emitted',
+        signal_key=key,
+        setup_time=setup_time.isoformat(),
+        trigger_time=ts.isoformat(),
+        entry=entry,
+        stop=stop,
+        take_profit_1=t1,
+        take_profit_2=t2,
+        message='signal sent to event bus',
+    )
     state['last_signal_key'] = key
     save_state(cfg['state_file'], state)
 
@@ -72,7 +143,14 @@ def run_shioaji_legacy_adapter(stage: str, cfg: dict):
     script = cfg['setup_script'] if stage == 'setup' else cfg['trigger_script']
     env_file = cfg['env_file']
     cmd = f"source {shlex.quote(env_file)} && /home/jasonpan_subscribe/.openclaw/workspace/.venv/bin/python {shlex.quote(script)}"
-    subprocess.run(['bash', '-lc', cmd], check=False)
+    result = subprocess.run(['bash', '-lc', cmd], check=False)
+    append_signal_log(
+        log_file=cfg['log_file'],
+        strategy=cfg['strategy'],
+        stage=stage,
+        status='adapter_ok' if result.returncode == 0 else 'adapter_error',
+        message=f"legacy script: {Path(script).name}, rc={result.returncode}",
+    )
 
 
 def main():
