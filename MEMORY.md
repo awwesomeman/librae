@@ -1,7 +1,19 @@
 
-# MEMORY.md — Long-term Memory Template
+# MEMORY.md — Long-term Memory
 
-*長期知識庫模板。保留結構，替換為你的內容。*
+長期記憶索引（主檔）。細節分流到 domain 檔案。
+
+## Domain Index [P0]
+- Quant Research: `memory/domains/quant.md`
+- Finance Knowledge: `memory/domains/finance.md`
+- Productivity: `memory/domains/productivity.md`
+- Tech Trends: `memory/domains/tech-trends.md`
+- Price Comparison: `memory/domains/price-comparison.md`
+
+## Auto Classification Rule [P0]
+- 我會依對話情境自動寫入最相關 domain。
+- 若內容跨主題，會主檔留摘要並分別寫入多個 domain。
+- 新情境出現時可動態新增 `memory/domains/<new-topic>.md`。
 
 ---
 
