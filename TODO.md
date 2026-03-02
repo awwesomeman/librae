@@ -3,6 +3,10 @@
 > 時間一律 UTC；未完成的 `完成時間` 填 `-`。
 
 ## 進行中
+- [ ] 監控腳本模組化（monitor core/profile/runner）
+  - 分派時間：2026-03-02 17:42 UTC
+  - 完成時間：-
+  - 狀態描述：已授權直接調整；先遷移 BTC 為兩階段監控，再收斂 TSI。
 - [ ] 建立「單一資產策略研究規劃清單」（可跨標的套用、參數再優化）
   - 分派時間：2026-03-02 14:05 UTC
   - 完成時間：-
@@ -22,6 +26,16 @@
   - 分派時間：2026-03-02 14:06 UTC
   - 完成時間：-
   - 狀態描述：主命名規則已定，待把剩餘歷史引用與報告標籤補齊。
+
+- [ ] 研究框架模組化（回測共用引擎）
+  - 分派時間：2026-03-02 17:15 UTC
+  - 完成時間：-
+  - 狀態描述：`run_backtest.py`、`run_walkforward.py`、`run_stability.py`、`render_report.py` 已完成；下一步把主策略腳本全面接入共用框架。 
+
+- [ ] 全域模板治理（single source + schema 檢核）
+  - 分派時間：2026-03-02 17:30 UTC
+  - 完成時間：-
+  - 狀態描述：已確認方向；待新增 `templates/robustness_report.md`、`templates/report_schema.json`，並完成 latest/history 一鍵輸出流程。
 
 ## 待執行
 - [ ] 連續期貨換月資料調整研究（TSI ETL v2）
