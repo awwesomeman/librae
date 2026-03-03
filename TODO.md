@@ -12,7 +12,7 @@
 - [ ] MultiFactorScore_v1.0-H1-L-TSI 穩健化
   - 分派時間：2026-03-02 10:54 UTC
   - 完成時間：-
-  - 狀態描述：已完成第一輪 WF + 穩定區 + 成本壓測（`scripts/legacy/tsi_multifactorscore_robust.py`）；待市場狀態拆解與報告定稿。
+  - 狀態描述：已完成第一輪 WF + 穩定區 + 成本壓測；待市場狀態拆解與報告定稿。
 
 - [ ] MultiFactorScore_v1.0-H1-LS-BTCF 穩健化
   - 分派時間：2026-03-02 13:50 UTC
