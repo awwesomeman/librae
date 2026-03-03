@@ -4,6 +4,11 @@
 
 ## 進行中
 
+- [ ] 四策略基線重置（v1.0 重新選參與回測）
+  - 分派時間：2026-03-03 06:31 UTC
+  - 完成時間：-
+  - 狀態描述：目標清單重置為 `TrendPullback_v1.0-H1-L-TSI`、`TrendPullback_v1.0-H1-L-BTCF`、`MultiFactorScore_v1.0-H1-L-TSI`、`MultiFactorScore_v1.0-H1-L-BTCF`；流程採 Train+Validation 找穩定參數，再做 OOS，並以新結果覆蓋最新留存資料。
+
 - [ ] 建立「單一資產策略研究規劃清單」（可跨標的套用、參數再優化）
   - 分派時間：2026-03-02 14:05 UTC
   - 完成時間：-
@@ -24,6 +29,11 @@
 ## 待執行
 
 
+
+- [ ] 搜尋開源參數最佳化模組（參數組合探索）
+  - 分派時間：2026-03-03 06:31 UTC
+  - 完成時間：-
+  - 狀態描述：盤點可用開源方案（Optuna/Hyperopt/Nevergrad/Skopt）並評估與現有共用回測框架整合方式。
 
 - [ ] Brave Web Search 升級規劃（稍晚提醒）
   - 分派時間：2026-03-03 00:53 UTC

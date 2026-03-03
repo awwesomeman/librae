@@ -9,7 +9,7 @@
 執行規則：
 1. 預設先輸出 brief（`templates/backtest_report_brief.md`）
 2. 使用者要求詳細時再輸出 full（`templates/backtest_report_full.md`）
-3. 必含欄位：交易次數/勝率/平均報酬率（每筆）/PF/年化報酬/夏普/MDD
+3. 必含欄位：交易次數/勝率/平均報酬率（每筆）/PF/權益倍數/年化報酬/夏普/MDD
 
 ## 穩健性測試觸發
 關鍵語句：

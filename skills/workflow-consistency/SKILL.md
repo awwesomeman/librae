@@ -11,7 +11,7 @@ Read `references/trigger-map.md` first when this skill triggers.
 
 ## Required Output Routing
 
-- 回測分析：預設 brief，使用者要求再 full。
+- 回測分析：預設 brief，使用者要求再 full；流程固定 Train+Validation 選穩定參數，再做 OOS 單次驗證。
 - 穩健性測試：使用 robust 模板，必含 WF/穩定區/成本壓測。
 - 待辦清單：固定 完成/進行中/待執行，且每項有簡單描述。
 - 監控策略：固定回報 setup/trigger、state、log、去重機制。
@@ -35,6 +35,12 @@ Use strategy naming:
 - Major: logic change
 - Minor: meaningful parameter/risk adjustment
 - Bugfix only: no version bump
+
+## LLM Tool Routing
+
+Use tool selection by task type:
+- 策略研究（research / hypothesis / experiment design）: prioritize Codex.
+- 策略開發（implementation / refactor / production scripts）: prioritize Claude CLI.
 
 ## Claude CLI Model Routing (coding tasks)
 
