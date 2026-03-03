@@ -69,12 +69,12 @@
 - [x] 研究框架模組化（回測共用引擎）
   - 分派時間：2026-03-02 17:15 UTC
   - 完成時間：2026-03-03 03:09 UTC
-  - 狀態描述：主策略腳本 `multifactorscore_v1_1_h1_l_tsi.py`、`trendpullback_v1_1_h1_l_btc_robust.py`、`btcf_m1_0_m1.py` 已接入共用引擎（run_backtest/run_walkforward/run_stability）；已通過 py_compile 與單元測試 7/7。
+  - 狀態描述：主策略腳本 `strategy_multifactorscore_v1_1_h1_l_tsi.py`、`strategy_trendpullback_v1_1_h1_l_btc.py`、`strategy_multifactorscore_v1_0_h1_ls_btcf.py` 已接入共用引擎（run_backtest/run_walkforward/run_stability）；原路徑保留向後相容 wrapper；已通過 py_compile 與單元測試 7/7。
 
 - [x] ETL 與回測模組解耦重構（多資料源一致化）
   - 分派時間：2026-03-03 01:49 UTC
   - 完成時間：2026-03-03 03:29 UTC
-  - 狀態描述：已新增 `core_data_sources.py`（Binance Spot/Futures + Shioaji adapter）與 `core_features.py`（統一特徵工程）；並完成三支主策略腳本接入與測試（9/9 pass）。
+  - 狀態描述：已新增 `core_data_sources.py`（Binance Spot/Futures + Shioaji adapter）與 `core_features.py`（統一特徵工程）；並完成三支主策略腳本（`strategy_multifactorscore_v1_1_h1_l_tsi.py`、`strategy_trendpullback_v1_1_h1_l_btc.py`、`strategy_multifactorscore_v1_0_h1_ls_btcf.py`）接入與測試（9/9 pass）。
 
 - [x] 應用場景專用 Skills 設計
   - 分派時間：2026-03-03 00:53 UTC
