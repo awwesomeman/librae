@@ -24,12 +24,6 @@
   - 完成時間：-
   - 狀態描述：主命名規則已定，待把剩餘歷史引用與報告標籤補齊。
 
-- [ ] 研究框架模組化（回測共用引擎）
-  - 分派時間：2026-03-02 17:15 UTC
-  - 完成時間：-
-  - 狀態描述：`run_backtest.py`、`run_walkforward.py`、`run_stability.py`、`render_report.py` 已完成；已完成基礎語法檢查（py_compile）與單元測試（7/7 pass），下一步把主策略腳本全面接入共用框架。 
-
-
 
 ## 待執行
 - [ ] 舊版資產清理審查（回測/監控/報告）
@@ -86,6 +80,11 @@
   - 分派時間：2026-03-02 17:54 UTC
   - 完成時間：2026-03-03 00:29 UTC
   - 狀態描述：`data/monitor/signals.jsonl` 已統一欄位並套用 BTC/TSI（含 setup/trigger/skip/duplicate/signal_emitted 狀態），可直接追蹤訊號生命週期。
+
+- [x] 研究框架模組化（回測共用引擎）
+  - 分派時間：2026-03-02 17:15 UTC
+  - 完成時間：2026-03-03 03:09 UTC
+  - 狀態描述：主策略腳本 `multifactorscore_v1_1_h1_l_tsi.py`、`trendpullback_v1_1_h1_l_btc_robust.py`、`btcf_m1_0_m1.py` 已接入共用引擎（run_backtest/run_walkforward/run_stability）；已通過 py_compile 與單元測試 7/7。
 
 - [x] 全域模板治理（single source + schema 檢核）
   - 分派時間：2026-03-02 17:30 UTC

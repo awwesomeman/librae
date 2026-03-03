@@ -34,6 +34,14 @@ Use strategy naming:
 - Minor: meaningful parameter/risk adjustment
 - Bugfix only: no version bump
 
+## Claude CLI Model Routing (coding tasks)
+
+When delegating coding tasks via Claude CLI, route by difficulty:
+- Sonnet 4.6: default for routine coding, moderate refactor, standard script work.
+- Opus 4.6: complex architecture changes, high-risk refactor, ambiguous/critical logic decisions.
+
+Prefer Sonnet for speed; escalate to Opus when correctness/risk dominates.
+
 ## Completion Checklist
 
 Before sending final response, confirm all:
