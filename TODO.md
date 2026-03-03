@@ -9,7 +9,7 @@
   - 完成時間：-
   - 狀態描述：已完成來源池初版（`research/source_pool.md`），下一步整理策略候選與驗證路線。
 
-- [ ] MultiFactorScore_v1.0-H1-L-TSI 穩健化
+- [ ] MultiFactorScore_v1.0-H1-L-MXFR1 穩健化
   - 分派時間：2026-03-02 10:54 UTC
   - 完成時間：-
   - 狀態描述：已完成第一輪 WF + 穩定區 + 成本壓測；待市場狀態拆解與報告定稿。
@@ -30,17 +30,13 @@
   - 完成時間：-
   - 狀態描述：盤點可用開源方案（Optuna/Hyperopt/Nevergrad/Skopt）並評估與現有共用回測框架整合方式。
 
-- [ ] ETL 快取層設計（Binance API 防限流）
-  - 分派時間：2026-03-03 07:06 UTC
-  - 完成時間：-
-  - 狀態描述：以最佳實踐加入可重用 cache（TTL + key 標準化 + 檔案落地），降低重複 API 呼叫；若可快速落地，優先先做最小可用版本。
 
 - [ ] Brave Web Search 升級規劃（稍晚提醒）
   - 分派時間：2026-03-03 00:53 UTC
   - 完成時間：-
   - 狀態描述：先記錄為今日稍晚提醒項，屆時協助你檢查 API key 與升級路線。
 
-- [ ] 連續期貨換月資料調整研究（TSI ETL v2）
+- [ ] 連續期貨換月資料調整研究（MXFR1 ETL v2）
   - 分派時間：2026-03-02 16:03 UTC
   - 完成時間：-
   - 狀態描述：尚未啟動；將檢查 MXFR1 是否未調整並建立 back-adjust 流程。
@@ -66,6 +62,16 @@
   - 狀態描述：尚未開始，作為 RegimeSwitch 第二階段。
 
 ## 完成
+- [x] Binance API 防限流 + ETL 快取層（模組化）
+  - 分派時間：2026-03-03 07:06 UTC
+  - 完成時間：2026-03-03 07:30 UTC
+  - 狀態描述：`scripts/etl/core_data_sources.py` 已完成 backoff+jitter、Retry-After、pacing、chunking；新增 `scripts/etl/cache_store.py`（TTL + key 標準化 + 原子寫入），並接入 spot/futures 抓取。
+
+- [x] v1.0 基線策略檔名與資產命名同步（TSI → MXFR1）
+  - 分派時間：2026-03-03 08:10 UTC
+  - 完成時間：2026-03-03 08:19 UTC
+  - 狀態描述：已將 `strategy_*_v1_0_h1_l_tsi.py` 更名為 `strategy_*_v1_0_h1_l_mxfr1.py`，並更新測試引用與輸出 strategy 名稱。
+
 - [x] 四策略基線重置（v1.0 重新選參與回測）
   - 分派時間：2026-03-03 06:31 UTC
   - 完成時間：2026-03-03 08:21 UTC
