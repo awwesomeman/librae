@@ -8,6 +8,12 @@ import requests
 from datetime import datetime, timezone
 import os
 import shioaji as sj
+try:
+    from utils_state import load_json_state, save_json_state
+    from utils_logging import rotate_if_oversize, append_jsonl
+except ImportError:
+    from scripts.utils_state import load_json_state, save_json_state
+    from scripts.utils_logging import rotate_if_oversize, append_jsonl
 
 BASE = "https://api.binance.com"
 
@@ -69,16 +75,11 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_state(path: str) -> dict:
-    p = Path(path)
-    if p.exists():
-        return json.loads(p.read_text(encoding='utf-8'))
-    return {}
+    return load_json_state(path)
 
 
-def save_state(path: str, state: dict):
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+def save_state(path: str, state: dict) -> None:
+    save_json_state(path, state)
 
 
 def trendpullback_setup_ok(setup: pd.Series, prev: pd.Series, d1: pd.DataFrame, setup_time: pd.Timestamp, pull=0.3, vol_ratio=0.9) -> bool:
@@ -135,9 +136,5 @@ def append_signal_log(
         'take_profit_2': take_profit_2,
         'message': message,
     }
-    path = Path(log_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.stat().st_size > 10 * 1024 * 1024:
-        path.replace(path.parent / (path.name + '.1'))
-    with path.open('a', encoding='utf-8') as f:
-        f.write(json.dumps(row, ensure_ascii=False) + '\n')
+    rotate_if_oversize(log_file, max_mb=10)
+    append_jsonl(log_file, row)

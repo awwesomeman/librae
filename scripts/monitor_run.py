@@ -16,6 +16,10 @@ from monitor_core import (
     trendpullback_trigger,
     append_signal_log,
 )
+try:
+    from utils_dedupe import build_signal_key, is_duplicate
+except ImportError:
+    from scripts.utils_dedupe import build_signal_key, is_duplicate
 
 
 def run_btc_trendpullback(stage: str, cfg: dict):
@@ -102,8 +106,8 @@ def run_btc_trendpullback(stage: str, cfg: dict):
 
     t1 = entry + 1.5 * risk
     t2 = entry + 2.2 * risk
-    key = f"{setup_time.isoformat()}::{ts.isoformat()}"
-    if state.get('last_signal_key') == key:
+    key = build_signal_key(setup_time.isoformat(), ts.isoformat())
+    if is_duplicate(state.get('last_signal_key'), key):
         append_signal_log(
             log_file=cfg['log_file'],
             strategy=cfg['strategy'],
@@ -247,8 +251,8 @@ def run_tsi_trendpullback(stage: str, cfg: dict):
 
     t1 = entry + 1.5 * risk
     t2 = entry + 2.2 * risk
-    key = f"{setup_time.isoformat()}::{ts.isoformat()}"
-    if state.get('last_signal_key') == key:
+    key = build_signal_key(setup_time.isoformat(), ts.isoformat())
+    if is_duplicate(state.get('last_signal_key'), key):
         append_signal_log(
             log_file=cfg['log_file'],
             strategy=cfg['strategy'],
