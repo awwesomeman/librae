@@ -19,10 +19,6 @@
   - 完成時間：-
   - 狀態描述：已跑出初版 OOS，待做 walk-forward、成本壓測、穩定區測試。
 
-- [ ] 策略命名規則升級（回填舊文檔與腳本引用）
-  - 分派時間：2026-03-02 14:06 UTC
-  - 完成時間：-
-  - 狀態描述：已啟動回填並建立目標清單 `research/naming_backfill_targets.md`；先處理 active 腳本與 TODO/監控設定，再補歷史敘述檔。
 
 
 ## 待執行
@@ -82,6 +78,11 @@
   - 分派時間：2026-03-02 17:15 UTC
   - 完成時間：2026-03-03 03:09 UTC
   - 狀態描述：主策略腳本 `multifactorscore_v1_1_h1_l_tsi.py`、`trendpullback_v1_1_h1_l_btc_robust.py`、`btcf_m1_0_m1.py` 已接入共用引擎（run_backtest/run_walkforward/run_stability）；已通過 py_compile 與單元測試 7/7。
+
+- [x] 策略命名規則升級（回填舊文檔與腳本引用）
+  - 分派時間：2026-03-02 14:06 UTC
+  - 完成時間：2026-03-03 03:23 UTC
+  - 狀態描述：已完成 KEEP 檔案回填與一致性檢查；結果記錄於 `research/naming_backfill_report_2026-03-03.md`。
 
 - [x] 全域模板治理（single source + schema 檢核）
   - 分派時間：2026-03-02 17:30 UTC
