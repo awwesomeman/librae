@@ -1,0 +1,16 @@
+[project]
+name = "nautilus-multi-market-lab"
+version = "0.1.0"
+description = "Local multi-market trading lab with NautilusTrader + Shioaji + Binance"
+requires-python = ">=3.10"
+dependencies = [
+  "nautilus_trader",
+  "shioaji",
+  "ccxt",
+  "empyrical",
+  "influxdb-client",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
