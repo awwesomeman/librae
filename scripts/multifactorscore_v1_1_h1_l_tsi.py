@@ -3,46 +3,11 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import shioaji as sj
 
 from run_backtest import run_strict_protocol, Periods
 from run_stability import run_stability
-
-
-def resample_ohlcv(df, rule):
-    x = pd.DataFrame()
-    x['open'] = df['open'].resample(rule).first()
-    x['high'] = df['high'].resample(rule).max()
-    x['low'] = df['low'].resample(rule).min()
-    x['close'] = df['close'].resample(rule).last()
-    x['volume'] = df['volume'].resample(rule).sum()
-    return x.dropna()
-
-
-def add_features(h1):
-    o = h1.copy()
-    o['ema20'] = o['close'].ewm(span=20, adjust=False).mean()
-    o['ema60'] = o['close'].ewm(span=60, adjust=False).mean()
-    tr = pd.concat([
-        o['high'] - o['low'],
-        (o['high'] - o['close'].shift(1)).abs(),
-        (o['low'] - o['close'].shift(1)).abs(),
-    ], axis=1).max(axis=1)
-    o['atr14'] = tr.ewm(alpha=1/14, adjust=False).mean()
-    o['vol_sma20'] = o['volume'].rolling(20).mean()
-    o['ret20'] = o['close'].pct_change(20)
-    o['ret60'] = o['close'].pct_change(60)
-    o['atrp'] = o['atr14'] / o['close']
-    return o
-
-
-def factor_score(r):
-    trend = 100 if (r['close'] > r['ema20'] > r['ema60']) else (60 if r['close'] > r['ema20'] else 20)
-    mom = 50 if (np.isnan(r['ret20']) or np.isnan(r['ret60'])) else np.clip(50 + (0.6*r['ret20']+0.4*r['ret60'])*1000, 0, 100)
-    volq = 40 if (np.isnan(r['vol_sma20']) or r['vol_sma20'] <= 0) else np.clip((r['volume']/r['vol_sma20'])*70, 0, 100)
-    vp = 50 if np.isnan(r['atrp']) else np.clip(100 - r['atrp']*5000, 0, 100)
-    return 0.35*trend + 0.30*mom + 0.20*volq + 0.15*vp
-
+from core_data_sources import fetch_shioaji_mxfr1_1m
+from core_features import resample_ohlcv, add_multifactor_features, add_daily_trend_gate, multifactor_score
 
 def run_backtest(m1, h1, d1, start, end, cost=2.0, th=75, bn=3, en=10):
     h = h1[(h1.index >= start) & (h1.index <= end)]
@@ -76,7 +41,7 @@ def run_backtest(m1, h1, d1, start, end, cost=2.0, th=75, bn=3, en=10):
         d = d1.loc[day]
         trend_gate = (d['close'] > d['ema20']) and (d['ema20'] > d['ema20_prev'])
         setup = trend_gate and (abs(cur['low'] - cur['ema20']) <= 0.3*cur['atr14']) and (cur['close'] > cur['open']) and (cur['close'] > prev['high'])
-        if (not setup) or factor_score(cur) < th:
+        if (not setup) or multifactor_score(cur) < th:
             continue
 
         ew = m1[(m1.index > t) & (m1.index <= nt)].copy()
@@ -120,18 +85,9 @@ def run_backtest(m1, h1, d1, start, end, cost=2.0, th=75, bn=3, en=10):
 
 
 def main():
-    key = os.getenv('SINO_API_KEY'); sec = os.getenv('SINO_SECRET_KEY')
-    api = sj.Shioaji(simulation=True)
-    api.login(api_key=key, secret_key=sec)
-    kb = api.kbars(api.Contracts.Futures.MXF.MXFR1, start='2024-01-01', end='2026-03-02')
-    api.logout()
-
-    df = pd.DataFrame({**kb}); df['ts'] = pd.to_datetime(df['ts'])
-    df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'}).set_index('ts').sort_index()
-    m1 = df[['open','high','low','close','volume']]
-    h1 = add_features(resample_ohlcv(m1, '60min'))
-    d1 = resample_ohlcv(m1, '1D')
-    d1['ema20'] = d1['close'].ewm(span=20, adjust=False).mean(); d1['ema20_prev'] = d1['ema20'].shift(1)
+    m1 = fetch_shioaji_mxfr1_1m('2024-01-01', '2026-03-02', simulation=True)
+    h1 = add_multifactor_features(resample_ohlcv(m1, '60min'))
+    d1 = add_daily_trend_gate(resample_ohlcv(m1, '1D'))
 
     def bt_fn(start, end, **params):
         return run_backtest(m1, h1, d1, start, end, **params)

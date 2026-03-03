@@ -1,71 +1,17 @@
 #!/usr/bin/env python3
 import json
-import time
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-import requests
 
 from run_backtest import run_strict_protocol, Periods
 from run_walkforward import run_walkforward, WFWindow
 from run_stability import run_stability
+from core_data_sources import fetch_binance_spot_klines
+from core_features import resample_ohlcv, add_trendpullback_features, add_daily_trend_gate
 
-BASE = "https://api.binance.com"
 SYMBOL = "BTCUSDT"
 COST_BPS = 8
-
-
-def fetch_klines(interval: str, start_ms: int, end_ms: int):
-    out, cur = [], start_ms
-    while cur < end_ms:
-        params = {"symbol": SYMBOL, "interval": interval, "startTime": cur, "endTime": end_ms, "limit": 1000}
-        rows = None
-        for _ in range(6):
-            r = requests.get(f"{BASE}/api/v3/klines", params=params, timeout=20)
-            if r.status_code == 429:
-                time.sleep(1.2); continue
-            r.raise_for_status(); rows = r.json(); break
-        if rows is None:
-            raise RuntimeError("rate limit retries exceeded")
-        if not rows:
-            break
-        out.extend(rows)
-        cur = int(rows[-1][0]) + 1
-        if len(rows) < 1000:
-            break
-        time.sleep(0.08)
-    return out
-
-
-def to_df(rows):
-    df = pd.DataFrame(rows, columns=["open_time","open","high","low","close","volume","close_time","qav","trades","tbv","tqv","ignore"])
-    for c in ["open","high","low","close","volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["ts"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    return df[["ts","open","high","low","close","volume"]].dropna().set_index("ts").sort_index()
-
-
-def resample_ohlcv(df, rule):
-    x = pd.DataFrame()
-    x["open"] = df["open"].resample(rule).first()
-    x["high"] = df["high"].resample(rule).max()
-    x["low"] = df["low"].resample(rule).min()
-    x["close"] = df["close"].resample(rule).last()
-    x["volume"] = df["volume"].resample(rule).sum()
-    return x.dropna()
-
-
-def add_indicators(df):
-    o = df.copy()
-    o["ema20"] = o["close"].ewm(span=20, adjust=False).mean()
-    tr = pd.concat([
-        o["high"] - o["low"],
-        (o["high"] - o["close"].shift(1)).abs(),
-        (o["low"] - o["close"].shift(1)).abs(),
-    ], axis=1).max(axis=1)
-    o["atr14"] = tr.ewm(alpha=1/14, adjust=False).mean()
-    o["vol_sma20"] = o["volume"].rolling(20).mean()
-    return o
 
 
 def run_backtest(m1, h1, d1, start, end, pull=0.3, bn=5, en=20, tstop=6, cost=8):
@@ -145,10 +91,9 @@ def run_backtest(m1, h1, d1, start, end, pull=0.3, bn=5, en=20, tstop=6, cost=8)
 def main():
     start_ms = int(datetime(2025,1,1,tzinfo=timezone.utc).timestamp()*1000)
     end_ms = int(datetime.now(tz=timezone.utc).timestamp()*1000)
-    m1 = to_df(fetch_klines('1m', start_ms, end_ms))
-    h1 = add_indicators(resample_ohlcv(m1, '60min'))
-    d1 = resample_ohlcv(m1, '1D')
-    d1['ema20'] = d1['close'].ewm(span=20, adjust=False).mean(); d1['ema20_prev'] = d1['ema20'].shift(1)
+    m1 = fetch_binance_spot_klines(SYMBOL, '1m', start_ms, end_ms)
+    h1 = add_trendpullback_features(resample_ohlcv(m1, '60min'))
+    d1 = add_daily_trend_gate(resample_ohlcv(m1, '1D'))
 
     periods = Periods('2025-01-01', '2025-08-31', '2025-09-01', '2025-10-31', '2025-11-01', pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%d'))
 

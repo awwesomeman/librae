@@ -1,83 +1,15 @@
 #!/usr/bin/env python3
 import json
 from datetime import datetime, timezone
-import time
-import numpy as np
 import pandas as pd
-import requests
 
 from run_backtest import run_strict_protocol, Periods
 from run_walkforward import run_walkforward, WFWindow
 from run_stability import run_stability
+from core_data_sources import fetch_binance_futures_klines
+from core_features import resample_ohlcv, add_multifactor_features, add_daily_trend_gate, multifactor_score
 
-BASE = "https://fapi.binance.com"
 SYMBOL = "BTCUSDT"
-
-
-def fetch_klines(interval: str, start_ms: int, end_ms: int):
-    out, cur = [], start_ms
-    while cur < end_ms:
-        params = {"symbol": SYMBOL, "interval": interval, "startTime": cur, "endTime": end_ms, "limit": 1500}
-        rows = None
-        for _ in range(5):
-            r = requests.get(f"{BASE}/fapi/v1/klines", params=params, timeout=20)
-            if r.status_code == 429:
-                time.sleep(1.2); continue
-            r.raise_for_status(); rows = r.json(); break
-        if rows is None:
-            raise RuntimeError("rate limit retries exceeded")
-        if not rows:
-            break
-        out.extend(rows)
-        cur = int(rows[-1][0]) + 1
-        if len(rows) < 1500:
-            break
-        time.sleep(0.12)
-    return out
-
-
-def to_df(rows):
-    df = pd.DataFrame(rows, columns=["open_time","open","high","low","close","volume","close_time","qav","trades","tbv","tqv","ignore"])
-    for c in ["open","high","low","close","volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["ts"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    return df[["ts","open","high","low","close","volume"]].dropna().set_index("ts").sort_index()
-
-
-def resample_ohlcv(df, rule):
-    x = pd.DataFrame()
-    x["open"] = df["open"].resample(rule).first()
-    x["high"] = df["high"].resample(rule).max()
-    x["low"] = df["low"].resample(rule).min()
-    x["close"] = df["close"].resample(rule).last()
-    x["volume"] = df["volume"].resample(rule).sum()
-    return x.dropna()
-
-
-def add_features(h1):
-    o = h1.copy()
-    o["ema20"] = o["close"].ewm(span=20, adjust=False).mean()
-    o["ema60"] = o["close"].ewm(span=60, adjust=False).mean()
-    tr = pd.concat([
-        o["high"] - o["low"],
-        (o["high"] - o["close"].shift(1)).abs(),
-        (o["low"] - o["close"].shift(1)).abs(),
-    ], axis=1).max(axis=1)
-    o["atr14"] = tr.ewm(alpha=1/14, adjust=False).mean()
-    o["vol_sma20"] = o["volume"].rolling(20).mean()
-    o["ret20"] = o["close"].pct_change(20)
-    o["ret60"] = o["close"].pct_change(60)
-    o["atrp"] = o["atr14"] / o["close"]
-    return o
-
-
-def factor_score(r):
-    trend = 100 if (r.close > r.ema20 > r.ema60) else (60 if r.close > r.ema20 else 20)
-    mom_raw = 0 if np.isnan(r.ret20) or np.isnan(r.ret60) else (0.6*r.ret20 + 0.4*r.ret60)
-    mom = np.clip(50 + mom_raw*1200, 0, 100)
-    volq = 40 if np.isnan(r.vol_sma20) or r.vol_sma20 <= 0 else np.clip((r.volume/r.vol_sma20)*70, 0, 100)
-    vol_pen = 50 if np.isnan(r.atrp) else np.clip(100 - r.atrp*7000, 0, 100)
-    return 0.35*trend + 0.30*mom + 0.20*volq + 0.15*vol_pen
 
 
 def run_backtest(m1, h1, d1, start, end, th=70, cost=10, bn=3, en=10):
@@ -110,7 +42,7 @@ def run_backtest(m1, h1, d1, start, end, th=70, cost=10, bn=3, en=10):
         d = d1.loc[day]
         trend_gate = (d.close > d.ema20) and (d.ema20 > d.ema20_prev)
         setup = trend_gate and (abs(cur.low-cur.ema20) <= 0.3*cur.atr14) and (cur.close > cur.open) and (cur.close > prev.high)
-        if not setup or factor_score(cur) < th:
+        if not setup or multifactor_score(cur) < th:
             continue
 
         ew = m1[(m1.index > t) & (m1.index <= nt)].copy()
@@ -150,10 +82,9 @@ def run_backtest(m1, h1, d1, start, end, th=70, cost=10, bn=3, en=10):
 def main():
     start_ms = int(datetime(2025,1,1,tzinfo=timezone.utc).timestamp()*1000)
     end_ms = int(datetime.now(tz=timezone.utc).timestamp()*1000)
-    m1 = to_df(fetch_klines('1m', start_ms, end_ms))
-    h1 = add_features(resample_ohlcv(m1, '60min'))
-    d1 = resample_ohlcv(m1, '1D')
-    d1['ema20'] = d1['close'].ewm(span=20, adjust=False).mean(); d1['ema20_prev'] = d1['ema20'].shift(1)
+    m1 = fetch_binance_futures_klines(SYMBOL, '1m', start_ms, end_ms)
+    h1 = add_multifactor_features(resample_ohlcv(m1, '60min'))
+    d1 = add_daily_trend_gate(resample_ohlcv(m1, '1D'))
 
     periods = Periods('2025-01-01','2025-07-31','2025-08-01','2025-09-30','2025-10-01', pd.Timestamp.utcnow().strftime('%Y-%m-%d'))
 

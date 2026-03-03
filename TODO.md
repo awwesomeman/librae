@@ -30,10 +30,6 @@
   - 完成時間：-
   - 狀態描述：先記錄為今日稍晚提醒項，屆時協助你檢查 API key 與升級路線。
 
-- [ ] ETL 與回測模組解耦重構（多資料源一致化）
-  - 分派時間：2026-03-03 01:49 UTC
-  - 完成時間：-
-  - 狀態描述：盤點目前 Binance/Shioaji 的 ETL、特徵工程與回測耦合點；設計資料源 adapter + 統一特徵計算層（可複用到不同標的），確保因子計算一致並減少重複程式碼。
 - [ ] 連續期貨換月資料調整研究（TSI ETL v2）
   - 分派時間：2026-03-02 16:03 UTC
   - 完成時間：-
@@ -74,6 +70,11 @@
   - 分派時間：2026-03-02 17:15 UTC
   - 完成時間：2026-03-03 03:09 UTC
   - 狀態描述：主策略腳本 `multifactorscore_v1_1_h1_l_tsi.py`、`trendpullback_v1_1_h1_l_btc_robust.py`、`btcf_m1_0_m1.py` 已接入共用引擎（run_backtest/run_walkforward/run_stability）；已通過 py_compile 與單元測試 7/7。
+
+- [x] ETL 與回測模組解耦重構（多資料源一致化）
+  - 分派時間：2026-03-03 01:49 UTC
+  - 完成時間：2026-03-03 03:29 UTC
+  - 狀態描述：已新增 `core_data_sources.py`（Binance Spot/Futures + Shioaji adapter）與 `core_features.py`（統一特徵工程）；並完成三支主策略腳本接入與測試（9/9 pass）。
 
 - [x] 應用場景專用 Skills 設計
   - 分派時間：2026-03-03 00:53 UTC
