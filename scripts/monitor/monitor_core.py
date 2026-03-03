@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 import os
 import shioaji as sj
 try:
+    from scripts.monitor.utils_state import load_json_state, save_json_state
+    from scripts.monitor.utils_logging import rotate_if_oversize, append_jsonl
+except ImportError:
     from utils_state import load_json_state, save_json_state
     from utils_logging import rotate_if_oversize, append_jsonl
-except ImportError:
-    from scripts.utils_state import load_json_state, save_json_state
-    from scripts.utils_logging import rotate_if_oversize, append_jsonl
 
 BASE = "https://api.binance.com"
 

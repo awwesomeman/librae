@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.run_backtest import run_strict_protocol, Periods
-from scripts.run_walkforward import run_walkforward, WFWindow
-from scripts.run_stability import run_stability
-from scripts.render_report import render_brief
+from scripts.backtest.run_backtest import run_strict_protocol, Periods
+from scripts.backtest.run_walkforward import run_walkforward, WFWindow
+from scripts.backtest.run_stability import run_stability
+from scripts.reporting.render_report import render_brief
 
 
 class TestResearchModules(unittest.TestCase):

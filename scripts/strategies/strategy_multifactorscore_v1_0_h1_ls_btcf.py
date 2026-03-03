@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 import json
+import os
+import sys
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from run_backtest import run_strict_protocol, Periods
-from run_walkforward import run_walkforward, WFWindow
-from run_stability import run_stability
-from core_data_sources import fetch_binance_futures_klines
-from core_features import resample_ohlcv, add_multifactor_features, add_daily_trend_gate, multifactor_score
+# Ensure project root is on sys.path for cross-package imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
+from scripts.backtest.run_backtest import run_strict_protocol, Periods
+from scripts.backtest.run_walkforward import run_walkforward, WFWindow
+from scripts.backtest.run_stability import run_stability
+from scripts.etl.core_data_sources import fetch_binance_futures_klines
+from scripts.etl.core_features import resample_ohlcv, add_multifactor_features, add_daily_trend_gate, multifactor_score
 
 SYMBOL = "BTCUSDT"
 

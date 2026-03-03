@@ -1,8 +1,8 @@
 import unittest
 import pandas as pd
 
-from scripts.core_features import resample_ohlcv, add_daily_trend_gate, add_multifactor_features
-from scripts.core_data_sources import normalize_ohlcv
+from scripts.etl.core_features import resample_ohlcv, add_daily_trend_gate, add_multifactor_features
+from scripts.etl.core_data_sources import normalize_ohlcv
 
 
 class TestEtlDecoupling(unittest.TestCase):

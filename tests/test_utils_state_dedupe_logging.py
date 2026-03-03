@@ -1,15 +1,12 @@
 """Unit tests for utils_state, utils_dedupe, and utils_logging."""
 import json
 import os
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
-
-from utils_state import load_json_state, save_json_state
-from utils_dedupe import build_signal_key, is_duplicate
-from utils_logging import rotate_if_oversize, append_jsonl
+from scripts.monitor.utils_state import load_json_state, save_json_state
+from scripts.monitor.utils_dedupe import build_signal_key, is_duplicate
+from scripts.monitor.utils_logging import rotate_if_oversize, append_jsonl
 
 
 class TestUtilsState(unittest.TestCase):

@@ -5,21 +5,32 @@ import json
 import subprocess
 from pathlib import Path
 import pandas as pd
-from monitor_core import (
-    fetch_binance_klines,
-    fetch_shioaji_mxf_kbars,
-    resample_ohlcv,
-    add_indicators,
-    load_state,
-    save_state,
-    trendpullback_setup_ok,
-    trendpullback_trigger,
-    append_signal_log,
-)
 try:
-    from utils_dedupe import build_signal_key, is_duplicate
+    from scripts.monitor.monitor_core import (
+        fetch_binance_klines,
+        fetch_shioaji_mxf_kbars,
+        resample_ohlcv,
+        add_indicators,
+        load_state,
+        save_state,
+        trendpullback_setup_ok,
+        trendpullback_trigger,
+        append_signal_log,
+    )
+    from scripts.monitor.utils_dedupe import build_signal_key, is_duplicate
 except ImportError:
-    from scripts.utils_dedupe import build_signal_key, is_duplicate
+    from monitor_core import (
+        fetch_binance_klines,
+        fetch_shioaji_mxf_kbars,
+        resample_ohlcv,
+        add_indicators,
+        load_state,
+        save_state,
+        trendpullback_setup_ok,
+        trendpullback_trigger,
+        append_signal_log,
+    )
+    from utils_dedupe import build_signal_key, is_duplicate
 
 
 def run_btc_trendpullback(stage: str, cfg: dict):
