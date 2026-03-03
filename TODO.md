@@ -29,10 +29,7 @@
   - 完成時間：-
   - 狀態描述：`run_backtest.py`、`run_walkforward.py`、`run_stability.py`、`render_report.py` 已完成；已完成基礎語法檢查（py_compile）與單元測試（7/7 pass），下一步把主策略腳本全面接入共用框架。 
 
-- [ ] 全域模板治理（single source + schema 檢核）
-  - 分派時間：2026-03-02 17:30 UTC
-  - 完成時間：-
-  - 狀態描述：已確認方向；待新增 `templates/robustness_report.md`、`templates/report_schema.json`，並完成 latest/history 一鍵輸出流程。
+
 
 ## 待執行
 - [ ] 舊版資產清理審查（回測/監控/報告）
@@ -49,6 +46,11 @@
   - 分派時間：2026-03-03 00:53 UTC
   - 完成時間：-
   - 狀態描述：先記錄為今日稍晚提醒項，屆時協助你檢查 API key 與升級路線。
+
+- [ ] ETL 與回測模組解耦重構（多資料源一致化）
+  - 分派時間：2026-03-03 01:49 UTC
+  - 完成時間：-
+  - 狀態描述：盤點目前 Binance/Shioaji 的 ETL、特徵工程與回測耦合點；設計資料源 adapter + 統一特徵計算層（可複用到不同標的），確保因子計算一致並減少重複程式碼。
 - [ ] 連續期貨換月資料調整研究（TSI ETL v2）
   - 分派時間：2026-03-02 16:03 UTC
   - 完成時間：-
@@ -84,6 +86,11 @@
   - 分派時間：2026-03-02 17:54 UTC
   - 完成時間：2026-03-03 00:29 UTC
   - 狀態描述：`data/monitor/signals.jsonl` 已統一欄位並套用 BTC/TSI（含 setup/trigger/skip/duplicate/signal_emitted 狀態），可直接追蹤訊號生命週期。
+
+- [x] 全域模板治理（single source + schema 檢核）
+  - 分派時間：2026-03-02 17:30 UTC
+  - 完成時間：2026-03-03 02:58 UTC
+  - 狀態描述：已新增 `templates/robustness_report.md`、`templates/report_schema.json`，並完成 `scripts/save_reports.py`（latest/history 一鍵存檔）。
 
 - [x] TrendPullback_v1.0-H1-L-BTC 初版回測（固定規則、無測試集調參）
   - 分派時間：2026-03-02 16:05 UTC
