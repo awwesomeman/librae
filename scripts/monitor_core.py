@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, timezone
+import os
+import shioaji as sj
 
 BASE = "https://api.binance.com"
 
@@ -19,6 +21,28 @@ def fetch_binance_klines(symbol: str, interval: str = '1m', limit: int = 4000) -
         df[c] = pd.to_numeric(df[c], errors='coerce')
     df['ts'] = pd.to_datetime(df['open_time'], unit='ms', utc=True)
     return df[['ts','open','high','low','close','volume']].dropna().set_index('ts').sort_index()
+
+
+def fetch_shioaji_mxf_kbars(start: str, end: str, simulation: bool = True) -> pd.DataFrame:
+    api_key = os.getenv('SINO_API_KEY')
+    secret_key = os.getenv('SINO_SECRET_KEY')
+    if not api_key or not secret_key:
+        return pd.DataFrame()
+
+    api = sj.Shioaji(simulation=simulation)
+    api.login(api_key=api_key, secret_key=secret_key)
+    kb = api.kbars(api.Contracts.Futures.MXF.MXFR1, start=start, end=end)
+    api.logout()
+
+    df = pd.DataFrame({**kb})
+    if df.empty:
+        return df
+    df['ts'] = pd.to_datetime(df['ts'])
+    df = df.rename(columns={
+        'Open': 'open', 'High': 'high', 'Low': 'low',
+        'Close': 'close', 'Volume': 'volume'
+    }).set_index('ts').sort_index()
+    return df[['open', 'high', 'low', 'close', 'volume']]
 
 
 def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:

@@ -1,12 +1,14 @@
 {
-  "kind": "shioaji_mxf_legacy_adapter",
+  "kind": "shioaji_trendpullback",
   "strategy": "TrendPullback_v1.0-H1-L-TSI",
-  "env_file": "/home/jasonpan_subscribe/.openclaw/workspace/.openclaw/mxf_env.sh",
+  "state_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/tsi_trendpullback_v1_0_state.json",
   "log_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/signals.jsonl",
-  "setup_script": "/home/jasonpan_subscribe/.openclaw/workspace/scripts/mxf_setup_scan.py",
-  "trigger_script": "/home/jasonpan_subscribe/.openclaw/workspace/scripts/mxf_trigger_watch.py",
-  "logs": {
-    "setup": "/home/jasonpan_subscribe/.openclaw/workspace/data/shioaji/mxf_setup_scan.log",
-    "trigger": "/home/jasonpan_subscribe/.openclaw/workspace/data/shioaji/mxf_trigger_watch.log"
+  "data_start": "2026-01-01",
+  "data_end": "2026-12-31",
+  "params": {
+    "pull": 0.3,
+    "vol_ratio": 0.9,
+    "breakout_n": 5,
+    "trigger_ema": 20
   }
 }
