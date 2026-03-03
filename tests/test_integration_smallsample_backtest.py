@@ -22,7 +22,7 @@ from scripts.etl.core_features import (
     add_trendpullback_features,
     resample_ohlcv,
 )
-from scripts.strategies.strategy_trendpullback_v1_1_h1_l_btc import run_backtest
+from scripts.strategies.strategy_trendpullback_v1_1_0_h1_l_btc import run_backtest
 
 
 # ---------------------------------------------------------------------------

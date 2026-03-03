@@ -1,8 +1,8 @@
 {
   "kind": "binance_trendpullback",
-  "strategy": "TrendPullback_v1.0-H1-L-BTC",
+  "strategy": "TrendPullback_v1.0.0-H1-L-BTC",
   "symbol": "BTCUSDT",
-  "state_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/btc_trendpullback_v1_0_state.json",
+  "state_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/btc_trendpullback_v1_0_0_state.json",
   "log_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/signals.jsonl",
   "limit": 4000,
   "params": {

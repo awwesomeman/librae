@@ -1,0 +1,102 @@
+Response Code: 0 | Event Code: 0 | Info: host '210.59.255.161:80', hostname '210.59.255.161:80' IP 210.59.255.161:80 (host 1 of 1) (host connection attempt 1 of 1) (total connection attempt 1 of 1) | Event: Session up
+Response Code: 200 | Event Code: 16 | Info: APISUB/V1/SYS/CONTRACT | Event: Subscribe or Unsubscribe ok
+{
+  "strategy": "MultiFactorScore_v1.0.0-H1-L-MXFR1",
+  "instrument": "MXFR1",
+  "data": "Shioaji",
+  "sample_periods": {
+    "train": {
+      "start": "2024-01-01",
+      "end": "2025-03-31"
+    },
+    "validation": {
+      "start": "2025-04-01",
+      "end": "2025-06-30"
+    },
+    "oos": {
+      "start": "2025-07-01",
+      "end": "2026-03-03"
+    }
+  },
+  "cost_settings": {
+    "fee": 100,
+    "slippage": 0,
+    "tax": 0,
+    "round_trip_cost": 2.0
+  },
+  "protocol": "strict: train-select, validation-check, oos-once",
+  "chosen_params": {
+    "th": 70,
+    "bn": 3,
+    "en": 20,
+    "cost": 2.0
+  },
+  "train": {
+    "trades": 84,
+    "win_rate": 0.6785714285714286,
+    "avg_ret": 0.0011090461638758136,
+    "pf": 2.528524195649543,
+    "equity": 1.0972237363548327,
+    "ann_return": 0.07732529366387242,
+    "ann_sharpe": 3.252566881428831,
+    "ann_vol": 0.022992251556631427,
+    "mdd": 0.010929993036477821
+  },
+  "validation": {
+    "trades": 11,
+    "win_rate": 0.8181818181818182,
+    "avg_ret": 0.002321129712806026,
+    "pf": 11.402578987703615,
+    "equity": 1.0258044548870373,
+    "ann_return": 0.10892904100149581,
+    "ann_sharpe": 6.825727323285573,
+    "ann_vol": 0.015180667791356356,
+    "mdd": 0.0024530106937345197
+  },
+  "validation_cost_stress": {
+    "2.0": {
+      "trades": 11,
+      "win_rate": 0.8181818181818182,
+      "avg_ret": 0.002321129712806026,
+      "pf": 11.402578987703615,
+      "equity": 1.0258044548870373,
+      "ann_return": 0.10892904100149581,
+      "ann_sharpe": 6.825727323285573,
+      "ann_vol": 0.015180667791356356,
+      "mdd": 0.0024530106937345197
+    },
+    "3.0": {
+      "trades": 11,
+      "win_rate": 0.8181818181818182,
+      "avg_ret": 0.002272889479809796,
+      "pf": 10.815214741842716,
+      "equity": 1.0252615301923291,
+      "ann_return": 0.10654905182666141,
+      "ann_sharpe": 6.686674361322442,
+      "ann_vol": 0.015174295777695858,
+      "mdd": 0.002545709804456937
+    },
+    "4.0": {
+      "trades": 11,
+      "win_rate": 0.8181818181818182,
+      "avg_ret": 0.0022246492468135665,
+      "pf": 10.26914985421942,
+      "equity": 1.0247188667070315,
+      "ann_return": 0.10417405627381493,
+      "ann_sharpe": 6.547501431773583,
+      "ann_vol": 0.015167931028554309,
+      "mdd": 0.0026384046081989786
+    }
+  },
+  "oos_final_once": {
+    "trades": 58,
+    "win_rate": 0.6896551724137931,
+    "avg_ret": 0.001366817028702286,
+    "pf": 3.179886651473959,
+    "equity": 1.0821727475585254,
+    "ann_return": 0.12494145346867969,
+    "ann_sharpe": 4.280353099633632,
+    "ann_vol": 0.02761104971287127,
+    "mdd": 0.0062670779602461354
+  }
+}

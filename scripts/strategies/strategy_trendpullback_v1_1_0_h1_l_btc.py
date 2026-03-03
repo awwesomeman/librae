@@ -127,8 +127,8 @@ def main():
     stability = run_stability(bt_fn, periods.val_start, periods.val_end, stability_grid)
 
     out = {
-        'baseline_name': 'TrendPullback_v1.0-H1-L-BTC',
-        'candidate_name': 'TrendPullback_v1.1-H1-L-BTC',
+        'baseline_name': 'TrendPullback_v1.0.0-H1-L-BTC',
+        'candidate_name': 'TrendPullback_v1.1.0-H1-L-BTC',
         **strict,
         'validation_baseline': bt_fn(periods.val_start, periods.val_end, **baseline),
         'oos_baseline': bt_fn(periods.oos_start, periods.oos_end, **baseline),

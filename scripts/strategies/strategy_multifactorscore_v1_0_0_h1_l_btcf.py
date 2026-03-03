@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""MultiFactorScore_v1.0-H1-L-TSI baseline — MXFR1 via Shioaji.
+"""MultiFactorScore_v1.0.0-H1-L-BTCF baseline — Binance USDS-M Futures.
 
 Strict flow: Train+Val parameter selection → OOS once.
 """
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -13,33 +14,33 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from scripts.backtest.run_backtest import run_strict_protocol, Periods
-from scripts.etl.core_data_sources import fetch_shioaji_mxfr1_1m
+from scripts.etl.core_data_sources import fetch_binance_futures_klines
 from scripts.etl.core_features import resample_ohlcv, add_multifactor_features, add_daily_trend_gate, multifactor_score
 from scripts.reporting.schema_builder import build_cost_settings, build_strategy_output
 
-COST_PTS = 2.0  # round-trip cost in index points
+SYMBOL = "BTCUSDT"
+COST_BPS = 8
 
 
-def run_backtest(m1, h1, d1, start, end, cost=2.0, th=75, bn=3, en=10):
+def run_backtest(m1, h1, d1, start, end, th=70, cost=8, bn=3, en=10):
     h = h1[(h1.index >= start) & (h1.index <= end)]
     rets, pos = [], None
     for i in range(70, len(h) - 1):
         cur = h.iloc[i]; prev = h.iloc[i - 1]; t = h.index[i]; nt = h.index[i + 1]
-
         if pos is not None:
             w = m1[(m1.index > pos['last']) & (m1.index <= t)]
             for _, r in w.iterrows():
                 if r['low'] <= pos['stop']:
-                    rets.append((pos['stop'] - pos['entry']) / pos['entry'] - cost / pos['entry']); pos = None; break
+                    rets.append((pos['stop'] - pos['entry']) / pos['entry'] - cost / 10000); pos = None; break
                 if (not pos['t1d']) and r['high'] >= pos['t1']:
                     pos['t1d'] = True; pos['part'] = 0.5 * ((pos['t1'] - pos['entry']) / pos['entry'])
                 if r['high'] >= pos['t2']:
                     rem = 0.5 if pos['t1d'] else 1.0
-                    rets.append(pos['part'] + rem * ((pos['t2'] - pos['entry']) / pos['entry']) - cost / pos['entry']); pos = None; break
+                    rets.append(pos['part'] + rem * ((pos['t2'] - pos['entry']) / pos['entry']) - cost / 10000); pos = None; break
             if pos is not None:
                 pos['bars'] += 1
                 if pos['bars'] >= 6 or cur['close'] < cur['ema20']:
-                    rets.append((cur['close'] - pos['entry']) / pos['entry'] - cost / pos['entry']); pos = None
+                    rets.append((cur['close'] - pos['entry']) / pos['entry'] - cost / 10000); pos = None
                 else:
                     pos['last'] = t
         if pos is not None:
@@ -51,7 +52,7 @@ def run_backtest(m1, h1, d1, start, end, cost=2.0, th=75, bn=3, en=10):
         d = d1.loc[day]
         trend_gate = (d['close'] > d['ema20']) and (d['ema20'] > d['ema20_prev'])
         setup = trend_gate and (abs(cur['low'] - cur['ema20']) <= 0.3 * cur['atr14']) and (cur['close'] > cur['open']) and (cur['close'] > prev['high'])
-        if (not setup) or multifactor_score(cur) < th:
+        if not setup or multifactor_score(cur) < th:
             continue
 
         ew = m1[(m1.index > t) & (m1.index <= nt)].copy()
@@ -95,31 +96,34 @@ def run_backtest(m1, h1, d1, start, end, cost=2.0, th=75, bn=3, en=10):
 
 
 def main():
-    m1 = fetch_shioaji_mxfr1_1m('2024-01-01', '2026-03-03', simulation=True)
+    start_ms = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    end_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    m1 = fetch_binance_futures_klines(SYMBOL, '1m', start_ms, end_ms)
     h1 = add_multifactor_features(resample_ohlcv(m1, '60min'))
     d1 = add_daily_trend_gate(resample_ohlcv(m1, '1D'))
 
-    periods = Periods('2024-01-01', '2025-03-31', '2025-04-01', '2025-06-30', '2025-07-01', '2026-03-03')
+    periods = Periods('2025-01-01', '2025-07-31', '2025-08-01', '2025-09-30', '2025-10-01',
+                       pd.Timestamp.now(tz=timezone.utc).strftime('%Y-%m-%d'))
 
     def bt_fn(start, end, **params):
         return run_backtest(m1, h1, d1, start, end, **params)
 
-    grid = [{'th': th, 'bn': bn, 'en': en, 'cost': COST_PTS}
-            for th in [65, 70, 75, 80] for bn in [3, 5] for en in [10, 15, 20]]
+    grid = [{'th': th, 'cost': COST_BPS, 'bn': bn, 'en': en}
+            for th in [65, 70, 75] for bn in [3, 5] for en in [10, 15]]
 
-    strict = run_strict_protocol(bt_fn, grid, periods, min_trades_train=15, cost_stress=[2.0, 3.0, 4.0])
+    strict = run_strict_protocol(bt_fn, grid, periods, min_trades_train=15, cost_stress=[8, 10, 12, 16])
 
     cost_settings = build_cost_settings(
-        fee=2.0,
-        slippage=0.0,
-        tax=0.0,
-        round_trip_cost=COST_PTS,
-        unit='points',
+        fee=4,
+        slippage=4,
+        tax=0,
+        round_trip_cost=COST_BPS,
+        unit='bps',
     )
     out = build_strategy_output(
-        strategy='MultiFactorScore_v1.0-H1-L-MXFR1',
-        instrument='MXFR1',
-        data='Shioaji',
+        strategy='MultiFactorScore_v1.0.0-H1-L-BTCF',
+        instrument='BTCUSDT',
+        data='Binance USDS-M Futures',
         periods=periods,
         cost_settings=cost_settings,
         strict_result=strict,

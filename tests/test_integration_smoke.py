@@ -25,13 +25,13 @@ LAYERED_MODULES = [
     "scripts.monitor.monitor_run",
     "scripts.reporting.render_report",
     "scripts.reporting.save_reports",
-    "scripts.strategies.strategy_multifactorscore_v1_1_h1_l_tsi",
-    "scripts.strategies.strategy_multifactorscore_v1_0_h1_ls_btcf",
-    "scripts.strategies.strategy_trendpullback_v1_1_h1_l_btc",
-    "scripts.strategies.strategy_trendpullback_v1_0_h1_l_mxfr1",
-    "scripts.strategies.strategy_trendpullback_v1_0_h1_l_btcf",
-    "scripts.strategies.strategy_multifactorscore_v1_0_h1_l_mxfr1",
-    "scripts.strategies.strategy_multifactorscore_v1_0_h1_l_btcf",
+    "scripts.strategies.strategy_multifactorscore_v1_1_0_h1_l_mxfr1",
+    "scripts.strategies.strategy_multifactorscore_v1_0_0_h1_ls_btcf",
+    "scripts.strategies.strategy_trendpullback_v1_1_0_h1_l_btc",
+    "scripts.strategies.strategy_trendpullback_v1_0_0_h1_l_mxfr1",
+    "scripts.strategies.strategy_trendpullback_v1_0_0_h1_l_btcf",
+    "scripts.strategies.strategy_multifactorscore_v1_0_0_h1_l_mxfr1",
+    "scripts.strategies.strategy_multifactorscore_v1_0_0_h1_l_btcf",
 ]
 
 

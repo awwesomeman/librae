@@ -116,7 +116,7 @@ def main():
     ])
 
     out = {
-        'strategy': 'MultiFactorScore_v1.0-H1-LS-BTCF',
+        'strategy': 'MultiFactorScore_v1.0.0-H1-LS-BTCF',
         'data': 'Binance USDS-M Futures',
         **strict,
         'walkforward': wf,

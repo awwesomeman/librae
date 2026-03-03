@@ -1,7 +1,7 @@
 {
   "kind": "shioaji_trendpullback",
-  "strategy": "TrendPullback_v1.0-H1-L-TSI",
-  "state_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/tsi_trendpullback_v1_0_state.json",
+  "strategy": "TrendPullback_v1.0.0-H1-L-MXFR1",
+  "state_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/mxfr1_trendpullback_v1_0_0_state.json",
   "log_file": "/home/jasonpan_subscribe/.openclaw/workspace/data/monitor/signals.jsonl",
   "data_start": "2026-01-01",
   "data_end": "2026-12-31",

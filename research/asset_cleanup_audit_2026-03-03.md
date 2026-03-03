@@ -17,8 +17,8 @@
 - scripts/save_reports.py
 - scripts/monitor_core.py
 - scripts/monitor_run.py
-- scripts/monitor_profiles/btc_trendpullback_v1_0_h1_l.json
-- scripts/monitor_profiles/tsi_trendpullback_v1_0_h1_l.json
+- scripts/monitor_profiles/btc_trendpullback_v1_0_0_h1_l.json
+- scripts/monitor_profiles/mxfr1_trendpullback_v1_0_0_h1_l.json
 - templates/backtest_report_brief.md
 - templates/backtest_report_full.md
 - templates/robustness_report.md
@@ -31,7 +31,7 @@
 - scripts/mxf_trigger_watch.py  # 已由 monitor_run 取代
 - scripts/btc_trendpullback_v1_0_monitor.py  # 已由 monitor_run 取代
 - scripts/tsi_multifactorscore_robust.py  # 已有共用框架版本
-- scripts/trendpullback_v1_0_h1_l_btc.py  # 舊版單體回測
+- scripts/trendpullback_v1_0_0_h1_l_btc.py  # 舊版單體回測
 - data/binance/btc_trendpullback_v1_0_monitor.log  # 舊監控日誌
 - data/shioaji/mxf_setup_scan.log  # 舊監控日誌
 - data/shioaji/mxf_trigger_watch.log  # 舊監控日誌
