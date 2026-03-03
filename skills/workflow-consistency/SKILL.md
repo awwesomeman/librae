@@ -7,12 +7,14 @@ description: Enforce consistent daily workflow outputs for quant operations. Use
 
 Use this skill to keep outputs and process stable across repeated quant tasks.
 
+Read `references/trigger-map.md` first when this skill triggers.
+
 ## Required Output Routing
 
-- If user asks 回測分析: use `templates/backtest_report_brief.md` first, then full version if requested.
-- If user asks 穩健性測試: include walk-forward + stability + cost stress summary.
-- If user asks 待辦清單: use full TODO structure with item descriptions.
-- If user asks 監控策略: report setup/trigger schedule, state file, log file, dedupe behavior.
+- 回測分析：預設 brief，使用者要求再 full。
+- 穩健性測試：使用 robust 模板，必含 WF/穩定區/成本壓測。
+- 待辦清單：固定 完成/進行中/待執行，且每項有簡單描述。
+- 監控策略：固定回報 setup/trigger、state、log、去重機制。
 
 ## Required Guardrails Before Finalizing Code
 
@@ -47,5 +49,6 @@ Prefer Sonnet for speed; escalate to Opus when correctness/risk dominates.
 Before sending final response, confirm all:
 - Correct template selected
 - Required metrics present
-- Best-practice checks completed
+- Best-practice checks completed (py_compile + unit test for core changes)
 - TODO synchronized for new/changed commitments
+- Response blocks use: 執行中 / 待執行 / 等待決策 (when status update is requested)

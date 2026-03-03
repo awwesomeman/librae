@@ -7,6 +7,8 @@ description: Review and clean obsolete quant artifacts safely. Use when user ask
 
 Use this skill to reduce clutter and technical debt without accidental loss.
 
+Read `references/cleanup-flow.md` first when this skill triggers.
+
 ## Safety Rule (Mandatory)
 
 Never hard-delete immediately.

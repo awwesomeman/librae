@@ -24,10 +24,6 @@
 ## 待執行
 
 
-- [ ] 應用場景專用 Skills 設計
-  - 分派時間：2026-03-03 00:53 UTC
-  - 完成時間：-
-  - 狀態描述：已啟動 `workflow-consistency` 與 `artifact-lifecycle-manager` 兩個 skill 骨架；下一步補齊觸發規則、輸出模板對應與清理安全流程。
 
 - [ ] Brave Web Search 升級規劃（稍晚提醒）
   - 分派時間：2026-03-03 00:53 UTC
@@ -78,6 +74,11 @@
   - 分派時間：2026-03-02 17:15 UTC
   - 完成時間：2026-03-03 03:09 UTC
   - 狀態描述：主策略腳本 `multifactorscore_v1_1_h1_l_tsi.py`、`trendpullback_v1_1_h1_l_btc_robust.py`、`btcf_m1_0_m1.py` 已接入共用引擎（run_backtest/run_walkforward/run_stability）；已通過 py_compile 與單元測試 7/7。
+
+- [x] 應用場景專用 Skills 設計
+  - 分派時間：2026-03-03 00:53 UTC
+  - 完成時間：2026-03-03 03:25 UTC
+  - 狀態描述：`workflow-consistency` 與 `artifact-lifecycle-manager` 已完成骨架+規則強化，並補齊 `references/trigger-map.md`、`references/cleanup-flow.md`。
 
 - [x] 策略命名規則升級（回填舊文檔與腳本引用）
   - 分派時間：2026-03-02 14:06 UTC
