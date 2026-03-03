@@ -52,15 +52,12 @@ class TestBuildCostSettings(unittest.TestCase):
             'slippage': 0,
             'tax': 0,
             'round_trip_cost': 2.0,
-            'round_trip_formula': 'round_trip_cost = fee + slippage + tax',
+            'round_trip_cost_text': 'round_trip_cost=2.0 points (fee=100, slippage=0, tax=0)',
         })
 
-    def test_notes(self):
-        cs = build_cost_settings(fee=4, slippage=4, tax=0, round_trip_cost=8, unit='bps', notes='bps')
-        self.assertEqual(cs['notes'], 'bps')
-
-    def test_no_notes_key_when_none(self):
+    def test_cost_text_format(self):
         cs = build_cost_settings(fee=4, slippage=4, tax=0, round_trip_cost=8, unit='bps')
+        self.assertEqual(cs['round_trip_cost_text'], 'round_trip_cost=8 bps (fee=4, slippage=4, tax=0)')
         self.assertNotIn('notes', cs)
 
 
@@ -71,7 +68,7 @@ class TestBuildStrategyOutput(unittest.TestCase):
             instrument='MXFR1',
             data='Shioaji',
             periods=FAKE_PERIODS,
-            cost_settings={'unit': 'points', 'fee': 100, 'slippage': 0, 'tax': 0, 'round_trip_cost': 2.0, 'round_trip_formula': 'round_trip_cost = fee + slippage + tax'},
+            cost_settings={'unit': 'points', 'fee': 100, 'slippage': 0, 'tax': 0, 'round_trip_cost': 2.0, 'round_trip_cost_text': 'round_trip_cost=2.0 points (fee=100, slippage=0, tax=0)'},
             strict_result=FAKE_STRICT,
         )
         defaults.update(kwargs)
@@ -125,7 +122,7 @@ class TestValidateAgainstReportSchema(unittest.TestCase):
         out = build_strategy_output(
             strategy='T', instrument='I', data='D',
             periods=FAKE_PERIODS,
-            cost_settings={'unit': 'points', 'fee': 0, 'slippage': 0, 'tax': 0, 'round_trip_cost': 0, 'round_trip_formula': 'round_trip_cost = fee + slippage + tax'},
+            cost_settings={'unit': 'points', 'fee': 0, 'slippage': 0, 'tax': 0, 'round_trip_cost': 0, 'round_trip_cost_text': 'round_trip_cost=0 points (fee=0, slippage=0, tax=0)'},
             strict_result=FAKE_STRICT,
         )
         schema_path = self._make_schema(
@@ -167,7 +164,7 @@ class TestValidateAgainstReportSchema(unittest.TestCase):
         out = build_strategy_output(
             strategy='T', instrument='I', data='D',
             periods=FAKE_PERIODS,
-            cost_settings={'unit': 'points', 'fee': 0, 'slippage': 0, 'tax': 0, 'round_trip_cost': 0, 'round_trip_formula': 'round_trip_cost = fee + slippage + tax'},
+            cost_settings={'unit': 'points', 'fee': 0, 'slippage': 0, 'tax': 0, 'round_trip_cost': 0, 'round_trip_cost_text': 'round_trip_cost=0 points (fee=0, slippage=0, tax=0)'},
             strict_result=FAKE_STRICT,
         )
         validate_against_report_schema(out)

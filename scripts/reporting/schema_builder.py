@@ -24,23 +24,19 @@ def build_cost_settings(
     tax,
     round_trip_cost,
     unit: str,
-    notes: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build canonical cost_settings dict.
 
     unit: "points" or "bps" (or other explicit unit agreed by strategy)
     """
-    d: Dict[str, Any] = {
+    return {
         'unit': unit,
         'fee': fee,
         'slippage': slippage,
         'tax': tax,
         'round_trip_cost': round_trip_cost,
-        'round_trip_formula': 'round_trip_cost = fee + slippage + tax',
+        'round_trip_cost_text': f'round_trip_cost={round_trip_cost} {unit} (fee={fee}, slippage={slippage}, tax={tax})',
     }
-    if notes is not None:
-        d['notes'] = notes
-    return d
 
 
 def build_strategy_output(

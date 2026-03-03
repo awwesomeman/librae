@@ -117,10 +117,9 @@ def main():
         tax=0.0,
         round_trip_cost=COST_PTS,
         unit='points',
-        notes='小台雙邊交易成本 NT$100 以 2 點等價表示',
     )
     out = build_strategy_output(
-        strategy='TrendPullback_v1.0-H1-L-TSI',
+        strategy='TrendPullback_v1.0-H1-L-MXFR1',
         instrument='MXFR1',
         data='Shioaji',
         periods=periods,
