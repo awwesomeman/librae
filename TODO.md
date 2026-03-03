@@ -27,7 +27,7 @@
 - [ ] 研究框架模組化（回測共用引擎）
   - 分派時間：2026-03-02 17:15 UTC
   - 完成時間：-
-  - 狀態描述：`run_backtest.py`、`run_walkforward.py`、`run_stability.py`、`render_report.py` 已完成；下一步把主策略腳本全面接入共用框架。 
+  - 狀態描述：`run_backtest.py`、`run_walkforward.py`、`run_stability.py`、`render_report.py` 已完成；已完成基礎語法檢查（py_compile）與單元測試（7/7 pass），下一步把主策略腳本全面接入共用框架。 
 
 - [ ] 全域模板治理（single source + schema 檢核）
   - 分派時間：2026-03-02 17:30 UTC
