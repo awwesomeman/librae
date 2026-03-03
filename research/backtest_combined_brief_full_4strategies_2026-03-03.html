@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backtest Report — 2026-03-03</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+    background: #f4f6f9;
+    color: #222;
+    padding: 16px;
+}
+h1 { font-size: 1.3em; margin-bottom: 12px; color: #1a1a2e; }
+h2 { font-size: 1.05em; margin: 12px 0 6px; color: #1a1a2e; border-bottom: 1px solid #ddd; padding-bottom: 3px; }
+h3 { font-size: 0.95em; margin: 10px 0 4px; color: #333; }
+
+/* ---- Summary table ---- */
+.summary-wrapper { overflow-x: auto; margin-bottom: 24px; }
+table.summary {
+    border-collapse: collapse;
+    min-width: 100%;
+    background: #fff;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+}
+table.summary th, table.summary td {
+    padding: 7px 12px;
+    text-align: right;
+    white-space: nowrap;
+    border-bottom: 1px solid #eee;
+}
+table.summary th:first-child, table.summary td:first-child {
+    text-align: left;
+    font-weight: 600;
+    color: #555;
+    min-width: 140px;
+}
+table.summary thead th {
+    background: #1a1a2e;
+    color: #fff;
+    font-weight: 600;
+}
+table.summary tbody tr:hover { background: #f0f4ff; }
+table.summary tbody tr:last-child td { border-bottom: none; }
+
+/* ---- Column card layout ---- */
+.columns {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+}
+.card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 1px 5px rgba(0,0,0,.09);
+    padding: 14px 16px;
+    flex: 1 1 260px;
+    min-width: 260px;
+}
+.card h2 { font-size: 0.95em; }
+
+/* ---- Metric tables inside cards ---- */
+table.metrics {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.88em;
+    margin-top: 4px;
+}
+table.metrics th, table.metrics td {
+    padding: 4px 8px;
+    text-align: right;
+    border-bottom: 1px solid #f0f0f0;
+}
+table.metrics th:first-child, table.metrics td:first-child {
+    text-align: left;
+    color: #555;
+}
+table.metrics thead th {
+    background: #eef2ff;
+    color: #333;
+    font-weight: 600;
+}
+table.metrics tbody tr:last-child td { border-bottom: none; }
+
+/* ---- Key-value pairs ---- */
+dl.kv { margin: 4px 0; }
+dl.kv dt { display: inline; font-weight: 600; color: #555; }
+dl.kv dd { display: inline; margin-left: 4px; color: #222; }
+dl.kv dd::after { content: '\A'; white-space: pre; }
+
+/* ---- Cost stress table ---- */
+table.stress { font-size: 0.85em; }
+table.stress thead th { background: #fff3e0; }
+
+/* ---- Responsive ---- */
+@media (max-width: 640px) {
+    .columns { flex-direction: column; }
+    .card { min-width: 0; }
+}
+
+</style>
+</head>
+<body>
+<h1>Backtest Combined Report — 2026-03-03</h1>
+<h2>OOS Summary Comparison</h2>
+<div class="summary-wrapper">
+<table class="summary">
+<thead><tr><th>Metric</th><th>MultiFactorScore_v1.0-H1-L-TSI</th><th>TrendPullback_v1.0-H1-L-TSI</th><th>MultiFactorScore_v1.0-H1-L-BTCF</th><th>TrendPullback_v1.0-H1-L-BTCF</th></tr></thead>
+<tbody>
+<tr><td>OOS Trades</td><td>58</td><td>48</td><td>26</td><td>15</td></tr>
+<tr><td>OOS Win Rate</td><td>68.97%</td><td>87.50%</td><td>69.23%</td><td>86.67%</td></tr>
+<tr><td>OOS Avg Ret</td><td>0.14%</td><td>0.27%</td><td>0.19%</td><td>0.36%</td></tr>
+<tr><td>OOS PF</td><td>3.18</td><td>12.61</td><td>2.44</td><td>9.27</td></tr>
+<tr><td>OOS Ann Return</td><td>12.49%</td><td>21.59%</td><td>12.09%</td><td>17.39%</td></tr>
+<tr><td>OOS Sharpe</td><td>4.28</td><td>8.87</td><td>3.15</td><td>5.12</td></tr>
+<tr><td>OOS Ann Vol</td><td>2.76%</td><td>2.21%</td><td>3.64%</td><td>3.14%</td></tr>
+<tr><td>OOS MDD</td><td>0.63%</td><td>0.28%</td><td>0.94%</td><td>0.56%</td></tr>
+</tbody>
+</table>
+</div>
+<h2>Strategy Details</h2>
+<div class="columns">
+<div class="card">
+<h2>MultiFactorScore_v1.0-H1-L-TSI</h2>
+<dl class="kv">
+<dt>Instrument:</dt><dd>MXFR1</dd>
+<dt>Data:</dt><dd>Shioaji</dd>
+<dt>Cost:</dt><dd>2.0</dd>
+<dt>Params:</dt><dd>th=70, bn=3, en=20, cost=2.0</dd>
+<dt>Protocol:</dt><dd>strict: train-select, validation-check, oos-once</dd>
+</dl>
+<h3>Sample Periods</h3>
+<dl class="kv"><dt>Train:</dt><dd>2024-01-01 → 2025-03-31</dd><dt>Validation:</dt><dd>2025-04-01 → 2025-06-30</dd><dt>Oos:</dt><dd>2025-07-01 → 2026-03-03</dd></dl>
+<h3>Train / Validation / OOS Metrics</h3>
+<table class="metrics">
+<thead><tr><th>Metric</th><th>Train</th><th>Val</th><th>OOS</th></tr></thead>
+<tbody>
+<tr><td>Trades</td><td>84</td><td>11</td><td>58</td></tr>
+<tr><td>Win Rate</td><td>67.86%</td><td>81.82%</td><td>68.97%</td></tr>
+<tr><td>Avg Ret</td><td>0.11%</td><td>0.23%</td><td>0.14%</td></tr>
+<tr><td>PF</td><td>2.53</td><td>11.40</td><td>3.18</td></tr>
+<tr><td>Ann Return</td><td>7.73%</td><td>10.89%</td><td>12.49%</td></tr>
+<tr><td>Sharpe</td><td>3.25</td><td>6.83</td><td>4.28</td></tr>
+<tr><td>Ann Vol</td><td>2.30%</td><td>1.52%</td><td>2.76%</td></tr>
+<tr><td>MDD</td><td>1.09%</td><td>0.25%</td><td>0.63%</td></tr>
+</tbody>
+</table>
+<h3>Cost Stress (Validation)</h3>
+<table class="metrics stress">
+<thead><tr><th>Metric</th><th>cost=2.0</th><th>cost=3.0</th><th>cost=4.0</th></tr></thead>
+<tbody>
+<tr><td>Ann Return</td><td>10.89%</td><td>10.65%</td><td>10.42%</td></tr>
+<tr><td>Sharpe</td><td>6.83</td><td>6.69</td><td>6.55</td></tr>
+<tr><td>MDD</td><td>0.25%</td><td>0.25%</td><td>0.26%</td></tr>
+</tbody>
+</table>
+</div>
+<div class="card">
+<h2>TrendPullback_v1.0-H1-L-TSI</h2>
+<dl class="kv">
+<dt>Instrument:</dt><dd>MXFR1</dd>
+<dt>Data:</dt><dd>Shioaji</dd>
+<dt>Cost:</dt><dd>2.0</dd>
+<dt>Params:</dt><dd>pull=0.35, bn=3, en=20, tstop=4, cost=2.0</dd>
+<dt>Protocol:</dt><dd>strict: train-select, validation-check, oos-once</dd>
+</dl>
+<h3>Sample Periods</h3>
+<dl class="kv"><dt>Train:</dt><dd>2024-01-01 → 2025-03-31</dd><dt>Validation:</dt><dd>2025-04-01 → 2025-06-30</dd><dt>Oos:</dt><dd>2025-07-01 → 2026-03-03</dd></dl>
+<h3>Train / Validation / OOS Metrics</h3>
+<table class="metrics">
+<thead><tr><th>Metric</th><th>Train</th><th>Val</th><th>OOS</th></tr></thead>
+<tbody>
+<tr><td>Trades</td><td>64</td><td>15</td><td>48</td></tr>
+<tr><td>Win Rate</td><td>71.88%</td><td>66.67%</td><td>87.50%</td></tr>
+<tr><td>Avg Ret</td><td>0.16%</td><td>0.08%</td><td>0.27%</td></tr>
+<tr><td>PF</td><td>3.36</td><td>1.67</td><td>12.61</td></tr>
+<tr><td>Ann Return</td><td>8.61%</td><td>4.86%</td><td>21.59%</td></tr>
+<tr><td>Sharpe</td><td>3.57</td><td>1.64</td><td>8.87</td></tr>
+<tr><td>Ann Vol</td><td>2.33%</td><td>2.92%</td><td>2.21%</td></tr>
+<tr><td>MDD</td><td>1.29%</td><td>1.01%</td><td>0.28%</td></tr>
+</tbody>
+</table>
+<h3>Cost Stress (Validation)</h3>
+<table class="metrics stress">
+<thead><tr><th>Metric</th><th>cost=2.0</th><th>cost=3.0</th><th>cost=4.0</th></tr></thead>
+<tbody>
+<tr><td>Ann Return</td><td>4.86%</td><td>4.55%</td><td>4.25%</td></tr>
+<tr><td>Sharpe</td><td>1.64</td><td>1.54</td><td>1.44</td></tr>
+<tr><td>MDD</td><td>1.01%</td><td>1.04%</td><td>1.07%</td></tr>
+</tbody>
+</table>
+</div>
+<div class="card">
+<h2>MultiFactorScore_v1.0-H1-L-BTCF</h2>
+<dl class="kv">
+<dt>Instrument:</dt><dd>BTCUSDT</dd>
+<dt>Data:</dt><dd>Binance USDS-M Futures</dd>
+<dt>Cost:</dt><dd>8</dd>
+<dt>Params:</dt><dd>th=75, cost=8, bn=3, en=15</dd>
+<dt>Protocol:</dt><dd>strict: train-select, validation-check, oos-once</dd>
+</dl>
+<h3>Sample Periods</h3>
+<dl class="kv"><dt>Train:</dt><dd>2025-01-01 → 2025-07-31</dd><dt>Validation:</dt><dd>2025-08-01 → 2025-09-30</dd><dt>Oos:</dt><dd>2025-10-01 → 2026-03-03</dd></dl>
+<h3>Train / Validation / OOS Metrics</h3>
+<table class="metrics">
+<thead><tr><th>Metric</th><th>Train</th><th>Val</th><th>OOS</th></tr></thead>
+<tbody>
+<tr><td>Trades</td><td>71</td><td>13</td><td>26</td></tr>
+<tr><td>Win Rate</td><td>71.83%</td><td>76.92%</td><td>69.23%</td></tr>
+<tr><td>Avg Ret</td><td>0.16%</td><td>0.17%</td><td>0.19%</td></tr>
+<tr><td>PF</td><td>2.03</td><td>3.12</td><td>2.44</td></tr>
+<tr><td>Ann Return</td><td>21.23%</td><td>14.06%</td><td>12.09%</td></tr>
+<tr><td>Sharpe</td><td>3.18</td><td>4.52</td><td>3.15</td></tr>
+<tr><td>Ann Vol</td><td>6.11%</td><td>2.92%</td><td>3.64%</td></tr>
+<tr><td>MDD</td><td>2.60%</td><td>0.61%</td><td>0.94%</td></tr>
+</tbody>
+</table>
+<h3>Cost Stress (Validation)</h3>
+<table class="metrics stress">
+<thead><tr><th>Metric</th><th>cost=8</th><th>cost=10</th><th>cost=12</th><th>cost=16</th></tr></thead>
+<tbody>
+<tr><td>Ann Return</td><td>14.06%</td><td>12.27%</td><td>10.51%</td><td>7.07%</td></tr>
+<tr><td>Sharpe</td><td>4.52</td><td>3.98</td><td>3.44</td><td>2.35</td></tr>
+<tr><td>MDD</td><td>0.61%</td><td>0.67%</td><td>0.73%</td><td>0.85%</td></tr>
+</tbody>
+</table>
+</div>
+<div class="card">
+<h2>TrendPullback_v1.0-H1-L-BTCF</h2>
+<dl class="kv">
+<dt>Instrument:</dt><dd>BTCUSDT</dd>
+<dt>Data:</dt><dd>Binance USDS-M Futures</dd>
+<dt>Cost:</dt><dd>8</dd>
+<dt>Params:</dt><dd>pull=0.35, bn=3, en=10, tstop=4, cost=8</dd>
+<dt>Protocol:</dt><dd>strict: train-select, validation-check, oos-once</dd>
+</dl>
+<h3>Sample Periods</h3>
+<dl class="kv"><dt>Train:</dt><dd>2025-01-01 → 2025-08-31</dd><dt>Validation:</dt><dd>2025-09-01 → 2025-10-31</dd><dt>Oos:</dt><dd>2025-11-01 → 2026-03-03</dd></dl>
+<h3>Train / Validation / OOS Metrics</h3>
+<table class="metrics">
+<thead><tr><th>Metric</th><th>Train</th><th>Val</th><th>OOS</th></tr></thead>
+<tbody>
+<tr><td>Trades</td><td>102</td><td>18</td><td>15</td></tr>
+<tr><td>Win Rate</td><td>77.45%</td><td>77.78%</td><td>86.67%</td></tr>
+<tr><td>Avg Ret</td><td>0.24%</td><td>0.23%</td><td>0.36%</td></tr>
+<tr><td>PF</td><td>3.29</td><td>6.02</td><td>9.27</td></tr>
+<tr><td>Ann Return</td><td>45.23%</td><td>28.21%</td><td>17.39%</td></tr>
+<tr><td>Sharpe</td><td>5.84</td><td>7.84</td><td>5.12</td></tr>
+<tr><td>Ann Vol</td><td>6.43%</td><td>3.18%</td><td>3.14%</td></tr>
+<tr><td>MDD</td><td>2.19%</td><td>0.36%</td><td>0.56%</td></tr>
+</tbody>
+</table>
+<h3>Cost Stress (Validation)</h3>
+<table class="metrics stress">
+<thead><tr><th>Metric</th><th>cost=8</th><th>cost=12</th><th>cost=16</th></tr></thead>
+<tbody>
+<tr><td>Ann Return</td><td>28.21%</td><td>22.73%</td><td>17.47%</td></tr>
+<tr><td>Sharpe</td><td>7.84</td><td>6.47</td><td>5.09</td></tr>
+<tr><td>MDD</td><td>0.36%</td><td>0.44%</td><td>0.52%</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+</body>
+</html>
