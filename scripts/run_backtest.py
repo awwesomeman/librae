@@ -28,6 +28,16 @@ class Periods:
     oos_end: str
 
 
+_REQUIRED_KEYS = ("trades", "ann_return", "ann_sharpe", "mdd")
+
+
+def _validate_metrics(m: Dict[str, Any], context: str = "") -> None:
+    missing = [k for k in _REQUIRED_KEYS if k not in m]
+    if missing:
+        ctx = f" ({context})" if context else ""
+        raise ValueError(f"backtest result missing required keys: {missing}{ctx}")
+
+
 def _score(m: Dict[str, Any]) -> float:
     sharpe = m.get("ann_sharpe") if m.get("ann_sharpe") is not None else -9
     mdd = m.get("mdd") if m.get("mdd") is not None else 1
@@ -47,6 +57,7 @@ def run_strict_protocol(
     scored = []
     for p in param_grid:
         m = backtest_fn(periods.train_start, periods.train_end, **p)
+        _validate_metrics(m, "train")
         if m.get("trades", 0) < min_trades_train:
             continue
         scored.append((_score(m), p, m))
@@ -59,6 +70,7 @@ def run_strict_protocol(
 
     # 2) Validation（不再選參）
     val_metrics = backtest_fn(periods.val_start, periods.val_end, **best_params)
+    _validate_metrics(val_metrics, "validation")
 
     val_cost = {}
     if cost_stress:
@@ -69,6 +81,7 @@ def run_strict_protocol(
 
     # 3) OOS 單次
     oos_metrics = backtest_fn(periods.oos_start, periods.oos_end, **best_params)
+    _validate_metrics(oos_metrics, "oos")
 
     return {
         "protocol": "strict: train-select, validation-check, oos-once",

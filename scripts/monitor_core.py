@@ -137,5 +137,7 @@ def append_signal_log(
     }
     path = Path(log_file)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 10 * 1024 * 1024:
+        path.replace(path.parent / (path.name + '.1'))
     with path.open('a', encoding='utf-8') as f:
         f.write(json.dumps(row, ensure_ascii=False) + '\n')

@@ -1,5 +1,3 @@
-
-```python
 #!/usr/bin/env python3
 """
 Memory Janitor — 記憶維護腳本
@@ -173,6 +171,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-
