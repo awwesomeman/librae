@@ -197,9 +197,9 @@ def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Event-Based Strategy Analysis", layout="wide")
-    st.title("Event-Based Strategy Analysis")
-    st.caption("UI build: 2026-03-05-0950")
+    st.set_page_config(page_title="策略回測分析", layout="wide")
+    st.title("策略回測分析")
+    st.caption("UI build: 2026-03-05-1036")
 
     section1_height = 580
     st.markdown(
@@ -246,19 +246,37 @@ def main() -> None:
             },
         )
 
-    # Section 1
+    # Section 1 (merged Decision + Context)
     with st.container(border=True):
-        st.markdown("### Section 1 · Decision")
-        t0, t1 = st.tabs(["績效總覽", "MDD 走勢"])
+        st.markdown("### 策略總覽")
 
-        with t0:
+        summary = meta.get("summary", {})
+        periods = meta.get("periods", {})
+        full_period = summary.get("full_sample_period", periods.get("full", "N/A"))
+        train_period = summary.get("train_period", periods.get("train", "N/A"))
+        oos_period = summary.get("oos_period", periods.get("oos", "N/A"))
+        asset = summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")
+        freq = str(summary.get("freq", meta.get("params", {}).get("timeframe", "N/A")))
+
+        h1, h2, h3, h4 = st.columns([2.4, 1.8, 1.4, 1.2])
+        h1.metric("全樣本期間", full_period)
+        h2.markdown(
+            f"<div style='font-size:0.85rem;color:#9aa0a6;'>Train: {train_period}<br>測試期間: {oos_period}</div>",
+            unsafe_allow_html=True,
+        )
+        h3.metric("交易標的", asset)
+        h4.metric("交易頻率", freq)
+
+        t_perf, t_risk, t_setup = st.tabs(["績效分析", "風險分析", "策略設定"])
+
+        with t_perf:
             _left, _right = st.columns([8, 1])
             with _right:
-                show_signals = st.toggle("Signals", value=True, key="show_signals_main")
+                show_signals = st.toggle("顯示訊號", value=True, key="show_signals_main")
 
             main_chart_height = 340
             if curve.empty:
-                st.warning("No curve data for selected filters.")
+                st.warning("目前篩選條件下沒有可用的績效曲線資料。")
             else:
                 curve["strategy_ret"] = (curve.get("equity", curve.get("nav", pd.Series(dtype=float))).astype(float) - 1.0)
                 curve["benchmark_ret"] = curve["benchmark_equity"].astype(float) - 1.0 if "benchmark_equity" in curve.columns else pd.NA
@@ -278,72 +296,59 @@ def main() -> None:
                 fig.update_layout(height=main_chart_height, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
                 st.plotly_chart(fig, use_container_width=True)
 
-            st.markdown("**Performance Analysis**")
+            st.markdown("**績效摘要表**")
             if perf_raw.empty:
-                st.warning("No performance data for selected filters.")
+                st.warning("目前篩選條件下沒有可用的績效資料。")
             else:
                 table = build_perf_table(perf_raw)
                 st.dataframe(table, use_container_width=True, hide_index=True, height=180)
 
-        with t1:
+        with t_risk:
+            st.markdown("**最大回撤趨勢（MDD）**")
             if curve.empty or "drawdown" not in curve.columns:
-                st.info("No drawdown series")
+                st.info("目前沒有可用的回撤序列資料。")
             else:
                 mdd_fig = go.Figure()
                 mdd_fig.add_trace(go.Scatter(x=curve["_time"], y=curve["drawdown"].astype(float), mode="lines", name="MDD"))
-                mdd_fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
+                mdd_fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
                 st.plotly_chart(mdd_fig, use_container_width=True)
 
-    # Section 2
-    with st.container(border=True):
-        st.markdown("### Section 2 · 策略背景說明")
-        top1, top2, top3, top4 = st.columns([1, 1, 1.5, 1.5])
-        top1.metric("Benchmark", meta.get("benchmark", "N/A"))
-        top2.metric("Data Source", meta.get("data_source", "N/A"))
-        top3.metric("Data Version", meta.get("data_version", "N/A"))
-        top4.metric("Last Updated (UTC)", meta.get("last_updated_utc", "N/A"))
-
-        t2, t3, t4, t5 = st.tabs(["期間", "邏輯與參數", "成本風控", "JSON"])
-        with t2:
-            periods = meta.get("periods", {})
-            st.markdown(f"- Full: `{periods.get('full', 'N/A')}`")
-            st.markdown(f"- Train: `{periods.get('train', 'N/A')}`")
-            st.markdown(f"- OOS: `{periods.get('oos', 'N/A')}`")
-            st.markdown(f"- Universe: `{', '.join(meta.get('universe', [])) if meta.get('universe') else 'N/A'}`")
-
-        with t3:
-            st.markdown("**Strategy Logic**")
+        with t_setup:
+            st.markdown("**策略邏輯**")
             st.write(meta.get("logic", "N/A"))
-            for a in meta.get("assumptions", []):
-                st.markdown(f"- {a}")
+
+            assumptions = meta.get("assumptions", [])
+            if assumptions:
+                st.markdown("**交易假設**")
+                for a in assumptions:
+                    st.markdown(f"- {a}")
+
+            st.markdown("**策略參數**")
             params = meta.get("params", {})
             if params:
-                st.dataframe(pd.DataFrame([{"Parameter": k, "Value": v} for k, v in params.items()]), use_container_width=True, hide_index=True, height=180)
+                st.dataframe(pd.DataFrame([{"Parameter": k, "Value": v} for k, v in params.items()]), use_container_width=True, hide_index=True, height=200)
 
-        with t4:
             c1, c2 = st.columns(2)
             with c1:
+                st.markdown("**成本模型**")
                 cost_model = meta.get("cost_model", {})
                 if cost_model:
                     st.dataframe(pd.DataFrame([{"Key": k, "Value": v} for k, v in cost_model.items()]), use_container_width=True, hide_index=True, height=180)
             with c2:
+                st.markdown("**風險限制**")
                 risk_limits = meta.get("risk_limits", {})
                 if risk_limits:
                     st.dataframe(pd.DataFrame([{"Key": k, "Value": v} for k, v in risk_limits.items()]), use_container_width=True, hide_index=True, height=180)
 
-        with t5:
-            with st.expander("Raw context JSON", expanded=False):
-                st.json(meta)
-
     # Section 3
     with st.container(border=True):
-        st.markdown("### Section 3 · 執行明細")
+        st.markdown("### 交易明細")
         col_pnl, col_tbl = st.columns([4, 6])
 
         with col_pnl:
-            st.markdown("**逐筆 PnL**")
+            st.markdown("**逐筆損益（不含成本）**")
             if trade_pnl.empty:
-                st.info("No trade_pnl data")
+                st.info("目前沒有可用的逐筆損益資料。")
             else:
                 pnl_fig = go.Figure()
                 pnl_fig.add_trace(go.Scatter(x=trade_pnl["_time"], y=trade_pnl["_value"].astype(float), mode="markers", marker=dict(size=8), name="Trade PnL"))
@@ -353,22 +358,22 @@ def main() -> None:
         with col_tbl:
             st.markdown("**訂單明細**")
             if signals.empty:
-                st.info("No order/signal detail data")
+                st.info("目前沒有可用的訂單/訊號明細資料。")
             else:
                 od = pd.DataFrame()
-                od["Time"] = pd.to_datetime(signals["_time"], utc=True)
+                od["時間"] = pd.to_datetime(signals["_time"], utc=True)
                 od["raw_price"] = signals["price"] if "price" in signals.columns else pd.NA
                 side_map = {"buy": "buy", "sell": "sell", "short": "sell_short", "sell_short": "sell_short", "cover": "buy_to_cover", "buy_to_cover": "buy_to_cover"}
-                od["Position"] = signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str).str.lower().map(side_map).fillna(signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str))
+                od["倉位"] = signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str).str.lower().map(side_map).fillna(signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str))
 
                 if not trade_pnl.empty:
-                    pnl = trade_pnl[["_time", "_value"]].copy().rename(columns={"_time": "Time", "_value": "Trade PnL (Gross)"})
-                    pnl["Time"] = pd.to_datetime(pnl["Time"], utc=True)
-                    od = pd.merge_asof(od.sort_values("Time"), pnl.sort_values("Time"), on="Time", direction="nearest", tolerance=pd.Timedelta("2h"))
+                    pnl = trade_pnl[["_time", "_value"]].copy().rename(columns={"_time": "時間", "_value": "該筆交易損益（不含成本）"})
+                    pnl["時間"] = pd.to_datetime(pnl["時間"], utc=True)
+                    od = pd.merge_asof(od.sort_values("時間"), pnl.sort_values("時間"), on="時間", direction="nearest", tolerance=pd.Timedelta("2h"))
                 else:
-                    od["Trade PnL (Gross)"] = pd.NA
+                    od["該筆交易損益（不含成本）"] = pd.NA
 
-                od = od[["Time", "Position", "raw_price", "Trade PnL (Gross)"]].sort_values("Time", ascending=False)
+                od = od[["時間", "倉位", "raw_price", "該筆交易損益（不含成本）"]].sort_values("時間", ascending=False)
                 st.dataframe(od, use_container_width=True, hide_index=True, height=280)
 
 
