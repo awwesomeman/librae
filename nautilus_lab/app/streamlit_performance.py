@@ -112,8 +112,8 @@ from(bucket: "{cfg.bucket}")
   |> filter(fn:(r)=> r._measurement=="strategy_signals")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
   |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "signal_strength")
-  |> keep(columns:["_time","_value","side"])
+  |> filter(fn:(r)=> r._field == "signal_strength" or r._field == "price")
+  |> pivot(rowKey:["_time","strategy","run_id","side"], columnKey:["_field"], valueColumn:"_value")
   |> sort(columns:["_time"], desc:false)
 '''
     df = query_df(client, cfg.org, flux)
@@ -197,9 +197,18 @@ def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Nautilus Performance (Final)", layout="wide")
-    st.title("Nautilus Performance (Final)")
-    st.caption("Cumulative Return + Performance Analysis")
+    st.set_page_config(page_title="Event-Based Strategy Analysis", layout="wide")
+    st.title("Event-Based Strategy Analysis")
+
+    section1_height = 560  # align with original compact section-1 feel
+    st.markdown(
+        f"""
+        <style>
+        div[data-baseweb=\"tab-panel\"] {{ min-height: {section1_height}px; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     cfg = get_cfg()
     if not cfg.token:
@@ -212,12 +221,11 @@ def main() -> None:
             st.warning("No strategy_performance data found yet.")
             st.stop()
 
-        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+        c1, c2, c3 = st.columns([3, 2, 3])
         strategy = c1.selectbox("Strategy", strategies, index=0)
         sample = c2.selectbox("Sample", ["oos", "train", "full"], index=0)
         run_ids = tag_values(client, cfg, "strategy_performance", "run_id")
         run_id = c3.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
-        show_signals = c4.toggle("Show Signals", value=True)
 
         strategy_meta = load_strategy_contexts()
         meta = strategy_meta.get(
@@ -233,7 +241,7 @@ def main() -> None:
         )
 
         with st.container(border=True):
-            st.markdown("### Strategy & Backtest Context")
+            st.markdown("### Overview")
 
             top1, top2, top3, top4 = st.columns([1.1, 1.1, 1.2, 1.2])
             top1.metric("Benchmark", meta.get("benchmark", "N/A"))
@@ -241,9 +249,9 @@ def main() -> None:
             top3.metric("Data Version", meta.get("data_version", "N/A"))
             top4.metric("Last Updated (UTC)", meta.get("last_updated_utc", "N/A"))
 
-            t1, t2, t3, t4 = st.tabs(["Periods", "Logic & Params", "Cost/Risk", "Meta"])
+            t0, t1, t2, t3, t4, t5 = st.tabs(["Performance", "Analysis", "Periods", "Logic & Params", "Cost/Risk", "Meta"])
 
-            with t1:
+            with t2:
                 periods = meta.get("periods", {})
                 st.markdown(f"- Full: `{periods.get('full', 'N/A')}`")
                 st.markdown(f"- Train: `{periods.get('train', 'N/A')}`")
@@ -256,20 +264,26 @@ def main() -> None:
                         pd.DataFrame([{"Key": k, "Value": v} for k, v in session_rules.items()]),
                         use_container_width=True,
                         hide_index=True,
+                        height=210,
                     )
 
-            with t2:
+            with t3:
                 st.markdown("**Strategy Logic**")
                 st.write(meta.get("logic", "N/A"))
+                assumptions = meta.get("assumptions", [])
+                if assumptions:
+                    st.markdown("**Assumptions**")
+                    for a in assumptions:
+                        st.markdown(f"- {a}")
                 st.markdown("**Parameters**")
                 params = meta.get("params", {})
                 if params:
                     pm = pd.DataFrame([{"Parameter": k, "Value": v} for k, v in params.items()])
-                    st.dataframe(pm, use_container_width=True, hide_index=True)
+                    st.dataframe(pm, use_container_width=True, hide_index=True, height=210)
                 else:
                     st.caption("No parameter metadata")
 
-            with t3:
+            with t4:
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown("**Cost Model**")
@@ -279,6 +293,7 @@ def main() -> None:
                             pd.DataFrame([{"Key": k, "Value": v} for k, v in cost_model.items()]),
                             use_container_width=True,
                             hide_index=True,
+                            height=210,
                         )
                     else:
                         st.caption("No cost model metadata")
@@ -290,27 +305,24 @@ def main() -> None:
                             pd.DataFrame([{"Key": k, "Value": v} for k, v in risk_limits.items()]),
                             use_container_width=True,
                             hide_index=True,
+                            height=210,
                         )
                     else:
                         st.caption("No risk limit metadata")
-                assumptions = meta.get("assumptions", [])
-                if assumptions:
-                    st.markdown("**Assumptions**")
-                    for a in assumptions:
-                        st.markdown(f"- {a}")
-
-            with t4:
+            with t5:
                 with st.expander("Raw context JSON", expanded=False):
                     st.json(meta)
 
         curve = load_curve(client, cfg, strategy, sample, run_id)
-        signals = load_signals(client, cfg, strategy, run_id) if show_signals else pd.DataFrame()
+        signals = load_signals(client, cfg, strategy, run_id)
         trade_pnl = load_trade_pnl(client, cfg, strategy, run_id)
         perf_raw = load_perf(client, cfg, strategy, sample, run_id)
 
-    left, right = st.columns([2.0, 1.4])
+    with t0:
+        # Keep section-1 height; tune chart/table inside this tab
+        main_chart_height = int(section1_height * 0.58)
+        show_signals = st.toggle("Show Signals", value=True, key="show_signals_main")
 
-    with left:
         if curve.empty:
             st.warning("No curve data for selected filters.")
         else:
@@ -325,10 +337,10 @@ def main() -> None:
             if curve["benchmark_ret"].notna().any():
                 fig.add_trace(go.Scatter(x=curve["_time"], y=curve["benchmark_ret"], mode="lines", name="Benchmark", line=dict(dash="dot")))
 
-            if show_signals and not signals.empty:
+            if show_signals and not signals.empty and "signal_strength" in signals.columns:
                 m = pd.DataFrame()
                 m["_time"] = signals["_time"]
-                m["marker_y"] = signals["_value"].apply(lambda v: 0.02 if float(v) > 0 else (-0.02 if float(v) < 0 else 0.0))
+                m["marker_y"] = signals["signal_strength"].apply(lambda v: 0.02 if float(v) > 0 else (-0.02 if float(v) < 0 else 0.0))
                 m["name"] = signals.get("side", pd.Series(["signal"] * len(signals))).astype(str)
                 fig.add_trace(
                     go.Scatter(
@@ -342,63 +354,74 @@ def main() -> None:
                     )
                 )
 
-            fig.update_layout(height=500, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
+            fig.update_layout(height=main_chart_height, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
             st.plotly_chart(fig, use_container_width=True)
 
-    with right:
+        st.subheader("Performance Analysis")
+        if perf_raw.empty:
+            st.warning("No performance data for selected filters.")
+        else:
+            table = build_perf_table(perf_raw)
+            st.dataframe(table, use_container_width=True, hide_index=True, height=max(180, section1_height - main_chart_height - 120))
+
+    with t1:
         st.subheader("MDD Trend")
         if curve.empty or "drawdown" not in curve.columns:
             st.info("No drawdown series")
         else:
             mdd_fig = go.Figure()
             mdd_fig.add_trace(go.Scatter(x=curve["_time"], y=curve["drawdown"].astype(float), mode="lines", name="MDD"))
-            mdd_fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
+            mdd_fig.update_layout(height=int(section1_height * 0.7), margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
             st.plotly_chart(mdd_fig, use_container_width=True)
 
-        st.subheader("Profit and Loss")
-        if trade_pnl.empty:
-            st.info("No trade_pnl data")
-        else:
-            pnl_fig = go.Figure()
-            pnl_fig.add_trace(
-                go.Scatter(
-                    x=trade_pnl["_time"],
-                    y=trade_pnl["_value"].astype(float),
-                    mode="markers",
-                    marker=dict(size=8),
-                    name="Trade PnL",
-                )
-            )
-            pnl_fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
-            st.plotly_chart(pnl_fig, use_container_width=True)
-
-    st.subheader("Performance Analysis")
-    if perf_raw.empty:
-        st.warning("No performance data for selected filters.")
-        return
-
-    table = build_perf_table(perf_raw)
-    st.dataframe(table, use_container_width=True, hide_index=True)
-
     st.subheader("Order Detail")
+    st.markdown("**Profit and Loss**")
+    if trade_pnl.empty:
+        st.info("No trade_pnl data")
+    else:
+        pnl_fig = go.Figure()
+        pnl_fig.add_trace(
+            go.Scatter(
+                x=trade_pnl["_time"],
+                y=trade_pnl["_value"].astype(float),
+                mode="markers",
+                marker=dict(size=8),
+                name="Trade PnL",
+            )
+        )
+        pnl_fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
+        st.plotly_chart(pnl_fig, use_container_width=True)
+
     if signals.empty:
         st.info("No order/signal detail data")
     else:
-        od = signals[["_time", "side", "_value"]].copy()
-        od = od.rename(columns={"_time": "Time", "side": "Side", "_value": "Signal Strength"})
-        od["Time"] = pd.to_datetime(od["Time"], utc=True)
+        od = pd.DataFrame()
+        od["Time"] = pd.to_datetime(signals["_time"], utc=True)
+        od["raw_price"] = signals["price"] if "price" in signals.columns else pd.NA
+
+        side_map = {
+            "buy": "buy",
+            "sell": "sell",
+            "short": "sell_short",
+            "sell_short": "sell_short",
+            "cover": "buy_to_cover",
+            "buy_to_cover": "buy_to_cover",
+        }
+        od["Position"] = signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str).str.lower().map(side_map).fillna(
+            signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str)
+        )
 
         if not trade_pnl.empty:
             pnl = trade_pnl[["_time", "_value"]].copy()
-            pnl = pnl.rename(columns={"_time": "Time", "_value": "Trade PnL %"})
+            pnl = pnl.rename(columns={"_time": "Time", "_value": "Trade PnL (Gross)"})
             pnl["Time"] = pd.to_datetime(pnl["Time"], utc=True)
             od = od.sort_values("Time")
             pnl = pnl.sort_values("Time")
             od = pd.merge_asof(od, pnl, on="Time", direction="nearest", tolerance=pd.Timedelta("2h"))
         else:
-            od["Trade PnL %"] = pd.NA
+            od["Trade PnL (Gross)"] = pd.NA
 
-        od = od.sort_values("Time", ascending=False)
+        od = od[["Time", "raw_price", "Position", "Trade PnL (Gross)"]].sort_values("Time", ascending=False)
         st.dataframe(od, use_container_width=True, hide_index=True)
 
 
