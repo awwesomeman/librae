@@ -234,26 +234,74 @@ def main() -> None:
 
         with st.container(border=True):
             st.markdown("### Strategy & Backtest Context")
-            p1, p2, p3 = st.columns([1.1, 1.2, 2.2])
-            with p1:
-                st.markdown("**Periods**")
-                st.markdown(f"- Full: `{meta.get('periods', {}).get('full','N/A')}`")
-                st.markdown(f"- Train: `{meta.get('periods', {}).get('train','N/A')}`")
-                st.markdown(f"- OOS: `{meta.get('periods', {}).get('oos','N/A')}`")
-                st.markdown(f"- Benchmark: `{meta.get('benchmark', 'N/A')}`")
-                st.markdown(f"- Data Source: `{meta.get('data_source', 'N/A')}`")
-            with p2:
-                st.markdown("**Trading Assumptions**")
-                for a in meta.get("assumptions", []):
-                    st.markdown(f"- {a}")
-            with p3:
-                st.markdown("**Logic & Parameters**")
-                st.markdown(f"- Logic: {meta.get('logic','N/A')}")
-                if meta.get("params"):
-                    pm = pd.DataFrame([{"Parameter": k, "Value": v} for k, v in meta["params"].items()])
+
+            top1, top2, top3, top4 = st.columns([1.1, 1.1, 1.2, 1.2])
+            top1.metric("Benchmark", meta.get("benchmark", "N/A"))
+            top2.metric("Data Source", meta.get("data_source", "N/A"))
+            top3.metric("Data Version", meta.get("data_version", "N/A"))
+            top4.metric("Last Updated (UTC)", meta.get("last_updated_utc", "N/A"))
+
+            t1, t2, t3, t4 = st.tabs(["Periods", "Logic & Params", "Cost/Risk", "Meta"])
+
+            with t1:
+                periods = meta.get("periods", {})
+                st.markdown(f"- Full: `{periods.get('full', 'N/A')}`")
+                st.markdown(f"- Train: `{periods.get('train', 'N/A')}`")
+                st.markdown(f"- OOS: `{periods.get('oos', 'N/A')}`")
+                st.markdown(f"- Universe: `{', '.join(meta.get('universe', [])) if meta.get('universe') else 'N/A'}`")
+                session_rules = meta.get("session_rules", {})
+                if session_rules:
+                    st.markdown("**Session Rules**")
+                    st.dataframe(
+                        pd.DataFrame([{"Key": k, "Value": v} for k, v in session_rules.items()]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            with t2:
+                st.markdown("**Strategy Logic**")
+                st.write(meta.get("logic", "N/A"))
+                st.markdown("**Parameters**")
+                params = meta.get("params", {})
+                if params:
+                    pm = pd.DataFrame([{"Parameter": k, "Value": v} for k, v in params.items()])
                     st.dataframe(pm, use_container_width=True, hide_index=True)
                 else:
                     st.caption("No parameter metadata")
+
+            with t3:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Cost Model**")
+                    cost_model = meta.get("cost_model", {})
+                    if cost_model:
+                        st.dataframe(
+                            pd.DataFrame([{"Key": k, "Value": v} for k, v in cost_model.items()]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.caption("No cost model metadata")
+                with c2:
+                    st.markdown("**Risk Limits**")
+                    risk_limits = meta.get("risk_limits", {})
+                    if risk_limits:
+                        st.dataframe(
+                            pd.DataFrame([{"Key": k, "Value": v} for k, v in risk_limits.items()]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.caption("No risk limit metadata")
+                assumptions = meta.get("assumptions", [])
+                if assumptions:
+                    st.markdown("**Assumptions**")
+                    for a in assumptions:
+                        st.markdown(f"- {a}")
+
+            with t4:
+                with st.expander("Raw context JSON", expanded=False):
+                    st.json(meta)
 
         curve = load_curve(client, cfg, strategy, sample, run_id)
         signals = load_signals(client, cfg, strategy, run_id) if show_signals else pd.DataFrame()

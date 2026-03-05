@@ -2,17 +2,33 @@
   "DemoBreakout_v1.0-H1-LS-TXF": {
     "benchmark": "TWSE",
     "data_source": "Seeded demo / InfluxDB",
+    "data_version": "seed-v1",
+    "last_updated_utc": "2026-03-05T08:30:00Z",
+    "universe": ["TXF"],
+    "session_rules": {
+      "market_hours": "TW Futures day + night session",
+      "include_night_session": true,
+      "holiday_handling": "exchange calendar"
+    },
     "periods": {
       "full": "2026-02-14 ~ 2026-03-05",
       "train": "2026-02-14 ~ 2026-02-23",
       "oos": "2026-02-24 ~ 2026-03-05"
     },
+    "cost_model": {
+      "commission_round_trip_pct": 0.10,
+      "slippage_ticks_per_side": 1,
+      "tax": "included in round-trip assumption"
+    },
+    "risk_limits": {
+      "position_sizing": "fixed 1 unit",
+      "max_concurrent_positions": 1,
+      "max_risk_per_trade_pct": 1.0,
+      "hard_stop": "ATR-based"
+    },
     "assumptions": [
-      "Commission: round-trip 0.10%",
-      "Slippage: 1 tick/side",
       "Execution: next-bar open",
-      "Timezone: UTC",
-      "Position sizing: fixed 1 unit"
+      "Timezone: UTC"
     ],
     "logic": "Breakout + momentum confirmation; enter on breakout with trend filter, exit by stop/target/timeout.",
     "params": {
