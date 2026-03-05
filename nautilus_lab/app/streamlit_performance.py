@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -49,6 +51,16 @@ schema.tagValues(bucket: "{cfg.bucket}", tag: "{tag}", predicate: (r) => r._meas
 
 def _sample_filter(sample: str) -> str:
     return "true" if sample == "full" else f'r.sample == "{sample}"'
+
+
+def load_strategy_contexts() -> dict:
+    path = Path(__file__).resolve().parents[1] / "config" / "strategy_context.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def load_curve(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
@@ -141,6 +153,49 @@ from(bucket: "{cfg.bucket}")
     return query_df(client, cfg.org, flux)
 
 
+def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
+    strategy_map = {
+        "total_return": "Total Return",
+        "max_drawdown": "Max Drawdown",
+        "profit_factor": "Profit Factor",
+        "win_rate": "Win Rate",
+        "avg_trade_return": "Avg Trade Return",
+        "trades": "#Trades",
+        "exposure_ratio": "Exposure Ratio",
+    }
+    benchmark_map = {
+        "bh_total_return": "Total Return",
+    }
+
+    rows: dict[str, dict[str, float | str | None]] = {}
+    for _, r in perf_raw.iterrows():
+        fld = str(r.get("_field"))
+        val = float(r.get("_value", 0.0))
+        if fld in strategy_map:
+            m = strategy_map[fld]
+            rows.setdefault(m, {"Metric": m, "Strategy": None, "Benchmark": None})
+            rows[m]["Strategy"] = val
+        elif fld in benchmark_map:
+            m = benchmark_map[fld]
+            rows.setdefault(m, {"Metric": m, "Strategy": None, "Benchmark": None})
+            rows[m]["Benchmark"] = val
+
+    table = pd.DataFrame(list(rows.values()))
+    order = [
+        "Total Return",
+        "Max Drawdown",
+        "Profit Factor",
+        "Win Rate",
+        "Avg Trade Return",
+        "#Trades",
+        "Exposure Ratio",
+    ]
+    if not table.empty:
+        table["Metric"] = pd.Categorical(table["Metric"], categories=order, ordered=True)
+        table = table.sort_values("Metric")
+    return table
+
+
 def main() -> None:
     st.set_page_config(page_title="Nautilus Performance (Final)", layout="wide")
     st.title("Nautilus Performance (Final)")
@@ -157,18 +212,55 @@ def main() -> None:
             st.warning("No strategy_performance data found yet.")
             st.stop()
 
-        c1, c2, c3 = st.columns([3, 2, 3])
+        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
         strategy = c1.selectbox("Strategy", strategies, index=0)
         sample = c2.selectbox("Sample", ["oos", "train", "full"], index=0)
         run_ids = tag_values(client, cfg, "strategy_performance", "run_id")
         run_id = c3.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
+        show_signals = c4.toggle("Show Signals", value=True)
+
+        strategy_meta = load_strategy_contexts()
+        meta = strategy_meta.get(
+            strategy,
+            {
+                "periods": {"full": "N/A", "train": "N/A", "oos": "N/A"},
+                "assumptions": ["Commission: N/A", "Slippage: N/A", "Execution: N/A", "Timezone: UTC"],
+                "logic": "N/A",
+                "params": {},
+                "benchmark": "N/A",
+                "data_source": "N/A",
+            },
+        )
+
+        with st.container(border=True):
+            st.markdown("### Strategy & Backtest Context")
+            p1, p2, p3 = st.columns([1.1, 1.2, 2.2])
+            with p1:
+                st.markdown("**Periods**")
+                st.markdown(f"- Full: `{meta.get('periods', {}).get('full','N/A')}`")
+                st.markdown(f"- Train: `{meta.get('periods', {}).get('train','N/A')}`")
+                st.markdown(f"- OOS: `{meta.get('periods', {}).get('oos','N/A')}`")
+                st.markdown(f"- Benchmark: `{meta.get('benchmark', 'N/A')}`")
+                st.markdown(f"- Data Source: `{meta.get('data_source', 'N/A')}`")
+            with p2:
+                st.markdown("**Trading Assumptions**")
+                for a in meta.get("assumptions", []):
+                    st.markdown(f"- {a}")
+            with p3:
+                st.markdown("**Logic & Parameters**")
+                st.markdown(f"- Logic: {meta.get('logic','N/A')}")
+                if meta.get("params"):
+                    pm = pd.DataFrame([{"Parameter": k, "Value": v} for k, v in meta["params"].items()])
+                    st.dataframe(pm, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No parameter metadata")
 
         curve = load_curve(client, cfg, strategy, sample, run_id)
-        signals = load_signals(client, cfg, strategy, run_id)
+        signals = load_signals(client, cfg, strategy, run_id) if show_signals else pd.DataFrame()
         trade_pnl = load_trade_pnl(client, cfg, strategy, run_id)
         perf_raw = load_perf(client, cfg, strategy, sample, run_id)
 
-    left, right = st.columns([3, 1.2])
+    left, right = st.columns([2.0, 1.4])
 
     with left:
         if curve.empty:
@@ -185,8 +277,7 @@ def main() -> None:
             if curve["benchmark_ret"].notna().any():
                 fig.add_trace(go.Scatter(x=curve["_time"], y=curve["benchmark_ret"], mode="lines", name="Benchmark", line=dict(dash="dot")))
 
-            if not signals.empty:
-                # map marker near top/bottom for visibility
+            if show_signals and not signals.empty:
                 m = pd.DataFrame()
                 m["_time"] = signals["_time"]
                 m["marker_y"] = signals["_value"].apply(lambda v: 0.02 if float(v) > 0 else (-0.02 if float(v) < 0 else 0.0))
@@ -233,45 +324,34 @@ def main() -> None:
             pnl_fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
             st.plotly_chart(pnl_fig, use_container_width=True)
 
-    metric_map = {
-        "total_return": "Total Return",
-        "max_drawdown": "Max Drawdown",
-        "profit_factor": "Profit Factor",
-        "win_rate": "Win Rate",
-        "avg_trade_return": "Avg Trade Return",
-        "trades": "#Trades",
-        "exposure_ratio": "Exposure Ratio",
-        "bh_total_return": "Benchmark Total Return",
-    }
-
     st.subheader("Performance Analysis")
     if perf_raw.empty:
         st.warning("No performance data for selected filters.")
         return
 
-    rows = []
-    for _, r in perf_raw.iterrows():
-        f = str(r.get("_field"))
-        if f not in metric_map:
-            continue
-        rows.append({"Metric": metric_map[f], "Value": float(r.get("_value", 0.0))})
-
-    table = pd.DataFrame(rows)
-    order = [
-        "Total Return",
-        "Benchmark Total Return",
-        "Max Drawdown",
-        "Profit Factor",
-        "Win Rate",
-        "Avg Trade Return",
-        "#Trades",
-        "Exposure Ratio",
-    ]
-    if not table.empty:
-        table["Metric"] = pd.Categorical(table["Metric"], categories=order, ordered=True)
-        table = table.sort_values("Metric")
-
+    table = build_perf_table(perf_raw)
     st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.subheader("Order Detail")
+    if signals.empty:
+        st.info("No order/signal detail data")
+    else:
+        od = signals[["_time", "side", "_value"]].copy()
+        od = od.rename(columns={"_time": "Time", "side": "Side", "_value": "Signal Strength"})
+        od["Time"] = pd.to_datetime(od["Time"], utc=True)
+
+        if not trade_pnl.empty:
+            pnl = trade_pnl[["_time", "_value"]].copy()
+            pnl = pnl.rename(columns={"_time": "Time", "_value": "Trade PnL %"})
+            pnl["Time"] = pd.to_datetime(pnl["Time"], utc=True)
+            od = od.sort_values("Time")
+            pnl = pnl.sort_values("Time")
+            od = pd.merge_asof(od, pnl, on="Time", direction="nearest", tolerance=pd.Timedelta("2h"))
+        else:
+            od["Trade PnL %"] = pd.NA
+
+        od = od.sort_values("Time", ascending=False)
+        st.dataframe(od, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":

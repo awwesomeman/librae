@@ -1,0 +1,27 @@
+{
+  "DemoBreakout_v1.0-H1-LS-TXF": {
+    "benchmark": "TWSE",
+    "data_source": "Seeded demo / InfluxDB",
+    "periods": {
+      "full": "2026-02-14 ~ 2026-03-05",
+      "train": "2026-02-14 ~ 2026-02-23",
+      "oos": "2026-02-24 ~ 2026-03-05"
+    },
+    "assumptions": [
+      "Commission: round-trip 0.10%",
+      "Slippage: 1 tick/side",
+      "Execution: next-bar open",
+      "Timezone: UTC",
+      "Position sizing: fixed 1 unit"
+    ],
+    "logic": "Breakout + momentum confirmation; enter on breakout with trend filter, exit by stop/target/timeout.",
+    "params": {
+      "timeframe": "H1",
+      "lookback": 20,
+      "breakout_buffer": 0.15,
+      "stop_atr": 1.8,
+      "tp_atr": 2.6,
+      "max_holding_bars": 36
+    }
+  }
+}
