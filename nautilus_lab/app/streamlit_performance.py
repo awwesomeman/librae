@@ -44,71 +44,107 @@ schema.tagValues(bucket: "{cfg.bucket}", tag: "{tag}", predicate: (r) => r._meas
     df = query_df(client, cfg.org, flux)
     if df.empty or "_value" not in df.columns:
         return []
-    vals = sorted([str(v) for v in df["_value"].dropna().unique()])
-    return vals
+    return sorted([str(v) for v in df["_value"].dropna().unique()])
+
+
+def _sample_filter(sample: str) -> str:
+    return "true" if sample == "full" else f'r.sample == "{sample}"'
 
 
 def load_curve(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
-    sample_filter = "true" if sample == "full" else f'r.sample == "{sample}"'
     flux = f'''
 from(bucket: "{cfg.bucket}")
   |> range(start: -365d)
   |> filter(fn:(r)=> r._measurement=="perf_equity_curve")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> {sample_filter})
+  |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "equity" or r._field == "benchmark_equity")
+  |> filter(fn:(r)=> r._field == "equity" or r._field == "benchmark_equity" or r._field == "drawdown")
   |> pivot(rowKey:["_time","strategy","sample","run_id"], columnKey:["_field"], valueColumn:"_value")
   |> sort(columns:["_time"], desc:false)
 '''
     df = query_df(client, cfg.org, flux)
     if df.empty:
-        # backward compatibility for older seeded fields
         flux2 = f'''
 from(bucket: "{cfg.bucket}")
   |> range(start: -365d)
   |> filter(fn:(r)=> r._measurement=="perf_equity_curve")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> {sample_filter})
+  |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "nav")
-  |> keep(columns:["_time","_value","curve_type"])
+  |> filter(fn:(r)=> r._field == "nav" or r._field == "drawdown")
+  |> keep(columns:["_time","_field","_value","curve_type"])
 '''
         raw = query_df(client, cfg.org, flux2)
         if raw.empty:
             return raw
         raw["_time"] = pd.to_datetime(raw["_time"], utc=True)
-        piv = raw.pivot_table(index="_time", columns="curve_type", values="_value", aggfunc="last").reset_index()
-        if "strategy" in piv.columns:
-            piv = piv.rename(columns={"strategy": "equity"})
-        if "buyhold" in piv.columns:
-            piv = piv.rename(columns={"buyhold": "benchmark_equity"})
-        return piv
+        nav = raw[raw["_field"] == "nav"].pivot_table(index="_time", columns="curve_type", values="_value", aggfunc="last")
+        dd = raw[raw["_field"] == "drawdown"].groupby("_time")["_value"].last()
+        out = nav.reset_index()
+        if "strategy" in out.columns:
+            out = out.rename(columns={"strategy": "equity"})
+        if "buyhold" in out.columns:
+            out = out.rename(columns={"buyhold": "benchmark_equity"})
+        out = out.merge(dd.rename("drawdown"), on="_time", how="left")
+        return out
 
     df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df
 
 
+def load_signals(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: str) -> pd.DataFrame:
+    flux = f'''
+from(bucket: "{cfg.bucket}")
+  |> range(start: -365d)
+  |> filter(fn:(r)=> r._measurement=="strategy_signals")
+  |> filter(fn:(r)=> r.strategy == "{strategy}")
+  |> filter(fn:(r)=> r.run_id == "{run_id}")
+  |> filter(fn:(r)=> r._field == "signal_strength")
+  |> keep(columns:["_time","_value","side"])
+  |> sort(columns:["_time"], desc:false)
+'''
+    df = query_df(client, cfg.org, flux)
+    if not df.empty:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    return df
+
+
+def load_trade_pnl(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: str) -> pd.DataFrame:
+    flux = f'''
+from(bucket: "{cfg.bucket}")
+  |> range(start: -365d)
+  |> filter(fn:(r)=> r._measurement=="trade_pnl")
+  |> filter(fn:(r)=> r.strategy == "{strategy}")
+  |> filter(fn:(r)=> r.run_id == "{run_id}")
+  |> filter(fn:(r)=> r._field == "trade_pnl_pct")
+  |> keep(columns:["_time","_value"])
+  |> sort(columns:["_time"], desc:false)
+'''
+    df = query_df(client, cfg.org, flux)
+    if not df.empty:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    return df
+
+
 def load_perf(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
-    sample_filter = "true" if sample == "full" else f'r.sample == "{sample}"'
     flux = f'''
 from(bucket: "{cfg.bucket}")
   |> range(start: -365d)
   |> filter(fn:(r)=> r._measurement=="strategy_performance")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> {sample_filter})
+  |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
   |> filter(fn:(r)=> r._field == "total_return" or r._field == "max_drawdown" or r._field == "profit_factor" or r._field == "win_rate" or r._field == "avg_trade_return" or r._field == "trades" or r._field == "exposure_ratio" or r._field == "bh_total_return")
   |> last()
 '''
-    df = query_df(client, cfg.org, flux)
-    return df
+    return query_df(client, cfg.org, flux)
 
 
 def main() -> None:
     st.set_page_config(page_title="Nautilus Performance (Final)", layout="wide")
     st.title("Nautilus Performance (Final)")
-    st.caption("Focused view: Cumulative Return comparison + Performance Analysis")
+    st.caption("Cumulative Return + Performance Analysis")
 
     cfg = get_cfg()
     if not cfg.token:
@@ -128,29 +164,74 @@ def main() -> None:
         run_id = c3.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
 
         curve = load_curve(client, cfg, strategy, sample, run_id)
+        signals = load_signals(client, cfg, strategy, run_id)
+        trade_pnl = load_trade_pnl(client, cfg, strategy, run_id)
         perf_raw = load_perf(client, cfg, strategy, sample, run_id)
 
-    if curve.empty:
-        st.warning("No curve data for selected filters.")
-    else:
-        if "equity" in curve.columns:
-            curve["strategy_ret"] = curve["equity"].astype(float) - 1.0
-        elif "nav" in curve.columns:
-            curve["strategy_ret"] = curve["nav"].astype(float) - 1.0
-        else:
-            curve["strategy_ret"] = pd.NA
+    left, right = st.columns([3, 1.2])
 
-        if "benchmark_equity" in curve.columns:
-            curve["benchmark_ret"] = curve["benchmark_equity"].astype(float) - 1.0
+    with left:
+        if curve.empty:
+            st.warning("No curve data for selected filters.")
         else:
-            curve["benchmark_ret"] = pd.NA
+            curve["strategy_ret"] = (curve.get("equity", curve.get("nav", pd.Series(dtype=float))).astype(float) - 1.0)
+            if "benchmark_equity" in curve.columns:
+                curve["benchmark_ret"] = curve["benchmark_equity"].astype(float) - 1.0
+            else:
+                curve["benchmark_ret"] = pd.NA
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=curve["_time"], y=curve["strategy_ret"], mode="lines", name="Strategy"))
-        if curve["benchmark_ret"].notna().any():
-            fig.add_trace(go.Scatter(x=curve["_time"], y=curve["benchmark_ret"], mode="lines", name="Benchmark", line=dict(dash="dot")))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
-        st.plotly_chart(fig, use_container_width=True)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=curve["_time"], y=curve["strategy_ret"], mode="lines", name="Strategy"))
+            if curve["benchmark_ret"].notna().any():
+                fig.add_trace(go.Scatter(x=curve["_time"], y=curve["benchmark_ret"], mode="lines", name="Benchmark", line=dict(dash="dot")))
+
+            if not signals.empty:
+                # map marker near top/bottom for visibility
+                m = pd.DataFrame()
+                m["_time"] = signals["_time"]
+                m["marker_y"] = signals["_value"].apply(lambda v: 0.02 if float(v) > 0 else (-0.02 if float(v) < 0 else 0.0))
+                m["name"] = signals.get("side", pd.Series(["signal"] * len(signals))).astype(str)
+                fig.add_trace(
+                    go.Scatter(
+                        x=m["_time"],
+                        y=m["marker_y"],
+                        mode="markers",
+                        name="Signals",
+                        marker=dict(size=7, symbol="circle-open"),
+                        text=m["name"],
+                        hovertemplate="%{x}<br>Signal: %{text}<extra></extra>",
+                    )
+                )
+
+            fig.update_layout(height=500, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with right:
+        st.subheader("MDD Trend")
+        if curve.empty or "drawdown" not in curve.columns:
+            st.info("No drawdown series")
+        else:
+            mdd_fig = go.Figure()
+            mdd_fig.add_trace(go.Scatter(x=curve["_time"], y=curve["drawdown"].astype(float), mode="lines", name="MDD"))
+            mdd_fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
+            st.plotly_chart(mdd_fig, use_container_width=True)
+
+        st.subheader("Profit and Loss")
+        if trade_pnl.empty:
+            st.info("No trade_pnl data")
+        else:
+            pnl_fig = go.Figure()
+            pnl_fig.add_trace(
+                go.Scatter(
+                    x=trade_pnl["_time"],
+                    y=trade_pnl["_value"].astype(float),
+                    mode="markers",
+                    marker=dict(size=8),
+                    name="Trade PnL",
+                )
+            )
+            pnl_fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
+            st.plotly_chart(pnl_fig, use_container_width=True)
 
     metric_map = {
         "total_return": "Total Return",
@@ -163,6 +244,7 @@ def main() -> None:
         "bh_total_return": "Benchmark Total Return",
     }
 
+    st.subheader("Performance Analysis")
     if perf_raw.empty:
         st.warning("No performance data for selected filters.")
         return
@@ -189,7 +271,6 @@ def main() -> None:
         table["Metric"] = pd.Categorical(table["Metric"], categories=order, ordered=True)
         table = table.sort_values("Metric")
 
-    st.subheader("Performance Analysis")
     st.dataframe(table, use_container_width=True, hide_index=True)
 
 
