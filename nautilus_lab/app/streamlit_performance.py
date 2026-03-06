@@ -313,7 +313,7 @@ def render_price_signal_chart(signals: pd.DataFrame) -> None:
                 )
             )
 
-    fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10))
+    fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -351,7 +351,7 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
                 )
             )
 
-    fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
+    fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -447,7 +447,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                         marker=dict(symbol="triangle-down", size=10),
                     ))
 
-            fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10))
+            fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
             st.plotly_chart(fig, use_container_width=True)
 
     with top_right:
@@ -469,7 +469,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 st.info("No strategy equity series available.")
             else:
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=data.curve["_time"], y=strategy_curve.astype(float) - 1.0, mode="lines", name="Strategy"))
+                fig.add_trace(go.Scatter(x=data.curve["_time"], y=strategy_curve.astype(float) - 1.0, mode="lines", name="Strategy", line=dict(width=2.5, color="#3B82F6")))
                 if "benchmark_equity" in data.curve.columns:
                     benchmark_ret = data.curve["benchmark_equity"].astype(float) - 1.0
                     if benchmark_ret.notna().any():
@@ -478,9 +478,9 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                             y=benchmark_ret,
                             mode="lines",
                             name="Buy and Hold",
-                            line=dict(dash="dot"),
+                            line=dict(width=1.5, color="#94A3B8", dash="dash"),
                         ))
-                fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
+                fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
                 st.plotly_chart(fig, use_container_width=True)
 
     with bottom_right:
@@ -528,15 +528,38 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.caption(APP_CAPTION)
+    st.markdown("<div style='font-size:12px;color:#64748B;margin-bottom:4px;'>Last Updated: auto (run-dependent)</div>", unsafe_allow_html=True)
     st.markdown(
         """
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
+        :root {
+            --primary: #3B82F6;
+            --success: #10B981;
+            --danger: #F43F5E;
+            --warning: #F59E0B;
+            --bg-main: #F8FAFC;
+            --grid: #F1F5F9;
+            --text-main: #1E293B;
+            --muted: #64748B;
+            --radius: 10px;
+            --border: #E2E8F0;
+        }
+
+        html, body, [class*="css"] { font-family: 'Inter', sans-serif; background: var(--bg-main); color: var(--text-main); }
         .overview-desc {font-size:14px; color:#666666; margin-bottom:10px;}
-        .metric-card {background:#F8F9FA; border:1px solid #E9ECEF; border-radius:10px; padding:16px 18px; min-height:120px;}
+        .metric-card {background:#FFFFFF; border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; min-height:120px; box-shadow:0 4px 10px rgba(15,23,42,.04);} 
         .metric-label {font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#8E8E93; margin-bottom:6px;}
-        .metric-value {font-size:20px; font-weight:600; color:#1C1C1E; line-height:1.35;}
+        .metric-value {font-size:20px; font-weight:700; color:#1C1C1E; line-height:1.35; font-family:'JetBrains Mono', monospace;}
         .metric-sub {font-size:12px; color:#666666; margin-top:6px;}
-        .metric-value-alpha {font-size:20px; font-weight:700; color:#1E3A8A; line-height:1.35;}
+        .metric-value-alpha {font-size:20px; font-weight:700; color:#1E3A8A; line-height:1.35; font-family:'JetBrains Mono', monospace;}
+
+        .stTabs [data-baseweb="tab-list"] { gap: 18px; }
+        .stTabs [data-baseweb="tab"] { height: 44px; color: var(--muted); font-weight: 600; }
+        .stTabs [aria-selected="true"] { color: var(--primary) !important; border-bottom-color: var(--primary) !important; }
+
+        [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace !important; }
         </style>
         """,
         unsafe_allow_html=True,
