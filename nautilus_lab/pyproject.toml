@@ -17,6 +17,13 @@ test = [
   "pytest>=8.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nautilus_lab*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
