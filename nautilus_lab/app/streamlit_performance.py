@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06"
+APP_CAPTION = "UI build: 2026-03-06-0809"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -548,6 +548,8 @@ def main() -> None:
         }
 
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; background: var(--bg-main); color: var(--text-main); }
+        .stApp {background-color: var(--bg-main) !important;}
+        section.main > div {background-color: var(--bg-main) !important;}
         .overview-desc {font-size:14px; color:#666666; margin-bottom:10px;}
         .metric-card {background:#FFFFFF; border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; min-height:120px; box-shadow:0 4px 10px rgba(15,23,42,.04);} 
         .metric-label {font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#8E8E93; margin-bottom:6px;}
