@@ -352,10 +352,19 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
 
 def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str) -> None:
     st.markdown("### Strategy Overview")
-    st.caption("<clean and clear description of main trading logic>")
+    st.caption("Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, exit on trailing-stop or momentum reversal.")
+
+    full_period = overview_ctx.get("Date Range (Full)", "N/A")
+    if "~" in full_period:
+        start, end = [x.strip() for x in full_period.split("~", 1)]
+        full_period_display = f"{start}\n{end}"
+    else:
+        full_period_display = full_period.replace(" to ", "\n")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Full Period", overview_ctx.get("Date Range (Full)", "N/A"))
+    with c1.container(border=True):
+        st.markdown("**Full Period**")
+        st.markdown(full_period_display.replace("\n", "  \n"))
     c2.metric("Asset", overview_ctx.get("Asset", "N/A"))
     c3.metric("Frequency", overview_ctx.get("Frequency", "N/A"))
     c4.metric("Alpha", alpha_value or "N/A")
