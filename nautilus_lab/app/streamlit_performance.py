@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0855"
+APP_CAPTION = "UI build: 2026-03-06-0858"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -82,6 +82,24 @@ METRIC_DEFINITIONS = {
     "Avg Return Per Trade": "Average return per round-trip trade.",
     "Exposure Ratio": "Active observations divided by total observations.",
     "Active Observations": "Periods holding position (either long or short).",
+}
+
+METRIC_FORMULAS = {
+    "Total Return": "(Ending Equity / Starting Equity) - 1",
+    "Max Drawdown": "min((Equity - RunningMaxEquity) / RunningMaxEquity)",
+    "Volatility": "StdDev(Periodic Returns)",
+    "Total Return (Active Period)": "Return computed on active-position periods only",
+    "Max Drawdown (Active Period)": "MDD computed on active-position periods only",
+    "Volatility (Active Period)": "Volatility computed on active-position periods only",
+    "Total Return (Full Period)": "Return computed over full backtest horizon",
+    "Max Drawdown (Full Period)": "MDD computed over full backtest horizon",
+    "Volatility (Full Period)": "Volatility over full backtest horizon",
+    "Trades": "Count(Round-Trip Transactions)",
+    "Profit Factor": "Gross Profit / Gross Loss",
+    "Win Rate": "Winning Trades / Total Trades",
+    "Avg Return Per Trade": "Sum(Trade Returns) / Trades",
+    "Exposure Ratio": "Active Observations / Total Observations",
+    "Active Observations": "Count(Periods with non-zero position)",
 }
 
 
@@ -578,6 +596,8 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 general_df[["Metric", "Strategy", "Benchmark"]],
                 specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
             ], ignore_index=True)
+            merged["MetricHelp"] = merged["Metric"].map(lambda x: METRIC_DEFINITIONS.get(str(x), "Definition pending."))
+            merged["MetricDisplay"] = merged["Metric"].map(lambda x: f"{x} ℹ️")
 
             st.markdown("**Performance Analysis**")
 
@@ -602,23 +622,34 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
             st.caption("Benchmark: default to benchmark return.")
             st.dataframe(
-                merged.style.apply(_row_style, axis=1),
+                merged[["MetricDisplay", "Strategy", "Benchmark"]].style.apply(_row_style, axis=1),
                 use_container_width=True,
                 hide_index=True,
                 height=TABLE_HEIGHT_PERF,
                 column_config={
-                    "Metric": st.column_config.TextColumn("Metric", help="Hover row in Metric Definitions below for detailed meaning."),
+                    "MetricDisplay": st.column_config.TextColumn("Metric", help="Each metric includes inline ℹ️ marker. See Metric Guide for definitions."),
                     "Strategy": st.column_config.TextColumn("Strategy", help="Strategy metric value."),
                     "Benchmark": st.column_config.TextColumn("Benchmark", help="Default to benchmark return."),
                 },
             )
 
-            with st.expander("Metric Definitions", expanded=False):
+            with st.popover("Metric Guide"):
                 defs = pd.DataFrame({
                     "Metric": merged["Metric"].astype(str).unique().tolist(),
                 })
                 defs["Definition"] = defs["Metric"].map(lambda x: METRIC_DEFINITIONS.get(x, "Definition pending."))
-                st.dataframe(defs, use_container_width=True, hide_index=True, height=180)
+                defs["Formula"] = defs["Metric"].map(lambda x: METRIC_FORMULAS.get(x, "Formula pending."))
+                st.dataframe(
+                    defs,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=220,
+                    column_config={
+                        "Metric": st.column_config.TextColumn("Metric", help="Metric name"),
+                        "Definition": st.column_config.TextColumn("Definition", help="Concise explanation"),
+                        "Formula": st.column_config.TextColumn("Formula", help="Calculation logic"),
+                    },
+                )
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
