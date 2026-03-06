@@ -4,11 +4,60 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from influxdb_client import InfluxDBClient
+
+
+APP_TITLE = "Strategy Backtest Dashboard"
+APP_CAPTION = "UI build: 2026-03-06"
+
+TABLE_HEIGHT_PERF = 220
+TABLE_HEIGHT_PARAM = 250
+CHART_HEIGHT_PRICE = 340
+CHART_HEIGHT_RETURN = 340
+
+SAMPLE_OPTIONS = ["oos", "train", "full"]
+
+DEFAULT_META = {
+    "periods": {"full": "N/A", "train": "N/A", "oos": "N/A"},
+    "assumptions": [],
+    "logic": "N/A",
+    "params": {},
+    "benchmark": "N/A",
+    "data_source": "N/A",
+    "data_version": "N/A",
+    "last_updated_utc": "N/A",
+    "summary": {},
+    "session_rules": {},
+    "cost_model": {},
+    "risk_limits": {},
+    "universe": [],
+}
+
+PERF_METRIC_MAP = {
+    "total_return": ("Total Return", "Strategy"),
+    "bh_total_return": ("Total Return", "Benchmark"),
+    "max_drawdown": ("Max Drawdown", "Strategy"),
+    "profit_factor": ("Profit Factor", "Strategy"),
+    "win_rate": ("Win Rate", "Strategy"),
+    "avg_trade_return": ("Avg Trade Return", "Strategy"),
+    "trades": ("Trades", "Strategy"),
+    "exposure_ratio": ("Exposure Ratio", "Strategy"),
+}
+
+PERF_METRIC_ORDER = [
+    "Total Return",
+    "Max Drawdown",
+    "Profit Factor",
+    "Win Rate",
+    "Avg Trade Return",
+    "Trades",
+    "Exposure Ratio",
+]
 
 
 @dataclass
@@ -17,6 +66,14 @@ class InfluxCfg:
     org: str
     bucket: str
     token: str
+
+
+@dataclass
+class DashboardData:
+    curve: pd.DataFrame
+    signals: pd.DataFrame
+    perf_raw: pd.DataFrame
+    meta: dict[str, Any]
 
 
 def get_cfg() -> InfluxCfg:
@@ -53,7 +110,7 @@ def _sample_filter(sample: str) -> str:
     return "true" if sample == "full" else f'r.sample == "{sample}"'
 
 
-def load_strategy_contexts() -> dict:
+def load_strategy_contexts() -> dict[str, Any]:
     path = Path(__file__).resolve().parents[1] / "config" / "strategy_context.json"
     if not path.exists():
         return {}
@@ -122,23 +179,6 @@ from(bucket: "{cfg.bucket}")
     return df
 
 
-def load_trade_pnl(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: str) -> pd.DataFrame:
-    flux = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn:(r)=> r._measurement=="trade_pnl")
-  |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "trade_pnl_pct")
-  |> keep(columns:["_time","_value"])
-  |> sort(columns:["_time"], desc:false)
-'''
-    df = query_df(client, cfg.org, flux)
-    if not df.empty:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
-    return df
-
-
 def load_perf(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
     flux = f'''
 from(bucket: "{cfg.bucket}")
@@ -154,62 +194,200 @@ from(bucket: "{cfg.bucket}")
 
 
 def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
-    strategy_map = {
-        "total_return": "Total Return",
-        "max_drawdown": "Max Drawdown",
-        "profit_factor": "Profit Factor",
-        "win_rate": "Win Rate",
-        "avg_trade_return": "Avg Trade Return",
-        "trades": "#Trades",
-        "exposure_ratio": "Exposure Ratio",
-    }
-    benchmark_map = {
-        "bh_total_return": "Total Return",
-    }
-
     rows: dict[str, dict[str, float | str | None]] = {}
     for _, r in perf_raw.iterrows():
-        fld = str(r.get("_field"))
-        val = float(r.get("_value", 0.0))
-        if fld in strategy_map:
-            m = strategy_map[fld]
-            rows.setdefault(m, {"Metric": m, "Strategy": None, "Benchmark": None})
-            rows[m]["Strategy"] = val
-        elif fld in benchmark_map:
-            m = benchmark_map[fld]
-            rows.setdefault(m, {"Metric": m, "Strategy": None, "Benchmark": None})
-            rows[m]["Benchmark"] = val
+        field = str(r.get("_field"))
+        if field not in PERF_METRIC_MAP:
+            continue
+        metric_name, column_name = PERF_METRIC_MAP[field]
+        value = float(r.get("_value", 0.0))
+        rows.setdefault(metric_name, {"Metric": metric_name, "Strategy": None, "Benchmark": None})
+        rows[metric_name][column_name] = value
 
     table = pd.DataFrame(list(rows.values()))
-    order = [
-        "Total Return",
-        "Max Drawdown",
-        "Profit Factor",
-        "Win Rate",
-        "Avg Trade Return",
-        "#Trades",
-        "Exposure Ratio",
-    ]
-    if not table.empty:
-        table["Metric"] = pd.Categorical(table["Metric"], categories=order, ordered=True)
-        table = table.sort_values("Metric")
-    return table
+    if table.empty:
+        return table
+
+    table["Metric"] = pd.Categorical(table["Metric"], categories=PERF_METRIC_ORDER, ordered=True)
+    return table.sort_values("Metric").reset_index(drop=True)
+
+
+def flatten_dict(prefix: str, data: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        full_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            out.update(flatten_dict(full_key, value))
+        else:
+            out[full_key] = value
+    return out
+
+
+def kv_to_df(kv: dict[str, Any]) -> pd.DataFrame:
+    rows = [{"Key": str(k), "Value": ", ".join(map(str, v)) if isinstance(v, list) else v} for k, v in kv.items()]
+    return pd.DataFrame(rows)
+
+
+def render_kv_table(title: str, kv: dict[str, Any], height: int = TABLE_HEIGHT_PARAM) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        if not kv:
+            st.info("No data available.")
+            return
+        st.dataframe(kv_to_df(kv), use_container_width=True, hide_index=True, height=height)
+
+
+def meta_context(meta: dict[str, Any]) -> dict[str, str]:
+    summary = meta.get("summary", {}) or {}
+    periods = meta.get("periods", {}) or {}
+    return {
+        "Date Range (Full)": str(summary.get("full_sample_period", periods.get("full", "N/A"))),
+        "Date Range (Train)": str(summary.get("train_period", periods.get("train", "N/A"))),
+        "Date Range (OOS)": str(summary.get("oos_period", periods.get("oos", "N/A"))),
+        "Benchmark": str(meta.get("benchmark", "N/A")),
+        "Asset": str(summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")),
+        "Frequency": str(summary.get("freq", meta.get("params", {}).get("timeframe", "N/A"))),
+    }
+
+
+def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> DashboardData:
+    curve = load_curve(client, cfg, strategy, sample, run_id)
+    signals = load_signals(client, cfg, strategy, run_id)
+    perf_raw = load_perf(client, cfg, strategy, sample, run_id)
+
+    contexts = load_strategy_contexts()
+    meta = {**DEFAULT_META, **contexts.get(strategy, {})}
+    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta)
+
+
+def render_price_signal_chart(signals: pd.DataFrame) -> None:
+    st.markdown("#### Raw Price + Signals")
+    if signals.empty or "price" not in signals.columns:
+        st.info("No signal/price data available for this selection.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=signals["_time"], y=signals["price"].astype(float), mode="lines", name="Raw Price"))
+
+    if "signal_strength" in signals.columns:
+        signal_strength = signals["signal_strength"].astype(float)
+        buy_mask = signal_strength > 0
+        sell_mask = signal_strength < 0
+
+        if buy_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=signals.loc[buy_mask, "_time"],
+                    y=signals.loc[buy_mask, "price"].astype(float),
+                    mode="markers",
+                    name="Buy Signal",
+                    marker=dict(symbol="triangle-up", size=10),
+                )
+            )
+        if sell_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=signals.loc[sell_mask, "_time"],
+                    y=signals.loc[sell_mask, "price"].astype(float),
+                    mode="markers",
+                    name="Sell Signal",
+                    marker=dict(symbol="triangle-down", size=10),
+                )
+            )
+
+    fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
+    st.markdown("#### Cumulative Return: Strategy vs Benchmark")
+    if curve.empty:
+        st.info("No equity curve data available for this selection.")
+        return
+
+    strategy_curve = curve.get("equity", curve.get("nav", pd.Series(dtype=float)))
+    if strategy_curve.empty:
+        st.info("No strategy equity series available.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=curve["_time"],
+            y=strategy_curve.astype(float) - 1.0,
+            mode="lines",
+            name="Strategy",
+        )
+    )
+
+    if "benchmark_equity" in curve.columns:
+        benchmark_ret = curve["benchmark_equity"].astype(float) - 1.0
+        if benchmark_ret.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=curve["_time"],
+                    y=benchmark_ret,
+                    mode="lines",
+                    name="Benchmark",
+                    line=dict(dash="dot"),
+                )
+            )
+
+    fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_performance_tab(data: DashboardData) -> None:
+    render_price_signal_chart(data.signals)
+    render_cumulative_return_chart(data.curve)
+
+    st.markdown("#### Performance Analysis")
+    if data.perf_raw.empty:
+        st.info("No performance metrics available for this selection.")
+        return
+    table = build_perf_table(data.perf_raw)
+    st.dataframe(table, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+
+
+def render_parameter_tab(meta: dict[str, Any]) -> None:
+    data_card = {
+        "benchmark": meta.get("benchmark", "N/A"),
+        "data_source": meta.get("data_source", "N/A"),
+        "data_version": meta.get("data_version", "N/A"),
+        "last_updated_utc": meta.get("last_updated_utc", "N/A"),
+    }
+    trading_card = {
+        **flatten_dict("session_rules", meta.get("session_rules", {}) or {}),
+        **flatten_dict("cost_model", meta.get("cost_model", {}) or {}),
+    }
+    assumptions = meta.get("assumptions", []) or []
+    if assumptions:
+        trading_card["assumptions"] = assumptions
+
+    risk_card = flatten_dict("risk_limits", meta.get("risk_limits", {}) or {})
+
+    strategy_card = {
+        "logic": meta.get("logic", "N/A"),
+        **flatten_dict("params", meta.get("params", {}) or {}),
+    }
+
+    row1_col1, row1_col2 = st.columns(2)
+    with row1_col1:
+        render_kv_table("Data", data_card)
+    with row1_col2:
+        render_kv_table("Trading", trading_card)
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
+        render_kv_table("Risk", risk_card)
+    with row2_col2:
+        render_kv_table("Strategy", strategy_card)
 
 
 def main() -> None:
-    st.set_page_config(page_title="策略回測分析", layout="wide")
-    st.title("策略回測分析")
-    st.caption("UI build: 2026-03-05-1036")
-
-    section1_height = 580
-    st.markdown(
-        f"""
-        <style>
-        div[data-baseweb=\"tab-panel\"] {{ min-height: {section1_height}px; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    st.title(APP_TITLE)
+    st.caption(APP_CAPTION)
 
     cfg = get_cfg()
     if not cfg.token:
@@ -222,159 +400,28 @@ def main() -> None:
             st.warning("No strategy_performance data found yet.")
             st.stop()
 
-        c1, c2, c3 = st.columns([4, 2, 3])
-        strategy = c1.selectbox("Strategy", strategies, index=0)
-        sample = c2.selectbox("Sample", ["oos", "train", "full"], index=0)
+        st.sidebar.header("Filters")
+        strategy = st.sidebar.selectbox("Strategy", strategies, index=0)
+        sample = st.sidebar.selectbox("Sample", SAMPLE_OPTIONS, index=0)
         run_ids = tag_values(client, cfg, "strategy_performance", "run_id")
-        run_id = c3.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
+        run_id = st.sidebar.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
 
-        curve = load_curve(client, cfg, strategy, sample, run_id)
-        signals = load_signals(client, cfg, strategy, run_id)
-        trade_pnl = load_trade_pnl(client, cfg, strategy, run_id)
-        perf_raw = load_perf(client, cfg, strategy, sample, run_id)
+        data = build_dashboard_data(client, cfg, strategy, sample, run_id)
 
-        strategy_meta = load_strategy_contexts()
-        meta = strategy_meta.get(
-            strategy,
-            {
-                "periods": {"full": "N/A", "train": "N/A", "oos": "N/A"},
-                "assumptions": ["Commission: N/A", "Slippage: N/A", "Execution: N/A", "Timezone: UTC"],
-                "logic": "N/A",
-                "params": {},
-                "benchmark": "N/A",
-                "data_source": "N/A",
-            },
-        )
+    context = meta_context(data.meta)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Date Range (Full)", context["Date Range (Full)"])
+    c2.metric("Date Range (Train/OOS)", f"{context['Date Range (Train)']} / {context['Date Range (OOS)']}")
+    c3.metric("Benchmark", context["Benchmark"])
+    c4.metric("Asset / Frequency", f"{context['Asset']} / {context['Frequency']}")
 
-    # Section 1 (merged Decision + Context)
-    with st.container(border=True):
-        st.markdown("### 策略總覽")
+    tab_performance, tab_parameters = st.tabs(["Performance", "Parameters"])
 
-        summary = meta.get("summary", {})
-        periods = meta.get("periods", {})
-        full_period = summary.get("full_sample_period", periods.get("full", "N/A"))
-        train_period = summary.get("train_period", periods.get("train", "N/A"))
-        oos_period = summary.get("oos_period", periods.get("oos", "N/A"))
-        asset = summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")
-        freq = str(summary.get("freq", meta.get("params", {}).get("timeframe", "N/A")))
+    with tab_performance:
+        render_performance_tab(data)
 
-        h1, h2, h3, h4 = st.columns([2.4, 1.8, 1.4, 1.2])
-        h1.metric("全樣本期間", full_period)
-        h2.markdown(
-            f"<div style='font-size:0.85rem;color:#9aa0a6;'>Train: {train_period}<br>測試期間: {oos_period}</div>",
-            unsafe_allow_html=True,
-        )
-        h3.metric("交易標的", asset)
-        h4.metric("交易頻率", freq)
-
-        t_perf, t_risk, t_setup = st.tabs(["績效分析", "風險分析", "策略設定"])
-
-        with t_perf:
-            _left, _right = st.columns([8, 1])
-            with _right:
-                show_signals = st.toggle("顯示訊號", value=True, key="show_signals_main")
-
-            main_chart_height = 340
-            if curve.empty:
-                st.warning("目前篩選條件下沒有可用的績效曲線資料。")
-            else:
-                curve["strategy_ret"] = (curve.get("equity", curve.get("nav", pd.Series(dtype=float))).astype(float) - 1.0)
-                curve["benchmark_ret"] = curve["benchmark_equity"].astype(float) - 1.0 if "benchmark_equity" in curve.columns else pd.NA
-
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=curve["_time"], y=curve["strategy_ret"], mode="lines", name="Strategy"))
-                if curve["benchmark_ret"].notna().any():
-                    fig.add_trace(go.Scatter(x=curve["_time"], y=curve["benchmark_ret"], mode="lines", name="Benchmark", line=dict(dash="dot")))
-
-                if show_signals and not signals.empty and "signal_strength" in signals.columns:
-                    m = pd.DataFrame()
-                    m["_time"] = signals["_time"]
-                    m["marker_y"] = signals["signal_strength"].apply(lambda v: 0.02 if float(v) > 0 else (-0.02 if float(v) < 0 else 0.0))
-                    m["name"] = signals.get("side", pd.Series(["signal"] * len(signals))).astype(str)
-                    fig.add_trace(go.Scatter(x=m["_time"], y=m["marker_y"], mode="markers", name="Signals", marker=dict(size=7, symbol="circle-open"), text=m["name"], hovertemplate="%{x}<br>Signal: %{text}<extra></extra>"))
-
-                fig.update_layout(height=main_chart_height, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
-                st.plotly_chart(fig, use_container_width=True)
-
-            st.markdown("**績效摘要表**")
-            if perf_raw.empty:
-                st.warning("目前篩選條件下沒有可用的績效資料。")
-            else:
-                table = build_perf_table(perf_raw)
-                st.dataframe(table, use_container_width=True, hide_index=True, height=180)
-
-        with t_risk:
-            st.markdown("**最大回撤趨勢（MDD）**")
-            if curve.empty or "drawdown" not in curve.columns:
-                st.info("目前沒有可用的回撤序列資料。")
-            else:
-                mdd_fig = go.Figure()
-                mdd_fig.add_trace(go.Scatter(x=curve["_time"], y=curve["drawdown"].astype(float), mode="lines", name="MDD"))
-                mdd_fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
-                st.plotly_chart(mdd_fig, use_container_width=True)
-
-        with t_setup:
-            st.markdown("**策略邏輯**")
-            st.write(meta.get("logic", "N/A"))
-
-            assumptions = meta.get("assumptions", [])
-            if assumptions:
-                st.markdown("**交易假設**")
-                for a in assumptions:
-                    st.markdown(f"- {a}")
-
-            st.markdown("**策略參數**")
-            params = meta.get("params", {})
-            if params:
-                st.dataframe(pd.DataFrame([{"Parameter": k, "Value": v} for k, v in params.items()]), use_container_width=True, hide_index=True, height=200)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**成本模型**")
-                cost_model = meta.get("cost_model", {})
-                if cost_model:
-                    st.dataframe(pd.DataFrame([{"Key": k, "Value": v} for k, v in cost_model.items()]), use_container_width=True, hide_index=True, height=180)
-            with c2:
-                st.markdown("**風險限制**")
-                risk_limits = meta.get("risk_limits", {})
-                if risk_limits:
-                    st.dataframe(pd.DataFrame([{"Key": k, "Value": v} for k, v in risk_limits.items()]), use_container_width=True, hide_index=True, height=180)
-
-    # Section 3
-    with st.container(border=True):
-        st.markdown("### 交易明細")
-        col_pnl, col_tbl = st.columns([4, 6])
-
-        with col_pnl:
-            st.markdown("**逐筆損益（不含成本）**")
-            if trade_pnl.empty:
-                st.info("目前沒有可用的逐筆損益資料。")
-            else:
-                pnl_fig = go.Figure()
-                pnl_fig.add_trace(go.Scatter(x=trade_pnl["_time"], y=trade_pnl["_value"].astype(float), mode="markers", marker=dict(size=8), name="Trade PnL"))
-                pnl_fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", showlegend=False)
-                st.plotly_chart(pnl_fig, use_container_width=True)
-
-        with col_tbl:
-            st.markdown("**訂單明細**")
-            if signals.empty:
-                st.info("目前沒有可用的訂單/訊號明細資料。")
-            else:
-                od = pd.DataFrame()
-                od["時間"] = pd.to_datetime(signals["_time"], utc=True)
-                od["raw_price"] = signals["price"] if "price" in signals.columns else pd.NA
-                side_map = {"buy": "buy", "sell": "sell", "short": "sell_short", "sell_short": "sell_short", "cover": "buy_to_cover", "buy_to_cover": "buy_to_cover"}
-                od["倉位"] = signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str).str.lower().map(side_map).fillna(signals.get("side", pd.Series(["unknown"] * len(signals))).astype(str))
-
-                if not trade_pnl.empty:
-                    pnl = trade_pnl[["_time", "_value"]].copy().rename(columns={"_time": "時間", "_value": "該筆交易損益（不含成本）"})
-                    pnl["時間"] = pd.to_datetime(pnl["時間"], utc=True)
-                    od = pd.merge_asof(od.sort_values("時間"), pnl.sort_values("時間"), on="時間", direction="nearest", tolerance=pd.Timedelta("2h"))
-                else:
-                    od["該筆交易損益（不含成本）"] = pd.NA
-
-                od = od[["時間", "倉位", "raw_price", "該筆交易損益（不含成本）"]].sort_values("時間", ascending=False)
-                st.dataframe(od, use_container_width=True, hide_index=True, height=280)
+    with tab_parameters:
+        render_parameter_tab(data.meta)
 
 
 if __name__ == "__main__":
