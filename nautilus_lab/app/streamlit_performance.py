@@ -22,6 +22,11 @@ CHART_HEIGHT_RETURN = 230
 
 SAMPLE_OPTIONS = ["oos", "train", "full"]
 
+
+def sample_label(sample: str, periods: dict[str, Any]) -> str:
+    period = str((periods or {}).get(sample, "")).strip()
+    return f"{sample} ({period})" if period else sample
+
 DEFAULT_META = {
     "periods": {"full": "N/A", "train": "N/A", "oos": "N/A"},
     "assumptions": [],
@@ -550,7 +555,18 @@ def main() -> None:
 
         st.sidebar.header("Filters")
         strategy = st.sidebar.selectbox("Strategy", strategies, index=0)
-        sample = st.sidebar.selectbox("Sample", SAMPLE_OPTIONS, index=0)
+
+        contexts_preview = load_strategy_contexts()
+        meta_preview = {**DEFAULT_META, **contexts_preview.get(strategy, {})}
+        periods_preview = meta_preview.get("periods", {}) or {}
+
+        sample = st.sidebar.selectbox(
+            "Sample",
+            SAMPLE_OPTIONS,
+            index=0,
+            format_func=lambda x: sample_label(x, periods_preview),
+        )
+
         run_ids = tag_values(client, cfg, "strategy_performance", "run_id")
         run_id = st.sidebar.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
 
