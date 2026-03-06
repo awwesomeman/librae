@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-1148"
+APP_CAPTION = "UI build: 2026-03-06-1235"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -95,22 +96,28 @@ METRIC_DEFINITIONS = {
 
 PARAMETER_SCHEMA = {
     "Data": [
-        ("Benchmark", "N/A", "Reference benchmark series for strategy comparison."),
-        ("Data Source", "N/A", "Primary data provider used in backtest and monitoring."),
-        ("Data Version", "N/A", "Version tag of ingested dataset."),
-        ("Last Updated Utc", "N/A", "Latest data refresh timestamp (UTC)."),
+        ("Benchmark.Symbol", "BTC Spot BuyAndHold", "Benchmark series used for strategy comparison."),
+        ("Data.Source", "influxdb.nautilus_signals", "Primary data source for backtest and monitoring."),
+        ("Data.Version", "v1", "Dataset version tag for reproducibility."),
+        ("Data.LastUpdatedUtc", "2026-03-06T00:00:00Z", "Most recent data refresh timestamp (UTC)."),
     ],
     "Trading": [
-        ("Session Rules", "N/A", "Trading session constraints and market hours."),
-        ("Cost Model", "N/A", "Commission and slippage assumptions."),
-        ("Assumptions", "N/A", "Execution assumptions used by strategy engine."),
+        ("Execution.Mode", "next_bar_open", "Order execution timing assumption."),
+        ("Execution.Timezone", "UTC", "Timezone used in backtest and signal timestamps."),
+        ("Cost.CommissionBps", 4, "Commission per side in basis points."),
+        ("Cost.SlippageTicks", 1, "Expected slippage in ticks per trade."),
     ],
     "Risk": [
-        ("Risk Limits", "N/A", "Risk guardrails such as max drawdown and limits."),
+        ("Risk.MaxDrawdownLimitPct", 15, "Hard stop when max drawdown exceeds this level."),
+        ("Risk.MaxPosition", 1, "Maximum concurrent position units."),
+        ("Risk.StopLossPct", 2, "Per-trade stop loss percentage."),
     ],
     "Strategy": [
-        ("Logic", "N/A", "Core strategy logic summary."),
-        ("Params", "N/A", "Strategy parameters; extensible by design."),
+        ("Signal.Timeframe", "1D", "Timeframe used to generate strategy signals."),
+        ("Execution.Timeframe", "1H", "Timeframe used for order execution."),
+        ("Param.TrendPeriod", 20, "Lookback period for trend detection."),
+        ("Param.PullbackPeriod", 5, "Lookback period for pullback confirmation."),
+        ("Param.EntryThreshold", 0.5, "Signal threshold required to trigger entry."),
     ],
 }
 
@@ -474,10 +481,37 @@ def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def generate_demo_curve() -> pd.DataFrame:
+    idx = pd.date_range(end=pd.Timestamp.utcnow().floor("h"), periods=120, freq="H", tz="UTC")
+    drift = np.linspace(0, 0.18, len(idx))
+    noise = np.sin(np.linspace(0, 12, len(idx))) * 0.015
+    strategy = 1.0 + drift + noise
+    benchmark = 1.0 + np.linspace(0, 0.11, len(idx)) + np.cos(np.linspace(0, 10, len(idx))) * 0.01
+    running_max = np.maximum.accumulate(strategy)
+    drawdown = (strategy - running_max) / running_max
+    return pd.DataFrame({"_time": idx, "equity": strategy, "benchmark_equity": benchmark, "drawdown": drawdown})
+
+
+def generate_demo_signals(curve: pd.DataFrame) -> pd.DataFrame:
+    points = curve.iloc[::12].copy().reset_index(drop=True)
+    points = points[["_time"]]
+    points["price"] = (1000 * (1 + np.linspace(0, 0.14, len(points)) + np.sin(np.linspace(0, 6, len(points))) * 0.02)).round(2)
+    pattern = [1, -1, 1, -1]
+    points["signal_strength"] = [pattern[i % len(pattern)] for i in range(len(points))]
+    side_map = {1: "buy", -1: "sell"}
+    points["side"] = points["signal_strength"].map(side_map)
+    return points
+
+
 def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> DashboardData:
     curve = load_curve(client, cfg, strategy, sample, run_id)
     signals = load_signals(client, cfg, strategy, run_id)
     perf_raw = load_perf(client, cfg, strategy, sample, run_id)
+
+    if curve.empty:
+        curve = generate_demo_curve()
+    if signals.empty:
+        signals = generate_demo_signals(curve)
 
     contexts = load_strategy_contexts()
     meta = {**DEFAULT_META, **contexts.get(strategy, {})}
@@ -741,78 +775,96 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
 
 def render_parameter_tab(meta: dict[str, Any]) -> None:
-    def _to_text(v: Any) -> str:
-        if isinstance(v, dict):
-            return ", ".join([f"{k}:{v[k]}" for k in v.keys()]) if v else "N/A"
-        if isinstance(v, list):
-            return ", ".join([str(x) for x in v]) if v else "N/A"
-        if v in (None, ""):
-            return "N/A"
-        return str(v)
+    def _flatten(prefix: str, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for k, v in value.items():
+                key = f"{prefix}.{k}" if prefix else str(k)
+                out.update(_flatten(key, v))
+            return out
+        return {prefix: value}
 
-    data_values = {
-        "Benchmark": meta.get("benchmark", "N/A"),
-        "Data Source": meta.get("data_source", "N/A"),
-        "Data Version": meta.get("data_version", "N/A"),
-        "Last Updated Utc": meta.get("last_updated_utc", "N/A"),
-    }
-    trading_values = {
-        "Session Rules": meta.get("session_rules", {}),
-        "Cost Model": meta.get("cost_model", {}),
-        "Assumptions": meta.get("assumptions", []),
-    }
-    risk_values = {
-        "Risk Limits": meta.get("risk_limits", {}),
-    }
-    strategy_values = {
-        "Logic": meta.get("logic", "N/A"),
-        "Params": meta.get("params", {}),
-    }
-
-    group_map = {
-        "Data": data_values,
-        "Trading": trading_values,
-        "Risk": risk_values,
-        "Strategy": strategy_values,
-    }
+    def _actual_values(group: str) -> dict[str, Any]:
+        if group == "Data":
+            raw = {
+                "Benchmark.Symbol": meta.get("benchmark", "N/A"),
+                "Data.Source": meta.get("data_source", "N/A"),
+                "Data.Version": meta.get("data_version", "N/A"),
+                "Data.LastUpdatedUtc": meta.get("last_updated_utc", "N/A"),
+            }
+            return raw
+        if group == "Trading":
+            combined = {
+                "Execution.Mode": (meta.get("params", {}) or {}).get("execution_mode", "next_bar_open"),
+                "Execution.Timezone": (meta.get("params", {}) or {}).get("timezone", "UTC"),
+                "Cost.CommissionBps": (meta.get("cost_model", {}) or {}).get("commission_bps", 4),
+                "Cost.SlippageTicks": (meta.get("cost_model", {}) or {}).get("slippage_ticks", 1),
+            }
+            combined.update(_flatten("Session", meta.get("session_rules", {}) or {}))
+            return combined
+        if group == "Risk":
+            defaults = {
+                "Risk.MaxDrawdownLimitPct": (meta.get("risk_limits", {}) or {}).get("max_drawdown_limit_pct", 15),
+                "Risk.MaxPosition": (meta.get("risk_limits", {}) or {}).get("max_position", 1),
+                "Risk.StopLossPct": (meta.get("risk_limits", {}) or {}).get("stop_loss_pct", 2),
+            }
+            defaults.update(_flatten("Risk", meta.get("risk_limits", {}) or {}))
+            return defaults
+        if group == "Strategy":
+            params = meta.get("params", {}) or {}
+            base = {
+                "Signal.Timeframe": params.get("signal_timeframe", params.get("timeframe", "1D")),
+                "Execution.Timeframe": params.get("execution_timeframe", params.get("entry_timeframe", "1H")),
+                "Param.TrendPeriod": params.get("trend_period", 20),
+                "Param.PullbackPeriod": params.get("pullback_period", 5),
+                "Param.EntryThreshold": params.get("entry_threshold", 0.5),
+            }
+            base["Logic.Summary"] = meta.get("logic", "N/A")
+            base.update(_flatten("Param", params))
+            return base
+        return {}
 
     intro_map = {
-        "Data": "Core data context and source metadata for this strategy run.",
-        "Trading": "Execution assumptions and trading environment settings.",
-        "Risk": "Risk controls and guardrails applied in backtest/live monitoring.",
-        "Strategy": "Strategy logic and parameter settings (extensible).",
+        "Data": "Core dataset and benchmark context used by this strategy run.",
+        "Trading": "Execution and cost assumptions used for simulation and monitoring.",
+        "Risk": "Risk guardrails and safety constraints applied to this strategy.",
+        "Strategy": "Signal and execution settings with extensible strategy parameters.",
     }
 
     def _build_rows(group: str) -> pd.DataFrame:
         schema = PARAMETER_SCHEMA.get(group, [])
-        values = group_map.get(group, {})
+        values = _actual_values(group)
+        desc_map = {k: d for k, _, d in schema}
+        default_map = {k: v for k, v, _ in schema}
+
         rows = []
         used = set()
-        for key, default, desc in schema:
+        for key, default_value, desc in schema:
             used.add(key)
+            actual = values.get(key, default_value)
             rows.append({
                 "Key": key,
-                "Value": _to_text(values.get(key, default)),
+                "Value": actual if actual not in (None, "") else default_value,
                 "Description": desc,
             })
-        for k, v in values.items():
-            if k not in used:
-                rows.append({
-                    "Key": k,
-                    "Value": _to_text(v),
-                    "Description": "Custom field for extensibility.",
-                })
-        return pd.DataFrame(rows, columns=["Key", "Value", "Description"])
+
+        for key, value in values.items():
+            if key in used:
+                continue
+            rows.append({
+                "Key": key,
+                "Value": value if value not in (None, "") else PARAM_DEFAULT_VALUE,
+                "Description": desc_map.get(key, PARAM_DEFAULT_DESCRIPTION),
+            })
+
+        df = pd.DataFrame(rows, columns=PARAM_TABLE_COLUMNS)
+        return df
 
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
         st.markdown("**Data**")
         st.caption(intro_map["Data"])
-        st.dataframe(
-            _build_rows("Data"),
-            use_container_width=True,
-            hide_index=True,
-            height=TABLE_HEIGHT_PARAM,
+        st.dataframe(_build_rows("Data"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
                 "Key": st.column_config.TextColumn("Key", width="medium"),
                 "Value": st.column_config.TextColumn("Value", width="medium"),
@@ -822,11 +874,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
     with row1_col2:
         st.markdown("**Trading**")
         st.caption(intro_map["Trading"])
-        st.dataframe(
-            _build_rows("Trading"),
-            use_container_width=True,
-            hide_index=True,
-            height=TABLE_HEIGHT_PARAM,
+        st.dataframe(_build_rows("Trading"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
                 "Key": st.column_config.TextColumn("Key", width="medium"),
                 "Value": st.column_config.TextColumn("Value", width="medium"),
@@ -838,11 +886,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
     with row2_col1:
         st.markdown("**Risk**")
         st.caption(intro_map["Risk"])
-        st.dataframe(
-            _build_rows("Risk"),
-            use_container_width=True,
-            hide_index=True,
-            height=TABLE_HEIGHT_PARAM,
+        st.dataframe(_build_rows("Risk"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
                 "Key": st.column_config.TextColumn("Key", width="medium"),
                 "Value": st.column_config.TextColumn("Value", width="medium"),
@@ -852,11 +896,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
     with row2_col2:
         st.markdown("**Strategy**")
         st.caption(intro_map["Strategy"])
-        st.dataframe(
-            _build_rows("Strategy"),
-            use_container_width=True,
-            hide_index=True,
-            height=TABLE_HEIGHT_PARAM,
+        st.dataframe(_build_rows("Strategy"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
                 "Key": st.column_config.TextColumn("Key", width="medium"),
                 "Value": st.column_config.TextColumn("Value", width="medium"),
