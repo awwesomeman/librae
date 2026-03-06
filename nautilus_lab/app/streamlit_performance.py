@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0906"
+APP_CAPTION = "UI build: 2026-03-06-0912"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -46,12 +46,12 @@ DEFAULT_META = {
 }
 
 PERF_METRIC_MAP = {
-    "total_return": ("Total Return", "Strategy"),
-    "bh_total_return": ("Total Return", "Benchmark"),
-    "max_drawdown": ("Max Drawdown", "Strategy"),
+    "total_return": ("Total Return (Active Period)", "Strategy"),
+    "bh_total_return": ("Total Return (Active Period)", "Benchmark"),
+    "max_drawdown": ("Max Drawdown (Active Period)", "Strategy"),
     "profit_factor": ("Profit Factor", "Strategy"),
     "win_rate": ("Win Rate", "Strategy"),
-    "avg_trade_return": ("Avg Return Per Trade", "Strategy"),
+    "avg_trade_return": ("Return Per Trade", "Strategy"),
     "trades": ("Trades", "Strategy"),
     "exposure_ratio": ("Exposure Ratio", "Strategy"),
 }
@@ -599,7 +599,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             ], ignore_index=True)
 
 
-            highlight_metrics = {"Total Return (Active Period)", "Max Drawdown (Active Period)", "Volatility (Active Period)"}
+            highlight_metrics = {"Total Return (Active Period)", "Max Drawdown (Active Period)", "Volatility (Active Period)", "Total Return (Full Period)", "Max Drawdown (Full Period)", "Volatility (Full Period)"}
 
             def _to_num(x: str) -> float | None:
                 try:
@@ -613,7 +613,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                     bv = _to_num(row.get("Benchmark", ""))
                     if gv is None or bv is None:
                         return [""] * len(row)
-                    good = ("Total Return" in row["Metric"] and gv > bv) or ("Max Drawdown" in row["Metric"] and gv > bv) or ("Volatility" in row["Metric"] and gv < bv)
+                    good = (("Total Return" in row["Metric"]) and (gv > bv)) or (("Max Drawdown" in row["Metric"]) and (gv > bv)) or (("Volatility" in row["Metric"]) and (gv < bv))
                     if good:
                         return ["background-color: #DCFCE7"] * len(row)
                 return [""] * len(row)
