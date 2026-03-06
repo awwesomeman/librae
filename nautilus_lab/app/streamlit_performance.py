@@ -353,7 +353,7 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
 def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str) -> None:
     st.markdown("### Strategy Overview")
     st.markdown(
-        "<div style='font-size:1.2rem; margin-bottom:10px;'>"
+        "<div class='overview-desc'>"
         "Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, "
         "exit on trailing-stop or momentum reversal."
         "</div>",
@@ -369,20 +369,48 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
         start, end = full_period, ""
 
     c1, c2, c3, c4 = st.columns(4)
-    with c1.container(border=True):
-        st.markdown("**Full Period**")
-        st.markdown(f"<div style='font-size:1.05rem; line-height:1.5;'>{start} ~ {end}</div>", unsafe_allow_html=True)
-        test_start = overview_ctx.get("Date Range (Train)", "N/A")
-        st.markdown(f"<div style='font-size:0.85rem; color:#666;'>Test Start: {test_start}</div>", unsafe_allow_html=True)
-    with c2.container(border=True):
-        st.markdown("**Asset**")
-        st.markdown(f"<div style='font-size:2rem; line-height:1.6;'>{overview_ctx.get('Asset', 'N/A')}</div>", unsafe_allow_html=True)
-    with c3.container(border=True):
-        st.markdown("**Frequency**")
-        st.markdown(f"<div style='font-size:2rem; line-height:1.6;'>{overview_ctx.get('Frequency', 'N/A')}</div>", unsafe_allow_html=True)
-    with c4.container(border=True):
-        st.markdown("**Alpha**")
-        st.markdown(f"<div style='font-size:2rem; line-height:1.6;'>{alpha_value or 'N/A'}</div>", unsafe_allow_html=True)
+    test_start = overview_ctx.get("Date Range (Train)", "N/A")
+    with c1:
+        st.markdown(
+            f"""
+            <div class='metric-card'>
+                <div class='metric-label'>Full Period</div>
+                <div class='metric-value'>{start} ~ {end}</div>
+                <div class='metric-sub'>Test Start: {test_start}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"""
+            <div class='metric-card'>
+                <div class='metric-label'>Asset</div>
+                <div class='metric-value'>{overview_ctx.get('Asset', 'N/A')}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f"""
+            <div class='metric-card'>
+                <div class='metric-label'>Frequency</div>
+                <div class='metric-value'>{overview_ctx.get('Frequency', 'N/A')}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            f"""
+            <div class='metric-card'>
+                <div class='metric-label'>Alpha</div>
+                <div class='metric-value-alpha'>{alpha_value or 'N/A'}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     top_left, top_right = st.columns(2)
     with top_left:
@@ -495,6 +523,19 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.caption(APP_CAPTION)
+    st.markdown(
+        """
+        <style>
+        .overview-desc {font-size:14px; color:#666666; margin-bottom:10px;}
+        .metric-card {background:#F8F9FA; border:1px solid #E9ECEF; border-radius:10px; padding:16px 18px; min-height:120px;}
+        .metric-label {font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#8E8E93; margin-bottom:6px;}
+        .metric-value {font-size:20px; font-weight:600; color:#1C1C1E; line-height:1.35;}
+        .metric-sub {font-size:12px; color:#666666; margin-top:6px;}
+        .metric-value-alpha {font-size:20px; font-weight:700; color:#1E3A8A; line-height:1.35;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     cfg = get_cfg()
     if not cfg.token:
