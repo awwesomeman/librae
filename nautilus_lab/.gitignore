@@ -1,0 +1,12 @@
+# Python cache/build
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environment
+.venv/
+
+# Data layer intermediates (do not ignore canonical seed jsonl)
+data/**/*.tmp
+data/**/*.cache
+data/**/*.bak
