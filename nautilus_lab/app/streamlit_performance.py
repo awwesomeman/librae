@@ -299,7 +299,7 @@ def render_price_signal_chart(signals: pd.DataFrame) -> None:
                     y=signals.loc[buy_mask, "price"].astype(float),
                     mode="markers",
                     name="Buy Signal",
-                    marker=dict(symbol="triangle-up", size=10),
+                    marker=dict(symbol="triangle-up", size=10, color="#10B981"),
                 )
             )
         if sell_mask.any():
@@ -309,7 +309,7 @@ def render_price_signal_chart(signals: pd.DataFrame) -> None:
                     y=signals.loc[sell_mask, "price"].astype(float),
                     mode="markers",
                     name="Sell Signal",
-                    marker=dict(symbol="triangle-down", size=10),
+                    marker=dict(symbol="triangle-down", size=10, color="#EF4444"),
                 )
             )
 
@@ -436,7 +436,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                         y=data.signals.loc[buy_mask, "price"].astype(float),
                         mode="markers",
                         name="Buy Signal",
-                        marker=dict(symbol="triangle-up", size=10),
+                        marker=dict(symbol="triangle-up", size=10, color="#10B981"),
                     ))
                 if sell_mask.any():
                     fig.add_trace(go.Scatter(
@@ -444,7 +444,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                         y=data.signals.loc[sell_mask, "price"].astype(float),
                         mode="markers",
                         name="Sell Signal",
-                        marker=dict(symbol="triangle-down", size=10),
+                        marker=dict(symbol="triangle-down", size=10, color="#EF4444"),
                     ))
 
             fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
@@ -469,7 +469,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 st.info("No strategy equity series available.")
             else:
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=data.curve["_time"], y=strategy_curve.astype(float) - 1.0, mode="lines", name="Strategy", line=dict(width=2.5, color="#3B82F6")))
+                fig.add_trace(go.Scatter(x=data.curve["_time"], y=strategy_curve.astype(float) - 1.0, mode="lines", name="Strategy", line=dict(width=2.5, color="#2563EB")))
                 if "benchmark_equity" in data.curve.columns:
                     benchmark_ret = data.curve["benchmark_equity"].astype(float) - 1.0
                     if benchmark_ret.notna().any():
@@ -535,14 +535,14 @@ def main() -> None:
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
 
         :root {
-            --primary: #3B82F6;
+            --primary: #1E3A8A;
             --success: #10B981;
-            --danger: #F43F5E;
+            --danger: #EF4444;
             --warning: #F59E0B;
             --bg-main: #F8FAFC;
             --grid: #F1F5F9;
-            --text-main: #1E293B;
-            --muted: #64748B;
+            --text-main: #0F172A;
+            --muted: #475569;
             --radius: 10px;
             --border: #E2E8F0;
         }
