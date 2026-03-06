@@ -381,7 +381,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             <div class='metric-card'>
                 <div class='metric-label'>Full Period</div>
                 <div class='metric-value'>{start} ~ {end}</div>
-                <div class='metric-sub'>Test Start: {test_start}</div>
+                <div class='metric-sub'>Test Period: {test_start}</div>
             </div>
             """,
             unsafe_allow_html=True,
