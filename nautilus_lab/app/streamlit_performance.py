@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0840"
+APP_CAPTION = "UI build: 2026-03-06-0843"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -46,24 +46,24 @@ DEFAULT_META = {
 }
 
 PERF_METRIC_MAP = {
-    "total_return": ("TotalReturn", "Strategy"),
-    "bh_total_return": ("TotalReturn", "Benchmark"),
-    "max_drawdown": ("MaxDrawdown", "Strategy"),
-    "profit_factor": ("ProfitFactor", "Strategy"),
-    "win_rate": ("WinRate", "Strategy"),
-    "avg_trade_return": ("AvgTradeReturn", "Strategy"),
+    "total_return": ("Total Return", "Strategy"),
+    "bh_total_return": ("Total Return", "Benchmark"),
+    "max_drawdown": ("Max Drawdown", "Strategy"),
+    "profit_factor": ("Profit Factor", "Strategy"),
+    "win_rate": ("Win Rate", "Strategy"),
+    "avg_trade_return": ("Avg Return Per Trade", "Strategy"),
     "trades": ("Trades", "Strategy"),
-    "exposure_ratio": ("ExposureRatio", "Strategy"),
+    "exposure_ratio": ("Exposure Ratio", "Strategy"),
 }
 
 PERF_METRIC_ORDER = [
-    "TotalReturn",
-    "MaxDrawdown",
-    "ProfitFactor",
-    "WinRate",
-    "AvgTradeReturn",
+    "Total Return",
+    "Max Drawdown",
+    "Profit Factor",
+    "Win Rate",
+    "Avg Return Per Trade",
     "Trades",
-    "ExposureRatio",
+    "Exposure Ratio",
 ]
 
 
@@ -247,15 +247,15 @@ def build_general_metrics_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
     b_vol_full = pmap.get("bh_volatility_full", pmap.get("bh_volatility"))
 
     rows = [
-        {"Metric": "TotalReturn", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": "yes" if (s_total_active is not None and b_total_active is not None and s_total_active > b_total_active) else ""},
-        {"Metric": "MaxDrawdown", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": "yes" if (s_mdd_active is not None and b_mdd_active is not None and s_mdd_active > b_mdd_active) else ""},
+        {"Metric": "Total Return", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": "yes" if (s_total_active is not None and b_total_active is not None and s_total_active > b_total_active) else ""},
+        {"Metric": "Max Drawdown", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": "yes" if (s_mdd_active is not None and b_mdd_active is not None and s_mdd_active > b_mdd_active) else ""},
         {"Metric": "Volatility", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": "yes" if (s_vol_active is not None and b_vol_active is not None and s_vol_active < b_vol_active) else ""},
-        {"Metric": "TotalReturnActivePeriod", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": ""},
-        {"Metric": "MaxDrawdownActivePeriod", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": ""},
-        {"Metric": "VolatilityActivePeriod", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": ""},
-        {"Metric": "TotalReturnFullPeriod", "Strategy": _fmt_pct(s_total_full), "Benchmark": _fmt_pct(b_total_full), "Highlight": ""},
-        {"Metric": "MaxDrawdownFullPeriod", "Strategy": _fmt_pct(s_mdd_full), "Benchmark": _fmt_pct(b_mdd_full), "Highlight": ""},
-        {"Metric": "VolatilityFullPeriod", "Strategy": _fmt_pct(s_vol_full), "Benchmark": _fmt_pct(b_vol_full), "Highlight": ""},
+        {"Metric": "Total Return (Active Period)", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": ""},
+        {"Metric": "Max Drawdown (Active Period)", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": ""},
+        {"Metric": "Volatility (Active Period)", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": ""},
+        {"Metric": "Total Return (Full Period)", "Strategy": _fmt_pct(s_total_full), "Benchmark": _fmt_pct(b_total_full), "Highlight": ""},
+        {"Metric": "Max Drawdown (Full Period)", "Strategy": _fmt_pct(s_mdd_full), "Benchmark": _fmt_pct(b_mdd_full), "Highlight": ""},
+        {"Metric": "Volatility (Full Period)", "Strategy": _fmt_pct(s_vol_full), "Benchmark": _fmt_pct(b_vol_full), "Highlight": ""},
     ]
     return pd.DataFrame(rows)
 
@@ -274,12 +274,12 @@ def build_strategy_specific_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
         exposure = active_obs / total_obs
 
     rows = [
-        {"Metric": "Trades", "Value": _fmt_int(trades), "Definition": "NumberOfRoundTripTransactions"},
-        {"Metric": "ProfitFactor", "Value": _fmt_num(profit_factor), "Definition": "GrossProfitDividedByGrossLoss"},
-        {"Metric": "WinRate", "Value": _fmt_pct(win_rate), "Definition": "WinningTradesDividedByTotalTrades"},
-        {"Metric": "AvgReturnPerTrade", "Value": _fmt_pct(avg_trade_return), "Definition": "AverageReturnPerRoundTripTrade"},
-        {"Metric": "ExposureRatio", "Value": _fmt_pct(exposure), "Definition": "ActiveObservationsDividedByTotalObservations"},
-        {"Metric": "ActiveObservations", "Value": _fmt_int(active_obs), "Definition": "PeriodsHoldingPositionEitherLongOrShort"},
+        {"Metric": "Trades", "Value": _fmt_int(trades), "Definition": "Number Of Round Trip Transactions"},
+        {"Metric": "Profit Factor", "Value": _fmt_num(profit_factor), "Definition": "Gross Profit Divided By Gross Loss"},
+        {"Metric": "Win Rate", "Value": _fmt_pct(win_rate), "Definition": "Winning Trades Divided By Total Trades"},
+        {"Metric": "Avg Return Per Trade", "Value": _fmt_pct(avg_trade_return), "Definition": "Average Return Per Round Trip Trade"},
+        {"Metric": "Exposure Ratio", "Value": _fmt_pct(exposure), "Definition": "Active Observations Divided By Total Observations"},
+        {"Metric": "Active Observations", "Value": _fmt_int(active_obs), "Definition": "Periods Holding Position (Either Long Or Short)"},
     ]
     return pd.DataFrame(rows)
 
@@ -517,7 +517,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
     top_left, top_right = st.columns(2)
     with top_left:
-        st.markdown("#### AssetPriceWithTradingSignals")
+        st.markdown("#### Asset Price With Trading Signals")
         if data.signals.empty or "price" not in data.signals.columns:
             st.info("No signal/price data available for this selection.")
         else:
@@ -549,12 +549,12 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             st.plotly_chart(fig, use_container_width=True)
 
     with top_right:
-        st.markdown("#### PerformanceAnalysis")
+        st.markdown("#### Performance Analysis")
         if data.perf_raw.empty:
             st.info("No performance metrics available for this selection.")
         else:
             general_df = build_general_metrics_table(data.perf_raw)
-            st.markdown("**GeneralMetrics**")
+            st.markdown("**General Metrics**")
 
             def _general_row_style(row: pd.Series):
                 if str(row.get("Highlight", "")) == "yes":
@@ -565,12 +565,12 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             st.dataframe(styled, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
             specific_df = build_strategy_specific_table(data.perf_raw)
-            st.markdown("**StrategySpecificMetrics**")
+            st.markdown("**Strategy Specific Metrics**")
             st.dataframe(specific_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
-        st.markdown("#### CumulativeReturnStrategyVsBuyAndHold")
+        st.markdown("#### Cumulative Return: Strategy vs. Buy and Hold")
         if data.curve.empty:
             st.info("No equity curve data available for this selection.")
         else:
@@ -594,7 +594,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 st.plotly_chart(fig, use_container_width=True)
 
     with bottom_right:
-        st.markdown("#### OrderDetails")
+        st.markdown("#### Order Details")
         order_df = build_order_details(data.signals)
         st.dataframe(order_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
