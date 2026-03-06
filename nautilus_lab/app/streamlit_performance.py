@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0812"
+APP_CAPTION = "UI build: 2026-03-06-0815"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -24,8 +24,10 @@ SAMPLE_OPTIONS = ["oos", "train", "full"]
 
 
 def sample_label(sample: str, periods: dict[str, Any]) -> str:
-    period = str((periods or {}).get(sample, "")).strip()
-    return f"{sample} ({period})" if period else sample
+    display = "test" if sample == "oos" else sample
+    period_key = "oos" if sample == "oos" else sample
+    period = str((periods or {}).get(period_key, "")).strip()
+    return f"{display} ({period})" if period else display
 
 DEFAULT_META = {
     "periods": {"full": "N/A", "train": "N/A", "oos": "N/A"},
@@ -280,7 +282,7 @@ def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     return {
         "Date Range (Full)": str(summary.get("full_sample_period", periods.get("full", "N/A"))),
         "Date Range (Train)": str(summary.get("train_period", periods.get("train", "N/A"))),
-        "Date Range (OOS)": str(summary.get("oos_period", periods.get("oos", "N/A"))),
+        "Date Range (Test)": str(summary.get("test_period", summary.get("oos_period", periods.get("test", periods.get("oos", "N/A"))))),
         "Benchmark": str(meta.get("benchmark", "N/A")),
         "Asset": str(summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")),
         "Frequency": str(summary.get("freq", meta.get("params", {}).get("timeframe", "N/A"))),
@@ -393,7 +395,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
         start, end = full_period, ""
 
     c1, c2, c3, c4 = st.columns(4)
-    test_start = overview_ctx.get("Date Range (Train)", "N/A")
+    test_start = overview_ctx.get("Date Range (Test)", "N/A")
     with c1:
         st.markdown(
             f"""
