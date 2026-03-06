@@ -362,7 +362,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
     top_left, top_right = st.columns(2)
     with top_left:
-        st.markdown("#### [chart] Asset Price with trading signals")
+        st.markdown("#### Asset Price with Trading Signals")
         if data.signals.empty or "price" not in data.signals.columns:
             st.info("No signal/price data available for this selection.")
         else:
@@ -394,7 +394,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             st.plotly_chart(fig, use_container_width=True)
 
     with top_right:
-        st.markdown("#### [table] Performance Analysis")
+        st.markdown("#### Performance Analysis")
         if data.perf_raw.empty:
             st.info("No performance metrics available for this selection.")
         else:
@@ -403,7 +403,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
-        st.markdown("#### [chart] Cumulative Return: Strategy vs. Buy and Hold")
+        st.markdown("#### Cumulative Return: Strategy vs. Buy and Hold")
         if data.curve.empty:
             st.info("No equity curve data available for this selection.")
         else:
@@ -427,7 +427,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 st.plotly_chart(fig, use_container_width=True)
 
     with bottom_right:
-        st.markdown("#### [table] Order Details")
+        st.markdown("#### Order Details")
         order_df = build_order_details(data.signals)
         st.dataframe(order_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
@@ -494,7 +494,7 @@ def main() -> None:
     context = meta_context(data.meta)
     alpha_value = str((data.meta.get("summary", {}) or {}).get("alpha", "20%"))
 
-    tab_performance, tab_parameters = st.tabs(["[tab] Performance", "[tab] Parameter"])
+    tab_performance, tab_parameters = st.tabs(["Performance", "Parameter"])
 
     with tab_performance:
         render_performance_tab(data, context, alpha_value)
