@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -98,7 +99,7 @@ PARAMETER_SCHEMA = {
         ("data_source", "binance_api", "Most upstream data origin (API or demo data)."),
         ("source", "binance_api", "Primary source identifier."),
         ("raw", "btc_1h, btc_5m", "Raw market data feeds used for research/backtest."),
-        ("feature", "rolling_mean_close, kdj", "Feature set generated from raw data."),
+        ("features", "rolling_mean_close, kdj", "Feature set generated from raw data."),
         ("data_version", "v1", "Dataset version tag for reproducibility."),
         ("last_updated_utc", "2026-03-06T00:00:00Z", "Most recent data refresh timestamp (UTC)."),
     ],
@@ -381,10 +382,21 @@ def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
     return build_general_metrics_table(perf_raw)
 
 
+def to_snake_case(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?<!^)(?=[A-Z])", "_", text)
+    text = text.replace("-", "_").replace(" ", "_").replace("/", "_").replace(".", "_")
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text.lower()
+
+
 def flatten_dict(prefix: str, data: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
-        full_key = f"{prefix}.{key}" if prefix else str(key)
+        key_snake = to_snake_case(key)
+        full_key = f"{prefix}.{key_snake}" if prefix else key_snake
         if isinstance(value, dict):
             out.update(flatten_dict(full_key, value))
         else:
@@ -755,7 +767,8 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
         if isinstance(value, dict):
             out: dict[str, Any] = {}
             for k, v in value.items():
-                key = f"{prefix}.{k}" if prefix else str(k)
+                key_snake = to_snake_case(k)
+                key = f"{prefix}.{key_snake}" if prefix else key_snake
                 out.update(_flatten(key, v))
             return out
         return {prefix: value}
@@ -771,12 +784,12 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
             raw_data = meta.get("data", {}) or {}
             source = raw_data.get("source", meta.get("source", "binance_api"))
             raw = raw_data.get("raw", ["btc_1h", "btc_5m"])
-            feature = raw_data.get("feature", params.get("features", ["rolling_mean_close", "kdj"]))
+            features = raw_data.get("features", raw_data.get("feature", params.get("features", ["rolling_mean_close", "kdj"])))
             return {
                 "data_source": meta.get("data_source", source),
                 "source": source,
                 "raw": raw,
-                "feature": feature,
+                "features": features,
                 "data_version": meta.get("data_version", "N/A"),
                 "last_updated_utc": meta.get("last_updated_utc", "N/A"),
             }
@@ -800,19 +813,40 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
             }
 
         if group == "strategy":
-            canonical_keys = {key for key, _, _ in PARAMETER_SCHEMA.get("strategy", [])}
+            canonical_keys = {to_snake_case(key) for key, _, _ in PARAMETER_SCHEMA.get("strategy", [])}
             strategy_values = {
-                key: params.get(key, default)
+                to_snake_case(key): params.get(key, default)
                 for key, default, _ in PARAMETER_SCHEMA.get("strategy", [])
             }
-            for key, value in params.items():
-                key_str = str(key)
-                if key_str in {"timeframe", "signal_timeframe", "execution_timeframe", "execution_mode", "timezone", "position", "position_sizing", "features"}:
+
+            key_aliases = {
+                "trend_lookback": "trend_period",
+                "pullback_lookback": "pullback_period",
+                "entry_th": "entry_threshold",
+            }
+            excluded = {
+                "timeframe",
+                "signal_timeframe",
+                "execution_timeframe",
+                "execution_mode",
+                "timezone",
+                "position",
+                "position_sizing",
+                "features",
+                "feature",
+            }
+
+            for raw_key, value in params.items():
+                key_snake = to_snake_case(raw_key)
+                if key_snake in excluded:
                     continue
-                if key_str in canonical_keys:
-                    strategy_values[key_str] = value
-                elif key_str not in strategy_values:
-                    strategy_values[key_str] = value
+
+                canonical_key = key_aliases.get(key_snake, key_snake)
+                if canonical_key in canonical_keys:
+                    strategy_values[canonical_key] = value
+                elif canonical_key not in strategy_values:
+                    strategy_values[canonical_key] = value
+
             return strategy_values
 
         return {}
@@ -826,17 +860,17 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
 
     def _build_rows(group: str) -> pd.DataFrame:
         schema = PARAMETER_SCHEMA.get(group, [])
-        values = _actual_values(group)
-        desc_map = {k: d for k, _, d in schema}
-        default_map = {k: v for k, v, _ in schema}
+        values = {to_snake_case(k): v for k, v in _actual_values(group).items()}
+        desc_map = {to_snake_case(k): d for k, _, d in schema}
 
         rows = []
         used = set()
         for key, default_value, desc in schema:
-            used.add(key)
-            actual = values.get(key, default_value)
+            key_snake = to_snake_case(key)
+            used.add(key_snake)
+            actual = values.get(key_snake, default_value)
             rows.append({
-                "Key": key,
+                "Key": key_snake,
                 "Value": actual if actual not in (None, "") else default_value,
                 "Description": desc,
             })
@@ -845,7 +879,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
             if key in used:
                 continue
             rows.append({
-                "Key": key,
+                "Key": to_snake_case(key),
                 "Value": value if value not in (None, "") else PARAM_DEFAULT_VALUE,
                 "Description": desc_map.get(key, PARAM_DEFAULT_DESCRIPTION),
             })
@@ -855,7 +889,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
 
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
-        st.markdown("**Data**")
+        st.markdown("**data**")
         st.caption(intro_map["data"])
         st.dataframe(_build_rows("data"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
@@ -865,7 +899,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
             },
         )
     with row1_col2:
-        st.markdown("**Trading**")
+        st.markdown("**trading**")
         st.caption(intro_map["trading"])
         st.dataframe(_build_rows("trading"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
@@ -877,7 +911,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
 
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
-        st.markdown("**Risk**")
+        st.markdown("**risk**")
         st.caption(intro_map["risk"])
         st.dataframe(_build_rows("risk"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
@@ -887,7 +921,7 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
             },
         )
     with row2_col2:
-        st.markdown("**Strategy**")
+        st.markdown("**strategy**")
         st.caption(intro_map["strategy"])
         st.dataframe(_build_rows("strategy"), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PARAM,
             column_config={
