@@ -352,22 +352,35 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
 
 def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str) -> None:
     st.markdown("### Strategy Overview")
-    st.markdown("<div style='font-size:1.25rem;'>Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, exit on trailing-stop or momentum reversal.</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div style='font-size:1.05rem; margin-bottom:10px;'>"
+        "Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, "
+        "exit on trailing-stop or momentum reversal."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     full_period = overview_ctx.get("Date Range (Full)", "N/A")
     if "~" in full_period:
         start, end = [x.strip() for x in full_period.split("~", 1)]
-        full_period_display = f"{start}\n{end}"
+    elif " to " in full_period:
+        start, end = [x.strip() for x in full_period.split(" to ", 1)]
     else:
-        full_period_display = full_period.replace(" to ", "\n")
+        start, end = full_period, ""
 
     c1, c2, c3, c4 = st.columns(4)
     with c1.container(border=True):
         st.markdown("**Full Period**")
-        st.markdown(full_period_display.replace("\n", "  \n"))
-    c2.metric("Asset", overview_ctx.get("Asset", "N/A"))
-    c3.metric("Frequency", overview_ctx.get("Frequency", "N/A"))
-    c4.metric("Alpha", alpha_value or "N/A")
+        st.markdown(f"<div style='font-size:1.15rem; line-height:1.5;'>{start}<br>{end}</div>", unsafe_allow_html=True)
+    with c2.container(border=True):
+        st.markdown("**Asset**")
+        st.markdown(f"<div style='font-size:2rem; line-height:1.6;'>{overview_ctx.get('Asset', 'N/A')}</div>", unsafe_allow_html=True)
+    with c3.container(border=True):
+        st.markdown("**Frequency**")
+        st.markdown(f"<div style='font-size:2rem; line-height:1.6;'>{overview_ctx.get('Frequency', 'N/A')}</div>", unsafe_allow_html=True)
+    with c4.container(border=True):
+        st.markdown("**Alpha**")
+        st.markdown(f"<div style='font-size:2rem; line-height:1.6;'>{alpha_value or 'N/A'}</div>", unsafe_allow_html=True)
 
     top_left, top_right = st.columns(2)
     with top_left:
