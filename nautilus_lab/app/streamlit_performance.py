@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0858"
+APP_CAPTION = "UI build: 2026-03-06-0901"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -596,8 +596,6 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 general_df[["Metric", "Strategy", "Benchmark"]],
                 specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
             ], ignore_index=True)
-            merged["MetricHelp"] = merged["Metric"].map(lambda x: METRIC_DEFINITIONS.get(str(x), "Definition pending."))
-            merged["MetricDisplay"] = merged["Metric"].map(lambda x: f"{x} ℹ️")
 
             st.markdown("**Performance Analysis**")
 
@@ -622,18 +620,13 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
             st.caption("Benchmark: default to benchmark return.")
             st.dataframe(
-                merged[["MetricDisplay", "Strategy", "Benchmark"]].style.apply(_row_style, axis=1),
+                merged[["Metric", "Strategy", "Benchmark"]].style.apply(_row_style, axis=1),
                 use_container_width=True,
                 hide_index=True,
                 height=TABLE_HEIGHT_PERF,
-                column_config={
-                    "MetricDisplay": st.column_config.TextColumn("Metric", help="Each metric includes inline ℹ️ marker. See Metric Guide for definitions."),
-                    "Strategy": st.column_config.TextColumn("Strategy", help="Strategy metric value."),
-                    "Benchmark": st.column_config.TextColumn("Benchmark", help="Default to benchmark return."),
-                },
             )
 
-            with st.popover("Metric Guide"):
+            with st.popover("Metric Guide", use_container_width=True):
                 defs = pd.DataFrame({
                     "Metric": merged["Metric"].astype(str).unique().tolist(),
                 })
@@ -643,12 +636,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                     defs,
                     use_container_width=True,
                     hide_index=True,
-                    height=220,
-                    column_config={
-                        "Metric": st.column_config.TextColumn("Metric", help="Metric name"),
-                        "Definition": st.column_config.TextColumn("Definition", help="Concise explanation"),
-                        "Formula": st.column_config.TextColumn("Formula", help="Calculation logic"),
-                    },
+                    height=TABLE_HEIGHT_PERF,
                 )
 
     bottom_left, bottom_right = st.columns(2)
