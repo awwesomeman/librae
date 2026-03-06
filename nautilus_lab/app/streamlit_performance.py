@@ -9,11 +9,12 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0848"
+APP_CAPTION = "UI build: 2026-03-06-0852"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -65,6 +66,24 @@ PERF_METRIC_ORDER = [
     "Trades",
     "Exposure Ratio",
 ]
+
+METRIC_DEFINITIONS = {
+    "Total Return": "Net return over the selected period.",
+    "Max Drawdown": "Largest peak-to-trough decline in portfolio value.",
+    "Volatility": "Standard deviation of returns over the selected period.",
+    "Total Return (Active Period)": "Return measured only when strategy is active (holding position).",
+    "Max Drawdown (Active Period)": "Max drawdown measured on active periods only.",
+    "Volatility (Active Period)": "Return volatility measured on active periods only.",
+    "Total Return (Full Period)": "Return measured over full backtest horizon.",
+    "Max Drawdown (Full Period)": "Max drawdown measured over full backtest horizon.",
+    "Volatility (Full Period)": "Return volatility measured over full backtest horizon.",
+    "Trades": "Number of round-trip transactions.",
+    "Profit Factor": "Gross profit divided by gross loss.",
+    "Win Rate": "Winning trades divided by total trades.",
+    "Avg Return Per Trade": "Average return per round-trip trade.",
+    "Exposure Ratio": "Active observations divided by total observations.",
+    "Active Observations": "Periods holding position (either long or short).",
+}
 
 
 @dataclass
@@ -561,26 +580,50 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
             ], ignore_index=True)
 
-            merged = merged.rename(columns={"Benchmark": "Benchmark"})
-            st.markdown("**Performance Analysis**  ")
-            st.markdown("<span title='Default to Benchmark return as Benchmark.' style='color:#64748B;font-size:12px;'>Benchmark info: default to benchmark return</span>", unsafe_allow_html=True)
+            st.markdown("**Performance Analysis**")
 
             highlight_metrics = {"Total Return", "Max Drawdown", "Volatility"}
 
+            def _to_num(x: str) -> float | None:
+                try:
+                    return float(str(x).replace('%', '').strip())
+                except Exception:
+                    return None
+
             def _row_style(row: pd.Series):
                 if str(row.get("Metric", "")) in highlight_metrics:
-                    g = str(row.get("Strategy", ""))
-                    b = str(row.get("Benchmark", ""))
-                    try:
-                        gv = float(g.replace('%', ''))
-                        bv = float(b.replace('%', ''))
-                        if ("Total Return" in row["Metric"] and gv > bv) or ("Max Drawdown" in row["Metric"] and gv > bv) or ("Volatility" in row["Metric"] and gv < bv):
-                            return ["background-color: #DCFCE7"] * len(row)
-                    except Exception:
-                        pass
+                    gv = _to_num(row.get("Strategy", ""))
+                    bv = _to_num(row.get("Benchmark", ""))
+                    if gv is None or bv is None:
+                        return [""] * len(row)
+                    good = ("Total Return" in row["Metric"] and gv > bv) or ("Max Drawdown" in row["Metric"] and gv > bv) or ("Volatility" in row["Metric"] and gv < bv)
+                    if good:
+                        return ["background-color: #DCFCE7"] * len(row)
                 return [""] * len(row)
 
-            st.dataframe(merged.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF * 2)
+            tooltip_df = pd.DataFrame({
+                "Metric": [METRIC_DEFINITIONS.get(str(m), "") for m in merged["Metric"]],
+                "Strategy": ["Strategy metric value." for _ in range(len(merged))],
+                "Benchmark": ["Default to benchmark return." for _ in range(len(merged))],
+            })
+
+            merged_html = merged.copy()
+            merged_html = merged_html.rename(columns={
+                "Benchmark": "<span title='Default to benchmark return.'>Benchmark</span>"
+            })
+            tooltip_df = tooltip_df.rename(columns={
+                "Benchmark": "<span title='Default to benchmark return.'>Benchmark</span>"
+            })
+
+            styled = (
+                merged_html.style
+                .apply(_row_style, axis=1)
+                .set_tooltips(tooltip_df, props="visibility: hidden; position: absolute; z-index: 10; background-color: #0F172A; color: #FFFFFF; border-radius: 6px; padding: 6px 8px; font-size: 11px;")
+                .hide(axis="index")
+            )
+
+            table_html = styled.to_html(escape=False)
+            components.html(table_html, height=TABLE_HEIGHT_PERF, scrolling=True)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
