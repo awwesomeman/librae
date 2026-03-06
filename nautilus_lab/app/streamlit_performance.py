@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+
+class SchemaValidationError(ValueError):
+    """Raised when payload does not match expected canonical schema."""
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -26,6 +30,19 @@ PARAM_DEFAULT_VALUE = "N/A"
 PARAM_DEFAULT_DESCRIPTION = "Reserved for future extension."
 
 SAMPLE_OPTIONS = ["oos", "train", "full"]
+
+REQUIRED_SIGNAL_COLUMNS = {"_time", "price", "signal_strength", "side", "run_id", "strategy"}
+REQUIRED_CURVE_COLUMNS = {"_time", "equity", "run_id", "strategy", "sample"}
+REQUIRED_PERF_FIELDS = {
+    "total_return",
+    "max_drawdown",
+    "profit_factor",
+    "win_rate",
+    "avg_trade_return",
+    "trades",
+    "exposure_ratio",
+    "bh_total_return",
+}
 
 
 def sample_label(sample: str, periods: dict[str, Any]) -> str:
@@ -160,7 +177,7 @@ def normalize_position(value: Any) -> str:
     }
     normalized = aliases.get(raw, raw)
     allowed = {"buy", "sell", "sell short", "buy to cover"}
-    return normalized if normalized in allowed else "buy"
+    return normalized if normalized in allowed else "unknown"
 
 
 @dataclass
@@ -198,15 +215,35 @@ def query_df(client: InfluxDBClient, org: str, flux: str) -> pd.DataFrame:
     return frames if isinstance(frames, pd.DataFrame) else pd.DataFrame()
 
 
-def tag_values(client: InfluxDBClient, cfg: InfluxCfg, measurement: str, tag: str) -> list[str]:
+def tag_values(client: InfluxDBClient, cfg: InfluxCfg, measurement: str, tag: str, predicate: str | None = None) -> list[str]:
+    pred = f'r._measurement == "{measurement}"'
+    if predicate:
+        pred = f"{pred} and ({predicate})"
     flux = f'''
 import "influxdata/influxdb/schema"
-schema.tagValues(bucket: "{cfg.bucket}", tag: "{tag}", predicate: (r) => r._measurement == "{measurement}", start: -365d)
+schema.tagValues(bucket: "{cfg.bucket}", tag: "{tag}", predicate: (r) => {pred}, start: -365d)
 '''
     df = query_df(client, cfg.org, flux)
     if df.empty or "_value" not in df.columns:
         return []
     return sorted([str(v) for v in df["_value"].dropna().unique()])
+
+
+def _require_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
+    if df.empty:
+        return
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise SchemaValidationError(f"{dataset} missing required columns: {', '.join(missing)}")
+
+
+def _require_perf_fields(perf_raw: pd.DataFrame) -> None:
+    if perf_raw.empty:
+        return
+    fields = {str(v) for v in perf_raw.get("_field", pd.Series(dtype=str)).dropna().tolist()}
+    missing = sorted(REQUIRED_PERF_FIELDS - fields)
+    if missing:
+        raise SchemaValidationError(f"strategy_performance missing required fields: {', '.join(missing)}")
 
 
 def _sample_filter(sample: str) -> str:
@@ -237,30 +274,9 @@ from(bucket: "{cfg.bucket}")
 '''
     df = query_df(client, cfg.org, flux)
     if df.empty:
-        flux2 = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn:(r)=> r._measurement=="perf_equity_curve")
-  |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> {_sample_filter(sample)})
-  |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "nav" or r._field == "drawdown")
-  |> keep(columns:["_time","_field","_value","curve_type"])
-'''
-        raw = query_df(client, cfg.org, flux2)
-        if raw.empty:
-            return raw
-        raw["_time"] = pd.to_datetime(raw["_time"], utc=True)
-        nav = raw[raw["_field"] == "nav"].pivot_table(index="_time", columns="curve_type", values="_value", aggfunc="last")
-        dd = raw[raw["_field"] == "drawdown"].groupby("_time")["_value"].last()
-        out = nav.reset_index()
-        if "strategy" in out.columns:
-            out = out.rename(columns={"strategy": "equity"})
-        if "buyhold" in out.columns:
-            out = out.rename(columns={"buyhold": "benchmark_equity"})
-        out = out.merge(dd.rename("drawdown"), on="_time", how="left")
-        return out
+        return df
 
+    _require_columns(df, REQUIRED_CURVE_COLUMNS, "perf_equity_curve")
     df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df
 
@@ -278,6 +294,7 @@ from(bucket: "{cfg.bucket}")
 '''
     df = query_df(client, cfg.org, flux)
     if not df.empty:
+        _require_columns(df, REQUIRED_SIGNAL_COLUMNS, "strategy_signals")
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df
 
@@ -293,7 +310,9 @@ from(bucket: "{cfg.bucket}")
   |> filter(fn:(r)=> r._field == "total_return" or r._field == "max_drawdown" or r._field == "profit_factor" or r._field == "win_rate" or r._field == "avg_trade_return" or r._field == "trades" or r._field == "exposure_ratio" or r._field == "bh_total_return")
   |> last()
 '''
-    return query_df(client, cfg.org, flux)
+    df = query_df(client, cfg.org, flux)
+    _require_perf_fields(df)
+    return df
 
 
 def _perf_map(perf_raw: pd.DataFrame) -> dict[str, float]:
@@ -328,19 +347,19 @@ def _fmt_int(v: float | None) -> str:
 def build_general_metrics_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
     pmap = _perf_map(perf_raw)
 
-    s_total_active = pmap.get("active_total_return", pmap.get("total_return"))
-    b_total_active = pmap.get("bh_active_total_return", pmap.get("bh_total_return"))
-    s_mdd_active = pmap.get("active_max_drawdown", pmap.get("max_drawdown"))
-    b_mdd_active = pmap.get("bh_active_max_drawdown", pmap.get("bh_max_drawdown"))
-    s_vol_active = pmap.get("active_volatility", pmap.get("volatility"))
-    b_vol_active = pmap.get("bh_active_volatility", pmap.get("bh_volatility"))
+    s_total_active = pmap.get("active_total_return")
+    b_total_active = pmap.get("bh_active_total_return")
+    s_mdd_active = pmap.get("active_max_drawdown")
+    b_mdd_active = pmap.get("bh_active_max_drawdown")
+    s_vol_active = pmap.get("active_volatility")
+    b_vol_active = pmap.get("bh_active_volatility")
 
-    s_total_full = pmap.get("total_return_full", pmap.get("total_return"))
-    b_total_full = pmap.get("bh_total_return_full", pmap.get("bh_total_return"))
-    s_mdd_full = pmap.get("max_drawdown_full", pmap.get("max_drawdown"))
-    b_mdd_full = pmap.get("bh_max_drawdown_full", pmap.get("bh_max_drawdown"))
-    s_vol_full = pmap.get("volatility_full", pmap.get("volatility"))
-    b_vol_full = pmap.get("bh_volatility_full", pmap.get("bh_volatility"))
+    s_total_full = pmap.get("total_return")
+    b_total_full = pmap.get("bh_total_return")
+    s_mdd_full = pmap.get("max_drawdown")
+    b_mdd_full = pmap.get("bh_max_drawdown")
+    s_vol_full = pmap.get("volatility")
+    b_vol_full = pmap.get("bh_volatility")
 
     rows = [
         {"Metric": "Total Return (Active Period)", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": ""},
@@ -487,7 +506,7 @@ def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     return {
         "Date Range (Full)": str(summary.get("full_sample_period", periods.get("full", "N/A"))),
         "Date Range (Train)": str(summary.get("train_period", periods.get("train", "N/A"))),
-        "Date Range (Test)": str(summary.get("test_period", summary.get("oos_period", periods.get("test", periods.get("oos", "N/A"))))),
+        "Date Range (Test)": str(summary.get("oos_period", periods.get("oos", "N/A"))),
         "Benchmark": str(meta.get("benchmark", "N/A")),
         "Asset": str(summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")),
         "Frequency": str(summary.get("freq", params.get("timeframe", "N/A"))),
@@ -583,13 +602,10 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str) -> None:
+def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str, strategy_logic: str) -> None:
     st.markdown("### Strategy Overview")
     st.markdown(
-        "<div class='overview-desc'>"
-        "Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, "
-        "exit on trailing-stop or momentum reversal."
-        "</div>",
+        f"<div class='overview-desc'>{strategy_logic}</div>",
         unsafe_allow_html=True,
     )
 
@@ -779,75 +795,53 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
         cost_model = meta.get("cost_model", {}) or {}
         session_rules = meta.get("session_rules", {}) or {}
         risk_limits = meta.get("risk_limits", {}) or {}
+        data_block = meta.get("data", {}) or {}
 
         if group == "data":
-            raw_data = meta.get("data", {}) or {}
-            source = raw_data.get("source", meta.get("source", "binance_api"))
-            raw = raw_data.get("raw", ["btc_1h", "btc_5m"])
-            features = raw_data.get("features", raw_data.get("feature", params.get("features", ["rolling_mean_close", "kdj"])))
             return {
-                "data_source": meta.get("data_source", source),
-                "source": source,
-                "raw": raw,
-                "features": features,
-                "data_version": meta.get("data_version", "N/A"),
-                "last_updated_utc": meta.get("last_updated_utc", "N/A"),
+                "data_source": meta.get("data_source"),
+                "source": data_block.get("source"),
+                "raw": data_block.get("raw"),
+                "features": data_block.get("features"),
+                "data_version": meta.get("data_version"),
+                "last_updated_utc": meta.get("last_updated_utc"),
             }
 
         if group == "trading":
             return {
-                "timezone": params.get("timezone", summary.get("timezone", "UTC")),
-                "execution": params.get("execution", params.get("execution_mode", "next_bar_open")),
-                "frequency": summary.get("frequency", "signal_per_hour_and_trade_on_5m"),
-                "commission": cost_model.get("commission", cost_model.get("commission_bps", 4)),
-                "slippage": cost_model.get("slippage", cost_model.get("slippage_ticks", 1)),
-                "position": params.get("position", params.get("position_sizing", "fixed_1_unit")),
-                "include_night_session": session_rules.get("include_night_session", False),
+                "timezone": params.get("timezone"),
+                "execution": params.get("execution"),
+                "frequency": summary.get("frequency"),
+                "commission": cost_model.get("commission"),
+                "slippage": cost_model.get("slippage"),
+                "position": params.get("position"),
+                "include_night_session": session_rules.get("include_night_session"),
             }
 
         if group == "risk":
             return {
-                "max_drawdown_limit": risk_limits.get("max_drawdown_limit", risk_limits.get("max_drawdown_limit_pct", 15)),
-                "max_position": risk_limits.get("max_position", 1),
-                "stop_loss": risk_limits.get("stop_loss", risk_limits.get("stop_loss_pct", 2)),
+                "max_drawdown_limit": risk_limits.get("max_drawdown_limit"),
+                "max_position": risk_limits.get("max_position"),
+                "stop_loss": risk_limits.get("stop_loss"),
             }
 
         if group == "strategy":
-            canonical_keys = {to_snake_case(key) for key, _, _ in PARAMETER_SCHEMA.get("strategy", [])}
-            strategy_values = {
-                to_snake_case(key): params.get(key, default)
-                for key, default, _ in PARAMETER_SCHEMA.get("strategy", [])
-            }
-
-            key_aliases = {
-                "trend_lookback": "trend_period",
-                "pullback_lookback": "pullback_period",
-                "entry_th": "entry_threshold",
-            }
             excluded = {
                 "timeframe",
                 "signal_timeframe",
                 "execution_timeframe",
-                "execution_mode",
+                "execution",
                 "timezone",
                 "position",
-                "position_sizing",
                 "features",
-                "feature",
             }
-
+            out: dict[str, Any] = {}
             for raw_key, value in params.items():
                 key_snake = to_snake_case(raw_key)
                 if key_snake in excluded:
                     continue
-
-                canonical_key = key_aliases.get(key_snake, key_snake)
-                if canonical_key in canonical_keys:
-                    strategy_values[canonical_key] = value
-                elif canonical_key not in strategy_values:
-                    strategy_values[canonical_key] = value
-
-            return strategy_values
+                out[key_snake] = value
+            return out
 
         return {}
 
@@ -865,13 +859,13 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
 
         rows = []
         used = set()
-        for key, default_value, desc in schema:
+        for key, _example_value, desc in schema:
             key_snake = to_snake_case(key)
             used.add(key_snake)
-            actual = values.get(key_snake, default_value)
+            actual = values.get(key_snake)
             rows.append({
                 "Key": key_snake,
-                "Value": actual if actual not in (None, "") else default_value,
+                "Value": actual if actual not in (None, "") else PARAM_DEFAULT_VALUE,
                 "Description": desc,
             })
 
@@ -1001,24 +995,39 @@ def main() -> None:
             format_func=lambda x: sample_label(x, periods_preview),
         )
 
-        run_ids = tag_values(client, cfg, "strategy_performance", "run_id")
-        run_id = st.sidebar.selectbox("Run ID", run_ids[::-1], index=0 if run_ids else None)
+        sample_predicate = "true" if sample == "full" else f'r.sample == "{sample}"'
+        run_ids = tag_values(
+            client,
+            cfg,
+            "strategy_performance",
+            "run_id",
+            predicate=f'r.strategy == "{strategy}" and {sample_predicate}',
+        )
+        if not run_ids:
+            st.warning("No run_id found for selected strategy/sample.")
+            st.stop()
+        run_id = st.sidebar.selectbox("Run ID", run_ids[::-1], index=0)
 
-        data = build_dashboard_data(client, cfg, strategy, sample, run_id)
+        try:
+            data = build_dashboard_data(client, cfg, strategy, sample, run_id)
+        except SchemaValidationError as e:
+            st.error(f"Schema validation failed: {e}")
+            st.stop()
 
     context = meta_context(data.meta)
-    alpha_value = str((data.meta.get("summary", {}) or {}).get("alpha", "20%"))
+    strategy_logic = str(data.meta.get("logic") or "No strategy logic provided.")
+    alpha_value = "N/A"
     if not data.perf_raw.empty:
         perf_map = {str(r.get("_field")): float(r.get("_value", 0.0)) for _, r in data.perf_raw.iterrows()}
-        strategy_ret = perf_map.get("active_total_return", perf_map.get("total_return"))
-        benchmark_ret = perf_map.get("bh_active_total_return", perf_map.get("bh_total_return"))
+        strategy_ret = perf_map.get("total_return")
+        benchmark_ret = perf_map.get("bh_total_return")
         if strategy_ret is not None and benchmark_ret is not None:
             alpha_value = f"{(strategy_ret - benchmark_ret):.2%}"
 
     tab_performance, tab_parameters = st.tabs(["Performance", "Parameter"])
 
     with tab_performance:
-        render_performance_tab(data, context, alpha_value)
+        render_performance_tab(data, context, alpha_value, strategy_logic)
 
     with tab_parameters:
         render_parameter_tab(data.meta)
