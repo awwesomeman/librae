@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0901"
+APP_CAPTION = "UI build: 2026-03-06-0902"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -597,7 +597,6 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
             ], ignore_index=True)
 
-            st.markdown("**Performance Analysis**")
 
             highlight_metrics = {"Total Return", "Max Drawdown", "Volatility"}
 
@@ -618,7 +617,6 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                         return ["background-color: #DCFCE7"] * len(row)
                 return [""] * len(row)
 
-            st.caption("Benchmark: default to benchmark return.")
             st.dataframe(
                 merged[["Metric", "Strategy", "Benchmark"]].style.apply(_row_style, axis=1),
                 use_container_width=True,
