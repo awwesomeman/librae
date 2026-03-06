@@ -9,12 +9,11 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0852"
+APP_CAPTION = "UI build: 2026-03-06-0855"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -601,29 +600,25 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                         return ["background-color: #DCFCE7"] * len(row)
                 return [""] * len(row)
 
-            tooltip_df = pd.DataFrame({
-                "Metric": [METRIC_DEFINITIONS.get(str(m), "") for m in merged["Metric"]],
-                "Strategy": ["Strategy metric value." for _ in range(len(merged))],
-                "Benchmark": ["Default to benchmark return." for _ in range(len(merged))],
-            })
-
-            merged_html = merged.copy()
-            merged_html = merged_html.rename(columns={
-                "Benchmark": "<span title='Default to benchmark return.'>Benchmark</span>"
-            })
-            tooltip_df = tooltip_df.rename(columns={
-                "Benchmark": "<span title='Default to benchmark return.'>Benchmark</span>"
-            })
-
-            styled = (
-                merged_html.style
-                .apply(_row_style, axis=1)
-                .set_tooltips(tooltip_df, props="visibility: hidden; position: absolute; z-index: 10; background-color: #0F172A; color: #FFFFFF; border-radius: 6px; padding: 6px 8px; font-size: 11px;")
-                .hide(axis="index")
+            st.caption("Benchmark: default to benchmark return.")
+            st.dataframe(
+                merged.style.apply(_row_style, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                height=TABLE_HEIGHT_PERF,
+                column_config={
+                    "Metric": st.column_config.TextColumn("Metric", help="Hover row in Metric Definitions below for detailed meaning."),
+                    "Strategy": st.column_config.TextColumn("Strategy", help="Strategy metric value."),
+                    "Benchmark": st.column_config.TextColumn("Benchmark", help="Default to benchmark return."),
+                },
             )
 
-            table_html = styled.to_html(escape=False)
-            components.html(table_html, height=TABLE_HEIGHT_PERF, scrolling=True)
+            with st.expander("Metric Definitions", expanded=False):
+                defs = pd.DataFrame({
+                    "Metric": merged["Metric"].astype(str).unique().tolist(),
+                })
+                defs["Definition"] = defs["Metric"].map(lambda x: METRIC_DEFINITIONS.get(x, "Definition pending."))
+                st.dataframe(defs, use_container_width=True, hide_index=True, height=180)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
