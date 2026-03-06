@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0843"
+APP_CAPTION = "UI build: 2026-03-06-0848"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -554,23 +554,37 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             st.info("No performance metrics available for this selection.")
         else:
             general_df = build_general_metrics_table(data.perf_raw)
-            st.markdown("**General Metrics**")
+            specific_df = build_strategy_specific_table(data.perf_raw)
 
-            def _general_row_style(row: pd.Series):
-                if str(row.get("Highlight", "")) == "yes":
-                    return ["background-color: #DCFCE7"] * len(row)
+            merged = pd.concat([
+                general_df[["Metric", "Strategy", "Benchmark"]],
+                specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
+            ], ignore_index=True)
+
+            merged = merged.rename(columns={"Benchmark": "Benchmark"})
+            st.markdown("**Performance Analysis**  ")
+            st.markdown("<span title='Default to Benchmark return as Benchmark.' style='color:#64748B;font-size:12px;'>Benchmark info: default to benchmark return</span>", unsafe_allow_html=True)
+
+            highlight_metrics = {"Total Return", "Max Drawdown", "Volatility"}
+
+            def _row_style(row: pd.Series):
+                if str(row.get("Metric", "")) in highlight_metrics:
+                    g = str(row.get("Strategy", ""))
+                    b = str(row.get("Benchmark", ""))
+                    try:
+                        gv = float(g.replace('%', ''))
+                        bv = float(b.replace('%', ''))
+                        if ("Total Return" in row["Metric"] and gv > bv) or ("Max Drawdown" in row["Metric"] and gv > bv) or ("Volatility" in row["Metric"] and gv < bv):
+                            return ["background-color: #DCFCE7"] * len(row)
+                    except Exception:
+                        pass
                 return [""] * len(row)
 
-            styled = general_df.style.apply(_general_row_style, axis=1)
-            st.dataframe(styled, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
-
-            specific_df = build_strategy_specific_table(data.perf_raw)
-            st.markdown("**Strategy Specific Metrics**")
-            st.dataframe(specific_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+            st.dataframe(merged.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF * 2)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
-        st.markdown("#### Cumulative Return: Strategy vs. Buy and Hold")
+        st.markdown("#### Cumulative Return: Strategy vs. Benchmark")
         if data.curve.empty:
             st.info("No equity curve data available for this selection.")
         else:
@@ -587,7 +601,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                             x=data.curve["_time"],
                             y=benchmark_ret,
                             mode="lines",
-                            name="Buy and Hold",
+                            name="Benchmark",
                             line=dict(width=1.5, color="#94A3B8", dash="dash"),
                         ))
                 fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
