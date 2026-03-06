@@ -28,16 +28,17 @@ def test_require_perf_fields_raises_on_missing_fields() -> None:
         _require_perf_fields(perf)
 
 
-def test_active_period_metrics_do_not_silent_fallback_to_full_period() -> None:
+def test_general_metrics_table_uses_canonical_fields() -> None:
     perf = pd.DataFrame(
         {
-            "_field": ["total_return", "max_drawdown", "trades", "profit_factor", "win_rate", "avg_trade_return", "exposure_ratio", "bh_total_return"],
-            "_value": [0.08, -0.03, 10, 1.2, 0.55, 0.01, 0.3, 0.04],
+            "_field": ["total_return", "annual_return", "sharpe", "max_drawdown", "win_rate", "trades"],
+            "_value": [0.08, 0.12, 1.4, -0.03, 0.55, 10],
         }
     )
-    table = build_general_metrics_table(perf)
-    row = table.loc[table["Metric"] == "Total Return (Active Period)", "Strategy"].iloc[0]
-    assert row == "-"
+    curve = pd.DataFrame({"benchmark_equity": [1.0, 1.05]})
+    table = build_general_metrics_table(perf, curve)
+    row = table.loc[table["Metric"] == "Total Return", "Strategy"].iloc[0]
+    assert row == "8.00%"
 
 
 def test_unknown_position_is_not_forced_to_buy() -> None:

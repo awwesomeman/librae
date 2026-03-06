@@ -31,7 +31,7 @@ PARAM_TABLE_COLUMNS = ["Key", "Value", "Description"]
 PARAM_DEFAULT_VALUE = "MISSING"
 PARAM_DEFAULT_DESCRIPTION = "Reserved for future extension."
 
-SAMPLE_OPTIONS = ["oos", "train", "full"]
+SAMPLE_PREFERRED_ORDER = ["oos", "train", "full", "validation"]
 
 REQUIRED_SIGNAL_COLUMNS = {"_time", "price", "signal_strength", "side", "run_id", "strategy"}
 REQUIRED_CURVE_COLUMNS = {"_time", "equity", "run_id", "strategy", "sample"}
@@ -41,47 +41,37 @@ def sample_label(sample: str, periods: dict[str, Any]) -> str:
     period = str((periods or {}).get(period_key, "")).strip()
     return f"{display} ({period})" if period else display
 
+
+def resolve_sample_options(samples: list[str]) -> list[str]:
+    seen = {str(s).strip() for s in (samples or []) if str(s).strip()}
+    ordered = [s for s in SAMPLE_PREFERRED_ORDER if s in seen]
+    extras = sorted([s for s in seen if s not in SAMPLE_PREFERRED_ORDER])
+    return ordered + extras
+
 PERF_METRIC_MAP = {
-    "total_return": ("Total Return (Active Period)", "Strategy"),
-    "bh_total_return": ("Total Return (Active Period)", "Benchmark"),
-    "max_drawdown": ("Max Drawdown (Active Period)", "Strategy"),
-    "profit_factor": ("Profit Factor", "Strategy"),
+    "total_return": ("Total Return", "Strategy"),
+    "annual_return": ("Annual Return", "Strategy"),
+    "sharpe": ("Sharpe", "Strategy"),
+    "max_drawdown": ("Max Drawdown", "Strategy"),
     "win_rate": ("Win Rate", "Strategy"),
-    "avg_trade_return": ("Return Per Trade", "Strategy"),
     "trades": ("Trades", "Strategy"),
-    "exposure_ratio": ("Exposure Ratio", "Strategy"),
 }
 
 PERF_METRIC_ORDER = [
-    "Total Return (Active Period)",
-    "Max Drawdown (Active Period)",
-    "Volatility (Active Period)",
-    "Total Return (Full Period)",
-    "Max Drawdown (Full Period)",
-    "Volatility (Full Period)",
-    "Trades",
-    "Active Observations",
-    "Exposure Ratio",
-    "Profit Factor",
-    "Return Per Trade",
+    "Total Return",
+    "Annual Return",
+    "Sharpe",
+    "Max Drawdown",
     "Win Rate",
+    "Trades",
 ]
 METRIC_DEFINITIONS = {
     "Total Return": "Net return over the selected period.",
+    "Annual Return": "Annualized return over the selected period.",
+    "Sharpe": "Risk-adjusted return ratio.",
     "Max Drawdown": "Largest peak-to-trough decline in portfolio value.",
-    "Volatility": "Standard deviation of returns over the selected period.",
-    "Total Return (Active Period)": "Return measured only when strategy is active (holding position).",
-    "Max Drawdown (Active Period)": "Max drawdown measured on active periods only.",
-    "Volatility (Active Period)": "Return volatility measured on active periods only.",
-    "Total Return (Full Period)": "Return measured over full backtest horizon.",
-    "Max Drawdown (Full Period)": "Max drawdown measured over full backtest horizon.",
-    "Volatility (Full Period)": "Return volatility measured over full backtest horizon.",
-    "Trades": "Number of round-trip transactions.",
-    "Profit Factor": "Gross profit divided by gross loss.",
     "Win Rate": "Winning trades divided by total trades.",
-    "Return Per Trade": "Average return per round-trip trade.",
-    "Exposure Ratio": "Active observations divided by total observations.",
-    "Active Observations": "Periods holding position (either long or short).",
+    "Trades": "Number of round-trip transactions.",
 }
 
 
@@ -117,20 +107,11 @@ PARAMETER_SCHEMA = {
 
 METRIC_FORMULAS = {
     "Total Return": "(Ending Equity / Starting Equity) - 1",
+    "Annual Return": "Annualized return over the selected period",
+    "Sharpe": "Mean Excess Return / Return Std Dev",
     "Max Drawdown": "min((Equity - RunningMaxEquity) / RunningMaxEquity)",
-    "Volatility": "StdDev(Periodic Returns)",
-    "Total Return (Active Period)": "Return computed on active-position periods only",
-    "Max Drawdown (Active Period)": "MDD computed on active-position periods only",
-    "Volatility (Active Period)": "Volatility computed on active-position periods only",
-    "Total Return (Full Period)": "Return computed over full backtest horizon",
-    "Max Drawdown (Full Period)": "MDD computed over full backtest horizon",
-    "Volatility (Full Period)": "Volatility over full backtest horizon",
-    "Trades": "Count(Round-Trip Transactions)",
-    "Profit Factor": "Gross Profit / Gross Loss",
     "Win Rate": "Winning Trades / Total Trades",
-    "Return Per Trade": "Sum(Trade Returns) / Trades",
-    "Exposure Ratio": "Active Observations / Total Observations",
-    "Active Observations": "Count(Periods with non-zero position)",
+    "Trades": "Count(Round-Trip Transactions)",
 }
 
 
@@ -288,7 +269,7 @@ from(bucket: "{cfg.bucket}")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
   |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "total_return" or r._field == "max_drawdown" or r._field == "profit_factor" or r._field == "win_rate" or r._field == "avg_trade_return" or r._field == "trades" or r._field == "exposure_ratio" or r._field == "bh_total_return")
+  |> filter(fn:(r)=> r._field == "total_return" or r._field == "annual_return" or r._field == "sharpe" or r._field == "max_drawdown" or r._field == "win_rate" or r._field == "trades")
   |> last()
 '''
     df = query_df(client, cfg.org, flux)
@@ -325,61 +306,48 @@ def _fmt_int(v: float | None) -> str:
     return f"{int(round(v))}"
 
 
-def build_general_metrics_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
+def benchmark_total_return_from_curve(curve: pd.DataFrame | None) -> float | None:
+    if curve is None or curve.empty or "benchmark_equity" not in curve.columns:
+        return None
+    series = pd.to_numeric(curve["benchmark_equity"], errors="coerce").dropna()
+    if series.empty:
+        return None
+    first = float(series.iloc[0])
+    last = float(series.iloc[-1])
+    if first == 0:
+        return None
+    return (last / first) - 1.0
+
+
+def build_general_metrics_table(perf_raw: pd.DataFrame, curve: pd.DataFrame | None = None) -> pd.DataFrame:
     pmap = _perf_map(perf_raw)
-
-    s_total_active = pmap.get("active_total_return")
-    b_total_active = pmap.get("bh_active_total_return")
-    s_mdd_active = pmap.get("active_max_drawdown")
-    b_mdd_active = pmap.get("bh_active_max_drawdown")
-    s_vol_active = pmap.get("active_volatility")
-    b_vol_active = pmap.get("bh_active_volatility")
-
-    s_total_full = pmap.get("total_return")
-    b_total_full = pmap.get("bh_total_return")
-    s_mdd_full = pmap.get("max_drawdown")
-    b_mdd_full = pmap.get("bh_max_drawdown")
-    s_vol_full = pmap.get("volatility")
-    b_vol_full = pmap.get("bh_volatility")
+    benchmark_total_return = benchmark_total_return_from_curve(curve)
 
     rows = [
-        {"Metric": "Total Return (Active Period)", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": ""},
-        {"Metric": "Max Drawdown (Active Period)", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": ""},
-        {"Metric": "Volatility (Active Period)", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": ""},
-        {"Metric": "Total Return (Full Period)", "Strategy": _fmt_pct(s_total_full), "Benchmark": _fmt_pct(b_total_full), "Highlight": ""},
-        {"Metric": "Max Drawdown (Full Period)", "Strategy": _fmt_pct(s_mdd_full), "Benchmark": _fmt_pct(b_mdd_full), "Highlight": ""},
-        {"Metric": "Volatility (Full Period)", "Strategy": _fmt_pct(s_vol_full), "Benchmark": _fmt_pct(b_vol_full), "Highlight": ""},
+        {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": _fmt_pct(benchmark_total_return)},
+        {"Metric": "Annual Return", "Strategy": _fmt_pct(pmap.get("annual_return")), "Benchmark": "-"},
+        {"Metric": "Sharpe", "Strategy": _fmt_num(pmap.get("sharpe")), "Benchmark": "-"},
+        {"Metric": "Max Drawdown", "Strategy": _fmt_pct(pmap.get("max_drawdown")), "Benchmark": "-"},
+        {"Metric": "Win Rate", "Strategy": _fmt_pct(pmap.get("win_rate")), "Benchmark": "-"},
+        {"Metric": "Trades", "Strategy": _fmt_int(pmap.get("trades")), "Benchmark": "-"},
     ]
     return pd.DataFrame(rows)
 
 
 def build_strategy_specific_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
     pmap = _perf_map(perf_raw)
-    trades = pmap.get("trades")
-    win_rate = pmap.get("win_rate")
-    avg_trade_return = pmap.get("avg_trade_return")
-    profit_factor = pmap.get("profit_factor")
-    exposure = pmap.get("exposure_ratio")
-    active_obs = pmap.get("active_observations")
-    total_obs = pmap.get("total_observations")
-
-    if exposure is None and active_obs is not None and total_obs not in (None, 0):
-        exposure = active_obs / total_obs
-
     rows = [
-        {"Metric": "Trades", "Value": _fmt_int(trades), "Definition": "Number Of Round Trip Transactions"},
-        {"Metric": "Profit Factor", "Value": _fmt_num(profit_factor), "Definition": "Gross Profit Divided By Gross Loss"},
-        {"Metric": "Win Rate", "Value": _fmt_pct(win_rate), "Definition": "Winning Trades Divided By Total Trades"},
-        {"Metric": "Return Per Trade", "Value": _fmt_pct(avg_trade_return), "Definition": "Average Return Per Round Trip Trade"},
-        {"Metric": "Exposure Ratio", "Value": _fmt_pct(exposure), "Definition": "Active Observations Divided By Total Observations"},
-        {"Metric": "Active Observations", "Value": _fmt_int(active_obs), "Definition": "Periods Holding Position (Either Long Or Short)"},
+        {"Metric": "Trades", "Value": _fmt_int(pmap.get("trades")), "Definition": "Number Of Round Trip Transactions"},
+        {"Metric": "Win Rate", "Value": _fmt_pct(pmap.get("win_rate")), "Definition": "Winning Trades Divided By Total Trades"},
+        {"Metric": "Annual Return", "Value": _fmt_pct(pmap.get("annual_return")), "Definition": "Annualized Return"},
+        {"Metric": "Sharpe", "Value": _fmt_num(pmap.get("sharpe")), "Definition": "Risk-Adjusted Return Ratio"},
     ]
     return pd.DataFrame(rows)
 
 
-def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
+def build_perf_table(perf_raw: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
     # backward-compat helper; unused after split tables
-    return build_general_metrics_table(perf_raw)
+    return build_general_metrics_table(perf_raw, curve)
 
 
 def to_snake_case(value: Any) -> str:
@@ -475,6 +443,46 @@ def render_kv_table(
         )
 
 
+def _fmt_date_range(start: Any, end: Any) -> str:
+    if not start or not end:
+        return "N/A"
+    return f"{start} ~ {end}"
+
+
+def derive_meta_from_canonical(strategy: str, curve: pd.DataFrame, perf_raw: pd.DataFrame) -> dict[str, Any]:
+    symbol = str(perf_raw.get("symbol", pd.Series(["N/A"])).iloc[0]) if not perf_raw.empty and "symbol" in perf_raw.columns else "N/A"
+    timeframe = str(perf_raw.get("timeframe", pd.Series(["N/A"])).iloc[0]) if not perf_raw.empty and "timeframe" in perf_raw.columns else "N/A"
+    benchmark = str(perf_raw.get("benchmark", pd.Series(["N/A"])).iloc[0]) if not perf_raw.empty and "benchmark" in perf_raw.columns else "N/A"
+
+    full_period = "N/A"
+    train_period = "N/A"
+    oos_period = "N/A"
+    if not curve.empty and "_time" in curve.columns:
+        full_period = _fmt_date_range(curve["_time"].min().date(), curve["_time"].max().date())
+        if "sample" in curve.columns:
+            train_df = curve[curve["sample"] == "train"]
+            oos_df = curve[curve["sample"] == "oos"]
+            if not train_df.empty:
+                train_period = _fmt_date_range(train_df["_time"].min().date(), train_df["_time"].max().date())
+            if not oos_df.empty:
+                oos_period = _fmt_date_range(oos_df["_time"].min().date(), oos_df["_time"].max().date())
+
+    return {
+        "benchmark": benchmark,
+        "summary": {
+            "full_sample_period": str(full_period),
+            "train_period": str(train_period),
+            "oos_period": str(oos_period),
+            "asset": symbol,
+            "freq": timeframe,
+        },
+        "params": {
+            "signal_timeframe": timeframe,
+            "execution_timeframe": timeframe,
+        },
+    }
+
+
 def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     summary = meta["summary"]
     params = meta["params"]
@@ -502,9 +510,10 @@ def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, 
 
     contexts = load_strategy_contexts()
     meta = contexts.get(strategy)
-    if not isinstance(meta, dict):
-        raise SchemaValidationError(f"strategy_context missing strategy: {strategy}")
-    validate_strategy_context_or_raise(meta, strategy)
+    if isinstance(meta, dict):
+        validate_strategy_context_or_raise(meta, strategy)
+    else:
+        meta = derive_meta_from_canonical(strategy, curve, perf_raw)
     return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta)
 
 
@@ -682,53 +691,18 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
         if data.perf_raw.empty:
             st.info("No performance metrics available for this selection.")
         else:
-            general_df = build_general_metrics_table(data.perf_raw)
-            specific_df = build_strategy_specific_table(data.perf_raw)
-
-            merged = pd.concat([
-                general_df[["Metric", "Strategy", "Benchmark"]],
-                specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
-            ], ignore_index=True)
-            metric_order = ordered_metrics(merged["Metric"].astype(str).tolist())
-            merged["Metric"] = pd.Categorical(merged["Metric"], categories=metric_order, ordered=True)
-            merged = merged.sort_values("Metric", na_position="last").reset_index(drop=True)
-            merged["Metric"] = merged["Metric"].astype(str)
-
-            highlight_metrics = {"Total Return (Active Period)", "Max Drawdown (Active Period)", "Volatility (Active Period)", "Total Return (Full Period)", "Max Drawdown (Full Period)", "Volatility (Full Period)"}
-
-            def _to_num(x: str) -> float | None:
-                try:
-                    return float(str(x).replace('%', '').strip())
-                except Exception:
-                    return None
-
-            def _row_style(row: pd.Series):
-                if str(row.get("Metric", "")) in highlight_metrics:
-                    gv = _to_num(row.get("Strategy", ""))
-                    bv = _to_num(row.get("Benchmark", ""))
-                    if gv is None or bv is None:
-                        return [""] * len(row)
-                    good = (("Total Return" in row["Metric"]) and (gv > bv)) or (("Max Drawdown" in row["Metric"]) and (gv > bv)) or (("Volatility" in row["Metric"]) and (gv < bv))
-                    if good:
-                        return ["background-color: #DCFCE7"] * len(row)
-                return [""] * len(row)
-
-            st.dataframe(
-                merged[["Metric", "Strategy", "Benchmark"]].style.apply(_row_style, axis=1),
-                use_container_width=True,
-                hide_index=True,
-                height=TABLE_HEIGHT_PERF,
-            )
-
-            with st.popover("Metric Guide", use_container_width=True):
-                defs = pd.DataFrame({"Metric": metric_order})
-                defs["Definition"] = defs["Metric"].map(lambda x: METRIC_DEFINITIONS.get(x, "Definition pending."))
-                st.dataframe(
-                    defs[["Metric", "Definition"]],
-                    use_container_width=True,
-                    hide_index=True,
-                    height=TABLE_HEIGHT_PERF,
-                )
+            pmap = _perf_map(data.perf_raw)
+            perf_rows = [
+                {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": _fmt_pct(pmap.get("bh_total_return"))},
+                {"Metric": "Max Drawdown", "Strategy": _fmt_pct(pmap.get("max_drawdown")), "Benchmark": "-"},
+                {"Metric": "Win Rate", "Strategy": _fmt_pct(pmap.get("win_rate")), "Benchmark": "-"},
+                {"Metric": "Profit Factor", "Strategy": _fmt_num(pmap.get("profit_factor")), "Benchmark": "-"},
+                {"Metric": "Avg Trade Return", "Strategy": _fmt_pct(pmap.get("avg_trade_return")), "Benchmark": "-"},
+                {"Metric": "Trades", "Strategy": _fmt_int(pmap.get("trades")), "Benchmark": "-"},
+                {"Metric": "Exposure Ratio", "Strategy": _fmt_pct(pmap.get("exposure_ratio")), "Benchmark": "-"},
+            ]
+            perf_df = pd.DataFrame(perf_rows)
+            st.dataframe(perf_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
@@ -948,6 +922,12 @@ def main() -> None:
 
         [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace !important; }
         div[data-baseweb="notification"]{background:#F5F7FA !important; border:1px solid #E2E8F0 !important; color:#334155 !important;}
+
+        @media (max-width: 768px) {
+            .metric-card { min-height: 92px; padding: 12px; }
+            .metric-value, .metric-value-alpha { font-size: 16px; }
+            .metric-sub { font-size: 11px; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -975,19 +955,31 @@ def main() -> None:
 
         contexts_preview = load_strategy_contexts()
         meta_preview = contexts_preview.get(strategy)
-        if not isinstance(meta_preview, dict):
-            st.error(f"strategy_context missing strategy: {strategy}")
+        has_strategy_context = isinstance(meta_preview, dict)
+        periods_preview = {}
+        if has_strategy_context:
+            try:
+                validate_strategy_context_or_raise(meta_preview, strategy)
+                periods_preview = meta_preview.get("periods", {}) or {}
+            except SchemaValidationError as e:
+                st.error(f"Schema validation failed: {e}")
+                st.stop()
+
+        sample_values = tag_values(
+            client,
+            cfg,
+            "strategy_performance",
+            "sample",
+            predicate=f'r.schema_version == "{SCHEMA_VERSION}" and r.strategy == "{strategy}"',
+        )
+        sample_options = resolve_sample_options(sample_values)
+        if not sample_options:
+            st.warning("No sample found for selected strategy.")
             st.stop()
-        try:
-            validate_strategy_context_or_raise(meta_preview, strategy)
-        except SchemaValidationError as e:
-            st.error(f"Schema validation failed: {e}")
-            st.stop()
-        periods_preview = meta_preview.get("periods", {}) or {}
 
         sample = st.sidebar.selectbox(
             "Sample",
-            SAMPLE_OPTIONS,
+            sample_options,
             index=0,
             format_func=lambda x: sample_label(x, periods_preview),
         )
@@ -1017,7 +1009,7 @@ def main() -> None:
     if not data.perf_raw.empty:
         perf_map = {str(r.get("_field")): float(r.get("_value", 0.0)) for _, r in data.perf_raw.iterrows()}
         strategy_ret = perf_map.get("total_return")
-        benchmark_ret = perf_map.get("bh_total_return")
+        benchmark_ret = benchmark_total_return_from_curve(data.curve)
         if strategy_ret is not None and benchmark_ret is not None:
             alpha_value = f"{(strategy_ret - benchmark_ret):.2%}"
 
@@ -1027,6 +1019,8 @@ def main() -> None:
         render_performance_tab(data, context, alpha_value, strategy_logic)
 
     with tab_parameters:
+        if not has_strategy_context:
+            st.warning("Blocker: strategy_context.json missing this strategy. Parameter tab can only show canonical-derived minimal mapping.")
         render_parameter_tab(data.meta)
 
 
