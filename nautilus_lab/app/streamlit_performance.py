@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nautilus_lab.contracts import SCHEMA_VERSION, validate_dataframe_columns, validate_perf_fields, validate_strategy_context
+
 
 class SchemaValidationError(ValueError):
     """Raised when payload does not match expected canonical schema."""
@@ -26,46 +28,18 @@ CHART_HEIGHT_PRICE = 300
 CHART_HEIGHT_RETURN = 230
 
 PARAM_TABLE_COLUMNS = ["Key", "Value", "Description"]
-PARAM_DEFAULT_VALUE = "N/A"
+PARAM_DEFAULT_VALUE = "MISSING"
 PARAM_DEFAULT_DESCRIPTION = "Reserved for future extension."
 
 SAMPLE_OPTIONS = ["oos", "train", "full"]
 
 REQUIRED_SIGNAL_COLUMNS = {"_time", "price", "signal_strength", "side", "run_id", "strategy"}
 REQUIRED_CURVE_COLUMNS = {"_time", "equity", "run_id", "strategy", "sample"}
-REQUIRED_PERF_FIELDS = {
-    "total_return",
-    "max_drawdown",
-    "profit_factor",
-    "win_rate",
-    "avg_trade_return",
-    "trades",
-    "exposure_ratio",
-    "bh_total_return",
-}
-
-
 def sample_label(sample: str, periods: dict[str, Any]) -> str:
     display = "test" if sample == "oos" else sample
     period_key = "oos" if sample == "oos" else sample
     period = str((periods or {}).get(period_key, "")).strip()
     return f"{display} ({period})" if period else display
-
-DEFAULT_META = {
-    "periods": {"full": "N/A", "train": "N/A", "oos": "N/A"},
-    "assumptions": [],
-    "logic": "N/A",
-    "params": {},
-    "benchmark": "N/A",
-    "data_source": "N/A",
-    "data_version": "N/A",
-    "last_updated_utc": "N/A",
-    "summary": {},
-    "session_rules": {},
-    "cost_model": {},
-    "risk_limits": {},
-    "universe": [],
-}
 
 PERF_METRIC_MAP = {
     "total_return": ("Total Return (Active Period)", "Strategy"),
@@ -113,31 +87,31 @@ METRIC_DEFINITIONS = {
 
 PARAMETER_SCHEMA = {
     "data": [
-        ("data_source", "binance_api", "Most upstream data origin (API or demo data)."),
-        ("source", "binance_api", "Primary source identifier."),
-        ("raw", "btc_1h, btc_5m", "Raw market data feeds used for research/backtest."),
-        ("features", "rolling_mean_close, kdj", "Feature set generated from raw data."),
-        ("data_version", "v1", "Dataset version tag for reproducibility."),
-        ("last_updated_utc", "2026-03-06T00:00:00Z", "Most recent data refresh timestamp (UTC)."),
+        ("data_source", None, "Most upstream data origin (API or demo data)."),
+        ("source", None, "Primary source identifier."),
+        ("raw", None, "Raw market data feeds used for research/backtest."),
+        ("features", None, "Feature set generated from raw data."),
+        ("data_version", None, "Dataset version tag for reproducibility."),
+        ("last_updated_utc", None, "Most recent data refresh timestamp (UTC)."),
     ],
     "trading": [
-        ("timezone", "UTC", "Timezone used in backtest and signal timestamps."),
-        ("execution", "next_bar_open", "Order execution timing assumption."),
-        ("frequency", "signal_per_hour_and_trade_on_5m", "Signal/execution cadence definition."),
-        ("commission", 4, "Commission per side (unit: bps)."),
-        ("slippage", 1, "Expected slippage per trade (unit: ticks)."),
-        ("position", "fixed_1_unit", "Position sizing mode."),
-        ("include_night_session", False, "Whether night session is included."),
+        ("timezone", None, "Timezone used in backtest and signal timestamps."),
+        ("execution", None, "Order execution timing assumption."),
+        ("frequency", None, "Signal/execution cadence definition."),
+        ("commission", None, "Commission per side (unit: bps)."),
+        ("slippage", None, "Expected slippage per trade (unit: ticks)."),
+        ("position", None, "Position sizing mode."),
+        ("include_night_session", None, "Whether night session is included."),
     ],
     "risk": [
-        ("max_drawdown_limit", 15, "Hard stop when max drawdown exceeds this level (unit: %)."),
-        ("max_position", 1, "Maximum concurrent position units."),
-        ("stop_loss", 2, "Per-trade stop loss (unit: %)."),
+        ("max_drawdown_limit", None, "Hard stop when max drawdown exceeds this level (unit: %)."),
+        ("max_position", None, "Maximum concurrent position units."),
+        ("stop_loss", None, "Per-trade stop loss (unit: %)."),
     ],
     "strategy": [
-        ("trend_period", 20, "Lookback period for trend detection."),
-        ("pullback_period", 5, "Lookback period for pullback confirmation."),
-        ("entry_threshold", 0.5, "Signal threshold required to trigger entry."),
+        ("trend_period", None, "Lookback period for trend detection."),
+        ("pullback_period", None, "Lookback period for pullback confirmation."),
+        ("entry_threshold", None, "Signal threshold required to trigger entry."),
     ],
 }
 
@@ -230,20 +204,17 @@ schema.tagValues(bucket: "{cfg.bucket}", tag: "{tag}", predicate: (r) => {pred},
 
 
 def _require_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
-    if df.empty:
-        return
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise SchemaValidationError(f"{dataset} missing required columns: {', '.join(missing)}")
+    try:
+        validate_dataframe_columns(df, required, dataset)
+    except ValueError as exc:
+        raise SchemaValidationError(str(exc)) from exc
 
 
 def _require_perf_fields(perf_raw: pd.DataFrame) -> None:
-    if perf_raw.empty:
-        return
-    fields = {str(v) for v in perf_raw.get("_field", pd.Series(dtype=str)).dropna().tolist()}
-    missing = sorted(REQUIRED_PERF_FIELDS - fields)
-    if missing:
-        raise SchemaValidationError(f"strategy_performance missing required fields: {', '.join(missing)}")
+    try:
+        validate_perf_fields(perf_raw)
+    except ValueError as exc:
+        raise SchemaValidationError(str(exc)) from exc
 
 
 def _sample_filter(sample: str) -> str:
@@ -260,11 +231,19 @@ def load_strategy_contexts() -> dict[str, Any]:
         return {}
 
 
+def validate_strategy_context_or_raise(meta: dict[str, Any], strategy: str) -> None:
+    try:
+        validate_strategy_context(meta, f"strategy_context[{strategy}]")
+    except ValueError as exc:
+        raise SchemaValidationError(str(exc)) from exc
+
+
 def load_curve(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
     flux = f'''
 from(bucket: "{cfg.bucket}")
   |> range(start: -365d)
   |> filter(fn:(r)=> r._measurement=="perf_equity_curve")
+  |> filter(fn:(r)=> r.schema_version == "{SCHEMA_VERSION}")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
   |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
@@ -286,6 +265,7 @@ def load_signals(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: 
 from(bucket: "{cfg.bucket}")
   |> range(start: -365d)
   |> filter(fn:(r)=> r._measurement=="strategy_signals")
+  |> filter(fn:(r)=> r.schema_version == "{SCHEMA_VERSION}")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
   |> filter(fn:(r)=> r.run_id == "{run_id}")
   |> filter(fn:(r)=> r._field == "signal_strength" or r._field == "price")
@@ -304,6 +284,7 @@ def load_perf(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str
 from(bucket: "{cfg.bucket}")
   |> range(start: -365d)
   |> filter(fn:(r)=> r._measurement=="strategy_performance")
+  |> filter(fn:(r)=> r.schema_version == "{SCHEMA_VERSION}")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
   |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
@@ -495,21 +476,20 @@ def render_kv_table(
 
 
 def meta_context(meta: dict[str, Any]) -> dict[str, str]:
-    summary = meta.get("summary", {}) or {}
-    periods = meta.get("periods", {}) or {}
-    params = meta.get("params", {}) or {}
+    summary = meta["summary"]
+    params = meta["params"]
 
-    signal_tf = str(params.get("signal_timeframe", params.get("timeframe", summary.get("freq", "N/A"))))
-    exec_tf = str(params.get("execution_timeframe", params.get("entry_timeframe", signal_tf)))
+    signal_tf = str(params.get("signal_timeframe") or summary["freq"])
+    exec_tf = str(params.get("execution_timeframe") or signal_tf)
     freq_display = f"Signal:{signal_tf} | Execution:{exec_tf}" if signal_tf != exec_tf else signal_tf
 
     return {
-        "Date Range (Full)": str(summary.get("full_sample_period", periods.get("full", "N/A"))),
-        "Date Range (Train)": str(summary.get("train_period", periods.get("train", "N/A"))),
-        "Date Range (Test)": str(summary.get("oos_period", periods.get("oos", "N/A"))),
-        "Benchmark": str(meta.get("benchmark", "N/A")),
-        "Asset": str(summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")),
-        "Frequency": str(summary.get("freq", params.get("timeframe", "N/A"))),
+        "Date Range (Full)": str(summary["full_sample_period"]),
+        "Date Range (Train)": str(summary["train_period"]),
+        "Date Range (Test)": str(summary["oos_period"]),
+        "Benchmark": str(meta["benchmark"]),
+        "Asset": str(summary["asset"]),
+        "Frequency": str(summary["freq"]),
         "FrequencyDisplay": freq_display,
     }
 
@@ -521,7 +501,10 @@ def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, 
     perf_raw = load_perf(client, cfg, strategy, sample, run_id)
 
     contexts = load_strategy_contexts()
-    meta = {**DEFAULT_META, **contexts.get(strategy, {})}
+    meta = contexts.get(strategy)
+    if not isinstance(meta, dict):
+        raise SchemaValidationError(f"strategy_context missing strategy: {strategy}")
+    validate_strategy_context_or_raise(meta, strategy)
     return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta)
 
 
@@ -976,7 +959,13 @@ def main() -> None:
         st.stop()
 
     with InfluxDBClient(url=cfg.url, token=cfg.token, org=cfg.org) as client:
-        strategies = tag_values(client, cfg, "strategy_performance", "strategy")
+        strategies = tag_values(
+            client,
+            cfg,
+            "strategy_performance",
+            "strategy",
+            predicate=f'r.schema_version == "{SCHEMA_VERSION}"',
+        )
         if not strategies:
             st.warning("No strategy_performance data found yet.")
             st.stop()
@@ -985,7 +974,15 @@ def main() -> None:
         strategy = st.sidebar.selectbox("Strategy", strategies, index=0)
 
         contexts_preview = load_strategy_contexts()
-        meta_preview = {**DEFAULT_META, **contexts_preview.get(strategy, {})}
+        meta_preview = contexts_preview.get(strategy)
+        if not isinstance(meta_preview, dict):
+            st.error(f"strategy_context missing strategy: {strategy}")
+            st.stop()
+        try:
+            validate_strategy_context_or_raise(meta_preview, strategy)
+        except SchemaValidationError as e:
+            st.error(f"Schema validation failed: {e}")
+            st.stop()
         periods_preview = meta_preview.get("periods", {}) or {}
 
         sample = st.sidebar.selectbox(
@@ -1001,7 +998,7 @@ def main() -> None:
             cfg,
             "strategy_performance",
             "run_id",
-            predicate=f'r.strategy == "{strategy}" and {sample_predicate}',
+            predicate=f'r.schema_version == "{SCHEMA_VERSION}" and r.strategy == "{strategy}" and {sample_predicate}',
         )
         if not run_ids:
             st.warning("No run_id found for selected strategy/sample.")

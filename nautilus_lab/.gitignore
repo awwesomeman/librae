@@ -6,7 +6,16 @@ __pycache__/
 # Local environment
 .venv/
 
-# Data layer intermediates (do not ignore canonical seed jsonl)
+# Data layer intermediates
+# Keep canonical seed files in version control by explicit allowlist when needed.
 data/**/*.tmp
 data/**/*.cache
 data/**/*.bak
+data/**/*.log
+data/**/*.jsonl
+!data/seed/**/*.jsonl
+
+# Runtime artifacts
+*.log
+*.tmp
+*.bak

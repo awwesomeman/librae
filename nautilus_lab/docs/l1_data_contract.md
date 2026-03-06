@@ -8,6 +8,8 @@
 - Canonical schema 檔案：`docs/canonical_schema.yaml`
 - 版本：`schema_version=1.0.0`
 - **後端定義並維護 schema**；資料寫入與查詢契約必須遵循此單一真源，不使用 alias/fallback。
+- 共用驗證 guard：`nautilus_lab/contracts.py`（前後端共用欄位與 key 驗證）。
+- 前端啟動時必須以 `schema_version` 做查詢 gate；不符合版本的資料不得混入報表。
 
 ## 1) Measurement: `strategy_signals`
 

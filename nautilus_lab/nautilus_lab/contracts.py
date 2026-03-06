@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import pandas as pd
+
 SCHEMA_VERSION = "1.0.0"
 
 
@@ -98,6 +100,23 @@ MEASUREMENT_SPECS: dict[str, MeasurementSpec] = {
 }
 
 REQUIRED_SIGNAL_KEYS: tuple[str, ...] = ("timestamp", "strategy", "symbol", "side", "timeframe")
+REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
+    "full_sample_period",
+    "train_period",
+    "oos_period",
+    "asset",
+    "freq",
+)
+REQUIRED_PERF_FIELDS: tuple[str, ...] = (
+    "total_return",
+    "max_drawdown",
+    "profit_factor",
+    "win_rate",
+    "avg_trade_return",
+    "trades",
+    "exposure_ratio",
+    "bh_total_return",
+)
 
 REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
     "benchmark",
@@ -143,3 +162,30 @@ def require_keys(record: dict[str, Any], keys: tuple[str, ...], record_name: str
 
 def validate_signal_record(record: dict[str, Any]) -> None:
     require_keys(record, REQUIRED_SIGNAL_KEYS, "strategy_signals record")
+
+
+def validate_dataframe_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
+    if df.empty:
+        return
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"{dataset} missing required columns: {', '.join(missing)}")
+
+
+def validate_perf_fields(perf_raw: pd.DataFrame) -> None:
+    if perf_raw.empty:
+        return
+    fields = {str(v) for v in perf_raw.get("_field", pd.Series(dtype=str)).dropna().tolist()}
+    missing = sorted(set(REQUIRED_PERF_FIELDS) - fields)
+    if missing:
+        raise ValueError(f"strategy_performance missing required fields: {', '.join(missing)}")
+
+
+def validate_strategy_context(record: dict[str, Any], record_name: str) -> None:
+    require_keys(record, REQUIRED_STRATEGY_CONTEXT_KEYS, record_name)
+    summary = record.get("summary")
+    if not isinstance(summary, dict):
+        raise ValueError(f"{record_name}.summary must be an object")
+    missing_summary = [k for k in REQUIRED_SUMMARY_KEYS if summary.get(k) in (None, "")]
+    if missing_summary:
+        raise ValueError(f"{record_name}.summary missing required keys: {missing_summary}")

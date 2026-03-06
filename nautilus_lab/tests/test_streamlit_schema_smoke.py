@@ -7,6 +7,7 @@ from app.streamlit_performance import (
     _require_perf_fields,
     build_general_metrics_table,
     normalize_position,
+    validate_strategy_context_or_raise,
 )
 
 
@@ -41,3 +42,15 @@ def test_active_period_metrics_do_not_silent_fallback_to_full_period() -> None:
 
 def test_unknown_position_is_not_forced_to_buy() -> None:
     assert normalize_position("flat") == "unknown"
+
+
+def test_strategy_context_requires_canonical_keys() -> None:
+    bad_meta = {
+        "benchmark": "TWSE",
+        "data_source": "seed",
+        "data_version": "v1",
+        "last_updated_utc": "2026-03-06T00:00:00Z",
+        "summary": {"full_sample_period": "2026-01-01~2026-01-31"},
+    }
+    with pytest.raises(SchemaValidationError, match="missing required keys"):
+        validate_strategy_context_or_raise(bad_meta, "DemoStrategy")
