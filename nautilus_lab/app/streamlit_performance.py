@@ -13,12 +13,16 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0951"
+APP_CAPTION = "UI build: 2026-03-06-1148"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
 CHART_HEIGHT_PRICE = 300
 CHART_HEIGHT_RETURN = 230
+
+PARAM_TABLE_COLUMNS = ["Key", "Value", "Description"]
+PARAM_DEFAULT_VALUE = "N/A"
+PARAM_DEFAULT_DESCRIPTION = "Reserved for future extension."
 
 SAMPLE_OPTIONS = ["oos", "train", "full"]
 
@@ -88,6 +92,28 @@ METRIC_DEFINITIONS = {
     "Active Observations": "Periods holding position (either long or short).",
 }
 
+
+PARAMETER_SCHEMA = {
+    "Data": [
+        ("Benchmark", "N/A", "Reference benchmark series for strategy comparison."),
+        ("Data Source", "N/A", "Primary data provider used in backtest and monitoring."),
+        ("Data Version", "N/A", "Version tag of ingested dataset."),
+        ("Last Updated Utc", "N/A", "Latest data refresh timestamp (UTC)."),
+    ],
+    "Trading": [
+        ("Session Rules", "N/A", "Trading session constraints and market hours."),
+        ("Cost Model", "N/A", "Commission and slippage assumptions."),
+        ("Assumptions", "N/A", "Execution assumptions used by strategy engine."),
+    ],
+    "Risk": [
+        ("Risk Limits", "N/A", "Risk guardrails such as max drawdown and limits."),
+    ],
+    "Strategy": [
+        ("Logic", "N/A", "Core strategy logic summary."),
+        ("Params", "N/A", "Strategy parameters; extensible by design."),
+    ],
+}
+
 METRIC_FORMULAS = {
     "Total Return": "(Ending Equity / Starting Equity) - 1",
     "Max Drawdown": "min((Equity - RunningMaxEquity) / RunningMaxEquity)",
@@ -105,6 +131,26 @@ METRIC_FORMULAS = {
     "Exposure Ratio": "Active Observations / Total Observations",
     "Active Observations": "Count(Periods with non-zero position)",
 }
+
+
+def ordered_metrics(metric_values: list[str]) -> list[str]:
+    existing = set(metric_values)
+    return [metric for metric in PERF_METRIC_ORDER if metric in existing]
+
+
+def normalize_position(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("_", " ")
+    aliases = {
+        "long": "buy",
+        "cover": "buy to cover",
+        "short": "sell short",
+        "short sell": "sell short",
+        "close short": "buy to cover",
+        "exit short": "buy to cover",
+    }
+    normalized = aliases.get(raw, raw)
+    allowed = {"buy", "sell", "sell short", "buy to cover"}
+    return normalized if normalized in allowed else "buy"
 
 
 @dataclass
@@ -337,23 +383,34 @@ def flatten_dict(prefix: str, data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def kv_to_df(kv: dict[str, Any]) -> pd.DataFrame:
-    rows = [{"Key": str(k), "Value": ", ".join(map(str, v)) if isinstance(v, list) else v} for k, v in kv.items()]
-    return pd.DataFrame(rows)
+def kv_to_df(kv: dict[str, Any], descriptions: dict[str, str] | None = None) -> pd.DataFrame:
+    descriptions = descriptions or {}
+    rows = []
+    for key, raw_value in kv.items():
+        value = ", ".join(map(str, raw_value)) if isinstance(raw_value, list) else raw_value
+        display_value = PARAM_DEFAULT_VALUE if value in (None, "") else value
+        rows.append(
+            {
+                "Key": str(key),
+                "Value": display_value,
+                "Description": descriptions.get(str(key), PARAM_DEFAULT_DESCRIPTION),
+            }
+        )
+    if not rows:
+        rows.append({"Key": "placeholder", "Value": PARAM_DEFAULT_VALUE, "Description": PARAM_DEFAULT_DESCRIPTION})
+    return pd.DataFrame(rows, columns=PARAM_TABLE_COLUMNS)
 
 
 def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
     if signals.empty:
-        return pd.DataFrame(columns=["TradeId", "Time", "Position", "ExecutionPrice", "GrossPnl"])
+        return pd.DataFrame(columns=["Trade Id", "Time", "Position", "Execution Price", "Gross Pnl"])
 
     out = pd.DataFrame()
     out["Time"] = pd.to_datetime(signals.get("_time", pd.Series([], dtype="datetime64[ns]")), utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-    side = signals.get("side", pd.Series(["buy"] * len(signals))).astype(str).str.lower().str.replace("_", " ")
-    allowed = {"buy", "sell", "buy to cover", "sell short"}
-    side = side.apply(lambda x: x if x in allowed else "buy")
-    out["Position"] = side
-    out["ExecutionPrice"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
-    out["GrossPnl"] = "N/A"
+    side = signals.get("side", pd.Series(["buy"] * len(signals))).astype(str)
+    out["Position"] = side.apply(normalize_position)
+    out["Execution Price"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
+    out["Gross Pnl"] = "N/A"
 
     trade_id = 0
     active_trade = None
@@ -369,9 +426,9 @@ def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
                 active_trade = f"T{trade_id:04d}"
             tids.append(active_trade)
             active_trade = None
-    out["TradeId"] = tids
+    out["Trade Id"] = tids
     out = out.dropna(subset=["Time"]).sort_values("Time", ascending=False).reset_index(drop=True)
-    return out[["TradeId", "Time", "Position", "ExecutionPrice", "GrossPnl"]]
+    return out[["Trade Id", "Time", "Position", "Execution Price", "Gross Pnl"]]
 
 
 def render_kv_table(title: str, kv: dict[str, Any], height: int = TABLE_HEIGHT_PARAM) -> None:
@@ -448,7 +505,7 @@ def render_price_signal_chart(signals: pd.DataFrame) -> None:
                 )
             )
 
-    fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
+    fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"), legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -486,7 +543,7 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
                 )
             )
 
-    fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
+    fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"), legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -582,7 +639,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                         marker=dict(symbol="triangle-down", size=10, color="#EF4444"),
                     ))
 
-            fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
+            fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"), legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
             st.plotly_chart(fig, use_container_width=True)
 
     with top_right:
@@ -632,9 +689,8 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                     "Metric": [m for m in PERF_METRIC_ORDER if m in set(merged["Metric"].astype(str).tolist())],
                 })
                 defs["Definition"] = defs["Metric"].map(lambda x: METRIC_DEFINITIONS.get(x, "Definition pending."))
-                defs["Formula"] = defs["Metric"].map(lambda x: METRIC_FORMULAS.get(x, "Formula pending."))
                 st.dataframe(
-                    defs,
+                    defs[["Metric", "Definition"]],
                     use_container_width=True,
                     hide_index=True,
                     height=TABLE_HEIGHT_PERF,
@@ -662,7 +718,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                             name="Benchmark",
                             line=dict(width=1.5, color="#94A3B8", dash="dash"),
                         ))
-                fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"))
+                fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"), legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
                 st.plotly_chart(fig, use_container_width=True)
 
     with bottom_right:
@@ -672,38 +728,128 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
 
 def render_parameter_tab(meta: dict[str, Any]) -> None:
-    data_card = {
-        "benchmark": meta.get("benchmark", "N/A"),
-        "data_source": meta.get("data_source", "N/A"),
-        "data_version": meta.get("data_version", "N/A"),
-        "last_updated_utc": meta.get("last_updated_utc", "N/A"),
-    }
-    trading_card = {
-        **flatten_dict("session_rules", meta.get("session_rules", {}) or {}),
-        **flatten_dict("cost_model", meta.get("cost_model", {}) or {}),
-    }
-    assumptions = meta.get("assumptions", []) or []
-    if assumptions:
-        trading_card["assumptions"] = assumptions
+    def _to_text(v: Any) -> str:
+        if isinstance(v, dict):
+            return ", ".join([f"{k}:{v[k]}" for k in v.keys()]) if v else "N/A"
+        if isinstance(v, list):
+            return ", ".join([str(x) for x in v]) if v else "N/A"
+        if v in (None, ""):
+            return "N/A"
+        return str(v)
 
-    risk_card = flatten_dict("risk_limits", meta.get("risk_limits", {}) or {})
-
-    strategy_card = {
-        "logic": meta.get("logic", "N/A"),
-        **flatten_dict("params", meta.get("params", {}) or {}),
+    data_values = {
+        "Benchmark": meta.get("benchmark", "N/A"),
+        "Data Source": meta.get("data_source", "N/A"),
+        "Data Version": meta.get("data_version", "N/A"),
+        "Last Updated Utc": meta.get("last_updated_utc", "N/A"),
     }
+    trading_values = {
+        "Session Rules": meta.get("session_rules", {}),
+        "Cost Model": meta.get("cost_model", {}),
+        "Assumptions": meta.get("assumptions", []),
+    }
+    risk_values = {
+        "Risk Limits": meta.get("risk_limits", {}),
+    }
+    strategy_values = {
+        "Logic": meta.get("logic", "N/A"),
+        "Params": meta.get("params", {}),
+    }
+
+    group_map = {
+        "Data": data_values,
+        "Trading": trading_values,
+        "Risk": risk_values,
+        "Strategy": strategy_values,
+    }
+
+    intro_map = {
+        "Data": "Core data context and source metadata for this strategy run.",
+        "Trading": "Execution assumptions and trading environment settings.",
+        "Risk": "Risk controls and guardrails applied in backtest/live monitoring.",
+        "Strategy": "Strategy logic and parameter settings (extensible).",
+    }
+
+    def _build_rows(group: str) -> pd.DataFrame:
+        schema = PARAMETER_SCHEMA.get(group, [])
+        values = group_map.get(group, {})
+        rows = []
+        used = set()
+        for key, default, desc in schema:
+            used.add(key)
+            rows.append({
+                "Key": key,
+                "Value": _to_text(values.get(key, default)),
+                "Description": desc,
+            })
+        for k, v in values.items():
+            if k not in used:
+                rows.append({
+                    "Key": k,
+                    "Value": _to_text(v),
+                    "Description": "Custom field for extensibility.",
+                })
+        return pd.DataFrame(rows, columns=["Key", "Value", "Description"])
 
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
-        render_kv_table("Data", data_card)
+        st.markdown("**Data**")
+        st.caption(intro_map["Data"])
+        st.dataframe(
+            _build_rows("Data"),
+            use_container_width=True,
+            hide_index=True,
+            height=TABLE_HEIGHT_PARAM,
+            column_config={
+                "Key": st.column_config.TextColumn("Key", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="medium"),
+                "Description": st.column_config.TextColumn("Description", width="medium"),
+            },
+        )
     with row1_col2:
-        render_kv_table("Trading", trading_card)
+        st.markdown("**Trading**")
+        st.caption(intro_map["Trading"])
+        st.dataframe(
+            _build_rows("Trading"),
+            use_container_width=True,
+            hide_index=True,
+            height=TABLE_HEIGHT_PARAM,
+            column_config={
+                "Key": st.column_config.TextColumn("Key", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="medium"),
+                "Description": st.column_config.TextColumn("Description", width="medium"),
+            },
+        )
 
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
-        render_kv_table("Risk", risk_card)
+        st.markdown("**Risk**")
+        st.caption(intro_map["Risk"])
+        st.dataframe(
+            _build_rows("Risk"),
+            use_container_width=True,
+            hide_index=True,
+            height=TABLE_HEIGHT_PARAM,
+            column_config={
+                "Key": st.column_config.TextColumn("Key", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="medium"),
+                "Description": st.column_config.TextColumn("Description", width="medium"),
+            },
+        )
     with row2_col2:
-        render_kv_table("Strategy", strategy_card)
+        st.markdown("**Strategy**")
+        st.caption(intro_map["Strategy"])
+        st.dataframe(
+            _build_rows("Strategy"),
+            use_container_width=True,
+            hide_index=True,
+            height=TABLE_HEIGHT_PARAM,
+            column_config={
+                "Key": st.column_config.TextColumn("Key", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="medium"),
+                "Description": st.column_config.TextColumn("Description", width="medium"),
+            },
+        )
 
 
 def main() -> None:
