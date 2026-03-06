@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0902"
+APP_CAPTION = "UI build: 2026-03-06-0906"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -57,15 +57,19 @@ PERF_METRIC_MAP = {
 }
 
 PERF_METRIC_ORDER = [
-    "Total Return",
-    "Max Drawdown",
-    "Profit Factor",
-    "Win Rate",
-    "Avg Return Per Trade",
+    "Total Return (Active Period)",
+    "Max Drawdown (Active Period)",
+    "Volatility (Active Period)",
+    "Total Return (Full Period)",
+    "Max Drawdown (Full Period)",
+    "Volatility (Full Period)",
     "Trades",
+    "Active Observations",
     "Exposure Ratio",
+    "Profit Factor",
+    "Return Per Trade",
+    "Win Rate",
 ]
-
 METRIC_DEFINITIONS = {
     "Total Return": "Net return over the selected period.",
     "Max Drawdown": "Largest peak-to-trough decline in portfolio value.",
@@ -79,7 +83,7 @@ METRIC_DEFINITIONS = {
     "Trades": "Number of round-trip transactions.",
     "Profit Factor": "Gross profit divided by gross loss.",
     "Win Rate": "Winning trades divided by total trades.",
-    "Avg Return Per Trade": "Average return per round-trip trade.",
+    "Return Per Trade": "Average return per round-trip trade.",
     "Exposure Ratio": "Active observations divided by total observations.",
     "Active Observations": "Periods holding position (either long or short).",
 }
@@ -97,7 +101,7 @@ METRIC_FORMULAS = {
     "Trades": "Count(Round-Trip Transactions)",
     "Profit Factor": "Gross Profit / Gross Loss",
     "Win Rate": "Winning Trades / Total Trades",
-    "Avg Return Per Trade": "Sum(Trade Returns) / Trades",
+    "Return Per Trade": "Sum(Trade Returns) / Trades",
     "Exposure Ratio": "Active Observations / Total Observations",
     "Active Observations": "Count(Periods with non-zero position)",
 }
@@ -283,9 +287,6 @@ def build_general_metrics_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
     b_vol_full = pmap.get("bh_volatility_full", pmap.get("bh_volatility"))
 
     rows = [
-        {"Metric": "Total Return", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": "yes" if (s_total_active is not None and b_total_active is not None and s_total_active > b_total_active) else ""},
-        {"Metric": "Max Drawdown", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": "yes" if (s_mdd_active is not None and b_mdd_active is not None and s_mdd_active > b_mdd_active) else ""},
-        {"Metric": "Volatility", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": "yes" if (s_vol_active is not None and b_vol_active is not None and s_vol_active < b_vol_active) else ""},
         {"Metric": "Total Return (Active Period)", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": ""},
         {"Metric": "Max Drawdown (Active Period)", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": ""},
         {"Metric": "Volatility (Active Period)", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": ""},
@@ -313,7 +314,7 @@ def build_strategy_specific_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
         {"Metric": "Trades", "Value": _fmt_int(trades), "Definition": "Number Of Round Trip Transactions"},
         {"Metric": "Profit Factor", "Value": _fmt_num(profit_factor), "Definition": "Gross Profit Divided By Gross Loss"},
         {"Metric": "Win Rate", "Value": _fmt_pct(win_rate), "Definition": "Winning Trades Divided By Total Trades"},
-        {"Metric": "Avg Return Per Trade", "Value": _fmt_pct(avg_trade_return), "Definition": "Average Return Per Round Trip Trade"},
+        {"Metric": "Return Per Trade", "Value": _fmt_pct(avg_trade_return), "Definition": "Average Return Per Round Trip Trade"},
         {"Metric": "Exposure Ratio", "Value": _fmt_pct(exposure), "Definition": "Active Observations Divided By Total Observations"},
         {"Metric": "Active Observations", "Value": _fmt_int(active_obs), "Definition": "Periods Holding Position (Either Long Or Short)"},
     ]
@@ -598,7 +599,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             ], ignore_index=True)
 
 
-            highlight_metrics = {"Total Return", "Max Drawdown", "Volatility"}
+            highlight_metrics = {"Total Return (Active Period)", "Max Drawdown (Active Period)", "Volatility (Active Period)"}
 
             def _to_num(x: str) -> float | None:
                 try:
@@ -626,7 +627,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
             with st.popover("Metric Guide", use_container_width=True):
                 defs = pd.DataFrame({
-                    "Metric": merged["Metric"].astype(str).unique().tolist(),
+                    "Metric": [m for m in PERF_METRIC_ORDER if m in set(merged["Metric"].astype(str).tolist())],
                 })
                 defs["Definition"] = defs["Metric"].map(lambda x: METRIC_DEFINITIONS.get(x, "Definition pending."))
                 defs["Formula"] = defs["Metric"].map(lambda x: METRIC_FORMULAS.get(x, "Formula pending."))
