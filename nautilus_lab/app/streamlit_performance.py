@@ -7,14 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-1235"
+APP_CAPTION = "UI build: 2026-03-06-1200"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -96,28 +95,27 @@ METRIC_DEFINITIONS = {
 
 PARAMETER_SCHEMA = {
     "Data": [
-        ("Benchmark.Symbol", "BTC Spot BuyAndHold", "Benchmark series used for strategy comparison."),
-        ("Data.Source", "influxdb.nautilus_signals", "Primary data source for backtest and monitoring."),
-        ("Data.Version", "v1", "Dataset version tag for reproducibility."),
-        ("Data.LastUpdatedUtc", "2026-03-06T00:00:00Z", "Most recent data refresh timestamp (UTC)."),
+                ("data_source", "influxdb.nautilus_signals", "Primary data source for backtest and monitoring."),
+        ("data_version", "v1", "Dataset version tag for reproducibility."),
+        ("last_updated_utc", "2026-03-06T00:00:00Z", "Most recent data refresh timestamp (UTC)."),
     ],
     "Trading": [
-        ("Execution.Mode", "next_bar_open", "Order execution timing assumption."),
-        ("Execution.Timezone", "UTC", "Timezone used in backtest and signal timestamps."),
-        ("Cost.CommissionBps", 4, "Commission per side in basis points."),
-        ("Cost.SlippageTicks", 1, "Expected slippage in ticks per trade."),
+        ("execution_mode", "next_bar_open", "Order execution timing assumption."),
+        ("execution_timezone", "UTC", "Timezone used in backtest and signal timestamps."),
+        ("commission_bps", 4, "Commission per side in basis points."),
+        ("slippage_ticks", 1, "Expected slippage in ticks per trade."),
     ],
     "Risk": [
-        ("Risk.MaxDrawdownLimitPct", 15, "Hard stop when max drawdown exceeds this level."),
-        ("Risk.MaxPosition", 1, "Maximum concurrent position units."),
-        ("Risk.StopLossPct", 2, "Per-trade stop loss percentage."),
+        ("max_drawdown_limit_pct", 15, "Hard stop when max drawdown exceeds this level."),
+        ("max_position", 1, "Maximum concurrent position units."),
+        ("stop_loss_pct", 2, "Per-trade stop loss percentage."),
     ],
     "Strategy": [
-        ("Signal.Timeframe", "1D", "Timeframe used to generate strategy signals."),
-        ("Execution.Timeframe", "1H", "Timeframe used for order execution."),
-        ("Param.TrendPeriod", 20, "Lookback period for trend detection."),
-        ("Param.PullbackPeriod", 5, "Lookback period for pullback confirmation."),
-        ("Param.EntryThreshold", 0.5, "Signal threshold required to trigger entry."),
+        ("signal_timeframe", "1D", "Timeframe used to generate strategy signals."),
+        ("execution_timeframe", "1h", "Timeframe used for order execution."),
+        ("trend_period", 20, "Lookback period for trend detection."),
+        ("pullback_period", 5, "Lookback period for pullback confirmation."),
+        ("entry_threshold", 0.5, "Signal threshold required to trigger entry."),
     ],
 }
 
@@ -481,37 +479,11 @@ def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def generate_demo_curve() -> pd.DataFrame:
-    idx = pd.date_range(end=pd.Timestamp.utcnow().floor("h"), periods=120, freq="H", tz="UTC")
-    drift = np.linspace(0, 0.18, len(idx))
-    noise = np.sin(np.linspace(0, 12, len(idx))) * 0.015
-    strategy = 1.0 + drift + noise
-    benchmark = 1.0 + np.linspace(0, 0.11, len(idx)) + np.cos(np.linspace(0, 10, len(idx))) * 0.01
-    running_max = np.maximum.accumulate(strategy)
-    drawdown = (strategy - running_max) / running_max
-    return pd.DataFrame({"_time": idx, "equity": strategy, "benchmark_equity": benchmark, "drawdown": drawdown})
-
-
-def generate_demo_signals(curve: pd.DataFrame) -> pd.DataFrame:
-    points = curve.iloc[::12].copy().reset_index(drop=True)
-    points = points[["_time"]]
-    points["price"] = (1000 * (1 + np.linspace(0, 0.14, len(points)) + np.sin(np.linspace(0, 6, len(points))) * 0.02)).round(2)
-    pattern = [1, -1, 1, -1]
-    points["signal_strength"] = [pattern[i % len(pattern)] for i in range(len(points))]
-    side_map = {1: "buy", -1: "sell"}
-    points["side"] = points["signal_strength"].map(side_map)
-    return points
-
 
 def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> DashboardData:
     curve = load_curve(client, cfg, strategy, sample, run_id)
     signals = load_signals(client, cfg, strategy, run_id)
     perf_raw = load_perf(client, cfg, strategy, sample, run_id)
-
-    if curve.empty:
-        curve = generate_demo_curve()
-    if signals.empty:
-        signals = generate_demo_signals(curve)
 
     contexts = load_strategy_contexts()
     meta = {**DEFAULT_META, **contexts.get(strategy, {})}
@@ -788,36 +760,36 @@ def render_parameter_tab(meta: dict[str, Any]) -> None:
         if group == "Data":
             raw = {
                 "Benchmark.Symbol": meta.get("benchmark", "N/A"),
-                "Data.Source": meta.get("data_source", "N/A"),
-                "Data.Version": meta.get("data_version", "N/A"),
-                "Data.LastUpdatedUtc": meta.get("last_updated_utc", "N/A"),
+                "data_source": meta.get("data_source", "N/A"),
+                "data_version": meta.get("data_version", "N/A"),
+                "last_updated_utc": meta.get("last_updated_utc", "N/A"),
             }
             return raw
         if group == "Trading":
             combined = {
-                "Execution.Mode": (meta.get("params", {}) or {}).get("execution_mode", "next_bar_open"),
-                "Execution.Timezone": (meta.get("params", {}) or {}).get("timezone", "UTC"),
-                "Cost.CommissionBps": (meta.get("cost_model", {}) or {}).get("commission_bps", 4),
-                "Cost.SlippageTicks": (meta.get("cost_model", {}) or {}).get("slippage_ticks", 1),
+                "execution_mode": (meta.get("params", {}) or {}).get("execution_mode", "next_bar_open"),
+                "execution_timezone": (meta.get("params", {}) or {}).get("timezone", "UTC"),
+                "commission_bps": (meta.get("cost_model", {}) or {}).get("commission_bps", 4),
+                "slippage_ticks": (meta.get("cost_model", {}) or {}).get("slippage_ticks", 1),
             }
             combined.update(_flatten("Session", meta.get("session_rules", {}) or {}))
             return combined
         if group == "Risk":
             defaults = {
-                "Risk.MaxDrawdownLimitPct": (meta.get("risk_limits", {}) or {}).get("max_drawdown_limit_pct", 15),
-                "Risk.MaxPosition": (meta.get("risk_limits", {}) or {}).get("max_position", 1),
-                "Risk.StopLossPct": (meta.get("risk_limits", {}) or {}).get("stop_loss_pct", 2),
+                "max_drawdown_limit_pct": (meta.get("risk_limits", {}) or {}).get("max_drawdown_limit_pct", 15),
+                "max_position": (meta.get("risk_limits", {}) or {}).get("max_position", 1),
+                "stop_loss_pct": (meta.get("risk_limits", {}) or {}).get("stop_loss_pct", 2),
             }
             defaults.update(_flatten("Risk", meta.get("risk_limits", {}) or {}))
             return defaults
         if group == "Strategy":
             params = meta.get("params", {}) or {}
             base = {
-                "Signal.Timeframe": params.get("signal_timeframe", params.get("timeframe", "1D")),
+                "signal_timeframe": params.get("signal_timeframe", params.get("timeframe", "1D")),
                 "Execution.Timeframe": params.get("execution_timeframe", params.get("entry_timeframe", "1H")),
-                "Param.TrendPeriod": params.get("trend_period", 20),
-                "Param.PullbackPeriod": params.get("pullback_period", 5),
-                "Param.EntryThreshold": params.get("entry_threshold", 0.5),
+                "trend_period": params.get("trend_period", 20),
+                "pullback_period": params.get("pullback_period", 5),
+                "entry_threshold": params.get("entry_threshold", 0.5),
             }
             base["Logic.Summary"] = meta.get("logic", "N/A")
             base.update(_flatten("Param", params))
