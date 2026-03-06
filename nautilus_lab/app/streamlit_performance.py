@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0815"
+APP_CAPTION = "UI build: 2026-03-06-0836"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -46,24 +46,24 @@ DEFAULT_META = {
 }
 
 PERF_METRIC_MAP = {
-    "total_return": ("Total Return", "Strategy"),
-    "bh_total_return": ("Total Return", "Benchmark"),
-    "max_drawdown": ("Max Drawdown", "Strategy"),
-    "profit_factor": ("Profit Factor", "Strategy"),
-    "win_rate": ("Win Rate", "Strategy"),
-    "avg_trade_return": ("Avg Trade Return", "Strategy"),
+    "total_return": ("TotalReturn", "Strategy"),
+    "bh_total_return": ("TotalReturn", "Benchmark"),
+    "max_drawdown": ("MaxDrawdown", "Strategy"),
+    "profit_factor": ("ProfitFactor", "Strategy"),
+    "win_rate": ("WinRate", "Strategy"),
+    "avg_trade_return": ("AvgTradeReturn", "Strategy"),
     "trades": ("Trades", "Strategy"),
-    "exposure_ratio": ("Exposure Ratio", "Strategy"),
+    "exposure_ratio": ("ExposureRatio", "Strategy"),
 }
 
 PERF_METRIC_ORDER = [
-    "Total Return",
-    "Max Drawdown",
-    "Profit Factor",
-    "Win Rate",
-    "Avg Trade Return",
+    "TotalReturn",
+    "MaxDrawdown",
+    "ProfitFactor",
+    "WinRate",
+    "AvgTradeReturn",
     "Trades",
-    "Exposure Ratio",
+    "ExposureRatio",
 ]
 
 
@@ -218,7 +218,7 @@ def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
     table["Metric"] = pd.Categorical(table["Metric"], categories=PERF_METRIC_ORDER, ordered=True)
     table = table.sort_values("Metric").reset_index(drop=True)
 
-    percent_metrics = {"Total Return", "Max Drawdown", "Win Rate", "Avg Trade Return", "Exposure Ratio"}
+    percent_metrics = {"TotalReturn", "MaxDrawdown", "WinRate", "AvgTradeReturn", "ExposureRatio"}
     int_metrics = {"Trades"}
 
     for idx, row in table.iterrows():
@@ -256,15 +256,34 @@ def kv_to_df(kv: dict[str, Any]) -> pd.DataFrame:
 
 def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
     if signals.empty:
-        return pd.DataFrame(columns=["Time", "Position", "Execution Price", "Gross PnL"])
+        return pd.DataFrame(columns=["TradeId", "Time", "Position", "ExecutionPrice", "GrossPnl"])
 
     out = pd.DataFrame()
     out["Time"] = pd.to_datetime(signals.get("_time", pd.Series([], dtype="datetime64[ns]")), utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-    out["Position"] = signals.get("side", pd.Series(["N/A"] * len(signals))).astype(str)
-    out["Execution Price"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
-    out["Gross PnL"] = "N/A"
+    side = signals.get("side", pd.Series(["buy"] * len(signals))).astype(str).str.lower().str.replace("_", " ")
+    allowed = {"buy", "sell", "buy to cover", "sell short"}
+    side = side.apply(lambda x: x if x in allowed else "buy")
+    out["Position"] = side
+    out["ExecutionPrice"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
+    out["GrossPnl"] = "N/A"
+
+    trade_id = 0
+    active_trade = None
+    tids = []
+    for pos in out["Position"].tolist():
+        if pos in {"buy", "sell short"}:
+            trade_id += 1
+            active_trade = f"T{trade_id:04d}"
+            tids.append(active_trade)
+        else:
+            if active_trade is None:
+                trade_id += 1
+                active_trade = f"T{trade_id:04d}"
+            tids.append(active_trade)
+            active_trade = None
+    out["TradeId"] = tids
     out = out.dropna(subset=["Time"]).sort_values("Time", ascending=False).reset_index(drop=True)
-    return out
+    return out[["TradeId", "Time", "Position", "ExecutionPrice", "GrossPnl"]]
 
 
 def render_kv_table(title: str, kv: dict[str, Any], height: int = TABLE_HEIGHT_PARAM) -> None:
@@ -279,13 +298,20 @@ def render_kv_table(title: str, kv: dict[str, Any], height: int = TABLE_HEIGHT_P
 def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     summary = meta.get("summary", {}) or {}
     periods = meta.get("periods", {}) or {}
+    params = meta.get("params", {}) or {}
+
+    signal_tf = str(params.get("signal_timeframe", params.get("timeframe", summary.get("freq", "N/A"))))
+    exec_tf = str(params.get("execution_timeframe", params.get("entry_timeframe", signal_tf)))
+    freq_display = f"Signal:{signal_tf} | Execution:{exec_tf}" if signal_tf != exec_tf else signal_tf
+
     return {
         "Date Range (Full)": str(summary.get("full_sample_period", periods.get("full", "N/A"))),
         "Date Range (Train)": str(summary.get("train_period", periods.get("train", "N/A"))),
         "Date Range (Test)": str(summary.get("test_period", summary.get("oos_period", periods.get("test", periods.get("oos", "N/A"))))),
         "Benchmark": str(meta.get("benchmark", "N/A")),
         "Asset": str(summary.get("asset", ", ".join(meta.get("universe", [])) if meta.get("universe") else "N/A")),
-        "Frequency": str(summary.get("freq", meta.get("params", {}).get("timeframe", "N/A"))),
+        "Frequency": str(summary.get("freq", params.get("timeframe", "N/A"))),
+        "FrequencyDisplay": freq_display,
     }
 
 
@@ -422,7 +448,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             f"""
             <div class='metric-card'>
                 <div class='metric-label'>Frequency</div>
-                <div class='metric-value'>{overview_ctx.get('Frequency', 'N/A')}</div>
+                <div class='metric-value'>{overview_ctx.get('FrequencyDisplay', overview_ctx.get('Frequency', 'N/A'))}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -440,7 +466,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
     top_left, top_right = st.columns(2)
     with top_left:
-        st.markdown("#### Asset Price with Trading Signals")
+        st.markdown("#### AssetPriceWithTradingSignals")
         if data.signals.empty or "price" not in data.signals.columns:
             st.info("No signal/price data available for this selection.")
         else:
@@ -472,7 +498,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             st.plotly_chart(fig, use_container_width=True)
 
     with top_right:
-        st.markdown("#### Performance Analysis")
+        st.markdown("#### PerformanceAnalysis")
         if data.perf_raw.empty:
             st.info("No performance metrics available for this selection.")
         else:
@@ -481,7 +507,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
-        st.markdown("#### Cumulative Return: Strategy vs. Buy and Hold")
+        st.markdown("#### CumulativeReturnStrategyVsBuyAndHold")
         if data.curve.empty:
             st.info("No equity curve data available for this selection.")
         else:
@@ -505,7 +531,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 st.plotly_chart(fig, use_container_width=True)
 
     with bottom_right:
-        st.markdown("#### Order Details")
+        st.markdown("#### OrderDetails")
         order_df = build_order_details(data.signals)
         st.dataframe(order_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
@@ -621,6 +647,12 @@ def main() -> None:
 
     context = meta_context(data.meta)
     alpha_value = str((data.meta.get("summary", {}) or {}).get("alpha", "20%"))
+    if not data.perf_raw.empty:
+        perf_map = {str(r.get("_field")): float(r.get("_value", 0.0)) for _, r in data.perf_raw.iterrows()}
+        strategy_ret = perf_map.get("active_total_return", perf_map.get("total_return"))
+        benchmark_ret = perf_map.get("bh_active_total_return", perf_map.get("bh_total_return"))
+        if strategy_ret is not None and benchmark_ret is not None:
+            alpha_value = f"{(strategy_ret - benchmark_ret):.2%}"
 
     tab_performance, tab_parameters = st.tabs(["Performance", "Parameter"])
 
