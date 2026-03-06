@@ -1,19 +1,19 @@
 """Canonical backend data contracts for nautilus_lab.
 
-Single source of truth for:
-- InfluxDB measurement schema
-- strategy_context required keys
+Single source of truth file:
+- nautilus_lab/contracts/canonical_schema.json
 """
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
-SCHEMA_VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)
@@ -38,101 +38,55 @@ class MeasurementSpec:
     fields: tuple[FieldSpec, ...]
 
 
-MEASUREMENT_SPECS: dict[str, MeasurementSpec] = {
-    "strategy_signals": MeasurementSpec(
-        measurement="strategy_signals",
-        tags=(
-            TagSpec("schema_version", "str", True),
-            TagSpec("strategy", "str", True),
-            TagSpec("symbol", "str", True),
-            TagSpec("timeframe", "str", True),
-            TagSpec("side", "str", True),
-            TagSpec("source", "str", True),
-            TagSpec("run_id", "str", True),
-            TagSpec("signal_type", "str", True),
-        ),
-        fields=(
-            FieldSpec("signal_strength", "float", True, "score"),
-            FieldSpec("confidence", "float", False, "ratio_0_1"),
-            FieldSpec("price", "float", False, "quote_ccy"),
-            FieldSpec("quantity", "float", False, "contract_or_asset_qty"),
-        ),
-    ),
-    "strategy_performance": MeasurementSpec(
-        measurement="strategy_performance",
-        tags=(
-            TagSpec("schema_version", "str", True),
-            TagSpec("strategy", "str", True),
-            TagSpec("symbol", "str", True),
-            TagSpec("timeframe", "str", True),
-            TagSpec("run_id", "str", True),
-            TagSpec("sample", "str", True),
-            TagSpec("benchmark", "str", True),
-        ),
-        fields=(
-            FieldSpec("total_return", "float", True, "ratio"),
-            FieldSpec("annual_return", "float", True, "ratio"),
-            FieldSpec("sharpe", "float", True, "score"),
-            FieldSpec("max_drawdown", "float", True, "ratio"),
-            FieldSpec("win_rate", "float", True, "ratio_0_1"),
-            FieldSpec("trades", "int", True, "count"),
-        ),
-    ),
-    "perf_equity_curve": MeasurementSpec(
-        measurement="perf_equity_curve",
-        tags=(
-            TagSpec("schema_version", "str", True),
-            TagSpec("strategy", "str", True),
-            TagSpec("symbol", "str", True),
-            TagSpec("timeframe", "str", True),
-            TagSpec("run_id", "str", True),
-            TagSpec("sample", "str", True),
-            TagSpec("benchmark", "str", True),
-        ),
-        fields=(
-            FieldSpec("equity", "float", True, "index"),
-            FieldSpec("ret_1d", "float", True, "ratio"),
-            FieldSpec("drawdown", "float", True, "ratio"),
-            FieldSpec("benchmark_equity", "float", True, "index"),
-            FieldSpec("benchmark_ret_1d", "float", True, "ratio"),
-        ),
-    ),
-}
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "contracts" / "canonical_schema.json"
+SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-REQUIRED_SIGNAL_KEYS: tuple[str, ...] = ("timestamp", "strategy", "symbol", "side", "timeframe")
-REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
-    "full_sample_period",
-    "train_period",
-    "oos_period",
-    "asset",
-    "freq",
-)
-REQUIRED_PERF_FIELDS: tuple[str, ...] = (
-    "total_return",
-    "max_drawdown",
-    "profit_factor",
-    "win_rate",
-    "avg_trade_return",
-    "trades",
-    "exposure_ratio",
-    "bh_total_return",
-)
 
-REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
-    "benchmark",
-    "data_source",
-    "data_version",
-    "last_updated_utc",
-    "summary",
-    "universe",
-    "session_rules",
-    "periods",
-    "cost_model",
-    "risk_limits",
-    "assumptions",
-    "logic",
-    "params",
-)
+def _load_canonical_schema() -> dict[str, Any]:
+    if not SCHEMA_PATH.exists():
+        raise RuntimeError(f"Canonical schema not found: {SCHEMA_PATH}")
+    payload = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("canonical_schema.json must be an object")
+    return payload
+
+
+CANONICAL_SCHEMA = _load_canonical_schema()
+SCHEMA_VERSION = str(CANONICAL_SCHEMA["schema_version"])
+SCHEMA_COMPATIBILITY_POLICY = dict(CANONICAL_SCHEMA.get("compatibility_policy", {}))
+
+
+def _build_measurement_specs(schema: dict[str, Any]) -> dict[str, MeasurementSpec]:
+    specs: dict[str, MeasurementSpec] = {}
+    for measurement, spec in schema.get("measurements", {}).items():
+        tags = tuple(
+            TagSpec(
+                name=str(t["name"]),
+                type_name=str(t["type"]),
+                required=bool(t.get("required", False)),
+            )
+            for t in spec.get("tags", [])
+        )
+        fields = tuple(
+            FieldSpec(
+                name=str(f["name"]),
+                type_name=str(f["type"]),
+                required=bool(f.get("required", False)),
+                unit=str(f.get("unit", "")),
+            )
+            for f in spec.get("fields", [])
+        )
+        specs[measurement] = MeasurementSpec(measurement=measurement, tags=tags, fields=fields)
+    return specs
+
+
+MEASUREMENT_SPECS: dict[str, MeasurementSpec] = _build_measurement_specs(CANONICAL_SCHEMA)
+
+REQUIRED_SIGNAL_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["signal_required_keys"])
+REQUIRED_SUMMARY_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["strategy_context_summary_required_keys"])
+REQUIRED_PERF_FIELDS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["performance_required_fields"])
+REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["strategy_context_required_keys"])
+REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["backtest_output_required_top_level"])
 
 
 def parse_utc_timestamp(value: Any) -> datetime:
@@ -154,14 +108,25 @@ def parse_utc_timestamp(value: Any) -> datetime:
     raise ValueError("timestamp must be ISO8601 string or epoch number")
 
 
+def ensure_snake_case_keys(keys: list[str] | tuple[str, ...], record_name: str) -> None:
+    invalid = [k for k in keys if not SNAKE_CASE_PATTERN.match(str(k))]
+    if invalid:
+        raise ValueError(f"{record_name} has non-snake_case keys: {invalid}")
+
+
 def require_keys(record: dict[str, Any], keys: tuple[str, ...], record_name: str) -> None:
     missing = [k for k in keys if k not in record or record[k] in (None, "")]
     if missing:
         raise ValueError(f"{record_name} missing required keys: {missing}")
 
 
+def validate_record_contract(record: dict[str, Any], required_keys: tuple[str, ...], record_name: str) -> None:
+    ensure_snake_case_keys(list(record.keys()), record_name)
+    require_keys(record, required_keys, record_name)
+
+
 def validate_signal_record(record: dict[str, Any]) -> None:
-    require_keys(record, REQUIRED_SIGNAL_KEYS, "strategy_signals record")
+    validate_record_contract(record, REQUIRED_SIGNAL_KEYS, "strategy_signals record")
 
 
 def validate_dataframe_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
@@ -182,10 +147,18 @@ def validate_perf_fields(perf_raw: pd.DataFrame) -> None:
 
 
 def validate_strategy_context(record: dict[str, Any], record_name: str) -> None:
-    require_keys(record, REQUIRED_STRATEGY_CONTEXT_KEYS, record_name)
+    validate_record_contract(record, REQUIRED_STRATEGY_CONTEXT_KEYS, record_name)
     summary = record.get("summary")
     if not isinstance(summary, dict):
         raise ValueError(f"{record_name}.summary must be an object")
-    missing_summary = [k for k in REQUIRED_SUMMARY_KEYS if summary.get(k) in (None, "")]
-    if missing_summary:
-        raise ValueError(f"{record_name}.summary missing required keys: {missing_summary}")
+    validate_record_contract(summary, REQUIRED_SUMMARY_KEYS, f"{record_name}.summary")
+
+
+def is_schema_compatible(payload_schema_version: str, expected_schema_version: str = SCHEMA_VERSION) -> bool:
+    """Backward compatibility policy: only major version must match."""
+    try:
+        payload_major = int(str(payload_schema_version).split(".")[0])
+        expected_major = int(str(expected_schema_version).split(".")[0])
+        return payload_major == expected_major
+    except Exception:
+        return False

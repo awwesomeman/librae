@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Sequence
 
-BACKTEST_SCHEMA_VERSION = "1.0.0"
+from nautilus_lab.contracts import SCHEMA_VERSION
+
+BACKTEST_SCHEMA_VERSION = SCHEMA_VERSION
 
 
 @dataclass(frozen=True)

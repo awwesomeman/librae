@@ -15,6 +15,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from nautilus_lab.contracts import (
+    REQUIRED_BACKTEST_TOP_LEVEL_KEYS,
+    SCHEMA_VERSION,
+    is_schema_compatible,
+    require_keys,
+)
+
 from .schema import (
     BacktestOutput,
     EquityCurvePoint,
@@ -54,6 +61,7 @@ def _output_to_dict(output: BacktestOutput) -> dict:
         trades.append(row)
 
     return {
+        "schema_version": output.run_metadata.schema_version or SCHEMA_VERSION,
         "run_metadata": meta,
         "equity_curve": equity_curve,
         "trades": trades,
@@ -63,6 +71,13 @@ def _output_to_dict(output: BacktestOutput) -> dict:
 
 def _dict_to_output(data: dict) -> BacktestOutput:
     """Deserialize a plain dict back to BacktestOutput."""
+    require_keys(data, REQUIRED_BACKTEST_TOP_LEVEL_KEYS, "backtest_output")
+    payload_version = str(data.get("schema_version", ""))
+    if not is_schema_compatible(payload_version, SCHEMA_VERSION):
+        raise ValueError(
+            f"Incompatible schema_version: payload={payload_version}, expected_major={SCHEMA_VERSION.split('.')[0]}"
+        )
+
     meta_raw = data["run_metadata"]
     for k in ("start_ts", "end_ts", "run_ts"):
         if isinstance(meta_raw.get(k), str):

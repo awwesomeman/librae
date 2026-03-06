@@ -228,7 +228,7 @@ def test_save_json_has_required_top_level_keys() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         paths = save_backtest_output(output, tmpdir)
         data = json.loads(paths["json"].read_text())
-    assert set(data.keys()) == {"run_metadata", "equity_curve", "trades", "metrics"}
+    assert set(data.keys()) == {"schema_version", "run_metadata", "equity_curve", "trades", "metrics"}
 
 
 def test_save_equity_csv_has_correct_columns() -> None:

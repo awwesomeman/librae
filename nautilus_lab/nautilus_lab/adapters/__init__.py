@@ -15,6 +15,7 @@ from .base import (
     Position,
     TradeTick,
 )
+from .wiring import AdapterBundle, build_adapter_bundle
 
 __all__ = [
     "AccountAdapter",
@@ -30,4 +31,6 @@ __all__ = [
     "OrderType",
     "Position",
     "TradeTick",
+    "AdapterBundle",
+    "build_adapter_bundle",
 ]
