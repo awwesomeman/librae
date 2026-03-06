@@ -12,13 +12,13 @@ import streamlit as st
 from influxdb_client import InfluxDBClient
 
 
-APP_TITLE = "Strategy Backtest Dashboard"
+APP_TITLE = "Strategy Backtest Analysis"
 APP_CAPTION = "UI build: 2026-03-06"
 
-TABLE_HEIGHT_PERF = 220
-TABLE_HEIGHT_PARAM = 250
-CHART_HEIGHT_PRICE = 340
-CHART_HEIGHT_RETURN = 340
+TABLE_HEIGHT_PERF = 260
+TABLE_HEIGHT_PARAM = 280
+CHART_HEIGHT_PRICE = 300
+CHART_HEIGHT_RETURN = 230
 
 SAMPLE_OPTIONS = ["oos", "train", "full"]
 
@@ -228,6 +228,19 @@ def kv_to_df(kv: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
+    if signals.empty:
+        return pd.DataFrame(columns=["Time", "Position", "Execution Price", "Gross PnL"])
+
+    out = pd.DataFrame()
+    out["Time"] = pd.to_datetime(signals.get("_time", pd.Series([], dtype="datetime64[ns]")), utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    out["Position"] = signals.get("side", pd.Series(["N/A"] * len(signals))).astype(str)
+    out["Execution Price"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
+    out["Gross PnL"] = "N/A"
+    out = out.dropna(subset=["Time"]).sort_values("Time", ascending=False).reset_index(drop=True)
+    return out
+
+
 def render_kv_table(title: str, kv: dict[str, Any], height: int = TABLE_HEIGHT_PARAM) -> None:
     with st.container(border=True):
         st.markdown(f"**{title}**")
@@ -337,16 +350,86 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_performance_tab(data: DashboardData) -> None:
-    render_price_signal_chart(data.signals)
-    render_cumulative_return_chart(data.curve)
+def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str) -> None:
+    st.markdown("### Strategy Overview")
+    st.caption("<clean and clear description of main trading logic>")
 
-    st.markdown("#### Performance Analysis")
-    if data.perf_raw.empty:
-        st.info("No performance metrics available for this selection.")
-        return
-    table = build_perf_table(data.perf_raw)
-    st.dataframe(table, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Full Period", overview_ctx.get("Date Range (Full)", "N/A"))
+    c2.metric("Asset", overview_ctx.get("Asset", "N/A"))
+    c3.metric("Frequency", overview_ctx.get("Frequency", "N/A"))
+    c4.metric("Alpha", alpha_value or "N/A")
+
+    top_left, top_right = st.columns(2)
+    with top_left:
+        st.markdown("#### [chart] Asset Price with trading signals")
+        if data.signals.empty or "price" not in data.signals.columns:
+            st.info("No signal/price data available for this selection.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=data.signals["_time"], y=data.signals["price"].astype(float), mode="lines", name="Raw Price"))
+
+            if "signal_strength" in data.signals.columns:
+                signal_strength = data.signals["signal_strength"].astype(float)
+                buy_mask = signal_strength > 0
+                sell_mask = signal_strength < 0
+                if buy_mask.any():
+                    fig.add_trace(go.Scatter(
+                        x=data.signals.loc[buy_mask, "_time"],
+                        y=data.signals.loc[buy_mask, "price"].astype(float),
+                        mode="markers",
+                        name="Buy Signal",
+                        marker=dict(symbol="triangle-up", size=10),
+                    ))
+                if sell_mask.any():
+                    fig.add_trace(go.Scatter(
+                        x=data.signals.loc[sell_mask, "_time"],
+                        y=data.signals.loc[sell_mask, "price"].astype(float),
+                        mode="markers",
+                        name="Sell Signal",
+                        marker=dict(symbol="triangle-down", size=10),
+                    ))
+
+            fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+    with top_right:
+        st.markdown("#### [table] Performance Analysis")
+        if data.perf_raw.empty:
+            st.info("No performance metrics available for this selection.")
+        else:
+            table = build_perf_table(data.perf_raw)
+            st.dataframe(table, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+
+    bottom_left, bottom_right = st.columns(2)
+    with bottom_left:
+        st.markdown("#### [chart] Cumulative Return: Strategy vs. Buy and Hold")
+        if data.curve.empty:
+            st.info("No equity curve data available for this selection.")
+        else:
+            strategy_curve = data.curve.get("equity", data.curve.get("nav", pd.Series(dtype=float)))
+            if strategy_curve.empty:
+                st.info("No strategy equity series available.")
+            else:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=data.curve["_time"], y=strategy_curve.astype(float) - 1.0, mode="lines", name="Strategy"))
+                if "benchmark_equity" in data.curve.columns:
+                    benchmark_ret = data.curve["benchmark_equity"].astype(float) - 1.0
+                    if benchmark_ret.notna().any():
+                        fig.add_trace(go.Scatter(
+                            x=data.curve["_time"],
+                            y=benchmark_ret,
+                            mode="lines",
+                            name="Buy and Hold",
+                            line=dict(dash="dot"),
+                        ))
+                fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%")
+                st.plotly_chart(fig, use_container_width=True)
+
+    with bottom_right:
+        st.markdown("#### [table] Order Details")
+        order_df = build_order_details(data.signals)
+        st.dataframe(order_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
 
 def render_parameter_tab(meta: dict[str, Any]) -> None:
@@ -409,16 +492,12 @@ def main() -> None:
         data = build_dashboard_data(client, cfg, strategy, sample, run_id)
 
     context = meta_context(data.meta)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Date Range (Full)", context["Date Range (Full)"])
-    c2.metric("Date Range (Train/OOS)", f"{context['Date Range (Train)']} / {context['Date Range (OOS)']}")
-    c3.metric("Benchmark", context["Benchmark"])
-    c4.metric("Asset / Frequency", f"{context['Asset']} / {context['Frequency']}")
+    alpha_value = str((data.meta.get("summary", {}) or {}).get("alpha", "20%"))
 
-    tab_performance, tab_parameters = st.tabs(["Performance", "Parameters"])
+    tab_performance, tab_parameters = st.tabs(["[tab] Performance", "[tab] Parameter"])
 
     with tab_performance:
-        render_performance_tab(data)
+        render_performance_tab(data, context, alpha_value)
 
     with tab_parameters:
         render_parameter_tab(data.meta)
