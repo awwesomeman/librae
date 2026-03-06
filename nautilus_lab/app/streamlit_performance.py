@@ -352,7 +352,7 @@ def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
 
 def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str) -> None:
     st.markdown("### Strategy Overview")
-    st.caption("Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, exit on trailing-stop or momentum reversal.")
+    st.markdown("<div style='font-size:1.25rem;'>Trend-following breakout strategy: enter long when price breaks above the 20-bar high with momentum confirmation, exit on trailing-stop or momentum reversal.</div>", unsafe_allow_html=True)
 
     full_period = overview_ctx.get("Date Range (Full)", "N/A")
     if "~" in full_period:
