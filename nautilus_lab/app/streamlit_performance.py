@@ -403,14 +403,14 @@ def kv_to_df(kv: dict[str, Any], descriptions: dict[str, str] | None = None) -> 
 
 def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
     if signals.empty:
-        return pd.DataFrame(columns=["Trade Id", "Time", "Position", "Execution Price", "Gross Pnl"])
+        return pd.DataFrame(columns=["Trade ID", "Time", "Position", "Execution Price", "Gross PnL"])
 
     out = pd.DataFrame()
     out["Time"] = pd.to_datetime(signals.get("_time", pd.Series([], dtype="datetime64[ns]")), utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
     side = signals.get("side", pd.Series(["buy"] * len(signals))).astype(str)
     out["Position"] = side.apply(normalize_position)
     out["Execution Price"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
-    out["Gross Pnl"] = "N/A"
+    out["Gross PnL"] = "N/A"
 
     trade_id = 0
     active_trade = None
@@ -426,18 +426,32 @@ def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
                 active_trade = f"T{trade_id:04d}"
             tids.append(active_trade)
             active_trade = None
-    out["Trade Id"] = tids
+    out["Trade ID"] = tids
     out = out.dropna(subset=["Time"]).sort_values("Time", ascending=False).reset_index(drop=True)
-    return out[["Trade Id", "Time", "Position", "Execution Price", "Gross Pnl"]]
+    return out[["Trade ID", "Time", "Position", "Execution Price", "Gross PnL"]]
 
 
-def render_kv_table(title: str, kv: dict[str, Any], height: int = TABLE_HEIGHT_PARAM) -> None:
+def render_kv_table(
+    title: str,
+    description: str,
+    kv: dict[str, Any],
+    field_descriptions: dict[str, str],
+    height: int = TABLE_HEIGHT_PARAM,
+) -> None:
     with st.container(border=True):
         st.markdown(f"**{title}**")
-        if not kv:
-            st.info("No data available.")
-            return
-        st.dataframe(kv_to_df(kv), use_container_width=True, hide_index=True, height=height)
+        st.caption(description)
+        st.dataframe(
+            kv_to_df(kv, field_descriptions),
+            use_container_width=True,
+            hide_index=True,
+            height=height,
+            column_config={
+                "Key": st.column_config.TextColumn("Key", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="medium"),
+                "Description": st.column_config.TextColumn("Description", width="medium"),
+            },
+        )
 
 
 def meta_context(meta: dict[str, Any]) -> dict[str, str]:
@@ -654,7 +668,8 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 general_df[["Metric", "Strategy", "Benchmark"]],
                 specific_df.assign(Benchmark="-")[["Metric", "Value", "Benchmark"]].rename(columns={"Value": "Strategy"}),
             ], ignore_index=True)
-            merged["Metric"] = pd.Categorical(merged["Metric"], categories=PERF_METRIC_ORDER, ordered=True)
+            metric_order = ordered_metrics(merged["Metric"].astype(str).tolist())
+            merged["Metric"] = pd.Categorical(merged["Metric"], categories=metric_order, ordered=True)
             merged = merged.sort_values("Metric", na_position="last").reset_index(drop=True)
             merged["Metric"] = merged["Metric"].astype(str)
 
@@ -685,9 +700,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             )
 
             with st.popover("Metric Guide", use_container_width=True):
-                defs = pd.DataFrame({
-                    "Metric": [m for m in PERF_METRIC_ORDER if m in set(merged["Metric"].astype(str).tolist())],
-                })
+                defs = pd.DataFrame({"Metric": metric_order})
                 defs["Definition"] = defs["Metric"].map(lambda x: METRIC_DEFINITIONS.get(x, "Definition pending."))
                 st.dataframe(
                     defs[["Metric", "Definition"]],
