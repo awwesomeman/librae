@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0809"
+APP_CAPTION = "UI build: 2026-03-06-0812"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -214,7 +214,26 @@ def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
         return table
 
     table["Metric"] = pd.Categorical(table["Metric"], categories=PERF_METRIC_ORDER, ordered=True)
-    return table.sort_values("Metric").reset_index(drop=True)
+    table = table.sort_values("Metric").reset_index(drop=True)
+
+    percent_metrics = {"Total Return", "Max Drawdown", "Win Rate", "Avg Trade Return", "Exposure Ratio"}
+    int_metrics = {"Trades"}
+
+    for idx, row in table.iterrows():
+        metric = str(row.get("Metric"))
+        for col in ["Strategy", "Benchmark"]:
+            val = row.get(col)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                table.at[idx, col] = "-"
+                continue
+            if metric in percent_metrics:
+                table.at[idx, col] = f"{float(val):.2%}" if abs(float(val)) <= 1.5 else f"{float(val):.2f}%"
+            elif metric in int_metrics:
+                table.at[idx, col] = f"{int(round(float(val)))}"
+            else:
+                table.at[idx, col] = f"{float(val):.2f}"
+
+    return table
 
 
 def flatten_dict(prefix: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -562,6 +581,7 @@ def main() -> None:
         .stTabs [aria-selected="true"] { color: var(--primary) !important; border-bottom-color: var(--primary) !important; }
 
         [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace !important; }
+        div[data-baseweb="notification"]{background:#F5F7FA !important; border:1px solid #E2E8F0 !important; color:#334155 !important;}
         </style>
         """,
         unsafe_allow_html=True,
