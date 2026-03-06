@@ -13,7 +13,7 @@ from influxdb_client import InfluxDBClient
 
 
 APP_TITLE = "Strategy Backtest Analysis"
-APP_CAPTION = "UI build: 2026-03-06-0836"
+APP_CAPTION = "UI build: 2026-03-06-0840"
 
 TABLE_HEIGHT_PERF = 260
 TABLE_HEIGHT_PARAM = 280
@@ -200,42 +200,93 @@ from(bucket: "{cfg.bucket}")
     return query_df(client, cfg.org, flux)
 
 
-def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
-    rows: dict[str, dict[str, float | str | None]] = {}
+def _perf_map(perf_raw: pd.DataFrame) -> dict[str, float]:
+    out: dict[str, float] = {}
     for _, r in perf_raw.iterrows():
-        field = str(r.get("_field"))
-        if field not in PERF_METRIC_MAP:
+        key = str(r.get("_field"))
+        try:
+            out[key] = float(r.get("_value", 0.0))
+        except Exception:
             continue
-        metric_name, column_name = PERF_METRIC_MAP[field]
-        value = float(r.get("_value", 0.0))
-        rows.setdefault(metric_name, {"Metric": metric_name, "Strategy": None, "Benchmark": None})
-        rows[metric_name][column_name] = value
+    return out
 
-    table = pd.DataFrame(list(rows.values()))
-    if table.empty:
-        return table
 
-    table["Metric"] = pd.Categorical(table["Metric"], categories=PERF_METRIC_ORDER, ordered=True)
-    table = table.sort_values("Metric").reset_index(drop=True)
+def _fmt_pct(v: float | None) -> str:
+    if v is None:
+        return "-"
+    return f"{v:.2%}" if abs(v) <= 1.5 else f"{v:.2f}%"
 
-    percent_metrics = {"TotalReturn", "MaxDrawdown", "WinRate", "AvgTradeReturn", "ExposureRatio"}
-    int_metrics = {"Trades"}
 
-    for idx, row in table.iterrows():
-        metric = str(row.get("Metric"))
-        for col in ["Strategy", "Benchmark"]:
-            val = row.get(col)
-            if val is None or (isinstance(val, float) and pd.isna(val)):
-                table.at[idx, col] = "-"
-                continue
-            if metric in percent_metrics:
-                table.at[idx, col] = f"{float(val):.2%}" if abs(float(val)) <= 1.5 else f"{float(val):.2f}%"
-            elif metric in int_metrics:
-                table.at[idx, col] = f"{int(round(float(val)))}"
-            else:
-                table.at[idx, col] = f"{float(val):.2f}"
+def _fmt_num(v: float | None) -> str:
+    if v is None:
+        return "-"
+    return f"{v:.2f}"
 
-    return table
+
+def _fmt_int(v: float | None) -> str:
+    if v is None:
+        return "-"
+    return f"{int(round(v))}"
+
+
+def build_general_metrics_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
+    pmap = _perf_map(perf_raw)
+
+    s_total_active = pmap.get("active_total_return", pmap.get("total_return"))
+    b_total_active = pmap.get("bh_active_total_return", pmap.get("bh_total_return"))
+    s_mdd_active = pmap.get("active_max_drawdown", pmap.get("max_drawdown"))
+    b_mdd_active = pmap.get("bh_active_max_drawdown", pmap.get("bh_max_drawdown"))
+    s_vol_active = pmap.get("active_volatility", pmap.get("volatility"))
+    b_vol_active = pmap.get("bh_active_volatility", pmap.get("bh_volatility"))
+
+    s_total_full = pmap.get("total_return_full", pmap.get("total_return"))
+    b_total_full = pmap.get("bh_total_return_full", pmap.get("bh_total_return"))
+    s_mdd_full = pmap.get("max_drawdown_full", pmap.get("max_drawdown"))
+    b_mdd_full = pmap.get("bh_max_drawdown_full", pmap.get("bh_max_drawdown"))
+    s_vol_full = pmap.get("volatility_full", pmap.get("volatility"))
+    b_vol_full = pmap.get("bh_volatility_full", pmap.get("bh_volatility"))
+
+    rows = [
+        {"Metric": "TotalReturn", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": "yes" if (s_total_active is not None and b_total_active is not None and s_total_active > b_total_active) else ""},
+        {"Metric": "MaxDrawdown", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": "yes" if (s_mdd_active is not None and b_mdd_active is not None and s_mdd_active > b_mdd_active) else ""},
+        {"Metric": "Volatility", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": "yes" if (s_vol_active is not None and b_vol_active is not None and s_vol_active < b_vol_active) else ""},
+        {"Metric": "TotalReturnActivePeriod", "Strategy": _fmt_pct(s_total_active), "Benchmark": _fmt_pct(b_total_active), "Highlight": ""},
+        {"Metric": "MaxDrawdownActivePeriod", "Strategy": _fmt_pct(s_mdd_active), "Benchmark": _fmt_pct(b_mdd_active), "Highlight": ""},
+        {"Metric": "VolatilityActivePeriod", "Strategy": _fmt_pct(s_vol_active), "Benchmark": _fmt_pct(b_vol_active), "Highlight": ""},
+        {"Metric": "TotalReturnFullPeriod", "Strategy": _fmt_pct(s_total_full), "Benchmark": _fmt_pct(b_total_full), "Highlight": ""},
+        {"Metric": "MaxDrawdownFullPeriod", "Strategy": _fmt_pct(s_mdd_full), "Benchmark": _fmt_pct(b_mdd_full), "Highlight": ""},
+        {"Metric": "VolatilityFullPeriod", "Strategy": _fmt_pct(s_vol_full), "Benchmark": _fmt_pct(b_vol_full), "Highlight": ""},
+    ]
+    return pd.DataFrame(rows)
+
+
+def build_strategy_specific_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
+    pmap = _perf_map(perf_raw)
+    trades = pmap.get("trades")
+    win_rate = pmap.get("win_rate")
+    avg_trade_return = pmap.get("avg_trade_return")
+    profit_factor = pmap.get("profit_factor")
+    exposure = pmap.get("exposure_ratio")
+    active_obs = pmap.get("active_observations")
+    total_obs = pmap.get("total_observations")
+
+    if exposure is None and active_obs is not None and total_obs not in (None, 0):
+        exposure = active_obs / total_obs
+
+    rows = [
+        {"Metric": "Trades", "Value": _fmt_int(trades), "Definition": "NumberOfRoundTripTransactions"},
+        {"Metric": "ProfitFactor", "Value": _fmt_num(profit_factor), "Definition": "GrossProfitDividedByGrossLoss"},
+        {"Metric": "WinRate", "Value": _fmt_pct(win_rate), "Definition": "WinningTradesDividedByTotalTrades"},
+        {"Metric": "AvgReturnPerTrade", "Value": _fmt_pct(avg_trade_return), "Definition": "AverageReturnPerRoundTripTrade"},
+        {"Metric": "ExposureRatio", "Value": _fmt_pct(exposure), "Definition": "ActiveObservationsDividedByTotalObservations"},
+        {"Metric": "ActiveObservations", "Value": _fmt_int(active_obs), "Definition": "PeriodsHoldingPositionEitherLongOrShort"},
+    ]
+    return pd.DataFrame(rows)
+
+
+def build_perf_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
+    # backward-compat helper; unused after split tables
+    return build_general_metrics_table(perf_raw)
 
 
 def flatten_dict(prefix: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -502,8 +553,20 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
         if data.perf_raw.empty:
             st.info("No performance metrics available for this selection.")
         else:
-            table = build_perf_table(data.perf_raw)
-            st.dataframe(table, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+            general_df = build_general_metrics_table(data.perf_raw)
+            st.markdown("**GeneralMetrics**")
+
+            def _general_row_style(row: pd.Series):
+                if str(row.get("Highlight", "")) == "yes":
+                    return ["background-color: #DCFCE7"] * len(row)
+                return [""] * len(row)
+
+            styled = general_df.style.apply(_general_row_style, axis=1)
+            st.dataframe(styled, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+
+            specific_df = build_strategy_specific_table(data.perf_raw)
+            st.markdown("**StrategySpecificMetrics**")
+            st.dataframe(specific_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
