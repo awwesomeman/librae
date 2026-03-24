@@ -4,8 +4,9 @@
 - 策略名稱：
 - 標的：
 - 週期：
+- 樣本期間（Train / Validation / OOS）：
 - 測試區間：
-- 成本設定：
+- 成本設定（手續費/滑價/稅費）：
 - 方法：Walk-Forward / 穩定區 / 成本壓測
 
 ## B) Walk-Forward 每期結果

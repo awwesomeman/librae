@@ -32,6 +32,7 @@ LAYERED_MODULES = [
     "scripts.strategies.strategy_trendpullback_v1_0_0_h1_l_btcf",
     "scripts.strategies.strategy_multifactorscore_v1_0_0_h1_l_mxfr1",
     "scripts.strategies.strategy_multifactorscore_v1_0_0_h1_l_btcf",
+    "scripts.strategies.strategy_trendpullback_v1_1_0_d1_l_mxfr1",
 ]
 
 

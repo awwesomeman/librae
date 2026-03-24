@@ -54,10 +54,6 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
         .field("max_drawdown", float(m.max_drawdown))
         .field("win_rate", float(m.win_rate))
         .field("trades", int(m.trades))
-        .field("profit_factor", float(m.profit_factor))
-        .field("avg_trade_return", float(m.avg_trade_return))
-        .field("exposure_ratio", float(m.exposure_ratio))
-        .field("bh_total_return", float(m.bh_total_return))
         .time(meta.run_ts)
     )
 
@@ -74,8 +70,8 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .field("equity", float(eq.equity))
             .field("ret_1d", float(eq.ret_1d))
             .field("drawdown", float(eq.drawdown))
-            .field("benchmark_equity", float(eq.benchmark_equity or eq.equity))
-            .field("benchmark_ret_1d", float(eq.benchmark_ret_1d or 0.0))
+            .field("benchmark_equity", float(eq.benchmark_equity if eq.benchmark_equity is not None else eq.equity))
+            .field("benchmark_ret_1d", float(eq.benchmark_ret_1d if eq.benchmark_ret_1d is not None else 0.0))
             .time(eq.ts)
         )
 

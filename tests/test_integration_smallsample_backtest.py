@@ -200,5 +200,103 @@ class TestAntiLookahead(unittest.TestCase):
         self._assert_metric_identical("mdd")
 
 
+# ---------------------------------------------------------------------------
+# TrendPullback v1.1.0-D1-L-MXFR1 — minimal schema + sane-metrics tests
+# ---------------------------------------------------------------------------
+
+from scripts.strategies.strategy_trendpullback_v1_1_0_d1_l_mxfr1 import (
+    run_backtest as run_backtest_d1,
+    _prepare_d1,
+    STRATEGY_NAME as D1_STRATEGY_NAME,
+)
+from scripts.reporting.schema_builder import build_cost_settings, build_strategy_output
+from scripts.backtest.run_backtest import Periods
+
+# Build D1-ready fixtures from the same synthetic 1m data (built once)
+_H1_D1 = add_trendpullback_features(resample_ohlcv(_M1, "60min"))
+_D1_FULL = _prepare_d1(_M1)
+
+_D1_START = "2024-01-01"
+_D1_END   = "2024-01-30"
+
+
+class TestTrendPullbackD1SaneMetrics(unittest.TestCase):
+    """run_backtest_d1 returns a sane dict on a short synthetic window."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = run_backtest_d1(_M1, _H1_D1, _D1_FULL, _D1_START, _D1_END)
+
+    def test_result_is_dict(self):
+        self.assertIsInstance(self.result, dict)
+
+    def test_trades_key_present(self):
+        self.assertIn("trades", self.result)
+
+    def test_trades_nonneg(self):
+        self.assertGreaterEqual(self.result["trades"], 0)
+
+    def test_win_rate_in_unit_interval(self):
+        if self.result["trades"] == 0:
+            self.skipTest("No trades on synthetic window")
+        self.assertGreaterEqual(self.result["win_rate"], 0.0)
+        self.assertLessEqual(self.result["win_rate"], 1.0)
+
+    def test_mdd_in_unit_interval(self):
+        if self.result["trades"] == 0:
+            self.skipTest("No trades on synthetic window")
+        self.assertGreaterEqual(self.result["mdd"], 0.0)
+        self.assertLessEqual(self.result["mdd"], 1.0)
+
+    def test_zero_trade_result_has_only_trades_key(self):
+        tiny = run_backtest_d1(_M1, _H1_D1, _D1_FULL, "2024-01-01", "2024-01-03")
+        if tiny["trades"] == 0:
+            self.assertEqual(set(tiny.keys()), {"trades"})
+
+
+class TestTrendPullbackD1SchemaOutput(unittest.TestCase):
+    """build_strategy_output for D1-L strategy contains all canonical keys."""
+
+    FAKE_METRICS = {
+        "trades": 15, "win_rate": 0.53, "avg_ret": 0.004,
+        "pf": 1.6, "equity": 1.08, "ann_return": 0.12,
+        "ann_sharpe": 1.1, "ann_vol": 0.11, "mdd": 0.09,
+    }
+
+    def test_strategy_output_canonical_keys(self):
+        periods = Periods(
+            "2024-01-01", "2025-03-31",
+            "2025-04-01", "2025-06-30",
+            "2025-07-01", "2026-03-03",
+        )
+        cost_settings = build_cost_settings(
+            fee=2.0, slippage=0.0, tax=0.0,
+            round_trip_cost=2.0, unit="points",
+        )
+        fake_strict = {
+            "protocol": "strict: train-select, validation-check, oos-once",
+            "chosen_params": {"pull": 0.30, "bn": 5, "en": 20, "tstop": 6, "cost": 2.0},
+            "train": dict(self.FAKE_METRICS),
+            "validation": dict(self.FAKE_METRICS),
+            "validation_cost_stress": {"2.0": dict(self.FAKE_METRICS)},
+            "oos_final_once": dict(self.FAKE_METRICS),
+        }
+        out = build_strategy_output(
+            strategy=D1_STRATEGY_NAME,
+            instrument="MXFR1",
+            data="Shioaji",
+            periods=periods,
+            cost_settings=cost_settings,
+            strict_result=fake_strict,
+        )
+        for key in ("strategy", "instrument", "data", "sample_periods",
+                    "cost_settings", "protocol", "chosen_params",
+                    "train", "validation", "oos_final_once"):
+            self.assertIn(key, out)
+        self.assertEqual(out["strategy"], D1_STRATEGY_NAME)
+        self.assertIn("train", out["sample_periods"])
+        self.assertIn("oos", out["sample_periods"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

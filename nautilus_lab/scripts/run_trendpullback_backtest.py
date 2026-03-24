@@ -17,10 +17,11 @@ from nautilus_lab.backtest.schema import BacktestOutput, EquityCurvePoint, RunMe
 from nautilus_lab.strategies import TrendPullBackParams, run_trendpullback_backtest
 
 
-def make_synthetic_m1(days: int = 420, seed: int = 42) -> pd.DataFrame:
+def make_synthetic_m1(days: int = 28, seed: int = 42) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     n = days * 24 * 60
-    idx = pd.date_range("2024-01-01", periods=n, freq="1min", tz="UTC")
+    start = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days)).floor("min")
+    idx = pd.date_range(start, periods=n, freq="1min", tz="UTC")
     ret = rng.normal(0.0005 / 1440, 0.0004, n)
     close = 20000.0 * np.exp(np.cumsum(ret))
     spread = rng.uniform(0.0002, 0.0010, n)
@@ -33,7 +34,14 @@ def make_synthetic_m1(days: int = 420, seed: int = 42) -> pd.DataFrame:
 
 def build_output(run_id: str) -> BacktestOutput:
     m1 = make_synthetic_m1()
-    params = TrendPullBackParams()
+    # Use a slightly relaxed parameter set to ensure signal/trade generation in
+    # synthetic data while preserving the same strategy logic.
+    params = TrendPullBackParams(
+        pullback_atr_ratio=0.8,
+        breakout_lookback_bars=3,
+        ema_span=10,
+        time_stop_bars=8,
+    )
     trades_raw, returns = run_trendpullback_backtest(m1, params)
 
     eq = np.cumprod(1 + returns) if len(returns) else np.asarray([1.0])
