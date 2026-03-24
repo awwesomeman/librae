@@ -1,0 +1,18 @@
+# Python artifacts
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime / local logs
+*.log
+data/cache/
+
+# Personal / session context (moved to quant-research-lab)
+TODO.md
+USER.md
+MEMORY.md
+memory/
+quant-research-lab/
+
+# OpenClaw local runtime
+.openclaw/
