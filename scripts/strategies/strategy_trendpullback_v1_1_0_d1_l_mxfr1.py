@@ -10,13 +10,17 @@ Strict flow: Train+Val parameter selection → OOS once.
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+NAUTILUS_ROOT = Path(__file__).resolve().parents[2] / "nautilus_lab"
+if str(NAUTILUS_ROOT) not in sys.path:
+    sys.path.insert(0, str(NAUTILUS_ROOT))
 
-from scripts.backtest.run_backtest import run_strict_protocol, Periods
+from nautilus_lab.backtest import run_strict_protocol, Periods
 from scripts.etl.core_data_sources import fetch_shioaji_mxfr1_1m
 from scripts.etl.core_features import resample_ohlcv, add_trendpullback_features
 from scripts.reporting.schema_builder import build_cost_settings, build_strategy_output

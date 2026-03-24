@@ -1,4 +1,4 @@
-"""Backtest output schema and persistence."""
+"""Backtest output schema, persistence, and protocol runners."""
 
 from .schema import (
     BacktestOutput,
@@ -8,6 +8,15 @@ from .schema import (
     TradeRecord,
 )
 from .persistence import save_backtest_output, load_backtest_output
+from .adapter import generate_run_id, metrics_dict_to_backtest_output
+from .scoring import REQUIRED_METRICS_KEYS, score, validate_metrics
+from .runners import (
+    Periods,
+    WFWindow,
+    run_strict_protocol,
+    run_walkforward,
+    run_stability,
+)
 
 __all__ = [
     "BacktestOutput",
@@ -17,4 +26,14 @@ __all__ = [
     "TradeRecord",
     "save_backtest_output",
     "load_backtest_output",
+    "generate_run_id",
+    "metrics_dict_to_backtest_output",
+    "REQUIRED_METRICS_KEYS",
+    "score",
+    "validate_metrics",
+    "Periods",
+    "WFWindow",
+    "run_strict_protocol",
+    "run_walkforward",
+    "run_stability",
 ]

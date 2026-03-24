@@ -3,15 +3,19 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
 # Ensure project root is on sys.path for cross-package imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+NAUTILUS_ROOT = Path(__file__).resolve().parents[2] / "nautilus_lab"
+if str(NAUTILUS_ROOT) not in sys.path:
+    sys.path.insert(0, str(NAUTILUS_ROOT))
 
-from scripts.backtest.run_backtest import run_strict_protocol, Periods
-from scripts.backtest.run_walkforward import run_walkforward, WFWindow
-from scripts.backtest.run_stability import run_stability
+from nautilus_lab.backtest import run_strict_protocol, Periods
+from nautilus_lab.backtest import run_walkforward, WFWindow
+from nautilus_lab.backtest import run_stability
 from scripts.etl.core_data_sources import fetch_binance_futures_klines
 from scripts.etl.core_features import resample_ohlcv, add_multifactor_features, add_daily_trend_gate, multifactor_score
 
