@@ -80,6 +80,7 @@
 - Backend 預設必含：`python, quant`
 - Frontend 預設必含：`python`（若涉及策略語意或指標欄位，需加 `quant`）
 - 若未使用到指定 skill，必須在 `RISKS` 行說明原因與補救作法
+- 若環境缺少 `quant` skill，預設安裝來源：`https://github.com/awwesomeman/python-skills#`（完成後再重跑該任務）
 
 ### 2.2 Fallback 規則（強制）
 
