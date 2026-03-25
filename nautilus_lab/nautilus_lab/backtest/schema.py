@@ -9,13 +9,20 @@ Storage targets: JSON (Streamlit), CSV equity curve (Grafana/Streamlit).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from nautilus_lab.contracts import SCHEMA_VERSION
 
 BACKTEST_SCHEMA_VERSION = SCHEMA_VERSION
+
+VALID_SAMPLE_LABELS = frozenset({"train", "validation", "oos", "live"})
+
+RUN_ID_PATTERN = re.compile(
+    r"^[a-z0-9][a-z0-9_.\-]*-\d{8}t\d{6}-[a-f0-9]{8}$"
+)
 
 
 @dataclass(frozen=True)
@@ -34,8 +41,9 @@ class RunMetadata:
     schema_version: str = BACKTEST_SCHEMA_VERSION
     # Optional human label
     label: Optional[str] = None
-    # Reserved: venue/sample split
+    # Reserved: venue
     venue: Optional[str] = None
+    # Sample split label — must be one of VALID_SAMPLE_LABELS when set
     sample: Optional[str] = None
 
 
@@ -94,6 +102,8 @@ class StrategyMetrics:
     profit_factor: float = 0.0
     avg_trade_return: float = 0.0
     avg_trade_return_unit: str = "ratio"
+    avg_pnl_points: float = 0.0
+    avg_pnl_points_unit: str = "points"
     trades: int = 0
     trades_unit: str = "count"
     exposure_ratio: float = 0.0
@@ -120,10 +130,29 @@ class BacktestOutput:
     trades: Sequence[TradeRecord]
     metrics: StrategyMetrics
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict with ISO datetime strings."""
+        def _convert(obj: Any) -> Any:
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, dict):
+                return {k: _convert(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_convert(item) for item in obj]
+            return obj
+
+        return _convert(asdict(self))
+
     def validate(self) -> None:
         """Raise ValueError if required fields are empty/missing."""
         if not self.run_metadata.run_id:
             raise ValueError("run_metadata.run_id is required")
+        if not RUN_ID_PATTERN.match(self.run_metadata.run_id):
+            raise ValueError(
+                f"run_metadata.run_id must match pattern "
+                f"'<strategy>-<symbol>-<YYYYMMDDThhmmss>-<hex8>', "
+                f"got {self.run_metadata.run_id!r}"
+            )
         if not self.run_metadata.strategy:
             raise ValueError("run_metadata.strategy is required")
         if not self.run_metadata.symbol:
@@ -134,3 +163,8 @@ class BacktestOutput:
             raise ValueError("equity_curve is required (may be empty list)")
         if self.trades is None:
             raise ValueError("trades is required (may be empty list)")
+        sample = self.run_metadata.sample
+        if sample is not None and sample not in VALID_SAMPLE_LABELS:
+            raise ValueError(
+                f"run_metadata.sample must be one of {sorted(VALID_SAMPLE_LABELS)}, got {sample!r}"
+            )

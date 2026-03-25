@@ -7,6 +7,7 @@ from typing import Iterable
 from influxdb_client import Point
 
 from nautilus_lab.backtest.schema import BacktestOutput
+from nautilus_lab.backtest.metrics import compute_all
 from nautilus_lab.contracts import SCHEMA_VERSION
 
 
@@ -39,7 +40,10 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
         )
 
     m = output.metrics
-    points.append(
+    # Recompute metrics from the metrics module for consistency
+    computed = compute_all(output)
+
+    perf_point = (
         Point("strategy_performance")
         .tag("schema_version", meta.schema_version or SCHEMA_VERSION)
         .tag("strategy", meta.strategy)
@@ -54,8 +58,13 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
         .field("max_drawdown", float(m.max_drawdown))
         .field("win_rate", float(m.win_rate))
         .field("trades", int(m.trades))
-        .time(meta.run_ts)
     )
+    # Add all computed metrics (sortino, calmar, payoff_ratio, expectancy, etc.)
+    for metric_name, result in computed.items():
+        if metric_name not in {"sharpe", "max_drawdown", "win_rate", "total_return", "annual_return"}:
+            perf_point = perf_point.field(metric_name, float(result.value))
+    perf_point = perf_point.time(meta.run_ts)
+    points.append(perf_point)
 
     for eq in output.equity_curve:
         points.append(

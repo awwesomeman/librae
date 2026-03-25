@@ -52,8 +52,13 @@ PERF_METRIC_MAP = {
     "total_return": ("Total Return", "Strategy"),
     "annual_return": ("Annual Return", "Strategy"),
     "sharpe": ("Sharpe", "Strategy"),
+    "sortino": ("Sortino", "Strategy"),
     "max_drawdown": ("Max Drawdown", "Strategy"),
+    "calmar": ("Calmar", "Strategy"),
     "win_rate": ("Win Rate", "Strategy"),
+    "profit_factor": ("Profit Factor", "Strategy"),
+    "payoff_ratio": ("Payoff Ratio", "Strategy"),
+    "expectancy": ("Expectancy", "Strategy"),
     "trades": ("Trades", "Strategy"),
 }
 
@@ -61,16 +66,26 @@ PERF_METRIC_ORDER = [
     "Total Return",
     "Annual Return",
     "Sharpe",
+    "Sortino",
     "Max Drawdown",
+    "Calmar",
     "Win Rate",
+    "Profit Factor",
+    "Payoff Ratio",
+    "Expectancy",
     "Trades",
 ]
 METRIC_DEFINITIONS = {
     "Total Return": "Net return over the selected period.",
     "Annual Return": "Annualized return over the selected period.",
-    "Sharpe": "Risk-adjusted return ratio.",
+    "Sharpe": "Risk-adjusted return ratio (annualized).",
+    "Sortino": "Risk-adjusted return using downside deviation only.",
     "Max Drawdown": "Largest peak-to-trough decline in portfolio value.",
+    "Calmar": "Annual return divided by max drawdown.",
     "Win Rate": "Winning trades divided by total trades.",
+    "Profit Factor": "Gross profit divided by gross loss.",
+    "Payoff Ratio": "Average win divided by average loss.",
+    "Expectancy": "Expected PnL per trade.",
     "Trades": "Number of round-trip transactions.",
 }
 
@@ -108,9 +123,14 @@ PARAMETER_SCHEMA = {
 METRIC_FORMULAS = {
     "Total Return": "(Ending Equity / Starting Equity) - 1",
     "Annual Return": "Annualized return over the selected period",
-    "Sharpe": "Mean Excess Return / Return Std Dev",
+    "Sharpe": "Mean Excess Return / Return Std Dev (annualized)",
+    "Sortino": "Mean Return / Downside Std Dev (annualized)",
     "Max Drawdown": "min((Equity - RunningMaxEquity) / RunningMaxEquity)",
+    "Calmar": "Annual Return / Max Drawdown",
     "Win Rate": "Winning Trades / Total Trades",
+    "Profit Factor": "Gross Profit / Gross Loss",
+    "Payoff Ratio": "Average Win / Average Loss",
+    "Expectancy": "Avg Win * Win Rate - Avg Loss * Loss Rate",
     "Trades": "Count(Round-Trip Transactions)",
 }
 
@@ -327,8 +347,11 @@ def build_general_metrics_table(perf_raw: pd.DataFrame, curve: pd.DataFrame | No
         {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": _fmt_pct(benchmark_total_return)},
         {"Metric": "Annual Return", "Strategy": _fmt_pct(pmap.get("annual_return")), "Benchmark": "-"},
         {"Metric": "Sharpe", "Strategy": _fmt_num(pmap.get("sharpe")), "Benchmark": "-"},
+        {"Metric": "Sortino", "Strategy": _fmt_num(pmap.get("sortino")), "Benchmark": "-"},
         {"Metric": "Max Drawdown", "Strategy": _fmt_pct(pmap.get("max_drawdown")), "Benchmark": "-"},
+        {"Metric": "Calmar", "Strategy": _fmt_num(pmap.get("calmar")), "Benchmark": "-"},
         {"Metric": "Win Rate", "Strategy": _fmt_pct(pmap.get("win_rate")), "Benchmark": "-"},
+        {"Metric": "Profit Factor", "Strategy": _fmt_num(pmap.get("profit_factor")), "Benchmark": "-"},
         {"Metric": "Trades", "Strategy": _fmt_int(pmap.get("trades")), "Benchmark": "-"},
     ]
     return pd.DataFrame(rows)
@@ -340,7 +363,9 @@ def build_strategy_specific_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
         {"Metric": "Trades", "Value": _fmt_int(pmap.get("trades")), "Definition": "Number Of Round Trip Transactions"},
         {"Metric": "Win Rate", "Value": _fmt_pct(pmap.get("win_rate")), "Definition": "Winning Trades Divided By Total Trades"},
         {"Metric": "Annual Return", "Value": _fmt_pct(pmap.get("annual_return")), "Definition": "Annualized Return"},
-        {"Metric": "Sharpe", "Value": _fmt_num(pmap.get("sharpe")), "Definition": "Risk-Adjusted Return Ratio"},
+        {"Metric": "Sharpe", "Value": _fmt_num(pmap.get("sharpe")), "Definition": "Risk-Adjusted Return Ratio (Annualized)"},
+        {"Metric": "Sortino", "Value": _fmt_num(pmap.get("sortino")), "Definition": "Risk-Adjusted Return (Downside Only)"},
+        {"Metric": "Profit Factor", "Value": _fmt_num(pmap.get("profit_factor")), "Definition": "Gross Profit / Gross Loss"},
     ]
     return pd.DataFrame(rows)
 
@@ -694,12 +719,16 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             pmap = _perf_map(data.perf_raw)
             perf_rows = [
                 {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": _fmt_pct(pmap.get("bh_total_return"))},
+                {"Metric": "Annual Return", "Strategy": _fmt_pct(pmap.get("annual_return")), "Benchmark": "-"},
+                {"Metric": "Sharpe", "Strategy": _fmt_num(pmap.get("sharpe")), "Benchmark": "-"},
+                {"Metric": "Sortino", "Strategy": _fmt_num(pmap.get("sortino")), "Benchmark": "-"},
                 {"Metric": "Max Drawdown", "Strategy": _fmt_pct(pmap.get("max_drawdown")), "Benchmark": "-"},
+                {"Metric": "Calmar", "Strategy": _fmt_num(pmap.get("calmar")), "Benchmark": "-"},
                 {"Metric": "Win Rate", "Strategy": _fmt_pct(pmap.get("win_rate")), "Benchmark": "-"},
                 {"Metric": "Profit Factor", "Strategy": _fmt_num(pmap.get("profit_factor")), "Benchmark": "-"},
-                {"Metric": "Avg Trade Return", "Strategy": _fmt_pct(pmap.get("avg_trade_return")), "Benchmark": "-"},
+                {"Metric": "Payoff Ratio", "Strategy": _fmt_num(pmap.get("payoff_ratio")), "Benchmark": "-"},
+                {"Metric": "Expectancy", "Strategy": _fmt_num(pmap.get("expectancy")), "Benchmark": "-"},
                 {"Metric": "Trades", "Strategy": _fmt_int(pmap.get("trades")), "Benchmark": "-"},
-                {"Metric": "Exposure Ratio", "Strategy": _fmt_pct(pmap.get("exposure_ratio")), "Benchmark": "-"},
             ]
             perf_df = pd.DataFrame(perf_rows)
             st.dataframe(perf_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)

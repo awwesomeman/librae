@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .schema import BacktestOutput, RunMetadata, StrategyMetrics
+from .schema import BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
 from ..contracts import parse_utc_timestamp
 
 
@@ -91,14 +91,39 @@ def metrics_dict_to_backtest_output(
         win_rate=metrics.get("win_rate", 0.0) or 0.0,
         profit_factor=metrics.get("pf", 0.0) or 0.0,
         avg_trade_return=metrics.get("avg_ret", 0.0) or 0.0,
+        avg_pnl_points=metrics.get("avg_pnl_points", 0.0) or 0.0,
         trades=n_trades,
         exposure_ratio=0.0,
         bh_total_return=0.0,
     )
 
+    # Convert trade_details dicts to TradeRecord objects if present
+    trade_records: list[TradeRecord] = []
+    raw_trades = metrics.get("trade_details", [])
+    for i, td in enumerate(raw_trades):
+        entry_p = td["entry_price"]
+        exit_p = td["exit_price"]
+        pnl = exit_p - entry_p
+        trade_records.append(TradeRecord(
+            trade_id=f"{run_id}-t{i:04d}",
+            entry_ts=start_dt,
+            exit_ts=end_dt,
+            symbol=symbol,
+            side="buy",
+            entry_price=entry_p,
+            exit_price=exit_p,
+            quantity=1.0,
+            price_unit="USDT",
+            quantity_unit=symbol,
+            gross_pnl=pnl,
+            net_pnl=pnl,
+            pnl_unit="USDT",
+            holding_bars=td.get("bars_held"),
+        ))
+
     return BacktestOutput(
         run_metadata=run_metadata,
         equity_curve=[],
-        trades=[],
+        trades=trade_records,
         metrics=strategy_metrics,
     )

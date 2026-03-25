@@ -135,12 +135,26 @@ def generate_performance(now: datetime) -> list[str]:
                     f"sample={_escape_tag(SAMPLE)},"
                     f"schema_version={_escape_tag(SCHEMA_VERSION)}"
                 )
+                # Derived metrics aligned with metrics module
+                sharpe = random.gauss(0.8, 0.3) + 0.2 * math.sin(i / 500)
+                sortino = sharpe * random.uniform(1.1, 1.5)
+                calmar = max(0, sharpe * 0.6 + random.gauss(0, 0.1))
+                profit_factor = max(0.3, 1.2 + 0.3 * math.sin(i / 400) + random.gauss(0, 0.2))
+                payoff_ratio = max(0.2, profit_factor * 0.8 + random.gauss(0, 0.1))
+                expectancy = pnl * 0.01
+
                 fields = (
                     f"equity={equity:.2f},"
                     f"pnl={pnl:.2f},"
                     f"drawdown_pct={drawdown_pct:.6f},"
                     f"drawdown_duration_hours={drawdown_duration_hours:.2f},"
-                    f"win_rate={win_rate:.6f}"
+                    f"win_rate={win_rate:.6f},"
+                    f"sharpe={sharpe:.6f},"
+                    f"sortino={sortino:.6f},"
+                    f"calmar={calmar:.6f},"
+                    f"profit_factor={profit_factor:.6f},"
+                    f"payoff_ratio={payoff_ratio:.6f},"
+                    f"expectancy={expectancy:.2f}"
                 )
                 lines.append(f"strategy_performance,{tags} {fields} {_ts_ns(dt)}")
     return lines
