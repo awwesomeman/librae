@@ -1,7 +1,7 @@
 """Canonical backend data contracts for nautilus_lab.
 
 Single source of truth file:
-- nautilus_lab/contracts/canonical_schema.json
+- nautilus_lab/schemas/canonical_schema.json
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class MeasurementSpec:
     fields: tuple[FieldSpec, ...]
 
 
-SCHEMA_PATH = Path(__file__).resolve().parents[1] / "contracts" / "canonical_schema.json"
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "canonical_schema.json"
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
