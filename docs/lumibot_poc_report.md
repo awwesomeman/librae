@@ -124,7 +124,7 @@ tests/test_lumibot_poc.py::TestLumibotStrategyClass::test_strategy_inherits_from
 
 ```bash
 # Install
-pip install lumibot --break-system-packages
+pip install lumibot
 
 # Run signal comparison
 python -m poc.lumibot.compare_signals
@@ -140,22 +140,12 @@ python -m pytest tests/test_lumibot_poc.py -v
 
 ## 7. Recommendation
 
-**Verdict: Lumibot is viable as execution layer but NOT recommended as backtest replacement.**
+**Verdict: PASS — Lumibot adopted as unified strategy framework (backtest + live).**
 
-**Strengths:**
-- Signal logic ports cleanly to Lumibot's Strategy class
-- 100% signal concordance proves correctness
-- Good live-trading broker support (Alpaca, IBKR, ccxt)
-- Event-driven model natural for live execution
+PoC validates that signal logic ports faithfully (100% concordance) and the
+pre-computed feature injection pattern is compatible with the existing ETL pipeline.
+Trade-offs (heavy deps, no built-in InfluxDB, DST handling) are accepted and documented
+in the Risks table above (Section 4).
 
-**Weaknesses:**
-- Extremely heavy dependency footprint (~80+ packages)
-- No built-in InfluxDB / monitoring integration (must build)
-- DST / timezone handling requires careful configuration
-- Different paradigm from existing vectorized backtest — maintaining both is costly
-- Backtest engine slower than custom loop for the same data volume
-
-**Recommended path:**
-1. Keep existing custom backtest stack (lighter, faster, InfluxDB-integrated)
-2. Consider Lumibot ONLY if live execution via Alpaca/IBKR becomes a hard requirement
-3. If adopted, use as execution-only layer with signal generation remaining in current stack
+Full decision rationale, architecture design, and re-evaluation triggers:
+see `docs/framework_selection_report.md` and `docs/trading_framework_blueprint.md`.

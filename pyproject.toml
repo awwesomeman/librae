@@ -1,0 +1,38 @@
+[project]
+name = "quant-strategy-lab"
+version = "0.1.0"
+description = "Lumibot-first quant strategy lab — backtest and live trading with unified strategy classes"
+requires-python = ">=3.10"
+dependencies = [
+  "lumibot>=4.4,<5",
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "empyrical>=0.5",
+  "influxdb-client[async]>=1.36",
+  "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+tw-live = [
+  "shioaji>=1.3",
+]
+test = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["poc*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "tw_live: tests requiring shioaji (deselect with: -m 'not tw_live')",
+  "nautilus: tests requiring nautilus_trader (deselect with: -m 'not nautilus')",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
