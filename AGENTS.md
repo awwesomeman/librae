@@ -1,210 +1,94 @@
 # AGENTS.md — quant-strategy-lab (Single Source of Truth)
 
-本檔是本專案唯一 Agent 編排規範（single truth）。
-所有任務分工、CLI 路由、回報格式與驗收門檻，以本檔為準。
+本檔是本專案唯一 Agent 編排規範。
 
 ---
 
-## 0) 目標與原則
+## 1) Agent 角色
 
-- 目標：在高效率下維持可驗證交付（correctness > fancy output）。
-- 原則：
-  1. 小上下文、強隔離（避免 Agent 互相污染）
-  2. 先功能可跑，再做結構優化
-  3. 無測試與 smoke，不宣稱完成
-  4. 回報必須短格式（5 行）
+| 角色 | 模型 | 職責 |
+|------|------|------|
+| **Backend** | `claude-opus-4-6` | 策略邏輯、回測引擎、指標模組、資料流、API |
+| **Frontend** | `claude-sonnet-4-6` | Streamlit / Grafana 版面、圖表、顯示邏輯 |
+| **Master** | `claude-opus-4-6` | 整合決策、交付驗收（預設兼任 QA） |
+| **QA**（選用） | `claude-sonnet-4-6` | 獨立全域驗證（僅高風險里程碑啟用） |
 
----
+**聯網查證**: 任何角色需要外部資訊時，使用 `gemini --search`。
 
-## 1) Agent 角色定義
-
-## 1.1 Backend Agent（GPT-5.3 orchestrator + Claude CLI）
-
-**定位**
-- GPT-5.3 負責量化邏輯拆解與任務編排
-- 代碼實作預設轉交 Claude CLI（優先 Opus 4.6）
-
-**工作範圍**
-- 策略邏輯、回測引擎、指標模組、資料流、API schema
-
-**硬性限制**
-- 預設僅讀寫 backend 範圍檔案（見第 4 節 Scope Isolation）
-- 禁止主動讀 UI 代碼（除非 Master 明確授權）
+**Fallback**:
+- Opus → Sonnet 4.6 → Sonnet 4.5
+- `gemini --search` 失敗 → `web_search` / `web_fetch`
+- 啟用 fallback 時須在回報中註記原模型、fallback 模型、原因
 
 ---
 
-## 1.2 Frontend Agent（GPT-5.3 orchestrator + Claude CLI）
+## 2) Skills（強制）
 
-**定位**
-- GPT-5.3 規劃 UI 結構
-- 前端代碼實作預設轉交 Claude CLI（固定 Sonnet 4.6）
-
-**工作範圍**
-- Streamlit / Grafana 版面、圖表配置、顯示邏輯
-
-**硬性限制**
-- 僅依賴 backend 提供的 schema / contract（禁止自行改 backend 欄位語意）
+- 預設安裝 `https://github.com/awwesomeman/python-skills#` 整包
+- 至少確認 `git`, `python`, `quant` 可用
+- 回報第一行必須標註 `Skills used: ...`
+- Backend 預設：`python, quant`；Frontend 預設：`python`（涉及策略語意加 `quant`）
 
 ---
 
-## 1.3 Master / QA（GPT-5.3 orchestrator + Claude CLI）
+## 3) 回報格式（5 行，強制）
 
-**定位**
-- Master 做最終決策與交付整合（Claude CLI 固定 Opus 4.6）
-- QA 預設由 Master 擔任；若拆分獨立 QA 子代理，固定 Sonnet 4.6
+```
+CHANGED: [檔案，最多 8 個，其餘 +N files]
+CMDS:    [關鍵命令/測試]
+TEST:    [pass x/y；失敗列前 3 個]
+RISKS:   [風險/漏洞]
+NEXT:    [建議下一步]
+```
 
-**工作範圍**
-- 全域一致性檢查、整合測試、回歸驗收、風險判讀
-
-**聯網補強（QA）**
-- 當需要外部查證/搜尋時，允許 Claude 依需求直接呼叫 `gemini --search`，但回報仍維持 5 行摘要
-
----
-
-## 2) CLI 路由規則（Tool Redirection）
-
-系統規則：
-- 複雜重構 / 算法修正 / 回測引擎修改 / 前端實作 → **優先 Claude CLI**
-- 聯網搜尋、外部資訊查證 → 由 Claude 視需求呼叫 `gemini --search`
-- 任何子代理輸出一律轉為 5 行摘要回報（見第 3 節）
-
-### 2.1 模型版本 Pin（強制）
-
-- Backend Agent（Claude CLI）：預設固定 `claude-opus-4-6`
-- Frontend Agent（Claude CLI）：預設固定 `claude-sonnet-4-6`
-- Master（整合/決策，Claude CLI）：預設固定 `claude-opus-4-6`
-- 獨立 QA 子代理（如啟用，Claude CLI）：預設固定 `claude-sonnet-4-6`
-
-### 2.1.1 Skill 使用確認（強制）
-
-- 不論 Claude CLI 或 Gemini CLI，任務回報第一行必須標註：`Skills used: ...`
-- Backend 預設必含：`python, quant`
-- Frontend 預設必含：`python`（若涉及策略語意或指標欄位，需加 `quant`）
-- 若未使用到指定 skill，必須在 `RISKS` 行說明原因與補救作法
-- 預設先安裝 `https://github.com/awwesomeman/python-skills#` 的整包 skills（開發任務前先檢查）。
-- 至少需確認 `git`, `python`, `quant` 可用；若缺少則先完成安裝再執行任務。
-
-### 2.2 Fallback 規則（強制）
-
-僅在以下情況可啟用 fallback：
-1. 指定模型暫時不可用
-2. CLI 回傳配額/連線錯誤且重試失敗
-
-Fallback 順序：
-- Backend/Master（Claude CLI）：`claude-opus-4-6` → `claude-sonnet-4-6` → `claude-sonnet-4-5`
-- Frontend/QA（Claude CLI）：`claude-sonnet-4-6` → `claude-sonnet-4-5`
-- 聯網搜尋（Gemini CLI）：`gemini --search` 失敗時，改用內建搜尋工具（web_search / web_fetch）
-
-啟用 fallback 時，回報格式需在 `CMDS` 或 `RISKS` 明確註記：
-- 原模型
-- fallback 模型
-- 觸發原因
+- 每行 ≤120 字
+- 禁止貼長 log（改存檔案路徑）
+- 禁止重述任務背景
 
 ---
 
-## 3) 子代理統一回報格式（強制）
+## 4) Scope Isolation
 
-每次回報必須只有以下 5 行語意：
-
-1. `CHANGED:` 修改檔案清單
-2. `CMDS:` 執行的關鍵命令/測試
-3. `TEST:` 測試結果（Pass/Total）
-4. `RISKS:` 邏輯漏洞、效能隱憂、資料風險
-5. `NEXT:` 建議 Master 的下一步
-
-**Token 控制格式（強制）**
-- 每行盡量精簡（建議 ≤120 字）。
-- `CHANGED` 最多列 8 個檔案，其餘以 `+N files` 表示。
-- `TEST` 僅回傳摘要（如 `pass 18/18`）；失敗時最多列前 3 個 failed test 名稱。
-- 禁止貼長篇測試 log；完整輸出改存檔案路徑供 Master 需要時查閱。
-- 禁止重述整段任務背景，只回報執行結果與決策資訊。
-
-禁止長篇 narrative，除非 Master 明確要求。
+- **Backend**: `nautilus_lab/nautilus_lab/strategies`, `backtest`, `monitoring`, `scripts`
+- **Frontend**: `nautilus_lab/app`, `nautilus_lab/grafana`, `docs`（UI 相關）
+- **Master/QA**: 全域可讀（僅里程碑觸發全域掃描）
+- 跨域改動需 Master 授權
 
 ---
 
-## 4) Scope Isolation（上下文隔離）
+## 5) 測試門檻
 
-預設範圍：
-- **Backend Agent**：
-  - `nautilus_lab/nautilus_lab/strategies`
-  - `nautilus_lab/nautilus_lab/backtest`
-  - `nautilus_lab/nautilus_lab/monitoring`
-  - `nautilus_lab/scripts`（限後端腳本）
-- **Frontend Agent**：
-  - `nautilus_lab/app`
-  - `nautilus_lab/grafana`
-  - `docs`（僅 UI/儀表板說明）
-- **Master/QA**：全域可讀，但僅在里程碑觸發時做全域掃描
-
-任何跨域改動需 Master 明確授權。
+- 每個交付：≥1 targeted test + ≥1 functional smoke
+- 使用者回報 blocking issue → reopen → 修 → 重測 → 再回報
 
 ---
 
-## 5) 測試與交付門檻（最小標準）
+## 6) /simplify 觸發
 
-每個交付至少滿足：
-1. **1 個 targeted test**（單元或整合）
-2. **1 個 functional smoke run**（腳本/服務可啟動）
-
-交付前（Master Gate）：
-- 主要路徑測試全綠
-- 指令可重現
-- 風險已明示
-
-若使用者回報 blocking issue：
-- 一律 reopen 任務
-- 修復後重新測試再回報
+- 多檔重構後
+- 主要功能交付前
+- 可讀性明顯下降
+- 使用者明確要求
+- Claude 實作的里程碑結束時預設執行一次
 
 ---
 
-## 6) /simplify 觸發策略（非每步強制）
+## 7) 里程碑 QA 觸發
 
-在下列時機觸發：
-1. 多檔重構後
-2. 主要功能完成準備交付前
-3. 程式可讀性下降或重複碼明顯時
-4. 使用者明確要求再優化
-
-補充：若該階段由 **Claude CLI** 實作，里程碑結束時預設執行一次 `/simplify`。
-避免每微步驟都跑，兼顧 token 與時間效率。
+- **M1**: 樣本資料完成，準備串回測
+- **M2**: 指標計算完成，準備推 Streamlit/Grafana
+- **M3**: 多資產擴展合併主分支前
 
 ---
 
-## 7) 里程碑觸發 QA（Milestone Triggers）
+## 8) 執行模式
 
-Master 僅在下列節點強制全域 QA：
-- **M1**：樣本資料生成完成，準備串回測引擎
-- **M2**：指標計算完成，準備推送 Streamlit/Grafana
-- **M3**：多資產擴展（如配對交易）合併主分支前
-
----
-
-## 8) 預設執行模式（成本可控）
-
-- **預設單代理先行**：先由 Backend 或 Frontend 其中一個代理執行（由 Master 判斷主任務面向）。
-- Master 直接承擔 QA（不預設開 QA 子代理）。
-- 只有在下列情況才升級為多代理：
-  1. 涉及前後端 schema/contract 同步改動
-  2. 進入 M1/M2/M3 里程碑驗收
-  3. 使用者明確要求並行加速
-- 高風險里程碑可再開第 3 個獨立 QA 子代理。
-- 目標：降低溝通成本與 token 消耗，同時保留驗收品質。
+- **預設單代理先行**（Master 判斷主面向）
+- Master 兼任 QA
+- 多代理時機：前後端 schema 同步改動 / 里程碑驗收 / 使用者要求並行
 
 ---
 
-## 9) OpenClaw 指令樣板（示意）
+## 9) 變更規範
 
-- Backend：
-  - 「請調用 claude-cli（`claude-opus-4-6`）實作 Lumibot 回測邏輯；完成後以 5 行回報」
-- Frontend：
-  - 「請調用 claude-cli（`claude-sonnet-4-6`）依 backtest schema 產生 Streamlit 儀表板；完成後 5 行回報」
-- Master/QA：
-  - 「請調用 claude-cli（Master 用 `claude-opus-4-6`、QA 用 `claude-sonnet-4-6`）做整合驗證；必要時用 `gemini --search` 補外部查證，回報僅測試結果與風險」
-
----
-
-## 10) 變更規範
-
-修改本檔即代表調整全專案 Agent 操作行為。
-若規則更新，請在 commit message 註明 `agents-policy`。
+修改本檔 = 調整全專案 Agent 行為。commit message 加 `agents-policy`。
