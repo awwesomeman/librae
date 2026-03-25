@@ -68,6 +68,27 @@
 - 大規模 UI 生成 / 長文本頁面 / 全域檔案掃描 → **優先 Gemini CLI**
 - 任何子代理輸出一律轉為 5 行摘要回報（見第 3 節）
 
+### 2.1 模型版本 Pin（強制）
+
+- Backend Agent（Claude CLI）：預設固定 `claude-opus-4-6`
+- Frontend / 全域掃描（Gemini CLI）：預設固定 `gemini-2.5-pro`（若該環境無此 alias，使用等價 2.5 Pro 型號）
+- Master（OpenClaw 主會話）：依當前 OpenClaw session model 執行，不額外切換
+
+### 2.2 Fallback 規則（強制）
+
+僅在以下情況可啟用 fallback：
+1. 指定模型暫時不可用
+2. CLI 回傳配額/連線錯誤且重試失敗
+
+Fallback 順序：
+- Claude CLI：`claude-opus-4-6` → `claude-sonnet-4-5`
+- Gemini CLI：`gemini-2.5-pro` → `gemini-2.5-flash`
+
+啟用 fallback 時，回報格式需在 `CMDS` 或 `RISKS` 明確註記：
+- 原模型
+- fallback 模型
+- 觸發原因
+
 ---
 
 ## 3) 子代理統一回報格式（強制）
