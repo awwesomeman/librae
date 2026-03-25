@@ -33,11 +33,11 @@
 
 ---
 
-## 1.2 Frontend Agent（GPT-5.3 orchestrator + Gemini CLI）
+## 1.2 Frontend Agent（GPT-5.3 orchestrator + Claude CLI）
 
 **定位**
 - GPT-5.3 規劃 UI 結構
-- 大規模 UI 產碼、長文本轉換優先交 Gemini CLI
+- 前端代碼實作預設轉交 Claude CLI（固定 Sonnet 4.6）
 
 **工作範圍**
 - Streamlit / Grafana 版面、圖表配置、顯示邏輯
@@ -47,32 +47,33 @@
 
 ---
 
-## 1.3 Master / QA（GPT-5.3，必要時調 Gemini CLI）
+## 1.3 Master / QA（GPT-5.3 orchestrator + Claude CLI）
 
 **定位**
-- Master 做最終決策與交付整合
-- QA 預設由 Master 擔任；只有在高風險里程碑才啟用獨立 QA 子代理
+- Master 做最終決策與交付整合（Claude CLI 固定 Opus 4.6）
+- QA 預設由 Master 擔任；若拆分獨立 QA 子代理，固定 Sonnet 4.6
 
 **工作範圍**
 - 全域一致性檢查、整合測試、回歸驗收、風險判讀
 
-**Gemini CLI 使用時機（QA）**
-- 需要全域掃描大量檔案、跨目錄一致性檢查時
+**聯網補強（QA）**
+- 當需要外部查證/搜尋時，允許 Claude 依需求直接呼叫 `gemini --search`，但回報仍維持 5 行摘要
 
 ---
 
 ## 2) CLI 路由規則（Tool Redirection）
 
 系統規則：
-- 複雜重構 / 算法修正 / 回測引擎修改 → **優先 Claude CLI**
-- 大規模 UI 生成 / 長文本頁面 / 全域檔案掃描 → **優先 Gemini CLI**
+- 複雜重構 / 算法修正 / 回測引擎修改 / 前端實作 → **優先 Claude CLI**
+- 聯網搜尋、外部資訊查證 → 由 Claude 視需求呼叫 `gemini --search`
 - 任何子代理輸出一律轉為 5 行摘要回報（見第 3 節）
 
 ### 2.1 模型版本 Pin（強制）
 
 - Backend Agent（Claude CLI）：預設固定 `claude-opus-4-6`
-- Frontend / 全域掃描（Gemini CLI）：預設使用 `gemini-3-auto`（由 CLI 自動選擇 Pro/Flash）
-- Master（OpenClaw 主會話）：依當前 OpenClaw session model 執行，不額外切換
+- Frontend Agent（Claude CLI）：預設固定 `claude-sonnet-4-6`
+- Master（整合/決策，Claude CLI）：預設固定 `claude-opus-4-6`
+- 獨立 QA 子代理（如啟用，Claude CLI）：預設固定 `claude-sonnet-4-6`
 
 ### 2.1.1 Skill 使用確認（強制）
 
@@ -90,8 +91,9 @@
 2. CLI 回傳配額/連線錯誤且重試失敗
 
 Fallback 順序：
-- Claude CLI：`claude-opus-4-6` → `claude-sonnet-4-5`
-- Gemini CLI：`gemini-3-auto` → `gemini-2.5-flash`
+- Backend/Master（Claude CLI）：`claude-opus-4-6` → `claude-sonnet-4-6` → `claude-sonnet-4-5`
+- Frontend/QA（Claude CLI）：`claude-sonnet-4-6` → `claude-sonnet-4-5`
+- 聯網搜尋（Gemini CLI）：`gemini --search` 失敗時，改用內建搜尋工具（web_search / web_fetch）
 
 啟用 fallback 時，回報格式需在 `CMDS` 或 `RISKS` 明確註記：
 - 原模型
@@ -194,11 +196,11 @@ Master 僅在下列節點強制全域 QA：
 ## 9) OpenClaw 指令樣板（示意）
 
 - Backend：
-  - 「請調用 claude-cli 實作 Lumibot 回測邏輯；完成後以 5 行回報」
+  - 「請調用 claude-cli（`claude-opus-4-6`）實作 Lumibot 回測邏輯；完成後以 5 行回報」
 - Frontend：
-  - 「請調用 gemini-cli 依 backtest schema 產生 Streamlit 儀表板；完成後 5 行回報」
+  - 「請調用 claude-cli（`claude-sonnet-4-6`）依 backtest schema 產生 Streamlit 儀表板；完成後 5 行回報」
 - Master/QA：
-  - 「請調用 gemini-cli 全域掃描，檢查前後端 schema 一致性；只回報測試結果與風險」
+  - 「請調用 claude-cli（Master 用 `claude-opus-4-6`、QA 用 `claude-sonnet-4-6`）做整合驗證；必要時用 `gemini --search` 補外部查證，回報僅測試結果與風險」
 
 ---
 
