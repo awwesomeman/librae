@@ -1,8 +1,8 @@
 # quant-strategy-lab Implementation Plan
 
-> Updated: 2026-03-24
+> Updated: 2026-03-25
 > Framework: **Lumibot-first** (backtest + live, single strategy class)
-> Status: Executing
+> Status: Phase 0 收尾中
 
 ---
 
@@ -13,12 +13,12 @@ Signal subscription platform covering futures, crypto, pair trading, stock selec
 
 ### Current phase goal
 Single-asset, verifiable, monitorable MVP:
-1. Lumibot strategy produces signals with real/synthetic data
-2. Compute key performance metrics
-3. Backtest dashboard (Grafana + Streamlit)
-4. Monitoring dashboard
-5. Validate strategy correctness (signal concordance >= 95%)
-6. Extensible to multi-asset / advanced strategies
+1. 用真實 Binance BTC 資料跑 Lumibot 策略
+2. 計算主要績效指標（Python metrics.py 為唯一計算來源）
+3. Streamlit 回測儀表板（研究分析 + 策略漂移偵測）
+4. Grafana 監控儀表板（24/7 告警 + 系統健康）
+5. 驗證策略正確性
+6. 保留多資產擴展空間
 
 ---
 
@@ -26,133 +26,91 @@ Single-asset, verifiable, monitorable MVP:
 
 | Area | Tool | Rationale |
 |------|------|-----------|
-| **Strategy framework** | **Lumibot** | Unified backtest + live; PoC validated 100% concordance |
-| Time-series storage | InfluxDB 2.x | Equity curve / signal / drawdown / monitoring metrics |
-| Experiment tracking | MLflow | Params, summary metrics, artifacts, version comparison |
-| API | FastAPI | Service layer with Pydantic contracts |
-| Dashboards | Grafana + Streamlit | Grafana for monitoring/alerts; Streamlit for backtest analysis |
-| Alerts | Grafana Alerting (Telegram) | Minimal custom alert complexity |
-| Scheduling | cron -> Prefect | Start simple, upgrade when needed |
-| Testing/CI | pytest + GitHub Actions | Regression, contract, integration test gates |
-| Deployment | docker-compose | MVP fast landing; scale later |
-| TW live trading | Shioaji (optional extra) | Isolated `tw-live` dependency group |
-
-### What about NautilusTrader?
-`nautilus_lab/` remains in the repo as reference architecture and for advanced use cases.
-It is NOT the active strategy execution layer. Lumibot is.
+| Strategy framework | **Lumibot** | Unified backtest + live |
+| Time-series storage | **InfluxDB 2.x** | Equity curve / signal / metrics |
+| Dashboards | **Streamlit**（研究分析）+ **Grafana**（監控告警） | 見 decisions/2026-03-25-dashboard-architecture.md |
+| Metrics engine | **metrics.py**（Python single truth） | Grafana 不重算，只讀已算好的值 |
+| Alerts | Grafana Alerting → Telegram | 24/7 無人值守 |
+| Scheduling | cron → Prefect（後續） | Start simple |
+| Testing/CI | pytest + GitHub Actions | core / tw-live 分流 |
+| Deployment | docker-compose | InfluxDB + Grafana |
+| TW live trading | Shioaji（optional extra） | 獨立 `tw-live` 依賴組 |
 
 ---
 
-## 3) Phase 0~3 Execution Plan
+## 3) Phase 進度追蹤
 
-### Phase 0 (1.5~2 weeks): Foundation & E2E pipeline
+### Phase 0 — Foundation & E2E（目標：Day 30）
 
-**Goal:** One single-asset strategy completes full chain:
-Lumibot backtest -> metrics -> InfluxDB -> Grafana.
+| 交付項目 | 狀態 |
+|---------|------|
+| docker-compose（InfluxDB + Grafana） | ✅ 完成 |
+| Canonical schema | ✅ 完成 |
+| 可擴展績效指標模組（metrics.py） | ✅ 完成 |
+| TrendPullback BTC 策略核心 | ✅ 完成 |
+| Backtest runner + Sim signal runner | ✅ 完成 |
+| Lumibot PoC（100% 訊號一致率） | ✅ 完成 |
+| Grafana MVP 監控儀表板 | ✅ 完成 |
+| Streamlit 回測儀表板 | ✅ 完成（token/plotly 修復） |
+| Telegram adapter（feature flag） | ✅ 完成 |
+| Binance 真實資料抓取模組 | ✅ 完成 |
+| **真實資料 → InfluxDB → 儀表板 e2e** | ⚠️ 進行中 |
+| **Lumibot 正式整合（取代 PoC）** | ⚠️ 待執行 |
+| CI 分流（core / tw-live） | ✅ 完成 |
+| pyproject.toml 依賴分層 | ✅ 完成 |
 
-**Deliverables:**
-1. `docker-compose` for InfluxDB + Grafana
-2. Canonical schema (measurement/tag/field)
-3. Lumibot backtest output aligned to `BacktestOutput` (with `run_id`)
-4. Seed script: backtest results -> InfluxDB
-5. Grafana basic panels (equity, drawdown, win rate)
-6. CI smoke + contract tests
+### Phase 1 — Experiment tracking & comparison（目標：Day 60）
 
-**Acceptance:**
-- New env reproducible in 5 min
-- Grafana shows `run_id` curves
-- Schema validation passes
-- CI green
+| 交付項目 | 狀態 |
+|---------|------|
+| MLflow server 整合 | 待執行 |
+| ≥2 策略可比較 | 待執行 |
+| Streamlit 策略漂移偵測（回測 vs 實盤疊圖） | 待執行 |
+| 回歸基準測試上 CI | 待執行 |
 
----
+### Phase 2 — Scheduling, notifications, API（目標：Day 90）
 
-### Phase 1 (2~3 weeks): Experiment tracking & strategy comparison
+| 交付項目 | 狀態 |
+|---------|------|
+| 排程（cron/Prefect） | 待執行 |
+| Telegram 訊號推播（正式版） | 待執行 |
+| Grafana 告警規則（MDD、心跳） | 待執行 |
+| FastAPI skeleton | 待執行 |
 
-**Goal:** Comparable, reproducible strategy experiment workflow.
+### Phase 3 — Multi-asset & subscription platform
 
-**Deliverables:**
-1. MLflow server + run log integration
-2. Auto-log: params, summary metrics, artifacts per backtest
-3. At least 2 strategies comparable (TrendPullback / MultiFactor)
-4. Streamlit analysis page
-5. Parity test v0 (legacy vs Lumibot output)
-
----
-
-### Phase 2 (3~4 weeks): Scheduling, notifications, API
-
-**Goal:** Strategies run on schedule with external query and notifications.
-
-**Deliverables:**
-1. cron / Prefect MVP for scheduled backtest/monitor
-2. Telegram signal push
-3. Grafana alert rules (drawdown, heartbeat)
-4. FastAPI skeleton (`/health`, `/signals/{strategy}`)
-5. Retry + basic observability (log + metric)
-
----
-
-### Phase 3 (6~8 weeks): Multi-asset & subscription platform
-
-**Goal:** From research tool to externally serviceable platform.
-
-**Deliverables:**
-1. Multi-asset strategy support (futures/crypto/pair/selection)
-2. User & subscription data model (PostgreSQL)
-3. Auth (JWT)
-4. Subscription management & notification routing
-5. Versioned strategy release process
+| 交付項目 | 狀態 |
+|---------|------|
+| 多資產策略支援 | 待執行 |
+| 使用者/訂閱（PostgreSQL + JWT） | 待執行 |
+| 版本化策略發布 | 待執行 |
 
 ---
 
 ## 4) When to refactor
 
-Trigger major refactor when 2-3 of these are true:
-1. Strategy count > 10 with > 40% duplicated logic
-2. Maintenance cost consistently > 1.5x baseline
-3. Need tick/orderbook-level backtest fidelity
-4. Subscribers > 50 and API latency is a bottleneck
-5. Data sources > 3 causing adapter layer inconsistency
-
-Refactor direction: consolidate all strategy logic into Lumibot Strategy classes.
+觸發任 2~3 條：
+1. 策略 >10 且重複邏輯 >40%
+2. 維護成本 >1.5x
+3. 需要 tick/orderbook 回測
+4. 訂閱者 >50 且 API 延遲成瓶頸
+5. 資料源 >3 導致 adapter 不一致
 
 ---
 
-## 5) 30 / 60 / 90 Day Milestones
+## 5) Immediate Next Actions
 
-### Day 30
-- Phase 0 complete
-- One strategy E2E reproducible (Lumibot backtest -> InfluxDB -> Grafana)
-- Schema + run_id contract locked
-
-### Day 60
-- Phase 1 complete, Phase 2 started
-- MLflow comparison for >= 2 strategies
-- Streamlit analysis page live
-- Parity test in CI
-
-### Day 90
-- Phase 2 complete
-- Scheduling + push + API working
-- Monitoring alerts stable
-- Data available for Phase 3 (platform) go/no-go decision
+1. 真實 Binance 資料回測結果寫入 InfluxDB → 儀表板顯示真實績效
+2. Lumibot 正式整合為回測主入口
+3. Streamlit 加入策略漂移偵測功能
+4. 更新 Grafana seed 用真實資料
 
 ---
 
-## 6) Immediate Next Actions
+## 6) Principles
 
-1. Create root `pyproject.toml` with `core` and `tw-live` extras
-2. Set up CI split: core tests (no shioaji) + tw-live tests (optional)
-3. Promote `poc/lumibot/` patterns to production structure
-4. Build InfluxDB seed pipeline (backtest results -> InfluxDB)
-5. Build Grafana v0 dashboard (equity/drawdown/trade count)
-6. Establish Phase 0 CI gate (smoke + contract + signal concordance)
-
----
-
-## 7) Principles
-
-- Every phase must be demo-able and acceptance-testable
-- Don't refactor prematurely for "looking advanced"
-- Usable first, extensible second; correct first, optimized second
-- Lumibot is the single source of truth for strategy execution
+- 每個 Phase 都要可 demo、可驗收
+- 不為了好看而提前重構
+- 先可用再擴展；先正確再優化
+- 指標計算 single truth（metrics.py）
+- Lumibot 為策略執行唯一框架
