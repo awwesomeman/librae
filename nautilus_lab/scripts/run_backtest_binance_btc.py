@@ -103,10 +103,11 @@ def main() -> None:
     url = os.getenv("INFLUX_URL", "http://localhost:8086")
     org = os.getenv("INFLUX_ORG", "quant_research")
     bucket = os.getenv("INFLUX_BUCKET", "nautilus_signals")
-    token = os.getenv("INFLUX_TOKEN") or os.getenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", "")
-    if not token:
-        print("[4/4] WARNING: No INFLUX_TOKEN set, skipping InfluxDB write")
-        return
+    token = (
+        os.getenv("INFLUX_TOKEN")
+        or os.getenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN")
+        or "change_me_super_secret_token"
+    )
 
     from influxdb_client import InfluxDBClient
     from influxdb_client.client.write_api import SYNCHRONOUS
