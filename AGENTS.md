@@ -74,6 +74,13 @@
 - Frontend / 全域掃描（Gemini CLI）：預設使用 `gemini-3-auto`（由 CLI 自動選擇 Pro/Flash）
 - Master（OpenClaw 主會話）：依當前 OpenClaw session model 執行，不額外切換
 
+### 2.1.1 Skill 使用確認（強制）
+
+- 不論 Claude CLI 或 Gemini CLI，任務回報第一行必須標註：`Skills used: ...`
+- Backend 預設必含：`python, quant`
+- Frontend 預設必含：`python`（若涉及策略語意或指標欄位，需加 `quant`）
+- 若未使用到指定 skill，必須在 `RISKS` 行說明原因與補救作法
+
 ### 2.2 Fallback 規則（強制）
 
 僅在以下情況可啟用 fallback：
@@ -155,6 +162,7 @@ Fallback 順序：
 3. 程式可讀性下降或重複碼明顯時
 4. 使用者明確要求再優化
 
+補充：若該階段由 **Claude CLI** 實作，里程碑結束時預設執行一次 `/simplify`。
 避免每微步驟都跑，兼顧 token 與時間效率。
 
 ---
