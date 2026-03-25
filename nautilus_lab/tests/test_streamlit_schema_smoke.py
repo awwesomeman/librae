@@ -6,6 +6,7 @@ from app.streamlit_performance import (
     _require_columns,
     _require_perf_fields,
     build_general_metrics_table,
+    get_cfg,
     normalize_position,
     validate_strategy_context_or_raise,
 )
@@ -55,3 +56,23 @@ def test_strategy_context_requires_canonical_keys() -> None:
     }
     with pytest.raises(SchemaValidationError, match="missing required keys"):
         validate_strategy_context_or_raise(bad_meta, "DemoStrategy")
+
+
+def test_get_cfg_loads_token_from_local_env_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("INFLUX_TOKEN", raising=False)
+    monkeypatch.delenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", raising=False)
+    env_dir = tmp_path / "nautilus_lab" / "deploy"
+    env_dir.mkdir(parents=True)
+    (env_dir / ".env").write_text("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=test_token\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    cfg = get_cfg()
+    assert cfg.token == "test_token"
+
+
+def test_get_cfg_falls_back_to_default_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("INFLUX_TOKEN", raising=False)
+    monkeypatch.delenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg = get_cfg()
+    assert cfg.token == "change_me_super_secret_token"

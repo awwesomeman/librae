@@ -171,12 +171,46 @@ class DashboardData:
     meta: dict[str, Any]
 
 
+def _load_token_from_env_file() -> str:
+    """Best-effort token discovery for local dashboard runs.
+
+    Reads known local env files when process env vars are not set.
+    """
+    candidates = [
+        Path.cwd() / "nautilus_lab" / "deploy" / ".env",
+        Path.cwd() / "deploy" / ".env",
+        Path(__file__).resolve().parents[1] / "deploy" / ".env",
+    ]
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                key = k.strip()
+                val = v.strip().strip('"').strip("'")
+                if key in {"INFLUX_TOKEN", "DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"} and val:
+                    return val
+        except OSError:
+            continue
+    return ""
+
+
 def get_cfg() -> InfluxCfg:
+    token = (
+        os.getenv("INFLUX_TOKEN")
+        or os.getenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN")
+        or _load_token_from_env_file()
+        or "change_me_super_secret_token"
+    )
     return InfluxCfg(
         url=os.getenv("INFLUX_URL", "http://localhost:8086"),
         org=os.getenv("INFLUX_ORG", "quant_research"),
         bucket=os.getenv("INFLUX_BUCKET", "nautilus_signals"),
-        token=os.getenv("INFLUX_TOKEN") or os.getenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", ""),
+        token=token,
     )
 
 
