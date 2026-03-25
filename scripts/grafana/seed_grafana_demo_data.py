@@ -149,6 +149,7 @@ def generate_performance(now: datetime) -> list[str]:
                     f"drawdown_pct={drawdown_pct:.6f},"
                     f"drawdown_duration_hours={drawdown_duration_hours:.2f},"
                     f"win_rate={win_rate:.6f},"
+                    f"trade_count={total_trades}i,"
                     f"sharpe={sharpe:.6f},"
                     f"sortino={sortino:.6f},"
                     f"calmar={calmar:.6f},"

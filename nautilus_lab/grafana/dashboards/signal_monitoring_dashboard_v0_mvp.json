@@ -10,7 +10,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": {
     "from": "now-24h",
@@ -126,7 +126,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Strategy Health",
+      "title": "KPI Overview",
       "id": 100,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "collapsed": false,
@@ -134,101 +134,34 @@
     },
     {
       "type": "stat",
-      "title": "Heartbeat (Last Signal Age)",
-      "description": "Time since the last signal was received. Green = active, Red = possibly stale.",
-      "id": 1,
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "title": "Total Return",
+      "description": "Cumulative return for the selected time range: (last_equity - first_equity) / first_equity",
+      "id": 7,
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
           "refId": "A",
-          "query": "import \"date\"\nfrom(bucket: \"${bucket}\")\n  |> range(start: -2h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> last()\n  |> map(fn: (r) => ({ r with _value: float(v: uint(v: date.sub(d: r._time, from: now()))) / 60000000000.0 }))"
+          "query": "first_val = from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> group()\n  |> first()\n  |> set(key: \"_field\", value: \"first\")\n\nlast_val = from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> group()\n  |> last()\n  |> set(key: \"_field\", value: \"last\")\n\nunion(tables: [first_val, last_val])\n  |> pivot(rowKey: [\"_start\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({_value: if r.first > 0.0 then (r.last - r.first) / r.first else 0.0}))"
         }
       ],
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "m",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 30 },
-              { "color": "red", "value": 120 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Signals (1h)",
-      "description": "Total signals received in the last hour",
-      "id": 2,
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> count()\n  |> last()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "value",
-        "graphMode": "area"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 5 },
-              { "color": "red", "value": 15 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Error Rate (1h)",
-      "description": "Percentage of signals with error flag in last hour. 0% = healthy.",
-      "id": 3,
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "total = from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"event_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> sum()\n  |> set(key: \"_field\", value: \"total\")\n\nerrors = from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"error_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> sum()\n  |> set(key: \"_field\", value: \"errors\")\n\nunion(tables: [total, errors])\n  |> pivot(rowKey: [\"_start\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value: if r.total > 0.0 then r.errors / r.total else 0.0 }))"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "decimals": 1,
+          "decimals": 2,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.01 },
-              { "color": "red", "value": 0.05 }
+              { "color": "red", "value": null },
+              { "color": "orange", "value": -0.02 },
+              { "color": "green", "value": 0 }
             ]
           }
         },
@@ -237,32 +170,35 @@
     },
     {
       "type": "stat",
-      "title": "Data Latency (p95)",
-      "description": "95th percentile data ingestion latency in the last hour",
-      "id": 4,
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "title": "Sharpe Ratio",
+      "description": "Latest Sharpe ratio snapshot from strategy_performance",
+      "id": 8,
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 1 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"data_latency_ms\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> quantile(q: 0.95)"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"sharpe\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> last()"
         }
       ],
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ms",
+          "unit": "short",
+          "decimals": 2,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 500 },
-              { "color": "red", "value": 2000 }
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0 },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 2 }
             ]
           }
         },
@@ -271,33 +207,35 @@
     },
     {
       "type": "stat",
-      "title": "Avg Signal Strength (24h)",
-      "description": "Mean signal strength over the past 24 hours",
-      "id": 5,
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "title": "Max Drawdown",
+      "description": "Maximum drawdown observed in the selected time range",
+      "id": 21,
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 1 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> mean()"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"drawdown_pct\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> min()"
         }
       ],
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
-        "colorMode": "value",
-        "graphMode": "area"
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 3,
+          "unit": "percentunit",
+          "decimals": 2,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "red", "value": null },
-              { "color": "orange", "value": 0.3 },
-              { "color": "green", "value": 0.6 }
+              { "color": "orange", "value": -0.2 },
+              { "color": "yellow", "value": -0.1 },
+              { "color": "green", "value": -0.05 }
             ]
           }
         },
@@ -309,7 +247,7 @@
       "title": "Win Rate",
       "description": "Latest win rate snapshot from strategy_performance",
       "id": 6,
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -320,8 +258,9 @@
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
-        "colorMode": "value",
-        "graphMode": "none"
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
@@ -340,6 +279,41 @@
       }
     },
     {
+      "type": "stat",
+      "title": "Trade Count",
+      "description": "Total number of trades executed in the selected time range",
+      "id": 9,
+      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 1 },
+      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"trade_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "row",
       "title": "Equity & PnL",
       "id": 200,
@@ -352,7 +326,7 @@
       "title": "Equity Curve",
       "description": "Cumulative equity over time, per strategy",
       "id": 10,
-      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 6 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -386,7 +360,7 @@
       "title": "PnL (Per Period)",
       "description": "Period-over-period PnL as bar chart",
       "id": 11,
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 6 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -405,7 +379,6 @@
             "showPoints": "never",
             "gradientMode": "none"
           },
-          "color": { "mode": "fixed", "fixedColor": "blue" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -415,7 +388,12 @@
           },
           "custom.thresholdsStyle": { "mode": "line" }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pnl" },
+            "properties": [{ "id": "color", "value": { "mode": "thresholds" } }]
+          }
+        ]
       },
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom" },
@@ -426,16 +404,16 @@
       "type": "row",
       "title": "Drawdown",
       "id": 300,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Drawdown (%)",
-      "description": "Running drawdown from equity peak. Inverted Y-axis: deeper drawdown = lower.",
+      "description": "Running drawdown from equity peak. Deeper = lower on chart.",
       "id": 20,
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 16 },
+      "gridPos": { "h": 7, "w": 20, "x": 0, "y": 15 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -474,48 +452,11 @@
       }
     },
     {
-      "type": "gauge",
-      "title": "Max Drawdown",
-      "description": "Maximum drawdown observed in the selected time range",
-      "id": 21,
-      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 16 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"drawdown_pct\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> min()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
-          "min": -0.5,
-          "max": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": -0.2 },
-              { "color": "green", "value": -0.05 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "type": "stat",
       "title": "Drawdown Duration",
       "description": "Current drawdown duration in hours (time since last equity peak)",
       "id": 22,
-      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 16 },
+      "gridPos": { "h": 7, "w": 4, "x": 20, "y": 15 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -527,7 +468,8 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "textMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
@@ -547,9 +489,9 @@
     },
     {
       "type": "row",
-      "title": "Signal Quality",
+      "title": "Signals & Recent Trades",
       "id": 400,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
       "collapsed": false,
       "panels": []
     },
@@ -558,7 +500,7 @@
       "title": "Signal Strength Timeline",
       "description": "Rolling signal strength over time, grouped by strategy/asset",
       "id": 30,
-      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 25 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 23 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -569,6 +511,8 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "min": 0,
+          "max": 1,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -591,7 +535,7 @@
       "title": "Signal Type Distribution (24h)",
       "description": "Count of signals by type in the last 24 hours",
       "id": 31,
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 25 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -610,95 +554,224 @@
       }
     },
     {
-      "type": "timeseries",
-      "title": "Win Rate (Rolling 7d)",
-      "description": "Rolling 7-day win rate trend",
-      "id": 32,
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 34 },
+      "type": "table",
+      "title": "Recent Trades / Signals",
+      "description": "Last 50 signals with full detail — sorted newest first",
+      "id": 50,
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 31 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"win_rate\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> yield(name: \"win_rate\")"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> pivot(rowKey: [\"_time\", \"strategy\", \"asset\", \"timeframe\", \"run_id\", \"side\", \"signal_type\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"strategy\", \"asset\", \"timeframe\", \"run_id\", \"side\", \"signal_type\", \"signal_strength\", \"confidence\", \"price\", \"quantity\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)"
         }
       ],
       "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 1,
-          "min": 0,
-          "max": 1,
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "pointSize": 5,
-            "showPoints": "auto"
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "_time" },
+            "properties": [{ "id": "displayName", "value": "Time" }]
           },
-          "color": { "mode": "palette-classic" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 0.5 }
+          {
+            "matcher": { "id": "byName", "options": "signal_strength" },
+            "properties": [
+              { "id": "displayName", "value": "Strength" },
+              { "id": "custom.width", "value": 100 },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "orange", "value": 0.3 },
+                    { "color": "green", "value": 0.6 }
+                  ]
+                }
+              }
             ]
           },
-          "custom.thresholdsStyle": { "mode": "dashed" }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Signal Count (5m bins)",
-      "description": "Signal frequency over time in 5-minute bins",
-      "id": 33,
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 34 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> aggregateWindow(every: 5m, fn: count, createEmpty: false)\n  |> yield(name: \"signal_count\")"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 0,
-            "fillOpacity": 60,
-            "pointSize": 5,
-            "showPoints": "never"
+          {
+            "matcher": { "id": "byName", "options": "side" },
+            "properties": [
+              { "id": "custom.width", "value": 60 },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "buy":  { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }
+                ]
+              }
+            ]
           },
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": []
+          {
+            "matcher": { "id": "byName", "options": "price" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "confidence" },
+            "properties": [{ "id": "unit", "value": "percentunit" }]
+          }
+        ]
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Time", "desc": true }],
+        "footer": { "show": false }
       }
     },
     {
       "type": "row",
-      "title": "Data Latency & System",
+      "title": "System Health",
       "id": 500,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
       "collapsed": false,
       "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Heartbeat (Last Signal Age)",
+      "description": "Time since the last signal was received. Green = active, Red = possibly stale.",
+      "id": 1,
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 42 },
+      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "import \"date\"\nfrom(bucket: \"${bucket}\")\n  |> range(start: -2h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> last()\n  |> map(fn: (r) => ({ r with _value: float(v: uint(v: date.sub(d: r._time, from: now()))) / 60000000000.0 }))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "red", "value": 120 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Signals (1h)",
+      "description": "Total signals received in the last hour",
+      "id": 2,
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 42 },
+      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> count()\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Error Rate (1h)",
+      "description": "Percentage of signals with error flag in last hour. 0% = healthy.",
+      "id": 3,
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 42 },
+      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "total = from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"event_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> sum()\n  |> set(key: \"_field\", value: \"total\")\n\nerrors = from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"error_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> sum()\n  |> set(key: \"_field\", value: \"errors\")\n\nunion(tables: [total, errors])\n  |> pivot(rowKey: [\"_start\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value: if r.total > 0.0 then r.errors / r.total else 0.0 }))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Data Latency (p95)",
+      "description": "95th percentile data ingestion latency in the last hour",
+      "id": 4,
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 42 },
+      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"data_latency_ms\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> quantile(q: 0.95)"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 500 },
+              { "color": "red", "value": 2000 }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
       "title": "Data Latency Over Time",
       "description": "Data ingestion latency trend (p50 and p95)",
       "id": 40,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -743,7 +816,7 @@
       "title": "Error Rate Over Time",
       "description": "Error event rate per 5-minute window",
       "id": 41,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
       "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
       "targets": [
         {
@@ -775,60 +848,6 @@
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom" },
         "tooltip": { "mode": "single" }
-      }
-    },
-    {
-      "type": "row",
-      "title": "Signal Detail",
-      "id": 600,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "table",
-      "title": "Recent Signals",
-      "description": "Last 20 signals with full detail",
-      "id": 50,
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 53 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> pivot(rowKey: [\"_time\", \"strategy\", \"asset\", \"timeframe\", \"run_id\", \"side\", \"signal_type\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"strategy\", \"asset\", \"timeframe\", \"run_id\", \"side\", \"signal_type\", \"signal_strength\", \"confidence\", \"price\", \"quantity\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 20)"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "_time" },
-            "properties": [{ "id": "displayName", "value": "Time" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "signal_strength" },
-            "properties": [
-              { "id": "displayName", "value": "Strength" },
-              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    { "color": "red", "value": null },
-                    { "color": "orange", "value": 0.3 },
-                    { "color": "green", "value": 0.6 }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [{ "displayName": "Time", "desc": true }],
-        "footer": { "show": false }
       }
     }
   ]
