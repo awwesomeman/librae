@@ -71,7 +71,7 @@
 ### 2.1 模型版本 Pin（強制）
 
 - Backend Agent（Claude CLI）：預設固定 `claude-opus-4-6`
-- Frontend / 全域掃描（Gemini CLI）：預設固定 `gemini-2.5-pro`（若該環境無此 alias，使用等價 2.5 Pro 型號）
+- Frontend / 全域掃描（Gemini CLI）：預設使用 `gemini-3-auto`（由 CLI 自動選擇 Pro/Flash）
 - Master（OpenClaw 主會話）：依當前 OpenClaw session model 執行，不額外切換
 
 ### 2.2 Fallback 規則（強制）
@@ -82,7 +82,7 @@
 
 Fallback 順序：
 - Claude CLI：`claude-opus-4-6` → `claude-sonnet-4-5`
-- Gemini CLI：`gemini-2.5-pro` → `gemini-2.5-flash`
+- Gemini CLI：`gemini-3-auto` → `gemini-2.5-flash`
 
 啟用 fallback 時，回報格式需在 `CMDS` 或 `RISKS` 明確註記：
 - 原模型
