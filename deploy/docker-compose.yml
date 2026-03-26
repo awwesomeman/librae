@@ -34,6 +34,21 @@ services:
     networks:
       - quant_network
 
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: quant_timescaledb
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=quant
+      - POSTGRES_USER=quant
+      - POSTGRES_PASSWORD=quant_secret
+    restart: unless-stopped
+    networks:
+      - quant_network
+
 networks:
   quant_network:
     driver: bridge
@@ -42,3 +57,4 @@ volumes:
   influxdb_data:
   influxdb_config:
   grafana_data:
+  timescaledb_data:

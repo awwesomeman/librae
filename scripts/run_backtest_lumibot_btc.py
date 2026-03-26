@@ -518,6 +518,14 @@ def main() -> None:
 
     print(f"[5/5] InfluxDB OK: points={len(points)}, counts={dict(counts)}, run_id={run_id}")
 
+    # TimescaleDB 雙寫（Phase A）
+    try:
+        from quant_lab.db.timescale_writer import write_backtest_output as ts_write
+        ts_counts = ts_write(output)
+        print(f"[5b] TimescaleDB written: {ts_counts}")
+    except Exception as e:
+        print(f"[5b] TimescaleDB write failed (non-fatal): {e}")
+
 
 if __name__ == "__main__":
     main()

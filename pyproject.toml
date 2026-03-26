@@ -11,6 +11,7 @@ dependencies = [
   "influxdb-client[async]>=1.36",
   "httpx>=0.24",
   "pyyaml>=6.0",
+  "psycopg2-binary>=2.9",
 ]
 
 [project.optional-dependencies]
