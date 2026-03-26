@@ -22,9 +22,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import uuid
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -61,11 +60,7 @@ from quant_lab.signal_engine.trendpullback import (
     generate_signals,
     resample_to_daily,
 )
-from scripts.etl.core_features import (
-    add_daily_trend_gate,
-    add_trendpullback_features,
-    resample_ohlcv,
-)
+
 
 # Load instrument config from markets.yaml
 _INST = get_instrument("BTC_USDT")

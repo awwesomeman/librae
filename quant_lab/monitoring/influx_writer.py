@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Iterable
 
 import pandas as pd
 from influxdb_client import Point

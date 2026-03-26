@@ -7,7 +7,7 @@ Skills: python, quant
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
