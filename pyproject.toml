@@ -10,6 +10,7 @@ dependencies = [
   "empyrical>=0.5",
   "influxdb-client[async]>=1.36",
   "httpx>=0.24",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

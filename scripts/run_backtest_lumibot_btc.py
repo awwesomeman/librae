@@ -47,6 +47,12 @@ from quant_lab.backtest.schema import (
     StrategyMetrics,
     TradeRecord,
 )
+from quant_lab.config.market_config import (
+    InstrumentConfig,
+    calc_commission,
+    calc_slippage,
+    get_instrument,
+)
 from quant_lab.data.binance_fetcher import fetch_ohlcv
 from quant_lab.monitoring.influx_writer import points_from_backtest, points_from_ohlcv
 from quant_lab.signal_engine.trendpullback import (
@@ -61,14 +67,18 @@ from scripts.etl.core_features import (
     resample_ohlcv,
 )
 
+# Load instrument config from markets.yaml
+_INST = get_instrument("BTC_USDT")
+
 STRATEGY_NAME = "trendpullback_lumibot"
-SYMBOL = "BTCUSDT"
+SYMBOL = _INST.symbol
 TIMEFRAME = "H1"
 DATA_SOURCE = "binance_spot"
 
-# Strategy parameters
+# Strategy parameters (from InstrumentConfig)
 PULL = 0.3
-MAX_HOLD_BARS = 24
+MAX_HOLD_BARS = _INST.max_hold_bars
+WARMUP_DAYS = _INST.warmup_bars // 24
 INITIAL_BUDGET = 100_000.0
 
 
@@ -76,15 +86,19 @@ def _run_vectorised_backtest(
     h1: pd.DataFrame,
     d1: pd.DataFrame,
     budget: float = INITIAL_BUDGET,
-    warmup_days: int = 7,
-    commission_bps: float = 10.0,
-    slippage_bps: float = 5.0,
+    warmup_days: int = WARMUP_DAYS,
+    commission_bps: float = _INST.commission_rate * 10_000,
+    slippage_bps: float = 0.0,  # slippage now tick-based via InstrumentConfig
+    inst: InstrumentConfig | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Bar-by-bar backtest over H1 data using signal_engine.
 
     Returns (trade_log, equity_log).
     Costs (commission + slippage) are deducted per round-trip from trade PnL.
+    When inst is provided, uses InstrumentConfig for cost calculations.
     """
+    if inst is None:
+        inst = _INST
     # --- Merge daily gate into h1 (vectorised via merge_asof) ---
     h1_feat = h1.copy()
     h1_idx_name = h1_feat.index.name or "ts"
@@ -126,7 +140,9 @@ def _run_vectorised_backtest(
     if valid_mask.sum() < 2:
         return trade_log, equity_log
 
+    # Legacy bps fallback (kept for CLI override compatibility)
     cost_rate = (commission_bps + slippage_bps) / 10_000.0  # per side
+    use_inst_cost = inst is not None
 
     cash = budget
     in_position = False
@@ -153,8 +169,12 @@ def _run_vectorised_backtest(
             # Exit
             exit_price = price
             gross_pnl = (exit_price - entry_price) * qty
-            entry_cost = entry_price * qty * cost_rate
-            exit_cost = exit_price * qty * cost_rate
+            if use_inst_cost:
+                entry_cost = calc_commission(inst, entry_price, qty) + calc_slippage(inst, qty)
+                exit_cost = calc_commission(inst, exit_price, qty) + calc_slippage(inst, qty)
+            else:
+                entry_cost = entry_price * qty * cost_rate
+                exit_cost = exit_price * qty * cost_rate
             total_cost = entry_cost + exit_cost
             net_pnl = gross_pnl - total_cost
             cash += qty * exit_price - exit_cost  # exit slippage+commission
@@ -181,10 +201,19 @@ def _run_vectorised_backtest(
             # Entry — size qty so total outlay (price + cost) fits in available
             entry_price = price
             available = cash * 0.95
-            qty = available / (entry_price * (1 + cost_rate))
+            if use_inst_cost:
+                # Estimate cost per unit for sizing
+                est_comm_rate = inst.commission_rate if inst.commission_rate > 0 else 0.0
+                est_slip_per_unit = inst.slippage_ticks * inst.tick_value
+                qty = available / (entry_price * (1 + est_comm_rate) + est_slip_per_unit)
+            else:
+                qty = available / (entry_price * (1 + cost_rate))
             if qty <= 0:
                 continue
-            entry_cost = entry_price * qty * cost_rate
+            if use_inst_cost:
+                entry_cost = calc_commission(inst, entry_price, qty) + calc_slippage(inst, qty)
+            else:
+                entry_cost = entry_price * qty * cost_rate
             cash -= qty * entry_price + entry_cost
             in_position = True
             entry_ts = t
@@ -198,8 +227,12 @@ def _run_vectorised_backtest(
         last = h1.iloc[-1]
         exit_price = float(last["close"])
         gross_pnl = (exit_price - entry_price) * qty
-        entry_cost = entry_price * qty * cost_rate
-        exit_cost = exit_price * qty * cost_rate
+        if use_inst_cost:
+            entry_cost = calc_commission(inst, entry_price, qty) + calc_slippage(inst, qty)
+            exit_cost = calc_commission(inst, exit_price, qty) + calc_slippage(inst, qty)
+        else:
+            entry_cost = entry_price * qty * cost_rate
+            exit_cost = exit_price * qty * cost_rate
         total_cost = entry_cost + exit_cost
         net_pnl = gross_pnl - total_cost
         cash += qty * exit_price - exit_cost
@@ -420,11 +453,12 @@ def main() -> None:
     run_id = generate_run_id(STRATEGY_NAME, SYMBOL)
 
     trade_log, equity_log = _run_vectorised_backtest(
-        h1, d1, budget=args.budget, warmup_days=7,
+        h1, d1, budget=args.budget, warmup_days=WARMUP_DAYS,
         commission_bps=args.commission_bps,
         slippage_bps=args.slippage_bps,
+        inst=_INST,
     )
-    print(f"       cost model: commission={args.commission_bps}bps, slippage={args.slippage_bps}bps")
+    print(f"       cost model: InstrumentConfig({_INST.symbol}) commission_rate={_INST.commission_rate}, slippage_ticks={_INST.slippage_ticks}")
     print(f"       trades={len(trade_log)}, equity_snapshots={len(equity_log)}")
 
     # 4) Build BacktestOutput
