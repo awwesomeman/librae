@@ -6,6 +6,7 @@ from app.streamlit_performance import (
     _require_columns,
     _require_perf_fields,
     build_general_metrics_table,
+    build_order_details,
     get_cfg,
     normalize_position,
     validate_strategy_context_or_raise,
@@ -76,3 +77,49 @@ def test_get_cfg_falls_back_to_default_token(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     cfg = get_cfg()
     assert cfg.token == "change_me_super_secret_token"
+
+
+def _make_blotter(**extra_cols):
+    """Helper: minimal blotter DataFrame for build_order_details tests."""
+    base = {
+        "_time": pd.to_datetime(["2026-03-04T08:00:00+00:00"]),
+        "side": ["buy"],
+        "entry_price": [18000.0],
+        "exit_price": [18200.0],
+        "quantity": [1.0],
+        "holding_bars": [4],
+    }
+    base.update(extra_cols)
+    return pd.DataFrame(base)
+
+
+def test_build_order_details_has_entry_time_column() -> None:
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])
+    result = build_order_details(blotter)
+    assert "Entry Time" in result.columns
+
+
+def test_build_order_details_entry_time_column_order() -> None:
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])
+    result = build_order_details(blotter)
+    cols = list(result.columns)
+    assert cols[1] == "Entry Time"
+    assert cols[2] == "Exit Time"
+
+
+def test_build_order_details_entry_time_empty_string_shows_dash() -> None:
+    blotter = _make_blotter(entry_time=[""])
+    result = build_order_details(blotter)
+    assert result["Entry Time"].iloc[0] == "—"
+
+
+def test_build_order_details_entry_time_missing_column_shows_dash() -> None:
+    blotter = _make_blotter()  # no entry_time column
+    result = build_order_details(blotter)
+    assert "Entry Time" in result.columns
+    assert result["Entry Time"].iloc[0] == "—"
+
+
+def test_build_order_details_empty_blotter_has_entry_time_column() -> None:
+    result = build_order_details(pd.DataFrame())
+    assert "Entry Time" in result.columns

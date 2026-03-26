@@ -122,6 +122,7 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .field("quantity", float(tr.quantity))
             .field("net_pnl", float(tr.net_pnl))
             .field("holding_bars", int(tr.holding_bars or 0))
+            .field("entry_time", tr.entry_ts.isoformat() if tr.entry_ts else "")
             .time(tr.exit_ts)
         )
 

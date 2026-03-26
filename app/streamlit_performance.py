@@ -170,6 +170,11 @@ class DashboardData:
     perf_raw: pd.DataFrame
     meta: dict[str, Any]
     ohlcv: pd.DataFrame | None = None
+    trade_blotter: pd.DataFrame = None
+
+    def __post_init__(self) -> None:
+        if self.trade_blotter is None:
+            self.trade_blotter = pd.DataFrame()
 
 
 def _load_token_from_env_file() -> str:
@@ -468,34 +473,60 @@ def kv_to_df(kv: dict[str, Any], descriptions: dict[str, str] | None = None) -> 
     return pd.DataFrame(rows, columns=PARAM_TABLE_COLUMNS)
 
 
-def build_order_details(signals: pd.DataFrame) -> pd.DataFrame:
-    if signals.empty:
-        return pd.DataFrame(columns=["Trade ID", "Time", "Position", "Execution Price", "Gross PnL"])
+def load_trade_blotter(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: str) -> pd.DataFrame:
+    """Load trade_blotter records from InfluxDB for a given strategy and run_id."""
+    flux = f'''
+from(bucket: "{cfg.bucket}")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "trade_blotter")
+  |> filter(fn: (r) => r.strategy == "{strategy}")
+  |> filter(fn: (r) => r.run_id == "{run_id}")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"], desc: false)
+'''
+    df = query_df(client, cfg.org, flux)
+    if not df.empty and "_time" in df.columns:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    if not df.empty and "entry_time" in df.columns:
+        parsed = pd.to_datetime(df["entry_time"], utc=True, errors="coerce")
+        df["entry_time"] = parsed.dt.strftime("%Y-%m-%d %H:%M").where(parsed.notna(), "—")
+        df["entry_time"] = df["entry_time"].apply(lambda v: "—" if str(v).strip() in ("", "nan", "NaT") else v)
+    return df
+
+
+def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
+    """Build Order Detail table from trade_blotter DataFrame."""
+    _ORDER_DETAIL_COLUMNS = ["#", "Entry Time", "Exit Time", "Side", "Entry Price", "Exit Price", "Qty", "Holding Bars", "Gross Return %"]
+
+    if blotter.empty:
+        return pd.DataFrame(columns=_ORDER_DETAIL_COLUMNS)
+
+    df = blotter.copy()
+    df = df.sort_values("_time", ascending=True).reset_index(drop=True)
 
     out = pd.DataFrame()
-    out["Time"] = pd.to_datetime(signals.get("_time", pd.Series([], dtype="datetime64[ns]")), utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-    side = signals.get("side", pd.Series(["buy"] * len(signals))).astype(str)
-    out["Position"] = side.apply(normalize_position)
-    out["Execution Price"] = pd.to_numeric(signals.get("price", pd.Series([None] * len(signals))), errors="coerce")
-    out["Gross PnL"] = "N/A"
+    out["#"] = range(1, len(df) + 1)
 
-    trade_id = 0
-    active_trade = None
-    tids = []
-    for pos in out["Position"].tolist():
-        if pos in {"buy", "sell short"}:
-            trade_id += 1
-            active_trade = f"T{trade_id:04d}"
-            tids.append(active_trade)
-        else:
-            if active_trade is None:
-                trade_id += 1
-                active_trade = f"T{trade_id:04d}"
-            tids.append(active_trade)
-            active_trade = None
-    out["Trade ID"] = tids
-    out = out.dropna(subset=["Time"]).sort_values("Time", ascending=False).reset_index(drop=True)
-    return out[["Trade ID", "Time", "Position", "Execution Price", "Gross PnL"]]
+    # entry_time: already formatted by load_trade_blotter; fallback to "—"
+    if "entry_time" in df.columns:
+        out["Entry Time"] = df["entry_time"].apply(lambda v: "—" if str(v).strip() in ("", "nan", "NaT", "None") else str(v))
+    else:
+        out["Entry Time"] = "—"
+
+    out["Exit Time"] = pd.to_datetime(df["_time"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    side_raw = df.get("side", pd.Series(["buy"] * len(df))).astype(str).str.lower()
+    out["Side"] = side_raw.apply(lambda s: "Long" if s == "buy" else s.capitalize())
+    out["Entry Price"] = pd.to_numeric(df.get("entry_price"), errors="coerce").round(2)
+    out["Exit Price"] = pd.to_numeric(df.get("exit_price"), errors="coerce").round(2)
+    out["Qty"] = pd.to_numeric(df.get("quantity"), errors="coerce").round(4)
+    out["Holding Bars"] = pd.to_numeric(df.get("holding_bars"), errors="coerce").astype("Int64")
+
+    entry = pd.to_numeric(df.get("entry_price"), errors="coerce")
+    exit_ = pd.to_numeric(df.get("exit_price"), errors="coerce")
+    gross_return = ((exit_ - entry) / entry * 100).round(2)
+    out["Gross Return %"] = gross_return
+
+    return out[_ORDER_DETAIL_COLUMNS]
 
 
 def render_kv_table(
@@ -592,13 +623,15 @@ def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, 
         symbol = str(perf_raw["symbol"].iloc[0])
     ohlcv = load_ohlcv(client, cfg, symbol, run_id)
 
+    trade_blotter = load_trade_blotter(client, cfg, strategy, run_id)
+
     contexts = load_strategy_contexts()
     meta = contexts.get(strategy)
     if isinstance(meta, dict):
         validate_strategy_context_or_raise(meta, strategy)
     else:
         meta = derive_meta_from_canonical(strategy, curve, perf_raw)
-    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta, ohlcv=ohlcv)
+    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta, ohlcv=ohlcv, trade_blotter=trade_blotter)
 
 
 def render_price_signal_chart(signals: pd.DataFrame) -> None:
@@ -831,8 +864,26 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
 
     with bottom_right:
         st.markdown("#### Order Details")
-        order_df = build_order_details(data.signals)
-        st.dataframe(order_df, use_container_width=True, hide_index=True, height=TABLE_HEIGHT_PERF)
+        order_df = build_order_details(data.trade_blotter)
+        if order_df.empty:
+            st.info("No trade blotter data available for this selection.")
+        else:
+            def _color_return(val: float) -> str:
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    return ""
+                return "color: #10B981; font-weight: 600" if v > 0 else ("color: #EF4444; font-weight: 600" if v < 0 else "")
+
+            styled = order_df.style.applymap(_color_return, subset=["Gross Return %"]).format(
+                {"Entry Price": "{:.2f}", "Exit Price": "{:.2f}", "Qty": "{:.4f}", "Gross Return %": "{:+.2f}%"}
+            )
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                hide_index=True,
+                height=TABLE_HEIGHT_PERF,
+            )
 
 
 def render_parameter_tab(meta: dict[str, Any]) -> None:
