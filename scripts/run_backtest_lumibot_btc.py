@@ -49,6 +49,12 @@ from quant_lab.backtest.schema import (
 )
 from quant_lab.data.binance_fetcher import fetch_ohlcv
 from quant_lab.monitoring.influx_writer import points_from_backtest
+from quant_lab.signal_engine.trendpullback import (
+    compute_daily_gate,
+    compute_features,
+    generate_signals,
+    resample_to_daily,
+)
 from scripts.etl.core_features import (
     add_daily_trend_gate,
     add_trendpullback_features,
@@ -71,21 +77,40 @@ def _run_vectorised_backtest(
     d1: pd.DataFrame,
     budget: float = INITIAL_BUDGET,
     warmup_days: int = 7,
+    commission_bps: float = 10.0,
+    slippage_bps: float = 5.0,
 ) -> tuple[list[dict], list[dict]]:
-    """Bar-by-bar backtest over H1 data.  Returns (trade_log, equity_log).
+    """Bar-by-bar backtest over H1 data using signal_engine.
 
-    Logic mirrors the Lumibot TrendPullbackTrading strategy exactly:
-    - Entry: daily trend gate + pullback near EMA20 + bullish bar + volume
-    - Exit: close < EMA20  OR  max holding bars reached
+    Returns (trade_log, equity_log).
+    Costs (commission + slippage) are deducted per round-trip from trade PnL.
     """
+    # --- Merge daily gate into h1 ---
+    h1_feat = h1.copy()
+    h1_feat["daily_trend"] = False
+    for i in range(len(h1_feat)):
+        t = h1_feat.index[i]
+        day = t.floor("D") - pd.Timedelta(days=1)
+        if day in d1.index:
+            d = d1.loc[day]
+            h1_feat.iloc[i, h1_feat.columns.get_loc("daily_trend")] = bool(
+                (d["close"] > d["ema20"]) and (d["ema20"] > d["ema20_prev"])
+            )
+
+    # --- Generate signals via signal_engine ---
+    sig_df = generate_signals(h1_feat)
+    signals = sig_df["signal"].values
+
+    # --- Execute trades following signals ---
     trade_log: list[dict] = []
     equity_log: list[dict] = []
 
-    # Trim warmup
     start_ts = h1.index[0] + pd.Timedelta(days=warmup_days)
     valid_mask = h1.index >= start_ts
     if valid_mask.sum() < 2:
         return trade_log, equity_log
+
+    cost_rate = (commission_bps + slippage_bps) / 10_000.0  # per side
 
     cash = budget
     in_position = False
@@ -94,94 +119,73 @@ def _run_vectorised_backtest(
     bars_held = 0
     qty = 0.0
 
-    for i in range(1, len(h1)):
+    for i in range(len(h1)):
         t = h1.index[i]
         if t < start_ts:
             continue
 
         cur = h1.iloc[i]
-        prev = h1.iloc[i - 1]
+        price = float(cur["close"])
 
         # Portfolio value
-        if in_position:
-            pv = cash + qty * cur["close"]
-        else:
-            pv = cash
-
+        pv = (cash + qty * price) if in_position else cash
         equity_log.append({"ts": t, "equity": float(pv)})
 
-        # --- Exit logic ---
-        if in_position:
+        sig = int(signals[i])
+
+        if sig == -1 and in_position:
+            # Exit
+            exit_price = price
+            gross_pnl = (exit_price - entry_price) * qty
+            entry_cost = entry_price * qty * cost_rate
+            exit_cost = exit_price * qty * cost_rate
+            total_cost = entry_cost + exit_cost
+            net_pnl = gross_pnl - total_cost
+            cash += qty * exit_price - exit_cost  # exit slippage+commission
+            trade_log.append({
+                "entry_ts": entry_ts,
+                "exit_ts": t,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "side": "buy",
+                "pnl": exit_price - entry_price,  # per-unit gross
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "cost": total_cost,
+                "bars_held": bars_held,
+                "quantity": qty,
+            })
+            in_position = False
+            entry_price = 0.0
+            entry_ts = None
+            bars_held = 0
+            qty = 0.0
+
+        elif sig == 1 and not in_position:
+            # Entry
+            entry_price = price
+            qty = (cash * 0.95) / entry_price
+            if qty <= 0:
+                continue
+            entry_cost = entry_price * qty * cost_rate
+            cash -= qty * entry_price + entry_cost
+            in_position = True
+            entry_ts = t
+            bars_held = 0
+
+        elif in_position:
             bars_held += 1
-            exit_signal = cur["close"] < cur["ema20"] or bars_held >= MAX_HOLD_BARS
-            if exit_signal:
-                exit_price = float(cur["close"])
-                cash += qty * exit_price
-                pnl = (exit_price - entry_price) * qty
-                trade_log.append({
-                    "entry_ts": entry_ts,
-                    "exit_ts": t,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "side": "buy",
-                    "pnl": exit_price - entry_price,  # per-unit
-                    "bars_held": bars_held,
-                    "quantity": qty,
-                })
-                in_position = False
-                entry_price = 0.0
-                entry_ts = None
-                bars_held = 0
-                qty = 0.0
-            continue
-
-        # --- Entry signal detection ---
-        if i >= len(h1) - 1:
-            continue
-
-        # Daily gate
-        day = t.floor("D") - pd.Timedelta(days=1)
-        if day not in d1.index:
-            continue
-        d = d1.loc[day]
-        trend = (d["close"] > d["ema20"]) and (d["ema20"] > d["ema20_prev"])
-        if not trend:
-            continue
-
-        # Pullback near EMA20
-        near = abs(cur["low"] - cur["ema20"]) <= PULL * cur["atr14"]
-        if not near:
-            continue
-
-        # Bullish bar
-        bullish = (cur["close"] > cur["open"]) and (cur["close"] > prev["high"])
-        if not bullish:
-            continue
-
-        # Volume filter
-        vol_ok = (
-            (cur["volume"] >= 0.9 * cur["vol_sma20"])
-            if not np.isnan(cur["vol_sma20"])
-            else False
-        )
-        if not (vol_ok and cur["atr14"] > 0):
-            continue
-
-        # Execute entry
-        entry_price = float(cur["close"])
-        qty = (cash * 0.95) / entry_price
-        if qty <= 0:
-            continue
-        cash -= qty * entry_price
-        in_position = True
-        entry_ts = t
-        bars_held = 0
 
     # Force-close open position at last bar
     if in_position:
         last = h1.iloc[-1]
         exit_price = float(last["close"])
-        cash += qty * exit_price
+        gross_pnl = (exit_price - entry_price) * qty
+        entry_cost = entry_price * qty * cost_rate
+        exit_cost = exit_price * qty * cost_rate
+        total_cost = entry_cost + exit_cost
+        net_pnl = gross_pnl - total_cost
+        cash += qty * exit_price - exit_cost
         trade_log.append({
             "entry_ts": entry_ts,
             "exit_ts": h1.index[-1],
@@ -189,6 +193,9 @@ def _run_vectorised_backtest(
             "exit_price": exit_price,
             "side": "buy",
             "pnl": exit_price - entry_price,
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "cost": total_cost,
             "bars_held": bars_held,
             "quantity": qty,
         })
@@ -231,6 +238,8 @@ def _build_backtest_output(
             ets = ets.to_pydatetime()
         if isinstance(xts, pd.Timestamp):
             xts = xts.to_pydatetime()
+        gross = td.get("gross_pnl", pnl)
+        net = td.get("net_pnl", pnl)
         trade_records.append(TradeRecord(
             trade_id=f"{run_id}-t{i:04d}",
             entry_ts=ets,
@@ -242,8 +251,8 @@ def _build_backtest_output(
             quantity=td.get("quantity", 1.0),
             price_unit="USDT",
             quantity_unit=SYMBOL,
-            gross_pnl=pnl,
-            net_pnl=pnl,
+            gross_pnl=gross,
+            net_pnl=net,
             pnl_unit="USDT",
             holding_bars=td.get("bars_held"),
         ))
@@ -341,6 +350,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample", default="oos", help="Sample tag for InfluxDB (default: oos)")
     p.add_argument("--benchmark", default="BTC_BH", help="Benchmark tag (default: BTC_BH)")
     p.add_argument("--budget", type=float, default=100_000, help="Initial budget (default: 100000)")
+    p.add_argument("--commission-bps", type=float, default=10.0, help="Commission in basis points per side (default: 10)")
+    p.add_argument("--slippage-bps", type=float, default=5.0, help="Slippage in basis points per side (default: 5)")
     return p.parse_args()
 
 
@@ -356,10 +367,10 @@ def main() -> None:
     h1_base = h1_raw.set_index("timestamp")
     h1_base.index.name = "ts"
 
-    # 2) Compute features on H1; resample H1→D1 for daily gate
-    print("[2/5] Computing H1/D1 features...")
-    h1 = add_trendpullback_features(h1_base)
-    d1 = add_daily_trend_gate(resample_ohlcv(h1_base, "1D"))
+    # 2) Compute features on H1; resample H1→D1 for daily gate (signal_engine)
+    print("[2/5] Computing H1/D1 features (signal_engine + pandas_ta)...")
+    h1 = compute_features(h1_base)
+    d1 = compute_daily_gate(resample_to_daily(h1_base))
     print(f"       H1 bars={len(h1)}, D1 bars={len(d1)}")
 
     # 3) Run vectorised backtest
@@ -368,7 +379,10 @@ def main() -> None:
 
     trade_log, equity_log = _run_vectorised_backtest(
         h1, d1, budget=args.budget, warmup_days=7,
+        commission_bps=args.commission_bps,
+        slippage_bps=args.slippage_bps,
     )
+    print(f"       cost model: commission={args.commission_bps}bps, slippage={args.slippage_bps}bps")
     print(f"       trades={len(trade_log)}, equity_snapshots={len(equity_log)}")
 
     # 4) Build BacktestOutput

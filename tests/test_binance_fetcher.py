@@ -96,6 +96,7 @@ class TestFetchOHLCV:
                 interval="1h",
                 start="2024-01-01",
                 end="2024-01-02",
+                use_cache=False,
             )
         assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
         assert len(df) == 3
@@ -121,7 +122,7 @@ class TestFetchOHLCV:
             mock_client.__exit__ = mock.MagicMock(return_value=False)
             MockClient.return_value = mock_client
 
-            df = fetch_ohlcv(symbol="BTCUSDT", interval="1h", start="2024-01-01", end="2024-01-02")
+            df = fetch_ohlcv(symbol="BTCUSDT", interval="1h", start="2024-01-01", end="2024-01-02", use_cache=False)
         assert len(df) == 0
         assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
 
@@ -138,6 +139,6 @@ class TestFetchOHLCV:
             mock_client.__exit__ = mock.MagicMock(return_value=False)
             MockClient.return_value = mock_client
 
-            df = fetch_ohlcv(symbol="BTCUSDT", interval="1h", start="2024-01-01", end="2024-01-02")
+            df = fetch_ohlcv(symbol="BTCUSDT", interval="1h", start="2024-01-01", end="2024-01-02", use_cache=False)
         for col in ("open", "high", "low", "close", "volume"):
             assert df[col].dtype == float, f"{col} should be float"

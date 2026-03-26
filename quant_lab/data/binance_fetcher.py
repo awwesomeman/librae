@@ -2,17 +2,47 @@
 
 No API key required — uses the public /api/v3/klines endpoint.
 Handles pagination (Binance returns max 1000 bars per request).
+Supports local Parquet cache to reduce redundant API calls.
 """
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pandas as pd
 
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 MAX_LIMIT = 1000
+
+# Cache directory relative to repo root (caller's cwd or explicit override)
+_DEFAULT_CACHE_DIR = Path("data/cache")
+_CACHE_MAX_AGE = timedelta(hours=6)
+
+
+def _cache_path(symbol: str, interval: str, cache_dir: Path | None = None) -> Path:
+    """Return the Parquet cache file path for a given symbol/interval."""
+    d = cache_dir or _DEFAULT_CACHE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{symbol}_{interval}.parquet"
+
+
+def _is_cache_fresh(path: Path, now: datetime | None = None) -> bool:
+    """Check whether the cached parquet's latest bar is within *_CACHE_MAX_AGE*."""
+    if not path.exists():
+        return False
+    try:
+        df = pd.read_parquet(path)
+        if df.empty:
+            return False
+        latest_ts = pd.Timestamp(df["timestamp"].max())
+        if latest_ts.tzinfo is None:
+            latest_ts = latest_ts.tz_localize("UTC")
+        ref = now or datetime.now(timezone.utc)
+        return (ref - latest_ts) < _CACHE_MAX_AGE
+    except Exception:
+        return False
 
 
 def fetch_ohlcv(
@@ -22,6 +52,8 @@ def fetch_ohlcv(
     end: str | datetime | None = None,
     months: int = 6,
     timeout: float = 30.0,
+    use_cache: bool = True,
+    cache_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV klines from Binance REST API.
 
@@ -39,6 +71,12 @@ def fetch_ohlcv(
         Fallback lookback if ``start`` is not given.
     timeout : float
         HTTP request timeout in seconds.
+    use_cache : bool
+        When True, read/write a local Parquet cache to avoid redundant
+        API calls.  Cache is considered fresh when the latest bar is
+        within 6 hours of *now*.
+    cache_dir : Path | None
+        Override the default cache directory (``data/cache/``).
 
     Returns
     -------
@@ -46,6 +84,11 @@ def fetch_ohlcv(
         Columns: timestamp, open, high, low, close, volume.
         timestamp is tz-aware UTC.
     """
+    # --- Cache read ---
+    cpath = _cache_path(symbol, interval, cache_dir)
+    if use_cache and _is_cache_fresh(cpath):
+        return pd.read_parquet(cpath)
+
     end_dt = _parse_dt(end) if end else datetime.now(timezone.utc)
     start_dt = _parse_dt(start) if start else _subtract_months(end_dt, months)
 
@@ -88,6 +131,24 @@ def fetch_ohlcv(
     for col in ("open", "high", "low", "close", "volume"):
         df[col] = df[col].astype(float)
     df = df[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+    # --- Cache write ---
+    if use_cache and not df.empty:
+        try:
+            cpath.parent.mkdir(parents=True, exist_ok=True)
+            # Append-merge if existing cache covers earlier period
+            if cpath.exists():
+                try:
+                    existing = pd.read_parquet(cpath)
+                    merged = pd.concat([existing, df], ignore_index=True)
+                    merged = merged.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                    df = merged
+                except Exception:
+                    pass  # overwrite on merge failure
+            df.to_parquet(cpath, index=False)
+        except Exception:
+            pass  # non-fatal: cache is best-effort
+
     return df
 
 
