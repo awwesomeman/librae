@@ -138,14 +138,14 @@ def test_build_order_details_position_long() -> None:
     """Long (buy) → +qty formatted to 4 decimals."""
     blotter = _make_blotter(entry_time=["2026-03-04 06:00"])  # side=buy, qty=1.0
     result = build_order_details(blotter)
-    assert result["Position"].iloc[0] == "+1.0000"
+    assert result["Position"].iloc[0] == "+1.00"
 
 
 def test_build_order_details_position_short() -> None:
     """Short (sell) → -qty formatted to 4 decimals."""
     blotter = _make_blotter(entry_time=["2026-03-04 06:00"], side=["sell"])
     result = build_order_details(blotter)
-    assert result["Position"].iloc[0] == "-1.0000"
+    assert result["Position"].iloc[0] == "-1.00"
 
 
 def test_build_order_details_full_columns() -> None:

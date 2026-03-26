@@ -517,7 +517,7 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     qty = pd.to_numeric(df.get("quantity"), errors="coerce").round(4)
     # Merge Side + Qty → Position with sign: Long(buy) → +qty, Short(sell) → -qty
     out["Position"] = [
-        f"+{q:.4f}" if s == "buy" else f"-{q:.4f}"
+        f"+{q:.2f}" if s == "buy" else f"-{q:.2f}"
         for s, q in zip(side_raw, qty)
     ]
     out["Entry Price"] = pd.to_numeric(df.get("entry_price"), errors="coerce").round(2)
