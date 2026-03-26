@@ -1,6 +1,5 @@
 markets:
-  binance:
-    exchange: binance
+  crypto:
     asset_class: crypto
     quote_currency: USDT
     timezone: UTC
@@ -11,8 +10,7 @@ markets:
     night_session_close: null
     settlement_day: null
 
-  taifex:
-    exchange: taifex
+  tw_futures:
     asset_class: futures
     quote_currency: TWD
     timezone: Asia/Taipei
@@ -23,8 +21,7 @@ markets:
     night_session_close: "05:00"
     settlement_day: third_wednesday
 
-  ib_us:
-    exchange: ib
+  us_equity:
     asset_class: equity
     quote_currency: USD
     timezone: America/New_York
@@ -37,7 +34,9 @@ markets:
 
 instruments:
   BTC_USDT:
-    market: binance
+    market: crypto
+    exchange: binance
+    data_source: binance
     base_asset: BTC
     symbol: BTCUSDT
     tick_size: 0.01
@@ -55,7 +54,9 @@ instruments:
     max_hold_bars: 24
 
   TW_TXFR:
-    market: taifex
+    market: tw_futures
+    exchange: taifex
+    data_source: shioaji
     base_asset: TXFR
     symbol: TXFR
     tick_size: 1.0
@@ -73,7 +74,9 @@ instruments:
     max_hold_bars: 48
 
   US_SPY:
-    market: ib_us
+    market: us_equity
+    exchange: ib
+    data_source: yfinance
     base_asset: SPY
     symbol: SPY
     tick_size: 0.01

@@ -1,4 +1,4 @@
-"""Two-layer market configuration: MarketConfig (exchange) + InstrumentConfig (instrument).
+"""Two-layer market configuration: MarketConfig (asset-class) + InstrumentConfig (instrument).
 
 Loads config/markets.yaml and resolves instrument -> market references.
 """
@@ -13,7 +13,6 @@ from pathlib import Path
 
 @dataclass
 class MarketConfig:
-    exchange: str
     asset_class: str          # crypto / futures / equity
     quote_currency: str
     timezone: str
@@ -28,6 +27,8 @@ class MarketConfig:
 @dataclass
 class InstrumentConfig:
     market_id: str
+    exchange: str
+    data_source: str
     base_asset: str
     symbol: str
     tick_size: float
@@ -72,7 +73,6 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, InstrumentC
     markets: dict[str, MarketConfig] = {}
     for market_id, mdata in raw.get("markets", {}).items():
         markets[market_id] = MarketConfig(
-            exchange=mdata["exchange"],
             asset_class=mdata["asset_class"],
             quote_currency=mdata["quote_currency"],
             timezone=mdata["timezone"],
@@ -91,6 +91,8 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, InstrumentC
         market_obj = markets.get(market_ref)
         instruments[inst_id] = InstrumentConfig(
             market_id=market_ref,
+            exchange=idata["exchange"],
+            data_source=idata["data_source"],
             base_asset=idata["base_asset"],
             symbol=idata["symbol"],
             tick_size=float(idata["tick_size"]),

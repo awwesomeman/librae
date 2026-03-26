@@ -88,6 +88,7 @@ def _make_blotter(**extra_cols):
         "exit_price": [18200.0],
         "quantity": [1.0],
         "holding_bars": [4],
+        "net_pnl": [150.0],
     }
     base.update(extra_cols)
     return pd.DataFrame(base)
@@ -150,7 +151,19 @@ def test_build_order_details_position_short() -> None:
 
 def test_build_order_details_full_columns() -> None:
     """Output columns must exactly match the expected schema."""
-    expected = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %"]
+    expected = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %", "Net Return %"]
     blotter = _make_blotter(entry_time=["2026-03-04 06:00"])
     result = build_order_details(blotter)
     assert list(result.columns) == expected
+
+
+def test_build_order_details_net_return_pct() -> None:
+    """Net Return % = net_pnl / (entry_price * quantity) * 100; must be <= Gross Return % when cost > 0."""
+    # entry=18000, exit=18200, qty=1, net_pnl=150 (gross=200 implied by price diff)
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"], net_pnl=[150.0])
+    result = build_order_details(blotter)
+    assert "Net Return %" in result.columns
+    expected_net = round(150.0 / (18000.0 * 1.0) * 100, 2)
+    assert result["Net Return %"].iloc[0] == pytest.approx(expected_net)
+    # Net Return % <= Gross Return % when there is cost
+    assert result["Net Return %"].iloc[0] <= result["Gross Return %"].iloc[0]

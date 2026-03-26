@@ -496,7 +496,7 @@ from(bucket: "{cfg.bucket}")
 
 def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     """Build Order Detail table from trade_blotter DataFrame."""
-    _ORDER_DETAIL_COLUMNS = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %"]
+    _ORDER_DETAIL_COLUMNS = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %", "Net Return %"]
 
     if blotter.empty:
         return pd.DataFrame(columns=_ORDER_DETAIL_COLUMNS)
@@ -528,6 +528,11 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     exit_ = pd.to_numeric(df.get("exit_price"), errors="coerce")
     gross_return = ((exit_ - entry) / entry * 100).round(2)
     out["Gross Return %"] = gross_return
+
+    net_pnl = pd.to_numeric(df.get("net_pnl"), errors="coerce")
+    quantity = pd.to_numeric(df.get("quantity"), errors="coerce")
+    net_return_pct = (net_pnl / (entry * quantity) * 100).round(2)
+    out["Net Return %"] = net_return_pct
 
     return out[_ORDER_DETAIL_COLUMNS]
 
@@ -878,12 +883,12 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                     return ""
                 return "color: #10B981; font-weight: 600" if v > 0 else ("color: #EF4444; font-weight: 600" if v < 0 else "")
 
-            styled = order_df.style.applymap(_color_return, subset=["Gross Return %"]).format(
-                {"Entry Price": "{:.2f}", "Exit Price": "{:.2f}", "Gross Return %": "{:+.2f}%"}
+            styled = order_df.style.applymap(_color_return, subset=["Gross Return %", "Net Return %"]).format(
+                {"Entry Price": "{:.2f}", "Exit Price": "{:.2f}", "Gross Return %": "{:+.2f}%", "Net Return %": "{:+.2f}%"}
             )
             # column_order ensures Entry Time, Exit Time, Position are always first.
             # 待 Streamlit 正式支援 freeze/pinned_columns 時啟用原生凍結欄位功能。
-            _COLUMN_ORDER = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %"]
+            _COLUMN_ORDER = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %", "Net Return %"]
             st.dataframe(
                 styled,
                 use_container_width=True,
