@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Iterable
 
+import pandas as pd
 from influxdb_client import Point
 
 from quant_lab.backtest.schema import BacktestOutput
@@ -124,3 +125,35 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
         )
 
     return points
+
+
+def points_from_ohlcv(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    run_id: str,
+    source: str = "backtest",
+) -> list[Point]:
+    """Convert an OHLCV DataFrame (DatetimeIndex) to InfluxDB points.
+
+    Measurement: ``ohlcv``
+    Tags: symbol, timeframe, source, run_id
+    Fields: open, high, low, close, volume (all float)
+    """
+    pts: list[Point] = []
+    for ts, row in df.iterrows():
+        pt = (
+            Point("ohlcv")
+            .tag("symbol", symbol)
+            .tag("timeframe", timeframe)
+            .tag("source", source)
+            .tag("run_id", run_id)
+            .field("open", float(row["open"]))
+            .field("high", float(row["high"]))
+            .field("low", float(row["low"]))
+            .field("close", float(row["close"]))
+            .field("volume", float(row.get("volume", 0.0)))
+            .time(ts)
+        )
+        pts.append(pt)
+    return pts

@@ -52,22 +52,43 @@ def _make_ohlcv(n: int = 500, seed: int = 42) -> pd.DataFrame:
 
 
 def _add_daily_trend_column(h1: pd.DataFrame, d1: pd.DataFrame) -> pd.DataFrame:
-    """Merge daily_trend bool column into H1 DataFrame."""
+    """Merge daily_trend bool column into H1 DataFrame (vectorised)."""
     h1 = h1.copy()
-    h1["daily_trend"] = False
-    for i in range(len(h1)):
-        t = h1.index[i]
-        day = t.floor("D") - pd.Timedelta(days=1)
-        if day in d1.index:
-            d = d1.loc[day]
-            h1.iloc[i, h1.columns.get_loc("daily_trend")] = bool(
-                (d["close"] > d["ema20"]) and (d["ema20"] > d["ema20_prev"])
-            )
+    h1_idx_name = h1.index.name or "ts"
+    h1.index.name = h1_idx_name
+
+    d1_trend = d1[["close", "ema20", "ema20_prev"]].copy()
+    d1_trend["daily_trend"] = (
+        (d1_trend["close"] > d1_trend["ema20"])
+        & (d1_trend["ema20"] > d1_trend["ema20_prev"])
+    )
+
+    # Prepare D1 right-side DataFrame with explicit column name
+    d1_right = d1_trend[["daily_trend"]].copy()
+    d1_right["d1_ts"] = d1_right.index
+    d1_right = d1_right.reset_index(drop=True)
+
+    h1 = pd.merge_asof(
+        h1.reset_index(),
+        d1_right,
+        left_on=h1_idx_name,
+        right_on="d1_ts",
+        direction="backward",
+    ).set_index(h1_idx_name).drop(columns=["d1_ts"], errors="ignore")
+    h1["daily_trend"] = h1["daily_trend"].fillna(False)
     return h1
 
 
 def _legacy_signals(h1: pd.DataFrame, d1: pd.DataFrame) -> np.ndarray:
-    """Reproduce old inline signal logic (operates on already-computed features)."""
+    """Reproduce inline signal logic using merge_asof daily gate (updated).
+
+    The daily gate is now pre-merged via _add_daily_trend_column (merge_asof),
+    matching the production code. The rest of the logic is identical to
+    generate_signals in the signal engine.
+    """
+    # Merge daily gate the same way as production
+    h1 = _add_daily_trend_column(h1, d1)
+
     PULL = 0.3
     MAX_HOLD = 24
     n = len(h1)
@@ -76,7 +97,6 @@ def _legacy_signals(h1: pd.DataFrame, d1: pd.DataFrame) -> np.ndarray:
     bars_held = 0
 
     for i in range(1, n):
-        t = h1.index[i]
         cur = h1.iloc[i]
         prev = h1.iloc[i - 1]
 
@@ -91,12 +111,7 @@ def _legacy_signals(h1: pd.DataFrame, d1: pd.DataFrame) -> np.ndarray:
         if i >= n - 1:
             continue
 
-        day = t.floor("D") - pd.Timedelta(days=1)
-        if day not in d1.index:
-            continue
-        d = d1.loc[day]
-        trend = (d["close"] > d["ema20"]) and (d["ema20"] > d["ema20_prev"])
-        if not trend:
+        if not cur.get("daily_trend", False):
             continue
 
         near = abs(cur["low"] - cur["ema20"]) <= PULL * cur["atr14"]

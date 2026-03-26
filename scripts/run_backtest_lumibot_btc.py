@@ -48,7 +48,7 @@ from quant_lab.backtest.schema import (
     TradeRecord,
 )
 from quant_lab.data.binance_fetcher import fetch_ohlcv
-from quant_lab.monitoring.influx_writer import points_from_backtest
+from quant_lab.monitoring.influx_writer import points_from_backtest, points_from_ohlcv
 from quant_lab.signal_engine.trendpullback import (
     compute_daily_gate,
     compute_features,
@@ -85,17 +85,33 @@ def _run_vectorised_backtest(
     Returns (trade_log, equity_log).
     Costs (commission + slippage) are deducted per round-trip from trade PnL.
     """
-    # --- Merge daily gate into h1 ---
+    # --- Merge daily gate into h1 (vectorised via merge_asof) ---
     h1_feat = h1.copy()
-    h1_feat["daily_trend"] = False
-    for i in range(len(h1_feat)):
-        t = h1_feat.index[i]
-        day = t.floor("D") - pd.Timedelta(days=1)
-        if day in d1.index:
-            d = d1.loc[day]
-            h1_feat.iloc[i, h1_feat.columns.get_loc("daily_trend")] = bool(
-                (d["close"] > d["ema20"]) and (d["ema20"] > d["ema20_prev"])
-            )
+    h1_idx_name = h1_feat.index.name or "ts"
+    h1_feat.index.name = h1_idx_name
+
+    # Compute daily_trend bool on D1
+    d1_trend = d1[["close", "ema20", "ema20_prev"]].copy()
+    d1_trend["daily_trend"] = (
+        (d1_trend["close"] > d1_trend["ema20"])
+        & (d1_trend["ema20"] > d1_trend["ema20_prev"])
+    )
+
+    # Prepare D1 right-side DataFrame with explicit column name
+    d1_right = d1_trend[["daily_trend"]].copy()
+    d1_right["d1_ts"] = d1_right.index
+    d1_right = d1_right.reset_index(drop=True)
+
+    # merge_asof: for each H1 bar, find the most recent *completed* D1 bar
+    # D1 index = bar open time, direction="backward" ensures no look-ahead
+    h1_feat = pd.merge_asof(
+        h1_feat.reset_index(),
+        d1_right,
+        left_on=h1_idx_name,
+        right_on="d1_ts",
+        direction="backward",
+    ).set_index(h1_idx_name).drop(columns=["d1_ts"], errors="ignore")
+    h1_feat["daily_trend"] = h1_feat["daily_trend"].fillna(False)
 
     # --- Generate signals via signal_engine ---
     sig_df = generate_signals(h1_feat)
@@ -210,6 +226,7 @@ def _build_backtest_output(
     trade_log: list[dict],
     equity_log: list[dict],
     sample: str | None = None,
+    close_series: pd.Series | None = None,
 ) -> BacktestOutput:
     """Convert trade/equity logs to a BacktestOutput."""
     now = datetime.now(tz=timezone.utc)
@@ -257,6 +274,20 @@ def _build_backtest_output(
             holding_bars=td.get("bars_held"),
         ))
 
+    # Build Buy & Hold benchmark from close_series
+    bh_equity_map: dict[pd.Timestamp, float] = {}
+    bh_ret_map: dict[pd.Timestamp, float] = {}
+    bh_total_return = 0.0
+    if close_series is not None and len(close_series) > 0:
+        first_close = float(close_series.iloc[0])
+        if first_close > 0:
+            bh_total_return = float(close_series.iloc[-1]) / first_close - 1.0
+            bh_eq = close_series / first_close
+            bh_ret = close_series.pct_change().fillna(0.0)
+            for ts_idx in bh_eq.index:
+                bh_equity_map[ts_idx] = float(bh_eq.loc[ts_idx])
+                bh_ret_map[ts_idx] = float(bh_ret.loc[ts_idx])
+
     # Build equity curve from logged snapshots
     equity_points: list[EquityCurvePoint] = []
     if equity_log:
@@ -266,18 +297,27 @@ def _build_backtest_output(
             eq_val = eq["equity"]
             ts = eq["ts"]
             if isinstance(ts, pd.Timestamp):
-                ts = ts.to_pydatetime()
+                ts_dt = ts.to_pydatetime()
+            else:
+                ts_dt = ts
             if eq_val > peak:
                 peak = eq_val
             dd = (peak - eq_val) / peak if peak > 0 else 0.0
             prev_eq = equity_log[j - 1]["equity"] if j > 0 else eq_val
             ret_1d = (eq_val - prev_eq) / prev_eq if prev_eq > 0 else 0.0
+
+            # Lookup BH benchmark for this timestamp
+            bh_eq_val = bh_equity_map.get(eq["ts"])
+            bh_ret_val = bh_ret_map.get(eq["ts"])
+
             equity_points.append(EquityCurvePoint(
-                ts=ts,
+                ts=ts_dt,
                 equity=eq_val / initial_equity if initial_equity > 0 else 1.0,
                 equity_unit="index",
                 ret_1d=ret_1d,
                 drawdown=dd,
+                benchmark_equity=bh_eq_val,
+                benchmark_ret_1d=bh_ret_val,
             ))
 
     # Compute aggregate metrics from trades
@@ -327,9 +367,10 @@ def _build_backtest_output(
             avg_trade_return=avg_ret,
             avg_pnl_points=float(np.mean([t.net_pnl for t in trade_records])),
             trades=n_trades,
+            bh_total_return=bh_total_return,
         )
     else:
-        metrics = StrategyMetrics(total_return=0.0, trades=0)
+        metrics = StrategyMetrics(total_return=0.0, trades=0, bh_total_return=bh_total_return)
 
     return BacktestOutput(
         run_metadata=run_metadata,
@@ -398,6 +439,7 @@ def main() -> None:
         trade_log=trade_log,
         equity_log=equity_log,
         sample=args.sample,
+        close_series=h1_base["close"],
     )
 
     m = output.metrics
@@ -416,6 +458,8 @@ def main() -> None:
         return
 
     points = points_from_backtest(output, sample=args.sample, benchmark=args.benchmark)
+    ohlcv_points = points_from_ohlcv(h1_base, symbol=SYMBOL, timeframe="1h", run_id=run_id, source="backtest")
+    points.extend(ohlcv_points)
     counts = Counter(p._name for p in points)
 
     if args.dry_run:

@@ -15,6 +15,8 @@ from .base import (
     Position,
     TradeTick,
 )
+from .crypto_adapter import CryptoAdapter
+from .market_hub import MarketHub
 from .wiring import AdapterBundle, build_adapter_bundle
 
 __all__ = [
@@ -33,4 +35,6 @@ __all__ = [
     "TradeTick",
     "AdapterBundle",
     "build_adapter_bundle",
+    "CryptoAdapter",
+    "MarketHub",
 ]

@@ -169,6 +169,7 @@ class DashboardData:
     signals: pd.DataFrame
     perf_raw: pd.DataFrame
     meta: dict[str, Any]
+    ohlcv: pd.DataFrame | None = None
 
 
 def _load_token_from_env_file() -> str:
@@ -292,6 +293,24 @@ from(bucket: "{cfg.bucket}")
 
     _require_columns(df, REQUIRED_CURVE_COLUMNS, "perf_equity_curve")
     df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    return df
+
+
+def load_ohlcv(client: InfluxDBClient, cfg: InfluxCfg, symbol: str, run_id: str) -> pd.DataFrame:
+    """Load OHLCV data for a given symbol and run_id from InfluxDB."""
+    flux = f'''
+from(bucket: "{cfg.bucket}")
+  |> range(start: -365d)
+  |> filter(fn:(r)=> r._measurement=="ohlcv")
+  |> filter(fn:(r)=> r.symbol == "{symbol}")
+  |> filter(fn:(r)=> r.run_id == "{run_id}")
+  |> filter(fn:(r)=> r._field == "open" or r._field == "high" or r._field == "low" or r._field == "close" or r._field == "volume")
+  |> pivot(rowKey:["_time","symbol","run_id"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns:["_time"], desc:false)
+'''
+    df = query_df(client, cfg.org, flux)
+    if not df.empty and "_time" in df.columns:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df
 
 
@@ -567,13 +586,19 @@ def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, 
     signals = load_signals(client, cfg, strategy, run_id)
     perf_raw = load_perf(client, cfg, strategy, sample, run_id)
 
+    # Load OHLCV for the asset price chart
+    symbol = "N/A"
+    if not perf_raw.empty and "symbol" in perf_raw.columns:
+        symbol = str(perf_raw["symbol"].iloc[0])
+    ohlcv = load_ohlcv(client, cfg, symbol, run_id)
+
     contexts = load_strategy_contexts()
     meta = contexts.get(strategy)
     if isinstance(meta, dict):
         validate_strategy_context_or_raise(meta, strategy)
     else:
         meta = derive_meta_from_canonical(strategy, curve, perf_raw)
-    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta)
+    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta, ohlcv=ohlcv)
 
 
 def render_price_signal_chart(signals: pd.DataFrame) -> None:
@@ -715,13 +740,25 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
     top_left, top_right = st.columns(2)
     with top_left:
         st.markdown("#### Asset Price With Trading Signals")
-        if data.signals.empty or "price" not in data.signals.columns:
+        has_ohlcv = data.ohlcv is not None and not data.ohlcv.empty and "close" in data.ohlcv.columns
+        has_signals = not data.signals.empty and "price" in data.signals.columns
+        if not has_ohlcv and not has_signals:
             st.info("No signal/price data available for this selection.")
         else:
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=data.signals["_time"], y=data.signals["price"].astype(float), mode="lines", name="Raw Price"))
 
-            if "signal_strength" in data.signals.columns:
+            # Draw continuous OHLCV close as base line
+            if has_ohlcv:
+                fig.add_trace(go.Scatter(
+                    x=data.ohlcv["_time"],
+                    y=data.ohlcv["close"].astype(float),
+                    mode="lines",
+                    name="Close Price",
+                    line=dict(width=1.5, color="#94A3B8"),
+                ))
+
+            # Overlay buy/sell signal markers
+            if has_signals and "signal_strength" in data.signals.columns:
                 signal_strength = data.signals["signal_strength"].astype(float)
                 buy_mask = signal_strength > 0
                 sell_mask = signal_strength < 0
