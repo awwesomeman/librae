@@ -12,7 +12,7 @@
   "version": 1,
   "refresh": "30s",
   "time": {
-    "from": "now-24h",
+    "from": "now-180d",
     "to": "now"
   },
   "templating": {
@@ -97,7 +97,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()"
         }
       ],
       "options": {
@@ -169,7 +169,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()\n  |> map(fn: (r) => ({r with _value: float(v: uint(v: r._time)) / 1000000.0}))"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()\n  |> map(fn: (r) => ({r with _value: float(v: uint(v: r._time)) / 1000000.0}))"
         }
       ],
       "options": {
@@ -229,7 +229,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
         }
       ],
       "options": {
@@ -282,7 +282,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"daily_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: today())\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"daily_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
         }
       ],
       "options": {
@@ -339,15 +339,15 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"unrealized_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"unrealized_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
         },
         {
           "refId": "B",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"quantity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"quantity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
         },
         {
           "refId": "C",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"direction\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"direction\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
         }
       ],
       "options": {
@@ -500,7 +500,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"confidence\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"confidence\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
         }
       ],
       "options": {
@@ -578,11 +578,11 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         },
         {
           "refId": "B",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"benchmark_equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"benchmark_equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ],
       "options": {
@@ -680,7 +680,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"drawdown\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"drawdown\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ],
       "options": {
@@ -755,15 +755,15 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"price\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"price\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         },
         {
           "refId": "B",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"price\" and r.signal_type == \"entry\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"price\" and r.signal_type == \"entry\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)"
         },
         {
           "refId": "C",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"price\" and r.signal_type == \"exit\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"price\" and r.signal_type == \"exit\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)"
         }
       ],
       "options": {
@@ -890,7 +890,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ],
       "options": {
@@ -956,7 +956,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"trades\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)\n  |> keep(columns: [\"_time\", \"side\", \"price\", \"quantity\", \"pnl\"])"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.run_id == \"trendpullback_lumibot-btcusdt-20260326t134948-4ef889e5\")\n  |> filter(fn: (r) => r._measurement == \"trades\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)\n  |> keep(columns: [\"_time\", \"side\", \"price\", \"quantity\", \"pnl\"])"
         }
       ],
       "options": {
