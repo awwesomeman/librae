@@ -12,5 +12,7 @@ TODO.md
 USER.md
 __pycache__/
 data/cache/
+data/backtests/
+data/archive/
 memory/
 quant-research-lab/
