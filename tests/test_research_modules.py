@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nautilus_lab.backtest import run_strict_protocol, Periods
-from nautilus_lab.backtest import run_walkforward, WFWindow
-from nautilus_lab.backtest import run_stability
+from quant_lab.backtest import run_strict_protocol, Periods
+from quant_lab.backtest import run_walkforward, WFWindow
+from quant_lab.backtest import run_stability
 from scripts.reporting.render_report import render_brief
 
 

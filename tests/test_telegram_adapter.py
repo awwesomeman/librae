@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nautilus_lab.adapters.telegram import TelegramAdapter, TelegramConfig
+from quant_lab.adapters.telegram import TelegramAdapter, TelegramConfig
 
 
 class TestTelegramConfig:

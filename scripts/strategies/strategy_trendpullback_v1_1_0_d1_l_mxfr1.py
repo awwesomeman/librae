@@ -16,11 +16,11 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-NAUTILUS_ROOT = Path(__file__).resolve().parents[2] / "nautilus_lab"
+NAUTILUS_ROOT = Path(__file__).resolve().parents[2] / "quant_lab"
 if str(NAUTILUS_ROOT) not in sys.path:
     sys.path.insert(0, str(NAUTILUS_ROOT))
 
-from nautilus_lab.backtest import run_strict_protocol, Periods
+from quant_lab.backtest import run_strict_protocol, Periods
 from scripts.etl.core_data_sources import fetch_shioaji_mxfr1_1m
 from scripts.etl.core_features import resample_ohlcv, add_trendpullback_features
 from scripts.reporting.schema_builder import build_cost_settings, build_strategy_output

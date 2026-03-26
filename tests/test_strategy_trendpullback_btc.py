@@ -4,8 +4,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from nautilus_lab.backtest.sample_data import generate_btc_h1_ohlcv
-from nautilus_lab.strategies.trendpullback_btc import (
+from quant_lab.backtest.sample_data import generate_btc_h1_ohlcv
+from quant_lab.strategies.trendpullback_btc import (
     Signal,
     TrendPullBackParams,
     add_daily_gate,

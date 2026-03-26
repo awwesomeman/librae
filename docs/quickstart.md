@@ -4,14 +4,14 @@
 
 ```bash
 cd /home/jasonpan_subscribe/.openclaw/workspace/quant-strategy-lab
-pip install -e nautilus_lab/
+pip install -e quant_lab/
 pip install -e ".[test]"
 ```
 
 ## 1. Run Backtest (TrendPullBack BTC H1)
 
 ```bash
-python3 nautilus_lab/scripts/run_backtest_trendpullback_btc.py --save-dir output/backtest
+python3 quant_lab/scripts/run_backtest_trendpullback_btc.py --save-dir output/backtest
 ```
 
 Outputs:
@@ -22,13 +22,13 @@ Outputs:
 
 ```bash
 # Single scan (no Telegram):
-python3 nautilus_lab/scripts/run_sim_signal_trendpullback_btc.py --once
+python3 quant_lab/scripts/run_sim_signal_trendpullback_btc.py --once
 
 # Continuous loop with Telegram notifications:
 export TELEGRAM_ENABLED=true
 export TELEGRAM_BOT_TOKEN=your_token
 export TELEGRAM_CHAT_ID=your_chat_id
-python3 nautilus_lab/scripts/run_sim_signal_trendpullback_btc.py --telegram --interval 60
+python3 quant_lab/scripts/run_sim_signal_trendpullback_btc.py --telegram --interval 60
 ```
 
 ## 3. Launch Streamlit Dashboard
@@ -39,7 +39,7 @@ export INFLUX_ORG=quant_research
 export INFLUX_BUCKET=nautilus_signals
 export INFLUX_TOKEN=your_token
 
-streamlit run nautilus_lab/app/streamlit_performance.py
+streamlit run quant_lab/app/streamlit_performance.py
 ```
 
 ## 4. Seed Grafana Demo Data

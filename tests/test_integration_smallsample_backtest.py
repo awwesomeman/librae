@@ -210,7 +210,7 @@ from scripts.strategies.strategy_trendpullback_v1_1_0_d1_l_mxfr1 import (
     STRATEGY_NAME as D1_STRATEGY_NAME,
 )
 from scripts.reporting.schema_builder import build_cost_settings, build_strategy_output
-from nautilus_lab.backtest import Periods
+from quant_lab.backtest import Periods
 
 # Build D1-ready fixtures from the same synthetic 1m data (built once)
 _H1_D1 = add_trendpullback_features(resample_ohlcv(_M1, "60min"))

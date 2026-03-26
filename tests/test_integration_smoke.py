@@ -16,9 +16,9 @@ MONITOR_PROFILES_DIR = os.path.join(
 )
 
 LAYERED_MODULES = [
-    "nautilus_lab.backtest.runners",
-    "nautilus_lab.backtest.scoring",
-    "nautilus_lab.backtest.adapter",
+    "quant_lab.backtest.runners",
+    "quant_lab.backtest.scoring",
+    "quant_lab.backtest.adapter",
     "scripts.etl.core_data_sources",
     "scripts.etl.core_features",
     "scripts.monitor.monitor_core",

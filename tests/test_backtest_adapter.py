@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for nautilus_lab.backtest.adapter — legacy dict → BacktestOutput conversion."""
+"""Tests for quant_lab.backtest.adapter — legacy dict → BacktestOutput conversion."""
 
 import os
 import sys
@@ -7,9 +7,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from nautilus_lab.backtest.schema import BacktestOutput, StrategyMetrics, RunMetadata
-from nautilus_lab.backtest.adapter import metrics_dict_to_backtest_output, generate_run_id as _generate_run_id
-from nautilus_lab.backtest.runners import run_strict_protocol, Periods
+from quant_lab.backtest.schema import BacktestOutput, StrategyMetrics, RunMetadata
+from quant_lab.backtest.adapter import metrics_dict_to_backtest_output, generate_run_id as _generate_run_id
+from quant_lab.backtest.runners import run_strict_protocol, Periods
 
 
 # ---------------------------------------------------------------------------

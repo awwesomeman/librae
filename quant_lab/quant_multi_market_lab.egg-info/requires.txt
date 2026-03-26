@@ -1,0 +1,10 @@
+nautilus_trader
+shioaji
+ccxt
+empyrical
+influxdb-client[async]
+httpx
+
+[test]
+pytest>=8.0
+pytest-asyncio>=0.23

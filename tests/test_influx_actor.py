@@ -12,13 +12,13 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-# Make nautilus_lab importable from the tests directory
+# Make quant_lab importable from the tests directory
 _WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_NL_ROOT = os.path.join(_WORKSPACE, "nautilus_lab")
+_NL_ROOT = os.path.join(_WORKSPACE, "quant_lab")
 if _NL_ROOT not in sys.path:
     sys.path.insert(0, _NL_ROOT)
 
-from nautilus_lab.influx_actor import (
+from quant_lab.influx_actor import (
     build_tick_point,
     build_position_point,
     format_telegram_message,

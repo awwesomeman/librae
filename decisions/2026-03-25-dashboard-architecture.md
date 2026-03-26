@@ -22,7 +22,7 @@
 - 使用場景：24/7 無人值守
 
 ### 指標邏輯 Single Truth
-- 所有指標計算走 `nautilus_lab/backtest/metrics.py`
+- 所有指標計算走 `quant_lab/backtest/metrics.py`
 - 計算結果寫入 InfluxDB
 - Grafana 只做讀 + 顯示 + 告警，不在 Flux 裡重算
 - 避免雙重維護風險

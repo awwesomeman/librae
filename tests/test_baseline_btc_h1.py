@@ -11,13 +11,13 @@ import tempfile
 
 import pytest
 
-from nautilus_lab.backtest.sample_data import (
+from quant_lab.backtest.sample_data import (
     generate_btc_h1_ohlcv,
     run_simple_sma_crossover,
 )
-from nautilus_lab.backtest.adapter import metrics_dict_to_backtest_output
-from nautilus_lab.backtest.persistence import save_backtest_output, load_backtest_output
-from nautilus_lab.backtest.schema import (
+from quant_lab.backtest.adapter import metrics_dict_to_backtest_output
+from quant_lab.backtest.persistence import save_backtest_output, load_backtest_output
+from quant_lab.backtest.schema import (
     BacktestOutput,
     RUN_ID_PATTERN,
     VALID_SAMPLE_LABELS,

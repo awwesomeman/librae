@@ -9,14 +9,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from nautilus_lab.backtest.metrics import (
+from quant_lab.backtest.metrics import (
     MetricResult,
     compute_all,
     compute_one,
     get_registry,
     register_metric,
 )
-from nautilus_lab.backtest.schema import (
+from quant_lab.backtest.schema import (
     BacktestOutput,
     EquityCurvePoint,
     RunMetadata,
