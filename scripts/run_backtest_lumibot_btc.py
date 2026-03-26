@@ -178,9 +178,10 @@ def _run_vectorised_backtest(
             qty = 0.0
 
         elif sig == 1 and not in_position:
-            # Entry
+            # Entry — size qty so total outlay (price + cost) fits in available
             entry_price = price
-            qty = (cash * 0.95) / entry_price
+            available = cash * 0.95
+            qty = available / (entry_price * (1 + cost_rate))
             if qty <= 0:
                 continue
             entry_cost = entry_price * qty * cost_rate

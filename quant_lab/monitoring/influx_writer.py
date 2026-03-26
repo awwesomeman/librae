@@ -23,6 +23,7 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
     for tr in output.trades:
         side = str(tr.side).lower()
         signal_strength = 1.0 if side in {"buy", "long"} else -1.0
+        # Entry point
         points.append(
             Point("strategy_signals")
             .tag("schema_version", meta.schema_version or SCHEMA_VERSION)
@@ -38,6 +39,24 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .field("price", float(tr.entry_price))
             .field("quantity", float(tr.quantity))
             .time(tr.entry_ts)
+        )
+        # Exit point
+        points.append(
+            Point("strategy_signals")
+            .tag("schema_version", meta.schema_version or SCHEMA_VERSION)
+            .tag("strategy", meta.strategy)
+            .tag("symbol", meta.symbol)
+            .tag("timeframe", meta.timeframe)
+            .tag("side", side)
+            .tag("source", meta.data_source)
+            .tag("run_id", meta.run_id)
+            .tag("signal_type", "exit")
+            .field("signal_strength", float(-signal_strength))
+            .field("confidence", 0.5)
+            .field("price", float(tr.exit_price))
+            .field("quantity", float(tr.quantity))
+            .field("net_pnl", float(tr.net_pnl))
+            .time(tr.exit_ts)
         )
 
     m = output.metrics

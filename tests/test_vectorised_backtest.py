@@ -129,7 +129,7 @@ class TestVectorisedBacktest:
         points = points_from_backtest(output, sample="test", benchmark="BTC_BH")
         counts = Counter(p._name for p in points)
 
-        assert counts["strategy_signals"] == len(trade_log)
+        assert counts["strategy_signals"] == len(trade_log) * 2  # entry + exit per trade
         assert counts["perf_equity_curve"] == len(equity_log)
         assert counts["perf_equity_curve"] > 1, "Equity curve should have >1 row"
         assert counts["strategy_performance"] == 1

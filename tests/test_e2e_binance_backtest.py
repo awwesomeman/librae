@@ -90,7 +90,7 @@ class TestE2EPipeline:
         assert counts["strategy_performance"] == 1
         assert counts["trade_blotter"] == metrics["trades"]
         assert counts["trade_distribution"] == 1
-        assert counts["strategy_signals"] == metrics["trades"]
+        assert counts["strategy_signals"] == metrics["trades"] * 2  # entry + exit per trade
 
     def test_json_roundtrip(self, btc_df, tmp_path):
         """BacktestOutput can be saved and reloaded."""
