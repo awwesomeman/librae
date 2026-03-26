@@ -7,10 +7,7 @@ import sys
 
 import pytest
 
-# Ensure the quant_lab sub-project is importable from the project root.
-_quant_lab_dir = pathlib.Path(__file__).parent / "quant_lab"
-if str(_quant_lab_dir) not in sys.path:
-    sys.path.insert(0, str(_quant_lab_dir))
+# quant_lab is now a top-level package; no extra sys.path needed.
 
 # Tests that depend on packages not in the core install.
 # nautilus_trader: separate sub-project (quant_lab/), not a root dependency.

@@ -5,7 +5,7 @@ Generates simulated trading signals on a loop, optionally pushing to
 Telegram and/or InfluxDB. Designed for paper/sim mode only.
 
 Usage:
-    python -m quant_lab.scripts.run_sim_signal_trendpullback_btc [--once] [--telegram]
+    python -m scripts.run_sim_signal_trendpullback_btc [--once] [--telegram]
 
 Environment variables:
     TELEGRAM_BOT_TOKEN  - Telegram bot token (optional)
@@ -30,7 +30,7 @@ from quant_lab.strategies.trendpullback_btc import (
     TrendPullBackParams,
     generate_signals,
 )
-from quant_lab.scripts._shared_data import prepare_sample_data
+from scripts._shared_data import prepare_sample_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

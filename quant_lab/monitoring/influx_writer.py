@@ -63,6 +63,11 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
     for metric_name, result in computed.items():
         if metric_name not in {"sharpe", "max_drawdown", "win_rate", "total_return", "annual_return"}:
             perf_point = perf_point.field(metric_name, float(result.value))
+    # Add required fields not covered by compute_all
+    perf_point = perf_point.field("avg_trade_return", float(m.avg_trade_return))
+    perf_point = perf_point.field("exposure_ratio", float(m.exposure_ratio))
+    perf_point = perf_point.field("bh_total_return", float(m.bh_total_return))
+    perf_point = perf_point.field("profit_factor", float(m.profit_factor))
     perf_point = perf_point.time(meta.run_ts)
     points.append(perf_point)
 

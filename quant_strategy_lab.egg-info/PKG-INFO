@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: quant-strategy-lab
+Version: 0.1.0
+Summary: Lumibot-first quant strategy lab — backtest and live trading with unified strategy classes
+Requires-Python: >=3.10
+Requires-Dist: lumibot<5,>=4.4
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: empyrical>=0.5
+Requires-Dist: influxdb-client[async]>=1.36
+Requires-Dist: httpx>=0.24
+Provides-Extra: tw-live
+Requires-Dist: shioaji>=1.3; extra == "tw-live"
+Provides-Extra: test
+Requires-Dist: pytest>=8.0; extra == "test"
+Requires-Dist: pytest-asyncio>=0.23; extra == "test"

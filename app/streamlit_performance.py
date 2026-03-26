@@ -323,7 +323,7 @@ from(bucket: "{cfg.bucket}")
   |> filter(fn:(r)=> r.strategy == "{strategy}")
   |> filter(fn:(r)=> {_sample_filter(sample)})
   |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "total_return" or r._field == "annual_return" or r._field == "sharpe" or r._field == "max_drawdown" or r._field == "win_rate" or r._field == "trades" or r._field == "profit_factor" or r._field == "avg_trade_return" or r._field == "exposure_ratio" or r._field == "bh_total_return")
+  |> filter(fn:(r)=> r._field == "total_return" or r._field == "annual_return" or r._field == "sharpe" or r._field == "sortino" or r._field == "max_drawdown" or r._field == "calmar" or r._field == "win_rate" or r._field == "trades" or r._field == "profit_factor" or r._field == "payoff_ratio" or r._field == "expectancy" or r._field == "avg_trade_return" or r._field == "exposure_ratio" or r._field == "bh_total_return")
   |> last()
 '''
     df = query_df(client, cfg.org, flux)

@@ -2,7 +2,7 @@
 """Backtest runner for TrendPullBack on Binance BTC spot H1.
 
 Usage:
-    python -m quant_lab.scripts.run_backtest_trendpullback_btc [--save-dir DIR]
+    python -m scripts.run_backtest_trendpullback_btc [--save-dir DIR]
 
 Uses deterministic sample data by default.
 """
@@ -22,7 +22,7 @@ from quant_lab.backtest import (
     save_backtest_output,
 )
 from quant_lab.strategies.trendpullback_btc import TrendPullBackParams, backtest
-from quant_lab.scripts._shared_data import prepare_sample_data
+from scripts._shared_data import prepare_sample_data
 
 SYMBOL = "BTCUSDT"
 STRATEGY = "trendpullback"

@@ -1,0 +1,1234 @@
+{
+  "id": null,
+  "uid": "signal_monitoring_v1",
+  "title": "Quant Strategy Monitor",
+  "tags": [
+    "quant_lab",
+    "signal_monitoring",
+    "quant"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "influxdb_uid",
+        "type": "constant",
+        "label": "InfluxDB UID",
+        "query": "bff2ivjbnyqyof",
+        "current": {
+          "text": "bff2ivjbnyqyof",
+          "value": "bff2ivjbnyqyof"
+        },
+        "hide": 2
+      },
+      {
+        "name": "strategy",
+        "label": "Strategy",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "${influxdb_uid}"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"nautilus_signals\", tag: \"strategy\", start: -30d)",
+        "multi": false,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      },
+      {
+        "name": "asset",
+        "label": "Asset",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "${influxdb_uid}"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"nautilus_signals\", tag: \"symbol\", start: -30d)",
+        "multi": false,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "一眼狀態",
+      "id": 1,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "策略狀態",
+      "id": 10,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Stopped",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Running",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "最後心跳",
+      "id": 11,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 5,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()\n  |> map(fn: (r) => ({r with _value: float(v: uint(v: r._time)) / 1000000.0}))"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": -300000
+              },
+              {
+                "color": "red",
+                "value": -600000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "當前淨值",
+      "id": 12,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 10,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "當日 PnL",
+      "id": 13,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"daily_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "持倉狀態",
+      "id": 14,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"unrealized_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+        },
+        {
+          "refId": "B",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"quantity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+        },
+        {
+          "refId": "C",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"direction\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "vertical",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "數量"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "方向"
+              },
+              {
+                "id": "unit",
+                "value": "string"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "long": {
+                        "text": "Long",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "short": {
+                        "text": "Short",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "flat": {
+                        "text": "Flat",
+                        "color": "gray",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "gray",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "績效核心",
+      "id": 2,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Equity Curve",
+      "id": 20,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+        },
+        {
+          "refId": "B",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"benchmark_equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "策略淨值"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Benchmark"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    5
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Drawdown %",
+      "id": 21,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"perf_equity_curve\" and r._field == \"drawdown\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "min"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "max": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "訊號與交易",
+      "id": 3,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "訊號標記圖",
+      "id": 30,
+      "gridPos": {
+        "h": 9,
+        "w": 13,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"signals\" and r._field == \"price\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+        },
+        {
+          "refId": "B",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"signals\" and r._field == \"price\" and r.signal_type == \"buy\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)"
+        },
+        {
+          "refId": "C",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"signals\" and r._field == \"price\" and r.signal_type == \"sell\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "價格"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Buy"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 9
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Sell"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 9
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "最近交易明細（50 筆）",
+      "id": 31,
+      "gridPos": {
+        "h": 9,
+        "w": 11,
+        "x": 13,
+        "y": 16
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${influxdb_uid}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"trades\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.symbol =~ /${asset}/)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)\n  |> keep(columns: [\"_time\", \"side\", \"price\", \"quantity\", \"pnl\"])"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "時間",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {
+              "_time": 0,
+              "side": 1,
+              "price": 2,
+              "quantity": 3,
+              "pnl": 4
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "_time"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "時間"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              },
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "side"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "方向"
+              },
+              {
+                "id": "custom.width",
+                "value": 60
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-text"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "buy": {
+                        "text": "Buy",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "sell": {
+                        "text": "Sell",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "價格"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "quantity"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "數量"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pnl"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "PnL"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-text"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "系統健康",
+      "id": 4,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "stat",
+          "title": "API 延遲",
+          "id": 40,
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 0,
+            "y": 26
+          },
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${influxdb_uid}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"system_health\" and r._field == \"api_latency_ms\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> mean()"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 200
+                  },
+                  {
+                    "color": "red",
+                    "value": 500
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "stat",
+          "title": "錯誤數量（今日）",
+          "id": 41,
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 8,
+            "y": 26
+          },
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${influxdb_uid}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"system_health\" and r._field == \"error_count\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> sum()"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 10
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "stat",
+          "title": "資料新鮮度",
+          "id": 42,
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 16,
+            "y": 26
+          },
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${influxdb_uid}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"system_health\" and r._field == \"data_age_s\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 60
+                  },
+                  {
+                    "color": "red",
+                    "value": 300
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          }
+        }
+      ]
+    }
+  ]
+}
