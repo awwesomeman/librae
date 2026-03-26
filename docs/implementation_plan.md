@@ -1,8 +1,8 @@
 # quant-strategy-lab Implementation Plan
 
-> Updated: 2026-03-26
-> Architecture: Signal Engine-first（pure function）+ 模組化分工
-> Status: Phase 0 收尾中，重構進行中
+> Updated: 2026-03-26（最後同步）
+> Architecture: Signal Engine-first（pure function）+ 模組化分工 + MarketAdapter 抽象層
+> Status: Phase 0 ✅ 完成；Phase 1 進行中（回測正確性審查）
 
 ---
 
@@ -66,40 +66,43 @@ Single-asset, verifiable, monitorable MVP with correct performance metrics:
 | Parquet 歸檔 | ✅ 完成 |
 | 目錄結構扁平化（nautilus_lab → quant_lab） | ✅ 完成 |
 | CI 分流（core / tw-live） | ✅ 完成 |
-| **signal_engine pure function 抽出** | ❌ 待執行 |
-| **pandas_ta 統一指標庫** | ❌ 待執行 |
-| **成本模型（commission + slippage）** | ❌ 待執行 |
-| **parity test（新舊指標對比）** | ❌ 待執行 |
+| **signal_engine pure function 抽出** | ✅ 完成（Sprint 1） |
+| **pandas_ta_classic 統一指標庫** | ✅ 完成 |
+| **成本模型（commission + slippage）** | ✅ 完成 |
+| **parity test（新舊指標對比）** | ✅ 完成（11 tests） |
+| signal_engine 接進 monitor pipeline | ✅ 完成（Sprint 2） |
+| Parquet cache（binance_fetcher） | ✅ 完成（Sprint 3） |
+| E2E monitor pipeline 整合測試 | ✅ 完成（Sprint 4） |
+| Grafana dashboard 對齊 strategy_signals | ✅ 完成（Sprint 5） |
+| CryptoAdapter + MarketHub | ✅ 完成（Sprint 6） |
+| 排程監控（每小時自動寫 InfluxDB） | ✅ 完成（Sprint 7） |
+| BH benchmark 曲線計算 | ✅ 完成 |
+| OHLCV 寫入 InfluxDB（Streamlit 走勢圖） | ✅ 完成 |
+| **回測正確性審查（daily gate 對齊、look-ahead bias、向量化）** | 🔄 進行中 |
 
-### Phase 0 重構 Sprint（當前任務）
-
-**Sprint 1（影響正確性）**
-1. 抽出 `quant_lab/signal_engine/trendpullback.py`（pure function）
-2. 加 `commission_bps` + `slippage_bps` 參數
-3. parity test（新舊 runner 對比）
-4. runner 呼叫 signal_engine，不再內嵌邏輯
-
-**Sprint 2（架構完整）**
-5. 指標計算換 pandas_ta
-6. quantstats 橋接（`compute_tearsheet`）
-
-### Phase 1 — Experiment tracking（Day 60）
+### Phase 1 — 回測正確性 & 策略優化（當前）
 
 | 交付項目 | 狀態 |
 |---------|------|
-| MLflow server 整合 | 待執行 |
-| ≥2 策略可比較 | 待執行 |
-| Streamlit 策略漂移偵測（回測 vs 即時）| 待執行 |
-| 回歸基準測試上 CI | 待執行 |
+| daily gate D1 對齊修正（merge_asof） | 🔄 進行中 |
+| look-ahead bias 自動化測試 | 🔄 進行中 |
+| entry cost 計算修正（qty 精度） | ⏳ 待執行 |
+| max_hold_bars 同步（engine ↔ runner） | ⏳ 待執行 |
+| Sharpe 改用 bar returns（quantstats 橋接） | ⏳ 待執行 |
+| 參數掃描（vectorbt） | ⏳ 待執行 |
+| 回測自動 ETL（跑完自動推 InfluxDB） | ⏳ 待執行 |
+| ≥2 策略可比較 | ⏳ 待執行 |
+| Streamlit 策略漂移偵測（回測 vs 即時）| ⏳ 待執行 |
 
 ### Phase 2 — Scheduling, notifications, API（Day 90）
 
 | 交付項目 | 狀態 |
 |---------|------|
-| 排程（cron/Prefect） | 待執行 |
-| Telegram 訊號推播（正式版） | 待執行 |
-| Grafana 告警規則 | 待執行 |
-| FastAPI skeleton | 待執行 |
+| 排程（每小時 scheduler） | ✅ 完成 |
+| Telegram 訊號推播（正式版） | ⏳ 待執行 |
+| Grafana 告警規則 | ⏳ 待執行 |
+| FastAPI skeleton | ⏳ 待執行 |
+| MLflow server 整合 | ⏳ 待執行 |
 
 ### Phase 3 — Multi-asset & subscription platform
 
@@ -115,6 +118,7 @@ Single-asset, verifiable, monitorable MVP with correct performance metrics:
 
 詳細見 `decisions/` 目錄：
 - `2026-03-26-platform-architecture.md`：整體架構分工
+- `2026-03-26-market-adapter-architecture.md`：MarketAdapter / MarketHub 設計
 - `2026-03-26-performance-metrics-standard.md`：績效計算標準
 - `2026-03-26-backtest-performance-optimization.md`：回測效能策略
 - `2026-03-26-dashboard-data-scope.md`：儀表板資料範圍
