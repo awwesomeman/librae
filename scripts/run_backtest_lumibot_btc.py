@@ -303,19 +303,23 @@ def _build_backtest_output(
             holding_bars=td.get("bars_held"),
         ))
 
-    # Build Buy & Hold benchmark from close_series
+    # Build Buy & Hold benchmark from close_series, aligned to equity_log start
     bh_equity_map: dict[pd.Timestamp, float] = {}
     bh_ret_map: dict[pd.Timestamp, float] = {}
     bh_total_return = 0.0
-    if close_series is not None and len(close_series) > 0:
-        first_close = float(close_series.iloc[0])
-        if first_close > 0:
-            bh_total_return = float(close_series.iloc[-1]) / first_close - 1.0
-            bh_eq = close_series / first_close
-            bh_ret = close_series.pct_change().fillna(0.0)
-            for ts_idx in bh_eq.index:
-                bh_equity_map[ts_idx] = float(bh_eq.loc[ts_idx])
-                bh_ret_map[ts_idx] = float(bh_ret.loc[ts_idx])
+    if close_series is not None and len(close_series) > 0 and equity_log:
+        # Align BH start to equity_log first timestamp (after warmup)
+        first_equity_ts = equity_log[0]["ts"]
+        close_aligned = close_series[close_series.index >= first_equity_ts]
+        if len(close_aligned) > 0:
+            first_close = float(close_aligned.iloc[0])
+            if first_close > 0:
+                bh_total_return = float(close_aligned.iloc[-1]) / first_close - 1.0
+                bh_eq = close_aligned / first_close  # starts at 1.0
+                bh_ret = close_aligned.pct_change().fillna(0.0)
+                for ts_idx in bh_eq.index:
+                    bh_equity_map[ts_idx] = float(bh_eq.loc[ts_idx])
+                    bh_ret_map[ts_idx] = float(bh_ret.loc[ts_idx])
 
     # Build equity curve from logged snapshots
     equity_points: list[EquityCurvePoint] = []
