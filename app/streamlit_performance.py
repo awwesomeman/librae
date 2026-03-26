@@ -496,7 +496,7 @@ from(bucket: "{cfg.bucket}")
 
 def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     """Build Order Detail table from trade_blotter DataFrame."""
-    _ORDER_DETAIL_COLUMNS = ["#", "Entry Time", "Exit Time", "Side", "Entry Price", "Exit Price", "Qty", "Holding Bars", "Gross Return %"]
+    _ORDER_DETAIL_COLUMNS = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %"]
 
     if blotter.empty:
         return pd.DataFrame(columns=_ORDER_DETAIL_COLUMNS)
@@ -505,20 +505,23 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("_time", ascending=True).reset_index(drop=True)
 
     out = pd.DataFrame()
-    out["#"] = range(1, len(df) + 1)
 
     # entry_time: already formatted by load_trade_blotter; fallback to "—"
     if "entry_time" in df.columns:
         out["Entry Time"] = df["entry_time"].apply(lambda v: "—" if str(v).strip() in ("", "nan", "NaT", "None") else str(v))
     else:
-        out["Entry Time"] = "—"
+        out["Entry Time"] = pd.Series(["—"] * len(df), index=df.index)
 
     out["Exit Time"] = pd.to_datetime(df["_time"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
     side_raw = df.get("side", pd.Series(["buy"] * len(df))).astype(str).str.lower()
-    out["Side"] = side_raw.apply(lambda s: "Long" if s == "buy" else s.capitalize())
+    qty = pd.to_numeric(df.get("quantity"), errors="coerce").round(4)
+    # Merge Side + Qty → Position with sign: Long(buy) → +qty, Short(sell) → -qty
+    out["Position"] = [
+        f"+{q:.4f}" if s == "buy" else f"-{q:.4f}"
+        for s, q in zip(side_raw, qty)
+    ]
     out["Entry Price"] = pd.to_numeric(df.get("entry_price"), errors="coerce").round(2)
     out["Exit Price"] = pd.to_numeric(df.get("exit_price"), errors="coerce").round(2)
-    out["Qty"] = pd.to_numeric(df.get("quantity"), errors="coerce").round(4)
     out["Holding Bars"] = pd.to_numeric(df.get("holding_bars"), errors="coerce").astype("Int64")
 
     entry = pd.to_numeric(df.get("entry_price"), errors="coerce")
@@ -876,13 +879,17 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
                 return "color: #10B981; font-weight: 600" if v > 0 else ("color: #EF4444; font-weight: 600" if v < 0 else "")
 
             styled = order_df.style.applymap(_color_return, subset=["Gross Return %"]).format(
-                {"Entry Price": "{:.2f}", "Exit Price": "{:.2f}", "Qty": "{:.4f}", "Gross Return %": "{:+.2f}%"}
+                {"Entry Price": "{:.2f}", "Exit Price": "{:.2f}", "Gross Return %": "{:+.2f}%"}
             )
+            # column_order ensures Entry Time, Exit Time, Position are always first.
+            # 待 Streamlit 正式支援 freeze/pinned_columns 時啟用原生凍結欄位功能。
+            _COLUMN_ORDER = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %"]
             st.dataframe(
                 styled,
                 use_container_width=True,
                 hide_index=True,
                 height=TABLE_HEIGHT_PERF,
+                column_order=_COLUMN_ORDER,
             )
 
 

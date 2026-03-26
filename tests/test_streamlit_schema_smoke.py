@@ -103,8 +103,9 @@ def test_build_order_details_entry_time_column_order() -> None:
     blotter = _make_blotter(entry_time=["2026-03-04 06:00"])
     result = build_order_details(blotter)
     cols = list(result.columns)
-    assert cols[1] == "Entry Time"
-    assert cols[2] == "Exit Time"
+    assert cols[0] == "Entry Time"
+    assert cols[1] == "Exit Time"
+    assert cols[2] == "Position"
 
 
 def test_build_order_details_entry_time_empty_string_shows_dash() -> None:
@@ -123,3 +124,33 @@ def test_build_order_details_entry_time_missing_column_shows_dash() -> None:
 def test_build_order_details_empty_blotter_has_entry_time_column() -> None:
     result = build_order_details(pd.DataFrame())
     assert "Entry Time" in result.columns
+
+
+def test_build_order_details_no_serial_side_qty_columns() -> None:
+    """#, Side, Qty columns should not exist in output."""
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])
+    result = build_order_details(blotter)
+    for removed_col in ("#", "Side", "Qty"):
+        assert removed_col not in result.columns
+
+
+def test_build_order_details_position_long() -> None:
+    """Long (buy) → +qty formatted to 4 decimals."""
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])  # side=buy, qty=1.0
+    result = build_order_details(blotter)
+    assert result["Position"].iloc[0] == "+1.0000"
+
+
+def test_build_order_details_position_short() -> None:
+    """Short (sell) → -qty formatted to 4 decimals."""
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"], side=["sell"])
+    result = build_order_details(blotter)
+    assert result["Position"].iloc[0] == "-1.0000"
+
+
+def test_build_order_details_full_columns() -> None:
+    """Output columns must exactly match the expected schema."""
+    expected = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %"]
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])
+    result = build_order_details(blotter)
+    assert list(result.columns) == expected
