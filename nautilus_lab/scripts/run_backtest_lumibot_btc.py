@@ -4,8 +4,8 @@
 Skills: python, quant
 
 Pipeline:
-  1. Fetch BTC/USDT 1m OHLCV from Binance (paginated)
-  2. Resample to H1/D1, compute TrendPullback features
+  1. Fetch BTC/USDT 1h OHLCV from Binance (paginated)
+  2. Compute H1 features, resample H1→D1 for daily gate
   3. Run through Lumibot backtesting engine with actual trading
   4. Build BacktestOutput with canonical metrics (metrics.py)
   5. Write canonical measurements to InfluxDB
@@ -370,7 +370,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Backtest TrendPullback via Lumibot on real Binance BTC/USDT"
     )
-    p.add_argument("--months", type=int, default=1, help="Lookback months for 1m data (default: 1)")
+    p.add_argument("--months", type=int, default=6, help="Lookback months for 1h data (default: 6)")
     p.add_argument("--out-dir", type=str, default=str(ROOT / "data" / "backtests"))
     p.add_argument("--no-influx", action="store_true", help="Skip InfluxDB write")
     p.add_argument("--dry-run", action="store_true", help="Print InfluxDB points without writing")
@@ -383,19 +383,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # 1) Fetch real 1m data
-    print(f"[1/5] Fetching Binance {SYMBOL} 1m data ({args.months} months)...")
-    m1_raw = fetch_ohlcv(symbol=SYMBOL, interval="1m", months=args.months)
-    print(f"       bars={len(m1_raw)}, range={m1_raw['timestamp'].iloc[0]} ~ {m1_raw['timestamp'].iloc[-1]}")
+    # 1) Fetch real H1 data (not M1 — strategy decides on H1, M1 is unnecessary)
+    print(f"[1/5] Fetching Binance {SYMBOL} 1h data ({args.months} months)...")
+    h1_raw = fetch_ohlcv(symbol=SYMBOL, interval="1h", months=args.months)
+    print(f"       bars={len(h1_raw)}, range={h1_raw['timestamp'].iloc[0]} ~ {h1_raw['timestamp'].iloc[-1]}")
 
-    # Convert to indexed DataFrame for resampling
-    m1 = m1_raw.set_index("timestamp")
-    m1.index.name = "ts"
+    # Convert to indexed DataFrame
+    h1_base = h1_raw.set_index("timestamp")
+    h1_base.index.name = "ts"
 
-    # 2) Resample and compute features
+    # 2) Compute features on H1; resample H1→D1 for daily gate
     print("[2/5] Computing H1/D1 features...")
-    h1 = add_trendpullback_features(resample_ohlcv(m1, "60min"))
-    d1 = add_daily_trend_gate(resample_ohlcv(m1, "1D"))
+    h1 = add_trendpullback_features(h1_base)
+    d1 = add_daily_trend_gate(resample_ohlcv(h1_base, "1D"))
     print(f"       H1 bars={len(h1)}, D1 bars={len(d1)}")
 
     # 3) Run Lumibot backtest
@@ -406,8 +406,8 @@ def main() -> None:
     usd_asset = Asset("USD", asset_type="forex")
 
     # Trim dates to avoid DST edge cases (same as PoC)
-    data_start = m1.index[0]
-    data_end = m1.index[-1]
+    data_start = h1_base.index[0]
+    data_end = h1_base.index[-1]
     bt_start = (data_start + timedelta(days=7)).replace(
         hour=0, minute=0, second=0, microsecond=0, tzinfo=None
     )
@@ -415,7 +415,7 @@ def main() -> None:
         hour=0, minute=0, second=0, microsecond=0, tzinfo=None
     )
 
-    lumi_df = m1.copy()
+    lumi_df = h1_base.copy()
     if lumi_df.index.tz is not None:
         lumi_df.index = lumi_df.index.tz_localize(None)
 
@@ -437,7 +437,7 @@ def main() -> None:
             pandas_data=[pandas_data],
             parameters={
                 "pull": 0.3, "bn": 5, "en": 20, "max_hold_bars": 24,
-                "run_id": run_id, "_h1": h1, "_d1": d1, "_m1": m1,
+                "run_id": run_id, "_h1": h1, "_d1": d1, "_m1": None,
             },
             budget=args.budget,
             show_plot=False,

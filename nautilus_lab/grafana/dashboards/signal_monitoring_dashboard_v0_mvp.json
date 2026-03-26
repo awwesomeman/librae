@@ -1,487 +1,354 @@
 {
   "id": null,
-  "uid": "signal_monitoring_v0",
+  "uid": "signal_monitoring_v1",
   "title": "Quant Strategy Monitor",
-  "tags": [
-    "nautilus_lab",
-    "signal_monitoring",
-    "quant",
-    "schema_1_0_0"
-  ],
+  "tags": ["nautilus_lab", "signal_monitoring", "quant"],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 1,
   "refresh": "30s",
-  "time": {
-    "from": "now-24h",
-    "to": "now"
-  },
+  "time": {"from": "now-24h", "to": "now"},
   "templating": {
     "list": [
       {
-        "name": "schema_version",
+        "name": "influxdb_uid",
         "type": "constant",
-        "query": "1.0.0",
-        "current": { "text": "1.0.0", "value": "1.0.0" },
-        "hide": 2,
-        "label": "schema_version"
+        "label": "InfluxDB UID",
+        "query": "replace_with_influxdb_uid",
+        "current": {"text": "replace_with_influxdb_uid", "value": "replace_with_influxdb_uid"},
+        "hide": 2
       },
       {
         "name": "strategy",
         "label": "Strategy",
         "type": "query",
-        "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"strategy\", predicate: (r) => r._measurement == \"strategy_signals\" and r.schema_version == \"${schema_version}\", start: -30d)",
-        "multi": true,
-        "includeAll": true,
-        "allValue": ".*",
-        "current": { "text": "All", "value": "$__all" }
-      },
-      {
-        "name": "run_id",
-        "label": "Run ID",
-        "type": "query",
-        "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"run_id\", predicate: (r) => r._measurement == \"strategy_signals\" and r.schema_version == \"${schema_version}\", start: -90d)",
+        "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"nautilus_signals\", tag: \"strategy\", start: -30d)",
         "multi": false,
-        "includeAll": false,
-        "sort": 3,
-        "current": { "text": "latest", "value": "latest" }
-      },
-      {
-        "name": "sample",
-        "label": "Sample",
-        "type": "custom",
-        "query": "train,oos",
-        "current": { "text": "oos", "value": "oos" }
-      },
-      {
-        "name": "timeframe",
-        "label": "Timeframe",
-        "type": "query",
-        "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"timeframe\", predicate: (r) => r._measurement == \"strategy_signals\" and r.schema_version == \"${schema_version}\", start: -30d)",
-        "multi": true,
         "includeAll": true,
         "allValue": ".*",
-        "current": { "text": "H1", "value": "H1" }
+        "current": {"text": "All", "value": "$__all"},
+        "refresh": 2
       },
       {
         "name": "asset",
         "label": "Asset",
         "type": "query",
-        "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"asset\", predicate: (r) => r._measurement == \"strategy_signals\" and r.schema_version == \"${schema_version}\", start: -30d)",
-        "multi": true,
-        "includeAll": true,
-        "allValue": ".*",
-        "current": { "text": "All", "value": "$__all" }
-      },
-      {
-        "name": "side",
-        "label": "Side",
-        "type": "custom",
-        "query": "both,buy,sell",
-        "current": { "text": "both", "value": "both" }
-      },
-      {
-        "name": "benchmark",
-        "label": "Benchmark",
-        "type": "query",
-        "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"benchmark\", predicate: (r) => r._measurement == \"strategy_performance\" and r.schema_version == \"${schema_version}\", start: -90d)",
+        "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"nautilus_signals\", tag: \"asset\", start: -30d)",
         "multi": false,
-        "includeAll": false,
-        "current": { "text": "primary", "value": "primary" }
-      },
-      {
-        "name": "signal_type",
-        "label": "Signal Type",
-        "type": "query",
-        "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"signal_type\", predicate: (r) => r._measurement == \"strategy_signals\" and r.schema_version == \"${schema_version}\", start: -30d)",
-        "multi": true,
         "includeAll": true,
         "allValue": ".*",
-        "current": { "text": "All", "value": "$__all" }
-      },
-      {
-        "name": "bucket",
-        "type": "constant",
-        "label": "bucket",
-        "query": "nautilus",
-        "current": { "text": "nautilus", "value": "nautilus" },
-        "hide": 2
-      },
-      {
-        "name": "influxdb_uid",
-        "type": "constant",
-        "label": "influxdb_uid",
-        "query": "replace_with_influxdb_uid",
-        "current": { "text": "replace_with_influxdb_uid", "value": "replace_with_influxdb_uid" },
-        "hide": 2
+        "current": {"text": "All", "value": "$__all"},
+        "refresh": 2
       }
     ]
   },
   "panels": [
     {
       "type": "row",
-      "title": "KPI Overview",
-      "id": 100,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "一眼狀態",
+      "id": 1,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
       "collapsed": false,
       "panels": []
     },
     {
       "type": "stat",
-      "title": "Total Return",
-      "description": "Cumulative return for the selected time range: (last_equity - first_equity) / first_equity",
-      "id": 7,
-      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "title": "策略狀態",
+      "id": 10,
+      "gridPos": {"h": 4, "w": 5, "x": 0, "y": 1},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
       "targets": [
         {
           "refId": "A",
-          "query": "first_val = from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> group()\n  |> first()\n  |> set(key: \"_field\", value: \"first\")\n\nlast_val = from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> group()\n  |> last()\n  |> set(key: \"_field\", value: \"last\")\n\nunion(tables: [first_val, last_val])\n  |> pivot(rowKey: [\"_start\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({_value: if r.first > 0.0 then (r.last - r.first) / r.first else 0.0}))"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()"
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "colorMode": "background",
         "graphMode": "none",
-        "textMode": "auto"
+        "textMode": "auto",
+        "justifyMode": "center"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {"text": "Stopped", "color": "red", "index": 0},
+                "1": {"text": "Running", "color": "green", "index": 1}
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": -0.02 },
-              { "color": "green", "value": 0 }
-            ]
-          }
+            "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]
+          },
+          "color": {"mode": "thresholds"}
         },
         "overrides": []
       }
     },
     {
       "type": "stat",
-      "title": "Sharpe Ratio",
-      "description": "Latest Sharpe ratio snapshot from strategy_performance",
-      "id": 8,
-      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "title": "最後心跳",
+      "id": 11,
+      "gridPos": {"h": 4, "w": 5, "x": 5, "y": 1},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"sharpe\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> last()"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_heartbeat\" and r._field == \"status\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()\n  |> map(fn: (r) => ({r with _value: float(v: uint(v: r._time)) / 1000000.0}))"
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 0 },
-              { "color": "yellow", "value": 1 },
-              { "color": "green", "value": 2 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Max Drawdown",
-      "description": "Maximum drawdown observed in the selected time range",
-      "id": 21,
-      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"drawdown_pct\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> min()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": -0.2 },
-              { "color": "yellow", "value": -0.1 },
-              { "color": "green", "value": -0.05 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Win Rate",
-      "description": "Latest win rate snapshot from strategy_performance",
-      "id": 6,
-      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"win_rate\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if exists r.side and \"${side}\" != \"both\" then r.side == \"${side}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> last()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 0.4 },
-              { "color": "green", "value": 0.5 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Trade Count",
-      "description": "Total number of trades executed in the selected time range",
-      "id": 9,
-      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 1 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"trade_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> last()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 0,
+          "unit": "dateTimeFromNow",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "blue", "value": null }
+              {"color": "green", "value": null},
+              {"color": "orange", "value": -300000},
+              {"color": "red", "value": -600000}
             ]
           },
-          "color": { "mode": "fixed", "fixedColor": "blue" }
+          "color": {"mode": "thresholds"}
         },
         "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "當前淨值",
+      "id": 12,
+      "gridPos": {"h": 4, "w": 4, "x": 10, "y": 1},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "text", "value": null}]
+          },
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "當日 PnL",
+      "id": 13,
+      "gridPos": {"h": 4, "w": 5, "x": 14, "y": 1},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"daily_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]
+          },
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "持倉狀態",
+      "id": 14,
+      "gridPos": {"h": 4, "w": 5, "x": 19, "y": 1},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"unrealized_pnl\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> last()"
+        },
+        {
+          "refId": "B",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"quantity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> last()"
+        },
+        {
+          "refId": "C",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"positions\" and r._field == \"direction\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "vertical",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]
+          },
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "B"},
+            "properties": [
+              {"id": "displayName", "value": "數量"},
+              {"id": "unit", "value": "short"},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "text"}},
+              {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}}
+            ]
+          },
+          {
+            "matcher": {"id": "byFrameRefID", "options": "C"},
+            "properties": [
+              {"id": "displayName", "value": "方向"},
+              {"id": "unit", "value": "string"},
+              {"id": "mappings", "value": [
+                {"type": "value", "options": {
+                  "long":  {"text": "Long",  "color": "green", "index": 0},
+                  "short": {"text": "Short", "color": "red",   "index": 1},
+                  "flat":  {"text": "Flat",  "color": "gray",  "index": 2}
+                }}
+              ]},
+              {"id": "color", "value": {"mode": "thresholds"}},
+              {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "gray", "value": null}]}}
+            ]
+          }
+        ]
       }
     },
     {
       "type": "row",
-      "title": "Equity & PnL",
-      "id": 200,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "title": "績效核心",
+      "id": 2,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Equity Curve",
-      "description": "Cumulative equity over time, per strategy",
-      "id": 10,
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 6 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "id": 20,
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 6},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> aggregateWindow(every: 5m, fn: last, createEmpty: false)\n  |> yield(name: \"equity\")"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+        },
+        {
+          "refId": "B",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"benchmark_equity\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ],
+      "options": {
+        "tooltip": {"mode": "multi", "sort": "none"},
+        "legend": {"displayMode": "list", "placement": "bottom", "calcs": []}
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
           "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
             "lineWidth": 2,
             "fillOpacity": 10,
-            "pointSize": 3,
+            "gradientMode": "none",
             "showPoints": "never",
-            "gradientMode": "scheme"
-          },
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "min", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "PnL (Per Period)",
-      "description": "Period-over-period PnL as bar chart",
-      "id": 11,
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"pnl\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> aggregateWindow(every: 1h, fn: sum, createEmpty: false)\n  |> yield(name: \"pnl\")"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 0,
-            "fillOpacity": 80,
-            "pointSize": 5,
-            "showPoints": "never",
-            "gradientMode": "none"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 0 }
-            ]
-          },
-          "custom.thresholdsStyle": { "mode": "line" }
+            "spanNulls": false
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "pnl" },
-            "properties": [{ "id": "color", "value": { "mode": "thresholds" } }]
+            "matcher": {"id": "byFrameRefID", "options": "A"},
+            "properties": [
+              {"id": "displayName", "value": "策略淨值"},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byFrameRefID", "options": "B"},
+            "properties": [
+              {"id": "displayName", "value": "Benchmark"},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "gray"}},
+              {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 5]}},
+              {"id": "custom.fillOpacity", "value": 0}
+            ]
           }
         ]
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
       }
     },
     {
-      "type": "row",
-      "title": "Drawdown",
-      "id": 300,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
-      "collapsed": false,
-      "panels": []
-    },
-    {
       "type": "timeseries",
-      "title": "Drawdown (%)",
-      "description": "Running drawdown from equity peak. Deeper = lower on chart.",
-      "id": 20,
-      "gridPos": { "h": 7, "w": 20, "x": 0, "y": 15 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "title": "Drawdown %",
+      "id": 21,
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"drawdown_pct\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> aggregateWindow(every: 5m, fn: last, createEmpty: false)\n  |> yield(name: \"drawdown\")"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"drawdown_pct\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ],
+      "options": {
+        "tooltip": {"mode": "single", "sort": "none"},
+        "legend": {"displayMode": "list", "placement": "bottom", "calcs": ["min"]}
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
           "decimals": 2,
+          "max": 0,
+          "color": {"mode": "fixed", "fixedColor": "red"},
           "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "pointSize": 3,
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "none",
             "showPoints": "never",
-            "gradientMode": "scheme"
+            "spanNulls": false
           },
-          "color": { "mode": "fixed", "fixedColor": "red" },
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": -0.05 },
-              { "color": "red", "value": -0.1 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["min", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "asc" }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Drawdown Duration",
-      "description": "Current drawdown duration in hours (time since last equity peak)",
-      "id": 22,
-      "gridPos": { "h": 7, "w": 4, "x": 20, "y": 15 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_performance\" and r._field == \"drawdown_duration_hours\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => r.benchmark == \"${benchmark}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> last()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "h",
-          "decimals": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 24 },
-              { "color": "red", "value": 72 }
-            ]
+            "steps": [{"color": "red", "value": null}]
           }
         },
         "overrides": []
@@ -489,366 +356,280 @@
     },
     {
       "type": "row",
-      "title": "Signals & Recent Trades",
-      "id": 400,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "title": "訊號與交易",
+      "id": 3,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 15},
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
-      "title": "Signal Strength Timeline",
-      "description": "Rolling signal strength over time, grouped by strategy/asset",
+      "title": "訊號標記圖",
       "id": 30,
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 23 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "gridPos": {"h": 9, "w": 13, "x": 0, "y": 16},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)\n  |> yield(name: \"signal_strength\")"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"signals\" and r._field == \"price\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+        },
+        {
+          "refId": "B",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"signals\" and r._field == \"price\" and r.signal_type == \"buy\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)"
+        },
+        {
+          "refId": "C",
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"signals\" and r._field == \"price\" and r.signal_type == \"sell\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)"
         }
       ],
+      "options": {
+        "tooltip": {"mode": "multi", "sort": "none"},
+        "legend": {"displayMode": "list", "placement": "bottom", "calcs": []}
+      },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "min": 0,
-          "max": 1,
+          "unit": "currencyUSD",
           "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "pointSize": 3,
-            "showPoints": "auto",
-            "fillOpacity": 5
-          },
-          "color": { "mode": "palette-classic" }
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": false
+          }
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "type": "bargauge",
-      "title": "Signal Type Distribution (24h)",
-      "description": "Count of signals by type in the last 24 hours",
-      "id": 31,
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> group(columns: [\"signal_type\"])\n  |> count()\n  |> keep(columns: [\"signal_type\", \"_value\"])"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "A"},
+            "properties": [
+              {"id": "displayName", "value": "價格"},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byFrameRefID", "options": "B"},
+            "properties": [
+              {"id": "displayName", "value": "Buy"},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}},
+              {"id": "custom.showPoints", "value": "always"},
+              {"id": "custom.pointSize", "value": 9},
+              {"id": "custom.lineWidth", "value": 0}
+            ]
+          },
+          {
+            "matcher": {"id": "byFrameRefID", "options": "C"},
+            "properties": [
+              {"id": "displayName", "value": "Sell"},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}},
+              {"id": "custom.showPoints", "value": "always"},
+              {"id": "custom.pointSize", "value": 9},
+              {"id": "custom.lineWidth", "value": 0}
+            ]
+          }
+        ]
       }
     },
     {
       "type": "table",
-      "title": "Recent Trades / Signals",
-      "description": "Last 50 signals with full detail — sorted newest first",
-      "id": 50,
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 31 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
+      "title": "最近交易明細（50 筆）",
+      "id": 31,
+      "gridPos": {"h": 9, "w": 11, "x": 13, "y": 16},
+      "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> pivot(rowKey: [\"_time\", \"strategy\", \"asset\", \"timeframe\", \"run_id\", \"side\", \"signal_type\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"strategy\", \"asset\", \"timeframe\", \"run_id\", \"side\", \"signal_type\", \"signal_strength\", \"confidence\", \"price\", \"quantity\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)"
+          "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"trades\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/ and r.asset =~ /${asset}/)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)\n  |> keep(columns: [\"_time\", \"side\", \"price\", \"quantity\", \"pnl\"])"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{"displayName": "時間", "desc": true}],
+        "footer": {"show": false, "reducer": ["sum"], "fields": ""}
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {"_time": 0, "side": 1, "price": 2, "quantity": 3, "pnl": 4},
+            "renameByName": {}
+          }
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "custom": {"align": "auto", "displayMode": "auto", "inspect": false}
+        },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "_time" },
-            "properties": [{ "id": "displayName", "value": "Time" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "signal_strength" },
+            "matcher": {"id": "byName", "options": "_time"},
             "properties": [
-              { "id": "displayName", "value": "Strength" },
-              { "id": "custom.width", "value": 100 },
-              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    { "color": "red", "value": null },
-                    { "color": "orange", "value": 0.3 },
-                    { "color": "green", "value": 0.6 }
-                  ]
-                }
-              }
+              {"id": "displayName", "value": "時間"},
+              {"id": "unit", "value": "dateTimeAsLocal"},
+              {"id": "custom.width", "value": 165}
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "side" },
+            "matcher": {"id": "byName", "options": "side"},
             "properties": [
-              { "id": "custom.width", "value": 60 },
-              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
-              {
-                "id": "mappings",
-                "value": [
-                  { "type": "value", "options": { "buy":  { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }
-                ]
-              }
+              {"id": "displayName", "value": "方向"},
+              {"id": "custom.width", "value": 60},
+              {"id": "custom.displayMode", "value": "color-text"},
+              {"id": "mappings", "value": [
+                {"type": "value", "options": {
+                  "buy":  {"text": "Buy",  "color": "green", "index": 0},
+                  "sell": {"text": "Sell", "color": "red",   "index": 1}
+                }}
+              ]},
+              {"id": "color", "value": {"mode": "thresholds"}},
+              {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}}
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "price" },
-            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+            "matcher": {"id": "byName", "options": "price"},
+            "properties": [
+              {"id": "displayName", "value": "價格"},
+              {"id": "unit", "value": "currencyUSD"},
+              {"id": "decimals", "value": 2}
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "confidence" },
-            "properties": [{ "id": "unit", "value": "percentunit" }]
+            "matcher": {"id": "byName", "options": "quantity"},
+            "properties": [
+              {"id": "displayName", "value": "數量"},
+              {"id": "unit", "value": "short"},
+              {"id": "decimals", "value": 4}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "pnl"},
+            "properties": [
+              {"id": "displayName", "value": "PnL"},
+              {"id": "unit", "value": "currencyUSD"},
+              {"id": "decimals", "value": 2},
+              {"id": "custom.displayMode", "value": "color-text"},
+              {"id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]
+              }},
+              {"id": "color", "value": {"mode": "thresholds"}}
+            ]
           }
         ]
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [{ "displayName": "Time", "desc": true }],
-        "footer": { "show": false }
       }
     },
     {
       "type": "row",
-      "title": "System Health",
-      "id": 500,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "Heartbeat (Last Signal Age)",
-      "description": "Time since the last signal was received. Green = active, Red = possibly stale.",
-      "id": 1,
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 42 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "import \"date\"\nfrom(bucket: \"${bucket}\")\n  |> range(start: -2h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> last()\n  |> map(fn: (r) => ({ r with _value: float(v: uint(v: date.sub(d: r._time, from: now()))) / 60000000000.0 }))"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "m",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 30 },
-              { "color": "red", "value": 120 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Signals (1h)",
-      "description": "Total signals received in the last hour",
-      "id": 2,
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 42 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_signals\" and r._field == \"signal_strength\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/ and r.asset =~ /${asset:regex}/ and r.timeframe =~ /${timeframe:regex}/)\n  |> filter(fn: (r) => if \"${signal_type:regex}\" == \".*\" then true else r.signal_type =~ /${signal_type:regex}/)\n  |> filter(fn: (r) => if \"${side}\" == \"both\" then true else r.side == \"${side}\")\n  |> filter(fn: (r) => if \"${run_id}\" == \"latest\" then true else r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => if exists r.sample then r.sample == \"${sample}\" else true)\n  |> count()\n  |> last()"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "value",
-        "graphMode": "area"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 5 },
-              { "color": "red", "value": 15 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Error Rate (1h)",
-      "description": "Percentage of signals with error flag in last hour. 0% = healthy.",
-      "id": 3,
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 42 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "total = from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"event_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> sum()\n  |> set(key: \"_field\", value: \"total\")\n\nerrors = from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"error_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> sum()\n  |> set(key: \"_field\", value: \"errors\")\n\nunion(tables: [total, errors])\n  |> pivot(rowKey: [\"_start\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value: if r.total > 0.0 then r.errors / r.total else 0.0 }))"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.01 },
-              { "color": "red", "value": 0.05 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Data Latency (p95)",
-      "description": "95th percentile data ingestion latency in the last hour",
+      "title": "系統健康",
       "id": 4,
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 42 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "collapsed": true,
+      "panels": [
         {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"data_latency_ms\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> quantile(q: 0.95)"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 500 },
-              { "color": "red", "value": 2000 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Data Latency Over Time",
-      "description": "Data ingestion latency trend (p50 and p95)",
-      "id": 40,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
-        {
-          "refId": "p50",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"data_latency_ms\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> aggregateWindow(every: 5m, fn: median, createEmpty: false)\n  |> yield(name: \"p50\")"
-        },
-        {
-          "refId": "p95",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"data_latency_ms\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> aggregateWindow(every: 5m, fn: (tables=<-, column) => tables |> quantile(q: 0.95), createEmpty: false)\n  |> yield(name: \"p95\")"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 5,
-            "pointSize": 3,
-            "showPoints": "never"
+          "type": "stat",
+          "title": "API 延遲",
+          "id": 40,
+          "gridPos": {"h": 4, "w": 8, "x": 0, "y": 26},
+          "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+          "targets": [
+            {
+              "refId": "A",
+              "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"system_health\" and r._field == \"api_latency_ms\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> mean()"
+            }
+          ],
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "colorMode": "background",
+            "graphMode": "area",
+            "textMode": "auto"
           },
-          "color": { "mode": "palette-classic" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 500 },
-              { "color": "red", "value": 2000 }
-            ]
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null},
+                  {"color": "orange", "value": 200},
+                  {"color": "red", "value": 500}
+                ]
+              },
+              "color": {"mode": "thresholds"}
+            },
+            "overrides": []
           }
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Error Rate Over Time",
-      "description": "Error event rate per 5-minute window",
-      "id": 41,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
-      "datasource": { "type": "influxdb", "uid": "${influxdb_uid}" },
-      "targets": [
         {
-          "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"strategy_health\" and r._field == \"error_count\")\n  |> filter(fn: (r) => r.schema_version == \"${schema_version}\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy:regex}/)\n  |> aggregateWindow(every: 5m, fn: sum, createEmpty: true)\n  |> yield(name: \"errors\")"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 0,
-            "fillOpacity": 80,
-            "pointSize": 5,
-            "showPoints": "never"
+          "type": "stat",
+          "title": "錯誤數量（今日）",
+          "id": 41,
+          "gridPos": {"h": 4, "w": 8, "x": 8, "y": 26},
+          "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+          "targets": [
+            {
+              "refId": "A",
+              "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"system_health\" and r._field == \"error_count\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> sum()"
+            }
+          ],
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
           },
-          "color": { "mode": "fixed", "fixedColor": "red" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null},
+                  {"color": "orange", "value": 1},
+                  {"color": "red", "value": 10}
+                ]
+              },
+              "color": {"mode": "thresholds"}
+            },
+            "overrides": []
           }
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
-      }
+        {
+          "type": "stat",
+          "title": "資料新鮮度",
+          "id": 42,
+          "gridPos": {"h": 4, "w": 8, "x": 16, "y": 26},
+          "datasource": {"type": "influxdb", "uid": "${influxdb_uid}"},
+          "targets": [
+            {
+              "refId": "A",
+              "query": "from(bucket: \"nautilus_signals\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"system_health\" and r._field == \"data_age_s\")\n  |> filter(fn: (r) => r.strategy =~ /${strategy}/)\n  |> last()"
+            }
+          ],
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null},
+                  {"color": "orange", "value": 60},
+                  {"color": "red", "value": 300}
+                ]
+              },
+              "color": {"mode": "thresholds"}
+            },
+            "overrides": []
+          }
+        }
+      ]
     }
   ]
 }
