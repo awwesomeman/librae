@@ -16,3 +16,9 @@ data/backtests/
 data/archive/
 memory/
 quant-research-lab/
+
+# Build artifacts
+*.egg-info/
+
+# Secrets
+deploy/.env
