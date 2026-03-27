@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""
-Grafana Dashboard Generator
-三個 dashboard（Backtest / Monitor / Live）從同一 source 產生，panels 定義在一處。
+"""Grafana Dashboard Generator.
+
+Produces three dashboards (Backtest / Monitor / Live) from shared panel definitions.
 Usage: python grafana/generate_dashboards.py
 """
-
 from __future__ import annotations
 
 import copy
@@ -14,9 +13,6 @@ import pathlib
 DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR = pathlib.Path(__file__).parent / "dashboards"
 
-# ---------------------------------------------------------------------------
-# Helper: make a target dict
-# ---------------------------------------------------------------------------
 
 def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
     return {"rawSql": sql, "format": fmt, "refId": ref_id}
@@ -26,19 +22,7 @@ def _stat_target(sql: str) -> dict:
     return _target(sql, "A", "table")
 
 
-# ---------------------------------------------------------------------------
-# BASE_PANELS_DEF  (panel definitions, id/gridPos assigned later)
-# ---------------------------------------------------------------------------
-
-# Each entry: (title, type, h, w, targets, fieldConfig, options)
-# gridPos x/y filled by build_panels()
-
-def _kpi_stat(
-    title: str,
-    sql: str,
-    unit: str | None,
-    thresholds: list[dict],
-) -> dict:
+def _kpi_stat(title: str, sql: str, unit: str | None, thresholds: list[dict]) -> dict:
     fc: dict = {
         "defaults": {
             "thresholds": {"mode": "absolute", "steps": thresholds},
@@ -65,7 +49,6 @@ def _kpi_stat(
 
 
 BASE_PANELS_DEF: list[dict] = [
-    # --- KPI row ---
     _kpi_stat(
         "Total Return",
         "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}'",
@@ -110,7 +93,6 @@ BASE_PANELS_DEF: list[dict] = [
         None,
         [{"color": "blue", "value": None}],
     ),
-    # --- Equity Curve (left half) ---
     {
         "_type": "half",
         "title": "Equity Curve",
@@ -152,7 +134,6 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # --- Drawdown (right half) ---
     {
         "_type": "half",
         "title": "Drawdown %",
@@ -178,7 +159,6 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # --- Trade Signals (left half) ---
     {
         "_type": "half",
         "title": "Trade Signals",
@@ -228,7 +208,6 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # --- Trade Detail (right half) ---
     {
         "_type": "half",
         "title": "Trade Detail",
@@ -278,10 +257,6 @@ BASE_PANELS_DEF: list[dict] = [
         },
     },
 ]
-
-# ---------------------------------------------------------------------------
-# EXTRA_PANELS  (Monitor + Live 額外)
-# ---------------------------------------------------------------------------
 
 EXTRA_PANELS: list[dict] = [
     {
@@ -333,43 +308,34 @@ EXTRA_PANELS: list[dict] = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# build_panels: assign id, gridPos, datasource; strip internal keys
-# ---------------------------------------------------------------------------
-
 def build_panels(panel_defs: list[dict]) -> list[dict]:
+    """Assign id, gridPos, datasource to panel definitions."""
     panels: list[dict] = []
     panel_id = 1
     y = 0
 
-    # Separate KPI row from rest
     kpi_defs = [p for p in panel_defs if p.get("_type") == "kpi"]
     other_defs = [p for p in panel_defs if p.get("_type") != "kpi"]
 
-    # KPI row: 6 stat panels in a single row (w=4 each, total=24)
     x = 0
     for defn in kpi_defs:
-        p = _materialize_panel(defn, panel_id, x, y)
-        panels.append(p)
+        panels.append(_materialize_panel(defn, panel_id, x, y))
         panel_id += 1
         x += defn["w"]
 
     if kpi_defs:
-        y += 4  # KPI row height
+        y += 4
 
-    # Other panels
     x = 0
     for defn in other_defs:
         ptype = defn.get("_type", "full_row")
         if ptype == "full_row":
-            p = _materialize_panel(defn, panel_id, 0, y)
-            panels.append(p)
+            panels.append(_materialize_panel(defn, panel_id, 0, y))
             panel_id += 1
             y += defn["h"]
             x = 0
         elif ptype == "half":
-            p = _materialize_panel(defn, panel_id, x, y)
-            panels.append(p)
+            panels.append(_materialize_panel(defn, panel_id, x, y))
             panel_id += 1
             x += defn["w"]
             if x >= 24:
@@ -381,7 +347,6 @@ def build_panels(panel_defs: list[dict]) -> list[dict]:
 
 def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
     p = copy.deepcopy(defn)
-    # Remove internal keys
     p.pop("_type", None)
     h = p.pop("h")
     w = p.pop("w")
@@ -391,11 +356,7 @@ def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
     return p
 
 
-# ---------------------------------------------------------------------------
-# Template variable
-# ---------------------------------------------------------------------------
-
-def make_run_id_variable(mode: str) -> dict:
+def _make_run_id_variable(mode: str) -> dict:
     return {
         "name": "run_id",
         "type": "query",
@@ -409,10 +370,6 @@ def make_run_id_variable(mode: str) -> dict:
         "multi": False,
     }
 
-
-# ---------------------------------------------------------------------------
-# render_dashboard
-# ---------------------------------------------------------------------------
 
 def render_dashboard(
     title: str,
@@ -432,17 +389,13 @@ def render_dashboard(
         "editable": True,
         "time": {"from": default_time, "to": "now"},
         "refresh": "5m",
-        "templating": {"list": [make_run_id_variable(mode)]},
+        "templating": {"list": [_make_run_id_variable(mode)]},
         "annotations": {"list": []},
         "panels": panels,
         "schemaVersion": 39,
         "version": 1,
     }
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 DASHBOARDS = [
     ("Backtest", "backtest_dashboard", "backtest", "now-180d", []),

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +41,6 @@ PARAM_DEFAULT_DESCRIPTION = "Reserved for future extension."
 
 SAMPLE_PREFERRED_ORDER = ["oos", "train", "full", "validation"]
 
-REQUIRED_SIGNAL_COLUMNS = {"_time", "price", "signal_strength", "side", "run_id", "strategy"}
-REQUIRED_CURVE_COLUMNS = {"_time", "equity", "run_id", "strategy", "sample"}
 def sample_label(sample: str, periods: dict[str, Any]) -> str:
     display = "test" if sample == "oos" else sample
     period_key = "oos" if sample == "oos" else sample
@@ -56,48 +53,6 @@ def resolve_sample_options(samples: list[str]) -> list[str]:
     ordered = [s for s in SAMPLE_PREFERRED_ORDER if s in seen]
     extras = sorted([s for s in seen if s not in SAMPLE_PREFERRED_ORDER])
     return ordered + extras
-
-PERF_METRIC_MAP = {
-    "total_return": ("Total Return", "Strategy"),
-    "annual_return": ("Annual Return", "Strategy"),
-    "sharpe": ("Sharpe", "Strategy"),
-    "sortino": ("Sortino", "Strategy"),
-    "max_drawdown": ("Max Drawdown", "Strategy"),
-    "calmar": ("Calmar", "Strategy"),
-    "win_rate": ("Win Rate", "Strategy"),
-    "profit_factor": ("Profit Factor", "Strategy"),
-    "payoff_ratio": ("Payoff Ratio", "Strategy"),
-    "expectancy": ("Expectancy", "Strategy"),
-    "trades": ("Trades", "Strategy"),
-}
-
-PERF_METRIC_ORDER = [
-    "Total Return",
-    "Annual Return",
-    "Sharpe",
-    "Sortino",
-    "Max Drawdown",
-    "Calmar",
-    "Win Rate",
-    "Profit Factor",
-    "Payoff Ratio",
-    "Expectancy",
-    "Trades",
-]
-METRIC_DEFINITIONS = {
-    "Total Return": "Net return over the selected period.",
-    "Annual Return": "Annualized return over the selected period.",
-    "Sharpe": "Risk-adjusted return ratio (annualized).",
-    "Sortino": "Risk-adjusted return using downside deviation only.",
-    "Max Drawdown": "Largest peak-to-trough decline in portfolio value.",
-    "Calmar": "Annual return divided by max drawdown.",
-    "Win Rate": "Winning trades divided by total trades.",
-    "Profit Factor": "Gross profit divided by gross loss.",
-    "Payoff Ratio": "Average win divided by average loss.",
-    "Expectancy": "Expected PnL per trade.",
-    "Trades": "Number of round-trip transactions.",
-}
-
 
 PARAMETER_SCHEMA = {
     "data": [
@@ -128,26 +83,6 @@ PARAMETER_SCHEMA = {
         ("entry_threshold", None, "Signal threshold required to trigger entry."),
     ],
 }
-
-METRIC_FORMULAS = {
-    "Total Return": "(Ending Equity / Starting Equity) - 1",
-    "Annual Return": "Annualized return over the selected period",
-    "Sharpe": "Mean Excess Return / Return Std Dev (annualized)",
-    "Sortino": "Mean Return / Downside Std Dev (annualized)",
-    "Max Drawdown": "min((Equity - RunningMaxEquity) / RunningMaxEquity)",
-    "Calmar": "Annual Return / Max Drawdown",
-    "Win Rate": "Winning Trades / Total Trades",
-    "Profit Factor": "Gross Profit / Gross Loss",
-    "Payoff Ratio": "Average Win / Average Loss",
-    "Expectancy": "Avg Win * Win Rate - Avg Loss * Loss Rate",
-    "Trades": "Count(Round-Trip Transactions)",
-}
-
-
-def ordered_metrics(metric_values: list[str]) -> list[str]:
-    existing = set(metric_values)
-    return [metric for metric in PERF_METRIC_ORDER if metric in existing]
-
 
 @dataclass
 class DashboardData:
@@ -265,24 +200,6 @@ def build_general_metrics_table(perf_raw: pd.DataFrame, curve: pd.DataFrame | No
     return pd.DataFrame(rows)
 
 
-def build_strategy_specific_table(perf_raw: pd.DataFrame) -> pd.DataFrame:
-    pmap = _perf_map(perf_raw)
-    rows = [
-        {"Metric": "Trades", "Value": _fmt_int(pmap.get("trades")), "Definition": "Number Of Round Trip Transactions"},
-        {"Metric": "Win Rate", "Value": _fmt_pct(pmap.get("win_rate")), "Definition": "Winning Trades Divided By Total Trades"},
-        {"Metric": "Annual Return", "Value": _fmt_pct(pmap.get("annual_return")), "Definition": "Annualized Return"},
-        {"Metric": "Sharpe", "Value": _fmt_num(pmap.get("sharpe")), "Definition": "Risk-Adjusted Return Ratio (Annualized)"},
-        {"Metric": "Sortino", "Value": _fmt_num(pmap.get("sortino")), "Definition": "Risk-Adjusted Return (Downside Only)"},
-        {"Metric": "Profit Factor", "Value": _fmt_num(pmap.get("profit_factor")), "Definition": "Gross Profit / Gross Loss"},
-    ]
-    return pd.DataFrame(rows)
-
-
-def build_perf_table(perf_raw: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
-    # backward-compat helper; unused after split tables
-    return build_general_metrics_table(perf_raw, curve)
-
-
 def to_snake_case(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -291,36 +208,6 @@ def to_snake_case(value: Any) -> str:
     text = text.replace("-", "_").replace(" ", "_").replace("/", "_").replace(".", "_")
     text = re.sub(r"_+", "_", text).strip("_")
     return text.lower()
-
-
-def flatten_dict(prefix: str, data: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, value in data.items():
-        key_snake = to_snake_case(key)
-        full_key = f"{prefix}.{key_snake}" if prefix else key_snake
-        if isinstance(value, dict):
-            out.update(flatten_dict(full_key, value))
-        else:
-            out[full_key] = value
-    return out
-
-
-def kv_to_df(kv: dict[str, Any], descriptions: dict[str, str] | None = None) -> pd.DataFrame:
-    descriptions = descriptions or {}
-    rows = []
-    for key, raw_value in kv.items():
-        value = ", ".join(map(str, raw_value)) if isinstance(raw_value, list) else raw_value
-        display_value = PARAM_DEFAULT_VALUE if value in (None, "") else value
-        rows.append(
-            {
-                "Key": str(key),
-                "Value": display_value,
-                "Description": descriptions.get(str(key), PARAM_DEFAULT_DESCRIPTION),
-            }
-        )
-    if not rows:
-        rows.append({"Key": "placeholder", "Value": PARAM_DEFAULT_VALUE, "Description": PARAM_DEFAULT_DESCRIPTION})
-    return pd.DataFrame(rows, columns=PARAM_TABLE_COLUMNS)
 
 
 def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
@@ -367,29 +254,6 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     out["Net Return %"] = net_return_pct
 
     return out[_ORDER_DETAIL_COLUMNS]
-
-
-def render_kv_table(
-    title: str,
-    description: str,
-    kv: dict[str, Any],
-    field_descriptions: dict[str, str],
-    height: int = TABLE_HEIGHT_PARAM,
-) -> None:
-    with st.container(border=True):
-        st.markdown(f"**{title}**")
-        st.caption(description)
-        st.dataframe(
-            kv_to_df(kv, field_descriptions),
-            use_container_width=True,
-            hide_index=True,
-            height=height,
-            column_config={
-                "Key": st.column_config.TextColumn("Key", width="medium"),
-                "Value": st.column_config.TextColumn("Value", width="medium"),
-                "Description": st.column_config.TextColumn("Description", width="medium"),
-            },
-        )
 
 
 def _fmt_date_range(start: Any, end: Any) -> str:
@@ -469,83 +333,6 @@ def build_dashboard_data(run_id: str) -> DashboardData:
     else:
         meta = derive_meta_from_canonical(strategy, curve, perf_raw)
     return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta, ohlcv=ohlcv, trade_blotter=trade_blotter)
-
-
-def render_price_signal_chart(signals: pd.DataFrame) -> None:
-    st.markdown("#### Raw Price + Signals")
-    if signals.empty or "price" not in signals.columns:
-        st.info("No signal/price data available for this selection.")
-        return
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=signals["_time"], y=signals["price"].astype(float), mode="lines", name="Raw Price"))
-
-    if "signal_strength" in signals.columns:
-        signal_strength = signals["signal_strength"].astype(float)
-        buy_mask = signal_strength > 0
-        sell_mask = signal_strength < 0
-
-        if buy_mask.any():
-            fig.add_trace(
-                go.Scatter(
-                    x=signals.loc[buy_mask, "_time"],
-                    y=signals.loc[buy_mask, "price"].astype(float),
-                    mode="markers",
-                    name="Buy Signal",
-                    marker=dict(symbol="triangle-up", size=10, color="#10B981"),
-                )
-            )
-        if sell_mask.any():
-            fig.add_trace(
-                go.Scatter(
-                    x=signals.loc[sell_mask, "_time"],
-                    y=signals.loc[sell_mask, "price"].astype(float),
-                    mode="markers",
-                    name="Sell Signal",
-                    marker=dict(symbol="triangle-down", size=10, color="#EF4444"),
-                )
-            )
-
-    fig.update_layout(height=CHART_HEIGHT_PRICE, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"), legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_cumulative_return_chart(curve: pd.DataFrame) -> None:
-    st.markdown("#### Cumulative Return: Strategy vs Benchmark")
-    if curve.empty:
-        st.info("No equity curve data available for this selection.")
-        return
-
-    strategy_curve = curve.get("equity", curve.get("nav", pd.Series(dtype=float)))
-    if strategy_curve.empty:
-        st.info("No strategy equity series available.")
-        return
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=curve["_time"],
-            y=strategy_curve.astype(float) - 1.0,
-            mode="lines",
-            name="Strategy",
-        )
-    )
-
-    if "benchmark_equity" in curve.columns:
-        benchmark_ret = curve["benchmark_equity"].astype(float) - 1.0
-        if benchmark_ret.notna().any():
-            fig.add_trace(
-                go.Scatter(
-                    x=curve["_time"],
-                    y=benchmark_ret,
-                    mode="lines",
-                    name="Benchmark",
-                    line=dict(dash="dot"),
-                )
-            )
-
-    fig.update_layout(height=CHART_HEIGHT_RETURN, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", xaxis=dict(gridcolor="#F1F5F9"), yaxis=dict(gridcolor="#F1F5F9"), legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
-    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], alpha_value: str, strategy_logic: str) -> None:

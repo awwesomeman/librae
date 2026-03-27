@@ -4,7 +4,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pandas as pd
-import psycopg2
 
 from quant_lab.db import TIMESCALE_DSN, get_pool
 
