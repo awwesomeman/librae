@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     profit_factor   DOUBLE PRECISION,
     trades          INTEGER,
     avg_trade_return DOUBLE PRECISION,
-    exposure_ratio  DOUBLE PRECISION
+    exposure_ratio  DOUBLE PRECISION,
+    benchmark_return DOUBLE PRECISION
 );
 
 -- ohlcv（hypertable）

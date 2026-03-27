@@ -446,7 +446,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
         else:
             pmap = _perf_map(data.perf_raw)
             perf_rows = [
-                {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": "-"},
+                {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": _fmt_pct(pmap.get("benchmark_return")) if pmap.get("benchmark_return") is not None else "-"},
                 {"Metric": "Annual Return", "Strategy": _fmt_pct(pmap.get("annual_return")), "Benchmark": "-"},
                 {"Metric": "Sharpe", "Strategy": _fmt_num(pmap.get("sharpe")), "Benchmark": "-"},
                 {"Metric": "Sortino", "Strategy": _fmt_num(pmap.get("sortino")), "Benchmark": "-"},

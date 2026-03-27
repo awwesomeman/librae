@@ -88,33 +88,38 @@ class TradeRecord:
 
 @dataclass
 class StrategyMetrics:
-    """Aggregate performance metrics for a backtest run."""
+    """Aggregate performance metrics for a backtest run.
 
+    Units convention (not stored, documented here):
+    - return/drawdown fields: ratio (e.g. 0.05 = 5%)
+    - win_rate/exposure_ratio: ratio 0-1
+    - sharpe/sortino/calmar/profit_factor: score (dimensionless)
+    - trades: count
+    - avg_pnl_points: quote currency points
+    """
+
+    # Universal (all strategies produce these)
     total_return: float
-    total_return_unit: str = "ratio"
     annual_return: float = 0.0
-    annual_return_unit: str = "ratio"
     sharpe: float = 0.0
     sortino: float = 0.0
     calmar: float = 0.0
     max_drawdown: float = 0.0
-    max_drawdown_unit: str = "ratio"
-    win_rate: float = 0.0
-    win_rate_unit: str = "ratio_0_1"
-    profit_factor: float = 0.0
-    avg_trade_return: float = 0.0
-    avg_trade_return_unit: str = "ratio"
-    avg_pnl_points: float = 0.0
-    avg_pnl_points_unit: str = "points"
     trades: int = 0
-    trades_unit: str = "count"
-    exposure_ratio: float = 0.0
-    exposure_ratio_unit: str = "ratio_0_1"
-    # Reserved: cost/slippage totals
+
+    # Most strategies (None if not applicable)
+    win_rate: Optional[float] = None
+    profit_factor: Optional[float] = None
+    avg_trade_return: Optional[float] = None
+    avg_pnl_points: Optional[float] = None
+    exposure_ratio: Optional[float] = None
+
+    # Benchmark
+    benchmark_return: Optional[float] = None
+
+    # Cost breakdown
     total_commission: Optional[float] = None
-    total_commission_unit: Optional[str] = None
     total_slippage: Optional[float] = None
-    total_slippage_unit: Optional[str] = None
 
 
 @dataclass

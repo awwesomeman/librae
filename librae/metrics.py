@@ -104,6 +104,12 @@ def compute_all(
     total_commission = float(commissions.sum())
     total_slippage = float(slippages.sum())
 
+    # Benchmark return (if benchmark_curve available)
+    benchmark_return: float | None = None
+    if result.benchmark_curve and len(result.benchmark_curve) >= 2:
+        bm = result.benchmark_curve
+        benchmark_return = float(bm[-1] / (bm[0] + EPSILON) - 1.0)
+
     return StrategyMetrics(
         total_return=total_ret,
         annual_return=ann_return,
@@ -111,12 +117,13 @@ def compute_all(
         sortino=sortino,
         calmar=calmar,
         max_drawdown=abs(max_dd),
+        trades=n_trades,
         win_rate=win_rate,
         profit_factor=profit_factor,
         avg_trade_return=avg_trade_return,
         avg_pnl_points=avg_pnl_points,
-        trades=n_trades,
         exposure_ratio=exposure_ratio,
+        benchmark_return=benchmark_return,
         total_commission=total_commission,
         total_slippage=total_slippage,
     )
