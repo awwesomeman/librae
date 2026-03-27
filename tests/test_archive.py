@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_lab.backtest.archive import archive_backtest_parquet
-from quant_lab.backtest.schema import (
+from librae.archive import archive_backtest_parquet
+from librae.schema import (
     BacktestOutput,
     EquityCurvePoint,
     RunMetadata,

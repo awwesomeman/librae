@@ -13,9 +13,9 @@ import psycopg2.extras
 
 import pandas as pd
 
-from quant_lab.backtest.schema import BacktestOutput
-from quant_lab.contracts import SCHEMA_VERSION
-from quant_lab.db import TIMESCALE_DSN, get_pool
+from librae.schema import BacktestOutput
+from librae.contracts import SCHEMA_VERSION
+from db import TIMESCALE_DSN, get_pool
 
 
 @contextmanager

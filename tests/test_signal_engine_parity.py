@@ -17,14 +17,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_lab.signal_engine.trendpullback import (
+from strategies.trendpullback.signals import (
     compute_daily_gate,
     compute_entry_conditions,
     compute_exit_conditions,
     compute_features,
     resample_to_daily,
 )
-from scripts.etl.core_features import (
+from pipeline.features.core_features import (
     add_daily_trend_gate,
     add_trendpullback_features,
     resample_ohlcv,
@@ -192,10 +192,10 @@ class TestSignalConditions:
 class TestCostModel:
 
     def test_cost_deducted_from_pnl(self):
-        from quant_lab.backtest.cost_model import CostModel
-        from quant_lab.backtest.engine import Backtest
-        from quant_lab.backtest.executor import BacktestExecutor
-        from quant_lab.backtest.strategy import Action, BaseStrategy
+        from librae.cost_model import CostModel
+        from librae.engine import Backtest
+        from librae.executor import BacktestExecutor
+        from librae.strategy import Action, BaseStrategy
 
         h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
@@ -209,7 +209,7 @@ class TestCostModel:
         merged_mi = merged.set_index(mi)
 
         # Precompute entry/exit signals
-        from quant_lab.signal_engine.trendpullback import compute_entry_conditions, compute_exit_conditions
+        from strategies.trendpullback.signals import compute_entry_conditions, compute_exit_conditions
         merged_mi["entry_signal"] = compute_entry_conditions(merged).values
         merged_mi["exit_signal"] = compute_exit_conditions(merged).values
 
@@ -237,10 +237,10 @@ class TestCostModel:
             assert abs(t.net_pnl - (t.gross_pnl - total_cost)) < 1e-6
 
     def test_zero_cost(self):
-        from quant_lab.backtest.cost_model import CostModel
-        from quant_lab.backtest.engine import Backtest
-        from quant_lab.backtest.executor import BacktestExecutor
-        from quant_lab.backtest.strategy import Action, BaseStrategy
+        from librae.cost_model import CostModel
+        from librae.engine import Backtest
+        from librae.executor import BacktestExecutor
+        from librae.strategy import Action, BaseStrategy
 
         h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
@@ -252,7 +252,7 @@ class TestCostModel:
         )
         merged_mi = merged.set_index(mi)
 
-        from quant_lab.signal_engine.trendpullback import compute_entry_conditions, compute_exit_conditions
+        from strategies.trendpullback.signals import compute_entry_conditions, compute_exit_conditions
         merged_mi["entry_signal"] = compute_entry_conditions(merged).values
         merged_mi["exit_signal"] = compute_exit_conditions(merged).values
 

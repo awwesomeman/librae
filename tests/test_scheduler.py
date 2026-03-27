@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.monitor.scheduler import run_job, _env_config
+from monitoring.scheduler import run_job, _env_config
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +67,8 @@ def _base_cfg(**overrides) -> dict:
 class TestSchedulerJobWritesCalled:
     """1. scheduler job executes once and TimescaleDB write is called."""
 
-    @patch("scripts.monitor.scheduler._write_to_timescale")
-    @patch("scripts.monitor.scheduler._build_adapter")
+    @patch("monitoring.scheduler._write_to_timescale")
+    @patch("monitoring.scheduler._build_adapter")
     def test_timescale_write_called_on_success(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.return_value = True
@@ -85,8 +85,8 @@ class TestSchedulerJobWritesCalled:
 class TestSchedulerTimescaleFailureNoCrash:
     """2. TimescaleDB write failure does not crash — job returns summary."""
 
-    @patch("scripts.monitor.scheduler._write_to_timescale")
-    @patch("scripts.monitor.scheduler._build_adapter")
+    @patch("monitoring.scheduler._write_to_timescale")
+    @patch("monitoring.scheduler._build_adapter")
     def test_timescale_write_failure_continues(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.return_value = False  # simulate failure
@@ -99,8 +99,8 @@ class TestSchedulerTimescaleFailureNoCrash:
         assert "signal" in result
         mock_write.assert_called_once()
 
-    @patch("scripts.monitor.scheduler._write_to_timescale")
-    @patch("scripts.monitor.scheduler._build_adapter")
+    @patch("monitoring.scheduler._write_to_timescale")
+    @patch("monitoring.scheduler._build_adapter")
     def test_timescale_write_exception_continues(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.side_effect = Exception("connection refused")
@@ -116,10 +116,10 @@ class TestSchedulerTimescaleFailureNoCrash:
 class TestSchedulerHoldSignalWritten:
     """3. signal=0 (hold/flat) still produces a Point and writes it."""
 
-    @patch("scripts.monitor.scheduler._write_to_timescale")
-    @patch("scripts.monitor.scheduler._build_adapter")
-    @patch("quant_lab.monitoring.signal_monitor.compute_exit_conditions")
-    @patch("quant_lab.monitoring.signal_monitor.compute_entry_conditions")
+    @patch("monitoring.scheduler._write_to_timescale")
+    @patch("monitoring.scheduler._build_adapter")
+    @patch("monitoring.signal_monitor.compute_exit_conditions")
+    @patch("monitoring.signal_monitor.compute_entry_conditions")
     def test_hold_signal_still_writes(self, mock_entry, mock_exit, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.return_value = True
@@ -142,8 +142,8 @@ class TestSchedulerHoldSignalWritten:
 class TestSchedulerDryRunSkips:
     """4. dry_run skips write."""
 
-    @patch("scripts.monitor.scheduler._write_to_timescale")
-    @patch("scripts.monitor.scheduler._build_adapter")
+    @patch("monitoring.scheduler._write_to_timescale")
+    @patch("monitoring.scheduler._build_adapter")
     def test_dry_run_skips_write(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
 

@@ -1,7 +1,7 @@
 """TrendPullBack strategy definition for MXFR1 (台指期小型).
 
 Pure strategy definition: parameters + feature engineering.
-No execution logic — use quant_lab.backtest.engine for backtesting.
+No execution logic — use librae.engine for backtesting.
 """
 from __future__ import annotations
 

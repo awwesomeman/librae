@@ -11,7 +11,7 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from scripts.etl.cache_store import build_cache_key, load_cache, save_cache
+from pipeline.features.cache_store import build_cache_key, load_cache, save_cache
 
 _DEFAULT_CACHE_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "cache", "binance"

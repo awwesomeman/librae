@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from quant_lab.contracts import SCHEMA_VERSION, validate_dataframe_columns, validate_perf_fields, validate_strategy_context
+from librae.contracts import SCHEMA_VERSION, validate_dataframe_columns, validate_perf_fields, validate_strategy_context
 
 
 class SchemaValidationError(ValueError):
@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # TimescaleDB reader (sole data source)
-from quant_lab.db.timescale_reader import (
+from db.timescale_reader import (
     list_runs as ts_list_runs,
     load_equity_curve as ts_load_equity_curve,
     load_trade_blotter as ts_load_trade_blotter,

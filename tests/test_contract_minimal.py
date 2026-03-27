@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from quant_lab.contracts import (
+from librae.contracts import (
     REQUIRED_BACKTEST_TOP_LEVEL_KEYS,
     SCHEMA_PATH,
     SCHEMA_VERSION,

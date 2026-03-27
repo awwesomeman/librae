@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from scripts.etl.cache_store import build_cache_key, load_cache, save_cache
+from pipeline.features.cache_store import build_cache_key, load_cache, save_cache
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +145,8 @@ class TestFetchSpotCacheIntegration(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_spot_cache_hit_skips_network(self):
-        from scripts.etl.cache_store import build_cache_key, save_cache
-        from scripts.etl.core_data_sources import fetch_binance_spot_klines
+        from pipeline.features.cache_store import build_cache_key, save_cache
+        from pipeline.features.core_data_sources import fetch_binance_spot_klines
 
         key = build_cache_key(
             "binance_spot",
@@ -155,7 +155,7 @@ class TestFetchSpotCacheIntegration(unittest.TestCase):
         )
         save_cache(self._tmpdir, key, [self.KLINE_ROW])
 
-        with patch("scripts.etl.core_data_sources._binance_request") as mock_req:
+        with patch("pipeline.features.core_data_sources._binance_request") as mock_req:
             df = fetch_binance_spot_klines(
                 "BTCUSDT", "1h", 1706745600000, 1706749200000,
                 cache_dir=self._tmpdir, cache_ttl_seconds=300,
@@ -165,11 +165,11 @@ class TestFetchSpotCacheIntegration(unittest.TestCase):
         self.assertAlmostEqual(float(df["close"].iloc[0]), 42500.0)
 
     def test_spot_cache_miss_calls_network_and_stores(self):
-        from scripts.etl.cache_store import build_cache_key, load_cache
-        from scripts.etl.core_data_sources import fetch_binance_spot_klines
+        from pipeline.features.cache_store import build_cache_key, load_cache
+        from pipeline.features.core_data_sources import fetch_binance_spot_klines
 
-        with patch("scripts.etl.core_data_sources._binance_request") as mock_req, \
-             patch("scripts.etl.core_data_sources._pace"):
+        with patch("pipeline.features.core_data_sources._binance_request") as mock_req, \
+             patch("pipeline.features.core_data_sources._pace"):
             mock_req.return_value = [self.KLINE_ROW]
             df = fetch_binance_spot_klines(
                 "BTCUSDT", "1h", 1706745600000, 1706749200000,
@@ -205,8 +205,8 @@ class TestFetchFuturesCacheIntegration(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_futures_cache_hit_skips_network(self):
-        from scripts.etl.cache_store import build_cache_key, save_cache
-        from scripts.etl.core_data_sources import fetch_binance_futures_klines
+        from pipeline.features.cache_store import build_cache_key, save_cache
+        from pipeline.features.core_data_sources import fetch_binance_futures_klines
 
         key = build_cache_key(
             "binance_futures",
@@ -215,7 +215,7 @@ class TestFetchFuturesCacheIntegration(unittest.TestCase):
         )
         save_cache(self._tmpdir, key, [self.KLINE_ROW])
 
-        with patch("scripts.etl.core_data_sources._binance_request") as mock_req:
+        with patch("pipeline.features.core_data_sources._binance_request") as mock_req:
             df = fetch_binance_futures_klines(
                 "BTCUSDT", "1h", 1706745600000, 1706749200000,
                 cache_dir=self._tmpdir, cache_ttl_seconds=300,

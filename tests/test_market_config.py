@@ -1,10 +1,10 @@
-"""Tests for quant_lab.config.market_config (two-layer MarketConfig architecture)."""
+"""Tests for config.market_config (two-layer MarketConfig architecture)."""
 from __future__ import annotations
 
 import pytest
 from pathlib import Path
 
-from quant_lab.config.market_config import (
+from config.market_config import (
     InstrumentConfig,
     MarketConfig,
     calc_commission,

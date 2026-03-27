@@ -1,7 +1,7 @@
 [project]
 name = "quant-strategy-lab"
 version = "0.1.0"
-description = "Lumibot-first quant strategy lab — backtest and live trading with unified strategy classes"
+description = "Quant strategy research platform — Librae backtest engine, multi-asset support"
 requires-python = ">=3.10"
 dependencies = [
   "lumibot>=4.4,<5",
@@ -25,7 +25,7 @@ test = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["quant_lab*", "poc*", "scripts*"]
+include = ["librae*", "strategies*", "pipeline*", "brokers*", "monitoring*", "db*", "config*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

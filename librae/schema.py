@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Optional, Sequence
 
-from quant_lab.contracts import SCHEMA_VERSION
+from librae.contracts import SCHEMA_VERSION
 
 BACKTEST_SCHEMA_VERSION = SCHEMA_VERSION
 
@@ -122,7 +122,7 @@ class BacktestOutput:
     """Top-level backtest output container.
 
     This is the canonical output object produced after a backtest run.
-    Persist via quant_lab.backtest.persistence.
+    Persist via librae.persistence.
     """
 
     run_metadata: RunMetadata

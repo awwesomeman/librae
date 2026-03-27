@@ -7,10 +7,10 @@ import sys
 
 import pytest
 
-# quant_lab is now a top-level package; no extra sys.path needed.
+# librae is now a top-level package; no extra sys.path needed.
 
 # Tests that depend on packages not in the core install.
-# nautilus_trader: separate sub-project (quant_lab/), not a root dependency.
+# nautilus_trader: separate sub-project (librae/), not a root dependency.
 # shioaji: optional tw-live extra.
 _NAUTILUS_TESTS = [
     "test_backtest_adapter.py",

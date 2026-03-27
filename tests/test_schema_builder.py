@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from quant_lab.backtest import Periods
+from librae import Periods
 from scripts.reporting.schema_builder import (
     build_sample_periods,
     build_cost_settings,

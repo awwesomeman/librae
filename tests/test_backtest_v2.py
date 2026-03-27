@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_lab.backtest.cost_model import CostModel
-from quant_lab.backtest.engine import Backtest, BacktestResult
-from quant_lab.backtest.executor import BacktestExecutor
-from quant_lab.backtest.strategy import Action, BaseStrategy, Context
+from librae.cost_model import CostModel
+from librae.engine import Backtest, BacktestResult
+from librae.executor import BacktestExecutor
+from librae.strategy import Action, BaseStrategy, Context
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

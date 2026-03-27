@@ -16,12 +16,12 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scripts.etl.core_features import (
+from pipeline.features.core_features import (
     add_daily_trend_gate,
     add_trendpullback_features,
     resample_ohlcv,
 )
-from quant_lab.strategies.trendpullback_btc import (
+from strategies.trendpullback.btc import (
     TrendPullBackParams,
     backtest as _btc_backtest,
     add_h1_features,
@@ -31,11 +31,11 @@ from quant_lab.strategies.trendpullback_btc import (
 
 
 # ---------------------------------------------------------------------------
-# Adapters: map quant_lab.strategies functions to legacy run_backtest API
+# Adapters: map strategies functions to legacy run_backtest API
 # ---------------------------------------------------------------------------
 
 def run_backtest(m1, h1, d1, start, end, pull=0.3, bn=5, en=20, tstop=6, cost=8):
-    """H1-L-BTC backtest adapter using quant_lab.strategies.trendpullback_btc."""
+    """H1-L-BTC backtest adapter using strategies.trendpullback.btc."""
     params = TrendPullBackParams(
         pullback_atr_ratio=pull,
         breakout_lookback_bars=bn,
@@ -217,14 +217,14 @@ class TestAntiLookahead(unittest.TestCase):
 # TrendPullback D1-L-MXFR1 — minimal schema + sane-metrics tests
 # ---------------------------------------------------------------------------
 
-from quant_lab.strategies.trendpullback_mxfr1 import (
+from strategies.trendpullback.mxfr1 import (
     TrendPullBackParams as MxfrParams,
     run_trendpullback_backtest as _mxfr_backtest,
     add_features as _mxfr_add_features,
     resample_ohlcv as _mxfr_resample,
 )
 from scripts.reporting.schema_builder import build_cost_settings, build_strategy_output
-from quant_lab.backtest import Periods
+from librae import Periods
 
 D1_STRATEGY_NAME = "TrendPullback_v1.1.0-D1-L-MXFR1"
 
@@ -237,7 +237,7 @@ def _prepare_d1(m1: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_backtest_d1(m1, h1, d1, start, end, pull=0.3, bn=5, en=20, tstop=6, cost=2.0):
-    """D1-L-MXFR1 backtest adapter using quant_lab.strategies.trendpullback_mxfr1."""
+    """D1-L-MXFR1 backtest adapter using strategies.trendpullback.mxfr1."""
     params = MxfrParams(
         pullback_atr_ratio=pull,
         breakout_lookback_bars=bn,

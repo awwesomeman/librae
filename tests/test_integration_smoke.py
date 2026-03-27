@@ -16,13 +16,13 @@ MONITOR_PROFILES_DIR = os.path.join(
 )
 
 LAYERED_MODULES = [
-    "quant_lab.backtest.runners",
-    "quant_lab.backtest.scoring",
-    "quant_lab.backtest.adapter",
-    "scripts.etl.core_data_sources",
-    "scripts.etl.core_features",
-    "scripts.monitor.monitor_core",
-    "scripts.monitor.monitor_run",
+    "librae.runners",
+    "librae.scoring",
+    "librae.adapter",
+    "pipeline.features.core_data_sources",
+    "pipeline.features.core_features",
+    "monitoring.monitor_core",
+    "monitoring.monitor_run",
     "scripts.reporting.render_report",
     "scripts.reporting.save_reports",
 ]

@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 import pandas as pd
 try:
-    from scripts.monitor.monitor_core import (
+    from monitoring.monitor_core import (
         fetch_binance_klines,
         fetch_shioaji_mxf_kbars,
         resample_ohlcv,
@@ -17,7 +17,7 @@ try:
         trendpullback_trigger,
         append_signal_log,
     )
-    from scripts.monitor.utils_dedupe import build_signal_key, is_duplicate
+    from monitoring.utils_dedupe import build_signal_key, is_duplicate
 except ImportError:
     from monitor_core import (
         fetch_binance_klines,

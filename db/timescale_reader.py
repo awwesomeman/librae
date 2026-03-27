@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 import pandas as pd
 
-from quant_lab.db import TIMESCALE_DSN, get_pool
+from db import TIMESCALE_DSN, get_pool
 
 
 @contextmanager

@@ -9,12 +9,12 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from quant_lab.backtest.cost_model import CostModel
-from quant_lab.backtest.engine import Backtest, BacktestResult, EquitySnapshot, TradeResult
-from quant_lab.backtest.executor import BacktestExecutor
-from quant_lab.backtest.strategy import Action, BaseStrategy
-from quant_lab.backtest.metrics import compute_all
-from quant_lab.backtest.schema import StrategyMetrics
+from librae.cost_model import CostModel
+from librae.engine import Backtest, BacktestResult, EquitySnapshot, TradeResult
+from librae.executor import BacktestExecutor
+from librae.strategy import Action, BaseStrategy
+from librae.metrics import compute_all
+from librae.schema import StrategyMetrics
 
 import pandas as pd
 

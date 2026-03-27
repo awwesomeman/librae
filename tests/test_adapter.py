@@ -1,10 +1,10 @@
-"""Tests for quant_lab.backtest.adapter — legacy dict -> BacktestOutput."""
+"""Tests for librae.adapter — legacy dict -> BacktestOutput."""
 from __future__ import annotations
 
 import pytest
 
-from quant_lab.backtest.adapter import generate_run_id, metrics_dict_to_backtest_output
-from quant_lab.backtest.schema import BacktestOutput
+from librae.adapter import generate_run_id, metrics_dict_to_backtest_output
+from librae.schema import BacktestOutput
 
 
 SAMPLE_METRICS = {

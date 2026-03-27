@@ -1,7 +1,7 @@
 """TrendPullBack strategy definition for Binance BTC.
 
 Pure strategy definition: parameters + signal generation.
-No execution logic — use quant_lab.backtest.engine for backtesting.
+No execution logic — use librae.engine for backtesting.
 """
 from __future__ import annotations
 

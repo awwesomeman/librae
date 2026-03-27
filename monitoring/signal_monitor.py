@@ -13,7 +13,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
 
-from quant_lab.signal_engine.trendpullback import (
+from strategies.trendpullback.signals import (
     compute_features,
     compute_daily_gate,
     compute_entry_conditions,

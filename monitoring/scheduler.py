@@ -72,7 +72,7 @@ def _env_config() -> dict:
 
 
 def _build_adapter(cfg: dict):
-    from quant_lab.adapters.crypto_adapter import CryptoAdapter
+    from brokers.crypto_adapter import CryptoAdapter
 
     return CryptoAdapter(
         exchange_id="binance",
@@ -84,7 +84,7 @@ def _build_adapter(cfg: dict):
 def _write_to_timescale(result, cfg: dict, run_id: str) -> bool:
     """Write SignalResult to TimescaleDB with mode='sim'. Returns True on success."""
     try:
-        from quant_lab.db.timescale_writer import get_conn, TIMESCALE_DSN
+        from db.timescale_writer import get_conn, TIMESCALE_DSN
 
         now = datetime.now(timezone.utc)
 
@@ -131,7 +131,7 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
     sim_run_id = f"scheduler-{symbol_clean}-trendpullback"
 
     try:
-        from quant_lab.monitoring.signal_monitor import run_monitor
+        from monitoring.signal_monitor import run_monitor
 
         adapter = _build_adapter(cfg)
         result = run_monitor(

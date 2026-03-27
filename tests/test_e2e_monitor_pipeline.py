@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_lab.monitoring.signal_monitor import run_monitor, SignalResult
+from monitoring.signal_monitor import run_monitor, SignalResult
 
 
 # ---------------------------------------------------------------------------

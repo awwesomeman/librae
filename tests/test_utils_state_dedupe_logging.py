@@ -4,9 +4,9 @@ import os
 import tempfile
 import unittest
 
-from scripts.monitor.utils_state import load_json_state, save_json_state
-from scripts.monitor.utils_dedupe import build_signal_key, is_duplicate
-from scripts.monitor.utils_logging import rotate_if_oversize, append_jsonl
+from monitoring.utils_state import load_json_state, save_json_state
+from monitoring.utils_dedupe import build_signal_key, is_duplicate
+from monitoring.utils_logging import rotate_if_oversize, append_jsonl
 
 
 class TestUtilsState(unittest.TestCase):

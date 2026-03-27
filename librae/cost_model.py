@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from quant_lab.config.market_config import InstrumentConfig
+    from config.market_config import InstrumentConfig
 
 logger = logging.getLogger(__name__)
 

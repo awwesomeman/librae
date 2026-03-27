@@ -2,8 +2,8 @@ import unittest
 from unittest.mock import patch, MagicMock
 import pandas as pd
 
-from scripts.etl.core_features import resample_ohlcv, add_daily_trend_gate, add_multifactor_features
-from scripts.etl.core_data_sources import (
+from pipeline.features.core_features import resample_ohlcv, add_daily_trend_gate, add_multifactor_features
+from pipeline.features.core_data_sources import (
     normalize_ohlcv,
     _binance_request,
     _chunk_ranges,
@@ -62,8 +62,8 @@ class TestEtlDecoupling(unittest.TestCase):
 class TestBinanceRequest(unittest.TestCase):
     """Validate _binance_request retry / backoff behaviour."""
 
-    @patch("scripts.etl.core_data_sources.time.sleep")
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.time.sleep")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_success_on_first_try(self, mock_get, mock_sleep):
         resp = MagicMock()
         resp.status_code = 200
@@ -74,8 +74,8 @@ class TestBinanceRequest(unittest.TestCase):
         self.assertEqual(result, [["data"]])
         mock_sleep.assert_not_called()
 
-    @patch("scripts.etl.core_data_sources.time.sleep")
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.time.sleep")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_retries_on_429_then_succeeds(self, mock_get, mock_sleep):
         resp_429 = MagicMock()
         resp_429.status_code = 429
@@ -90,8 +90,8 @@ class TestBinanceRequest(unittest.TestCase):
         self.assertEqual(result, [["ok"]])
         self.assertEqual(mock_sleep.call_count, 2)
 
-    @patch("scripts.etl.core_data_sources.time.sleep")
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.time.sleep")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_429_exhausts_retries_raises(self, mock_get, mock_sleep):
         resp_429 = MagicMock()
         resp_429.status_code = 429
@@ -103,8 +103,8 @@ class TestBinanceRequest(unittest.TestCase):
         self.assertIn("endpoint=https://x/endpoint", str(ctx.exception))
         self.assertIn("retries=3", str(ctx.exception))
 
-    @patch("scripts.etl.core_data_sources.time.sleep")
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.time.sleep")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_respects_retry_after_header(self, mock_get, mock_sleep):
         resp_429 = MagicMock()
         resp_429.status_code = 429
@@ -118,8 +118,8 @@ class TestBinanceRequest(unittest.TestCase):
         _binance_request("https://x/klines", {}, max_retries=3)
         mock_sleep.assert_called_once_with(2.0)
 
-    @patch("scripts.etl.core_data_sources.time.sleep")
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.time.sleep")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_retry_after_capped_by_max_sleep(self, mock_get, mock_sleep):
         resp_429 = MagicMock()
         resp_429.status_code = 429
@@ -134,8 +134,8 @@ class TestBinanceRequest(unittest.TestCase):
         # Should be capped at _MAX_SLEEP (30)
         mock_sleep.assert_called_once_with(30.0)
 
-    @patch("scripts.etl.core_data_sources.time.sleep")
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.time.sleep")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_retries_on_500(self, mock_get, mock_sleep):
         resp_500 = MagicMock()
         resp_500.status_code = 500
@@ -149,7 +149,7 @@ class TestBinanceRequest(unittest.TestCase):
         result = _binance_request("https://x/klines", {}, max_retries=3)
         self.assertEqual(result, [["ok"]])
 
-    @patch("scripts.etl.core_data_sources.requests.get")
+    @patch("pipeline.features.core_data_sources.requests.get")
     def test_raises_immediately_on_4xx(self, mock_get):
         resp = MagicMock()
         resp.status_code = 403

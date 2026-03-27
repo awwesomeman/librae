@@ -1,7 +1,7 @@
-"""Canonical backend data contracts for quant_lab.
+"""Canonical backend data contracts for librae.
 
 Single source of truth file:
-- quant_lab/schemas/canonical_schema.json
+- librae/schemas/canonical_schema.json
 """
 
 from __future__ import annotations

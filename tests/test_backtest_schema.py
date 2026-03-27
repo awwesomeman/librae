@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from quant_lab.backtest.schema import (
+from librae.schema import (
     BACKTEST_SCHEMA_VERSION,
     BacktestOutput,
     EquityCurvePoint,
@@ -17,7 +17,7 @@ from quant_lab.backtest.schema import (
     StrategyMetrics,
     TradeRecord,
 )
-from quant_lab.backtest.persistence import save_backtest_output, load_backtest_output
+from librae.persistence import save_backtest_output, load_backtest_output
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
 START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)

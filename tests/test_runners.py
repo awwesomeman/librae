@@ -1,17 +1,17 @@
-"""Tests for quant_lab.backtest.runners — ported protocol runners."""
+"""Tests for librae.runners — ported protocol runners."""
 from __future__ import annotations
 
 import pytest
 
-from quant_lab.backtest.runners import (
+from librae.runners import (
     Periods,
     WFWindow,
     run_strict_protocol,
     run_stability,
     run_walkforward,
 )
-from quant_lab.backtest.schema import BacktestOutput
-from quant_lab.backtest.scoring import REQUIRED_METRICS_KEYS, score, validate_metrics
+from librae.schema import BacktestOutput
+from librae.scoring import REQUIRED_METRICS_KEYS, score, validate_metrics
 
 
 # ---------------------------------------------------------------------------

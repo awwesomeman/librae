@@ -60,7 +60,7 @@ class InstrumentConfig:
 
 def _default_yaml_path() -> Path:
     """Return the default config/markets.yaml path relative to project root."""
-    return Path(__file__).resolve().parents[2] / "config" / "markets.yaml"
+    return Path(__file__).resolve().parent / "markets.yaml"
 
 
 def load_market_configs(path: str | Path | None = None) -> dict[str, InstrumentConfig]:

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from quant_lab.data.binance_fetcher import (
+from pipeline.fetchers.binance_fetcher import (
     _cache_path,
     _is_cache_fresh,
     _CACHE_MAX_AGE,
@@ -122,7 +122,7 @@ class TestFetchOhlcvCache:
         p = _cache_path("BTCUSDT", "1h", cache_dir=tmp_cache)
         df.to_parquet(p, index=False)
 
-        with patch("quant_lab.data.binance_fetcher.httpx.Client") as mock_client:
+        with patch("pipeline.fetchers.binance_fetcher.httpx.Client") as mock_client:
             result = fetch_ohlcv("BTCUSDT", "1h", use_cache=True, cache_dir=tmp_cache)
 
         mock_client.assert_not_called()
@@ -141,7 +141,7 @@ class TestFetchOhlcvCache:
         mock_http.__exit__ = MagicMock(return_value=False)
         mock_http.get.return_value = mock_resp
 
-        with patch("quant_lab.data.binance_fetcher.httpx.Client", return_value=mock_http):
+        with patch("pipeline.fetchers.binance_fetcher.httpx.Client", return_value=mock_http):
             result = fetch_ohlcv(
                 "BTCUSDT", "1h",
                 start="2023-11-14", end="2023-11-15",
@@ -171,7 +171,7 @@ class TestFetchOhlcvCache:
         mock_http.__exit__ = MagicMock(return_value=False)
         mock_http.get.return_value = mock_resp
 
-        with patch("quant_lab.data.binance_fetcher.httpx.Client", return_value=mock_http):
+        with patch("pipeline.fetchers.binance_fetcher.httpx.Client", return_value=mock_http):
             result = fetch_ohlcv(
                 "BTCUSDT", "1h",
                 start="2023-11-14", end="2023-11-15",
@@ -201,7 +201,7 @@ class TestFetchOhlcvCache:
         mock_http.__exit__ = MagicMock(return_value=False)
         mock_http.get.return_value = mock_resp
 
-        with patch("quant_lab.data.binance_fetcher.httpx.Client", return_value=mock_http):
+        with patch("pipeline.fetchers.binance_fetcher.httpx.Client", return_value=mock_http):
             result = fetch_ohlcv(
                 "BTCUSDT", "1h",
                 start="2023-11-14", end="2023-11-15",

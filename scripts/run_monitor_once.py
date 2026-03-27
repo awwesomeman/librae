@@ -23,7 +23,7 @@ _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO))
 
 import pandas as pd
-from quant_lab.monitoring.signal_monitor import run_monitor
+from monitoring.signal_monitor import run_monitor
 
 
 class BinanceLiveAdapter:
@@ -35,7 +35,7 @@ class BinanceLiveAdapter:
         self._use_cache = use_cache
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        from quant_lab.data.binance_fetcher import fetch_ohlcv as _fetch
+        from pipeline.fetchers.binance_fetcher import fetch_ohlcv as _fetch
 
         raw_symbol = symbol.replace("/", "")
         interval = self._TF_MAP.get(timeframe, timeframe)
@@ -53,7 +53,7 @@ class BinanceLiveAdapter:
 def _build_adapter(name: str):
     """Return the appropriate adapter instance."""
     if name == "ccxt":
-        from quant_lab.adapters.crypto_adapter import CryptoAdapter
+        from brokers.crypto_adapter import CryptoAdapter
 
         api_key = os.environ.get("CCXT_API_KEY", "")
         api_secret = os.environ.get("CCXT_API_SECRET", "")
@@ -105,7 +105,7 @@ def main() -> None:
 
     # Write to TimescaleDB
     try:
-        from quant_lab.db.timescale_writer import get_conn, TIMESCALE_DSN
+        from db.timescale_writer import get_conn, TIMESCALE_DSN
 
         now = datetime.now(timezone.utc)
         run_id = "once"

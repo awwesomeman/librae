@@ -4,7 +4,7 @@ Legacy run_backtest() returns a flat dict like:
     {trades, win_rate, avg_ret, pf, equity, ann_return, ann_sharpe, ann_vol, mdd}
 
 This module maps that dict + caller-supplied metadata into a BacktestOutput
-object that can be persisted via quant_lab.backtest.persistence.
+object that can be persisted via librae.persistence.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .schema import BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
-from ..contracts import parse_utc_timestamp
+from .contracts import parse_utc_timestamp
 
 
 def generate_run_id(strategy: str, symbol: str) -> str:

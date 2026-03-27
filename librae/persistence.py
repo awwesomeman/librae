@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from quant_lab.contracts import (
+from librae.contracts import (
     REQUIRED_BACKTEST_TOP_LEVEL_KEYS,
     SCHEMA_VERSION,
     is_schema_compatible,

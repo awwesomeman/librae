@@ -1,4 +1,4 @@
-"""Tests for quant_lab.monitoring.signal_monitor.
+"""Tests for monitoring.signal_monitor.
 
 Covers: run_monitor, SignalResult, adapter protocol, edge cases.
 """
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_lab.monitoring.signal_monitor import (
+from monitoring.signal_monitor import (
     OHLCVAdapter,
     SignalResult,
     run_monitor,

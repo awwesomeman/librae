@@ -4,24 +4,24 @@ from datetime import datetime, timezone
 
 import pytest
 
-from quant_lab.adapters.base import (
+from brokers.base import (
     AdapterInfo,
     MarketDataAdapter,
     OrderSide,
     OrderStatus,
     OrderType,
 )
-from quant_lab.adapters.binance import (
+from brokers.binance import (
     BinanceAccountAdapter,
     BinanceMarketDataAdapter,
     BinanceOrderAdapter,
 )
-from quant_lab.adapters.shioaji import (
+from brokers.shioaji import (
     ShioajiAccountAdapter,
     ShioajiMarketDataAdapter,
     ShioajiOrderAdapter,
 )
-from quant_lab.adapters.wiring import build_adapter_bundle
+from brokers.wiring import build_adapter_bundle
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
 

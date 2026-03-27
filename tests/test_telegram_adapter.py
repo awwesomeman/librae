@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from quant_lab.adapters.telegram import TelegramAdapter, TelegramConfig
+from brokers.telegram import TelegramAdapter, TelegramConfig
 
 
 class TestTelegramConfig:

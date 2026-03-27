@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from scripts.monitor.monitor_core import trendpullback_setup_ok, trendpullback_trigger, append_signal_log
+from monitoring.monitor_core import trendpullback_setup_ok, trendpullback_trigger, append_signal_log
 
 
 class TestMonitorCore(unittest.TestCase):

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from quant_lab.contracts import (
+from librae.contracts import (
     MEASUREMENT_SPECS,
     REQUIRED_STRATEGY_CONTEXT_KEYS,
     SCHEMA_VERSION,

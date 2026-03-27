@@ -4,9 +4,9 @@ All stubs are deterministic and offline; no network required.
 """
 import unittest
 
-from quant_lab.backtest import run_strict_protocol, Periods
-from quant_lab.backtest import run_walkforward, WFWindow
-from quant_lab.backtest import run_stability
+from librae import run_strict_protocol, Periods
+from librae import run_walkforward, WFWindow
+from librae import run_stability
 
 
 # ---------------------------------------------------------------------------

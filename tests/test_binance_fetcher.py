@@ -13,7 +13,7 @@ import httpx
 import pandas as pd
 import pytest
 
-from quant_lab.data.binance_fetcher import (
+from pipeline.fetchers.binance_fetcher import (
     BINANCE_KLINES_URL,
     fetch_ohlcv,
     _parse_dt,
@@ -112,7 +112,7 @@ class TestFetchOHLCV:
             httpx.Client.__init__.__wrapped__(self_client, *args, timeout=30.0, **kwargs) if hasattr(httpx.Client.__init__, '__wrapped__') else None
 
         # Use a simpler approach
-        with mock.patch("quant_lab.data.binance_fetcher.httpx.Client") as MockClient:
+        with mock.patch("pipeline.fetchers.binance_fetcher.httpx.Client") as MockClient:
             mock_client = mock.MagicMock()
             mock_resp = mock.MagicMock()
             mock_resp.json.return_value = []
@@ -129,7 +129,7 @@ class TestFetchOHLCV:
     def test_dtypes_are_float(self):
         import unittest.mock as mock
         klines = [_make_kline(1704067200000 + i * 3600000) for i in range(5)]
-        with mock.patch("quant_lab.data.binance_fetcher.httpx.Client") as MockClient:
+        with mock.patch("pipeline.fetchers.binance_fetcher.httpx.Client") as MockClient:
             mock_client = mock.MagicMock()
             mock_resp = mock.MagicMock()
             mock_resp.json.return_value = klines

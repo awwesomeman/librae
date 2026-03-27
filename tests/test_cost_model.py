@@ -4,8 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from quant_lab.backtest.cost_model import CostModel
-from quant_lab.config.market_config import get_instrument
+from librae.cost_model import CostModel
+from config.market_config import get_instrument
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────

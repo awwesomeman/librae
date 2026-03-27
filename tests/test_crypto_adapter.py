@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from quant_lab.adapters.crypto_adapter import CryptoAdapter
-from quant_lab.adapters.market_hub import MarketHub
+from brokers.crypto_adapter import CryptoAdapter
+from brokers.market_hub import MarketHub
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ def mock_ccxt_exchange():
 @pytest.fixture
 def readonly_adapter(mock_ccxt_exchange):
     """CryptoAdapter in read-only mode (no API key) with mocked exchange."""
-    with patch("quant_lab.adapters.crypto_adapter._require_ccxt") as mock_ccxt:
+    with patch("brokers.crypto_adapter._require_ccxt") as mock_ccxt:
         mock_exchange_cls = MagicMock(return_value=mock_ccxt_exchange)
         mock_ccxt.return_value = MagicMock(**{"binance": mock_exchange_cls})
         # Manually construct to bypass __init__ ccxt lookup
