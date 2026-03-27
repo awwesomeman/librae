@@ -5,7 +5,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from app.reporting.render_report_html import (
+from app.streamlit.render_report_html import (
     render_page,
     render_summary_table,
     render_strategy_card,

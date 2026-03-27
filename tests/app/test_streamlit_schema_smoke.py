@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from app.streamlit_performance import (
+from app.streamlit.streamlit_performance import (
     SchemaValidationError,
     _require_columns,
     _require_perf_fields,

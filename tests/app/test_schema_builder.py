@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from librae import Periods
-from app.reporting.schema_builder import (
+from app.streamlit.schema_builder import (
     build_sample_periods,
     build_cost_settings,
     build_strategy_output,
