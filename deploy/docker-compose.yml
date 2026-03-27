@@ -13,6 +13,7 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=false
     depends_on:
       - timescaledb
+    restart: unless-stopped
     networks:
       - quant_network
 
