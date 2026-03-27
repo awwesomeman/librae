@@ -4,87 +4,52 @@
 
 ---
 
-## 快速開始
+## 使用情境
 
-### 環境需求
+### A. 從其他裝置連進已部署的伺服器
 
-- Python 3.11
-- Docker + Docker Compose
-- Git
+1. 安裝 [Tailscale](https://tailscale.com/download) 並登入同一帳號
+2. 透過 Tailscale 虛擬 IP 存取：
+   - Grafana：`http://<tailscale-ip>:3000`（預設帳密 admin / admin）
+   - TimescaleDB：`<tailscale-ip>:5432`（user: `quant` / password: `quant_secret`）
 
-### 1. Clone & 安裝
+### B. 首次部署（GCE / 本地）
+
+詳細部署步驟請參考：
+- GCE：[docs/gce_deploy.md](docs/gce_deploy.md)
+- Windows：[docs/windows_server_deploy.md](docs/windows_server_deploy.md)
+
+簡要流程：
 
 ```bash
+# 1. Clone & 安裝
 git clone git@github-quant-strategy:awwesomeman/quant-strategy-lab.git
 cd quant-strategy-lab
+python3.11 -m venv .venv && .venv/bin/pip install -e .
 
-python3.11 -m venv .venv
-.venv/bin/pip install -e .
+# 2. 設定環境變數
+cd deploy
+cp .env.example .env   # 填入 TS_AUTHKEY（VPN 用，可選）
+
+# 3. 啟動服務（不需要 VPN 可省略 tailscale）
+docker compose up -d
+
+# 4. 初始化 DB schema（首次必做）
+sleep 10
+docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
+
+# 5. 部署 Grafana 儀表板（首次必做）
+cd .. && python scripts/setup_grafana.py
 ```
 
-### 2. 啟動 TimescaleDB + Grafana
+### C. 本地開發（不需要 VPN）
+
+只啟動 DB 和 Grafana：
 
 ```bash
 cd deploy
 docker compose up -d timescaledb grafana
-
-# 等 TimescaleDB 啟動後初始化 schema（首次必做）
-sleep 10
-docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 ```
-
-### 3. 跑一次回測（填充資料）
-
-```bash
-cd ..
-.venv/bin/python scripts/run_backtest_lumibot_btc.py --months 6 --sample oos
-```
-
-### 4. 啟動 Streamlit
-
-```bash
-.venv/bin/python -m streamlit run app/streamlit_performance.py --server.port 8502
-```
-
-### 5. 部署 Grafana 儀表板
-
-```bash
-# 自動偵測 datasource uid + 產生三板 JSON + 部署（首次必跑）
-python scripts/setup_grafana.py
-
-# 或手動：只重新產生 JSON（不部署）
-.venv/bin/python grafana/generate_dashboards.py
-```
-
----
-
-## 換環境注意事項
-
-### Grafana datasource uid（最常見問題）
-
-每個 Grafana 實例會自動產生不同的 datasource uid，導致儀表板空白。
-**首次部署或 Grafana volume 重建後必跑：**
-
-```bash
-python scripts/setup_grafana.py
-```
-
-此腳本會自動偵測 uid、更新 generator、重新部署三板。支援自訂參數：
-
-```bash
-python scripts/setup_grafana.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
-```
-
-### TimescaleDB 密碼
-
-預設密碼 `quant_secret`（開發用）。Production 環境請修改：
-1. `deploy/docker-compose.yml` → `POSTGRES_PASSWORD`
-2. `grafana/provisioning/datasources/timescaledb.yaml` → `secureJsonData.password`
-3. 環境變數 `TIMESCALE_DSN` 同步更新
-
-### Python 版本
-
-需要 Python >= 3.10。建議 3.11。
 
 ---
 
@@ -92,6 +57,8 @@ python scripts/setup_grafana.py --grafana-url http://host:3000 --grafana-user ad
 
 | 變數 | 預設值 | 說明 |
 |------|--------|------|
+| `TS_AUTHKEY` | 必填 | Tailscale Auth Key（從 Admin Console 產生） |
+| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin 密碼 |
 | `TIMESCALE_DSN` | `postgresql://quant:quant_secret@localhost:5432/quant` | TimescaleDB 連線 |
 | `CCXT_API_KEY` | （選填）| Binance API key，未設定為 read-only |
 | `CCXT_API_SECRET` | （選填）| Binance API secret |
@@ -116,6 +83,7 @@ quant-strategy-lab/
 │   └── markets.yaml        # 市場/標的 config（兩層架構）
 ├── deploy/
 │   ├── docker-compose.yml
+│   ├── .env                # 本地環境變數（不入 git）
 │   └── timescale_init.sql  # TimescaleDB schema（首次必跑）
 ├── docs/
 │   └── implementation_plan.md
