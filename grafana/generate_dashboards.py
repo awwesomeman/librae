@@ -11,7 +11,7 @@ import copy
 import json
 import pathlib
 
-DATASOURCE = {"type": "postgres", "uid": "timescaledb"}
+DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR = pathlib.Path(__file__).parent / "dashboards"
 
 # ---------------------------------------------------------------------------
@@ -399,7 +399,7 @@ def make_run_id_variable(mode: str) -> dict:
     return {
         "name": "run_id",
         "type": "query",
-        "datasource": {"type": "postgres", "uid": "timescaledb"},
+        "datasource": DATASOURCE,
         "query": f"SELECT run_id FROM backtest_runs WHERE mode='{mode}' ORDER BY run_ts DESC LIMIT 20",
         "refresh": 2,
         "includeAll": False,

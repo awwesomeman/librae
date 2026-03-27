@@ -16,8 +16,8 @@
         "name": "run_id",
         "type": "query",
         "datasource": {
-          "type": "postgres",
-          "uid": "timescaledb"
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
         },
         "query": "SELECT run_id FROM backtest_runs WHERE mode='sim' ORDER BY run_ts DESC LIMIT 20",
         "refresh": 2,
@@ -82,8 +82,8 @@
         "y": 0
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -131,8 +131,8 @@
         "y": 0
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -187,8 +187,8 @@
         "y": 0
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -240,8 +240,8 @@
         "y": 0
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -296,8 +296,8 @@
         "y": 0
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -344,8 +344,8 @@
         "y": 0
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -417,8 +417,8 @@
         "y": 4
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -463,8 +463,8 @@
         "y": 12
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -553,8 +553,8 @@
         "y": 18
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -619,8 +619,8 @@
         "y": 26
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -667,8 +667,8 @@
         "y": 36
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     },
     {
@@ -715,8 +715,8 @@
         "y": 36
       },
       "datasource": {
-        "type": "postgres",
-        "uid": "timescaledb"
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
       }
     }
   ],

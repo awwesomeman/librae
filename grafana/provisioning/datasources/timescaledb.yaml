@@ -1,7 +1,9 @@
 apiVersion: 1
 datasources:
   - name: TimescaleDB
-    type: postgres
+    uid: P40AE60E18F02DE32
+    orgId: 1
+    type: grafana-postgresql-datasource
     url: quant_timescaledb:5432
     database: quant
     user: quant
@@ -12,5 +14,5 @@ datasources:
       maxOpenConns: 5
       postgresVersion: 1600
       timescaledb: true
-    isDefault: false
+    isDefault: true
     editable: false
