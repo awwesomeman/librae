@@ -49,41 +49,46 @@ cd ..
 ### 5. 部署 Grafana 儀表板
 
 ```bash
-# 重新產生三板 JSON 並部署（首次或改版後）
-.venv/bin/python grafana/generate_dashboards.py
+# 自動偵測 datasource uid + 產生三板 JSON + 部署（首次必跑）
+python scripts/setup_grafana.py
 
-python3 -c "
-import json, requests
-for f in ['backtest_dashboard.json', 'sim_dashboard.json', 'live_dashboard.json']:
-    d = json.load(open(f'grafana/dashboards/{f}'))
-    d.pop('id', None)
-    r = requests.post('http://localhost:3000/api/dashboards/db',
-        json={'dashboard': d, 'folderId': 0, 'overwrite': True},
-        auth=('admin', 'admin'))
-    print(f, r.json().get('status'))
-"
+# 或手動：只重新產生 JSON（不部署）
+.venv/bin/python grafana/generate_dashboards.py
 ```
 
 ---
 
-## 注意事項
+## 換環境注意事項
 
-### Grafana datasource uid
+### Grafana datasource uid（最常見問題）
 
-Grafana 啟動時會自動產生 datasource uid。若儀表板顯示空白，需要更新 `grafana/generate_dashboards.py` 的 `DATASOURCE` uid：
+每個 Grafana 實例會自動產生不同的 datasource uid，導致儀表板空白。
+**首次部署或 Grafana volume 重建後必跑：**
 
 ```bash
-# 查詢實際 uid
-curl -s http://admin:admin@localhost:3000/api/datasources | python3 -c "
-import json,sys
-for d in json.load(sys.stdin):
-    print(d['name'], d['uid'])
-"
+python scripts/setup_grafana.py
 ```
 
-再把 `generate_dashboards.py` 第一行的 `DATASOURCE` uid 改成查詢結果，重新跑步驟 5。
+此腳本會自動偵測 uid、更新 generator、重新部署三板。支援自訂參數：
 
-### 環境變數
+```bash
+python scripts/setup_grafana.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
+```
+
+### TimescaleDB 密碼
+
+預設密碼 `quant_secret`（開發用）。Production 環境請修改：
+1. `deploy/docker-compose.yml` → `POSTGRES_PASSWORD`
+2. `grafana/provisioning/datasources/timescaledb.yaml` → `secureJsonData.password`
+3. 環境變數 `TIMESCALE_DSN` 同步更新
+
+### Python 版本
+
+需要 Python >= 3.10。建議 3.11。
+
+---
+
+## 環境變數
 
 | 變數 | 預設值 | 說明 |
 |------|--------|------|

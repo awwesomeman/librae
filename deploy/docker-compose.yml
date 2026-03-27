@@ -1,24 +1,5 @@
 version: '3.8'
 services:
-  influxdb:
-    image: influxdb:2.7-alpine
-    container_name: quant_influxdb
-    ports:
-      - "8086:8086"
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-      - influxdb_config:/etc/influxdb2
-    environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=${DOCKER_INFLUXDB_INIT_USERNAME}
-      - DOCKER_INFLUXDB_INIT_PASSWORD=${DOCKER_INFLUXDB_INIT_PASSWORD}
-      - DOCKER_INFLUXDB_INIT_ORG=${DOCKER_INFLUXDB_INIT_ORG}
-      - DOCKER_INFLUXDB_INIT_BUCKET=${DOCKER_INFLUXDB_INIT_BUCKET}
-      - DOCKER_INFLUXDB_INIT_RETENTION=${DOCKER_INFLUXDB_INIT_RETENTION}
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
-    networks:
-      - quant_network
-
   grafana:
     image: grafana/grafana:latest
     container_name: quant_grafana
@@ -31,7 +12,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
       - GF_AUTH_ANONYMOUS_ENABLED=false
     depends_on:
-      - influxdb
+      - timescaledb
     networks:
       - quant_network
 
@@ -55,7 +36,5 @@ networks:
     driver: bridge
 
 volumes:
-  influxdb_data:
-  influxdb_config:
   grafana_data:
   timescaledb_data:
