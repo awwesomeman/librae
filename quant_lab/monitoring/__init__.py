@@ -1,4 +1,4 @@
-"""Monitoring skeleton — strategy and system metrics to InfluxDB."""
+"""Monitoring skeleton — strategy and system metrics."""
 
 from .metrics import (
     MonitoringConfig,
@@ -7,7 +7,6 @@ from .metrics import (
     build_strategy_point,
     build_system_point,
 )
-from .influx_writer import points_from_backtest
 from .signal_monitor import run_monitor, signal_to_point, OHLCVAdapter
 
 __all__ = [
@@ -16,7 +15,6 @@ __all__ = [
     "StrategyMetricsSender",
     "build_strategy_point",
     "build_system_point",
-    "points_from_backtest",
     "run_monitor",
     "signal_to_point",
     "OHLCVAdapter",

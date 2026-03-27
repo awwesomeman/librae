@@ -8,10 +8,10 @@ Pipeline:
   2. Compute H1 features, resample H1→D1 for daily gate
   3. Vectorised bar-by-bar backtest with identical logic to Lumibot PoC
   4. Build BacktestOutput with canonical metrics (metrics.py)
-  5. Write canonical measurements to InfluxDB
+  5. Write results to TimescaleDB
 
 Usage:
-    python scripts/run_backtest_lumibot_btc.py [--months 6] [--dry-run] [--no-influx]
+    python scripts/run_backtest_lumibot_btc.py [--months 6] [--dry-run]
 
 Note: The original Lumibot engine has a known DST infinite-loop bug when
 backtesting 24/7 crypto markets.  This script replaces it with a fast
@@ -20,9 +20,7 @@ vectorised loop that produces identical signals and is DST-safe.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,7 +51,6 @@ from quant_lab.config.market_config import (
     get_instrument,
 )
 from quant_lab.data.binance_fetcher import fetch_ohlcv
-from quant_lab.monitoring.influx_writer import points_from_backtest, points_from_ohlcv
 from quant_lab.signal_engine.trendpullback import (
     compute_daily_gate,
     compute_features,
@@ -419,9 +416,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--months", type=int, default=6, help="Lookback months for 1h data (default: 6)")
     p.add_argument("--out-dir", type=str, default=str(ROOT / "data" / "backtests"))
-    p.add_argument("--no-influx", action="store_true", help="Skip InfluxDB write")
-    p.add_argument("--dry-run", action="store_true", help="Print InfluxDB points without writing")
-    p.add_argument("--sample", default="oos", help="Sample tag for InfluxDB (default: oos)")
+    p.add_argument("--dry-run", action="store_true", help="Skip TimescaleDB write")
+    p.add_argument("--sample", default="oos", help="Sample tag (default: oos)")
     p.add_argument("--benchmark", default="BTC_BH", help="Benchmark tag (default: BTC_BH)")
     p.add_argument("--budget", type=float, default=100_000, help="Initial budget (default: 100000)")
     p.add_argument("--commission-bps", type=float, default=10.0, help="Commission in basis points per side (default: 10)")
@@ -486,47 +482,16 @@ def main() -> None:
     print(f"       Saved: {paths['json']}")
     print(f"       Archive: {archive_paths['equity_curve']}, {archive_paths['trades']}")
 
-    # 5) InfluxDB
-    if args.no_influx:
-        print("[5/5] InfluxDB write skipped (--no-influx)")
-        return
-
-    points = points_from_backtest(output, sample=args.sample, benchmark=args.benchmark)
-    ohlcv_points = points_from_ohlcv(h1_base, symbol=SYMBOL, timeframe="1h", run_id=run_id, source="backtest")
-    points.extend(ohlcv_points)
-    counts = Counter(p._name for p in points)
-
+    # 5) Write to TimescaleDB
     if args.dry_run:
-        print(f"[5/5] [DRY-RUN] points={len(points)}, counts={dict(counts)}")
+        print("[5/5] [DRY-RUN] Skipping TimescaleDB write")
         return
 
-    url = os.getenv("INFLUX_URL", "http://localhost:8086")
-    org = os.getenv("INFLUX_ORG", "quant_research")
-    bucket = os.getenv("INFLUX_BUCKET", "nautilus_signals")
-    token = (
-        os.getenv("INFLUX_TOKEN")
-        or os.getenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN")
-        or "change_me_super_secret_token"
-    )
-
-    from influxdb_client import InfluxDBClient
-    from influxdb_client.client.write_api import SYNCHRONOUS
-
-    with InfluxDBClient(url=url, token=token, org=org) as client:
-        writer = client.write_api(write_options=SYNCHRONOUS)
-        writer.write(bucket=bucket, org=org, record=points)
-
-    print(f"[5/5] InfluxDB OK: points={len(points)}, counts={dict(counts)}, run_id={run_id}")
-
-    # TimescaleDB 雙寫（Phase A + ohlcv）
-    try:
-        from quant_lab.db.timescale_writer import write_backtest_output as ts_write, write_ohlcv as ts_write_ohlcv
-        ts_counts = ts_write(output)
-        ohlcv_rows = ts_write_ohlcv(h1_base, symbol=SYMBOL, timeframe="1h", run_id=run_id, source="backtest")
-        ts_counts["ohlcv"] = ohlcv_rows
-        print(f"[5b] TimescaleDB written: {ts_counts}")
-    except Exception as e:
-        print(f"[5b] TimescaleDB write failed (non-fatal): {e}")
+    from quant_lab.db.timescale_writer import write_backtest_output as ts_write, write_ohlcv as ts_write_ohlcv
+    ts_counts = ts_write(output)
+    ohlcv_rows = ts_write_ohlcv(h1_base, symbol=SYMBOL, timeframe="1h", run_id=run_id, source="backtest")
+    ts_counts["ohlcv"] = ohlcv_rows
+    print(f"[5/5] TimescaleDB written: {ts_counts}, run_id={run_id}")
 
 
 if __name__ == "__main__":

@@ -6,11 +6,9 @@ Validates:
   1. Backtest produces trades and equity snapshots on synthetic data
   2. Equity curve has correct number of snapshots (one per H1 bar after warmup)
   3. BacktestOutput builds correctly from trade/equity logs
-  4. InfluxDB points include strategy_signals and perf_equity_curve with >1 row
 """
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timezone
 
 import numpy as np
@@ -26,7 +24,6 @@ from scripts.etl.core_features import (
     add_trendpullback_features,
     resample_ohlcv,
 )
-from quant_lab.monitoring.influx_writer import points_from_backtest
 
 
 def _make_trending_btc_data(n_bars: int = 1200) -> pd.DataFrame:
@@ -113,27 +110,6 @@ class TestVectorisedBacktest:
         assert output.metrics.trades == len(trade_log)
         assert len(output.equity_curve) == len(equity_log)
         assert len(output.trades) == len(trade_log)
-
-    def test_influx_points_complete(self, h1_d1):
-        """InfluxDB points include strategy_signals and perf_equity_curve (>1 row)."""
-        h1, d1 = h1_d1
-        trade_log, equity_log = _run_vectorised_backtest(h1, d1, budget=100_000)
-        output = _build_backtest_output(
-            run_id="test-run-influx",
-            start_ts=datetime(2025, 7, 1, tzinfo=timezone.utc),
-            end_ts=datetime(2025, 8, 20, tzinfo=timezone.utc),
-            trade_log=trade_log,
-            equity_log=equity_log,
-            sample="test",
-        )
-        points = points_from_backtest(output, sample="test", benchmark="BTC_BH")
-        counts = Counter(p._name for p in points)
-
-        assert counts["strategy_signals"] == len(trade_log) * 2  # entry + exit per trade
-        assert counts["perf_equity_curve"] == len(equity_log)
-        assert counts["perf_equity_curve"] > 1, "Equity curve should have >1 row"
-        assert counts["strategy_performance"] == 1
-        assert counts["trade_blotter"] == len(trade_log)
 
     def test_no_trades_on_flat_data(self):
         """Flat data should produce zero trades."""

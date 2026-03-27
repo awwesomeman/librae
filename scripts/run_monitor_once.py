@@ -6,12 +6,6 @@ Usage:
     python scripts/run_monitor_once.py --adapter binance_rest   # legacy REST fetcher
     python scripts/run_monitor_once.py --dry-run                # print only, no write
 
-Environment variables (only needed without --dry-run):
-    INFLUX_URL     (default: http://localhost:8086)
-    INFLUX_TOKEN
-    INFLUX_ORG     (default: quant_lab)
-    INFLUX_BUCKET  (default: quant_signals)
-
 CCXT credentials (optional, read-only mode when absent):
     CCXT_API_KEY
     CCXT_API_SECRET
@@ -79,7 +73,7 @@ def _build_adapter(name: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run signal monitor once")
-    parser.add_argument("--dry-run", action="store_true", help="Print result only, skip InfluxDB write")
+    parser.add_argument("--dry-run", action="store_true", help="Print result only, skip TimescaleDB write")
     parser.add_argument("--adapter", default="ccxt", choices=["ccxt", "binance_rest"],
                         help="Data adapter to use (default: ccxt)")
     parser.add_argument("--symbol", default="BTC/USDT", help="Trading pair (default: BTC/USDT)")
@@ -115,31 +109,56 @@ def main() -> None:
     )
 
     if args.dry_run:
-        print("[run_monitor_once] --dry-run: skipping InfluxDB write")
+        print("[run_monitor_once] --dry-run: skipping TimescaleDB write")
         print(f"[line_protocol] {line}")
         return
 
-    # Write to InfluxDB
-    influx_url = os.environ.get("INFLUX_URL", "http://localhost:8086")
-    influx_token = os.environ.get("INFLUX_TOKEN", "")
-    influx_org = os.environ.get("INFLUX_ORG", "quant_lab")
-    influx_bucket = os.environ.get("INFLUX_BUCKET", "quant_signals")
-
-    if not influx_token:
-        print("[run_monitor_once] WARNING: INFLUX_TOKEN not set, skipping write")
-        return
-
+    # Write to TimescaleDB
     try:
-        from influxdb_client import InfluxDBClient
-        from influxdb_client.client.write_api import SYNCHRONOUS
+        from quant_lab.db.timescale_writer import get_conn, TIMESCALE_DSN
 
-        client = InfluxDBClient(url=influx_url, token=influx_token, org=influx_org)
-        write_api = client.write_api(write_options=SYNCHRONOUS)
-        write_api.write(bucket=influx_bucket, org=influx_org, record=pt)
-        print(f"[run_monitor_once] ✅ Written to InfluxDB ({influx_url}, bucket={influx_bucket})")
-        client.close()
+        now = datetime.now(timezone.utc)
+
+        # Parse tags from line protocol
+        tag_part = line.split(" ")[0] if " " in line else ""
+        tag_map = {}
+        for pair in tag_part.split(",")[1:]:
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                tag_map[k] = v
+
+        strategy = tag_map.get("strategy", "TrendPullback")
+        symbol = args.symbol
+        timeframe = args.timeframe
+        run_id = "once"
+
+        with get_conn(TIMESCALE_DSN) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO backtest_runs
+                   (run_id, strategy, symbol, timeframe, run_ts, mode)
+                   VALUES (%s, %s, %s, %s, %s, 'sim')
+                   ON CONFLICT (run_id) DO UPDATE SET run_ts = EXCLUDED.run_ts""",
+                (run_id, strategy, symbol, timeframe, now),
+            )
+
+            price = float(field_map.get("price", "0").rstrip("i"))
+            signal_strength = float(field_map.get("signal_strength", "0").rstrip("i"))
+            confidence = float(field_map.get("confidence", "0").rstrip("i"))
+            signal_type = tag_map.get("signal_type", "hold")
+
+            cur.execute(
+                """INSERT INTO strategy_signals
+                   (ts, run_id, strategy, symbol, timeframe,
+                    signal_type, source, price, signal_strength, confidence, quantity)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'manual', %s, %s, %s, 0)""",
+                (now, run_id, strategy, symbol, timeframe,
+                 signal_type, price, signal_strength, confidence),
+            )
+            cur.close()
+        print(f"[run_monitor_once] ✅ Written to TimescaleDB (run_id={run_id})")
     except Exception as e:
-        print(f"[run_monitor_once] ❌ InfluxDB write failed: {e}")
+        print(f"[run_monitor_once] ❌ TimescaleDB write failed: {e}")
         print("[run_monitor_once] Point was generated successfully but not persisted")
 
 

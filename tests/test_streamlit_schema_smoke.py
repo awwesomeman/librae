@@ -7,8 +7,6 @@ from app.streamlit_performance import (
     _require_perf_fields,
     build_general_metrics_table,
     build_order_details,
-    get_cfg,
-    normalize_position,
     validate_strategy_context_or_raise,
 )
 
@@ -43,10 +41,6 @@ def test_general_metrics_table_uses_canonical_fields() -> None:
     assert row == "8.00%"
 
 
-def test_unknown_position_is_not_forced_to_buy() -> None:
-    assert normalize_position("flat") == "unknown"
-
-
 def test_strategy_context_requires_canonical_keys() -> None:
     bad_meta = {
         "benchmark": "TWSE",
@@ -57,26 +51,6 @@ def test_strategy_context_requires_canonical_keys() -> None:
     }
     with pytest.raises(SchemaValidationError, match="missing required keys"):
         validate_strategy_context_or_raise(bad_meta, "DemoStrategy")
-
-
-def test_get_cfg_loads_token_from_local_env_file(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("INFLUX_TOKEN", raising=False)
-    monkeypatch.delenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", raising=False)
-    env_dir = tmp_path / "quant_lab" / "deploy"
-    env_dir.mkdir(parents=True)
-    (env_dir / ".env").write_text("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=test_token\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-
-    cfg = get_cfg()
-    assert cfg.token == "test_token"
-
-
-def test_get_cfg_falls_back_to_default_token(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("INFLUX_TOKEN", raising=False)
-    monkeypatch.delenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", raising=False)
-    monkeypatch.chdir(tmp_path)
-    cfg = get_cfg()
-    assert cfg.token == "change_me_super_secret_token"
 
 
 def _make_blotter(**extra_cols):

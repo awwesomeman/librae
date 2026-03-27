@@ -1,7 +1,7 @@
-"""E2E integration tests: run_monitor → InfluxDB Point → write_api.
+"""E2E integration tests: run_monitor → Point → write pipeline.
 
 Validates the full pipeline from mock adapter through signal generation
-to InfluxDB point creation and mock write, without real InfluxDB connection.
+to Point creation and mock write.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Tests for the monitoring skeleton.
 
-Tests pure point-builder helpers without requiring a live InfluxDB instance.
+Tests pure point-builder helpers (uses influxdb_client.Point as a serialisation format).
 """
 
 from __future__ import annotations

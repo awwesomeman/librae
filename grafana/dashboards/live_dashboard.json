@@ -1,12 +1,8 @@
 {
   "uid": "live_dashboard",
-  "title": "Live Dashboard (實盤追蹤)",
+  "title": "Live",
   "description": "Live trading dashboard — placeholder until broker API connected",
-  "tags": [
-    "quant",
-    "timescaledb",
-    "live"
-  ],
+  "tags": [],
   "timezone": "browser",
   "editable": true,
   "time": {

@@ -1,12 +1,8 @@
 {
   "uid": "backtest_dashboard",
-  "title": "Backtest Dashboard",
+  "title": "Backtest",
   "description": "Historical backtest results with full equity curve and trade detail",
-  "tags": [
-    "quant",
-    "timescaledb",
-    "backtest"
-  ],
+  "tags": [],
   "timezone": "browser",
   "editable": true,
   "time": {

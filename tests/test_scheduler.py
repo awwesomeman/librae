@@ -1,10 +1,10 @@
 """Tests for scripts/monitor/scheduler.py
 
 Covers:
-1. Job executes once and InfluxDB write is called
-2. InfluxDB write failure does not crash the job
+1. Job executes once and TimescaleDB write is called
+2. TimescaleDB write failure does not crash the job
 3. signal=0 (hold) still writes a Point
-4. Missing INFLUX_TOKEN warns and skips write
+4. dry_run skips write
 
 Skills: python, quant
 """
@@ -50,10 +50,6 @@ def _mock_adapter():
 
 def _base_cfg(**overrides) -> dict:
     cfg = {
-        "influx_url": "http://localhost:8086",
-        "influx_token": "test-token-123",
-        "influx_org": "quant_research",
-        "influx_bucket": "nautilus_signals",
         "symbol": "BTC/USDT",
         "timeframe": "1h",
         "api_key": "",
@@ -69,11 +65,11 @@ def _base_cfg(**overrides) -> dict:
 
 
 class TestSchedulerJobWritesCalled:
-    """1. scheduler job executes once and InfluxDB write is called."""
+    """1. scheduler job executes once and TimescaleDB write is called."""
 
-    @patch("scripts.monitor.scheduler._write_to_influx")
+    @patch("scripts.monitor.scheduler._write_to_timescale")
     @patch("scripts.monitor.scheduler._build_adapter")
-    def test_influx_write_called_on_success(self, mock_build, mock_write):
+    def test_timescale_write_called_on_success(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.return_value = True
 
@@ -86,12 +82,12 @@ class TestSchedulerJobWritesCalled:
         mock_write.assert_called_once()
 
 
-class TestSchedulerInfluxFailureNoCrash:
-    """2. InfluxDB write failure does not crash — job returns summary."""
+class TestSchedulerTimescaleFailureNoCrash:
+    """2. TimescaleDB write failure does not crash — job returns summary."""
 
-    @patch("scripts.monitor.scheduler._write_to_influx")
+    @patch("scripts.monitor.scheduler._write_to_timescale")
     @patch("scripts.monitor.scheduler._build_adapter")
-    def test_influx_write_failure_continues(self, mock_build, mock_write):
+    def test_timescale_write_failure_continues(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.return_value = False  # simulate failure
 
@@ -103,9 +99,9 @@ class TestSchedulerInfluxFailureNoCrash:
         assert "signal" in result
         mock_write.assert_called_once()
 
-    @patch("scripts.monitor.scheduler._write_to_influx")
+    @patch("scripts.monitor.scheduler._write_to_timescale")
     @patch("scripts.monitor.scheduler._build_adapter")
-    def test_influx_write_exception_continues(self, mock_build, mock_write):
+    def test_timescale_write_exception_continues(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.side_effect = Exception("connection refused")
 
@@ -114,13 +110,13 @@ class TestSchedulerInfluxFailureNoCrash:
         try:
             result = run_job(cfg=cfg, dry_run=False)
         except Exception:
-            pytest.fail("run_job should not propagate InfluxDB exceptions")
+            pytest.fail("run_job should not propagate TimescaleDB exceptions")
 
 
 class TestSchedulerHoldSignalWritten:
     """3. signal=0 (hold/flat) still produces a Point and writes it."""
 
-    @patch("scripts.monitor.scheduler._write_to_influx")
+    @patch("scripts.monitor.scheduler._write_to_timescale")
     @patch("scripts.monitor.scheduler._build_adapter")
     @patch("quant_lab.monitoring.signal_monitor.generate_signals")
     def test_hold_signal_still_writes(self, mock_gen, mock_build, mock_write):
@@ -145,20 +141,17 @@ class TestSchedulerHoldSignalWritten:
         mock_write.assert_called_once()
 
 
-class TestSchedulerMissingTokenSkips:
-    """4. Missing INFLUX_TOKEN warns and skips write."""
+class TestSchedulerDryRunSkips:
+    """4. dry_run skips write."""
 
-    @patch("scripts.monitor.scheduler._write_to_influx")
+    @patch("scripts.monitor.scheduler._write_to_timescale")
     @patch("scripts.monitor.scheduler._build_adapter")
-    def test_no_token_skips_write(self, mock_build, mock_write, caplog):
+    def test_dry_run_skips_write(self, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
 
-        cfg = _base_cfg(influx_token="")  # no token
-        with caplog.at_level(logging.WARNING):
-            result = run_job(cfg=cfg, dry_run=False)
+        cfg = _base_cfg()
+        result = run_job(cfg=cfg, dry_run=True)
 
         assert result is not None
-        # _write_to_influx should NOT be called when token is empty
+        # _write_to_timescale should NOT be called in dry_run mode
         mock_write.assert_not_called()
-        # Should have logged a warning about missing token
-        assert any("INFLUX_TOKEN" in msg for msg in caplog.messages)

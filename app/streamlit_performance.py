@@ -17,27 +17,15 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# TimescaleDB reader (primary data source)
-try:
-    from quant_lab.db.timescale_reader import (
-        list_runs as ts_list_runs,
-        load_equity_curve as ts_load_equity_curve,
-        load_trade_blotter as ts_load_trade_blotter,
-        load_performance as ts_load_performance,
-        load_strategy_signals as ts_load_signals,
-        load_ohlcv as ts_load_ohlcv,
-    )
-    _HAS_TIMESCALE = True
-except ImportError:
-    _HAS_TIMESCALE = False
-
-# InfluxDB (fallback)
-try:
-    from influxdb_client import InfluxDBClient
-    _HAS_INFLUX = True
-except ImportError:
-    InfluxDBClient = None  # type: ignore
-    _HAS_INFLUX = False
+# TimescaleDB reader (sole data source)
+from quant_lab.db.timescale_reader import (
+    list_runs as ts_list_runs,
+    load_equity_curve as ts_load_equity_curve,
+    load_trade_blotter as ts_load_trade_blotter,
+    load_performance as ts_load_performance,
+    load_strategy_signals as ts_load_signals,
+    load_ohlcv as ts_load_ohlcv,
+)
 
 
 APP_TITLE = "Strategy Backtest Analysis"
@@ -161,29 +149,6 @@ def ordered_metrics(metric_values: list[str]) -> list[str]:
     return [metric for metric in PERF_METRIC_ORDER if metric in existing]
 
 
-def normalize_position(value: Any) -> str:
-    raw = str(value or "").strip().lower().replace("_", " ")
-    aliases = {
-        "long": "buy",
-        "cover": "buy to cover",
-        "short": "sell short",
-        "short sell": "sell short",
-        "close short": "buy to cover",
-        "exit short": "buy to cover",
-    }
-    normalized = aliases.get(raw, raw)
-    allowed = {"buy", "sell", "sell short", "buy to cover"}
-    return normalized if normalized in allowed else "unknown"
-
-
-@dataclass
-class InfluxCfg:
-    url: str
-    org: str
-    bucket: str
-    token: str
-
-
 @dataclass
 class DashboardData:
     curve: pd.DataFrame
@@ -198,73 +163,6 @@ class DashboardData:
             self.trade_blotter = pd.DataFrame()
 
 
-def _load_token_from_env_file() -> str:
-    """Best-effort token discovery for local dashboard runs.
-
-    Reads known local env files when process env vars are not set.
-    """
-    candidates = [
-        Path.cwd() / "quant_lab" / "deploy" / ".env",
-        Path.cwd() / "deploy" / ".env",
-        Path(__file__).resolve().parents[1] / "deploy" / ".env",
-    ]
-    for p in candidates:
-        if not p.exists():
-            continue
-        try:
-            for raw in p.read_text(encoding="utf-8").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                key = k.strip()
-                val = v.strip().strip('"').strip("'")
-                if key in {"INFLUX_TOKEN", "DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"} and val:
-                    return val
-        except OSError:
-            continue
-    return ""
-
-
-def get_cfg() -> InfluxCfg:
-    token = (
-        os.getenv("INFLUX_TOKEN")
-        or os.getenv("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN")
-        or _load_token_from_env_file()
-        or "change_me_super_secret_token"
-    )
-    return InfluxCfg(
-        url=os.getenv("INFLUX_URL", "http://localhost:8086"),
-        org=os.getenv("INFLUX_ORG", "quant_research"),
-        bucket=os.getenv("INFLUX_BUCKET", "nautilus_signals"),
-        token=token,
-    )
-
-
-def query_df(client: InfluxDBClient, org: str, flux: str) -> pd.DataFrame:
-    frames = client.query_api().query_data_frame(query=flux, org=org)
-    if isinstance(frames, list):
-        frames = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
-        if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
-    return frames if isinstance(frames, pd.DataFrame) else pd.DataFrame()
-
-
-def tag_values(client: InfluxDBClient, cfg: InfluxCfg, measurement: str, tag: str, predicate: str | None = None) -> list[str]:
-    pred = f'r._measurement == "{measurement}"'
-    if predicate:
-        pred = f"{pred} and ({predicate})"
-    flux = f'''
-import "influxdata/influxdb/schema"
-schema.tagValues(bucket: "{cfg.bucket}", tag: "{tag}", predicate: (r) => {pred}, start: -365d)
-'''
-    df = query_df(client, cfg.org, flux)
-    if df.empty or "_value" not in df.columns:
-        return []
-    return sorted([str(v) for v in df["_value"].dropna().unique()])
-
-
 def _require_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
     try:
         validate_dataframe_columns(df, required, dataset)
@@ -277,10 +175,6 @@ def _require_perf_fields(perf_raw: pd.DataFrame) -> None:
         validate_perf_fields(perf_raw)
     except ValueError as exc:
         raise SchemaValidationError(str(exc)) from exc
-
-
-def _sample_filter(sample: str) -> str:
-    return "true" if sample == "full" else f'r.sample == "{sample}"'
 
 
 def load_strategy_contexts() -> dict[str, Any]:
@@ -298,82 +192,6 @@ def validate_strategy_context_or_raise(meta: dict[str, Any], strategy: str) -> N
         validate_strategy_context(meta, f"strategy_context[{strategy}]")
     except ValueError as exc:
         raise SchemaValidationError(str(exc)) from exc
-
-
-def load_curve(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
-    flux = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn:(r)=> r._measurement=="perf_equity_curve")
-  |> filter(fn:(r)=> r.schema_version == "{SCHEMA_VERSION}")
-  |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> {_sample_filter(sample)})
-  |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "equity" or r._field == "benchmark_equity" or r._field == "drawdown")
-  |> pivot(rowKey:["_time","strategy","sample","run_id"], columnKey:["_field"], valueColumn:"_value")
-  |> sort(columns:["_time"], desc:false)
-'''
-    df = query_df(client, cfg.org, flux)
-    if df.empty:
-        return df
-
-    _require_columns(df, REQUIRED_CURVE_COLUMNS, "perf_equity_curve")
-    df["_time"] = pd.to_datetime(df["_time"], utc=True)
-    return df
-
-
-def load_ohlcv(client: InfluxDBClient, cfg: InfluxCfg, symbol: str, run_id: str) -> pd.DataFrame:
-    """Load OHLCV data for a given symbol and run_id from InfluxDB."""
-    flux = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn:(r)=> r._measurement=="ohlcv")
-  |> filter(fn:(r)=> r.symbol == "{symbol}")
-  |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "open" or r._field == "high" or r._field == "low" or r._field == "close" or r._field == "volume")
-  |> pivot(rowKey:["_time","symbol","run_id"], columnKey:["_field"], valueColumn:"_value")
-  |> sort(columns:["_time"], desc:false)
-'''
-    df = query_df(client, cfg.org, flux)
-    if not df.empty and "_time" in df.columns:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
-    return df
-
-
-def load_signals(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: str) -> pd.DataFrame:
-    flux = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn:(r)=> r._measurement=="strategy_signals")
-  |> filter(fn:(r)=> r.schema_version == "{SCHEMA_VERSION}")
-  |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "signal_strength" or r._field == "price")
-  |> pivot(rowKey:["_time","strategy","run_id","side"], columnKey:["_field"], valueColumn:"_value")
-  |> sort(columns:["_time"], desc:false)
-'''
-    df = query_df(client, cfg.org, flux)
-    if not df.empty:
-        _require_columns(df, REQUIRED_SIGNAL_COLUMNS, "strategy_signals")
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
-    return df
-
-
-def load_perf(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> pd.DataFrame:
-    flux = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn:(r)=> r._measurement=="strategy_performance")
-  |> filter(fn:(r)=> r.schema_version == "{SCHEMA_VERSION}")
-  |> filter(fn:(r)=> r.strategy == "{strategy}")
-  |> filter(fn:(r)=> {_sample_filter(sample)})
-  |> filter(fn:(r)=> r.run_id == "{run_id}")
-  |> filter(fn:(r)=> r._field == "total_return" or r._field == "annual_return" or r._field == "sharpe" or r._field == "sortino" or r._field == "max_drawdown" or r._field == "calmar" or r._field == "win_rate" or r._field == "trades" or r._field == "profit_factor" or r._field == "payoff_ratio" or r._field == "expectancy" or r._field == "avg_trade_return" or r._field == "exposure_ratio" or r._field == "bh_total_return")
-  |> last()
-'''
-    df = query_df(client, cfg.org, flux)
-    _require_perf_fields(df)
-    return df
 
 
 def _perf_map(perf_raw: pd.DataFrame) -> dict[str, float]:
@@ -494,27 +312,6 @@ def kv_to_df(kv: dict[str, Any], descriptions: dict[str, str] | None = None) -> 
     return pd.DataFrame(rows, columns=PARAM_TABLE_COLUMNS)
 
 
-def load_trade_blotter(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, run_id: str) -> pd.DataFrame:
-    """Load trade_blotter records from InfluxDB for a given strategy and run_id."""
-    flux = f'''
-from(bucket: "{cfg.bucket}")
-  |> range(start: -365d)
-  |> filter(fn: (r) => r._measurement == "trade_blotter")
-  |> filter(fn: (r) => r.strategy == "{strategy}")
-  |> filter(fn: (r) => r.run_id == "{run_id}")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-  |> sort(columns: ["_time"], desc: false)
-'''
-    df = query_df(client, cfg.org, flux)
-    if not df.empty and "_time" in df.columns:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
-    if not df.empty and "entry_time" in df.columns:
-        parsed = pd.to_datetime(df["entry_time"], utc=True, errors="coerce")
-        df["entry_time"] = parsed.dt.strftime("%Y-%m-%d %H:%M").where(parsed.notna(), "—")
-        df["entry_time"] = df["entry_time"].apply(lambda v: "—" if str(v).strip() in ("", "nan", "NaT") else v)
-    return df
-
-
 def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     """Build Order Detail table from trade_blotter DataFrame."""
     _ORDER_DETAIL_COLUMNS = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %", "Net Return %"]
@@ -530,6 +327,9 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     # entry_time: already formatted by load_trade_blotter; fallback to "—"
     if "entry_time" in df.columns:
         out["Entry Time"] = df["entry_time"].apply(lambda v: "—" if str(v).strip() in ("", "nan", "NaT", "None") else str(v))
+    elif "entry_ts" in df.columns:
+        out["Entry Time"] = pd.to_datetime(df["entry_ts"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+        out["Entry Time"] = out["Entry Time"].apply(lambda v: "—" if str(v).strip() in ("", "nan", "NaT", "None") else str(v))
     else:
         out["Entry Time"] = pd.Series(["—"] * len(df), index=df.index)
 
@@ -640,9 +440,8 @@ def meta_context(meta: dict[str, Any]) -> dict[str, str]:
     }
 
 
-
-def build_dashboard_data_timescale(run_id: str) -> DashboardData:
-    """Build DashboardData from TimescaleDB (primary path)."""
+def build_dashboard_data(run_id: str) -> DashboardData:
+    """Build DashboardData from TimescaleDB (sole data source)."""
     curve = ts_load_equity_curve(run_id)
     signals = ts_load_signals(run_id)
     perf_raw = ts_load_performance(run_id)
@@ -651,29 +450,6 @@ def build_dashboard_data_timescale(run_id: str) -> DashboardData:
 
     # Derive strategy name from perf_raw
     strategy = str(perf_raw["strategy"].iloc[0]) if not perf_raw.empty and "strategy" in perf_raw.columns else "unknown"
-
-    contexts = load_strategy_contexts()
-    meta = contexts.get(strategy)
-    if isinstance(meta, dict):
-        validate_strategy_context_or_raise(meta, strategy)
-    else:
-        meta = derive_meta_from_canonical(strategy, curve, perf_raw)
-    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta, ohlcv=ohlcv, trade_blotter=trade_blotter)
-
-
-def build_dashboard_data(client, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> DashboardData:
-    """Build DashboardData from InfluxDB (fallback path)."""
-    curve = load_curve(client, cfg, strategy, sample, run_id)
-    signals = load_signals(client, cfg, strategy, run_id)
-    perf_raw = load_perf(client, cfg, strategy, sample, run_id)
-
-    # Load OHLCV for the asset price chart
-    symbol = "N/A"
-    if not perf_raw.empty and "symbol" in perf_raw.columns:
-        symbol = str(perf_raw["symbol"].iloc[0])
-    ohlcv = load_ohlcv(client, cfg, symbol, run_id)
-
-    trade_blotter = load_trade_blotter(client, cfg, strategy, run_id)
 
     contexts = load_strategy_contexts()
     meta = contexts.get(strategy)
@@ -928,8 +704,6 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
             styled = order_df.style.applymap(_color_return, subset=["Gross Return %", "Net Return %"]).format(
                 {"Entry Price": "{:.2f}", "Exit Price": "{:.2f}", "Gross Return %": "{:+.2f}%", "Net Return %": "{:+.2f}%"}
             )
-            # column_order ensures Entry Time, Exit Time, Position are always first.
-            # 待 Streamlit 正式支援 freeze/pinned_columns 時啟用原生凍結欄位功能。
             _COLUMN_ORDER = ["Entry Time", "Exit Time", "Position", "Entry Price", "Exit Price", "Holding Bars", "Gross Return %", "Net Return %"]
             st.dataframe(
                 styled,
@@ -1115,7 +889,7 @@ def main() -> None:
         .stApp {background-color: var(--bg-main) !important;}
         section.main > div {background-color: var(--bg-main) !important;}
         .overview-desc {font-size:14px; color:#666666; margin-bottom:10px;}
-        .metric-card {background:#FFFFFF; border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; min-height:120px; box-shadow:0 4px 10px rgba(15,23,42,.04);} 
+        .metric-card {background:#FFFFFF; border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; min-height:120px; box-shadow:0 4px 10px rgba(15,23,42,.04);}
         .metric-label {font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#8E8E93; margin-bottom:6px;}
         .metric-value {font-size:20px; font-weight:700; color:#1C1C1E; line-height:1.35; font-family:'JetBrains Mono', monospace;}
         .metric-sub {font-size:12px; color:#666666; margin-top:6px;}
@@ -1138,75 +912,76 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    cfg = get_cfg()
-    if not cfg.token:
-        st.error("Missing INFLUX_TOKEN (or DOCKER_INFLUXDB_INIT_ADMIN_TOKEN).")
+    # --- Sidebar: Run selector from TimescaleDB ---
+    try:
+        runs_df = ts_list_runs(limit=50)
+    except Exception as e:
+        st.error(f"TimescaleDB 連線失敗: {e}")
         st.stop()
 
-    with InfluxDBClient(url=cfg.url, token=cfg.token, org=cfg.org) as client:
-        strategies = tag_values(
-            client,
-            cfg,
-            "strategy_performance",
-            "strategy",
-            predicate=f'r.schema_version == "{SCHEMA_VERSION}"',
-        )
-        if not strategies:
-            st.warning("No strategy_performance data found yet.")
-            st.stop()
+    if runs_df.empty:
+        st.warning("No backtest runs found in TimescaleDB.")
+        st.stop()
 
-        st.sidebar.header("Filters")
-        strategy = st.sidebar.selectbox("Strategy", strategies, index=0)
+    st.sidebar.header("Filters")
 
-        contexts_preview = load_strategy_contexts()
-        meta_preview = contexts_preview.get(strategy)
-        has_strategy_context = isinstance(meta_preview, dict)
-        periods_preview = {}
-        if has_strategy_context:
-            try:
-                validate_strategy_context_or_raise(meta_preview, strategy)
-                periods_preview = meta_preview.get("periods", {}) or {}
-            except SchemaValidationError as e:
-                st.error(f"Schema validation failed: {e}")
-                st.stop()
+    # Strategy selector
+    strategies = sorted(runs_df["strategy"].dropna().unique().tolist())
+    if not strategies:
+        st.warning("No strategies found.")
+        st.stop()
+    strategy = st.sidebar.selectbox("Strategy", strategies, index=0)
 
-        sample_values = tag_values(
-            client,
-            cfg,
-            "strategy_performance",
-            "sample",
-            predicate=f'r.schema_version == "{SCHEMA_VERSION}" and r.strategy == "{strategy}"',
-        )
-        sample_options = resolve_sample_options(sample_values)
-        if not sample_options:
-            st.warning("No sample found for selected strategy.")
-            st.stop()
+    # Filter runs by strategy
+    strategy_runs = runs_df[runs_df["strategy"] == strategy]
 
-        sample = st.sidebar.selectbox(
-            "Sample",
-            sample_options,
-            index=0,
-            format_func=lambda x: sample_label(x, periods_preview),
-        )
-
-        sample_predicate = "true" if sample == "full" else f'r.sample == "{sample}"'
-        run_ids = tag_values(
-            client,
-            cfg,
-            "strategy_performance",
-            "run_id",
-            predicate=f'r.schema_version == "{SCHEMA_VERSION}" and r.strategy == "{strategy}" and {sample_predicate}',
-        )
-        if not run_ids:
-            st.warning("No run_id found for selected strategy/sample.")
-            st.stop()
-        run_id = st.sidebar.selectbox("Run ID", run_ids[::-1], index=0)
-
+    # Sample selector
+    contexts_preview = load_strategy_contexts()
+    meta_preview = contexts_preview.get(strategy)
+    has_strategy_context = isinstance(meta_preview, dict)
+    periods_preview = {}
+    if has_strategy_context:
         try:
-            data = build_dashboard_data(client, cfg, strategy, sample, run_id)
+            validate_strategy_context_or_raise(meta_preview, strategy)
+            periods_preview = meta_preview.get("periods", {}) or {}
         except SchemaValidationError as e:
             st.error(f"Schema validation failed: {e}")
             st.stop()
+
+    sample_values = strategy_runs["sample"].dropna().unique().tolist()
+    sample_options = resolve_sample_options(sample_values)
+    if not sample_options:
+        st.warning("No sample found for selected strategy.")
+        st.stop()
+
+    sample = st.sidebar.selectbox(
+        "Sample",
+        sample_options,
+        index=0,
+        format_func=lambda x: sample_label(x, periods_preview),
+    )
+
+    # Run ID selector
+    if sample != "full":
+        filtered_runs = strategy_runs[strategy_runs["sample"] == sample]
+    else:
+        filtered_runs = strategy_runs
+
+    run_ids = filtered_runs["run_id"].tolist()
+    if not run_ids:
+        st.warning("No run_id found for selected strategy/sample.")
+        st.stop()
+    run_id = st.sidebar.selectbox("Run ID", run_ids, index=0)
+
+    # --- Load data ---
+    try:
+        data = build_dashboard_data(run_id)
+    except SchemaValidationError as e:
+        st.error(f"Schema validation failed: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"TimescaleDB 連線失敗: {e}")
+        st.stop()
 
     context = meta_context(data.meta)
     strategy_logic = str(data.meta.get("logic") or "No strategy logic provided.")
@@ -1227,6 +1002,7 @@ def main() -> None:
         if not has_strategy_context:
             st.warning("Blocker: strategy_context.json missing this strategy. Parameter tab can only show canonical-derived minimal mapping.")
         render_parameter_tab(data.meta)
+
 
 
 if __name__ == "__main__":

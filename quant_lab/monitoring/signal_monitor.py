@@ -1,7 +1,7 @@
 """Real-time signal monitor — bridges signal_engine into the monitoring pipeline.
 
 Accepts live OHLCV data via a duck-typed adapter, runs TrendPullback signal
-generation, and produces InfluxDB Points aligned with ``influx_writer.py``.
+generation, and produces Points for downstream consumers (TimescaleDB writer).
 
 Skills: python, quant
 """
@@ -42,9 +42,7 @@ def signal_to_point(
     source: str = "live",
     run_id: str = "monitor",
 ) -> Point:
-    """Format a single signal into an InfluxDB ``strategy_signals`` Point.
-
-    Tags are aligned with ``influx_writer.points_from_backtest``:
+    """Format a single signal into a ``strategy_signals`` Point.
         schema_version, strategy, symbol, timeframe, side, source, run_id, signal_type.
 
     Fields: signal_strength (float), confidence (float), price (float).
@@ -156,8 +154,7 @@ def run_monitor(
     Returns
     -------
     Point or None
-        An ``influxdb_client.Point`` with measurement ``strategy_signals``
-        whose tags match ``influx_writer.points_from_backtest``.
+        An ``influxdb_client.Point`` with measurement ``strategy_signals``.
         Returns ``None`` when the adapter returns an empty DataFrame.
 
     Output Point schema

@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""Periodic signal monitor scheduler — runs run_monitor every hour and writes to InfluxDB.
+"""Periodic signal monitor scheduler — runs run_monitor every hour and writes to TimescaleDB.
 
 Usage:
     python scripts/monitor/scheduler.py                 # continuous hourly loop
     python scripts/monitor/scheduler.py --once          # run once then exit
-    python scripts/monitor/scheduler.py --once --dry-run  # run once, print only, no InfluxDB write
+    python scripts/monitor/scheduler.py --once --dry-run  # run once, print only, no DB write
 
 Environment variables:
-    INFLUX_URL      (default: http://localhost:8086)
-    INFLUX_TOKEN    (required — warns and skips write if absent)
-    INFLUX_ORG      (default: quant_research)
-    INFLUX_BUCKET   (default: nautilus_signals)
     CCXT_API_KEY    (optional — read-only mode when absent)
     CCXT_API_SECRET (optional)
     MONITOR_SYMBOL  (default: BTC/USDT)
@@ -61,10 +57,6 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 def _env_config() -> dict:
     return {
-        "influx_url": os.environ.get("INFLUX_URL", "http://localhost:8086"),
-        "influx_token": os.environ.get("INFLUX_TOKEN", ""),
-        "influx_org": os.environ.get("INFLUX_ORG", "quant_research"),
-        "influx_bucket": os.environ.get("INFLUX_BUCKET", "nautilus_signals"),
         "symbol": os.environ.get("MONITOR_SYMBOL", "BTC/USDT"),
         "timeframe": os.environ.get("MONITOR_TIMEFRAME", "1h"),
         "api_key": os.environ.get("CCXT_API_KEY", ""),
@@ -87,35 +79,9 @@ def _build_adapter(cfg: dict):
     )
 
 
-def _write_to_influx(pt, cfg: dict) -> bool:
-    """Write a Point to InfluxDB. Returns True on success."""
-    try:
-        from influxdb_client import InfluxDBClient
-        from influxdb_client.client.write_api import SYNCHRONOUS
-
-        client = InfluxDBClient(
-            url=cfg["influx_url"],
-            token=cfg["influx_token"],
-            org=cfg["influx_org"],
-        )
-        write_api = client.write_api(write_options=SYNCHRONOUS)
-        write_api.write(
-            bucket=cfg["influx_bucket"],
-            org=cfg["influx_org"],
-            record=pt,
-        )
-        client.close()
-        return True
-    except Exception as exc:
-        logger.error("InfluxDB write failed: %s", exc)
-        return False
-
-
 def _write_to_timescale(pt, cfg: dict, run_id: str) -> bool:
     """Write signal data to TimescaleDB with mode='sim'. Returns True on success."""
     try:
-        import psycopg2
-
         # Parse InfluxDB point for field values
         line = pt.to_line_protocol()
         fields_str = line.split(" ")[1] if " " in line else ""
@@ -235,27 +201,15 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
     )
 
     if dry_run:
-        logger.info("[%s] --dry-run: skipping InfluxDB write", ts_label)
+        logger.info("[%s] --dry-run: skipping TimescaleDB write", ts_label)
         logger.info("[line_protocol] %s", line)
         return summary
 
-    if not cfg["influx_token"]:
-        logger.warning(
-            "[%s] INFLUX_TOKEN not set — skipping InfluxDB write", ts_label
-        )
-        return summary
-
+    # Write to TimescaleDB
     try:
-        ok = _write_to_influx(pt, cfg)
-    except Exception as exc:
-        logger.error("[%s] InfluxDB write exception: %s", ts_label, exc)
-        ok = False
-    if ok:
-        logger.info("[%s] ✅ Written to InfluxDB (bucket=%s)", ts_label, cfg["influx_bucket"])
-
-    # Also write to TimescaleDB (mode='sim')
-    if not dry_run:
         _write_to_timescale(pt, cfg, sim_run_id)
+    except Exception as exc:
+        logger.error("[%s] TimescaleDB write exception: %s", ts_label, exc)
 
     return summary
 
@@ -305,18 +259,14 @@ def _run_loop_sleep(cfg: dict, dry_run: bool):
 def main():
     parser = argparse.ArgumentParser(description="Signal monitor scheduler")
     parser.add_argument("--once", action="store_true", help="Run once and exit")
-    parser.add_argument("--dry-run", action="store_true", help="Skip InfluxDB write")
+    parser.add_argument("--dry-run", action="store_true", help="Skip TimescaleDB write")
     args = parser.parse_args()
 
     cfg = _env_config()
     logger.info(
-        "Config: symbol=%s timeframe=%s influx_url=%s org=%s bucket=%s token_set=%s",
+        "Config: symbol=%s timeframe=%s",
         cfg["symbol"],
         cfg["timeframe"],
-        cfg["influx_url"],
-        cfg["influx_org"],
-        cfg["influx_bucket"],
-        bool(cfg["influx_token"]),
     )
 
     if args.once:

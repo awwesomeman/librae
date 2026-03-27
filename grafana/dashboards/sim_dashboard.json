@@ -1,12 +1,8 @@
 {
   "uid": "sim_dashboard",
-  "title": "Sim Dashboard (Signal Tracking)",
+  "title": "Monitor",
   "description": "Simulated signal tracking from scheduler",
-  "tags": [
-    "quant",
-    "timescaledb",
-    "sim"
-  ],
+  "tags": [],
   "timezone": "browser",
   "editable": true,
   "time": {

@@ -15,7 +15,6 @@ import pytest
 _NAUTILUS_TESTS = [
     "test_backtest_adapter.py",
     "test_baseline_btc_h1.py",
-    "test_influx_actor.py",
     "test_integration_smallsample_backtest.py",
     "test_integration_smoke.py",
     "test_metrics_module.py",
