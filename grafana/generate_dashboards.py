@@ -110,13 +110,13 @@ BASE_PANELS_DEF: list[dict] = [
         None,
         [{"color": "blue", "value": None}],
     ),
-    # --- Equity Curve ---
+    # --- Equity Curve (left half) ---
     {
-        "_type": "full_row",
+        "_type": "half",
         "title": "Equity Curve",
         "type": "timeseries",
         "h": 8,
-        "w": 24,
+        "w": 12,
         "targets": [
             _target(
                 "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\""
@@ -152,13 +152,13 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # --- Drawdown ---
+    # --- Drawdown (right half) ---
     {
-        "_type": "full_row",
+        "_type": "half",
         "title": "Drawdown %",
         "type": "timeseries",
-        "h": 6,
-        "w": 24,
+        "h": 8,
+        "w": 12,
         "targets": [
             _target(
                 "SELECT ts AS time, drawdown * -1 AS \"Drawdown %\""
@@ -178,13 +178,13 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # --- Asset Price + Signals ---
+    # --- Trade Signals (left half) ---
     {
-        "_type": "full_row",
-        "title": "Asset Price + Signals",
+        "_type": "half",
+        "title": "Trade Signals",
         "type": "timeseries",
-        "h": 8,
-        "w": 24,
+        "h": 10,
+        "w": 12,
         "targets": [
             _target(
                 "SELECT ts AS time, close FROM ohlcv"
@@ -228,13 +228,13 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # --- Trade Table ---
+    # --- Trade Detail (right half) ---
     {
-        "_type": "full_row",
+        "_type": "half",
         "title": "Trade Detail",
         "type": "table",
         "h": 10,
-        "w": 24,
+        "w": 12,
         "targets": [
             _target(
                 "SELECT"
