@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from librae.schema import BacktestOutput, StrategyMetrics, RunMetadata
-from librae.adapter import metrics_dict_to_backtest_output, generate_run_id as _generate_run_id
+from librae.utils import metrics_dict_to_backtest_output, generate_run_id as _generate_run_id
 from librae.runners import run_strict_protocol, Periods
 
 

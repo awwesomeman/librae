@@ -35,7 +35,7 @@ def _make_result(
     return BacktestResult(
         trades=trades or [],
         equity_curve=snapshots,
-        initial_budget=budget,
+        initial_balance=budget,
         final_equity=eq[-1],
     )
 
@@ -45,7 +45,7 @@ def _trade(
 ) -> TradeResult:
     gross = (exit_ - entry) * qty
     return TradeResult(
-        entry_ts=START, exit_ts=END, side="buy",
+        instrument="TEST", entry_ts=START, exit_ts=END, side="buy",
         entry_price=entry, exit_price=exit_, quantity=qty,
         gross_pnl=gross, commission=0.0, slippage=0.0, tax=0.0,
         net_pnl=gross, holding_bars=holding,
@@ -54,7 +54,7 @@ def _trade(
 
 class TestComputeAllEmpty:
     def test_no_equity_curve(self) -> None:
-        result = BacktestResult(trades=[], equity_curve=[], initial_budget=10_000, final_equity=10_000)
+        result = BacktestResult(trades=[], equity_curve=[], initial_balance=10_000, final_equity=10_000)
         m = compute_all(result, START, END)
         assert m.trades == 0
         assert np.isclose(m.total_return, 0.0)
@@ -100,12 +100,12 @@ class TestComputeAllMetrics:
 
     def test_cost_totals(self) -> None:
         t = TradeResult(
-            entry_ts=START, exit_ts=END, side="buy",
+            instrument="TEST", entry_ts=START, exit_ts=END, side="buy",
             entry_price=100, exit_price=110, quantity=1.0,
             gross_pnl=10.0, commission=2.0, slippage=1.0, tax=0.5,
             net_pnl=6.5, holding_bars=3,
         )
-        equity = [10_000.0, 10_006.5]
+        equity = [10_000.0, 10_003.0, 10_006.5]
         m = compute_all(_make_result([t], equity), START, END)
         assert np.isclose(m.total_commission, 2.0)
         assert np.isclose(m.total_slippage, 1.0)

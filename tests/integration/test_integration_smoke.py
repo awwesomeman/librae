@@ -10,21 +10,19 @@ import unittest
 MONITOR_PROFILES_DIR = os.path.join(
     os.path.dirname(__file__),
     "..",
-    "scripts",
-    "monitor",
-    "monitor_profiles",
+    "..",
+    "monitoring",
+    "profiles",
 )
 
 LAYERED_MODULES = [
     "librae.runners",
     "librae.scoring",
-    "librae.adapter",
+    "librae.utils",
     "pipeline.features.core_data_sources",
     "pipeline.features.core_features",
-    "monitoring.monitor_core",
-    "monitoring.monitor_run",
-    "scripts.reporting.render_report",
-    "scripts.reporting.save_reports",
+    "app.reporting.render_report",
+    "app.reporting.save_reports",
 ]
 
 

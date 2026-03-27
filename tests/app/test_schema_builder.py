@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for scripts.reporting.schema_builder."""
+"""Tests for app.reporting.schema_builder."""
 
 import os
 import sys
@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from librae import Periods
-from scripts.reporting.schema_builder import (
+from app.reporting.schema_builder import (
     build_sample_periods,
     build_cost_settings,
     build_strategy_output,

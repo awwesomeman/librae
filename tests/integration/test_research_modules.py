@@ -6,7 +6,7 @@ from pathlib import Path
 from librae import run_strict_protocol, Periods
 from librae import run_walkforward, WFWindow
 from librae import run_stability
-from scripts.reporting.render_report import render_brief
+from app.reporting.render_report import render_brief
 
 
 class TestResearchModules(unittest.TestCase):

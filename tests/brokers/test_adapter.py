@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from librae.adapter import generate_run_id, metrics_dict_to_backtest_output
+from librae.utils import generate_run_id, metrics_dict_to_backtest_output
 from librae.schema import BacktestOutput
 
 

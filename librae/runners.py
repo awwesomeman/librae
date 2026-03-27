@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from .adapter import generate_run_id, metrics_dict_to_backtest_output
+from .utils import generate_run_id, metrics_dict_to_backtest_output
 from .scoring import REQUIRED_METRICS_KEYS, score, validate_metrics
 
 

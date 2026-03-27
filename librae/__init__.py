@@ -10,7 +10,7 @@ from .schema import (
     RUN_ID_PATTERN,
 )
 from .persistence import save_backtest_output, load_backtest_output
-from .adapter import generate_run_id, metrics_dict_to_backtest_output
+from .utils import generate_run_id, metrics_dict_to_backtest_output
 from .scoring import REQUIRED_METRICS_KEYS, score, validate_metrics
 from .cost_model import CostModel
 from .strategy import Action, BaseStrategy, Context, Fill, Position

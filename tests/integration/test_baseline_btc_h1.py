@@ -11,11 +11,11 @@ import tempfile
 
 import pytest
 
-from librae.sample_data import (
+from tests.sample_data import (
     generate_btc_h1_ohlcv,
     run_simple_sma_crossover,
 )
-from librae.adapter import metrics_dict_to_backtest_output
+from librae.utils import metrics_dict_to_backtest_output
 from librae.persistence import save_backtest_output, load_backtest_output
 from librae.schema import (
     BacktestOutput,
