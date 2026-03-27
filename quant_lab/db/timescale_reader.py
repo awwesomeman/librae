@@ -86,39 +86,20 @@ def load_trade_blotter(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
 def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """Load strategy_performance joined with backtest_runs.
 
-    Returns a DataFrame with one row per metric in _field/_value format
-    (matching the _field/_value pivot layout expected by the Streamlit app).
+    Returns a column-based DataFrame with one row containing all metrics.
     """
     sql = """
-        SELECT sp.*, br.strategy, br.symbol, br.timeframe, br.sample
+        SELECT sp.run_id, sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
+               sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.trades,
+               sp.avg_trade_return, sp.exposure_ratio, sp.bh_total_return,
+               br.strategy, br.symbol, br.timeframe, br.sample
         FROM strategy_performance sp
         JOIN backtest_runs br ON sp.run_id = br.run_id
         WHERE sp.run_id = %s
     """
     with _conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
-    if df.empty:
-        return df
-
-    # Pivot to _field/_value format matching InfluxDB convention
-    metric_cols = [
-        "total_return", "annual_return", "sharpe", "sortino",
-        "max_drawdown", "win_rate", "profit_factor", "trades",
-        "avg_trade_return", "exposure_ratio", "bh_total_return",
-    ]
-    rows = []
-    row = df.iloc[0]
-    for col in metric_cols:
-        if col in row.index and row[col] is not None:
-            rows.append({
-                "_field": col,
-                "_value": float(row[col]) if row[col] is not None else 0.0,
-                "strategy": row.get("strategy"),
-                "symbol": row.get("symbol"),
-                "timeframe": row.get("timeframe"),
-                "sample": row.get("sample"),
-            })
-    return pd.DataFrame(rows)
+    return df
 
 
 def load_strategy_signals(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:

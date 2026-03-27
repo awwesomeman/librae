@@ -140,8 +140,9 @@ def validate_dataframe_columns(df: pd.DataFrame, required: set[str], dataset: st
 def validate_perf_fields(perf_raw: pd.DataFrame) -> None:
     if perf_raw.empty:
         return
-    fields = {str(v) for v in perf_raw.get("_field", pd.Series(dtype=str)).dropna().tolist()}
-    missing = sorted(set(REQUIRED_PERF_FIELDS) - fields)
+    # Column-based format: each metric is a column in the DataFrame
+    columns = set(perf_raw.columns)
+    missing = sorted(set(REQUIRED_PERF_FIELDS) - columns)
     if missing:
         raise ValueError(f"strategy_performance missing required fields: {', '.join(missing)}")
 

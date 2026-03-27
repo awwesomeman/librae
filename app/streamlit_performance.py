@@ -194,14 +194,25 @@ def validate_strategy_context_or_raise(meta: dict[str, Any], strategy: str) -> N
         raise SchemaValidationError(str(exc)) from exc
 
 
+METRIC_COLS = [
+    "total_return", "annual_return", "sharpe", "sortino",
+    "max_drawdown", "win_rate", "profit_factor", "trades",
+    "avg_trade_return", "exposure_ratio", "bh_total_return",
+    "calmar", "payoff_ratio", "expectancy",
+]
+
+
 def _perf_map(perf_raw: pd.DataFrame) -> dict[str, float]:
+    if perf_raw.empty:
+        return {}
+    row = perf_raw.iloc[0]
     out: dict[str, float] = {}
-    for _, r in perf_raw.iterrows():
-        key = str(r.get("_field"))
-        try:
-            out[key] = float(r.get("_value", 0.0))
-        except Exception:
-            continue
+    for col in METRIC_COLS:
+        if col in row.index and row[col] is not None:
+            try:
+                out[col] = float(row[col])
+            except Exception:
+                continue
     return out
 
 
@@ -987,7 +998,7 @@ def main() -> None:
     strategy_logic = str(data.meta.get("logic") or "No strategy logic provided.")
     alpha_value = "N/A"
     if not data.perf_raw.empty:
-        perf_map = {str(r.get("_field")): float(r.get("_value", 0.0)) for _, r in data.perf_raw.iterrows()}
+        perf_map = _perf_map(data.perf_raw)
         strategy_ret = perf_map.get("total_return")
         benchmark_ret = benchmark_total_return_from_curve(data.curve)
         if strategy_ret is not None and benchmark_ret is not None:

@@ -20,8 +20,9 @@ def test_require_columns_raises_on_missing_columns() -> None:
 def test_require_perf_fields_raises_on_missing_fields() -> None:
     perf = pd.DataFrame(
         {
-            "_field": ["total_return", "max_drawdown", "trades"],
-            "_value": [0.1, -0.2, 50],
+            "total_return": [0.1],
+            "max_drawdown": [-0.2],
+            "trades": [50],
         }
     )
     with pytest.raises(SchemaValidationError, match="strategy_performance missing required fields"):
@@ -31,8 +32,12 @@ def test_require_perf_fields_raises_on_missing_fields() -> None:
 def test_general_metrics_table_uses_canonical_fields() -> None:
     perf = pd.DataFrame(
         {
-            "_field": ["total_return", "annual_return", "sharpe", "max_drawdown", "win_rate", "trades"],
-            "_value": [0.08, 0.12, 1.4, -0.03, 0.55, 10],
+            "total_return": [0.08],
+            "annual_return": [0.12],
+            "sharpe": [1.4],
+            "max_drawdown": [-0.03],
+            "win_rate": [0.55],
+            "trades": [10],
         }
     )
     curve = pd.DataFrame({"benchmark_equity": [1.0, 1.05]})
