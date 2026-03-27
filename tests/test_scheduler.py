@@ -118,18 +118,16 @@ class TestSchedulerHoldSignalWritten:
 
     @patch("scripts.monitor.scheduler._write_to_timescale")
     @patch("scripts.monitor.scheduler._build_adapter")
-    @patch("quant_lab.monitoring.signal_monitor.generate_signals")
-    def test_hold_signal_still_writes(self, mock_gen, mock_build, mock_write):
+    @patch("quant_lab.monitoring.signal_monitor.compute_exit_conditions")
+    @patch("quant_lab.monitoring.signal_monitor.compute_entry_conditions")
+    def test_hold_signal_still_writes(self, mock_entry, mock_exit, mock_build, mock_write):
         mock_build.return_value = _mock_adapter()
         mock_write.return_value = True
 
-        # Force signal=0 for all rows
-        def fake_gen(df, params=None):
-            out = df.copy()
-            out["signal"] = 0
-            return out
-
-        mock_gen.side_effect = fake_gen
+        # Force no entry/exit → hold signal
+        import pandas as pd
+        mock_entry.return_value = pd.Series([False] * 500)
+        mock_exit.return_value = pd.Series([False] * 500)
 
         cfg = _base_cfg()
         result = run_job(cfg=cfg, dry_run=False)

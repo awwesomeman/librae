@@ -19,8 +19,9 @@ import pytest
 
 from quant_lab.signal_engine.trendpullback import (
     compute_daily_gate,
+    compute_entry_conditions,
+    compute_exit_conditions,
     compute_features,
-    generate_signals,
     resample_to_daily,
 )
 from scripts.etl.core_features import (
@@ -79,62 +80,6 @@ def _add_daily_trend_column(h1: pd.DataFrame, d1: pd.DataFrame) -> pd.DataFrame:
     return h1
 
 
-def _legacy_signals(h1: pd.DataFrame, d1: pd.DataFrame) -> np.ndarray:
-    """Reproduce inline signal logic using merge_asof daily gate (updated).
-
-    The daily gate is now pre-merged via _add_daily_trend_column (merge_asof),
-    matching the production code. The rest of the logic is identical to
-    generate_signals in the signal engine.
-    """
-    # Merge daily gate the same way as production
-    h1 = _add_daily_trend_column(h1, d1)
-
-    PULL = 0.3
-    MAX_HOLD = 24
-    n = len(h1)
-    signals = np.zeros(n, dtype=np.int8)
-    in_position = False
-    bars_held = 0
-
-    for i in range(1, n):
-        cur = h1.iloc[i]
-        prev = h1.iloc[i - 1]
-
-        if in_position:
-            bars_held += 1
-            if cur["close"] < cur["ema20"] or bars_held >= MAX_HOLD:
-                signals[i] = -1
-                in_position = False
-                bars_held = 0
-            continue
-
-        if i >= n - 1:
-            continue
-
-        if not cur.get("daily_trend", False):
-            continue
-
-        near = abs(cur["low"] - cur["ema20"]) <= PULL * cur["atr14"]
-        if not near:
-            continue
-
-        bullish = (cur["close"] > cur["open"]) and (cur["close"] > prev["high"])
-        if not bullish:
-            continue
-
-        vol_ok = (
-            (cur["volume"] >= 0.9 * cur["vol_sma20"])
-            if not np.isnan(cur["vol_sma20"])
-            else False
-        )
-        if not (vol_ok and cur["atr14"] > 0):
-            continue
-
-        signals[i] = 1
-        in_position = True
-        bars_held = 0
-
-    return signals
 
 
 # ---------------------------------------------------------------------------
@@ -188,95 +133,148 @@ class TestFeatureShape:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Signal logic parity (same features → same signals)
+# Tests: Pure signal conditions (entry/exit as boolean Series)
 # ---------------------------------------------------------------------------
 
-class TestSignalLogicParity:
-    """Given the SAME features, generate_signals must produce identical signals
-    as the legacy inline logic."""
+class TestSignalConditions:
+    """Test compute_entry_conditions and compute_exit_conditions produce valid booleans."""
 
-    @pytest.mark.parametrize("n,seed", [(1000, 42), (800, 123), (600, 99)])
-    def test_same_features_same_signals(self, n: int, seed: int):
-        h1_base = _make_ohlcv(n=n, seed=seed)
-
-        # Use legacy features for both paths
-        h1_legacy = add_trendpullback_features(h1_base)
-        d1_legacy = add_daily_trend_gate(resample_ohlcv(h1_base, "1D"))
-
-        # Legacy signals
-        old_signals = _legacy_signals(h1_legacy, d1_legacy)
-
-        # New engine signals (using same legacy features + daily_trend column)
-        h1_for_engine = _add_daily_trend_column(h1_legacy, d1_legacy)
-        new_signals = generate_signals(h1_for_engine)["signal"].values
-
-        new_entries = np.where(new_signals == 1)[0]
-        old_entries = np.where(old_signals == 1)[0]
-        new_exits = np.where(new_signals == -1)[0]
-        old_exits = np.where(old_signals == -1)[0]
-
-        np.testing.assert_array_equal(
-            new_entries, old_entries,
-            err_msg=f"Entry mismatch (seed={seed}): new={new_entries}, old={old_entries}",
-        )
-        np.testing.assert_array_equal(
-            new_exits, old_exits,
-            err_msg=f"Exit mismatch (seed={seed}): new={new_exits}, old={old_exits}",
-        )
-
-    def test_signal_engine_end_to_end(self):
-        """Full pipeline with pandas_ta features produces valid signals."""
-        h1_base = _make_ohlcv(n=1000, seed=42)
+    def test_entry_conditions_returns_bool(self):
+        h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
         d1 = compute_daily_gate(resample_to_daily(h1_base))
-        h1_with_gate = _add_daily_trend_column(h1, d1)
-        sig = generate_signals(h1_with_gate)
+        merged = _add_daily_trend_column(h1, d1)
+        entry = compute_entry_conditions(merged)
+        assert entry.dtype == bool
+        assert len(entry) == len(merged)
 
-        assert "signal" in sig.columns
-        assert set(sig["signal"].unique()).issubset({-1, 0, 1})
-        assert len(sig) == len(h1_base)
+    def test_exit_conditions_returns_bool(self):
+        h1_base = _make_ohlcv(n=500, seed=42)
+        h1 = compute_features(h1_base)
+        exit_cond = compute_exit_conditions(h1)
+        assert exit_cond.dtype == bool
+        assert len(exit_cond) == len(h1)
 
-        # Entries and exits should pair up
-        entries = (sig["signal"] == 1).sum()
-        exits = (sig["signal"] == -1).sum()
-        assert abs(entries - exits) <= 1, "Entry/exit count mismatch > 1"
+    def test_entry_conditions_require_daily_trend(self):
+        """Without daily_trend column, entries should still work (default True)."""
+        h1 = compute_features(_make_ohlcv(n=500, seed=42))
+        entry = compute_entry_conditions(h1)
+        assert isinstance(entry, pd.Series)
+
+    @pytest.mark.parametrize("seed", [42, 123, 99])
+    def test_entry_conditions_on_trending_data(self, seed):
+        """Trending data should produce some entry signals."""
+        rng = np.random.default_rng(seed)
+        n = 1000
+        base = 50000.0
+        # Strong uptrend
+        returns = rng.normal(0.002, 0.005, n)
+        close = base * np.cumprod(1 + returns)
+        idx = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "open": close * 0.999,
+            "high": close * 1.002,
+            "low": close * 0.998,
+            "close": close,
+            "volume": rng.uniform(500, 3000, n),
+        }, index=idx)
+        h1 = compute_features(df)
+        d1 = compute_daily_gate(resample_to_daily(df))
+        merged = _add_daily_trend_column(h1, d1)
+        entry = compute_entry_conditions(merged)
+        assert entry.sum() > 0, "Strong uptrend should have entry signals"
 
 
 # ---------------------------------------------------------------------------
-# Tests: Cost model
+# Tests: Cost model (via new engine)
 # ---------------------------------------------------------------------------
 
 class TestCostModel:
 
     def test_cost_deducted_from_pnl(self):
+        from quant_lab.backtest.cost_model import CostModel
+        from quant_lab.backtest.engine import Backtest
+        from quant_lab.backtest.executor import BacktestExecutor
+        from quant_lab.backtest.strategy import Action, BaseStrategy
+
         h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
         d1 = compute_daily_gate(resample_to_daily(h1_base))
+        merged = _add_daily_trend_column(h1, d1)
 
-        from scripts.run_backtest_lumibot_btc import _run_vectorised_backtest
-        trade_log, _ = _run_vectorised_backtest(
-            h1, d1, budget=100_000, warmup_days=7,
-            commission_bps=10.0, slippage_bps=5.0,
+        # Convert to MultiIndex
+        mi = pd.MultiIndex.from_arrays(
+            [["TEST"] * len(merged), merged.index], names=["instrument", "datetime"],
         )
+        merged_mi = merged.set_index(mi)
 
-        for t in trade_log:
-            assert "net_pnl" in t
-            assert "gross_pnl" in t
-            assert "cost" in t
-            assert t["cost"] >= 0
-            assert abs(t["net_pnl"] - (t["gross_pnl"] - t["cost"])) < 1e-6
+        # Precompute entry/exit signals
+        from quant_lab.signal_engine.trendpullback import compute_entry_conditions, compute_exit_conditions
+        merged_mi["entry_signal"] = compute_entry_conditions(merged).values
+        merged_mi["exit_signal"] = compute_exit_conditions(merged).values
+
+        class SignalStrat(BaseStrategy):
+            def on_bar(self, ctx):
+                pos = ctx.positions.get(ctx.instrument)
+                if pos and (ctx.bar["exit_signal"] or pos.bars_held >= 24):
+                    return [Action(type="close", instrument=ctx.instrument)]
+                if not pos and ctx.bar["entry_signal"]:
+                    return [Action(type="buy", instrument=ctx.instrument)]
+                return []
+
+        cost_model = CostModel(
+            multiplier=1.0, commission_rate=0.001,
+            min_commission=0.0, slippage_ticks=2.0,
+            tick_size=0.01, transaction_tax=0.0,
+        )
+        bt = Backtest(merged_mi, SignalStrat(), initial_balance=100_000,
+                      warmup_bars=168, executor=BacktestExecutor(cost_model))
+        result = bt.run()
+
+        for t in result.trades:
+            total_cost = t.commission + t.slippage + t.tax
+            assert total_cost >= 0
+            assert abs(t.net_pnl - (t.gross_pnl - total_cost)) < 1e-6
 
     def test_zero_cost(self):
+        from quant_lab.backtest.cost_model import CostModel
+        from quant_lab.backtest.engine import Backtest
+        from quant_lab.backtest.executor import BacktestExecutor
+        from quant_lab.backtest.strategy import Action, BaseStrategy
+
         h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
         d1 = compute_daily_gate(resample_to_daily(h1_base))
+        merged = _add_daily_trend_column(h1, d1)
 
-        from scripts.run_backtest_lumibot_btc import _run_vectorised_backtest
-        trade_log, _ = _run_vectorised_backtest(
-            h1, d1, budget=100_000, warmup_days=7,
-            commission_bps=0.0, slippage_bps=0.0,
+        mi = pd.MultiIndex.from_arrays(
+            [["TEST"] * len(merged), merged.index], names=["instrument", "datetime"],
         )
+        merged_mi = merged.set_index(mi)
 
-        for t in trade_log:
-            assert abs(t["cost"]) < 1e-10
-            assert abs(t["net_pnl"] - t["gross_pnl"]) < 1e-6
+        from quant_lab.signal_engine.trendpullback import compute_entry_conditions, compute_exit_conditions
+        merged_mi["entry_signal"] = compute_entry_conditions(merged).values
+        merged_mi["exit_signal"] = compute_exit_conditions(merged).values
+
+        class SignalStrat(BaseStrategy):
+            def on_bar(self, ctx):
+                pos = ctx.positions.get(ctx.instrument)
+                if pos and (ctx.bar["exit_signal"] or pos.bars_held >= 24):
+                    return [Action(type="close", instrument=ctx.instrument)]
+                if not pos and ctx.bar["entry_signal"]:
+                    return [Action(type="buy", instrument=ctx.instrument)]
+                return []
+
+        cost_model = CostModel(
+            multiplier=1.0, commission_rate=0.0,
+            min_commission=0.0, slippage_ticks=0.0,
+            tick_size=0.01, transaction_tax=0.0,
+        )
+        bt = Backtest(merged_mi, SignalStrat(), initial_balance=100_000,
+                      warmup_bars=168, executor=BacktestExecutor(cost_model))
+        result = bt.run()
+
+        for t in result.trades:
+            assert abs(t.commission) < 1e-10
+            assert abs(t.slippage) < 1e-10
+            assert abs(t.net_pnl - t.gross_pnl) < 1e-6

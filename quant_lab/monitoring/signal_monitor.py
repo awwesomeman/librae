@@ -16,7 +16,8 @@ import pandas as pd
 from quant_lab.signal_engine.trendpullback import (
     compute_features,
     compute_daily_gate,
-    generate_signals,
+    compute_entry_conditions,
+    compute_exit_conditions,
     resample_to_daily,
     DEFAULT_PARAMS,
 )
@@ -147,11 +148,11 @@ def run_monitor(
             daily_df = None  # fall back to resample inside _prepare_dataframe
 
     prepared = _prepare_dataframe(raw, params, daily_df=daily_df)
-    sig_df = generate_signals(prepared, params)
+    entry_conds = compute_entry_conditions(prepared, params)
+    exit_conds = compute_exit_conditions(prepared, params)
 
-    # Latest bar
-    last_idx = sig_df.index[-1]
-    signal_val = int(sig_df.iloc[-1]["signal"])
+    last_idx = prepared.index[-1]
+    signal_val = 1 if entry_conds.iloc[-1] else (-1 if exit_conds.iloc[-1] else 0)
 
     # Confidence: binary — 1.0 when any signal present, 0.0 for hold
     confidence = 1.0 if signal_val != 0 else 0.0

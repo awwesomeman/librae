@@ -198,7 +198,7 @@ conn.close()
 ### 2.4 跑回測（資料寫到 Server 的 DB）
 
 ```bash
-.venv/bin/python scripts/run_backtest_lumibot_btc.py --months 6 --sample oos
+.venv/bin/python scripts/run_backtest.py --months 6 --sample oos
 ```
 
 ### 2.5 開 Streamlit

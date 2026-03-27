@@ -97,7 +97,7 @@ quant-strategy-lab/
 │   ├── monitoring/         # SignalResult, run_monitor
 │   └── adapters/           # CryptoAdapter, MarketHub
 ├── scripts/
-│   ├── run_backtest_lumibot_btc.py  # 主回測腳本
+│   ├── run_backtest.py  # 主回測腳本
 │   ├── run_monitor_once.py
 │   └── monitor/
 │       ├── scheduler.py
@@ -112,8 +112,8 @@ quant-strategy-lab/
 | 指令 | 說明 |
 |------|------|
 | `pytest tests/ -v` | 跑所有測試 |
-| `python scripts/run_backtest_lumibot_btc.py --months 6` | 跑回測 |
-| `python scripts/run_backtest_lumibot_btc.py --dry-run` | 回測不寫 DB |
+| `python scripts/run_backtest.py --months 6` | 跑回測 |
+| `python scripts/run_backtest.py --dry-run` | 回測不寫 DB |
 | `python scripts/run_monitor_once.py --dry-run` | 單次訊號 dry-run |
 | `python grafana/generate_dashboards.py` | 重新產生三板 JSON |
 

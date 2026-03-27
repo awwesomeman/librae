@@ -1,9 +1,10 @@
-"""TrendPullback signal engine — pure functions, no I/O.
+"""TrendPullback signal engine — pure functions, no I/O, no position tracking.
 
 All indicator computations use pandas_ta_classic (EMA, ATR, SMA).
 Functions are deterministic: same input → same output.
 
-Skills: python, quant
+Entry/exit conditions are pure boolean Series — no in_position or bars_held.
+Position management belongs in the Strategy layer.
 """
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ def compute_features(df: pd.DataFrame, params: dict | None = None) -> pd.DataFra
 
     out["ema20"] = ta.ema(out["close"], length=p["ema_period"])
     out["atr14"] = ta.atr(
-        out["high"], out["low"], out["close"], length=p["atr_period"]
+        out["high"], out["low"], out["close"], length=p["atr_period"],
     )
     out["vol_sma20"] = ta.sma(out["volume"], length=p["vol_sma_period"])
 
@@ -71,85 +72,41 @@ def resample_to_daily(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Signal generation (pure)
+# Signal conditions (pure boolean Series — no position tracking)
 # ---------------------------------------------------------------------------
 
-def generate_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
-    """Generate entry/exit signals for TrendPullback strategy.
+def compute_entry_conditions(df: pd.DataFrame, params: dict | None = None) -> pd.Series:
+    """Return boolean Series: True where all entry conditions are met.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        H1 OHLCV with features already computed (ema20, atr14, vol_sma20).
-        Must also contain a ``daily_trend`` column (bool) indicating whether
-        the daily gate is bullish for each bar's date.
-    params : dict, optional
-        Override default parameters.
+    Conditions:
+    1. daily_trend gate is True (pre-merged into df)
+    2. Pullback near EMA20: |low - ema20| <= pullback_factor * atr14
+    3. Bullish bar: close > open AND close > prev high
+    4. Volume filter: volume >= vol_threshold * vol_sma20
+    5. ATR > 0 (valid volatility)
 
-    Returns
-    -------
-    pd.DataFrame
-        A single-column DataFrame (index = df.index) with column ``signal``:
-        - 1  = entry (long)
-        - -1 = exit
-        - 0  = hold / no action
+    No position tracking. No bars_held. Just market conditions.
     """
     p = {**DEFAULT_PARAMS, **(params or {})}
 
-    n = len(df)
-    signals = np.zeros(n, dtype=np.int8)
+    daily_trend = df.get("daily_trend", pd.Series(True, index=df.index))
+    near_ema = (df["low"] - df["ema20"]).abs() <= p["pullback_factor"] * df["atr14"]
+    bullish = (df["close"] > df["open"]) & (df["close"] > df["high"].shift(1))
+    vol_ok = df["volume"] >= p["vol_threshold"] * df["vol_sma20"]
+    atr_valid = df["atr14"] > 0
 
-    pull = p["pullback_factor"]
-    max_hold = p["max_hold_bars"]
-    vol_thresh = p["vol_threshold"]
+    entry = daily_trend & near_ema & bullish & vol_ok & atr_valid
 
-    in_position = False
-    bars_held = 0
+    # NaN safety: first few bars won't have indicators
+    return entry.fillna(False)
 
-    for i in range(1, n):
-        cur = df.iloc[i]
-        prev = df.iloc[i - 1]
 
-        # --- Exit ---
-        if in_position:
-            bars_held += 1
-            if cur["close"] < cur["ema20"] or bars_held >= max_hold:
-                signals[i] = -1
-                in_position = False
-                bars_held = 0
-            continue
+def compute_exit_conditions(df: pd.DataFrame, params: dict | None = None) -> pd.Series:
+    """Return boolean Series: True where exit condition is met.
 
-        # --- Entry conditions ---
-        # Skip last bar
-        if i >= n - 1:
-            continue
+    Condition: close < ema20 (trend broken).
+    max_hold_bars is NOT checked here — that's the Strategy's job.
+    """
+    return (df["close"] < df["ema20"]).fillna(False)
 
-        # Daily gate
-        if not cur.get("daily_trend", False):
-            continue
 
-        # Pullback near EMA20
-        near = abs(cur["low"] - cur["ema20"]) <= pull * cur["atr14"]
-        if not near:
-            continue
-
-        # Bullish bar
-        bullish = (cur["close"] > cur["open"]) and (cur["close"] > prev["high"])
-        if not bullish:
-            continue
-
-        # Volume filter
-        vol_ok = (
-            (cur["volume"] >= vol_thresh * cur["vol_sma20"])
-            if not np.isnan(cur["vol_sma20"])
-            else False
-        )
-        if not (vol_ok and cur["atr14"] > 0):
-            continue
-
-        # Entry
-        signals[i] = 1
-        in_position = True
-        bars_held = 0
-
-    return pd.DataFrame({"signal": signals}, index=df.index)

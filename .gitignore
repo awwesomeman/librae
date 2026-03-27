@@ -22,3 +22,4 @@ quant-research-lab/
 
 # Secrets
 deploy/.env
+.env.local

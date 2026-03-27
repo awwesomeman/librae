@@ -112,7 +112,7 @@ conn.close()
 ### 2.3 跑回測 / Streamlit / Grafana
 
 ```bash
-python scripts/run_backtest_lumibot_btc.py --months 6 --sample oos
+python scripts/run_backtest.py --months 6 --sample oos
 python -m streamlit run app/streamlit_performance.py --server.port 8502
 # Grafana → http://localhost:3000
 ```

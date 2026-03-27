@@ -8,8 +8,70 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import pandas as pd
+
 from .adapter import generate_run_id, metrics_dict_to_backtest_output
 from .scoring import REQUIRED_METRICS_KEYS, score, validate_metrics
+
+
+# ---------------------------------------------------------------------------
+# Factory: bridge Backtest class → runners' backtest_fn interface
+# ---------------------------------------------------------------------------
+
+
+def make_backtest_fn(
+    df: pd.DataFrame,
+    strategy: Any,
+    initial_balance: float = 100_000.0,
+    warmup_bars: int = 0,
+) -> Callable[..., dict[str, Any]]:
+    """Create a backtest_fn compatible with run_strict_protocol / run_walkforward.
+
+    The returned function has signature ``(start, end, **params) -> dict``
+    where start/end are ISO date strings used to slice the DataFrame.
+
+    Args:
+        df: Full MultiIndex DataFrame with all features.
+        strategy: BaseStrategy instance.
+        initial_balance: Starting cash.
+        warmup_bars: Bars to skip at start.
+    """
+    from .engine import Backtest
+    from .metrics import compute_all
+
+    def backtest_fn(start: str, end: str, **params: Any) -> dict[str, Any]:
+        # Slice by datetime level
+        dt_idx = df.index.get_level_values("datetime")
+        sliced = df[(dt_idx >= start) & (dt_idx <= end)]
+        if len(sliced) < warmup_bars + 2:
+            return {"trades": 0, "ann_return": 0, "ann_sharpe": 0, "mdd": 0}
+
+        bt = Backtest(
+            data=sliced,
+            strategy=strategy,
+            initial_balance=initial_balance,
+            warmup_bars=warmup_bars,
+        )
+        result = bt.run()
+
+        timeline = sorted(sliced.index.get_level_values("datetime").unique())
+        start_ts = timeline[0].to_pydatetime()
+        end_ts = timeline[-1].to_pydatetime()
+        metrics = compute_all(result, start_ts, end_ts)
+
+        return {
+            "trades": metrics.trades,
+            "ann_return": metrics.annual_return,
+            "ann_sharpe": metrics.sharpe,
+            "mdd": metrics.max_drawdown,
+            "pf": metrics.profit_factor,
+            "win_rate": metrics.win_rate,
+            "avg_ret": metrics.avg_trade_return,
+            "avg_pnl_points": metrics.avg_pnl_points,
+            "total_return": metrics.total_return,
+        }
+
+    return backtest_fn
 
 
 # ---------------------------------------------------------------------------
@@ -39,11 +101,7 @@ def run_strict_protocol(
     timeframe: str | None = None,
     data_source: str = "unknown",
 ) -> dict[str, Any]:
-    """Strict flow: train-select params, validation health-check, OOS once.
-
-    When strategy/symbol/timeframe are provided, the result includes
-    a ``backtest_outputs`` dict mapping sample names to BacktestOutput objects.
-    """
+    """Strict flow: train-select params, validation health-check, OOS once."""
     scored = []
     for p in param_grid:
         m = backtest_fn(periods.train_start, periods.train_end, **p)
