@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import pandas as pd
-import quantstats_lumi as qs
+import quantstats as qs
 
 from .schema import StrategyMetrics
 
@@ -108,6 +108,8 @@ def compute_all(
         total_return=total_ret,
         annual_return=ann_return,
         sharpe=sharpe,
+        sortino=sortino,
+        calmar=calmar,
         max_drawdown=abs(max_dd),
         win_rate=win_rate,
         profit_factor=profit_factor,

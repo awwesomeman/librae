@@ -228,7 +228,7 @@ class TestCostModel:
             tick_size=0.01, transaction_tax=0.0,
         )
         bt = Backtest(merged_mi, SignalStrat(), initial_balance=100_000,
-                      warmup_bars=168, executor=BacktestExecutor(cost_model))
+                      executor=BacktestExecutor(cost_model))
         result = bt.run()
 
         for t in result.trades:
@@ -271,7 +271,7 @@ class TestCostModel:
             tick_size=0.01, transaction_tax=0.0,
         )
         bt = Backtest(merged_mi, SignalStrat(), initial_balance=100_000,
-                      warmup_bars=168, executor=BacktestExecutor(cost_model))
+                      executor=BacktestExecutor(cost_model))
         result = bt.run()
 
         for t in result.trades:

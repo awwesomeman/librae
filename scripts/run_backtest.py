@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from librae import Backtest, BacktestResult, compute_all
-from librae.config.market_config import get_instrument
+from librae.config.market_config import get_market
 from librae.persistence import save_backtest_output
 from librae.archive import archive_backtest_parquet
 from librae.schema import (
@@ -108,8 +108,7 @@ def build_output(
     end_ts = timeline[-1].to_pydatetime()
     now = datetime.now(tz=timezone.utc)
 
-    inst = get_instrument(symbol.replace("USDT", "_USDT").replace("TXFR", "_TXFR"))
-    quote_ccy = inst.market.quote_currency if inst.market else "USDT"
+    quote_ccy = "USDT"  # TODO: derive from market config when multi-market
 
     run_metadata = RunMetadata(
         run_id=run_id,
@@ -171,11 +170,11 @@ def build_output(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run backtest via Librae engine")
-    p.add_argument("--instrument", default="BTC_USDT", help="Instrument ID from markets config")
+    p.add_argument("--symbol", default="BTCUSDT", help="Trading symbol")
+    p.add_argument("--market", default="crypto", help="Market key from markets.yaml")
     p.add_argument("--months", type=int, default=6, help="Lookback months")
     p.add_argument("--initial-balance", type=float, default=100_000, help="Starting cash")
     p.add_argument("--max-hold-bars", type=int, default=24, help="Max bars to hold")
-    p.add_argument("--warmup-bars", type=int, default=168, help="Warmup bars to skip")
     p.add_argument("--sample", default="oos", help="Sample tag")
     p.add_argument("--out-dir", default=str(ROOT / "data" / "backtests"))
     p.add_argument("--dry-run", action="store_true", help="Skip TimescaleDB write")
@@ -184,10 +183,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    inst = get_instrument(args.instrument)
 
     # 1) Fetch & prepare data
-    df = prepare_data(inst.symbol, args.months)
+    df = prepare_data(args.symbol, args.months)
 
     # 2) Run backtest
     print("[2/5] Running backtest...")
@@ -196,16 +194,16 @@ def main() -> None:
     bt = Backtest(
         data=df,
         strategy=strategy,
+        market=args.market,
         initial_balance=args.initial_balance,
-        warmup_bars=args.warmup_bars,
     )
     result = bt.run()
     print(f"       trades={len(result.trades)}, equity_snapshots={len(result.equity_curve)}")
 
     # 3) Build output + metrics
     print("[3/5] Building BacktestOutput + metrics...")
-    run_id = generate_run_id(f"trendpullback_{args.instrument.lower()}", inst.symbol)
-    output = build_output(result, run_id, "trendpullback", inst.symbol, df, args.sample)
+    run_id = generate_run_id(f"trendpullback_{args.market}", args.symbol)
+    output = build_output(result, run_id, "trendpullback", args.symbol, df, args.sample)
 
     m = output.metrics
     print(f"       trades={m.trades}  sharpe={m.sharpe:.3f}  "

@@ -95,6 +95,8 @@ class StrategyMetrics:
     annual_return: float = 0.0
     annual_return_unit: str = "ratio"
     sharpe: float = 0.0
+    sortino: float = 0.0
+    calmar: float = 0.0
     max_drawdown: float = 0.0
     max_drawdown_unit: str = "ratio"
     win_rate: float = 0.0
@@ -108,8 +110,6 @@ class StrategyMetrics:
     trades_unit: str = "count"
     exposure_ratio: float = 0.0
     exposure_ratio_unit: str = "ratio_0_1"
-    bh_total_return: float = 0.0
-    bh_total_return_unit: str = "ratio"
     # Reserved: cost/slippage totals
     total_commission: Optional[float] = None
     total_commission_unit: Optional[str] = None

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from librae.cost_model import CostModel
-from librae.config.market_config import get_instrument
+from librae.config.market_config import get_market
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -37,21 +37,21 @@ def tw_futures_cost() -> CostModel:
     )
 
 
-# ── CostModel.from_instrument ────────────────────────────────────────────
+# ── CostModel.from_market ─────────────────────────────────────────────
 
 
-class TestFromInstrument:
+class TestFromMarket:
     def test_crypto_multiplier_is_one(self) -> None:
-        inst = get_instrument("BTC_USDT")
-        cm = CostModel.from_instrument(inst)
+        market = get_market("crypto")
+        cm = CostModel.from_market(market)
         assert np.isclose(cm.multiplier, 1.0)
         assert np.isclose(cm.commission_rate, 0.001)
         assert np.isclose(cm.transaction_tax, 0.0)
 
     def test_futures_multiplier(self) -> None:
-        inst = get_instrument("TW_TXFR")
-        cm = CostModel.from_instrument(inst)
-        assert np.isclose(cm.multiplier, 50.0)  # tick_value=50 / tick_size=1
+        market = get_market("tw_futures")
+        cm = CostModel.from_market(market)
+        assert np.isclose(cm.multiplier, 50.0)
         assert np.isclose(cm.min_commission, 100.0)
 
 

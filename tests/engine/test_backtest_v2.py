@@ -184,9 +184,13 @@ class TestMultiAsset:
             def on_bar(self, ctx):
                 actions = []
                 if ctx.bar_index == 2:
+                    n_instruments = len(ctx.instruments)
                     for inst in ctx.instruments:
                         if inst not in ctx.positions:
-                            actions.append(Action(type="buy", instrument=inst))
+                            bar = ctx.bars.get(inst, {})
+                            price = bar.get("close", 1.0)
+                            qty = (ctx.cash / n_instruments) / price if price > 0 else 0
+                            actions.append(Action(type="buy", instrument=inst, quantity=qty))
                 if ctx.bar_index == 5:
                     for inst in ctx.instruments:
                         if inst in ctx.positions:

@@ -94,7 +94,6 @@ def metrics_dict_to_backtest_output(
         avg_pnl_points=metrics.get("avg_pnl_points", 0.0) or 0.0,
         trades=n_trades,
         exposure_ratio=0.0,
-        bh_total_return=0.0,
     )
 
     # Convert trade_details dicts to TradeRecord objects if present

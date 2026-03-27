@@ -168,28 +168,27 @@ def write_backtest_output(
         # strategy_performance (upsert — full column coverage)
         cur.execute(
             """INSERT INTO strategy_performance
-               (run_id, total_return, annual_return, sharpe, sortino,
+               (run_id, total_return, annual_return, sharpe, sortino, calmar,
                 max_drawdown, win_rate, profit_factor, trades,
-                avg_trade_return, exposure_ratio, bh_total_return)
+                avg_trade_return, exposure_ratio)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  total_return=EXCLUDED.total_return,
                  annual_return=EXCLUDED.annual_return,
                  sharpe=EXCLUDED.sharpe,
                  sortino=EXCLUDED.sortino,
+                 calmar=EXCLUDED.calmar,
                  max_drawdown=EXCLUDED.max_drawdown,
                  win_rate=EXCLUDED.win_rate,
                  profit_factor=EXCLUDED.profit_factor,
                  trades=EXCLUDED.trades,
                  avg_trade_return=EXCLUDED.avg_trade_return,
-                 exposure_ratio=EXCLUDED.exposure_ratio,
-                 bh_total_return=EXCLUDED.bh_total_return""",
+                 exposure_ratio=EXCLUDED.exposure_ratio""",
             (
                 meta.run_id, m.total_return, m.annual_return,
-                m.sharpe, getattr(m, "sortino", None),
+                m.sharpe, m.sortino, m.calmar,
                 m.max_drawdown, m.win_rate, m.profit_factor,
                 m.trades, m.avg_trade_return, m.exposure_ratio,
-                m.bh_total_return,
             ),
         )
         counts["strategy_performance"] = 1

@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Quant strategy research platform — Librae backtest engine, multi-asset support"
 requires-python = ">=3.10"
 dependencies = [
-  "lumibot>=4.4,<5",
   "pandas>=2.0",
   "numpy>=1.24",
-  "empyrical>=0.5",
+  "quantstats>=0.0.62",
+  "pandas-ta-classic>=0.1",
   "httpx>=0.24",
   "apscheduler>=3.10,<4",
   "pyyaml>=6.0",

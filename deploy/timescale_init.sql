@@ -70,13 +70,13 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     annual_return   DOUBLE PRECISION,
     sharpe          DOUBLE PRECISION,
     sortino         DOUBLE PRECISION,
+    calmar          DOUBLE PRECISION,
     max_drawdown    DOUBLE PRECISION,
     win_rate        DOUBLE PRECISION,
     profit_factor   DOUBLE PRECISION,
     trades          INTEGER,
     avg_trade_return DOUBLE PRECISION,
-    exposure_ratio  DOUBLE PRECISION,
-    bh_total_return DOUBLE PRECISION
+    exposure_ratio  DOUBLE PRECISION
 );
 
 -- ohlcv（hypertable）

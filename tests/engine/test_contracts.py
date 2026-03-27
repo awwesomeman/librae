@@ -28,11 +28,18 @@ def test_schema_required_fields_and_types_are_canonical() -> None:
         "total_return",
         "annual_return",
         "sharpe",
+        "sortino",
+        "calmar",
         "max_drawdown",
         "win_rate",
+        "profit_factor",
+        "exposure_ratio",
         "trades",
     ]
-    assert [f.type_name for f in perf.fields] == ["float", "float", "float", "float", "float", "int"]
+    assert [f.type_name for f in perf.fields] == [
+        "float", "float", "float", "float", "float",
+        "float", "float", "float", "float", "int",
+    ]
 
     curve = MEASUREMENT_SPECS["perf_equity_curve"]
     assert [f.name for f in curve.fields] == [

@@ -23,7 +23,6 @@ def make_backtest_fn(
     df: pd.DataFrame,
     strategy: Any,
     initial_balance: float = 100_000.0,
-    warmup_bars: int = 0,
 ) -> Callable[..., dict[str, Any]]:
     """Create a backtest_fn compatible with run_strict_protocol / run_walkforward.
 
@@ -34,7 +33,6 @@ def make_backtest_fn(
         df: Full MultiIndex DataFrame with all features.
         strategy: BaseStrategy instance.
         initial_balance: Starting cash.
-        warmup_bars: Bars to skip at start.
     """
     from .engine import Backtest
     from .metrics import compute_all
@@ -43,14 +41,13 @@ def make_backtest_fn(
         # Slice by datetime level
         dt_idx = df.index.get_level_values("datetime")
         sliced = df[(dt_idx >= start) & (dt_idx <= end)]
-        if len(sliced) < warmup_bars + 2:
+        if len(sliced) < 2:
             return {"trades": 0, "ann_return": 0, "ann_sharpe": 0, "mdd": 0}
 
         bt = Backtest(
             data=sliced,
             strategy=strategy,
             initial_balance=initial_balance,
-            warmup_bars=warmup_bars,
         )
         result = bt.run()
 

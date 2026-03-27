@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from librae.config.market_config import InstrumentConfig
+    from librae.config.market_config import MarketConfig
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,15 @@ class CostModel:
         )
 
     @classmethod
-    def from_instrument(cls, inst: InstrumentConfig) -> CostModel:
-        """Build CostModel from InstrumentConfig (markets.yaml)."""
-        tick_size = inst.tick_size if inst.tick_size > 0 else 1.0
-        multiplier = inst.tick_value / tick_size if inst.tick_value > 0 else 1.0
+    def from_market(cls, market: MarketConfig) -> CostModel:
+        """Build CostModel from MarketConfig (markets.yaml)."""
         return cls(
-            multiplier=multiplier,
-            commission_rate=inst.commission_rate,
-            min_commission=inst.min_commission,
-            slippage_ticks=float(inst.slippage_ticks),
-            tick_size=tick_size,
-            transaction_tax=inst.transaction_tax,
+            multiplier=market.multiplier,
+            commission_rate=market.commission_rate,
+            min_commission=market.min_commission,
+            slippage_ticks=float(market.slippage_ticks),
+            tick_size=market.tick_size if market.tick_size > 0 else 0.01,
+            transaction_tax=market.transaction_tax,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, qty: float) -> float:

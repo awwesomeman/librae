@@ -99,7 +99,6 @@ def _make_metrics() -> StrategyMetrics:
         avg_trade_return=0.01,
         trades=10,
         exposure_ratio=0.4,
-        bh_total_return=0.02,
     )
 
 

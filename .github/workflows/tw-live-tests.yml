@@ -3,7 +3,8 @@ name: tw-live-tests
 on:
   push:
     paths:
-      - "poc/**"
+      - "librae/**"
+      - "brokers/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"
@@ -11,7 +12,8 @@ on:
       - ".github/workflows/tw-live-tests.yml"
   pull_request:
     paths:
-      - "poc/**"
+      - "librae/**"
+      - "brokers/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"

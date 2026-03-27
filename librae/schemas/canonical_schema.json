@@ -37,8 +37,12 @@
         {"name": "total_return", "type": "float", "required": true, "unit": "ratio"},
         {"name": "annual_return", "type": "float", "required": true, "unit": "ratio"},
         {"name": "sharpe", "type": "float", "required": true, "unit": "score"},
+        {"name": "sortino", "type": "float", "required": true, "unit": "score"},
+        {"name": "calmar", "type": "float", "required": true, "unit": "score"},
         {"name": "max_drawdown", "type": "float", "required": true, "unit": "ratio"},
         {"name": "win_rate", "type": "float", "required": true, "unit": "ratio_0_1"},
+        {"name": "profit_factor", "type": "float", "required": true, "unit": "ratio"},
+        {"name": "exposure_ratio", "type": "float", "required": true, "unit": "ratio_0_1"},
         {"name": "trades", "type": "int", "required": true, "unit": "count"}
       ]
     },
@@ -82,12 +86,14 @@
     "performance_required_fields": [
       "total_return",
       "max_drawdown",
+      "sharpe",
+      "sortino",
+      "calmar",
       "profit_factor",
       "win_rate",
       "avg_trade_return",
       "trades",
-      "exposure_ratio",
-      "bh_total_return"
+      "exposure_ratio"
     ],
     "backtest_output_required_top_level": ["schema_version", "run_metadata", "equity_curve", "trades", "metrics"]
   }

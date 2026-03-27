@@ -1,8 +1,13 @@
 """Backtest engine — bar-by-bar execution with Strategy + Executor pattern.
 
 Usage:
-    bt = Backtest(data=df, strategy=my_strategy, initial_balance=100_000)
+    bt = Backtest(data=df, strategy=my_strategy, market="crypto")
     result = bt.run()
+
+    # With builder
+    result = (Backtest(data=df, strategy=my_strategy, market="crypto")
+              .set_benchmark("auto")
+              .run())
 
 The engine owns all position state. Strategies only observe via Context.
 Execution is delegated to an Executor (BacktestExecutor for simulation).
@@ -30,7 +35,7 @@ EPSILON = 1e-9
 
 
 # ---------------------------------------------------------------------------
-# Output dataclasses (unchanged from v1)
+# Output dataclasses
 # ---------------------------------------------------------------------------
 
 
@@ -69,6 +74,7 @@ class BacktestResult:
     equity_curve: Sequence[EquitySnapshot]
     initial_balance: float
     final_equity: float
+    benchmark_curve: Sequence[float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,25 +104,25 @@ class Backtest:
 
     Args:
         data: MultiIndex DataFrame (instrument, datetime) with OHLCV + features.
-              For single-asset, wrap with: df.index = pd.MultiIndex.from_product([["SYM"], df.index])
+              For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
         strategy: BaseStrategy subclass.
+        market: Market key from markets.yaml (e.g. "crypto", "tw_futures").
         initial_balance: Starting cash.
-        warmup_bars: Number of timeline steps to skip before calling strategy.
-        executor: Optional custom Executor. If None, auto-builds from markets.yaml.
+        executor: Custom Executor (overrides market config).
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
         strategy: BaseStrategy,
+        market: str | None = None,
         initial_balance: float = 100_000.0,
-        warmup_bars: int = 0,
         executor: BacktestExecutor | None = None,
     ) -> None:
         self._data = data
         self._strategy = strategy
         self._initial_balance = initial_balance
-        self._warmup_bars = warmup_bars
+        self._benchmark: str | pd.Series | None = "auto"
 
         # Parse instruments from MultiIndex
         if not isinstance(data.index, pd.MultiIndex):
@@ -129,33 +135,41 @@ class Backtest:
         self._time_groups = data.groupby(level="datetime")
         self._timeline = sorted(self._time_groups.groups.keys())
 
-        # Build executors per instrument
+        # Build executors: executor > market > zero-cost fallback
         if executor is not None:
             self._executors = {inst: executor for inst in self._instruments}
+        elif market is not None:
+            self._executors = self._build_from_market(market)
         else:
-            self._executors = self._auto_build_executors()
+            default_exec = BacktestExecutor(CostModel.zero())
+            self._executors = {inst: default_exec for inst in self._instruments}
 
-    def _auto_build_executors(self) -> dict[str, BacktestExecutor]:
-        """Build BacktestExecutor per instrument from markets.yaml."""
-        from librae.config.market_config import load_market_configs
-        configs = load_market_configs()
+    # --- Builder methods ---
 
-        # Build symbol → instrument_id mapping
-        symbol_to_id = {cfg.symbol: inst_id for inst_id, cfg in configs.items()}
+    def set_benchmark(self, val: str | pd.Series | None) -> Backtest:
+        """Set benchmark mode. Returns self for chaining.
 
-        executors: dict[str, BacktestExecutor] = {}
-        for inst in self._instruments:
-            inst_id = symbol_to_id.get(inst)
-            if inst_id and inst_id in configs:
-                cm = CostModel.from_instrument(configs[inst_id])
-            else:
-                logger.warning(
-                    "No config for instrument %s, using zero-cost model", inst,
-                )
-                cm = CostModel.zero()
-            executors[inst] = BacktestExecutor(cm)
+        Args:
+            val: "auto" (buy-and-hold for single asset), pd.Series (custom), or None (skip).
+        """
+        self._benchmark = val
+        return self
 
-        return executors
+    # --- Private helpers ---
+
+    @staticmethod
+    def _build_from_market(market_name: str) -> dict[str, BacktestExecutor]:
+        """Build executor from market config."""
+        from .config.market_config import get_market
+        config = get_market(market_name)
+        cm = CostModel.from_market(config)
+        executor = BacktestExecutor(cm)
+        # Same executor for all instruments in this market
+        return {"__default__": executor}
+
+    def _get_executor(self, inst: str) -> BacktestExecutor | None:
+        """Get executor for an instrument, falling back to __default__."""
+        return self._executors.get(inst) or self._executors.get("__default__")
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Returns BacktestResult."""
@@ -170,10 +184,6 @@ class Backtest:
 
             mtm = self._calc_portfolio_value(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
-
-            if step < self._warmup_bars:
-                self._increment_bars_held(positions)
-                continue
 
             primary_inst = self._instruments[0]
             ctx = Context(
@@ -191,13 +201,15 @@ class Backtest:
 
             for action in actions:
                 inst = action.instrument or primary_inst
-                executor = self._executors.get(inst)
+                executor = self._get_executor(inst)
                 if executor is None:
+                    logger.warning("No executor for %s, skipping action", inst)
                     continue
 
                 bar_data = bars.get(inst)
                 price = bar_data["close"] if bar_data is not None else 0.0
                 if price <= 0:
+                    logger.warning("Invalid price %s for %s, skipping", price, inst)
                     continue
 
                 if action.type in ("buy", "sell") and inst not in positions:
@@ -234,20 +246,48 @@ class Backtest:
                 pos = positions[inst]
                 last_bar = last_bars.get(inst)
                 price = last_bar["close"] if last_bar is not None else pos.entry_price
-                cm = self._executors[inst].cost_model
+                executor = self._get_executor(inst)
+                cm = executor.cost_model if executor else CostModel.zero()
                 trade, proceeds = self._close_position(pos, last_ts, price, cm)
                 trades.append(trade)
                 cash += proceeds
                 del positions[inst]
+
+        # Compute benchmark
+        benchmark_curve = self._compute_benchmark()
 
         return BacktestResult(
             trades=trades,
             equity_curve=equity_curve,
             initial_balance=self._initial_balance,
             final_equity=cash,
+            benchmark_curve=benchmark_curve,
         )
 
-    # --- Private helpers ---
+    def _compute_benchmark(self) -> list[float] | None:
+        """Compute benchmark equity curve based on self._benchmark setting."""
+        if self._benchmark is None:
+            return None
+
+        if isinstance(self._benchmark, pd.Series):
+            # User-provided return series → cumulative equity
+            cum = (1 + self._benchmark).cumprod() * self._initial_balance
+            return cum.tolist()
+
+        # "auto": buy-and-hold for single asset only
+        if self._benchmark == "auto" and len(self._instruments) == 1:
+            inst = self._instruments[0]
+            closes = []
+            for ts in self._timeline:
+                cross = self._time_groups.get_group(ts)
+                bars = self._build_bars(cross)
+                bar = bars.get(inst)
+                if bar is not None:
+                    closes.append(bar["close"])
+            if closes and closes[0] > 0:
+                return [self._initial_balance * (c / closes[0]) for c in closes]
+
+        return None
 
     @staticmethod
     def _build_bars(cross: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -270,7 +310,8 @@ class Backtest:
         for inst, pos in positions.items():
             bar = bars.get(inst)
             price = bar["close"] if bar is not None else pos.entry_price
-            cm = self._executors[inst].cost_model
+            executor = self._get_executor(inst)
+            cm = executor.cost_model if executor else CostModel.zero()
             mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity)
             mtm += pos.entry_price * pos.quantity * cm.multiplier
         return mtm
@@ -285,7 +326,8 @@ class Backtest:
         for inst, ps in positions.items():
             bar = bars.get(inst)
             price = bar["close"] if bar is not None else ps.entry_price
-            cm = self._executors[inst].cost_model
+            executor = self._get_executor(inst)
+            cm = executor.cost_model if executor else CostModel.zero()
             snapshot[inst] = Position(
                 instrument=inst,
                 side=ps.side,

@@ -130,10 +130,10 @@ def validate_strategy_context_or_raise(meta: dict[str, Any], strategy: str) -> N
 
 
 METRIC_COLS = [
-    "total_return", "annual_return", "sharpe", "sortino",
+    "total_return", "annual_return", "sharpe", "sortino", "calmar",
     "max_drawdown", "win_rate", "profit_factor", "trades",
-    "avg_trade_return", "exposure_ratio", "bh_total_return",
-    "calmar", "payoff_ratio", "expectancy",
+    "avg_trade_return", "exposure_ratio",
+    "payoff_ratio", "expectancy",
 ]
 
 
@@ -446,7 +446,7 @@ def render_performance_tab(data: DashboardData, overview_ctx: dict[str, str], al
         else:
             pmap = _perf_map(data.perf_raw)
             perf_rows = [
-                {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": _fmt_pct(pmap.get("bh_total_return"))},
+                {"Metric": "Total Return", "Strategy": _fmt_pct(pmap.get("total_return")), "Benchmark": "-"},
                 {"Metric": "Annual Return", "Strategy": _fmt_pct(pmap.get("annual_return")), "Benchmark": "-"},
                 {"Metric": "Sharpe", "Strategy": _fmt_num(pmap.get("sharpe")), "Benchmark": "-"},
                 {"Metric": "Sortino", "Strategy": _fmt_num(pmap.get("sortino")), "Benchmark": "-"},

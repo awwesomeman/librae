@@ -78,31 +78,30 @@ bash scripts/monitor/run_scheduler.sh
 
 ```
 quant-strategy-lab/
+├── librae/                 # 回測引擎核心（Strategy Protocol + Executor + CostModel）
+│   ├── config/markets/     # 按市場分檔 YAML（crypto, tw_futures, us_equity）
+│   ├── schemas/            # canonical_schema.json（single source of truth）
+│   ├── engine.py           # bar-by-bar backtest engine
+│   ├── strategy.py         # BaseStrategy ABC, Context, Action, Position
+│   ├── executor.py         # BacktestExecutor / LiveExecutor(future)
+│   ├── cost_model.py       # 統一手續費/滑價/稅模型
+│   ├── metrics.py          # QuantStats adapter
+│   ├── runners.py          # strict protocol, walk-forward, stability
+│   ├── schema.py           # BacktestOutput, TradeRecord, StrategyMetrics
+│   └── persistence.py      # JSON/CSV 儲存
+├── strategies/             # 策略實作（ETL 信號 + Strategy 類別）
+│   └── trendpullback/
+├── pipeline/               # 資料取得與特徵工程
+│   ├── fetchers/           # Binance OHLCV fetcher
+│   └── features/           # core_features
+├── brokers/                # 券商 API adapter
+├── db/                     # TimescaleDB 讀寫層
 ├── app/                    # Streamlit 策略研究工具
-├── config/
-│   └── markets.yaml        # 市場/標的 config（兩層架構）
-├── deploy/
-│   ├── docker-compose.yml
-│   ├── .env                # 本地環境變數（不入 git）
-│   └── timescale_init.sql  # TimescaleDB schema（首次必跑）
-├── docs/
-│   └── implementation_plan.md
-├── grafana/
-│   ├── dashboards/         # 三板 JSON（由 generate_dashboards.py 產生）
-│   ├── generate_dashboards.py  # 修改儀表板的唯一入口
-│   └── provisioning/
-├── quant_lab/
-│   ├── db/                 # TimescaleDB 讀寫層
-│   ├── signal_engine/      # TrendPullback pure function
-│   ├── monitoring/         # SignalResult, run_monitor
-│   └── adapters/           # CryptoAdapter, MarketHub
-├── scripts/
-│   ├── run_backtest.py  # 主回測腳本
-│   ├── run_monitor_once.py
-│   └── monitor/
-│       ├── scheduler.py
-│       └── run_scheduler.sh
-└── tests/                  # pytest，405/405
+├── monitoring/             # 訊號監控排程
+├── deploy/                 # Docker Compose + DB schema
+├── grafana/                # 儀表板 JSON + provisioning
+├── scripts/                # CLI 腳本（run_backtest.py 等）
+└── tests/                  # pytest
 ```
 
 ---
@@ -122,6 +121,6 @@ quant-strategy-lab/
 ## 相關文件
 
 - `docs/implementation_plan.md`：開發計劃與進度
-- `decisions/`：重大架構決策記錄
-- `config/markets.yaml`：市場與標的設定
-- `.learnings/ERRORS.md`：已知踩坑記錄
+- `docs/decisions/`：重大架構決策記錄
+- `librae/config/markets/`：市場與標的設定（per-market YAML）
+- `librae/schemas/canonical_schema.json`：資料契約定義

@@ -3,7 +3,9 @@ name: core-tests
 on:
   push:
     paths:
-      - "poc/**"
+      - "librae/**"
+      - "strategies/**"
+      - "pipeline/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"
@@ -11,7 +13,9 @@ on:
       - ".github/workflows/core-tests.yml"
   pull_request:
     paths:
-      - "poc/**"
+      - "librae/**"
+      - "strategies/**"
+      - "pipeline/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"

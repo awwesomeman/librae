@@ -2,6 +2,9 @@
 
 BacktestExecutor: simulated fills using CostModel (for backtesting).
 LiveExecutor: real broker API (future, Phase 2-3).
+
+Position sizing is the strategy's responsibility (set Action.quantity).
+If strategy doesn't specify quantity, executor uses all available cash.
 """
 from __future__ import annotations
 
@@ -11,7 +14,6 @@ from .cost_model import CostModel
 from .strategy import Action, Fill
 
 EPSILON = 1e-9
-CASH_UTILIZATION = 0.95
 
 
 class Executor(Protocol):
@@ -66,9 +68,8 @@ class BacktestExecutor:
         return None
 
     def _size_position(self, price: float, cash: float) -> float:
-        """Calculate position size that fits within available cash."""
-        available = cash * CASH_UTILIZATION
+        """Fallback sizing: use all available cash."""
         outlay_per_unit = self._cost_model.estimate_entry_outlay(price, 1.0)
         if outlay_per_unit < EPSILON:
             return 0.0
-        return available / outlay_per_unit
+        return cash / outlay_per_unit

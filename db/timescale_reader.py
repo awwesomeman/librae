@@ -89,8 +89,8 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """
     sql = """
         SELECT sp.run_id, sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
-               sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.trades,
-               sp.avg_trade_return, sp.exposure_ratio, sp.bh_total_return,
+               sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.trades,
+               sp.avg_trade_return, sp.exposure_ratio,
                br.strategy, br.symbol, br.timeframe, br.sample
         FROM strategy_performance sp
         JOIN backtest_runs br ON sp.run_id = br.run_id
