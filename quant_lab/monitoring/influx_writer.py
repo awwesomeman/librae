@@ -1,54 +1,60 @@
-from __future__ import annotations
+"""InfluxDB writer — converts BacktestOutput to InfluxDB points.
 
-from datetime import datetime, timezone
+Measurements: strategy_signals, strategy_performance, perf_equity_curve,
+trade_blotter, trade_distribution, ohlcv.
+"""
+from __future__ import annotations
 
 import pandas as pd
 from influxdb_client import Point
 
-from quant_lab.backtest.schema import BacktestOutput
 from quant_lab.backtest.metrics import compute_all
+from quant_lab.backtest.schema import BacktestOutput
 from quant_lab.contracts import SCHEMA_VERSION
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark: str = "TWSE") -> list[Point]:
+def points_from_backtest(
+    output: BacktestOutput,
+    sample: str = "oos",
+    benchmark: str = "TWSE",
+) -> list[Point]:
+    """Convert BacktestOutput to a list of InfluxDB Point objects."""
     meta = output.run_metadata
     points: list[Point] = []
 
+    # --- Strategy signals (entry + exit per trade) ---
     for tr in output.trades:
         side = str(tr.side).lower()
         signal_strength = 1.0 if side in {"buy", "long"} else -1.0
-        # Entry point
-        points.append(
-            Point("strategy_signals")
-            .tag("schema_version", meta.schema_version or SCHEMA_VERSION)
-            .tag("strategy", meta.strategy)
-            .tag("symbol", meta.symbol)
-            .tag("timeframe", meta.timeframe)
-            .tag("side", side)
-            .tag("source", meta.data_source)
-            .tag("run_id", meta.run_id)
-            .tag("signal_type", "entry")
+        base_tags = {
+            "schema_version": meta.schema_version or SCHEMA_VERSION,
+            "strategy": meta.strategy,
+            "symbol": meta.symbol,
+            "timeframe": meta.timeframe,
+            "side": side,
+            "source": meta.data_source,
+            "run_id": meta.run_id,
+        }
+        # Entry
+        entry_pt = Point("strategy_signals")
+        for k, v in base_tags.items():
+            entry_pt = entry_pt.tag(k, v)
+        entry_pt = (
+            entry_pt.tag("signal_type", "entry")
             .field("signal_strength", float(signal_strength))
             .field("confidence", 0.5)
             .field("price", float(tr.entry_price))
             .field("quantity", float(tr.quantity))
             .time(tr.entry_ts)
         )
-        # Exit point
-        points.append(
-            Point("strategy_signals")
-            .tag("schema_version", meta.schema_version or SCHEMA_VERSION)
-            .tag("strategy", meta.strategy)
-            .tag("symbol", meta.symbol)
-            .tag("timeframe", meta.timeframe)
-            .tag("side", side)
-            .tag("source", meta.data_source)
-            .tag("run_id", meta.run_id)
-            .tag("signal_type", "exit")
+        points.append(entry_pt)
+
+        # Exit
+        exit_pt = Point("strategy_signals")
+        for k, v in base_tags.items():
+            exit_pt = exit_pt.tag(k, v)
+        exit_pt = (
+            exit_pt.tag("signal_type", "exit")
             .field("signal_strength", float(-signal_strength))
             .field("confidence", 0.5)
             .field("price", float(tr.exit_price))
@@ -56,9 +62,10 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .field("net_pnl", float(tr.net_pnl))
             .time(tr.exit_ts)
         )
+        points.append(exit_pt)
 
+    # --- Strategy performance ---
     m = output.metrics
-    # Recompute metrics from the metrics module for consistency
     computed = compute_all(output)
 
     perf_point = (
@@ -77,18 +84,21 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
         .field("win_rate", float(m.win_rate))
         .field("trades", int(m.trades))
     )
-    # Add all computed metrics (sortino, calmar, payoff_ratio, expectancy, etc.)
+    # Append computed metrics not already present
+    skip_fields = {"sharpe", "max_drawdown", "win_rate", "total_return", "annual_return"}
     for metric_name, result in computed.items():
-        if metric_name not in {"sharpe", "max_drawdown", "win_rate", "total_return", "annual_return"}:
+        if metric_name not in skip_fields:
             perf_point = perf_point.field(metric_name, float(result.value))
-    # Add required fields not covered by compute_all
-    perf_point = perf_point.field("avg_trade_return", float(m.avg_trade_return))
-    perf_point = perf_point.field("exposure_ratio", float(m.exposure_ratio))
-    perf_point = perf_point.field("bh_total_return", float(m.bh_total_return))
-    perf_point = perf_point.field("profit_factor", float(m.profit_factor))
-    perf_point = perf_point.time(meta.run_ts)
+    perf_point = (
+        perf_point.field("avg_trade_return", float(m.avg_trade_return))
+        .field("exposure_ratio", float(m.exposure_ratio))
+        .field("bh_total_return", float(m.bh_total_return))
+        .field("profit_factor", float(m.profit_factor))
+        .time(meta.run_ts)
+    )
     points.append(perf_point)
 
+    # --- Equity curve ---
     for eq in output.equity_curve:
         points.append(
             Point("perf_equity_curve")
@@ -107,6 +117,7 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .time(eq.ts)
         )
 
+    # --- Trade blotter ---
     for tr in output.trades:
         points.append(
             Point("trade_blotter")
@@ -124,6 +135,7 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .time(tr.exit_ts)
         )
 
+    # --- Trade distribution ---
     pnl_values = [float(t.net_pnl) for t in output.trades]
     if pnl_values:
         wins = [x for x in pnl_values if x > 0]
@@ -134,9 +146,9 @@ def points_from_backtest(output: BacktestOutput, sample: str = "oos", benchmark:
             .tag("strategy", meta.strategy)
             .tag("symbol", meta.symbol)
             .tag("run_id", meta.run_id)
-            .field("count", int(len(pnl_values)))
-            .field("win_count", int(len(wins)))
-            .field("loss_count", int(len(losses)))
+            .field("count", len(pnl_values))
+            .field("win_count", len(wins))
+            .field("loss_count", len(losses))
             .field("avg_win", float(sum(wins) / len(wins) if wins else 0.0))
             .field("avg_loss", float(sum(losses) / len(losses) if losses else 0.0))
             .time(meta.run_ts)
@@ -160,7 +172,7 @@ def points_from_ohlcv(
     """
     pts: list[Point] = []
     for ts, row in df.iterrows():
-        pt = (
+        pts.append(
             Point("ohlcv")
             .tag("symbol", symbol)
             .tag("timeframe", timeframe)
@@ -173,5 +185,4 @@ def points_from_ohlcv(
             .field("volume", float(row.get("volume", 0.0)))
             .time(ts)
         )
-        pts.append(pt)
     return pts

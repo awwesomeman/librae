@@ -16,7 +16,28 @@ class SchemaValidationError(ValueError):
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from influxdb_client import InfluxDBClient
+
+# TimescaleDB reader (primary data source)
+try:
+    from quant_lab.db.timescale_reader import (
+        list_runs as ts_list_runs,
+        load_equity_curve as ts_load_equity_curve,
+        load_trade_blotter as ts_load_trade_blotter,
+        load_performance as ts_load_performance,
+        load_strategy_signals as ts_load_signals,
+        load_ohlcv as ts_load_ohlcv,
+    )
+    _HAS_TIMESCALE = True
+except ImportError:
+    _HAS_TIMESCALE = False
+
+# InfluxDB (fallback)
+try:
+    from influxdb_client import InfluxDBClient
+    _HAS_INFLUX = True
+except ImportError:
+    InfluxDBClient = None  # type: ignore
+    _HAS_INFLUX = False
 
 
 APP_TITLE = "Strategy Backtest Analysis"
@@ -620,7 +641,28 @@ def meta_context(meta: dict[str, Any]) -> dict[str, str]:
 
 
 
-def build_dashboard_data(client: InfluxDBClient, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> DashboardData:
+def build_dashboard_data_timescale(run_id: str) -> DashboardData:
+    """Build DashboardData from TimescaleDB (primary path)."""
+    curve = ts_load_equity_curve(run_id)
+    signals = ts_load_signals(run_id)
+    perf_raw = ts_load_performance(run_id)
+    ohlcv = ts_load_ohlcv(run_id)
+    trade_blotter = ts_load_trade_blotter(run_id)
+
+    # Derive strategy name from perf_raw
+    strategy = str(perf_raw["strategy"].iloc[0]) if not perf_raw.empty and "strategy" in perf_raw.columns else "unknown"
+
+    contexts = load_strategy_contexts()
+    meta = contexts.get(strategy)
+    if isinstance(meta, dict):
+        validate_strategy_context_or_raise(meta, strategy)
+    else:
+        meta = derive_meta_from_canonical(strategy, curve, perf_raw)
+    return DashboardData(curve=curve, signals=signals, perf_raw=perf_raw, meta=meta, ohlcv=ohlcv, trade_blotter=trade_blotter)
+
+
+def build_dashboard_data(client, cfg: InfluxCfg, strategy: str, sample: str, run_id: str) -> DashboardData:
+    """Build DashboardData from InfluxDB (fallback path)."""
     curve = load_curve(client, cfg, strategy, sample, run_id)
     signals = load_signals(client, cfg, strategy, run_id)
     perf_raw = load_perf(client, cfg, strategy, sample, run_id)

@@ -518,10 +518,12 @@ def main() -> None:
 
     print(f"[5/5] InfluxDB OK: points={len(points)}, counts={dict(counts)}, run_id={run_id}")
 
-    # TimescaleDB 雙寫（Phase A）
+    # TimescaleDB 雙寫（Phase A + ohlcv）
     try:
-        from quant_lab.db.timescale_writer import write_backtest_output as ts_write
+        from quant_lab.db.timescale_writer import write_backtest_output as ts_write, write_ohlcv as ts_write_ohlcv
         ts_counts = ts_write(output)
+        ohlcv_rows = ts_write_ohlcv(h1_base, symbol=SYMBOL, timeframe="1h", run_id=run_id, source="backtest")
+        ts_counts["ohlcv"] = ohlcv_rows
         print(f"[5b] TimescaleDB written: {ts_counts}")
     except Exception as e:
         print(f"[5b] TimescaleDB write failed (non-fatal): {e}")

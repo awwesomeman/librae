@@ -1,17 +1,18 @@
-"""TimescaleDB writer — mirrors influx_writer but uses PostgreSQL.
+"""TimescaleDB writer for BacktestOutput.
 
-Writes BacktestOutput to TimescaleDB tables:
-  backtest_runs, equity_curve, trade_blotter,
-  strategy_signals, strategy_performance, ohlcv
+Writes to tables: backtest_runs, equity_curve, trade_blotter,
+strategy_signals, strategy_performance.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
+
+import pandas as pd
 
 from quant_lab.backtest.schema import BacktestOutput
 from quant_lab.contracts import SCHEMA_VERSION
@@ -34,7 +35,7 @@ def get_conn(dsn: str = TIMESCALE_DSN):
 
 
 def _to_dt(ts: Any) -> datetime | None:
-    """Normalise timestamp to datetime."""
+    """Normalise timestamp to datetime (handles pandas Timestamp)."""
     if ts is None:
         return None
     if hasattr(ts, "to_pydatetime"):
@@ -43,7 +44,11 @@ def _to_dt(ts: Any) -> datetime | None:
 
 
 def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> dict:
-    """Write a complete BacktestOutput to TimescaleDB. Returns counts dict."""
+    """Write a complete BacktestOutput to TimescaleDB.
+
+    Returns:
+        Dict mapping table names to row counts written.
+    """
     meta = output.run_metadata
     m = output.metrics
     counts: dict[str, int] = {}
@@ -51,7 +56,7 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
     with get_conn(dsn) as conn:
         cur = conn.cursor()
 
-        # 1. backtest_runs (upsert)
+        # backtest_runs (upsert)
         cur.execute(
             """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, sample, data_source,
@@ -68,7 +73,7 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
         )
         counts["backtest_runs"] = 1
 
-        # 2. equity_curve (batch)
+        # equity_curve (batch)
         if output.equity_curve:
             eq_rows = [
                 (
@@ -88,7 +93,7 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
             )
             counts["equity_curve"] = len(eq_rows)
 
-        # 3. trade_blotter (batch)
+        # trade_blotter (batch)
         if output.trades:
             trade_rows = [
                 (
@@ -114,19 +119,17 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
             )
             counts["trade_blotter"] = len(trade_rows)
 
-        # 4. strategy_signals (from trades: entry + exit)
+        # strategy_signals (derived from trades: entry + exit)
         signal_rows = []
         for tr in output.trades:
             side = str(tr.side).lower()
             strength = 1.0 if side in {"buy", "long"} else -1.0
-            # Entry signal
             signal_rows.append((
                 _to_dt(tr.entry_ts), meta.run_id, meta.strategy,
                 meta.symbol, meta.timeframe,
                 "entry", meta.data_source,
                 tr.entry_price, strength, 0.5, tr.quantity,
             ))
-            # Exit signal
             signal_rows.append((
                 _to_dt(tr.exit_ts), meta.run_id, meta.strategy,
                 meta.symbol, meta.timeframe,
@@ -146,7 +149,7 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
             )
             counts["strategy_signals"] = len(signal_rows)
 
-        # 5. strategy_performance (upsert)
+        # strategy_performance (upsert)
         cur.execute(
             """INSERT INTO strategy_performance
                (run_id, total_return, annual_return, sharpe, sortino,
@@ -170,3 +173,58 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
         cur.close()
 
     return counts
+
+
+def write_ohlcv(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    run_id: str,
+    source: str = "backtest",
+    dsn: str = TIMESCALE_DSN,
+) -> int:
+    """Write OHLCV DataFrame to TimescaleDB ohlcv table.
+
+    Expects df with DatetimeIndex (or 'ts'/'timestamp' column) and
+    columns: open, high, low, close, volume.
+    Returns number of rows written.
+    """
+    if df is None or df.empty:
+        return 0
+
+    # Normalise index → ts column
+    work = df.copy()
+    if "ts" not in work.columns and "timestamp" not in work.columns:
+        work = work.reset_index()
+    ts_col = "ts" if "ts" in work.columns else "timestamp"
+
+    rows = [
+        (
+            _to_dt(row[ts_col]),
+            symbol,
+            timeframe,
+            run_id,
+            source,
+            float(row["open"]),
+            float(row["high"]),
+            float(row["low"]),
+            float(row["close"]),
+            float(row.get("volume", 0)),
+        )
+        for _, row in work.iterrows()
+    ]
+
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO ohlcv (ts, symbol, timeframe, run_id, source,
+               open, high, low, close, volume)
+               VALUES %s
+               ON CONFLICT DO NOTHING""",
+            rows,
+            page_size=2000,
+        )
+        cur.close()
+
+    return len(rows)
