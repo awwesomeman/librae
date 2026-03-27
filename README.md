@@ -79,7 +79,7 @@ bash scripts/monitor/run_scheduler.sh
 ```
 quant-strategy-lab/
 ├── librae/                 # 回測引擎核心（Strategy Protocol + Executor + CostModel）
-│   ├── config/markets/     # 按市場分檔 YAML（crypto, tw_futures, us_equity）
+│   ├── config/             # markets.yaml（市場級別回測參數）
 │   ├── schemas/            # canonical_schema.json（single source of truth）
 │   ├── engine.py           # bar-by-bar backtest engine
 │   ├── strategy.py         # BaseStrategy ABC, Context, Action, Position
@@ -89,8 +89,10 @@ quant-strategy-lab/
 │   ├── runners.py          # strict protocol, walk-forward, stability
 │   ├── schema.py           # BacktestOutput, TradeRecord, StrategyMetrics
 │   └── persistence.py      # JSON/CSV 儲存
-├── strategies/             # 策略實作（ETL 信號 + Strategy 類別）
-│   └── trendpullback/
+├── strategies/             # 驗證過的策略（被 engine import）
+│   └── trendpullback/      # signals.py + strategy.py
+├── experiments/            # 策略研究實驗（獨立可執行，不被其他模組 import）
+│   └── trendpullback_btc/  # run_backtest.py, run_monitor.py
 ├── pipeline/               # 資料取得與特徵工程
 │   ├── fetchers/           # Binance OHLCV fetcher
 │   └── features/           # core_features
@@ -100,7 +102,7 @@ quant-strategy-lab/
 ├── monitoring/             # 訊號監控排程
 ├── deploy/                 # Docker Compose + DB schema
 ├── grafana/                # 儀表板 JSON + provisioning
-├── scripts/                # CLI 腳本（run_backtest.py 等）
+├── scripts/                # 通用工具（setup_grafana 等）
 └── tests/                  # pytest
 ```
 
@@ -111,9 +113,8 @@ quant-strategy-lab/
 | 指令 | 說明 |
 |------|------|
 | `pytest tests/ -v` | 跑所有測試 |
-| `python scripts/run_backtest.py --months 6` | 跑回測 |
-| `python scripts/run_backtest.py --dry-run` | 回測不寫 DB |
-| `python scripts/run_monitor_once.py --dry-run` | 單次訊號 dry-run |
+| `python experiments/trendpullback_btc/run_backtest.py --dry-run` | TrendPullback 回測 |
+| `python experiments/trendpullback_btc/run_monitor.py --dry-run` | 單次訊號 dry-run |
 | `python grafana/generate_dashboards.py` | 重新產生三板 JSON |
 
 ---
