@@ -111,6 +111,70 @@ def _write_to_influx(pt, cfg: dict) -> bool:
         return False
 
 
+def _write_to_timescale(pt, cfg: dict, run_id: str) -> bool:
+    """Write signal data to TimescaleDB with mode='sim'. Returns True on success."""
+    try:
+        import psycopg2
+
+        # Parse InfluxDB point for field values
+        line = pt.to_line_protocol()
+        fields_str = line.split(" ")[1] if " " in line else ""
+        field_map = {}
+        for pair in fields_str.split(","):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                field_map[k] = v
+
+        # Parse tags
+        tag_part = line.split(" ")[0] if " " in line else ""
+        tag_map = {}
+        for pair in tag_part.split(",")[1:]:  # skip measurement name
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                tag_map[k] = v
+
+        from quant_lab.db.timescale_writer import get_conn, TIMESCALE_DSN
+
+        now = datetime.now(timezone.utc)
+        strategy = tag_map.get("strategy", "TrendPullback")
+        symbol = cfg["symbol"]
+        timeframe = cfg["timeframe"]
+
+        with get_conn(TIMESCALE_DSN) as conn:
+            cur = conn.cursor()
+
+            # Ensure backtest_runs entry exists for this sim run
+            cur.execute(
+                """INSERT INTO backtest_runs
+                   (run_id, strategy, symbol, timeframe, run_ts, mode)
+                   VALUES (%s, %s, %s, %s, %s, 'sim')
+                   ON CONFLICT (run_id) DO UPDATE SET run_ts = EXCLUDED.run_ts""",
+                (run_id, strategy, symbol, timeframe, now),
+            )
+
+            # Write signal to strategy_signals
+            price = float(field_map.get("price", "0").rstrip("i"))
+            signal_strength = float(field_map.get("signal_strength", "0").rstrip("i"))
+            confidence = float(field_map.get("confidence", "0").rstrip("i"))
+            signal_type = tag_map.get("signal_type", "hold")
+
+            cur.execute(
+                """INSERT INTO strategy_signals
+                   (ts, run_id, strategy, symbol, timeframe,
+                    signal_type, source, price, signal_strength, confidence, quantity)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'sim', %s, %s, %s, 0)""",
+                (now, run_id, strategy, symbol, timeframe,
+                 signal_type, price, signal_strength, confidence),
+            )
+            cur.close()
+
+        logger.info("✅ Written to TimescaleDB (run_id=%s, mode=sim)", run_id)
+        return True
+    except Exception as exc:
+        logger.error("TimescaleDB write failed: %s", exc)
+        return False
+
+
 def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
     """Execute one monitoring cycle. Returns a summary dict or None on failure."""
     if cfg is None:
@@ -118,6 +182,10 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
 
     now = datetime.now(timezone.utc)
     ts_label = now.strftime("%H:%M")
+
+    # Fixed run_id for scheduler: scheduler-<symbol>-<strategy>
+    symbol_clean = cfg["symbol"].replace("/", "").lower()
+    sim_run_id = f"scheduler-{symbol_clean}-trendpullback"
 
     try:
         from quant_lab.monitoring.signal_monitor import run_monitor
@@ -128,7 +196,7 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
             symbol=cfg["symbol"],
             timeframe=cfg["timeframe"],
             source="scheduler",
-            run_id="scheduler",
+            run_id=sim_run_id,
         )
     except Exception as exc:
         logger.error("[%s] run_monitor failed: %s", ts_label, exc)
@@ -184,6 +252,10 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
         ok = False
     if ok:
         logger.info("[%s] ✅ Written to InfluxDB (bucket=%s)", ts_label, cfg["influx_bucket"])
+
+    # Also write to TimescaleDB (mode='sim')
+    if not dry_run:
+        _write_to_timescale(pt, cfg, sim_run_id)
 
     return summary
 
