@@ -1,7 +1,7 @@
 """Canonical backend data contracts for librae.
 
 Single source of truth file:
-- librae/schemas/canonical_schema.json
+- schemas/canonical_schema.json
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class MeasurementSpec:
     fields: tuple[FieldSpec, ...]
 
 
-SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "canonical_schema.json"
+SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "canonical_schema.json"
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 

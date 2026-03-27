@@ -37,8 +37,8 @@ def get_timescaledb_uid(base_url: str, auth: tuple[str, str]) -> tuple[str | Non
 
 
 def update_generate_dashboards(uid: str, ds_type: str) -> None:
-    """Update DATASOURCE dict in grafana/generate_dashboards.py."""
-    path = "grafana/generate_dashboards.py"
+    """Update DATASOURCE dict in app/grafana/generate_dashboards.py."""
+    path = "app/grafana/generate_dashboards.py"
     content = open(path).read()
     new_ds = f'{{"type": "{ds_type}", "uid": "{uid}"}}'
     updated = re.sub(r'DATASOURCE = \{[^}]*\}', f'DATASOURCE = {new_ds}', content)
@@ -51,9 +51,9 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
 
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Re-generate dashboard JSONs and deploy to Grafana."""
-    subprocess.run([sys.executable, "grafana/generate_dashboards.py"], check=True)
+    subprocess.run([sys.executable, "app/grafana/generate_dashboards.py"], check=True)
     for fname in ["backtest_dashboard.json", "sim_dashboard.json", "live_dashboard.json"]:
-        fpath = f"grafana/dashboards/{fname}"
+        fpath = f"app/grafana/dashboards/{fname}"
         d = json.load(open(fpath))
         d.pop("id", None)
         r = requests.post(

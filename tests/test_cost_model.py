@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from librae.cost_model import CostModel
-from config.market_config import get_instrument
+from librae.config.market_config import get_instrument
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────

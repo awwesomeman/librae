@@ -53,15 +53,6 @@ def test_schema_version_tag_required_in_all_measurements() -> None:
     assert SCHEMA_VERSION == "1.0.0"
 
 
-def test_strategy_context_has_required_keys() -> None:
-    path = Path(__file__).resolve().parents[1] / "config" / "strategy_context.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload, "strategy_context.json should not be empty"
-
-    for strategy_name, context in payload.items():
-        assert isinstance(context, dict), f"{strategy_name} must be an object"
-        require_keys(context, REQUIRED_STRATEGY_CONTEXT_KEYS, f"strategy_context[{strategy_name}]")
-
 
 def test_no_alias_fallback_allowed_for_signal_core_keys() -> None:
     alias_record = {

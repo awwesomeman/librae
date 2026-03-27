@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from config.market_config import (
+from librae.config.market_config import (
     InstrumentConfig,
     MarketConfig,
     calc_commission,
@@ -13,7 +13,7 @@ from config.market_config import (
     load_market_configs,
 )
 
-YAML_PATH = Path(__file__).resolve().parents[1] / "config" / "markets.yaml"
+YAML_PATH = Path(__file__).resolve().parents[1] / "librae" / "config" / "markets.yaml"
 
 
 @pytest.fixture

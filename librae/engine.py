@@ -137,7 +137,7 @@ class Backtest:
 
     def _auto_build_executors(self) -> dict[str, BacktestExecutor]:
         """Build BacktestExecutor per instrument from markets.yaml."""
-        from config.market_config import load_market_configs
+        from librae.config.market_config import load_market_configs
         configs = load_market_configs()
 
         # Build symbol → instrument_id mapping
