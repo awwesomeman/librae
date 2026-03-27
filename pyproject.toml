@@ -8,8 +8,8 @@ dependencies = [
   "pandas>=2.0",
   "numpy>=1.24",
   "empyrical>=0.5",
-  "influxdb-client[async]>=1.36",
   "httpx>=0.24",
+  "apscheduler>=3.10,<4",
   "pyyaml>=6.0",
   "psycopg2-binary>=2.9",
 ]

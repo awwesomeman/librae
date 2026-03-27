@@ -24,6 +24,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from apscheduler.schedulers.blocking import BlockingScheduler
+
 # Ensure repo root on path
 _REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO))
@@ -79,32 +81,12 @@ def _build_adapter(cfg: dict):
     )
 
 
-def _write_to_timescale(pt, cfg: dict, run_id: str) -> bool:
-    """Write signal data to TimescaleDB with mode='sim'. Returns True on success."""
+def _write_to_timescale(result, cfg: dict, run_id: str) -> bool:
+    """Write SignalResult to TimescaleDB with mode='sim'. Returns True on success."""
     try:
-        # Parse InfluxDB point for field values
-        line = pt.to_line_protocol()
-        fields_str = line.split(" ")[1] if " " in line else ""
-        field_map = {}
-        for pair in fields_str.split(","):
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-                field_map[k] = v
-
-        # Parse tags
-        tag_part = line.split(" ")[0] if " " in line else ""
-        tag_map = {}
-        for pair in tag_part.split(",")[1:]:  # skip measurement name
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-                tag_map[k] = v
-
         from quant_lab.db.timescale_writer import get_conn, TIMESCALE_DSN
 
         now = datetime.now(timezone.utc)
-        strategy = tag_map.get("strategy", "TrendPullback")
-        symbol = cfg["symbol"]
-        timeframe = cfg["timeframe"]
 
         with get_conn(TIMESCALE_DSN) as conn:
             cur = conn.cursor()
@@ -115,22 +97,17 @@ def _write_to_timescale(pt, cfg: dict, run_id: str) -> bool:
                    (run_id, strategy, symbol, timeframe, run_ts, mode)
                    VALUES (%s, %s, %s, %s, %s, 'sim')
                    ON CONFLICT (run_id) DO UPDATE SET run_ts = EXCLUDED.run_ts""",
-                (run_id, strategy, symbol, timeframe, now),
+                (run_id, result.strategy, result.symbol, result.timeframe, now),
             )
 
             # Write signal to strategy_signals
-            price = float(field_map.get("price", "0").rstrip("i"))
-            signal_strength = float(field_map.get("signal_strength", "0").rstrip("i"))
-            confidence = float(field_map.get("confidence", "0").rstrip("i"))
-            signal_type = tag_map.get("signal_type", "hold")
-
             cur.execute(
                 """INSERT INTO strategy_signals
                    (ts, run_id, strategy, symbol, timeframe,
                     signal_type, source, price, signal_strength, confidence, quantity)
                    VALUES (%s, %s, %s, %s, %s, %s, 'sim', %s, %s, %s, 0)""",
-                (now, run_id, strategy, symbol, timeframe,
-                 signal_type, price, signal_strength, confidence),
+                (now, run_id, result.strategy, result.symbol, result.timeframe,
+                 result.signal_type, result.price, result.signal_strength, result.confidence),
             )
             cur.close()
 
@@ -157,7 +134,7 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
         from quant_lab.monitoring.signal_monitor import run_monitor
 
         adapter = _build_adapter(cfg)
-        pt = run_monitor(
+        result = run_monitor(
             adapter,
             symbol=cfg["symbol"],
             timeframe=cfg["timeframe"],
@@ -168,46 +145,34 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
         logger.error("[%s] run_monitor failed: %s", ts_label, exc)
         return None
 
-    if pt is None:
+    if result is None:
         logger.warning("[%s] run_monitor returned None (no data?)", ts_label)
         return None
 
-    # Parse the point for logging
-    line = pt.to_line_protocol()
-    fields_str = line.split(" ")[1] if " " in line else ""
-    field_map = {}
-    for pair in fields_str.split(","):
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            field_map[k] = v
-
-    ts_ns = int(line.split(" ")[-1]) if len(line.split(" ")) >= 3 else 0
-    ts_dt = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc) if ts_ns else now
-
-    sig = field_map.get("signal_strength", "?")
-    conf = field_map.get("confidence", "?")
-    price = field_map.get("price", "?")
-
     summary = {
-        "signal": sig,
-        "confidence": conf,
-        "price": price,
-        "ts": ts_dt.isoformat(),
+        "signal": result.signal,
+        "confidence": result.confidence,
+        "price": result.price,
+        "ts": result.ts.isoformat() if result.ts else now.isoformat(),
     }
 
     logger.info(
         "[%s] signal=%s confidence=%s price=%s ts=%s",
-        ts_label, sig, conf, price, ts_dt.isoformat(),
+        ts_label, result.signal, result.confidence, result.price,
+        result.ts.isoformat() if result.ts else "?",
     )
 
     if dry_run:
         logger.info("[%s] --dry-run: skipping TimescaleDB write", ts_label)
-        logger.info("[line_protocol] %s", line)
+        logger.info(
+            "[summary] signal=%s type=%s confidence=%s price=%s",
+            result.signal, result.signal_type, result.confidence, result.price,
+        )
         return summary
 
     # Write to TimescaleDB
     try:
-        _write_to_timescale(pt, cfg, sim_run_id)
+        _write_to_timescale(result, cfg, sim_run_id)
     except Exception as exc:
         logger.error("[%s] TimescaleDB write exception: %s", ts_label, exc)
 
@@ -219,10 +184,8 @@ def run_job(cfg: dict | None = None, dry_run: bool = False) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _run_loop_apscheduler(cfg: dict, dry_run: bool):
+def _run_loop(cfg: dict, dry_run: bool):
     """Use APScheduler for cron-style hourly execution."""
-    from apscheduler.schedulers.blocking import BlockingScheduler
-
     sched = BlockingScheduler()
     sched.add_job(
         run_job,
@@ -239,21 +202,6 @@ def _run_loop_apscheduler(cfg: dict, dry_run: bool):
         sched.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Scheduler stopped")
-
-
-def _run_loop_sleep(cfg: dict, dry_run: bool):
-    """Fallback: simple sleep loop every 3600s."""
-    import time
-
-    logger.info("Using time.sleep loop (APScheduler not available)")
-    while not _shutdown:
-        run_job(cfg=cfg, dry_run=dry_run)
-        # Sleep in small increments for responsive shutdown
-        for _ in range(360):
-            if _shutdown:
-                break
-            time.sleep(10)
-    logger.info("Sleep-loop scheduler stopped")
 
 
 def main():
@@ -281,10 +229,7 @@ def main():
         return
 
     # Continuous mode
-    try:
-        _run_loop_apscheduler(cfg, args.dry_run)
-    except ImportError:
-        _run_loop_sleep(cfg, args.dry_run)
+    _run_loop(cfg, args.dry_run)
 
 
 if __name__ == "__main__":

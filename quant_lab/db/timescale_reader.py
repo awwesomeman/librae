@@ -87,7 +87,7 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """Load strategy_performance joined with backtest_runs.
 
     Returns a DataFrame with one row per metric in _field/_value format
-    (matching the InfluxDB pivot layout expected by the Streamlit app).
+    (matching the _field/_value pivot layout expected by the Streamlit app).
     """
     sql = """
         SELECT sp.*, br.strategy, br.symbol, br.timeframe, br.sample

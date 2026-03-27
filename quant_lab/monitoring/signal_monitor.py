@@ -1,19 +1,18 @@
 """Real-time signal monitor — bridges signal_engine into the monitoring pipeline.
 
 Accepts live OHLCV data via a duck-typed adapter, runs TrendPullback signal
-generation, and produces Points for downstream consumers (TimescaleDB writer).
+generation, and produces SignalResult for downstream consumers (TimescaleDB writer).
 
 Skills: python, quant
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
-from influxdb_client import Point
 
-from quant_lab.contracts import SCHEMA_VERSION
 from quant_lab.signal_engine.trendpullback import (
     compute_features,
     compute_daily_gate,
@@ -23,48 +22,28 @@ from quant_lab.signal_engine.trendpullback import (
 )
 
 
+@dataclass
+class SignalResult:
+    """Pure-Python result from a single monitoring cycle."""
+
+    ts: datetime
+    symbol: str
+    strategy: str
+    timeframe: str
+    signal: int  # 1 / -1 / 0
+    signal_type: str  # entry / exit / hold
+    confidence: float
+    price: float
+    signal_strength: float
+    run_id: str
+    source: str
+
+
 @runtime_checkable
 class OHLCVAdapter(Protocol):
     """Duck-typed adapter — any object with ``fetch_ohlcv`` qualifies."""
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame: ...
-
-
-def signal_to_point(
-    signal: int,
-    confidence: float,
-    price: float,
-    ts: datetime,
-    *,
-    strategy: str = "TrendPullback",
-    symbol: str = "UNKNOWN",
-    timeframe: str = "1h",
-    source: str = "live",
-    run_id: str = "monitor",
-) -> Point:
-    """Format a single signal into a ``strategy_signals`` Point.
-        schema_version, strategy, symbol, timeframe, side, source, run_id, signal_type.
-
-    Fields: signal_strength (float), confidence (float), price (float).
-    """
-    side = "long" if signal >= 1 else "exit" if signal <= -1 else "flat"
-    signal_type = "entry" if signal >= 1 else "exit" if signal <= -1 else "hold"
-
-    return (
-        Point("strategy_signals")
-        .tag("schema_version", SCHEMA_VERSION)
-        .tag("strategy", strategy)
-        .tag("symbol", symbol)
-        .tag("timeframe", timeframe)
-        .tag("side", side)
-        .tag("source", source)
-        .tag("run_id", run_id)
-        .tag("signal_type", signal_type)
-        .field("signal_strength", float(signal))
-        .field("confidence", float(confidence))
-        .field("price", float(price))
-        .time(ts)
-    )
 
 
 def _prepare_dataframe(
@@ -127,8 +106,8 @@ def run_monitor(
     source: str = "live",
     run_id: str = "monitor",
     daily_df: pd.DataFrame | None = None,
-) -> Point | None:
-    """Fetch latest OHLCV, generate signals, return an InfluxDB Point.
+) -> SignalResult | None:
+    """Fetch latest OHLCV, generate signals, return a SignalResult.
 
     Parameters
     ----------
@@ -144,25 +123,17 @@ def run_monitor(
     limit : int
         Number of bars to request from the adapter (default 200).
     source : str
-        Tag value for the InfluxDB point (default ``"live"``).
+        Tag value (default ``"live"``).
     run_id : str
-        Tag value for the InfluxDB point (default ``"monitor"``).
+        Tag value (default ``"monitor"``).
     daily_df : pd.DataFrame | None
         Pre-fetched D1 OHLCV for the daily trend gate.  When ``None``
         the adapter is used to fetch D1 data automatically.
 
     Returns
     -------
-    Point or None
-        An ``influxdb_client.Point`` with measurement ``strategy_signals``.
+    SignalResult or None
         Returns ``None`` when the adapter returns an empty DataFrame.
-
-    Output Point schema
-    -------------------
-    - measurement: ``strategy_signals``
-    - tags: schema_version, strategy, symbol, timeframe, side, source, run_id, signal_type
-    - fields: signal_strength (float), confidence (float), price (float)
-    - time: timestamp of the latest bar
     """
     raw = adapter.fetch_ohlcv(symbol, timeframe, limit)
     if raw is None or raw.empty:
@@ -187,14 +158,18 @@ def run_monitor(
     price = float(prepared.loc[last_idx, "close"])
     ts = last_idx if isinstance(last_idx, datetime) else pd.Timestamp(last_idx).to_pydatetime()
 
-    return signal_to_point(
+    signal_type = "entry" if signal_val >= 1 else "exit" if signal_val <= -1 else "hold"
+
+    return SignalResult(
+        ts=ts,
+        symbol=symbol,
+        strategy="TrendPullback",
+        timeframe=timeframe,
         signal=signal_val,
+        signal_type=signal_type,
         confidence=confidence,
         price=price,
-        ts=ts,
-        strategy="TrendPullback",
-        symbol=symbol,
-        timeframe=timeframe,
-        source=source,
+        signal_strength=float(signal_val),
         run_id=run_id,
+        source=source,
     )

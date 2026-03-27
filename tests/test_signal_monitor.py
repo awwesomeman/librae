@@ -1,6 +1,6 @@
 """Tests for quant_lab.monitoring.signal_monitor.
 
-Covers: run_monitor, signal_to_point, adapter protocol, edge cases.
+Covers: run_monitor, SignalResult, adapter protocol, edge cases.
 """
 from __future__ import annotations
 
@@ -9,12 +9,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import pytest
-from influxdb_client import Point
 
 from quant_lab.monitoring.signal_monitor import (
     OHLCVAdapter,
+    SignalResult,
     run_monitor,
-    signal_to_point,
     _prepare_dataframe,
 )
 
@@ -68,78 +67,73 @@ class EmptyAdapter:
 # Tests
 # ---------------------------------------------------------------------------
 
-class TestSignalToPoint:
-    """Unit tests for signal_to_point formatting."""
+class TestSignalResult:
+    """Unit tests for SignalResult dataclass."""
 
-    def test_entry_signal_produces_correct_measurement(self):
-        pt = signal_to_point(
-            signal=1, confidence=1.0, price=50000.0,
+    def test_entry_signal_type(self):
+        df = _make_ohlcv(100)
+        adapter = MockAdapter(df)
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result is not None
+        assert result.signal_type in ("entry", "exit", "hold")
+
+    def test_signal_type_entry_when_positive(self):
+        r = SignalResult(
             ts=datetime(2025, 3, 1, tzinfo=timezone.utc),
-            symbol="BTC/USDT", timeframe="1h",
+            symbol="BTC/USDT", strategy="TrendPullback", timeframe="1h",
+            signal=1, signal_type="entry", confidence=1.0, price=50000.0,
+            signal_strength=1.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        assert line.startswith("strategy_signals,")
+        assert r.signal_type == "entry"
+        assert r.signal == 1
 
-    def test_entry_tags_aligned_with_influx_writer(self):
-        pt = signal_to_point(
-            signal=1, confidence=1.0, price=50000.0,
-            ts=datetime(2025, 3, 1, tzinfo=timezone.utc),
-            symbol="BTC/USDT", timeframe="1h",
-        )
-        line = pt.to_line_protocol()
-        # All required tags present
-        for tag in ("schema_version=", "strategy=", "symbol=", "timeframe=",
-                     "side=", "source=", "run_id=", "signal_type="):
-            assert tag in line, f"Missing tag: {tag}"
-
-    def test_exit_signal_side_tag(self):
-        pt = signal_to_point(
-            signal=-1, confidence=1.0, price=49000.0,
+    def test_signal_type_exit_when_negative(self):
+        r = SignalResult(
             ts=datetime(2025, 3, 2, tzinfo=timezone.utc),
-            symbol="BTC/USDT", timeframe="1h",
+            symbol="BTC/USDT", strategy="TrendPullback", timeframe="1h",
+            signal=-1, signal_type="exit", confidence=1.0, price=49000.0,
+            signal_strength=-1.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        assert "side=exit" in line
-        assert "signal_type=exit" in line
+        assert r.signal_type == "exit"
+        assert r.signal == -1
 
-    def test_hold_signal_side_tag(self):
-        pt = signal_to_point(
-            signal=0, confidence=0.0, price=49500.0,
+    def test_signal_type_hold_when_zero(self):
+        r = SignalResult(
             ts=datetime(2025, 3, 3, tzinfo=timezone.utc),
-            symbol="BTC/USDT", timeframe="1h",
+            symbol="BTC/USDT", strategy="TrendPullback", timeframe="1h",
+            signal=0, signal_type="hold", confidence=0.0, price=49500.0,
+            signal_strength=0.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        assert "side=flat" in line
-        assert "signal_type=hold" in line
+        assert r.signal_type == "hold"
+        assert r.signal == 0
 
     def test_fields_present(self):
-        pt = signal_to_point(
-            signal=1, confidence=0.95, price=123.45,
+        r = SignalResult(
             ts=datetime(2025, 3, 1, tzinfo=timezone.utc),
-            symbol="ETH/USDT", timeframe="4h",
+            symbol="ETH/USDT", strategy="TrendPullback", timeframe="4h",
+            signal=1, signal_type="entry", confidence=0.95, price=123.45,
+            signal_strength=1.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        assert "signal_strength=1.0" in line or "signal_strength=1" in line
-        assert "confidence=0.95" in line
-        assert "price=123.45" in line
+        assert r.signal_strength == 1.0
+        assert r.confidence == 0.95
+        assert r.price == 123.45
 
 
 class TestRunMonitor:
     """Integration tests for run_monitor pipeline."""
 
-    def test_returns_point_with_valid_adapter(self):
+    def test_returns_signal_result_with_valid_adapter(self):
         df = _make_ohlcv(100)
         adapter = MockAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        assert pt is not None
-        assert isinstance(pt, Point)
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result is not None
+        assert isinstance(result, SignalResult)
 
-    def test_measurement_is_strategy_signals(self):
+    def test_strategy_is_trendpullback(self):
         df = _make_ohlcv(100)
         adapter = MockAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        line = pt.to_line_protocol()
-        assert line.startswith("strategy_signals,")
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result.strategy == "TrendPullback"
 
     def test_returns_none_for_empty_adapter(self):
         adapter = EmptyAdapter()
@@ -157,27 +151,25 @@ class TestRunMonitor:
         df = _make_ohlcv(100)
         adapter = MockAdapter(df)
         params = {"ema_period": 10, "atr_period": 7}
-        pt = run_monitor(adapter, symbol="ETH/USDT", timeframe="1h", params=params)
-        assert pt is not None
+        result = run_monitor(adapter, symbol="ETH/USDT", timeframe="1h", params=params)
+        assert result is not None
 
-    def test_symbol_and_timeframe_in_tags(self):
+    def test_symbol_and_timeframe_in_result(self):
         df = _make_ohlcv(100)
         adapter = MockAdapter(df)
-        pt = run_monitor(adapter, symbol="ETH/USDT", timeframe="4h")
-        line = pt.to_line_protocol()
-        assert "symbol=ETH/USDT" in line
-        assert "timeframe=4h" in line
+        result = run_monitor(adapter, symbol="ETH/USDT", timeframe="4h")
+        assert result.symbol == "ETH/USDT"
+        assert result.timeframe == "4h"
 
-    def test_source_and_run_id_tags(self):
+    def test_source_and_run_id(self):
         df = _make_ohlcv(100)
         adapter = MockAdapter(df)
-        pt = run_monitor(
+        result = run_monitor(
             adapter, symbol="BTC/USDT", timeframe="1h",
             source="backfill", run_id="test-123",
         )
-        line = pt.to_line_protocol()
-        assert "source=backfill" in line
-        assert "run_id=test-123" in line
+        assert result.source == "backfill"
+        assert result.run_id == "test-123"
 
 
 class TestAdapterProtocol:

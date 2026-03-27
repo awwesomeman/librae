@@ -1,7 +1,7 @@
-"""E2E integration tests: run_monitor → Point → write pipeline.
+"""E2E integration tests: run_monitor → SignalResult → write pipeline.
 
 Validates the full pipeline from mock adapter through signal generation
-to Point creation and mock write.
+to SignalResult creation and mock write.
 """
 from __future__ import annotations
 
@@ -11,9 +11,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
-from influxdb_client import Point
 
-from quant_lab.monitoring.signal_monitor import run_monitor, signal_to_point
+from quant_lab.monitoring.signal_monitor import run_monitor, SignalResult
 
 
 # ---------------------------------------------------------------------------
@@ -59,85 +58,66 @@ class EmptyAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: run_monitor with mock adapter returns a valid Point
+# Test 1: run_monitor with mock adapter returns a valid SignalResult
 # ---------------------------------------------------------------------------
 
-class TestRunMonitorReturnsValidPoint:
-    def test_run_monitor_returns_influxdb_point(self):
+class TestRunMonitorReturnsValidResult:
+    def test_run_monitor_returns_signal_result(self):
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        assert pt is not None
-        assert isinstance(pt, Point)
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result is not None
+        assert isinstance(result, SignalResult)
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Point measurement and tags completeness
+# Test 2: SignalResult fields completeness
 # ---------------------------------------------------------------------------
 
-class TestPointMeasurementAndTags:
-    def test_measurement_is_strategy_signals(self):
+class TestSignalResultFields:
+    def test_strategy_is_trendpullback(self):
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        line = pt.to_line_protocol()
-        assert line.startswith("strategy_signals,")
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result.strategy == "TrendPullback"
 
-    def test_all_required_tags_present(self):
+    def test_all_required_fields_present(self):
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        line = pt.to_line_protocol()
-        required_tags = [
-            "schema_version=",
-            "strategy=",
-            "symbol=",
-            "timeframe=",
-            "side=",
-            "source=",
-            "run_id=",
-            "signal_type=",
-        ]
-        for tag in required_tags:
-            assert tag in line, f"Missing tag: {tag}"
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result.symbol == "BTC/USDT"
+        assert result.timeframe == "1h"
+        assert result.source == "live"
+        assert result.run_id == "monitor"
+        assert result.signal_type in ("entry", "exit", "hold")
+        assert isinstance(result.ts, datetime)
 
 
 # ---------------------------------------------------------------------------
 # Test 3: Fields present with correct types (float)
 # ---------------------------------------------------------------------------
 
-class TestPointFieldTypes:
-    def test_fields_present_in_line_protocol(self):
+class TestSignalResultFieldTypes:
+    def test_fields_are_correct_types(self):
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        line = pt.to_line_protocol()
-        assert "signal_strength=" in line
-        assert "confidence=" in line
-        assert "price=" in line
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert isinstance(result.signal_strength, float)
+        assert isinstance(result.confidence, float)
+        assert isinstance(result.price, float)
+        assert isinstance(result.signal, int)
 
-    def test_signal_to_point_fields_are_float(self):
-        """Directly verify field types via signal_to_point."""
-        pt = signal_to_point(
-            signal=1,
-            confidence=1.0,
-            price=50000.0,
+    def test_signal_result_fields_are_float(self):
+        """Directly verify field types via SignalResult construction."""
+        r = SignalResult(
             ts=datetime(2025, 6, 1, tzinfo=timezone.utc),
-            symbol="BTC/USDT",
-            timeframe="1h",
+            symbol="BTC/USDT", strategy="TrendPullback", timeframe="1h",
+            signal=1, signal_type="entry", confidence=1.0, price=50000.0,
+            signal_strength=1.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        # InfluxDB line protocol: floats don't have 'i' suffix
-        # Extract fields section (between last tag-space and timestamp-space)
-        parts = line.split(" ")
-        # parts: [measurement+tags, fields, timestamp]
-        fields_str = parts[1]
-        field_pairs = fields_str.split(",")
-        for pair in field_pairs:
-            key, val = pair.split("=", 1)
-            # float values should parse as float, not end with 'i' (integer)
-            assert not val.endswith("i"), f"Field {key} is integer, expected float"
-            float(val)  # should not raise
+        assert isinstance(r.signal_strength, float)
+        assert isinstance(r.confidence, float)
+        assert isinstance(r.price, float)
 
 
 # ---------------------------------------------------------------------------
@@ -147,86 +127,72 @@ class TestPointFieldTypes:
 class TestConfidenceValues:
     def test_confidence_is_1_when_signal_present(self):
         """Entry signal → confidence must be 1.0."""
-        pt = signal_to_point(
-            signal=1, confidence=1.0, price=50000.0,
+        r = SignalResult(
             ts=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            symbol="BTC/USDT", strategy="TrendPullback", timeframe="1h",
+            signal=1, signal_type="entry", confidence=1.0, price=50000.0,
+            signal_strength=1.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        assert "confidence=1.0" in line or "confidence=1" in line
+        assert r.confidence == 1.0
 
     def test_confidence_is_0_when_no_signal(self):
         """Hold signal → confidence must be 0.0."""
-        pt = signal_to_point(
-            signal=0, confidence=0.0, price=49000.0,
+        r = SignalResult(
             ts=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            symbol="BTC/USDT", strategy="TrendPullback", timeframe="1h",
+            signal=0, signal_type="hold", confidence=0.0, price=49000.0,
+            signal_strength=0.0, run_id="test", source="live",
         )
-        line = pt.to_line_protocol()
-        assert "confidence=0.0" in line or "confidence=0" in line
+        assert r.confidence == 0.0
 
     def test_run_monitor_confidence_is_binary(self):
         """Full pipeline: confidence from run_monitor must be 0.0 or 1.0."""
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-        line = pt.to_line_protocol()
-        # Extract confidence value
-        fields_str = line.split(" ")[1]
-        conf_val = None
-        for pair in fields_str.split(","):
-            k, v = pair.split("=", 1)
-            if k == "confidence":
-                conf_val = float(v)
-                break
-        assert conf_val is not None, "confidence field not found"
-        assert conf_val in (0.0, 1.0), f"confidence={conf_val}, expected 0.0 or 1.0"
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result.confidence in (0.0, 1.0), f"confidence={result.confidence}, expected 0.0 or 1.0"
 
 
 # ---------------------------------------------------------------------------
-# Test 5: mock InfluxDB write_api receives the Point correctly
+# Test 5: mock write receives the SignalResult correctly
 # ---------------------------------------------------------------------------
 
-class TestMockInfluxDBWrite:
-    def test_write_api_receives_point(self):
+class TestMockWrite:
+    def test_write_function_receives_result(self):
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
 
-        mock_write_api = MagicMock()
-        mock_write_api.write(bucket="test-bucket", org="test-org", record=pt)
+        mock_writer = MagicMock()
+        mock_writer.write(result=result, run_id=result.run_id)
 
-        mock_write_api.write.assert_called_once_with(
-            bucket="test-bucket", org="test-org", record=pt,
+        mock_writer.write.assert_called_once_with(
+            result=result, run_id=result.run_id,
         )
 
-    def test_write_api_receives_correct_point_type(self):
+    def test_write_receives_correct_result_type(self):
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
 
-        mock_write_api = MagicMock()
-        mock_write_api.write(bucket="signals", org="myorg", record=pt)
+        mock_writer = MagicMock()
+        mock_writer.write(result=result)
 
-        call_args = mock_write_api.write.call_args
-        assert isinstance(call_args.kwargs["record"], Point)
+        call_args = mock_writer.write.call_args
+        assert isinstance(call_args.kwargs["result"], SignalResult)
 
-    def test_write_api_point_line_protocol_valid(self):
-        """The point written to InfluxDB produces valid line protocol."""
+    def test_result_has_valid_signal_values(self):
+        """The result should have valid signal values for downstream consumers."""
         df = _make_ohlcv(150)
         adapter = MockBinanceAdapter(df)
-        pt = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
-
-        mock_write_api = MagicMock()
-        mock_write_api.write(bucket="b", org="o", record=pt)
-
-        written_pt = mock_write_api.write.call_args.kwargs["record"]
-        line = written_pt.to_line_protocol()
-        # Valid line protocol: measurement,tags fields timestamp
-        parts = line.split(" ")
-        assert len(parts) == 3, f"Invalid line protocol: {line}"
+        result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
+        assert result.signal in (-1, 0, 1)
+        assert result.signal_type in ("entry", "exit", "hold")
+        assert result.price > 0
 
 
 # ---------------------------------------------------------------------------
-# Test 6: empty adapter → None, write_api NOT called
+# Test 6: empty adapter → None, write NOT called
 # ---------------------------------------------------------------------------
 
 class TestEmptyAdapterNoWrite:
@@ -235,13 +201,12 @@ class TestEmptyAdapterNoWrite:
         result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
         assert result is None
 
-    def test_write_api_not_called_on_none(self):
+    def test_write_not_called_on_none(self):
         adapter = EmptyAdapter()
         result = run_monitor(adapter, symbol="BTC/USDT", timeframe="1h")
 
-        mock_write_api = MagicMock()
-        # Only write if result is not None (simulating real usage)
+        mock_writer = MagicMock()
         if result is not None:
-            mock_write_api.write(bucket="b", org="o", record=result)
+            mock_writer.write(result=result)
 
-        mock_write_api.write.assert_not_called()
+        mock_writer.write.assert_not_called()

@@ -84,33 +84,23 @@ def main() -> None:
           f"adapter={args.adapter} dry_run={args.dry_run}")
 
     adapter = _build_adapter(args.adapter)
-    pt = run_monitor(adapter, symbol=args.symbol, timeframe=args.timeframe, source="manual", run_id="once")
+    result = run_monitor(adapter, symbol=args.symbol, timeframe=args.timeframe, source="manual", run_id="once")
 
-    if pt is None:
-        print("[run_monitor_once] No data returned — point is None")
+    if result is None:
+        print("[run_monitor_once] No data returned — result is None")
         return
 
-    # Parse line protocol for summary
-    line = pt.to_line_protocol()
-    fields_str = line.split(" ")[1]
-    field_map = {}
-    for pair in fields_str.split(","):
-        k, v = pair.split("=", 1)
-        field_map[k] = v
-
-    ts_ns = int(line.split(" ")[2])
-    ts_dt = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
-
     print(
-        f"signal={field_map.get('signal_strength', '?')}, "
-        f"confidence={field_map.get('confidence', '?')}, "
-        f"price={field_map.get('price', '?')}, "
-        f"ts={ts_dt.isoformat()}"
+        f"signal={result.signal}, "
+        f"confidence={result.confidence}, "
+        f"price={result.price}, "
+        f"ts={result.ts.isoformat()}"
     )
 
     if args.dry_run:
         print("[run_monitor_once] --dry-run: skipping TimescaleDB write")
-        print(f"[line_protocol] {line}")
+        print(f"[summary] signal_type={result.signal_type} strategy={result.strategy} "
+              f"symbol={result.symbol} timeframe={result.timeframe}")
         return
 
     # Write to TimescaleDB
@@ -118,18 +108,6 @@ def main() -> None:
         from quant_lab.db.timescale_writer import get_conn, TIMESCALE_DSN
 
         now = datetime.now(timezone.utc)
-
-        # Parse tags from line protocol
-        tag_part = line.split(" ")[0] if " " in line else ""
-        tag_map = {}
-        for pair in tag_part.split(",")[1:]:
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-                tag_map[k] = v
-
-        strategy = tag_map.get("strategy", "TrendPullback")
-        symbol = args.symbol
-        timeframe = args.timeframe
         run_id = "once"
 
         with get_conn(TIMESCALE_DSN) as conn:
@@ -139,27 +117,22 @@ def main() -> None:
                    (run_id, strategy, symbol, timeframe, run_ts, mode)
                    VALUES (%s, %s, %s, %s, %s, 'sim')
                    ON CONFLICT (run_id) DO UPDATE SET run_ts = EXCLUDED.run_ts""",
-                (run_id, strategy, symbol, timeframe, now),
+                (run_id, result.strategy, result.symbol, result.timeframe, now),
             )
-
-            price = float(field_map.get("price", "0").rstrip("i"))
-            signal_strength = float(field_map.get("signal_strength", "0").rstrip("i"))
-            confidence = float(field_map.get("confidence", "0").rstrip("i"))
-            signal_type = tag_map.get("signal_type", "hold")
 
             cur.execute(
                 """INSERT INTO strategy_signals
                    (ts, run_id, strategy, symbol, timeframe,
                     signal_type, source, price, signal_strength, confidence, quantity)
                    VALUES (%s, %s, %s, %s, %s, %s, 'manual', %s, %s, %s, 0)""",
-                (now, run_id, strategy, symbol, timeframe,
-                 signal_type, price, signal_strength, confidence),
+                (now, run_id, result.strategy, result.symbol, result.timeframe,
+                 result.signal_type, result.price, result.signal_strength, result.confidence),
             )
             cur.close()
         print(f"[run_monitor_once] ✅ Written to TimescaleDB (run_id={run_id})")
     except Exception as e:
         print(f"[run_monitor_once] ❌ TimescaleDB write failed: {e}")
-        print("[run_monitor_once] Point was generated successfully but not persisted")
+        print("[run_monitor_once] Result was generated successfully but not persisted")
 
 
 if __name__ == "__main__":
