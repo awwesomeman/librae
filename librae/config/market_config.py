@@ -1,19 +1,22 @@
 """Two-layer market configuration: MarketConfig (asset-class) + InstrumentConfig (instrument).
 
-Loads config/markets.yaml and resolves instrument -> market references.
+Loads per-market YAML files from librae/config/markets/ directory.
+Each file defines a market, defaults, and instruments that inherit defaults.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import yaml
-from pathlib import Path
 
 
 @dataclass
 class MarketConfig:
-    asset_class: str          # crypto / futures / equity
+    """Asset-class level configuration."""
+
+    asset_class: str
     quote_currency: str
     timezone: str
     is_24h: bool
@@ -26,10 +29,13 @@ class MarketConfig:
 
 @dataclass
 class InstrumentConfig:
+    """Individual instrument configuration.
+
+    Fields inherit from market-level defaults, then override per instrument.
+    """
+
     market_id: str
     exchange: str
-    data_source: str
-    base_asset: str
     symbol: str
     tick_size: float
     tick_value: float
@@ -41,81 +47,53 @@ class InstrumentConfig:
     min_commission: float
     transaction_tax: float
     slippage_ticks: int
-    default_timeframe: str
-    warmup_bars: int
-    max_hold_bars: int
-    # resolved at load time
     market: Optional[MarketConfig] = None
 
     @property
-    def commission_per_unit(self) -> float:
-        """最低手續費保護：max(rate-based, min_commission)"""
-        return self.min_commission
-
-    @property
-    def slippage_cost(self) -> float:
-        """單邊滑點成本（以 quote_currency 計）"""
-        return self.slippage_ticks * self.tick_value
+    def multiplier(self) -> float:
+        """Contract multiplier: tick_value / tick_size."""
+        return self.tick_value / self.tick_size if self.tick_size > 0 else 1.0
 
 
-def _default_yaml_path() -> Path:
-    """Return the default config/markets.yaml path relative to project root."""
-    return Path(__file__).resolve().parent / "markets.yaml"
+def _default_markets_dir() -> Path:
+    """Return the default markets/ directory path."""
+    return Path(__file__).resolve().parent / "markets"
 
 
 def load_market_configs(path: str | Path | None = None) -> dict[str, InstrumentConfig]:
-    """載入 config/markets.yaml，回傳 instrument_id -> InstrumentConfig dict"""
-    yaml_path = Path(path) if path else _default_yaml_path()
-    with open(yaml_path, "r") as f:
-        raw = yaml.safe_load(f)
+    """Load all market YAML files from a directory.
 
-    # Parse markets
-    markets: dict[str, MarketConfig] = {}
-    for market_id, mdata in raw.get("markets", {}).items():
-        markets[market_id] = MarketConfig(
-            asset_class=mdata["asset_class"],
-            quote_currency=mdata["quote_currency"],
-            timezone=mdata["timezone"],
-            is_24h=mdata["is_24h"],
-            session_open=mdata.get("session_open"),
-            session_close=mdata.get("session_close"),
-            night_session_open=mdata.get("night_session_open"),
-            night_session_close=mdata.get("night_session_close"),
-            settlement_day=mdata.get("settlement_day"),
-        )
+    Each file defines: market (asset-class config), defaults, instruments.
+    Instrument fields inherit from defaults, then override.
 
-    # Parse instruments and resolve market references
+    Args:
+        path: Directory containing market YAML files.
+              Defaults to librae/config/markets/.
+    """
+    markets_dir = Path(path) if path else _default_markets_dir()
+
     instruments: dict[str, InstrumentConfig] = {}
-    for inst_id, idata in raw.get("instruments", {}).items():
-        market_ref = idata["market"]
-        market_obj = markets.get(market_ref)
-        instruments[inst_id] = InstrumentConfig(
-            market_id=market_ref,
-            exchange=idata["exchange"],
-            data_source=idata["data_source"],
-            base_asset=idata["base_asset"],
-            symbol=idata["symbol"],
-            tick_size=float(idata["tick_size"]),
-            tick_value=float(idata["tick_value"]),
-            trade_unit=float(idata["trade_unit"]),
-            min_qty=float(idata["min_qty"]),
-            qty_precision=int(idata["qty_precision"]),
-            margin_rate=float(idata["margin_rate"]),
-            commission_rate=float(idata["commission_rate"]),
-            min_commission=float(idata["min_commission"]),
-            transaction_tax=float(idata["transaction_tax"]),
-            slippage_ticks=int(idata["slippage_ticks"]),
-            default_timeframe=idata["default_timeframe"],
-            warmup_bars=int(idata["warmup_bars"]),
-            max_hold_bars=int(idata["max_hold_bars"]),
-            market=market_obj,
-        )
+
+    for yaml_file in sorted(markets_dir.glob("*.yaml")):
+        with open(yaml_file, "r") as f:
+            raw = yaml.safe_load(f)
+
+        if not raw:
+            continue
+
+        market_id = yaml_file.stem
+        market_obj = _parse_market(raw.get("market", {}), market_id)
+        defaults = raw.get("defaults", {})
+
+        for inst_id, idata in raw.get("instruments", {}).items():
+            merged = {**defaults, **(idata or {})}
+            instruments[inst_id] = _build_instrument(inst_id, merged, market_id, market_obj)
 
     return instruments
 
 
 def get_instrument(instrument_id: str, path: str | Path | None = None) -> InstrumentConfig:
-    """取得單一標的 config"""
+    """Get a single instrument config by ID."""
     instruments = load_market_configs(path)
     if instrument_id not in instruments:
         available = list(instruments.keys())
@@ -123,12 +101,39 @@ def get_instrument(instrument_id: str, path: str | Path | None = None) -> Instru
     return instruments[instrument_id]
 
 
-def calc_commission(inst: InstrumentConfig, price: float, qty: float) -> float:
-    """計算手續費（考慮 min_commission）"""
-    rate_based = price * qty * inst.commission_rate
-    return max(rate_based, inst.min_commission)
+def _parse_market(mdata: dict, market_id: str) -> MarketConfig:
+    return MarketConfig(
+        asset_class=mdata.get("asset_class", "unknown"),
+        quote_currency=mdata.get("quote_currency", "USD"),
+        timezone=mdata.get("timezone", "UTC"),
+        is_24h=mdata.get("is_24h", False),
+        session_open=mdata.get("session_open"),
+        session_close=mdata.get("session_close"),
+        night_session_open=mdata.get("night_session_open"),
+        night_session_close=mdata.get("night_session_close"),
+        settlement_day=mdata.get("settlement_day"),
+    )
 
 
-def calc_slippage(inst: InstrumentConfig, qty: float) -> float:
-    """計算滑點成本"""
-    return inst.slippage_ticks * inst.tick_value * qty
+def _build_instrument(
+    inst_id: str,
+    merged: dict,
+    market_id: str,
+    market_obj: MarketConfig,
+) -> InstrumentConfig:
+    return InstrumentConfig(
+        market_id=market_id,
+        exchange=str(merged.get("exchange", "")),
+        symbol=str(merged["symbol"]),
+        tick_size=float(merged.get("tick_size", 0.01)),
+        tick_value=float(merged.get("tick_value", 0.01)),
+        trade_unit=float(merged.get("trade_unit", 1)),
+        min_qty=float(merged.get("min_qty", 1)),
+        qty_precision=int(merged.get("qty_precision", 0)),
+        margin_rate=float(merged.get("margin_rate", 0.0)),
+        commission_rate=float(merged.get("commission_rate", 0.0)),
+        min_commission=float(merged.get("min_commission", 0.0)),
+        transaction_tax=float(merged.get("transaction_tax", 0.0)),
+        slippage_ticks=int(merged.get("slippage_ticks", 0)),
+        market=market_obj,
+    )
