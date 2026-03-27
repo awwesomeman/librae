@@ -6,16 +6,17 @@ from contextlib import contextmanager
 import pandas as pd
 import psycopg2
 
-TIMESCALE_DSN = "postgresql://quant:quant_secret@localhost:5432/quant"
+from quant_lab.db import TIMESCALE_DSN, get_pool
 
 
 @contextmanager
 def _conn(dsn: str = TIMESCALE_DSN):
-    conn = psycopg2.connect(dsn)
+    pool = get_pool(dsn)
+    conn = pool.getconn()
     try:
         yield conn
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> str | None:

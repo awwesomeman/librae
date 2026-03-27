@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     start_ts        TIMESTAMPTZ,
     end_ts          TIMESTAMPTZ,
     run_ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    schema_version  TEXT
+    schema_version  TEXT,
+    mode            TEXT DEFAULT 'backtest'
 );
 
 -- equity curve（hypertable，chunk = 1 month）
@@ -93,3 +94,4 @@ CREATE TABLE IF NOT EXISTS ohlcv (
 );
 SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, run_id);

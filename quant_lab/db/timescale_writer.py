@@ -16,14 +16,14 @@ import pandas as pd
 
 from quant_lab.backtest.schema import BacktestOutput
 from quant_lab.contracts import SCHEMA_VERSION
-
-TIMESCALE_DSN = "postgresql://quant:quant_secret@localhost:5432/quant"
+from quant_lab.db import TIMESCALE_DSN, get_pool
 
 
 @contextmanager
 def get_conn(dsn: str = TIMESCALE_DSN):
-    """Yield a psycopg2 connection with auto-commit/rollback."""
-    conn = psycopg2.connect(dsn)
+    """Yield a psycopg2 connection from the pool with auto-commit/rollback."""
+    pool = get_pool(dsn)
+    conn = pool.getconn()
     try:
         yield conn
         conn.commit()
@@ -31,7 +31,7 @@ def get_conn(dsn: str = TIMESCALE_DSN):
         conn.rollback()
         raise
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 def _to_dt(ts: Any) -> datetime | None:
@@ -43,8 +43,17 @@ def _to_dt(ts: Any) -> datetime | None:
     return ts
 
 
-def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> dict:
+def write_backtest_output(
+    output: BacktestOutput,
+    dsn: str = TIMESCALE_DSN,
+    mode: str = "backtest",
+) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
+
+    Args:
+        output: BacktestOutput to write.
+        dsn: TimescaleDB DSN.
+        mode: One of 'backtest', 'sim', 'live'.
 
     Returns:
         Dict mapping table names to row counts written.
@@ -60,18 +69,26 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
         cur.execute(
             """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, sample, data_source,
-                start_ts, end_ts, run_ts, schema_version)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                start_ts, end_ts, run_ts, schema_version, mode)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
-                 strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts""",
+                 strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
+                 mode=EXCLUDED.mode""",
             (
                 meta.run_id, meta.strategy, meta.symbol, meta.timeframe,
                 meta.sample, meta.data_source,
                 _to_dt(meta.start_ts), _to_dt(meta.end_ts),
                 _to_dt(meta.run_ts), meta.schema_version or SCHEMA_VERSION,
+                mode,
             ),
         )
         counts["backtest_runs"] = 1
+
+        # 清除舊資料（idempotent re-run）
+        cur.execute("DELETE FROM strategy_signals WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM equity_curve WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM trade_blotter WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
         # equity_curve (batch)
         if output.equity_curve:
@@ -149,7 +166,7 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
             )
             counts["strategy_signals"] = len(signal_rows)
 
-        # strategy_performance (upsert)
+        # strategy_performance (upsert — full column coverage)
         cur.execute(
             """INSERT INTO strategy_performance
                (run_id, total_return, annual_return, sharpe, sortino,
@@ -158,8 +175,16 @@ def write_backtest_output(output: BacktestOutput, dsn: str = TIMESCALE_DSN) -> d
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  total_return=EXCLUDED.total_return,
+                 annual_return=EXCLUDED.annual_return,
                  sharpe=EXCLUDED.sharpe,
-                 max_drawdown=EXCLUDED.max_drawdown""",
+                 sortino=EXCLUDED.sortino,
+                 max_drawdown=EXCLUDED.max_drawdown,
+                 win_rate=EXCLUDED.win_rate,
+                 profit_factor=EXCLUDED.profit_factor,
+                 trades=EXCLUDED.trades,
+                 avg_trade_return=EXCLUDED.avg_trade_return,
+                 exposure_ratio=EXCLUDED.exposure_ratio,
+                 bh_total_return=EXCLUDED.bh_total_return""",
             (
                 meta.run_id, m.total_return, m.annual_return,
                 m.sharpe, getattr(m, "sortino", None),
@@ -198,21 +223,18 @@ def write_ohlcv(
         work = work.reset_index()
     ts_col = "ts" if "ts" in work.columns else "timestamp"
 
-    rows = [
-        (
-            _to_dt(row[ts_col]),
-            symbol,
-            timeframe,
-            run_id,
-            source,
-            float(row["open"]),
-            float(row["high"]),
-            float(row["low"]),
-            float(row["close"]),
-            float(row.get("volume", 0)),
-        )
-        for _, row in work.iterrows()
-    ]
+    rows = list(zip(
+        work[ts_col].apply(_to_dt),
+        [symbol] * len(work),
+        [timeframe] * len(work),
+        [run_id] * len(work),
+        [source] * len(work),
+        work["open"].astype(float),
+        work["high"].astype(float),
+        work["low"].astype(float),
+        work["close"].astype(float),
+        work.get("volume", pd.Series([0.0] * len(work))).astype(float),
+    ))
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
@@ -221,7 +243,7 @@ def write_ohlcv(
             """INSERT INTO ohlcv (ts, symbol, timeframe, run_id, source,
                open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (ts, symbol, timeframe, run_id) DO NOTHING""",
             rows,
             page_size=2000,
         )
