@@ -1,8 +1,8 @@
 # quant-strategy-lab Implementation Plan
 
-> Updated: 2026-03-26（最後同步）
-> Architecture: Signal Engine-first（pure function）+ 模組化分工 + MarketAdapter 抽象層
-> Status: Phase 0 ✅ 完成；Phase 1 進行中（回測正確性審查）
+> Updated: 2026-03-27
+> Architecture: Signal Engine-first + MarketAdapter + TimescaleDB
+> Status: Phase 1 進行中（策略研究工具 + 多策略擴展）
 
 ---
 
@@ -12,136 +12,100 @@
 Signal subscription platform for futures, crypto, pair trading, stock selection.
 
 ### Current phase goal
-Single-asset, verifiable, monitorable MVP with correct performance metrics:
-1. signal_engine pure function（single truth）
-2. 完整績效計算（含成本模型）
-3. Streamlit 回測儀表板
-4. Grafana 即時監控儀表板（只放 live 資料）
-5. 驗證策略正確性（look-ahead bias、成本、三段式 OOS）
+單一資產 MVP 可驗證、可監控，儀表板正確顯示回測與即時訊號。
 
 ---
 
-## 2) Tech Stack（最新）
+## 2) Tech Stack（當前）
 
-| Area | Tool | Rationale |
-|------|------|-----------|
-| Signal Engine | pure Python/Pandas + pandas_ta | Single truth，pure function，無框架依賴 |
-| 研究/參數掃描 | vectorbt（開源版 → 視需求升 Pro） | 多 TF、停損停利、向量化快速掃描 |
-| 高保真回測 | 自建 bar-by-bar runner（含成本模型） | 訂閱者績效標準，DST-safe |
-| 執行層 | CCXT（crypto）/ ib_insync（美股）/ Shioaji（台指） | 各市場最穩定工具 |
-| Time-series storage | InfluxDB 2.x | 監控/訊號時序 |
-| 指標展示（報告） | quantstats（橋接）| 業界標準 tearsheet |
-| 指標計算（內部） | metrics.py（pluggable registry）| InfluxDB 寫入 |
-| Dashboards | Streamlit（回測分析）+ Grafana（即時監控）| 職責分離 |
-| Alerts | Grafana Alerting → Telegram | 24/7 無人值守 |
-| Testing/CI | pytest + GitHub Actions | core / tw-live 分流 |
-| Deployment | docker-compose | InfluxDB + Grafana |
+| Area | Tool | 說明 |
+|------|------|------|
+| Signal Engine | pure Python/Pandas + pandas_ta_classic | Single truth，pure function |
+| 研究/參數掃描 | vectorbt（開源版） | 多 TF、向量化快速掃描 |
+| 高保真回測 | 自建 bar-by-bar runner（含成本模型） | InstrumentConfig 驅動 |
+| Market Config | `config/markets.yaml`（兩層架構） | 市場層（asset-class）+ 標的層 |
+| 執行層 | CCXT / ib_insync / Shioaji | 依市場選工具 |
+| Time-series DB | **TimescaleDB**（唯一資料源） | InfluxDB 已退役 |
+| Dashboards | Streamlit（策略研究）+ Grafana（三板監控） | 分工明確 |
+| Grafana 三板 | Backtest / Monitor / Live | Python generator，單一 source |
+| Scheduler | APScheduler（每小時整點） | mode=sim 寫 TimescaleDB |
+| Alerts | Grafana Alerting → Telegram | 待實作 |
+| Testing | pytest 405/405 | core tests 全過 |
+| Deployment | docker-compose（TimescaleDB + Grafana） | VPS: 35.194.150.232 |
 
-### Dashboard 資料範圍
-- **Grafana**：只放即時監控資料（live/sim runner 持續寫入）
-- **Streamlit**：只放回測分析資料（一次性回測輸出）
-
-### 績效指標計算標準
-詳見 `decisions/2026-03-26-performance-metrics-standard.md`
-
----
-
-## 3) Phase 進度追蹤
-
-### Phase 0 — Foundation & E2E（收尾中）
-
-| 交付項目 | 狀態 |
-|---------|------|
-| docker-compose（InfluxDB + Grafana） | ✅ 完成 |
-| Canonical schema | ✅ 完成 |
-| 可擴展績效指標模組（metrics.py） | ✅ 完成 |
-| TrendPullback BTC 策略核心 | ✅ 完成 |
-| Backtest runner（自建向量化）| ✅ 完成（DST bug 修復） |
-| Sim signal runner | ✅ 完成 |
-| Lumibot PoC（100% 訊號一致率） | ✅ 完成 |
-| Grafana MVP 監控儀表板 | ✅ 完成 |
-| Streamlit 回測儀表板 | ✅ 完成 |
-| Telegram adapter（feature flag） | ✅ 完成 |
-| Binance 真實資料抓取 | ✅ 完成 |
-| Parquet 歸檔 | ✅ 完成 |
-| 目錄結構扁平化（nautilus_lab → quant_lab） | ✅ 完成 |
-| CI 分流（core / tw-live） | ✅ 完成 |
-| **signal_engine pure function 抽出** | ✅ 完成（Sprint 1） |
-| **pandas_ta_classic 統一指標庫** | ✅ 完成 |
-| **成本模型（commission + slippage）** | ✅ 完成 |
-| **parity test（新舊指標對比）** | ✅ 完成（11 tests） |
-| signal_engine 接進 monitor pipeline | ✅ 完成（Sprint 2） |
-| Parquet cache（binance_fetcher） | ✅ 完成（Sprint 3） |
-| E2E monitor pipeline 整合測試 | ✅ 完成（Sprint 4） |
-| Grafana dashboard 對齊 strategy_signals | ✅ 完成（Sprint 5） |
-| CryptoAdapter + MarketHub | ✅ 完成（Sprint 6） |
-| 排程監控（每小時自動寫 InfluxDB） | ✅ 完成（Sprint 7） |
-| BH benchmark 曲線計算 | ✅ 完成 |
-| OHLCV 寫入 InfluxDB（Streamlit 走勢圖） | ✅ 完成 |
-| **回測正確性審查（daily gate 對齊、look-ahead bias、向量化）** | 🔄 進行中 |
-
-### Phase 1 — 回測正確性 & 策略優化（當前）
-
-| 交付項目 | 狀態 |
-|---------|------|
-| daily gate D1 對齊修正（merge_asof） | 🔄 進行中 |
-| look-ahead bias 自動化測試 | 🔄 進行中 |
-| entry cost 計算修正（qty 精度） | ⏳ 待執行 |
-| max_hold_bars 同步（engine ↔ runner） | ⏳ 待執行 |
-| Sharpe 改用 bar returns（quantstats 橋接） | ⏳ 待執行 |
-| 參數掃描（vectorbt） | ⏳ 待執行 |
-| 回測自動 ETL（跑完自動推 InfluxDB） | ⏳ 待執行 |
-| ≥2 策略可比較 | ⏳ 待執行 |
-| Streamlit 策略漂移偵測（回測 vs 即時）| ⏳ 待執行 |
-
-### Phase 2 — Scheduling, notifications, API（Day 90）
-
-| 交付項目 | 狀態 |
-|---------|------|
-| 排程（每小時 scheduler） | ✅ 完成 |
-| Telegram 訊號推播（正式版） | ⏳ 待執行 |
-| Grafana 告警規則 | ⏳ 待執行 |
-| FastAPI skeleton | ⏳ 待執行 |
-| MLflow server 整合 | ⏳ 待執行 |
-
-### Phase 3 — Multi-asset & subscription platform
-
-| 交付項目 | 狀態 |
-|---------|------|
-| 多資產策略支援 | 待執行 |
-| 使用者/訂閱（PostgreSQL + JWT） | 待執行 |
-| 版本化策略發布 | 待執行 |
+### 設計原則
+- **No-fallback**：所有資料源直連，連線失敗直接報錯
+- **Single truth**：signal_engine 是唯一策略邏輯來源
+- **TimescaleDB only**：所有讀寫走 `quant_lab/db/`，不依賴 InfluxDB
 
 ---
 
-## 4) Key Architecture Decisions
+## 3) Phase 進度
 
-詳細見 `decisions/` 目錄：
-- `2026-03-26-platform-architecture.md`：整體架構分工
-- `2026-03-26-market-adapter-architecture.md`：MarketAdapter / MarketHub 設計
-- `2026-03-26-performance-metrics-standard.md`：績效計算標準
-- `2026-03-26-backtest-performance-optimization.md`：回測效能策略
-- `2026-03-26-dashboard-data-scope.md`：儀表板資料範圍
-- `2026-03-25-dashboard-architecture.md`：Grafana vs Streamlit 分工
+### Phase 0 — Foundation ✅ 完成
+
+| 項目 | 狀態 |
+|------|------|
+| signal_engine pure function（trendpullback） | ✅ |
+| 自建回測引擎（成本模型、冪等重跑） | ✅ |
+| Market Config 兩層架構（markets.yaml） | ✅ |
+| CryptoAdapter + MarketHub | ✅ |
+| TimescaleDB 完全取代 InfluxDB | ✅ |
+| Grafana 三板（Python generator，2×2 版面） | ✅ |
+| Streamlit（TimescaleDB 讀取，run_id 選擇） | ✅ |
+| Scheduler（APScheduler，mode=sim） | ✅ |
+| Look-ahead bias 自動化測試 | ✅ |
+| QA 驗證（訊號/績效正確性，21/21 pass） | ✅ |
+
+### Phase 1 — 策略研究工具（當前）
+
+| 項目 | 狀態 |
+|------|------|
+| Streamlit 改版為 vectorbt 研究工具 | ⏳ |
+| param_sweep_results 表（TimescaleDB） | ⏳ |
+| 參數掃描結果互動式呈現 | ⏳ |
+| ≥2 策略可比較（Backtest 板 run_id 對比） | ⏳ |
+| Sharpe 改用 bar returns（quantstats 橋接） | ⏳ |
+| InfluxDB container 退役 | ⏳ |
+| Monitor 板真實 sim 資料驗證 | ⏳ |
+
+### Phase 2 — Notifications & API
+
+| 項目 | 狀態 |
+|------|------|
+| Grafana 告警規則 → Telegram | ⏳ |
+| Telegram 訊號推播（正式版） | ⏳ |
+| Grafana Public Dashboard（第三方觀測） | ⏳ |
+| FastAPI skeleton | ⏳ |
+
+### Phase 3 — Multi-asset & Subscription
+
+| 項目 | 狀態 |
+|------|------|
+| 台指期 TWSAdapter（Shioaji） | ⏳ |
+| 多資產策略支援 | ⏳ |
+| 使用者/訂閱（PostgreSQL + JWT） | ⏳ |
+| 版本化策略發布 | ⏳ |
 
 ---
 
-## 5) When to refactor（大幅重構門檻）
+## 4) Key Decisions
 
-觸發任 2~3 條：
+見 `decisions/` 目錄：
+- `2026-03-26-platform-architecture.md`
+- `2026-03-26-market-adapter-architecture.md`
+- `2026-03-26-performance-metrics-standard.md`
+- `2026-03-26-backtest-performance-optimization.md`
+- `2026-03-26-dashboard-data-scope.md`
+- `2026-03-25-dashboard-architecture.md`
+
+---
+
+## 5) Refactor 門檻
+
+觸發任 2~3 條才考慮大幅重構：
 1. 策略 >10 且重複邏輯 >40%
-2. 自建 runner 效能成瓶頸（考慮 Numba JIT）
+2. runner 效能成瓶頸（考慮 Numba JIT）
 3. 需要 tick/orderbook 回測（考慮 NautilusTrader）
 4. 訂閱者 >50 且 API 延遲成瓶頸
 5. 資料源 >3 導致 adapter 不一致
-
----
-
-## 6) Principles
-
-- signal_engine = single truth（pure function）
-- 回測和 live 都呼叫同一個 signal_engine
-- Grafana = 即時監控；Streamlit = 回測分析（不混用）
-- 成本模型必須納入（commission + slippage）
-- 指標計算：quantstats（展示）/ metrics.py（InfluxDB）
-- 先可用再擴展；先正確再優化
