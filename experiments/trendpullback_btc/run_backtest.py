@@ -29,7 +29,7 @@ from librae.schema import (
 )
 from librae.utils import generate_run_id
 from librae.data import fetch_ohlcv
-from strategies.trendpullback.signals import (
+from strategies.trendpullback.utils import (
     compute_entry_conditions,
     compute_exit_conditions,
     compute_features,

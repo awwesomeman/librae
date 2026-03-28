@@ -13,7 +13,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
 
-from strategies.trendpullback.signals import (
+from strategies.trendpullback.utils import (
     compute_features,
     compute_daily_gate,
     compute_entry_conditions,

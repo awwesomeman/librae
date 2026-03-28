@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from strategies.trendpullback.signals import (
+from strategies.trendpullback.utils import (
     compute_daily_gate,
     compute_entry_conditions,
     compute_exit_conditions,
@@ -209,7 +209,7 @@ class TestCostModel:
         merged_mi = merged.set_index(mi)
 
         # Precompute entry/exit signals
-        from strategies.trendpullback.signals import compute_entry_conditions, compute_exit_conditions
+        from strategies.trendpullback.utils import compute_entry_conditions, compute_exit_conditions
         merged_mi["entry_signal"] = compute_entry_conditions(merged).values
         merged_mi["exit_signal"] = compute_exit_conditions(merged).values
 
@@ -252,7 +252,7 @@ class TestCostModel:
         )
         merged_mi = merged.set_index(mi)
 
-        from strategies.trendpullback.signals import compute_entry_conditions, compute_exit_conditions
+        from strategies.trendpullback.utils import compute_entry_conditions, compute_exit_conditions
         merged_mi["entry_signal"] = compute_entry_conditions(merged).values
         merged_mi["exit_signal"] = compute_exit_conditions(merged).values
 

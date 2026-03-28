@@ -1,9 +1,9 @@
-"""TrendPullback signal engine — pure functions, no I/O, no position tracking.
+"""TrendPullback utils — data fetching, ETL, feature engineering, signal computation.
 
 All indicator computations use pandas_ta_classic (EMA, ATR, SMA).
-Functions are deterministic: same input → same output.
+Pure functions: same input → same output.
 
-Entry/exit conditions are pure boolean Series — no in_position or bars_held.
+Entry/exit conditions are pure boolean Series — no position tracking.
 Position management belongs in the Strategy layer.
 """
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
+
+from librae.data import fetch_ohlcv
 
 
 # ---------------------------------------------------------------------------
@@ -110,3 +112,64 @@ def compute_exit_conditions(df: pd.DataFrame, params: dict | None = None) -> pd.
     return (df["close"] < df["ema20"]).fillna(False)
 
 
+# ---------------------------------------------------------------------------
+# Data pipeline: fetch → features → signals → MultiIndex
+# ---------------------------------------------------------------------------
+
+
+def fetch_and_prepare(
+    symbol: str = "BTCUSDT",
+    months: int = 6,
+    params: dict | None = None,
+) -> pd.DataFrame:
+    """End-to-end data preparation: fetch OHLCV → features → signals → MultiIndex.
+
+    Returns a MultiIndex DataFrame (instrument, datetime) ready for Backtest.
+    """
+    h1_raw = fetch_ohlcv(symbol=symbol, interval="1h", months=months)
+    h1_base = h1_raw.set_index("timestamp")
+    h1_base.index.name = "ts"
+
+    # Features
+    h1 = compute_features(h1_base, params)
+
+    # Daily gate
+    d1 = compute_daily_gate(resample_to_daily(h1_base), params)
+    h1 = _merge_daily_gate(h1, d1)
+
+    # Signals
+    h1["entry_signal"] = compute_entry_conditions(h1, params).values
+    h1["exit_signal"] = compute_exit_conditions(h1, params).values
+
+    # MultiIndex
+    mi = pd.MultiIndex.from_arrays(
+        [[symbol] * len(h1), h1.index], names=["instrument", "datetime"],
+    )
+    return h1.set_index(mi)
+
+
+def _merge_daily_gate(h1: pd.DataFrame, d1: pd.DataFrame) -> pd.DataFrame:
+    """Merge D1 daily_trend bool into H1 via merge_asof (no look-ahead)."""
+    h1_feat = h1.copy()
+    idx_name = h1_feat.index.name or "ts"
+
+    d1_trend = d1[["close", "ema20", "ema20_prev"]].copy()
+    d1_trend["daily_trend"] = (
+        (d1_trend["close"] > d1_trend["ema20"])
+        & (d1_trend["ema20"] > d1_trend["ema20_prev"])
+    )
+
+    d1_right = d1_trend[["daily_trend"]].copy()
+    d1_right["d1_ts"] = d1_right.index
+    d1_right = d1_right.reset_index(drop=True)
+
+    h1_feat = pd.merge_asof(
+        h1_feat.reset_index(),
+        d1_right,
+        left_on=idx_name,
+        right_on="d1_ts",
+        direction="backward",
+    ).set_index(idx_name).drop(columns=["d1_ts"], errors="ignore")
+    h1_feat["daily_trend"] = h1_feat["daily_trend"].fillna(False)
+
+    return h1_feat
