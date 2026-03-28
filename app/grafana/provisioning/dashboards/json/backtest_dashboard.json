@@ -33,6 +33,7 @@
       }
     ]
   },
+  "graphTooltip": 1,
   "annotations": {
     "list": []
   },
@@ -505,31 +506,13 @@
       }
     },
     {
-      "title": "Trade Signals",
+      "title": "OHLCV Price",
       "type": "timeseries",
       "targets": [
         {
           "rawSql": "SELECT ts AS time, close FROM ohlcv WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "P40AE60E18F02DE32"
-          }
-        },
-        {
-          "rawSql": "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
-          "format": "time_series",
-          "refId": "B",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "P40AE60E18F02DE32"
-          }
-        },
-        {
-          "rawSql": "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
-          "format": "time_series",
-          "refId": "C",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "P40AE60E18F02DE32"
@@ -558,66 +541,12 @@
                 }
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Entry"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 0
-              },
-              {
-                "id": "custom.showPoints",
-                "value": "always"
-              },
-              {
-                "id": "custom.pointSize",
-                "value": 10
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Exit"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 0
-              },
-              {
-                "id": "custom.showPoints",
-                "value": "always"
-              },
-              {
-                "id": "custom.pointSize",
-                "value": 10
-              }
-            ]
           }
         ]
       },
       "options": {
         "tooltip": {
-          "mode": "multi"
+          "mode": "single"
         },
         "legend": {
           "displayMode": "list",
@@ -626,7 +555,7 @@
       },
       "id": 9,
       "gridPos": {
-        "h": 10,
+        "h": 5,
         "w": 12,
         "x": 0,
         "y": 12
@@ -700,6 +629,91 @@
         "w": 12,
         "x": 12,
         "y": 12
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
+      }
+    },
+    {
+      "title": "Entry / Exit Signals",
+      "type": "timeseries",
+      "targets": [
+        {
+          "rawSql": "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
+          "format": "time_series",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
+        },
+        {
+          "rawSql": "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
+          "format": "time_series",
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 0,
+            "showPoints": "always",
+            "pointSize": 12
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Entry"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Exit"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "id": 11,
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 17
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",

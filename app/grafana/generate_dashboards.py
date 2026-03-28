@@ -18,6 +18,15 @@ def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
     return {"rawSql": sql, "format": fmt, "refId": ref_id, "datasource": DATASOURCE}
 
 
+def _color_override(name: str, color: str) -> dict:
+    return {
+        "matcher": {"id": "byName", "options": name},
+        "properties": [
+            {"id": "color", "value": {"fixedColor": color, "mode": "fixed"}},
+        ],
+    }
+
+
 def _stat_target(sql: str) -> dict:
     return _target(sql, "A", "table")
 
@@ -115,18 +124,8 @@ BASE_PANELS_DEF: list[dict] = [
                 }
             },
             "overrides": [
-                {
-                    "matcher": {"id": "byName", "options": "Strategy"},
-                    "properties": [
-                        {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}
-                    ],
-                },
-                {
-                    "matcher": {"id": "byName", "options": "Benchmark"},
-                    "properties": [
-                        {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}
-                    ],
-                },
+                _color_override("Strategy", "green"),
+                _color_override("Benchmark", "orange"),
             ],
         },
         "options": {
@@ -161,10 +160,10 @@ BASE_PANELS_DEF: list[dict] = [
         },
     },
     {
-        "_type": "half",
-        "title": "Trade Signals",
+        "_type": "fixed", "_x": 0, "_dy": 0,
+        "title": "OHLCV Price",
         "type": "timeseries",
-        "h": 10,
+        "h": 5,
         "w": 12,
         "targets": [
             _target(
@@ -172,55 +171,20 @@ BASE_PANELS_DEF: list[dict] = [
                 " WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
                 "A",
             ),
-            _target(
-                "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals"
-                " WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
-                "B",
-            ),
-            _target(
-                "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals"
-                " WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
-                "C",
-            ),
         ],
         "fieldConfig": {
             "defaults": {
                 "custom": {"lineWidth": 1, "showPoints": "never"}
             },
-            "overrides": [
-                {
-                    "matcher": {"id": "byName", "options": "close"},
-                    "properties": [
-                        {"id": "color", "value": {"fixedColor": "#5794F2", "mode": "fixed"}},
-                    ],
-                },
-                {
-                    "matcher": {"id": "byName", "options": "Entry"},
-                    "properties": [
-                        {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
-                        {"id": "custom.lineWidth", "value": 0},
-                        {"id": "custom.showPoints", "value": "always"},
-                        {"id": "custom.pointSize", "value": 10},
-                    ],
-                },
-                {
-                    "matcher": {"id": "byName", "options": "Exit"},
-                    "properties": [
-                        {"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
-                        {"id": "custom.lineWidth", "value": 0},
-                        {"id": "custom.showPoints", "value": "always"},
-                        {"id": "custom.pointSize", "value": 10},
-                    ],
-                },
-            ],
+            "overrides": [_color_override("close", "#5794F2")],
         },
         "options": {
-            "tooltip": {"mode": "multi"},
+            "tooltip": {"mode": "single"},
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
     {
-        "_type": "half",
+        "_type": "fixed", "_x": 12, "_dy": 0,
         "title": "Trade Detail",
         "type": "table",
         "h": 10,
@@ -269,6 +233,38 @@ BASE_PANELS_DEF: list[dict] = [
         "options": {
             "showHeader": True,
             "sortBy": [{"displayName": "Entry Time", "desc": False}],
+        },
+    },
+    {
+        "_type": "fixed", "_x": 0, "_dy": 5,
+        "title": "Entry / Exit Signals",
+        "type": "timeseries",
+        "h": 5,
+        "w": 12,
+        "targets": [
+            _target(
+                "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals"
+                " WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
+                "A",
+            ),
+            _target(
+                "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals"
+                " WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
+                "B",
+            ),
+        ],
+        "fieldConfig": {
+            "defaults": {
+                "custom": {"lineWidth": 0, "showPoints": "always", "pointSize": 12}
+            },
+            "overrides": [
+                _color_override("Entry", "green"),
+                _color_override("Exit", "red"),
+            ],
+        },
+        "options": {
+            "tooltip": {"mode": "single"},
+            "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
 ]
@@ -342,8 +338,12 @@ def build_panels(panel_defs: list[dict]) -> list[dict]:
         y += 4
 
     x = 0
+    fixed_defs = []
     for defn in other_defs:
         ptype = defn.get("_type", "full_row")
+        if ptype == "fixed":
+            fixed_defs.append(defn)
+            continue
         if ptype == "full_row":
             panels.append(_materialize_panel(defn, panel_id, 0, y))
             panel_id += 1
@@ -357,12 +357,19 @@ def build_panels(panel_defs: list[dict]) -> list[dict]:
                 y += defn["h"]
                 x = 0
 
+    # Fixed-position panels (explicit _x, _dy offset for rowspan layouts)
+    for defn in fixed_defs:
+        panels.append(_materialize_panel(defn, panel_id, defn["_x"], y + defn["_dy"]))
+        panel_id += 1
+
     return panels
 
 
 def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
     p = copy.deepcopy(defn)
     p.pop("_type", None)
+    p.pop("_x", None)
+    p.pop("_dy", None)
     h = p.pop("h")
     w = p.pop("w")
     p["id"] = panel_id
@@ -422,6 +429,7 @@ def render_dashboard(
                 ),
             ],
         },
+        "graphTooltip": 1,
         "annotations": {"list": []},
         "panels": panels,
         "schemaVersion": 39,
