@@ -78,32 +78,28 @@ bash scripts/monitor/run_scheduler.sh
 
 ```
 quant-strategy-lab/
-├── librae/                 # 回測引擎核心（Strategy Protocol + Executor + CostModel）
-│   ├── config/             # markets.yaml（市場級別回測參數）
-│   ├── schemas/            # canonical_schema.json（single source of truth）
+├── librae/                 # 回測引擎核心
+│   ├── config/markets.yaml # 市場級別回測參數
+│   ├── schemas/            # canonical_schema.json
+│   ├── data.py             # fetch_ohlcv, resample_ohlcv, cache
 │   ├── engine.py           # bar-by-bar backtest engine
 │   ├── strategy.py         # BaseStrategy ABC, Context, Action, Position
 │   ├── executor.py         # BacktestExecutor / LiveExecutor(future)
-│   ├── cost_model.py       # 統一手續費/滑價/稅模型
+│   ├── cost_model.py       # 手續費/滑價/稅模型
 │   ├── metrics.py          # QuantStats adapter
-│   ├── runners.py          # strict protocol, walk-forward, stability
 │   ├── schema.py           # BacktestOutput, TradeRecord, StrategyMetrics
-│   └── persistence.py      # JSON/CSV 儲存
-├── strategies/             # 驗證過的策略（被 engine import）
-│   └── trendpullback/      # signals.py + strategy.py
-├── experiments/            # 策略研究實驗（獨立可執行，不被其他模組 import）
-│   └── trendpullback_btc/  # run_backtest.py, run_monitor.py
-├── pipeline/               # 資料取得與特徵工程
-│   ├── fetchers/           # Binance OHLCV fetcher
-│   └── features/           # core_features
+│   └── notifications/      # Telegram 等通知
+├── strategies/             # production 策略（標準結構：strategy.py + utils.py + run.py）
+│   └── trendpullback/
+├── experiments/            # 策略研究實驗（獨立可執行）
+│   └── trendpullback_btc/
 ├── brokers/                # 券商 API adapter
 ├── db/                     # TimescaleDB 讀寫層
-├── app/                    # Streamlit 策略研究工具
-├── monitoring/             # 訊號監控排程
-├── deploy/                 # Docker Compose + DB schema
-├── grafana/                # 儀表板 JSON + provisioning
-├── scripts/                # 通用工具（setup_grafana 等）
-└── tests/                  # pytest
+├── app/                    # 展示層
+│   ├── streamlit/          # Streamlit 互動報表
+│   └── grafana/            # Grafana 儀表板
+├── deploy/                 # Docker Compose + 部署腳本
+└── tests/
 ```
 
 ---
@@ -113,8 +109,8 @@ quant-strategy-lab/
 | 指令 | 說明 |
 |------|------|
 | `pytest tests/ -v` | 跑所有測試 |
-| `python experiments/trendpullback_btc/run_backtest.py --dry-run` | TrendPullback 回測 |
-| `python experiments/trendpullback_btc/run_monitor.py --dry-run` | 單次訊號 dry-run |
+| `python -m strategies.trendpullback.run --mode backtest --dry-run` | TrendPullback 回測 |
+| `python -m strategies.trendpullback.run --mode monitor` | 訊號監控（未來） |
 | `python grafana/generate_dashboards.py` | 重新產生三板 JSON |
 
 ---
