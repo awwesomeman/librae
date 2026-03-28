@@ -35,7 +35,7 @@ class BinanceLiveAdapter:
         self._use_cache = use_cache
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        from pipeline.fetchers.binance_fetcher import fetch_ohlcv as _fetch
+        from librae.data import fetch_ohlcv as _fetch
 
         raw_symbol = symbol.replace("/", "")
         interval = self._TF_MAP.get(timeframe, timeframe)

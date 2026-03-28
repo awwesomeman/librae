@@ -28,7 +28,7 @@ from librae.schema import (
     BacktestOutput, EquityCurvePoint, RunMetadata, StrategyMetrics, TradeRecord,
 )
 from librae.utils import generate_run_id
-from pipeline.fetchers.binance_fetcher import fetch_ohlcv
+from librae.data import fetch_ohlcv
 from strategies.trendpullback.signals import (
     compute_entry_conditions,
     compute_exit_conditions,
