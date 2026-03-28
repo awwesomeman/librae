@@ -14,10 +14,9 @@ import re
 DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
 
-# WHY: $__timeFilter is replaced with run_start/run_end variable-based SQL filtering,
-# so queries return the run's actual period regardless of Grafana's time picker position.
-_TF_RE = re.compile(r"\$__timeFilter\((\w+)\)")
-_TF_REPLACEMENT = r"\1 >= '${run_start}'::timestamptz AND \1 <= '${run_end}'::timestamptz"
+# WHY: $__timeFilter is stripped — run_id already uniquely scopes all data,
+# so no additional time filter is needed. Grafana time picker acts as zoom only.
+_TF_RE = re.compile(r"\s+AND\s+\$__timeFilter\(\w+\)")
 
 
 def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
@@ -328,8 +327,8 @@ EXTRA_PANELS: list[dict] = [
 ]
 
 
-def _resolve_time_filter(panel_defs: list[dict]) -> list[dict]:
-    """Replace $__timeFilter(col) with run_start/run_end variable references.
+def _strip_time_filter(panel_defs: list[dict]) -> list[dict]:
+    """Remove $__timeFilter clauses — run_id is sufficient for data scoping.
 
     Deep-copies each panel to avoid mutating the shared BASE_PANELS_DEF.
     """
@@ -339,7 +338,7 @@ def _resolve_time_filter(panel_defs: list[dict]) -> list[dict]:
         for target in defn.get("targets", []):
             raw = target.get("rawSql", "")
             if "$__timeFilter" in raw:
-                target["rawSql"] = _TF_RE.sub(_TF_REPLACEMENT, raw)
+                target["rawSql"] = _TF_RE.sub("", raw)
         result.append(defn)
     return result
 
@@ -392,9 +391,6 @@ def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
     return p
 
 
-_VAR_HIDDEN = 2  # Grafana variable hide mode: 2 = hidden from UI
-
-
 def _make_query_variable(
     name: str, sql: str, *, hide: int = 0, label: str | None = None,
 ) -> dict:
@@ -426,7 +422,7 @@ def render_dashboard(
     extra_panels: list[dict],
 ) -> dict:
     all_defs = list(BASE_PANELS_DEF) + list(extra_panels)
-    all_defs = _resolve_time_filter(all_defs)
+    all_defs = _strip_time_filter(all_defs)
     panels = build_panels(all_defs)
     return {
         "uid": uid,
@@ -444,18 +440,6 @@ def render_dashboard(
                     f"SELECT run_id FROM backtest_runs WHERE mode='{mode}'"
                     " ORDER BY run_ts DESC LIMIT 20",
                     label="Run ID",
-                ),
-                _make_query_variable(
-                    "run_start",
-                    "SELECT TO_CHAR(COALESCE(start_ts, NOW()), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
-                    " FROM backtest_runs WHERE run_id = '${run_id}'",
-                    hide=_VAR_HIDDEN,
-                ),
-                _make_query_variable(
-                    "run_end",
-                    "SELECT TO_CHAR(COALESCE(end_ts, NOW()), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
-                    " FROM backtest_runs WHERE run_id = '${run_id}'",
-                    hide=_VAR_HIDDEN,
                 ),
             ],
         },
