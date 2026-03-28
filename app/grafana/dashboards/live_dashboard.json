@@ -14,13 +14,17 @@
     "list": [
       {
         "name": "run_id",
+        "label": "Run ID",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
+        "definition": "SELECT run_id FROM backtest_runs WHERE mode='live' ORDER BY run_ts DESC LIMIT 20",
         "query": "SELECT run_id FROM backtest_runs WHERE mode='live' ORDER BY run_ts DESC LIMIT 20",
-        "refresh": 2,
+        "rawQuery": true,
+        "refresh": 1,
+        "regex": "",
         "includeAll": false,
         "sort": 0,
         "current": {},
@@ -40,7 +44,11 @@
         {
           "rawSql": "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}'",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -93,7 +101,11 @@
         {
           "rawSql": "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}'",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -142,7 +154,11 @@
         {
           "rawSql": "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}'",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -198,7 +214,11 @@
         {
           "rawSql": "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}'",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -251,7 +271,11 @@
         {
           "rawSql": "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}'",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -307,7 +331,11 @@
         {
           "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}'",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -355,7 +383,11 @@
         {
           "rawSql": "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -428,7 +460,11 @@
         {
           "rawSql": "SELECT ts AS time, drawdown * -1 AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -474,17 +510,29 @@
         {
           "rawSql": "SELECT ts AS time, close FROM ohlcv WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         },
         {
           "rawSql": "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
           "format": "time_series",
-          "refId": "B"
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         },
         {
           "rawSql": "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
           "format": "time_series",
-          "refId": "C"
+          "refId": "C",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -564,7 +612,11 @@
         {
           "rawSql": "SELECT entry_ts AS \"Entry Time\", exit_ts AS \"Exit Time\", CASE WHEN side='buy' THEN '+' ELSE '-' END || ROUND(quantity::numeric,2) AS \"Position\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(exit_price::numeric,2) AS \"Exit Price\", holding_bars AS \"Bars\", ROUND(((exit_price-entry_price)/NULLIF(entry_price,0)*100)::numeric,2) AS \"Gross Return %\", ROUND((net_pnl/NULLIF(entry_price*quantity,0)*100)::numeric,2) AS \"Net Return %\" FROM trade_blotter WHERE run_id = '${run_id}' ORDER BY entry_ts DESC",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -630,7 +682,11 @@
         {
           "rawSql": "SELECT 0 AS \"Unrealized PnL\"  -- placeholder",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {
@@ -678,7 +734,11 @@
         {
           "rawSql": "SELECT 'N/A' AS \"Position\"  -- placeholder",
           "format": "table",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
         }
       ],
       "fieldConfig": {

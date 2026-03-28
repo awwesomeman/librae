@@ -10,9 +10,10 @@ datasources:
     secureJsonData:
       password: quant_secret
     jsonData:
+      database: quant
       sslmode: disable
       maxOpenConns: 5
       postgresVersion: 1600
       timescaledb: true
     isDefault: true
-    editable: false
+    editable: true

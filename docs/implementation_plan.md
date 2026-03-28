@@ -2,17 +2,26 @@
 
 > Updated: 2026-03-28
 > Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 1 完成（引擎重構 + 目錄重組），Phase 2 進行中
+> Status: Phase 1 完成，Phase 2 進行中，brokers/ adapter 重構完成
 
 ---
 
 ## 1) Goal Alignment
 
 ### End goal
-Signal subscription platform for futures, crypto, pair trading, stock selection.
+Signal subscription and live auto trading platform for futures, crypto, pair trading, stock selection.
+
+### 兩大目標
+
+| # | 目標 | 說明 | 對應 Phase |
+|---|------|------|-----------|
+| **Goal 1** | **Signal Subscription** | 即時偵測信號 → 推播通知給訂閱者 | Phase 3 |
+| **Goal 2** | **Live Auto Trading** | 基於信號自動下單 → 持倉管理 → 風控 | Phase 4 |
+
+Goal 1 是 Goal 2 的前提 — LiveExecutor `simulation=True` 即為信號推播，`simulation=False` 即為自動交易。同一套程式碼，不同模式。
 
 ### Current phase goal
-回測引擎架構穩定，能端到端跑策略回測 + 寫 DB + Grafana 顯示。
+Phase 2：端到端回測 pipeline 跑通（共同基礎，兩個目標都需要）。
 
 ---
 
@@ -61,15 +70,16 @@ quant-strategy-lab/
 │   ├── fetchers/            # binance_fetcher.py
 │   └── features/            # core_features.py, transforms
 │
-├── brokers/                 ← 券商 adapter（一個 broker 同時負責資料和下單）
-│   ├── base.py              # BaseBroker protocol
-│   ├── binance.py, shioaji.py, sim.py
-│   └── ...
+├── brokers/                 ← 券商 adapter（三層分離：MarketData / Order / Account）
+│   ├── base.py              # ABCs + CredentialConfig + _ConnectableMixin
+│   ├── sim.py               # Sim adapters（paper/backtest 用）
+│   ├── binance.py           # Binance venue adapters（目前繼承 Sim）
+│   ├── shioaji.py           # Shioaji venue adapters（目前繼承 Sim）
+│   ├── crypto_adapter.py    # CCXT-based sync adapter（fetch_ohlcv, place_order）
+│   ├── market_hub.py        # Multi-market dispatcher
+│   └── wiring.py            # AdapterBundle + build_adapter_bundle() factory
 │
-├── monitoring/              ← 訊號監控 + 排程 + 通知
-│   ├── signal_monitor.py, scheduler.py
-│   ├── telegram.py
-│   └── profiles/            # monitor config JSON
+├── monitoring/              ← 訊號監控 + 排程 + 通知（已遷移，僅剩 __pycache__）
 │
 ├── db/                      ← TimescaleDB 讀寫
 ├── app/                     ← UI（Streamlit + Grafana）
@@ -89,13 +99,13 @@ quant-strategy-lab/
 | 績效指標 | QuantStats + 客製指標 | `librae/metrics.py` thin adapter |
 | 信號條件 | `strategies/trendpullback/signals.py` | compute_entry/exit_conditions（純布林 Series） |
 | 資料格式 | MultiIndex DataFrame (instrument, datetime) | 單資產是特例，多資產統一 |
-| 研究/參數掃描 | vectorbt（開源版） | Phase 2 待建 |
+| 研究/參數掃描 | vectorbt（開源版） | Phase 5 |
 | Market Config | `librae/config/markets.yaml` | 兩層：MarketConfig + InstrumentConfig |
-| 執行層 | CCXT / ib_insync / Shioaji | 直接包裝，不經 Lumibot |
+| 執行層 | CCXT / Shioaji | brokers/ 三層 adapter + CryptoAdapter |
 | Time-series DB | TimescaleDB | 唯一資料源 |
 | Dashboards | Streamlit + Grafana | 統一在 app/ |
 | Deployment | docker-compose + Tailscale | VPS 或 GCE |
-| Testing | pytest 331 passed | 按模組分目錄 |
+| Testing | pytest 201 tests | 按模組分目錄 |
 
 ### 設計原則
 
@@ -105,10 +115,18 @@ quant-strategy-lab/
 - **Executor 可替換**：回測用 BacktestExecutor，實盤用 LiveExecutor
 - **同一份 Strategy 跑回測和實盤**：零修改
 - **CostModel 內部實作**：使用者不需知道，Backtest 自動從 markets.yaml 建
+- **Python coding-standards skill**：所有程式碼遵循 `~/.claude/skills/python/coding-standards/` 規範（命名慣例、型別標註、錯誤處理、不過度設計）
 
 ---
 
 ## 3) Phase 進度
+
+```
+Phase 0–1 ✅           Phase 2 ⏳            Phase 3              Phase 4              Phase 5
+Foundation +      ──→  E2E Backtest    ──→  Signal Sub     ──→  Live Trading    ──→  Scale
+Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)        (Multi-asset)
+                        (共同基礎)             Crypto (BTC)        Binance testnet     + 訂閱平台
+```
 
 ### Phase 0 — Foundation ✅
 
@@ -134,45 +152,68 @@ quant-strategy-lab/
 | runners.py make_backtest_fn() factory | ✅ |
 | 目錄重組：librae/ + strategies/ + pipeline/ + brokers/ + monitoring/ | ✅ |
 | tests 按模組分目錄 | ✅ |
-| 331 tests passed | ✅ |
+| 201 tests passed | ✅ |
 
-### Phase 2 — 端到端串接 + 策略研究（當前）
+### Phase 2 — E2E Backtest Pipeline（共同基礎）← 當前
+
+> 完成標準：至少 1 個策略能端到端跑回測，結果寫進 DB，Grafana 可看。
 
 | 項目 | 狀態 |
 |------|------|
-| TrendPullback BaseStrategy 子類 | ⏳ |
-| run_backtest.py 新版（用 Backtest class + MultiIndex） | ⏳ |
-| 端到端驗證：取資料 → ETL → 策略 → 回測 → DB → Grafana | ⏳ |
+| brokers/ 三層 adapter 架構（MarketData/Order/Account ABC） | ✅ |
+| CredentialConfig + from_env() 統一 credential 管理 | ✅ |
+| CryptoAdapter（CCXT wrapper）+ MarketHub dispatcher | ✅ |
+| async context manager + connected 狀態追蹤 | ✅ |
+| AdapterBundle + build_adapter_bundle() factory | ✅ |
+| TrendPullback BaseStrategy 子類 | ✅ |
+| `strategies/trendpullback/run.py` CLI（backtest + DB write） | ✅ |
+| 端到端驗證：fetch → ETL → 策略 → 回測 → JSON → DB → 可讀回 | ✅ |
+| Grafana dashboard 確認可看 | ⏳ |
 | 補回 look-ahead bias 測試（新 API） | ⏳ |
-| Streamlit 改版為 vectorbt 研究工具 | ⏳ |
-| 參數掃描結果 TimescaleDB 表 + 互動呈現 | ⏳ |
 | ≥2 策略可比較（Backtest 板 run_id 對比） | ⏳ |
 
-### Phase 3 — 實盤 + 通知
+### Phase 3 — Signal Subscription（Goal 1 MVP）— 首個市場: Crypto (BTC)
 
-| 項目 | 狀態 |
+> 完成標準：BTC TrendPullback 策略能即時偵測信號並推送 Telegram。
+
+| 項目 | 說明 |
 |------|------|
-| LiveExecutor（simulation 參數切換真下單/訊號通知） | ⏳ |
-| LiveRunner（while loop，等新 bar） | ⏳ |
-| Broker wrappers：CCXTBroker, ShioajiBroker（資料 + 下單統一） | ⏳ |
-| Grafana 告警 → Telegram | ⏳ |
-| Telegram 訊號推播 | ⏳ |
+| LiveRunner | while loop，每根 bar 結束時跑 strategy.on_bar()，偵測 Action |
+| LiveExecutor(simulation=True) | 收到 Action 不下單，改推送通知 |
+| Telegram 訊號推播 | Signal → formatted message → Telegram bot |
+| Signal Dashboard | Grafana/Streamlit 顯示即時信號 + 歷史命中率 |
+| 部署 | docker-compose 跑 LiveRunner + Scheduler |
 
-### Phase 4 — 多資產 + 訂閱
+已有基礎：CryptoAdapter (CCXT) 可直接 fetch_ohlcv，不需額外實作 live adapter。
 
-| 項目 | 狀態 |
+### Phase 4 — Live Auto Trading（Goal 2 MVP）
+
+> 完成標準：BTC TrendPullback 能在 Binance testnet 自動交易。
+
+| 項目 | 說明 |
 |------|------|
-| 多資產策略驗證（選股、套利） | ⏳ |
-| 台指期 ShioajiBroker | ⏳ |
-| 使用者/訂閱（PostgreSQL + JWT） | ⏳ |
-| FastAPI skeleton | ⏳ |
-| 版本化策略發布 | ⏳ |
+| Binance live adapter | 實作真實 API（繼承 MarketDataAdapter + OrderAdapter） |
+| LiveExecutor(simulation=False) | 真下單 + fill 回報 |
+| 風控層 | 最大持倉、單筆上限、日虧損上限 |
+| Position monitor | 持倉追蹤 + PnL dashboard |
+| Alerting | 異常狀態（斷線、拒單、超時）→ Telegram 告警 |
+
+### Phase 5 — Scale（多資產 + 訂閱平台）
+
+| 項目 | 說明 |
+|------|------|
+| Shioaji live adapter | 台指期真實交易 |
+| 多資產策略驗證 | 選股、配對交易、套利 |
+| FastAPI + 訂閱系統 | 使用者管理、策略訂閱、JWT |
+| 版本化策略發布 | 策略打包 + 發布流程 |
+| Streamlit vectorbt 研究工具 | 參數掃描 + 互動呈現 |
 
 ---
 
 ## 4) Key Decisions
 
 見 `docs/decisions/` 目錄：
+- `2026-03-28-strategy-folder-convention.md` — 策略目錄慣例
 - `2026-03-27-backtest-engine-refactor.md` — 統一回測引擎 + CostModel + QuantStats
 - `2026-03-26-platform-architecture.md`
 - `2026-03-26-market-adapter-architecture.md`
@@ -180,6 +221,7 @@ quant-strategy-lab/
 - `2026-03-26-backtest-performance-optimization.md`
 - `2026-03-26-dashboard-data-scope.md`
 - `2026-03-25-dashboard-architecture.md`
+- `2026-03-06-core-tooling-and-schema.md`
 
 ---
 

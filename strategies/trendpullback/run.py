@@ -15,6 +15,7 @@ from pathlib import Path
 
 from librae import Backtest, compute_all
 from librae.persistence import save_backtest_output
+from db.timescale_writer import write_backtest_output
 from librae.schema import (
     BacktestOutput, EquityCurvePoint, RunMetadata, StrategyMetrics, TradeRecord,
 )
@@ -52,6 +53,13 @@ def run_backtest(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir)
     paths = save_backtest_output(output, out_dir)
     print(f"[4/4] Saved: {paths['json']}")
+
+    if not args.no_db:
+        try:
+            counts = write_backtest_output(output)
+            print(f"       DB: {counts}")
+        except Exception as e:
+            print(f"       DB write skipped: {e}")
 
 
 def run_monitor(args: argparse.Namespace) -> None:
@@ -110,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample", default="oos")
     p.add_argument("--out-dir", default="data/backtests")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     return p.parse_args()
 
 

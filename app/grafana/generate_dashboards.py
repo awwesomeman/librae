@@ -15,7 +15,7 @@ OUT_DIR = pathlib.Path(__file__).parent / "dashboards"
 
 
 def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
-    return {"rawSql": sql, "format": fmt, "refId": ref_id}
+    return {"rawSql": sql, "format": fmt, "refId": ref_id, "datasource": DATASOURCE}
 
 
 def _stat_target(sql: str) -> dict:
@@ -357,12 +357,17 @@ def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
 
 
 def _make_run_id_variable(mode: str) -> dict:
+    sql = f"SELECT run_id FROM backtest_runs WHERE mode='{mode}' ORDER BY run_ts DESC LIMIT 20"
     return {
         "name": "run_id",
+        "label": "Run ID",
         "type": "query",
         "datasource": DATASOURCE,
-        "query": f"SELECT run_id FROM backtest_runs WHERE mode='{mode}' ORDER BY run_ts DESC LIMIT 20",
-        "refresh": 2,
+        "definition": sql,
+        "query": sql,
+        "rawQuery": True,
+        "refresh": 1,
+        "regex": "",
         "includeAll": False,
         "sort": 0,
         "current": {},
