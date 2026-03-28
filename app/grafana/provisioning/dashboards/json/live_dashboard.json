@@ -610,7 +610,7 @@
       }
     },
     {
-      "title": "OHLCV Price",
+      "title": "Price Trend",
       "type": "timeseries",
       "targets": [
         {
@@ -659,7 +659,7 @@
       },
       "id": 11,
       "gridPos": {
-        "h": 5,
+        "h": 10,
         "w": 12,
         "x": 0,
         "y": 16
@@ -729,7 +729,7 @@
       },
       "id": 12,
       "gridPos": {
-        "h": 10,
+        "h": 15,
         "w": 12,
         "x": 12,
         "y": 16
@@ -817,7 +817,7 @@
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 26
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",

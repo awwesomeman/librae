@@ -161,9 +161,9 @@ BASE_PANELS_DEF: list[dict] = [
     },
     {
         "_type": "fixed", "_x": 0, "_dy": 0,
-        "title": "OHLCV Price",
+        "title": "Price Trend",
         "type": "timeseries",
-        "h": 5,
+        "h": 10,
         "w": 12,
         "targets": [
             _target(
@@ -187,7 +187,7 @@ BASE_PANELS_DEF: list[dict] = [
         "_type": "fixed", "_x": 12, "_dy": 0,
         "title": "Trade Detail",
         "type": "table",
-        "h": 10,
+        "h": 15,
         "w": 12,
         "targets": [
             _target(
@@ -236,7 +236,7 @@ BASE_PANELS_DEF: list[dict] = [
         },
     },
     {
-        "_type": "fixed", "_x": 0, "_dy": 5,
+        "_type": "fixed", "_x": 0, "_dy": 10,
         "title": "Entry / Exit Signals",
         "type": "timeseries",
         "h": 5,
