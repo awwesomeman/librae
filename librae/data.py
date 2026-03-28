@@ -10,8 +10,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import logging
+
 import httpx
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Binance OHLCV fetcher
@@ -42,7 +46,8 @@ def _is_cache_fresh(path: Path, now: datetime | None = None) -> bool:
             latest_ts = latest_ts.tz_localize("UTC")
         ref = now or datetime.now(timezone.utc)
         return (ref - latest_ts) < _CACHE_MAX_AGE
-    except Exception:
+    except Exception as exc:
+        logger.warning("Cache read failed for %s: %s", path, exc)
         return False
 
 
@@ -117,11 +122,11 @@ def fetch_ohlcv(
                     merged = pd.concat([existing, df], ignore_index=True)
                     merged = merged.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
                     df = merged
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Cache merge failed, overwriting: %s", exc)
             df.to_parquet(cpath, index=False)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Cache write failed: %s", exc)
 
     return df
 

@@ -137,7 +137,7 @@ def fetch_and_prepare(
     d1 = compute_daily_gate(resample_to_daily(h1_base), params)
     h1 = _merge_daily_gate(h1, d1)
 
-    # Signals
+    # Signals — .values strips index to avoid alignment mismatch after merge_asof
     h1["entry_signal"] = compute_entry_conditions(h1, params).values
     h1["exit_signal"] = compute_exit_conditions(h1, params).values
 
