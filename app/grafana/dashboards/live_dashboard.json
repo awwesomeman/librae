@@ -458,7 +458,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, drawdown * -1 AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, drawdown AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -470,6 +470,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
+          "max": 0,
           "custom": {
             "lineWidth": 1,
             "fillOpacity": 30,
@@ -538,12 +539,26 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 0,
-            "showPoints": "always",
-            "pointSize": 8
+            "lineWidth": 1,
+            "showPoints": "never"
           }
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "close"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -556,6 +571,14 @@
                   "fixedColor": "green",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
               },
               {
                 "id": "custom.pointSize",
@@ -575,6 +598,14 @@
                   "fixedColor": "red",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
               },
               {
                 "id": "custom.pointSize",

@@ -23,6 +23,7 @@ def make_backtest_fn(
     df: pd.DataFrame,
     strategy: Any,
     initial_balance: float = 100_000.0,
+    annualize: bool = True,
 ) -> Callable[..., dict[str, Any]]:
     """Create a backtest_fn compatible with run_strict_protocol / run_walkforward.
 
@@ -33,6 +34,7 @@ def make_backtest_fn(
         df: Full MultiIndex DataFrame with all features.
         strategy: BaseStrategy instance.
         initial_balance: Starting cash.
+        annualize: If True, compute annualized metrics; if False, skip.
     """
     from .engine import Backtest
     from .metrics import compute_all
@@ -42,7 +44,7 @@ def make_backtest_fn(
         dt_idx = df.index.get_level_values("datetime")
         sliced = df[(dt_idx >= start) & (dt_idx <= end)]
         if len(sliced) < 2:
-            return {"trades": 0, "ann_return": 0, "ann_sharpe": 0, "mdd": 0}
+            return {"trades": 0, "ann_return": None, "ann_sharpe": None, "mdd": 0}
 
         bt = Backtest(
             data=sliced,
@@ -54,7 +56,7 @@ def make_backtest_fn(
         timeline = sorted(sliced.index.get_level_values("datetime").unique())
         start_ts = timeline[0].to_pydatetime()
         end_ts = timeline[-1].to_pydatetime()
-        metrics = compute_all(result, start_ts, end_ts)
+        metrics = compute_all(result, start_ts, end_ts, annualize=annualize)
 
         return {
             "trades": metrics.trades,

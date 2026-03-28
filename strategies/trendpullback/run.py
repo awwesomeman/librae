@@ -42,8 +42,9 @@ def run_backtest(args: argparse.Namespace) -> None:
     timeline = sorted(df.index.get_level_values("datetime").unique())
     start_ts = timeline[0].to_pydatetime()
     end_ts = timeline[-1].to_pydatetime()
-    metrics = compute_all(result, start_ts, end_ts)
-    print(f"       sharpe={metrics.sharpe:.3f}  mdd={metrics.max_drawdown:.4f}  ret={metrics.total_return:.4f}")
+    metrics = compute_all(result, start_ts, end_ts, annualize=not args.no_annualize)
+    sharpe_str = f"{metrics.sharpe:.3f}" if metrics.sharpe is not None else "N/A"
+    print(f"       sharpe={sharpe_str}  mdd={metrics.max_drawdown:.4f}  ret={metrics.total_return:.4f}")
 
     if args.dry_run:
         print("[4/4] [DRY-RUN] Done.")
@@ -99,15 +100,16 @@ def _build_output(result, metrics, run_id, symbol, start_ts, end_ts, sample):
         for i, t in enumerate(result.trades)
     ]
 
-    # Compute normalized equity, drawdown, benchmark in single pass
-    initial_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
+    # Compute equity, drawdown, benchmark in single pass
+    # WHY: equity stored as actual value (initial_balance based), not normalized,
+    # so Grafana Y-axis shows real dollar amounts aligned with initial_balance.
     has_benchmark = result.benchmark_curve is not None and len(result.benchmark_curve) > 0
     equity_points = []
     peak = 0.0
-    prev_eq = 1.0
+    prev_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
     prev_bm = 1.0
     for i, s in enumerate(result.equity_curve):
-        eq = s.equity / initial_eq
+        eq = s.equity
         peak = max(peak, eq)
         drawdown = (eq - peak) / peak if peak > 0 else 0.0
         ret_1d = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
@@ -142,6 +144,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-hold-bars", type=int, default=24)
     p.add_argument("--sample", default="oos")
     p.add_argument("--out-dir", default="data/backtests")
+    p.add_argument("--no-annualize", action="store_true",
+                   help="skip annualized metrics (sharpe, sortino, calmar, CAGR)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     return p.parse_args()

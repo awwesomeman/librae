@@ -91,12 +91,14 @@ class StrategyMetrics:
 
     # Universal (all strategies produce these)
     total_return: float
-    annual_return: float = 0.0
-    sharpe: float = 0.0
-    sortino: float = 0.0
-    calmar: float = 0.0
     max_drawdown: float = 0.0
     trades: int = 0
+
+    # Annualized (None when periods=0 or not computable)
+    annual_return: Optional[float] = None
+    sharpe: Optional[float] = None
+    sortino: Optional[float] = None
+    calmar: Optional[float] = None
 
     # Most strategies (None if not applicable)
     win_rate: Optional[float] = None

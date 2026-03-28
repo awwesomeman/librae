@@ -142,13 +142,14 @@ BASE_PANELS_DEF: list[dict] = [
         "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, drawdown * -1 AS \"Drawdown %\""
+                "SELECT ts AS time, drawdown AS \"Drawdown %\""
                 " FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
         "fieldConfig": {
             "defaults": {
                 "unit": "percentunit",
+                "max": 0,
                 "custom": {"lineWidth": 1, "fillOpacity": 30, "showPoints": "never"},
                 "color": {"fixedColor": "red", "mode": "fixed"},
             },
@@ -184,13 +185,21 @@ BASE_PANELS_DEF: list[dict] = [
         ],
         "fieldConfig": {
             "defaults": {
-                "custom": {"lineWidth": 0, "showPoints": "always", "pointSize": 8}
+                "custom": {"lineWidth": 1, "showPoints": "never"}
             },
             "overrides": [
+                {
+                    "matcher": {"id": "byName", "options": "close"},
+                    "properties": [
+                        {"id": "color", "value": {"fixedColor": "#5794F2", "mode": "fixed"}},
+                    ],
+                },
                 {
                     "matcher": {"id": "byName", "options": "Entry"},
                     "properties": [
                         {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
+                        {"id": "custom.lineWidth", "value": 0},
+                        {"id": "custom.showPoints", "value": "always"},
                         {"id": "custom.pointSize", "value": 10},
                     ],
                 },
@@ -198,6 +207,8 @@ BASE_PANELS_DEF: list[dict] = [
                     "matcher": {"id": "byName", "options": "Exit"},
                     "properties": [
                         {"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
+                        {"id": "custom.lineWidth", "value": 0},
+                        {"id": "custom.showPoints", "value": "always"},
                         {"id": "custom.pointSize", "value": 10},
                     ],
                 },
