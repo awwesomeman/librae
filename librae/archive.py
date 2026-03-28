@@ -50,7 +50,7 @@ def archive_backtest_parquet(
             eq_df["ts"] = pd.to_datetime(eq_df["ts"], utc=True)
     else:
         eq_df = pd.DataFrame(
-            columns=["ts", "equity", "equity_unit", "ret_1d", "drawdown",
+            columns=["ts", "equity", "ret_1d", "drawdown",
                       "benchmark_equity", "benchmark_ret_1d"]
         )
 
@@ -68,10 +68,9 @@ def archive_backtest_parquet(
     else:
         trades_df = pd.DataFrame(
             columns=["trade_id", "entry_ts", "exit_ts", "symbol", "side",
-                      "entry_price", "exit_price", "quantity", "price_unit",
-                      "quantity_unit", "gross_pnl", "net_pnl", "pnl_unit",
-                      "commission", "commission_unit", "slippage",
-                      "slippage_unit", "holding_bars"]
+                      "entry_price", "exit_price", "quantity",
+                      "gross_pnl", "net_pnl",
+                      "commission", "slippage", "holding_bars"]
         )
 
     trades_path = archive_dir / "trades.parquet"

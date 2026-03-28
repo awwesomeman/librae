@@ -96,7 +96,6 @@ def compute_all(
 
     trade_returns = net_pnls / (entry_prices + EPSILON)
     avg_trade_return = float(np.mean(trade_returns))
-    avg_pnl_points = float(np.mean(net_pnls))
 
     total_bars = len(result.equity_curve)
     exposure_ratio = float(holding_bars.sum() / total_bars) if total_bars > 0 else 0.0
@@ -121,7 +120,6 @@ def compute_all(
         win_rate=win_rate,
         profit_factor=profit_factor,
         avg_trade_return=avg_trade_return,
-        avg_pnl_points=avg_pnl_points,
         exposure_ratio=exposure_ratio,
         benchmark_return=benchmark_return,
         total_commission=total_commission,

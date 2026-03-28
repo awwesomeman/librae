@@ -15,7 +15,7 @@ from pathlib import Path
 
 from librae import Backtest, compute_all
 from librae.persistence import save_backtest_output
-from db.timescale_writer import write_backtest_output
+from db.timescale_writer import write_backtest_output, write_ohlcv
 from librae.schema import (
     BacktestOutput, EquityCurvePoint, RunMetadata, StrategyMetrics, TradeRecord,
 )
@@ -34,6 +34,7 @@ def run_backtest(args: argparse.Namespace) -> None:
     print("[2/4] Running backtest...")
     strategy = TrendPullbackStrategy(max_hold_bars=args.max_hold_bars)
     bt = Backtest(data=df, strategy=strategy, market=args.market, initial_balance=args.initial_balance)
+    bt.set_benchmark("auto")
     result = bt.run()
     print(f"       trades={len(result.trades)}")
 
@@ -57,6 +58,10 @@ def run_backtest(args: argparse.Namespace) -> None:
     if not args.no_db:
         try:
             counts = write_backtest_output(output)
+            ohlcv_df = df.droplevel("instrument")[["open", "high", "low", "close", "volume"]]
+            ohlcv_df.index.name = "ts"
+            ohlcv_count = write_ohlcv(ohlcv_df, args.symbol, "H1", run_id)
+            counts["ohlcv"] = ohlcv_count
             print(f"       DB: {counts}")
         except Exception as e:
             print(f"       DB write skipped: {e}")
@@ -78,7 +83,7 @@ def _build_output(result, metrics, run_id, symbol, start_ts, end_ts, sample):
     run_metadata = RunMetadata(
         run_id=run_id, strategy="trendpullback", symbol=symbol,
         timeframe="H1", start_ts=start_ts, end_ts=end_ts,
-        run_ts=now, data_source="binance", data_version="1", sample=sample,
+        run_ts=now, data_source="binance", mode="backtest", sample=sample,
     )
     trade_records = [
         TradeRecord(
@@ -86,21 +91,41 @@ def _build_output(result, metrics, run_id, symbol, start_ts, end_ts, sample):
             entry_ts=t.entry_ts, exit_ts=t.exit_ts,
             symbol=symbol, side=t.side,
             entry_price=float(t.entry_price), exit_price=float(t.exit_price),
-            quantity=float(t.quantity), price_unit="USDT", quantity_unit=symbol,
-            gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl), pnl_unit="USDT",
+            quantity=float(t.quantity),
+            gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
             commission=float(t.commission), slippage=float(t.slippage),
             holding_bars=int(t.holding_bars),
         )
         for i, t in enumerate(result.trades)
     ]
+
+    # Compute normalized equity, drawdown, benchmark in single pass
     initial_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
-    equity_points = [
-        EquityCurvePoint(
-            ts=s.ts, equity=float(s.equity / initial_eq),
-            equity_unit="index", ret_1d=0.0, drawdown=0.0,
-        )
-        for s in result.equity_curve
-    ]
+    has_benchmark = result.benchmark_curve is not None and len(result.benchmark_curve) > 0
+    equity_points = []
+    peak = 0.0
+    prev_eq = 1.0
+    prev_bm = 1.0
+    for i, s in enumerate(result.equity_curve):
+        eq = s.equity / initial_eq
+        peak = max(peak, eq)
+        drawdown = (eq - peak) / peak if peak > 0 else 0.0
+        ret_1d = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
+        prev_eq = eq
+
+        bm_eq = None
+        bm_ret = None
+        if has_benchmark and i < len(result.benchmark_curve):
+            bm_eq = float(result.benchmark_curve[i])
+            bm_ret = (bm_eq / prev_bm - 1.0) if prev_bm > 0 else 0.0
+            prev_bm = bm_eq
+
+        equity_points.append(EquityCurvePoint(
+            ts=s.ts, equity=float(eq),
+            ret_1d=float(ret_1d), drawdown=float(drawdown),
+            benchmark_equity=bm_eq, benchmark_ret_1d=bm_ret,
+        ))
+
     return BacktestOutput(
         run_metadata=run_metadata, equity_curve=equity_points,
         trades=trade_records, metrics=metrics,

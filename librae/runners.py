@@ -64,7 +64,6 @@ def make_backtest_fn(
             "pf": metrics.profit_factor,
             "win_rate": metrics.win_rate,
             "avg_ret": metrics.avg_trade_return,
-            "avg_pnl_points": metrics.avg_pnl_points,
             "total_return": metrics.total_return,
         }
 

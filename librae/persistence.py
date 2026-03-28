@@ -142,7 +142,6 @@ def save_backtest_output(
         fieldnames = [
             "ts",
             "equity",
-            "equity_unit",
             "ret_1d",
             "drawdown",
             "benchmark_equity",

@@ -34,7 +34,6 @@ def _make_run_metadata(**kwargs) -> RunMetadata:
         end_ts=END,
         run_ts=NOW,
         data_source="seed-v1",
-        data_version="v1",
     )
     defaults.update(kwargs)
     return RunMetadata(**defaults)
@@ -45,7 +44,6 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
         EquityCurvePoint(
             ts=datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc),
             equity=1_000_000.0,
-            equity_unit="TWD",
             ret_1d=0.0,
             drawdown=0.0,
             benchmark_equity=1_000_000.0,
@@ -54,7 +52,6 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
         EquityCurvePoint(
             ts=datetime(2026, 3, 2, 10, 0, 0, tzinfo=timezone.utc),
             equity=1_005_000.0,
-            equity_unit="TWD",
             ret_1d=0.005,
             drawdown=0.0,
             benchmark_equity=1_001_000.0,
@@ -74,15 +71,10 @@ def _make_trades() -> list[TradeRecord]:
             entry_price=21000.0,
             exit_price=21200.0,
             quantity=1.0,
-            price_unit="TWD",
-            quantity_unit="contracts",
             gross_pnl=200.0,
             net_pnl=180.0,
-            pnl_unit="TWD",
             commission=20.0,
-            commission_unit="TWD",
             slippage=0.0,
-            slippage_unit="TWD",
             holding_bars=6,
         )
     ]
@@ -114,8 +106,7 @@ def test_schema_version_constant() -> None:
 def test_run_metadata_defaults() -> None:
     meta = _make_run_metadata()
     assert meta.schema_version == "1.0.0"
-    assert meta.venue is None
-    assert meta.label is None
+    assert meta.mode == "backtest"
 
 
 def test_backtest_output_validate_passes() -> None:
@@ -162,11 +153,8 @@ def test_trade_record_cost_fields_optional() -> None:
         entry_price=50000.0,
         exit_price=49000.0,
         quantity=0.1,
-        price_unit="USDT",
-        quantity_unit="BTC",
         gross_pnl=-100.0,
         net_pnl=-100.0,
-        pnl_unit="USDT",
     )
     assert tr.commission is None
     assert tr.slippage is None
@@ -183,7 +171,6 @@ def test_equity_curve_point_benchmark_optional() -> None:
     pt = EquityCurvePoint(
         ts=NOW,
         equity=1_000_000.0,
-        equity_unit="USDT",
         ret_1d=0.01,
         drawdown=-0.005,
     )
@@ -256,7 +243,6 @@ def test_load_roundtrip_preserves_cost_fields() -> None:
         loaded = load_backtest_output(paths["json"])
     t = loaded.trades[0]
     assert t.commission == 20.0
-    assert t.commission_unit == "TWD"
     assert t.slippage == 0.0
     assert t.holding_bars == 6
 

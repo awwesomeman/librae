@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS trade_blotter (
     quantity        DOUBLE PRECISION,
     gross_pnl       DOUBLE PRECISION,
     net_pnl         DOUBLE PRECISION,
-    commission      DOUBLE PRECISION,
+    price_unit      TEXT DEFAULT 'USDT',
+    quantity_unit   TEXT DEFAULT 'asset',
+    pnl_unit        TEXT DEFAULT 'USDT',
+    commission      DOUBLE PRECISION DEFAULT 0,
+    slippage        DOUBLE PRECISION DEFAULT 0,
     holding_bars    INTEGER
 );
 
@@ -77,7 +81,9 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     trades          INTEGER,
     avg_trade_return DOUBLE PRECISION,
     exposure_ratio  DOUBLE PRECISION,
-    benchmark_return DOUBLE PRECISION
+    benchmark_return DOUBLE PRECISION,
+    total_commission DOUBLE PRECISION DEFAULT 0,
+    total_slippage  DOUBLE PRECISION DEFAULT 0
 );
 
 -- ohlcv（hypertable）

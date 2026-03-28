@@ -311,7 +311,6 @@ class TestContractV1Roundtrip:
 
         assert loaded.run_metadata.sample == "oos"
         assert loaded.metrics.trades == EXPECTED_TRADES
-        assert loaded.metrics.avg_pnl_points == EXPECTED_AVG_PNL_POINTS
         assert len(loaded.trades) == EXPECTED_TRADES
         assert loaded.trades[0].symbol == "BTCUSDT"
 

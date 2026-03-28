@@ -6,15 +6,13 @@ import pytest
 
 from librae.contracts import (
     REQUIRED_BACKTEST_TOP_LEVEL_KEYS,
-    SCHEMA_PATH,
     SCHEMA_VERSION,
     ensure_snake_case_keys,
     require_keys,
 )
 
 
-def test_canonical_schema_file_exists_and_version_set() -> None:
-    assert SCHEMA_PATH.exists(), f"Missing canonical schema file: {SCHEMA_PATH}"
+def test_schema_version_set() -> None:
     assert re.match(r"^\d+\.\d+\.\d+$", SCHEMA_VERSION)
 
 

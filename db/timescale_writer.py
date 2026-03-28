@@ -45,14 +45,12 @@ def _to_dt(ts: Any) -> datetime | None:
 def write_backtest_output(
     output: BacktestOutput,
     dsn: str = TIMESCALE_DSN,
-    mode: str = "backtest",
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
 
     Args:
         output: BacktestOutput to write.
         dsn: TimescaleDB DSN.
-        mode: One of 'backtest', 'sim', 'live'.
 
     Returns:
         Dict mapping table names to row counts written.
@@ -78,7 +76,7 @@ def write_backtest_output(
                 meta.sample, meta.data_source,
                 _to_dt(meta.start_ts), _to_dt(meta.end_ts),
                 _to_dt(meta.run_ts), meta.schema_version or SCHEMA_VERSION,
-                mode,
+                meta.mode,
             ),
         )
         counts["backtest_runs"] = 1
@@ -118,7 +116,10 @@ def write_backtest_output(
                     tr.symbol, tr.side,
                     tr.entry_price, tr.exit_price, tr.quantity,
                     tr.gross_pnl, tr.net_pnl,
-                    tr.commission, tr.holding_bars,
+                    tr.price_unit,
+                    tr.quantity_unit,
+                    tr.pnl_unit,
+                    tr.commission, tr.slippage, tr.holding_bars,
                 )
                 for tr in output.trades
             ]
@@ -127,7 +128,9 @@ def write_backtest_output(
                 """INSERT INTO trade_blotter
                    (trade_id, run_id, entry_ts, exit_ts, symbol, side,
                     entry_price, exit_price, quantity,
-                    gross_pnl, net_pnl, commission, holding_bars)
+                    gross_pnl, net_pnl,
+                    price_unit, quantity_unit, pnl_unit,
+                    commission, slippage, holding_bars)
                    VALUES %s
                    ON CONFLICT (trade_id) DO NOTHING""",
                 trade_rows,
@@ -170,8 +173,9 @@ def write_backtest_output(
             """INSERT INTO strategy_performance
                (run_id, total_return, annual_return, sharpe, sortino, calmar,
                 max_drawdown, win_rate, profit_factor, trades,
-                avg_trade_return, exposure_ratio, benchmark_return)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                avg_trade_return, exposure_ratio, benchmark_return,
+                total_commission, total_slippage)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  total_return=EXCLUDED.total_return,
                  annual_return=EXCLUDED.annual_return,
@@ -184,13 +188,15 @@ def write_backtest_output(
                  trades=EXCLUDED.trades,
                  avg_trade_return=EXCLUDED.avg_trade_return,
                  exposure_ratio=EXCLUDED.exposure_ratio,
-                 benchmark_return=EXCLUDED.benchmark_return""",
+                 benchmark_return=EXCLUDED.benchmark_return,
+                 total_commission=EXCLUDED.total_commission,
+                 total_slippage=EXCLUDED.total_slippage""",
             (
                 meta.run_id, m.total_return, m.annual_return,
                 m.sharpe, m.sortino, m.calmar,
                 m.max_drawdown, m.win_rate, m.profit_factor,
                 m.trades, m.avg_trade_return, m.exposure_ratio,
-                m.benchmark_return,
+                m.benchmark_return, m.total_commission, m.total_slippage,
             ),
         )
         counts["strategy_performance"] = 1

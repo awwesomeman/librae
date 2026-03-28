@@ -32,7 +32,6 @@ def metrics_dict_to_backtest_output(
     start: str,
     end: str,
     data_source: str = "unknown",
-    data_version: str = "1",
     run_id: str | None = None,
     sample: str | None = None,
 ) -> BacktestOutput:
@@ -48,8 +47,6 @@ def metrics_dict_to_backtest_output(
         ISO date strings for the backtest window.
     data_source : str
         Origin of market data (e.g. "Shioaji", "Binance", "synthetic").
-    data_version : str
-        Version tag for data snapshot.
     run_id : str | None
         If None, one is auto-generated.
     sample : str | None
@@ -77,7 +74,6 @@ def metrics_dict_to_backtest_output(
         end_ts=end_dt,
         run_ts=now,
         data_source=data_source,
-        data_version=data_version,
         sample=sample,
     )
 
@@ -91,7 +87,6 @@ def metrics_dict_to_backtest_output(
         win_rate=metrics.get("win_rate", 0.0) or 0.0,
         profit_factor=metrics.get("pf", 0.0) or 0.0,
         avg_trade_return=metrics.get("avg_ret", 0.0) or 0.0,
-        avg_pnl_points=metrics.get("avg_pnl_points", 0.0) or 0.0,
         trades=n_trades,
         exposure_ratio=0.0,
     )
@@ -112,11 +107,8 @@ def metrics_dict_to_backtest_output(
             entry_price=entry_p,
             exit_price=exit_p,
             quantity=1.0,
-            price_unit="USDT",
-            quantity_unit=symbol,
             gross_pnl=pnl,
             net_pnl=pnl,
-            pnl_unit="USDT",
             holding_bars=td.get("bars_held"),
         ))
 

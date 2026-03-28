@@ -1,8 +1,8 @@
 """Standardized backtest output schema.
 
 All field names: strict snake_case.
-Units are explicit fields; never encoded inside key names or values.
-Cost/slippage fields are reserved (may be None for simple backtests).
+Unit fields stored alongside values for multi-market support (USDT, TWD, contracts, etc.).
+Cost/slippage fields are optional (may be None for simple backtests).
 
 Storage targets: JSON (Streamlit), CSV equity curve (Grafana/Streamlit).
 """
@@ -37,12 +37,8 @@ class RunMetadata:
     end_ts: datetime
     run_ts: datetime
     data_source: str
-    data_version: str
     schema_version: str = BACKTEST_SCHEMA_VERSION
-    # Optional human label
-    label: Optional[str] = None
-    # Reserved: venue
-    venue: Optional[str] = None
+    mode: str = "backtest"
     # Sample split label — must be one of VALID_SAMPLE_LABELS when set
     sample: Optional[str] = None
 
@@ -53,7 +49,6 @@ class EquityCurvePoint:
 
     ts: datetime
     equity: float
-    equity_unit: str
     ret_1d: float
     drawdown: float
     benchmark_equity: Optional[float] = None
@@ -72,17 +67,14 @@ class TradeRecord:
     entry_price: float
     exit_price: float
     quantity: float
-    price_unit: str
-    quantity_unit: str
     gross_pnl: float
     net_pnl: float
-    pnl_unit: str
-    # Reserved: cost breakdown
+    # Units for multi-market support
+    price_unit: str = "USDT"
+    quantity_unit: str = "asset"
+    pnl_unit: str = "USDT"
     commission: Optional[float] = None
-    commission_unit: Optional[str] = None
     slippage: Optional[float] = None
-    slippage_unit: Optional[str] = None
-    # Reserved: bar counts
     holding_bars: Optional[int] = None
 
 
@@ -95,7 +87,6 @@ class StrategyMetrics:
     - win_rate/exposure_ratio: ratio 0-1
     - sharpe/sortino/calmar/profit_factor: score (dimensionless)
     - trades: count
-    - avg_pnl_points: quote currency points
     """
 
     # Universal (all strategies produce these)
@@ -111,7 +102,6 @@ class StrategyMetrics:
     win_rate: Optional[float] = None
     profit_factor: Optional[float] = None
     avg_trade_return: Optional[float] = None
-    avg_pnl_points: Optional[float] = None
     exposure_ratio: Optional[float] = None
 
     # Benchmark

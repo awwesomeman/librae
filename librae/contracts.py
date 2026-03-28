@@ -1,92 +1,39 @@
 """Canonical backend data contracts for librae.
 
-Single source of truth file:
-- schemas/canonical_schema.json
+Constants are inlined — no external JSON dependency.
 """
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 
-@dataclass(frozen=True)
-class FieldSpec:
-    name: str
-    type_name: str
-    required: bool
-    unit: str
+SCHEMA_VERSION: str = "1.0.0"
 
-
-@dataclass(frozen=True)
-class TagSpec:
-    name: str
-    type_name: str
-    required: bool
-
-
-@dataclass(frozen=True)
-class MeasurementSpec:
-    measurement: str
-    tags: tuple[TagSpec, ...]
-    fields: tuple[FieldSpec, ...]
-
-
-SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "canonical_schema.json"
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-
-def _load_canonical_schema() -> dict[str, Any]:
-    if not SCHEMA_PATH.exists():
-        raise RuntimeError(f"Canonical schema not found: {SCHEMA_PATH}")
-    payload = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise RuntimeError("canonical_schema.json must be an object")
-    return payload
-
-
-CANONICAL_SCHEMA = _load_canonical_schema()
-SCHEMA_VERSION = str(CANONICAL_SCHEMA["schema_version"])
-SCHEMA_COMPATIBILITY_POLICY = dict(CANONICAL_SCHEMA.get("compatibility_policy", {}))
-
-
-def _build_measurement_specs(schema: dict[str, Any]) -> dict[str, MeasurementSpec]:
-    specs: dict[str, MeasurementSpec] = {}
-    for measurement, spec in schema.get("measurements", {}).items():
-        tags = tuple(
-            TagSpec(
-                name=str(t["name"]),
-                type_name=str(t["type"]),
-                required=bool(t.get("required", False)),
-            )
-            for t in spec.get("tags", [])
-        )
-        fields = tuple(
-            FieldSpec(
-                name=str(f["name"]),
-                type_name=str(f["type"]),
-                required=bool(f.get("required", False)),
-                unit=str(f.get("unit", "")),
-            )
-            for f in spec.get("fields", [])
-        )
-        specs[measurement] = MeasurementSpec(measurement=measurement, tags=tags, fields=fields)
-    return specs
-
-
-MEASUREMENT_SPECS: dict[str, MeasurementSpec] = _build_measurement_specs(CANONICAL_SCHEMA)
-
-REQUIRED_SIGNAL_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["signal_required_keys"])
-REQUIRED_SUMMARY_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["strategy_context_summary_required_keys"])
-REQUIRED_PERF_FIELDS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["performance_required_fields"])
-REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["strategy_context_required_keys"])
-REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = tuple(CANONICAL_SCHEMA["records"]["backtest_output_required_top_level"])
+REQUIRED_SIGNAL_KEYS: tuple[str, ...] = (
+    "timestamp", "strategy", "symbol", "side", "timeframe",
+)
+REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
+    "full_sample_period", "train_period", "oos_period", "asset", "freq",
+)
+REQUIRED_PERF_FIELDS: tuple[str, ...] = (
+    "total_return", "max_drawdown", "sharpe", "sortino", "calmar",
+    "profit_factor", "win_rate", "avg_trade_return", "trades", "exposure_ratio",
+)
+REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
+    "benchmark", "data_source", "last_updated_utc", "summary",
+    "universe", "session_rules", "periods", "cost_model",
+    "risk_limits", "assumptions", "logic", "params",
+)
+REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
+    "schema_version", "run_metadata", "equity_curve", "trades", "metrics",
+)
 
 
 def parse_utc_timestamp(value: Any) -> datetime:

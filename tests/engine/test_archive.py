@@ -33,13 +33,11 @@ def _make_sample_output(run_id: str = "test_strat-btcusdt-20260326t000000-abcd12
         end_ts=datetime(2026, 3, 1, tzinfo=timezone.utc),
         run_ts=now,
         data_source="test",
-        data_version="1",
     )
     equity = [
         EquityCurvePoint(
             ts=datetime(2026, 1, 1, h, tzinfo=timezone.utc),
             equity=1.0 + h * 0.001,
-            equity_unit="index",
             ret_1d=0.001,
             drawdown=0.0,
         )
@@ -55,11 +53,8 @@ def _make_sample_output(run_id: str = "test_strat-btcusdt-20260326t000000-abcd12
             entry_price=40000.0,
             exit_price=41000.0,
             quantity=0.1,
-            price_unit="USDT",
-            quantity_unit="BTC",
             gross_pnl=100.0,
             net_pnl=100.0,
-            pnl_unit="USDT",
             holding_bars=24,
         ),
     ]
