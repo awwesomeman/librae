@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from monitoring.telegram import TelegramAdapter, TelegramConfig
+from librae.notifications.telegram import TelegramAdapter, TelegramConfig
 
 
 class TestTelegramConfig:

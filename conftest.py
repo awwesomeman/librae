@@ -20,7 +20,6 @@ _NAUTILUS_TESTS = [
     "integration/test_regression_baselines.py",
     "integration/test_research_modules.py",
     "app/test_schema_builder.py",
-    "monitoring/test_telegram_adapter.py",
 ]
 
 collect_ignore: list[str] = []
