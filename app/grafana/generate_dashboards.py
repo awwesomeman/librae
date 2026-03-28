@@ -9,14 +9,9 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
-import re
 
 DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
-
-# WHY: $__timeFilter is stripped — run_id already uniquely scopes all data,
-# so no additional time filter is needed. Grafana time picker acts as zoom only.
-_TF_RE = re.compile(r"\s+AND\s+\$__timeFilter\(\w+\)")
 
 
 def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
@@ -233,6 +228,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "SELECT"
+                " ROW_NUMBER() OVER (ORDER BY entry_ts) AS \"#\","
                 " entry_ts AS \"Entry Time\","
                 " exit_ts AS \"Exit Time\","
                 " CASE WHEN side='buy' THEN 'Long' ELSE 'Short' END AS \"Side\","
@@ -243,7 +239,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " ROUND(((exit_price-entry_price)/NULLIF(entry_price,0)*100)::numeric,2) AS \"Gross Return %\","
                 " ROUND((net_pnl/NULLIF(entry_price*quantity,0)*100)::numeric,2) AS \"Net Return %\""
                 " FROM trade_blotter WHERE run_id = '${run_id}'"
-                " AND $__timeFilter(entry_ts)"
+                " AND ($__timeFilter(entry_ts) OR $__timeFilter(exit_ts))"
                 " ORDER BY entry_ts",
                 "A",
                 "table",
@@ -327,22 +323,6 @@ EXTRA_PANELS: list[dict] = [
 ]
 
 
-def _strip_time_filter(panel_defs: list[dict]) -> list[dict]:
-    """Remove $__timeFilter clauses — run_id is sufficient for data scoping.
-
-    Deep-copies each panel to avoid mutating the shared BASE_PANELS_DEF.
-    """
-    result = []
-    for defn in panel_defs:
-        defn = copy.deepcopy(defn)
-        for target in defn.get("targets", []):
-            raw = target.get("rawSql", "")
-            if "$__timeFilter" in raw:
-                target["rawSql"] = _TF_RE.sub("", raw)
-        result.append(defn)
-    return result
-
-
 def build_panels(panel_defs: list[dict]) -> list[dict]:
     """Assign id, gridPos, datasource to panel definitions."""
     panels: list[dict] = []
@@ -422,7 +402,6 @@ def render_dashboard(
     extra_panels: list[dict],
 ) -> dict:
     all_defs = list(BASE_PANELS_DEF) + list(extra_panels)
-    all_defs = _strip_time_filter(all_defs)
     panels = build_panels(all_defs)
     return {
         "uid": uid,
@@ -431,7 +410,7 @@ def render_dashboard(
         "tags": [],
         "timezone": "browser",
         "editable": True,
-        "time": {"from": "now-10y", "to": "now"},
+        "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
             "list": [
