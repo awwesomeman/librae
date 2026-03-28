@@ -9,9 +9,15 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import re
 
 DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR = pathlib.Path(__file__).parent / "dashboards"
+
+# WHY: $__timeFilter is replaced with run_start/run_end variable-based SQL filtering,
+# so queries return the run's actual period regardless of Grafana's time picker position.
+_TF_RE = re.compile(r"\$__timeFilter\((\w+)\)")
+_TF_REPLACEMENT = r"\1 >= '${run_start}'::timestamptz AND \1 <= '${run_end}'::timestamptz"
 
 
 def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
@@ -230,13 +236,16 @@ BASE_PANELS_DEF: list[dict] = [
                 "SELECT"
                 " entry_ts AS \"Entry Time\","
                 " exit_ts AS \"Exit Time\","
-                " CASE WHEN side='buy' THEN '+' ELSE '-' END || ROUND(quantity::numeric,2) AS \"Position\","
+                " CASE WHEN side='buy' THEN 'Long' ELSE 'Short' END AS \"Side\","
+                " ROUND(quantity::numeric,4) AS \"Qty\","
                 " ROUND(entry_price::numeric,2) AS \"Entry Price\","
                 " ROUND(exit_price::numeric,2) AS \"Exit Price\","
                 " holding_bars AS \"Bars\","
                 " ROUND(((exit_price-entry_price)/NULLIF(entry_price,0)*100)::numeric,2) AS \"Gross Return %\","
                 " ROUND((net_pnl/NULLIF(entry_price*quantity,0)*100)::numeric,2) AS \"Net Return %\""
-                " FROM trade_blotter WHERE run_id = '${run_id}' ORDER BY entry_ts DESC",
+                " FROM trade_blotter WHERE run_id = '${run_id}'"
+                " AND $__timeFilter(entry_ts)"
+                " ORDER BY entry_ts",
                 "A",
                 "table",
             )
@@ -264,7 +273,7 @@ BASE_PANELS_DEF: list[dict] = [
         },
         "options": {
             "showHeader": True,
-            "sortBy": [{"displayName": "Entry Time", "desc": True}],
+            "sortBy": [{"displayName": "Entry Time", "desc": False}],
         },
     },
 ]
@@ -319,6 +328,22 @@ EXTRA_PANELS: list[dict] = [
 ]
 
 
+def _resolve_time_filter(panel_defs: list[dict]) -> list[dict]:
+    """Replace $__timeFilter(col) with run_start/run_end variable references.
+
+    Deep-copies each panel to avoid mutating the shared BASE_PANELS_DEF.
+    """
+    result = []
+    for defn in panel_defs:
+        defn = copy.deepcopy(defn)
+        for target in defn.get("targets", []):
+            raw = target.get("rawSql", "")
+            if "$__timeFilter" in raw:
+                target["rawSql"] = _TF_RE.sub(_TF_REPLACEMENT, raw)
+        result.append(defn)
+    return result
+
+
 def build_panels(panel_defs: list[dict]) -> list[dict]:
     """Assign id, gridPos, datasource to panel definitions."""
     panels: list[dict] = []
@@ -367,11 +392,15 @@ def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
     return p
 
 
-def _make_run_id_variable(mode: str) -> dict:
-    sql = f"SELECT run_id FROM backtest_runs WHERE mode='{mode}' ORDER BY run_ts DESC LIMIT 20"
-    return {
-        "name": "run_id",
-        "label": "Run ID",
+_VAR_HIDDEN = 2  # Grafana variable hide mode: 2 = hidden from UI
+
+
+def _make_query_variable(
+    name: str, sql: str, *, hide: int = 0, label: str | None = None,
+) -> dict:
+    """Build a Grafana query-type template variable."""
+    v: dict = {
+        "name": name,
         "type": "query",
         "datasource": DATASOURCE,
         "definition": sql,
@@ -382,19 +411,22 @@ def _make_run_id_variable(mode: str) -> dict:
         "includeAll": False,
         "sort": 0,
         "current": {},
-        "hide": 0,
+        "hide": hide,
         "multi": False,
     }
+    if label:
+        v["label"] = label
+    return v
 
 
 def render_dashboard(
     title: str,
     uid: str,
     mode: str,
-    default_time: str,
     extra_panels: list[dict],
 ) -> dict:
     all_defs = list(BASE_PANELS_DEF) + list(extra_panels)
+    all_defs = _resolve_time_filter(all_defs)
     panels = build_panels(all_defs)
     return {
         "uid": uid,
@@ -403,9 +435,30 @@ def render_dashboard(
         "tags": [],
         "timezone": "browser",
         "editable": True,
-        "time": {"from": default_time, "to": "now"},
+        "time": {"from": "now-10y", "to": "now"},
         "refresh": "5m",
-        "templating": {"list": [_make_run_id_variable(mode)]},
+        "templating": {
+            "list": [
+                _make_query_variable(
+                    "run_id",
+                    f"SELECT run_id FROM backtest_runs WHERE mode='{mode}'"
+                    " ORDER BY run_ts DESC LIMIT 20",
+                    label="Run ID",
+                ),
+                _make_query_variable(
+                    "run_start",
+                    "SELECT COALESCE(start_ts, NOW()) FROM backtest_runs"
+                    " WHERE run_id = '${run_id}'",
+                    hide=_VAR_HIDDEN,
+                ),
+                _make_query_variable(
+                    "run_end",
+                    "SELECT COALESCE(end_ts, NOW()) FROM backtest_runs"
+                    " WHERE run_id = '${run_id}'",
+                    hide=_VAR_HIDDEN,
+                ),
+            ],
+        },
         "annotations": {"list": []},
         "panels": panels,
         "schemaVersion": 39,
@@ -414,19 +467,19 @@ def render_dashboard(
 
 
 DASHBOARDS = [
-    ("Backtest", "backtest_dashboard", "backtest", "now-180d", []),
-    ("Monitor",  "sim_dashboard",      "sim",      "now-7d",   EXTRA_PANELS),
-    ("Live",     "live_dashboard",     "live",     "now-1d",   EXTRA_PANELS),
+    ("Backtest", "backtest_dashboard", "backtest", []),
+    ("Monitor",  "sim_dashboard",      "sim",      EXTRA_PANELS),
+    ("Live",     "live_dashboard",     "live",     EXTRA_PANELS),
 ]
 
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for title, uid, mode, default_time, extra in DASHBOARDS:
-        d = render_dashboard(title, uid, mode, default_time, extra)
+    for title, uid, mode, extra in DASHBOARDS:
+        d = render_dashboard(title, uid, mode, extra)
         out_path = OUT_DIR / f"{uid}.json"
         out_path.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-        print(f"✅ {out_path} — {len(d['panels'])} panels")
+        print(f"  {out_path} — {len(d['panels'])} panels")
 
 
 if __name__ == "__main__":

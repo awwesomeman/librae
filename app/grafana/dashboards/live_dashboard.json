@@ -6,7 +6,7 @@
   "timezone": "browser",
   "editable": true,
   "time": {
-    "from": "now-1d",
+    "from": "now-10y",
     "to": "now"
   },
   "refresh": "5m",
@@ -14,7 +14,6 @@
     "list": [
       {
         "name": "run_id",
-        "label": "Run ID",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
@@ -29,6 +28,43 @@
         "sort": 0,
         "current": {},
         "hide": 0,
+        "multi": false,
+        "label": "Run ID"
+      },
+      {
+        "name": "run_start",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT COALESCE(start_ts, NOW()) FROM backtest_runs WHERE run_id = '${run_id}'",
+        "query": "SELECT COALESCE(start_ts, NOW()) FROM backtest_runs WHERE run_id = '${run_id}'",
+        "rawQuery": true,
+        "refresh": 1,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 2,
+        "multi": false
+      },
+      {
+        "name": "run_end",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT COALESCE(end_ts, NOW()) FROM backtest_runs WHERE run_id = '${run_id}'",
+        "query": "SELECT COALESCE(end_ts, NOW()) FROM backtest_runs WHERE run_id = '${run_id}'",
+        "rawQuery": true,
+        "refresh": 1,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 2,
         "multi": false
       }
     ]
@@ -381,7 +417,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\" FROM equity_curve WHERE run_id = '${run_id}' AND ts >= '${run_start}'::timestamptz AND ts <= '${run_end}'::timestamptz ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -458,7 +494,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, drawdown AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, drawdown AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND ts >= '${run_start}'::timestamptz AND ts <= '${run_end}'::timestamptz ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -509,7 +545,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, close FROM ohlcv WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, close FROM ohlcv WHERE run_id = '${run_id}' AND ts >= '${run_start}'::timestamptz AND ts <= '${run_end}'::timestamptz ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -518,7 +554,7 @@
           }
         },
         {
-          "rawSql": "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
+          "rawSql": "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'entry' AND ts >= '${run_start}'::timestamptz AND ts <= '${run_end}'::timestamptz",
           "format": "time_series",
           "refId": "B",
           "datasource": {
@@ -527,7 +563,7 @@
           }
         },
         {
-          "rawSql": "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
+          "rawSql": "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'exit' AND ts >= '${run_start}'::timestamptz AND ts <= '${run_end}'::timestamptz",
           "format": "time_series",
           "refId": "C",
           "datasource": {
@@ -641,7 +677,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT entry_ts AS \"Entry Time\", exit_ts AS \"Exit Time\", CASE WHEN side='buy' THEN '+' ELSE '-' END || ROUND(quantity::numeric,2) AS \"Position\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(exit_price::numeric,2) AS \"Exit Price\", holding_bars AS \"Bars\", ROUND(((exit_price-entry_price)/NULLIF(entry_price,0)*100)::numeric,2) AS \"Gross Return %\", ROUND((net_pnl/NULLIF(entry_price*quantity,0)*100)::numeric,2) AS \"Net Return %\" FROM trade_blotter WHERE run_id = '${run_id}' ORDER BY entry_ts DESC",
+          "rawSql": "SELECT entry_ts AS \"Entry Time\", exit_ts AS \"Exit Time\", CASE WHEN side='buy' THEN 'Long' ELSE 'Short' END AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(exit_price::numeric,2) AS \"Exit Price\", holding_bars AS \"Bars\", ROUND(((exit_price-entry_price)/NULLIF(entry_price,0)*100)::numeric,2) AS \"Gross Return %\", ROUND((net_pnl/NULLIF(entry_price*quantity,0)*100)::numeric,2) AS \"Net Return %\" FROM trade_blotter WHERE run_id = '${run_id}' AND entry_ts >= '${run_start}'::timestamptz AND entry_ts <= '${run_end}'::timestamptz ORDER BY entry_ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -690,7 +726,7 @@
         "sortBy": [
           {
             "displayName": "Entry Time",
-            "desc": true
+            "desc": false
           }
         ]
       },
