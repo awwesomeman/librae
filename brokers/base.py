@@ -11,11 +11,14 @@ Naming conventions:
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import AsyncIterator, Callable, Optional, Sequence
+from types import TracebackType
+from typing import Callable, Optional, Self, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -166,24 +169,81 @@ class Position:
 
 
 # ---------------------------------------------------------------------------
+# Credential config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CredentialConfig:
+    """Base credential config with env-var loading.
+
+    Subclass and add fields for each venue.  Call ``from_env()`` to
+    populate fields from environment variables automatically.
+
+    Env-var mapping convention: ``{PREFIX}_{FIELD_UPPER}``.
+    E.g. ``BINANCE_API_KEY`` for field ``api_key`` with prefix ``BINANCE``.
+    """
+
+    @classmethod
+    def from_env(cls, prefix: str, **overrides: str) -> Self:
+        """Build credentials from environment variables.
+
+        For each dataclass field, looks up ``{prefix}_{FIELD_UPPER}``
+        in ``os.environ``.  Explicit *overrides* take precedence.
+        """
+        _sentinel = object()
+        kwargs: dict = {}
+        for f in dataclasses.fields(cls):
+            override = overrides.get(f.name, _sentinel)
+            if override is not _sentinel:
+                kwargs[f.name] = override
+            else:
+                env_val = os.environ.get(f"{prefix}_{f.name.upper()}")
+                if env_val is not None:
+                    kwargs[f.name] = env_val
+        return cls(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Abstract interfaces
 # ---------------------------------------------------------------------------
 
 
-class MarketDataAdapter(ABC):
+class _ConnectableMixin:
+    """Shared async-context-manager and connection state for all adapters."""
+
+    _connected: bool = False
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    async def connect(self) -> None:
+        self._connected = True
+
+    async def disconnect(self) -> None:
+        self._connected = False
+
+    async def __aenter__(self) -> Self:
+        await self.connect()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self._connected:
+            await self.disconnect()
+
+
+class MarketDataAdapter(_ConnectableMixin, ABC):
     """Interface for real-time and historical market data."""
 
     @abstractmethod
     def info(self) -> AdapterInfo:
         """Return adapter metadata."""
-
-    @abstractmethod
-    async def connect(self) -> None:
-        """Establish connection to the data source."""
-
-    @abstractmethod
-    async def disconnect(self) -> None:
-        """Tear down connection."""
 
     @abstractmethod
     async def subscribe_l1(
@@ -212,20 +272,12 @@ class MarketDataAdapter(ABC):
         """Fetch historical OHLCV bars."""
 
 
-class OrderAdapter(ABC):
+class OrderAdapter(_ConnectableMixin, ABC):
     """Interface for order submission and lifecycle management."""
 
     @abstractmethod
     def info(self) -> AdapterInfo:
         """Return adapter metadata."""
-
-    @abstractmethod
-    async def connect(self) -> None:
-        """Establish connection to the broker/exchange."""
-
-    @abstractmethod
-    async def disconnect(self) -> None:
-        """Tear down connection."""
 
     @abstractmethod
     async def submit_order(
@@ -257,20 +309,12 @@ class OrderAdapter(ABC):
         """Subscribe to fill events (all symbols for this account)."""
 
 
-class AccountAdapter(ABC):
+class AccountAdapter(_ConnectableMixin, ABC):
     """Interface for account/portfolio state queries."""
 
     @abstractmethod
     def info(self) -> AdapterInfo:
         """Return adapter metadata."""
-
-    @abstractmethod
-    async def connect(self) -> None:
-        """Establish connection."""
-
-    @abstractmethod
-    async def disconnect(self) -> None:
-        """Tear down connection."""
 
     @abstractmethod
     async def get_positions(self) -> Sequence[Position]:

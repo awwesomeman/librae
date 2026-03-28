@@ -3,27 +3,47 @@
 Wraps CCXT to provide a simple duck-typed interface compatible with
 signal_monitor's ``fetch_ohlcv`` protocol, plus optional order/position
 methods when API credentials are supplied.
+
+Credentials can be passed explicitly or loaded from environment variables
+using the ``CRYPTO_`` prefix convention (``CRYPTO_API_KEY``,
+``CRYPTO_API_SECRET``, ``CRYPTO_EXCHANGE_ID``, ``CRYPTO_SANDBOX``).
 """
 
 from __future__ import annotations
 
-import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 
+from .base import AdapterInfo, CredentialConfig
 
-def _require_ccxt():
+
+def _require_ccxt() -> object:
     """Import and return ccxt, raising a friendly error if missing."""
     try:
         import ccxt
         return ccxt
-    except ImportError:
+    except ImportError as e:
         raise ImportError(
             "ccxt is required for CryptoAdapter. "
             "Install it with: pip install ccxt"
-        )
+        ) from e
+
+
+@dataclass
+class CryptoCredentials(CredentialConfig):
+    """Credentials for a CCXT-backed exchange."""
+
+    api_key: str = ""
+    api_secret: str = ""
+    exchange_id: str = "binance"
+    sandbox: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sandbox, str):
+            self.sandbox = self.sandbox.lower() == "true"
 
 
 class CryptoAdapter:
@@ -37,6 +57,9 @@ class CryptoAdapter:
         Exchange credentials. Empty strings → read-only mode.
     sandbox : bool
         If True, enable the exchange sandbox/testnet.
+    credentials : CryptoCredentials | None
+        Alternative to individual params.  When given, the explicit
+        params above are ignored.
     """
 
     def __init__(
@@ -45,7 +68,14 @@ class CryptoAdapter:
         api_key: str = "",
         api_secret: str = "",
         sandbox: bool = False,
+        credentials: CryptoCredentials | None = None,
     ) -> None:
+        if credentials is not None:
+            exchange_id = credentials.exchange_id if credentials.exchange_id else exchange_id
+            api_key = credentials.api_key if credentials.api_key else api_key
+            api_secret = credentials.api_secret if credentials.api_secret else api_secret
+            sandbox = credentials.sandbox or sandbox
+
         ccxt = _require_ccxt()
         exchange_class = getattr(ccxt, exchange_id, None)
         if exchange_class is None:
@@ -62,7 +92,15 @@ class CryptoAdapter:
             self._exchange.set_sandbox_mode(True)
 
         self._read_only = not bool(api_key)
-        self.exchange_id = exchange_id
+        self._exchange_id = exchange_id
+
+    def info(self) -> AdapterInfo:
+        """Return adapter metadata (consistent with ABC adapters)."""
+        return AdapterInfo(
+            adapter_id=f"crypto_{self._exchange_id}",
+            venue=self._exchange_id.upper(),
+            market_type="spot",
+        )
 
     # ------------------------------------------------------------------
     # Market data

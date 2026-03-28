@@ -25,18 +25,11 @@ from .base import (
 class SimMarketDataAdapter(MarketDataAdapter):
     def __init__(self, adapter_id: str, venue: str, market_type: str, price_unit: str, size_unit: str) -> None:
         self._info = AdapterInfo(adapter_id=adapter_id, venue=venue, market_type=market_type)
-        self._connected = False
         self._price_unit = price_unit
         self._size_unit = size_unit
 
     def info(self) -> AdapterInfo:
         return self._info
-
-    async def connect(self) -> None:
-        self._connected = True
-
-    async def disconnect(self) -> None:
-        self._connected = False
 
     async def subscribe_l1(self, symbol: str, callback: Callable[[L1Quote], None]) -> None:
         now = datetime.now(timezone.utc)
@@ -71,18 +64,18 @@ class SimMarketDataAdapter(MarketDataAdapter):
         bars: list[Bar] = []
         step = timedelta(hours=1 if timeframe.lower() in {"h1", "1h", "60m"} else 1)
         ts = start
-        px = 100.0
+        price = 100.0
         while ts < end:
-            close = px * 1.001
+            close = price * 1.001
             bars.append(
                 Bar(
                     symbol=symbol,
                     ts_open=ts,
                     ts_close=ts + step,
                     timeframe=timeframe,
-                    open=px,
-                    high=max(px, close) * 1.001,
-                    low=min(px, close) * 0.999,
+                    open=price,
+                    high=max(price, close) * 1.001,
+                    low=min(price, close) * 0.999,
                     close=close,
                     volume=10.0,
                     price_unit=self._price_unit,
@@ -90,7 +83,7 @@ class SimMarketDataAdapter(MarketDataAdapter):
                 )
             )
             ts += step
-            px = close
+            price = close
         return bars
 
 
@@ -104,12 +97,6 @@ class SimOrderAdapter(OrderAdapter):
 
     def info(self) -> AdapterInfo:
         return self._info
-
-    async def connect(self) -> None:
-        return None
-
-    async def disconnect(self) -> None:
-        return None
 
     async def submit_order(
         self,
@@ -180,12 +167,6 @@ class SimAccountAdapter(AccountAdapter):
 
     def info(self) -> AdapterInfo:
         return self._info
-
-    async def connect(self) -> None:
-        return None
-
-    async def disconnect(self) -> None:
-        return None
 
     async def get_positions(self) -> Sequence[Position]:
         return [

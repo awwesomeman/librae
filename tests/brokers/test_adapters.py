@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
 
 from brokers.base import (
     AdapterInfo,
+    CredentialConfig,
     MarketDataAdapter,
     OrderSide,
     OrderStatus,
@@ -72,3 +74,78 @@ def test_wiring_builds_bundle() -> None:
     assert s.order.info().venue == "SHIOAJI"
     with pytest.raises(ValueError):
         build_adapter_bundle("unknown")
+
+
+# ---------------------------------------------------------------------------
+# Connection state & async context manager
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connected_state_tracks_connect_disconnect() -> None:
+    md = BinanceMarketDataAdapter()
+    assert md.connected is False
+    await md.connect()
+    assert md.connected is True
+    await md.disconnect()
+    assert md.connected is False
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager() -> None:
+    async with BinanceOrderAdapter() as od:
+        assert od.connected is True
+        order = await od.submit_order(
+            "BTCUSDT", OrderSide.BUY, OrderType.MARKET, 0.1, "asset",
+        )
+        assert order.status == OrderStatus.FILLED
+    assert od.connected is False
+
+
+@pytest.mark.asyncio
+async def test_account_context_manager() -> None:
+    async with BinanceAccountAdapter() as ac:
+        assert ac.connected is True
+    assert ac.connected is False
+
+
+# ---------------------------------------------------------------------------
+# CredentialConfig.from_env
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TestCreds(CredentialConfig):
+    api_key: str = ""
+    secret: str = ""
+
+
+def test_credential_config_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "k123")
+    monkeypatch.setenv("TEST_SECRET", "s456")
+    creds = _TestCreds.from_env("TEST")
+    assert creds.api_key == "k123"
+    assert creds.secret == "s456"
+
+
+def test_credential_config_override_beats_env(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "from_env")
+    creds = _TestCreds.from_env("TEST", api_key="explicit")
+    assert creds.api_key == "explicit"
+
+
+# ---------------------------------------------------------------------------
+# CryptoAdapter.info()
+# ---------------------------------------------------------------------------
+
+
+def test_crypto_adapter_info() -> None:
+    from brokers.crypto_adapter import CryptoAdapter
+
+    adapter = CryptoAdapter.__new__(CryptoAdapter)
+    adapter._exchange = None
+    adapter._read_only = True
+    adapter._exchange_id = "binance"
+    info = adapter.info()
+    assert info.venue == "BINANCE"
+    assert info.adapter_id == "crypto_binance"

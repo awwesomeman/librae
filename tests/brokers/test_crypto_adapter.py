@@ -41,7 +41,7 @@ def readonly_adapter(mock_ccxt_exchange):
         adapter = CryptoAdapter.__new__(CryptoAdapter)
         adapter._exchange = mock_ccxt_exchange
         adapter._read_only = True
-        adapter.exchange_id = "binance"
+        adapter._exchange_id = "binance"
     return adapter
 
 
@@ -51,7 +51,7 @@ def authed_adapter(mock_ccxt_exchange):
     adapter = CryptoAdapter.__new__(CryptoAdapter)
     adapter._exchange = mock_ccxt_exchange
     adapter._read_only = False
-    adapter.exchange_id = "binance"
+    adapter._exchange_id = "binance"
     return adapter
 
 
