@@ -243,15 +243,8 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
     out["Exit Price"] = pd.to_numeric(df.get("exit_price"), errors="coerce").round(2)
     out["Holding Bars"] = pd.to_numeric(df.get("holding_bars"), errors="coerce").astype("Int64")
 
-    entry = pd.to_numeric(df.get("entry_price"), errors="coerce")
-    exit_ = pd.to_numeric(df.get("exit_price"), errors="coerce")
-    gross_return = ((exit_ - entry) / entry * 100).round(2)
-    out["Gross Return %"] = gross_return
-
-    net_pnl = pd.to_numeric(df.get("net_pnl"), errors="coerce")
-    quantity = pd.to_numeric(df.get("quantity"), errors="coerce")
-    net_return_pct = (net_pnl / (entry * quantity) * 100).round(2)
-    out["Net Return %"] = net_return_pct
+    out["Gross Return %"] = pd.to_numeric(df.get("gross_return"), errors="coerce").round(2)
+    out["Net Return %"] = pd.to_numeric(df.get("net_return"), errors="coerce").round(2)
 
     return out[_ORDER_DETAIL_COLUMNS]
 

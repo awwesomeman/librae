@@ -117,6 +117,7 @@ def write_backtest_output(
                     tr.symbol, tr.side,
                     tr.entry_price, tr.exit_price, tr.quantity,
                     tr.gross_pnl, tr.net_pnl,
+                    tr.gross_return, tr.net_return,
                     tr.price_unit,
                     tr.quantity_unit,
                     tr.pnl_unit,
@@ -130,6 +131,7 @@ def write_backtest_output(
                    (trade_id, run_id, entry_ts, exit_ts, symbol, side,
                     entry_price, exit_price, quantity,
                     gross_pnl, net_pnl,
+                    gross_return, net_return,
                     price_unit, quantity_unit, pnl_unit,
                     commission, slippage, holding_bars)
                    VALUES %s

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS trade_blotter (
     quantity        DOUBLE PRECISION,
     gross_pnl       DOUBLE PRECISION,
     net_pnl         DOUBLE PRECISION,
+    gross_return    DOUBLE PRECISION,
+    net_return      DOUBLE PRECISION,
     price_unit      TEXT DEFAULT 'USDT',
     quantity_unit   TEXT DEFAULT 'asset',
     pnl_unit        TEXT DEFAULT 'USDT',

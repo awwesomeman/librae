@@ -69,6 +69,8 @@ class TradeRecord:
     quantity: float
     gross_pnl: float
     net_pnl: float
+    gross_return: Optional[float] = None
+    net_return: Optional[float] = None
     # Units for multi-market support
     price_unit: str = "USDT"
     quantity_unit: str = "asset"

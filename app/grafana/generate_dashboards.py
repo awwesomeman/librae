@@ -200,8 +200,8 @@ BASE_PANELS_DEF: list[dict] = [
                 " ROUND(entry_price::numeric,2) AS \"Entry Price\","
                 " ROUND(exit_price::numeric,2) AS \"Exit Price\","
                 " holding_bars AS \"Bars\","
-                " ROUND(((exit_price-entry_price)/NULLIF(entry_price,0)*100)::numeric,2) AS \"Gross Return %\","
-                " ROUND((net_pnl/NULLIF(entry_price*quantity,0)*100)::numeric,2) AS \"Net Return %\""
+                " ROUND(gross_return::numeric,2) AS \"Gross Return %\","
+                " ROUND(net_return::numeric,2) AS \"Net Return %\""
                 " FROM trade_blotter WHERE run_id = '${run_id}'"
                 " AND ($__timeFilter(entry_ts) OR $__timeFilter(exit_ts))"
                 " ORDER BY entry_ts",

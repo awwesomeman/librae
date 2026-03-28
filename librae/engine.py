@@ -55,6 +55,8 @@ class TradeResult:
     slippage: float
     tax: float
     net_pnl: float
+    gross_return: float
+    net_return: float
     holding_bars: int
 
 
@@ -90,6 +92,10 @@ class _PositionState:
     quantity: float
     entry_ts: datetime
     bars_held: int
+
+    @property
+    def direction(self) -> float:
+        return -1.0 if self.side == "short" else 1.0
     entry_commission: float
     entry_slippage: float
 
@@ -312,7 +318,7 @@ class Backtest:
             price = bar["close"] if bar is not None else pos.entry_price
             executor = self._get_executor(inst)
             cm = executor.cost_model if executor else CostModel.zero()
-            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity)
+            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity) * pos.direction
             mtm += pos.entry_price * pos.quantity * cm.multiplier
         return mtm
 
@@ -335,7 +341,7 @@ class Backtest:
                 quantity=ps.quantity,
                 entry_ts=ps.entry_ts,
                 bars_held=ps.bars_held,
-                unrealized_pnl=cm.calc_pnl(ps.entry_price, price, ps.quantity),
+                unrealized_pnl=cm.calc_pnl(ps.entry_price, price, ps.quantity) * ps.direction,
             )
         return snapshot
 
@@ -347,7 +353,7 @@ class Backtest:
         cm: CostModel,
     ) -> tuple[TradeResult, float]:
         """Close a position. Returns (TradeResult, cash_proceeds)."""
-        gross_pnl = cm.calc_pnl(pos.entry_price, exit_price, pos.quantity)
+        gross_pnl = cm.calc_pnl(pos.entry_price, exit_price, pos.quantity) * pos.direction
         exit_commission = cm.calc_commission(exit_price, pos.quantity)
         exit_slippage = cm.calc_slippage(pos.quantity)
         exit_tax = cm.calc_tax(exit_price, pos.quantity, is_sell=True)
@@ -355,6 +361,10 @@ class Backtest:
         total_commission = pos.entry_commission + exit_commission
         total_slippage = pos.entry_slippage + exit_slippage
         net_pnl = gross_pnl - total_commission - total_slippage - exit_tax
+
+        entry_notional = pos.entry_price * pos.quantity * cm.multiplier
+        gross_return = (gross_pnl / entry_notional * 100) if entry_notional > EPSILON else 0.0
+        net_return = (net_pnl / entry_notional * 100) if entry_notional > EPSILON else 0.0
 
         notional = exit_price * pos.quantity * cm.multiplier
         proceeds = notional - exit_commission - exit_slippage - exit_tax
@@ -372,6 +382,8 @@ class Backtest:
             slippage=total_slippage,
             tax=exit_tax,
             net_pnl=net_pnl,
+            gross_return=gross_return,
+            net_return=net_return,
             holding_bars=pos.bars_held,
         )
         return trade, proceeds

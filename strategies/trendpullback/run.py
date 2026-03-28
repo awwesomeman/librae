@@ -94,6 +94,7 @@ def _build_output(result, metrics, run_id, symbol, start_ts, end_ts, sample):
             entry_price=float(t.entry_price), exit_price=float(t.exit_price),
             quantity=float(t.quantity),
             gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
+            gross_return=float(t.gross_return), net_return=float(t.net_return),
             commission=float(t.commission), slippage=float(t.slippage),
             holding_bars=int(t.holding_bars),
         )
