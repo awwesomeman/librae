@@ -447,14 +447,14 @@ def render_dashboard(
                 ),
                 _make_query_variable(
                     "run_start",
-                    "SELECT COALESCE(start_ts, NOW()) FROM backtest_runs"
-                    " WHERE run_id = '${run_id}'",
+                    "SELECT TO_CHAR(COALESCE(start_ts, NOW()), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+                    " FROM backtest_runs WHERE run_id = '${run_id}'",
                     hide=_VAR_HIDDEN,
                 ),
                 _make_query_variable(
                     "run_end",
-                    "SELECT COALESCE(end_ts, NOW()) FROM backtest_runs"
-                    " WHERE run_id = '${run_id}'",
+                    "SELECT TO_CHAR(COALESCE(end_ts, NOW()), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+                    " FROM backtest_runs WHERE run_id = '${run_id}'",
                     hide=_VAR_HIDDEN,
                 ),
             ],

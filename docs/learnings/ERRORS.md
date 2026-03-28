@@ -57,3 +57,16 @@ editable: true            # <-- 允許 runtime 修改
 - Grafana 升版後檢查 provisioning datasource 的 `jsonData` 欄位需求
 - 目錄重組後用 `docker-compose up -d`（不是 `restart`）確保 volume 掛載更新
 - Provisioning datasource 用 `editable: true` 方便除錯
+
+## 2026-03-28 Grafana provisioned dashboard 更新後不生效
+
+**症狀**：推版後 `docker-compose up -d` 重啟 Grafana，但 dashboard 仍顯示舊版（舊欄位、舊 SQL、舊時間篩選）。
+
+**根因**：`generate_dashboards.py` 輸出到 `app/grafana/dashboards/`，但 Grafana provisioning config（`default.yaml`）讀的是 `/etc/grafana/provisioning/dashboards/json/`。docker-compose 只掛載了 `app/grafana/provisioning/` → `/etc/grafana/provisioning/`，所以 `dashboards/` 目錄從未被 Grafana 讀取。
+
+**修法**：把 `generate_dashboards.py` 的輸出路徑改為 `app/grafana/provisioning/dashboards/json/`，跟 provisioning config 的 `path` 對齊。
+
+**預防**：
+- Dashboard JSON 輸出路徑必須在 provisioning 掛載路徑內
+- 部署後檢查 Grafana container 內是否看得到檔案：`docker exec quant_grafana ls /etc/grafana/provisioning/dashboards/json/`
+- Provisioning 的 `updateIntervalSeconds: 30` 會自動掃描，但首次需要 restart 才載入
