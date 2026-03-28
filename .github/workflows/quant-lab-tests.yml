@@ -3,12 +3,12 @@ name: quant-lab-tests
 on:
   push:
     paths:
-      - "quant_lab/**"
+      - "librae/**"
       - "tests/**"
       - ".github/workflows/quant-lab-tests.yml"
   pull_request:
     paths:
-      - "quant_lab/**"
+      - "librae/**"
       - "tests/**"
       - ".github/workflows/quant-lab-tests.yml"
 
@@ -31,4 +31,4 @@ jobs:
 
       - name: Run contract + streamlit smoke tests
         run: |
-          pytest -q tests/test_contracts.py tests/test_streamlit_schema_smoke.py
+          pytest -q tests/engine/test_contract_minimal.py tests/app/test_schema_builder.py

@@ -5,7 +5,7 @@ on:
     paths:
       - "librae/**"
       - "brokers/**"
-      - "scripts/**"
+      - "db/**"
       - "tests/**"
       - "pyproject.toml"
       - "conftest.py"
@@ -14,7 +14,7 @@ on:
     paths:
       - "librae/**"
       - "brokers/**"
-      - "scripts/**"
+      - "db/**"
       - "tests/**"
       - "pyproject.toml"
       - "conftest.py"

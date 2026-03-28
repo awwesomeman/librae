@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+from typing import Any
 
 import psycopg2
 import psycopg2.extras
