@@ -12,7 +12,7 @@ import pathlib
 import re
 
 DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
-OUT_DIR = pathlib.Path(__file__).parent / "dashboards"
+OUT_DIR = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
 
 # WHY: $__timeFilter is replaced with run_start/run_end variable-based SQL filtering,
 # so queries return the run's actual period regardless of Grafana's time picker position.
