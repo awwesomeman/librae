@@ -2,8 +2,8 @@
 """Grafana setup script — auto-detect datasource uid, update generator, deploy dashboards.
 
 Usage:
-    python scripts/setup_grafana.py
-    python scripts/setup_grafana.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
+    python deploy/setup_grafana.py
+    python deploy/setup_grafana.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
 """
 from __future__ import annotations
 
@@ -39,31 +39,44 @@ def get_timescaledb_uid(base_url: str, auth: tuple[str, str]) -> tuple[str | Non
 def update_generate_dashboards(uid: str, ds_type: str) -> None:
     """Update DATASOURCE dict in app/grafana/generate_dashboards.py."""
     path = "app/grafana/generate_dashboards.py"
-    content = open(path).read()
-    new_ds = f'{{"type": "{ds_type}", "uid": "{uid}"}}'
-    updated = re.sub(r'DATASOURCE = \{[^}]*\}', f'DATASOURCE = {new_ds}', content)
+    with open(path) as f:
+        content = f.read()
+    new_ds = json.dumps({"type": ds_type, "uid": uid})
+    updated = re.sub(r'DATASOURCE[^=]*= \{[^}]*\}', f'DATASOURCE: dict = {new_ds}', content)
     if updated == content:
         print(f"WARNING: DATASOURCE pattern not found in {path}, no changes made")
         return
-    open(path, "w").write(updated)
+    with open(path, "w") as f:
+        f.write(updated)
     print(f"Updated DATASOURCE uid={uid} type={ds_type}")
 
 
-def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
-    """Re-generate dashboard JSONs and deploy to Grafana."""
-    subprocess.run([sys.executable, "app/grafana/generate_dashboards.py"], check=True)
-    for fname in ["backtest_dashboard.json", "sim_dashboard.json", "live_dashboard.json"]:
-        fpath = f"app/grafana/dashboards/{fname}"
-        d = json.load(open(fpath))
-        d.pop("id", None)
-        r = requests.post(
-            f"{base_url}/api/dashboards/db",
-            json={"dashboard": d, "folderId": 0, "overwrite": True},
-            auth=auth,
-            timeout=30,
-        )
+def delete_old_dashboards(base_url: str, auth: tuple[str, str]) -> None:
+    """Remove legacy per-mode dashboards from Grafana."""
+    old_uids = ["backtest_dashboard", "sim_dashboard", "live_dashboard"]
+    for uid in old_uids:
+        r = requests.delete(f"{base_url}/api/dashboards/uid/{uid}", auth=auth, timeout=10)
+        if r.status_code == 404:
+            continue
         r.raise_for_status()
-        print(f"  {fname}: {r.json().get('status', '?')}")
+        print(f"  Deleted old dashboard: {uid}")
+
+
+def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
+    """Re-generate dashboard JSON and deploy to Grafana."""
+    subprocess.run([sys.executable, "app/grafana/generate_dashboards.py"], check=True)
+    fpath = "app/grafana/provisioning/dashboards/json/strategy_dashboard.json"
+    with open(fpath) as f:
+        d = json.load(f)
+    d.pop("id", None)
+    r = requests.post(
+        f"{base_url}/api/dashboards/db",
+        json={"dashboard": d, "folderId": 0, "overwrite": True},
+        auth=auth,
+        timeout=30,
+    )
+    r.raise_for_status()
+    print(f"  strategy_dashboard.json: {r.json().get('status', '?')}")
 
 
 def main() -> None:
@@ -76,6 +89,7 @@ def main() -> None:
         sys.exit(1)
 
     update_generate_dashboards(uid, ds_type)
+    delete_old_dashboards(args.grafana_url, auth)
     deploy_dashboards(args.grafana_url, auth)
     print("✅ Grafana setup complete")
 

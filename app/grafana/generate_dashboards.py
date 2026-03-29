@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Grafana Dashboard Generator.
 
-Produces three dashboards (Backtest / Monitor / Live) from shared panel definitions.
-Usage: python grafana/generate_dashboards.py
+Produces a single unified Strategy Dashboard with mode filtering.
+Usage: python app/grafana/generate_dashboards.py
 """
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import copy
 import json
 import pathlib
 
-DATASOURCE = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
-OUT_DIR = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
+DATASOURCE: dict = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
+OUT_DIR: pathlib.Path = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
 
 
 def _target(sql: str, ref_id: str = "A", fmt: str = "time_series") -> dict:
@@ -31,7 +31,16 @@ def _stat_target(sql: str) -> dict:
     return _target(sql, "A", "table")
 
 
-def _kpi_stat(title: str, sql: str, unit: str | None, thresholds: list[dict]) -> dict:
+def _stat_panel(
+    title: str,
+    sql: str,
+    unit: str | None,
+    thresholds: list[dict],
+    *,
+    layout: str = "kpi",
+    w: int = 4,
+) -> dict:
+    """Build a Grafana stat panel definition."""
     fc: dict = {
         "defaults": {
             "thresholds": {"mode": "absolute", "steps": thresholds},
@@ -42,11 +51,11 @@ def _kpi_stat(title: str, sql: str, unit: str | None, thresholds: list[dict]) ->
     if unit:
         fc["defaults"]["unit"] = unit
     return {
-        "_type": "kpi",
+        "_type": layout,
         "title": title,
         "type": "stat",
         "h": 4,
-        "w": 4,
+        "w": w,
         "targets": [_stat_target(sql)],
         "fieldConfig": fc,
         "options": {
@@ -58,19 +67,20 @@ def _kpi_stat(title: str, sql: str, unit: str | None, thresholds: list[dict]) ->
 
 
 BASE_PANELS_DEF: list[dict] = [
-    _kpi_stat(
+    {"_type": "row", "title": "Performance Overview"},
+    _stat_panel(
         "Total Return",
         "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}'",
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
     ),
-    _kpi_stat(
+    _stat_panel(
         "Max Drawdown",
         "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}'",
         "percentunit",
         [{"color": "red", "value": None}],
     ),
-    _kpi_stat(
+    _stat_panel(
         "Sharpe Ratio",
         "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}'",
         None,
@@ -80,13 +90,13 @@ BASE_PANELS_DEF: list[dict] = [
             {"color": "green", "value": 1.0},
         ],
     ),
-    _kpi_stat(
+    _stat_panel(
         "Win Rate",
         "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}'",
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0.5}],
     ),
-    _kpi_stat(
+    _stat_panel(
         "Profit Factor",
         "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}'",
         None,
@@ -96,7 +106,7 @@ BASE_PANELS_DEF: list[dict] = [
             {"color": "green", "value": 1.5},
         ],
     ),
-    _kpi_stat(
+    _stat_panel(
         "Trades",
         "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}'",
         None,
@@ -270,94 +280,73 @@ BASE_PANELS_DEF: list[dict] = [
 ]
 
 EXTRA_PANELS: list[dict] = [
-    {
-        "_type": "half",
-        "title": "Unrealized PnL",
-        "type": "stat",
-        "h": 4,
-        "w": 12,
-        "targets": [_stat_target("SELECT 0 AS \"Unrealized PnL\"  -- placeholder")],
-        "fieldConfig": {
-            "defaults": {
-                "thresholds": {
-                    "mode": "absolute",
-                    "steps": [{"color": "blue", "value": None}],
-                },
-                "color": {"mode": "thresholds"},
-            },
-            "overrides": [],
-        },
-        "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "value",
-            "graphMode": "none",
-        },
-    },
-    {
-        "_type": "half",
-        "title": "Current Position",
-        "type": "stat",
-        "h": 4,
-        "w": 12,
-        "targets": [_stat_target("SELECT 'N/A' AS \"Position\"  -- placeholder")],
-        "fieldConfig": {
-            "defaults": {
-                "thresholds": {
-                    "mode": "absolute",
-                    "steps": [{"color": "blue", "value": None}],
-                },
-                "color": {"mode": "thresholds"},
-            },
-            "overrides": [],
-        },
-        "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "value",
-            "graphMode": "none",
-        },
-    },
+    {"_type": "row", "title": "Live / Sim Only"},
+    _stat_panel(
+        "Unrealized PnL",
+        "SELECT 0 AS \"Unrealized PnL\"  -- TODO: replace placeholder",
+        None,
+        [{"color": "blue", "value": None}],
+        layout="half",
+        w=12,
+    ),
+    _stat_panel(
+        "Current Position",
+        "SELECT 'N/A' AS \"Position\"  -- TODO: replace placeholder",
+        None,
+        [{"color": "blue", "value": None}],
+        layout="half",
+        w=12,
+    ),
 ]
 
 
 def build_panels(panel_defs: list[dict]) -> list[dict]:
-    """Assign id, gridPos, datasource to panel definitions."""
+    """Assign id, gridPos, datasource to panel definitions in definition order."""
     panels: list[dict] = []
     panel_id = 1
+    x = 0
     y = 0
+    row_h = 0  # tallest panel in the current row
 
-    kpi_defs = [p for p in panel_defs if p.get("_type") == "kpi"]
-    other_defs = [p for p in panel_defs if p.get("_type") != "kpi"]
-
-    x = 0
-    for defn in kpi_defs:
-        panels.append(_materialize_panel(defn, panel_id, x, y))
-        panel_id += 1
-        x += defn["w"]
-
-    if kpi_defs:
-        y += 4
-
-    x = 0
-    fixed_defs = []
-    for defn in other_defs:
-        ptype = defn.get("_type", "full_row")
+    fixed_defs: list[dict] = []
+    valid_types = {"kpi", "half", "fixed", "row", "full_row"}
+    for defn in panel_defs:
+        ptype = defn.get("_type")
+        if ptype is None:
+            raise ValueError(f"Missing _type in panel {defn.get('title', '?')!r}")
+        if ptype not in valid_types:
+            raise ValueError(f"Unknown panel _type: {ptype!r} in panel {defn.get('title', '?')!r}")
         if ptype == "fixed":
             fixed_defs.append(defn)
             continue
-        if ptype == "full_row":
+
+        # WHY: flush incomplete row before block-level panels (row / full_row)
+        if ptype in ("row", "full_row") and x > 0:
+            y += row_h
+            x = 0
+            row_h = 0
+
+        if ptype == "row":
+            panels.append(_materialize_row(defn, panel_id, y))
+            panel_id += 1
+            y += 1
+        elif ptype == "full_row":
             panels.append(_materialize_panel(defn, panel_id, 0, y))
             panel_id += 1
             y += defn["h"]
-            x = 0
-        elif ptype == "half":
+        elif ptype in ("kpi", "half"):
             panels.append(_materialize_panel(defn, panel_id, x, y))
             panel_id += 1
+            row_h = max(row_h, defn["h"])
             x += defn["w"]
             if x >= 24:
-                y += defn["h"]
+                y += row_h
                 x = 0
+                row_h = 0
 
-    # Fixed-position panels (explicit _x, _dy offset for rowspan layouts)
+    # WHY: flush any trailing incomplete row before placing fixed panels
+    if x > 0:
+        y += row_h
     for defn in fixed_defs:
         panels.append(_materialize_panel(defn, panel_id, defn["_x"], y + defn["_dy"]))
         panel_id += 1
@@ -378,6 +367,45 @@ def _materialize_panel(defn: dict, panel_id: int, x: int, y: int) -> dict:
     return p
 
 
+def _materialize_row(defn: dict, panel_id: int, y: int) -> dict:
+    """Build a Grafana collapsible row panel."""
+    return {
+        "id": panel_id,
+        "type": "row",
+        "title": defn["title"],
+        "collapsed": False,
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": y},
+        "panels": [],
+    }
+
+
+def _make_custom_variable(
+    name: str,
+    options: list[tuple[str, str]],
+    *,
+    label: str | None = None,
+) -> dict:
+    """Build a Grafana custom-type template variable."""
+    csv = ",".join(value for _, value in options)
+    grafana_options = [
+        {"text": text, "value": value, "selected": i == 0}
+        for i, (text, value) in enumerate(options)
+    ]
+    v: dict = {
+        "name": name,
+        "type": "custom",
+        "query": csv,
+        "current": {"text": options[0][0], "value": options[0][1]},
+        "options": grafana_options,
+        "hide": 0,
+        "includeAll": False,
+        "multi": False,
+    }
+    if label:
+        v["label"] = label
+    return v
+
+
 def _make_query_variable(
     name: str, sql: str, *, hide: int = 0, label: str | None = None,
 ) -> dict:
@@ -389,7 +417,7 @@ def _make_query_variable(
         "definition": sql,
         "query": sql,
         "rawQuery": True,
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "includeAll": False,
         "sort": 0,
@@ -402,32 +430,34 @@ def _make_query_variable(
     return v
 
 
-def render_dashboard(
-    title: str,
-    uid: str,
-    mode: str,
-    extra_panels: list[dict],
-) -> dict:
-    all_defs = list(BASE_PANELS_DEF) + list(extra_panels)
+def render_unified_dashboard() -> dict:
+    """Build the single unified Strategy Dashboard."""
+    all_defs = list(EXTRA_PANELS) + list(BASE_PANELS_DEF)
     panels = build_panels(all_defs)
+
+    mode_var = _make_custom_variable(
+        "mode",
+        [("Backtest", "backtest"), ("Monitor", "sim"), ("Live", "live")],
+        label="Mode",
+    )
+    run_id_var = _make_query_variable(
+        "run_id",
+        "SELECT run_id FROM backtest_runs WHERE mode='${mode}'"
+        " ORDER BY run_ts DESC LIMIT 20",
+        label="Run ID",
+    )
+
     return {
-        "uid": uid,
-        "title": title,
-        "description": f"{title} dashboard — generated by generate_dashboards.py",
+        "uid": "strategy_dashboard",
+        "title": "Strategy Dashboard",
+        "description": "Unified strategy dashboard — generated by generate_dashboards.py",
         "tags": [],
         "timezone": "browser",
         "editable": True,
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [
-                _make_query_variable(
-                    "run_id",
-                    f"SELECT run_id FROM backtest_runs WHERE mode='{mode}'"
-                    " ORDER BY run_ts DESC LIMIT 20",
-                    label="Run ID",
-                ),
-            ],
+            "list": [mode_var, run_id_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},
@@ -437,20 +467,12 @@ def render_dashboard(
     }
 
 
-DASHBOARDS = [
-    ("Backtest", "backtest_dashboard", "backtest", []),
-    ("Monitor",  "sim_dashboard",      "sim",      EXTRA_PANELS),
-    ("Live",     "live_dashboard",     "live",     EXTRA_PANELS),
-]
-
-
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for title, uid, mode, extra in DASHBOARDS:
-        d = render_dashboard(title, uid, mode, extra)
-        out_path = OUT_DIR / f"{uid}.json"
-        out_path.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-        print(f"  {out_path} — {len(d['panels'])} panels")
+    dashboard = render_unified_dashboard()
+    out_path = OUT_DIR / "strategy_dashboard.json"
+    out_path.write_text(json.dumps(dashboard, indent=2, ensure_ascii=False))
+    print(f"  {out_path} — {len(dashboard['panels'])} panels")
 
 
 if __name__ == "__main__":
