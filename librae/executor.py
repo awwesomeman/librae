@@ -1,7 +1,7 @@
 """Execution layer — separates trade execution from engine logic.
 
 BacktestExecutor: simulated fills using CostModel (for backtesting).
-LiveExecutor: real broker API (future, Phase 2-3).
+LiveExecutor: see librae/live_executor.py.
 
 Position sizing is the strategy's responsibility (set Action.quantity).
 If strategy doesn't specify quantity, executor uses all available cash.
@@ -27,6 +27,36 @@ class Executor(Protocol):
         ...
 
 
+def size_position(cost_model: CostModel, price: float, cash: float) -> float:
+    """Compute position size using all available cash."""
+    outlay_per_unit = cost_model.estimate_entry_outlay(price, 1.0)
+    if outlay_per_unit < EPSILON:
+        return 0.0
+    return cash / outlay_per_unit
+
+
+def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) -> Fill | None:
+    """Build a Fill for a buy/sell action. Returns None if rejected."""
+    if action.type not in ("buy", "sell"):
+        return None
+
+    qty = action.quantity
+    if qty is None:
+        qty = size_position(cost_model, price, cash)
+    if qty <= 0:
+        return None
+
+    return Fill(
+        instrument=action.instrument,
+        side="long" if action.type == "buy" else "short",
+        price=price,
+        quantity=qty,
+        commission=cost_model.calc_commission(price, qty),
+        slippage=cost_model.calc_slippage(qty),
+        tax=cost_model.calc_tax(price, qty, is_sell=(action.type == "sell")),
+    )
+
+
 class BacktestExecutor:
     """Simulated execution using CostModel."""
 
@@ -40,36 +70,4 @@ class BacktestExecutor:
     def execute(self, action: Action, price: float, cash: float) -> Fill | None:
         if action.type == "hold":
             return None
-
-        cm = self._cost_model
-
-        if action.type in ("buy", "sell"):
-            qty = action.quantity
-            if qty is None:
-                qty = self._size_position(price, cash)
-            if qty <= 0:
-                return None
-
-            commission = cm.calc_commission(price, qty)
-            slippage = cm.calc_slippage(qty)
-            tax = cm.calc_tax(price, qty, is_sell=(action.type == "sell"))
-
-            return Fill(
-                instrument=action.instrument,
-                side="long" if action.type == "buy" else "short",
-                price=price,
-                quantity=qty,
-                commission=commission,
-                slippage=slippage,
-                tax=tax,
-            )
-
-        # "close" actions are handled directly by the engine (it knows position size)
-        return None
-
-    def _size_position(self, price: float, cash: float) -> float:
-        """Fallback sizing: use all available cash."""
-        outlay_per_unit = self._cost_model.estimate_entry_outlay(price, 1.0)
-        if outlay_per_unit < EPSILON:
-            return 0.0
-        return cash / outlay_per_unit
+        return make_fill(action, price, cash, self._cost_model)
