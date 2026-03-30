@@ -2,7 +2,7 @@
 
 > Updated: 2026-03-30
 > Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 2 接近完成（剩 ≥2 策略對比），Grafana 整合 + look-ahead bias 測試已完成
+> Status: Phase 3 進行中（LiveRunner + Docker 已完成，剩端到端驗證）
 
 ---
 
@@ -105,7 +105,7 @@ quant-strategy-lab/
 | Time-series DB | TimescaleDB | 唯一資料源 |
 | Dashboards | Streamlit + Grafana（單一 Strategy Dashboard，mode 篩選） | 統一在 app/ |
 | Deployment | docker-compose + Tailscale | VPS 或 GCE |
-| Testing | pytest 206 tests | 按模組分目錄（含 look-ahead bias） |
+| Testing | pytest 220 tests | 按模組分目錄（含 look-ahead bias + LiveRunner） |
 
 ### 設計原則
 
@@ -154,7 +154,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | tests 按模組分目錄 | ✅ |
 | 206 tests passed | ✅ |
 
-### Phase 2 — E2E Backtest Pipeline（共同基礎）← 當前
+### Phase 2 — E2E Backtest Pipeline（共同基礎）✅（剩 ≥2 策略對比）
 
 > 完成標準：至少 1 個策略能端到端跑回測，結果寫進 DB，Grafana 可看。
 
@@ -172,19 +172,26 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | 補回 look-ahead bias 測試（信號穩定性 + D1 merge + 引擎時機，9 tests） | ✅ |
 | ≥2 策略可比較（Backtest 板 run_id 對比） | ⏳ |
 
-### Phase 3 — Signal Subscription（Goal 1 MVP）— 首個市場: Crypto (BTC)
+### Phase 3 — Signal Subscription（Goal 1 MVP）— 首個市場: Crypto (BTC) ← 當前
 
 > 完成標準：BTC TrendPullback 策略能即時偵測信號並推送 Telegram。
 
-| 項目 | 說明 |
+| 項目 | 狀態 |
 |------|------|
-| LiveRunner | while loop，每根 bar 結束時跑 strategy.on_bar()，偵測 Action |
-| LiveExecutor(simulation=True) | 收到 Action 不下單，改推送通知 |
-| Telegram 訊號推播 | Signal → formatted message → Telegram bot |
-| Signal Dashboard | Grafana/Streamlit 顯示即時信號 + 歷史命中率 |
-| 部署 | docker-compose 跑 LiveRunner + Scheduler |
-
-已有基礎：CryptoAdapter (CCXT) 可直接 fetch_ohlcv，不需額外實作 live adapter。
+| CryptoAdapter hardening（drop_incomplete, since, length warning） | ✅ |
+| Telegram retry + rate-limit + HTML escape | ✅ |
+| DB schema dedup（strategy_signals unique index） | ✅ |
+| write_signal() + write_run_metadata() 單筆寫入 | ✅ |
+| Executor 重構（make_fill/size_position 共用函式） | ✅ |
+| LiveRunner（polling + OHLCV cache + bars_held + unrealized PnL） | ✅ |
+| LiveExecutor(simulation=True) + notify_exit | ✅ |
+| prepare_signals() 共用 pipeline | ✅ |
+| run_monitor CLI（--mode monitor --symbol --poll-interval） | ✅ |
+| LiveRunner + LiveExecutor 單元測試（14 tests） | ✅ |
+| Monitor run 註冊 backtest_runs（mode=sim） | ✅ |
+| Docker monitor service（Dockerfile + docker-compose） | ✅ |
+| Telegram bot 建立 + 端到端驗證 | ⏳ |
+| 多資產同時監控驗證 | ⏳ |
 
 ### Phase 4 — Live Auto Trading（Goal 2 MVP）
 
@@ -204,6 +211,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 |------|------|
 | Shioaji live adapter | 台指期真實交易 |
 | 多資產策略驗證 | 選股、配對交易、套利 |
+| Strategy Orchestrator | 策略 >5 個時，改為單一 container 內多 thread/process 管理多個 LiveRunner，減少 container 數量（目前一策略一 container，YAGNI） |
 | FastAPI + 訂閱系統 | 使用者管理、策略訂閱、JWT |
 | 版本化策略發布 | 策略打包 + 發布流程 |
 | Streamlit vectorbt 研究工具 | 參數掃描 + 互動呈現 |
