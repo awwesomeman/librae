@@ -300,6 +300,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     args = parse_args()
     dispatch = {"backtest": run_backtest, "sim": run_sim, "live": run_live}
     dispatch[args.mode](args)
