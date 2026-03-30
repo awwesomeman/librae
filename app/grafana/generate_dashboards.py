@@ -66,11 +66,26 @@ def _stat_panel(
     }
 
 
-# WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat)
+# WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
+# Threshold = 2x strategy timeframe (not poll_interval) to avoid false Offline on brief delays.
 _STATUS_SQL = (
     "SELECT CASE"
     " WHEN last_heartbeat IS NULL THEN -1"
-    " WHEN last_heartbeat > now() - (COALESCE(poll_interval, 60) * 2) * interval '1 second' THEN 1"
+    " WHEN last_heartbeat > now() - "
+    "CASE UPPER(timeframe)"
+    " WHEN 'H1' THEN interval '2 hours'"
+    " WHEN '1H' THEN interval '2 hours'"
+    " WHEN 'M5' THEN interval '10 minutes'"
+    " WHEN '5M' THEN interval '10 minutes'"
+    " WHEN 'M15' THEN interval '30 minutes'"
+    " WHEN '15M' THEN interval '30 minutes'"
+    " WHEN 'H4' THEN interval '8 hours'"
+    " WHEN '4H' THEN interval '8 hours'"
+    " WHEN 'D1' THEN interval '2 days'"
+    " WHEN '1D' THEN interval '2 days'"
+    " ELSE interval '2 hours'"
+    " END"
+    " THEN 1"
     " ELSE 0"
     " END AS status"
     " FROM backtest_runs WHERE run_id = '${run_id}'"
