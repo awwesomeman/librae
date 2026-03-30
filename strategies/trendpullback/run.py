@@ -78,7 +78,7 @@ def run_monitor(args: argparse.Namespace) -> None:
     from librae.live_runner import LiveRunner
     from librae.notifications.telegram import TelegramAdapter
     from librae.strategy import Action
-    from db.timescale_writer import write_signal
+    from db.timescale_writer import write_run_metadata, write_signal
 
     from .utils import prepare_signals
 
@@ -88,6 +88,17 @@ def run_monitor(args: argparse.Namespace) -> None:
     telegram = TelegramAdapter()
     cost_model = CostModel.from_instrument(f"crypto:{symbols[0]}")
     run_id = generate_run_id(f"trendpullback_{args.market}", symbols[0])
+
+    # Register run in DB so Grafana mode='sim' dropdown picks it up
+    if not args.no_db:
+        try:
+            now = datetime.now(tz=timezone.utc)
+            write_run_metadata(
+                run_id=run_id, strategy="trendpullback", symbol=symbols[0],
+                timeframe="H1", mode="sim", start_ts=now, data_source="binance",
+            )
+        except Exception as e:
+            _logger.warning("DB write_run_metadata failed: %s", e)
 
     def fetcher(symbol: str, timeframe: str, limit: int, **kwargs) -> pd.DataFrame:
         return adapter.fetch_ohlcv(symbol, timeframe, limit, **kwargs)
@@ -104,7 +115,7 @@ def run_monitor(args: argparse.Namespace) -> None:
             write_signal(
                 ts=ts, run_id=run_id, strategy="trendpullback",
                 symbol=symbol, timeframe="H1", signal_type=signal_type,
-                source="live", price=price, signal_strength=strength,
+                source="sim", price=price, signal_strength=strength,
             )
         except Exception as e:
             _logger.warning("DB write_signal failed: %s", e)

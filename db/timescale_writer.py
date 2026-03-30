@@ -6,7 +6,7 @@ strategy_signals, strategy_performance, ohlcv.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg2
@@ -43,6 +43,41 @@ def _to_dt(ts: Any) -> datetime | None:
     return ts
 
 
+def write_run_metadata(
+    run_id: str,
+    strategy: str,
+    symbol: str,
+    timeframe: str,
+    mode: str,
+    *,
+    start_ts: datetime | None = None,
+    end_ts: datetime | None = None,
+    run_ts: datetime | None = None,
+    data_source: str = "binance",
+    sample: str | None = None,
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Write a single run record to backtest_runs (upsert)."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO backtest_runs
+               (run_id, strategy, symbol, timeframe, sample, data_source,
+                start_ts, end_ts, run_ts, schema_version, mode)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id) DO UPDATE SET
+                 strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
+                 mode=EXCLUDED.mode""",
+            (
+                run_id, strategy, symbol, timeframe, sample, data_source,
+                _to_dt(start_ts), _to_dt(end_ts),
+                _to_dt(run_ts) or datetime.now(tz=timezone.utc),
+                SCHEMA_VERSION, mode,
+            ),
+        )
+        cur.close()
+
+
 def write_backtest_output(
     output: BacktestOutput,
     dsn: str = TIMESCALE_DSN,
@@ -60,27 +95,16 @@ def write_backtest_output(
     m = output.metrics
     counts: dict[str, int] = {}
 
+    write_run_metadata(
+        run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
+        timeframe=meta.timeframe, mode=meta.mode,
+        start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
+        data_source=meta.data_source, sample=meta.sample, dsn=dsn,
+    )
+    counts["backtest_runs"] = 1
+
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-
-        # backtest_runs (upsert)
-        cur.execute(
-            """INSERT INTO backtest_runs
-               (run_id, strategy, symbol, timeframe, sample, data_source,
-                start_ts, end_ts, run_ts, schema_version, mode)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id) DO UPDATE SET
-                 strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
-                 mode=EXCLUDED.mode""",
-            (
-                meta.run_id, meta.strategy, meta.symbol, meta.timeframe,
-                meta.sample, meta.data_source,
-                _to_dt(meta.start_ts), _to_dt(meta.end_ts),
-                _to_dt(meta.run_ts), meta.schema_version or SCHEMA_VERSION,
-                meta.mode,
-            ),
-        )
-        counts["backtest_runs"] = 1
 
         # 清除舊資料（idempotent re-run）
         cur.execute("DELETE FROM strategy_signals WHERE run_id = %s", (meta.run_id,))
