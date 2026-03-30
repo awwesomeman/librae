@@ -55,6 +55,7 @@ def write_run_metadata(
     run_ts: datetime | None = None,
     data_source: str = "binance",
     sample: str | None = None,
+    poll_interval: int | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Write a single run record to backtest_runs (upsert)."""
@@ -63,17 +64,28 @@ def write_run_metadata(
         cur.execute(
             """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, sample, data_source,
-                start_ts, end_ts, run_ts, schema_version, mode)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                start_ts, end_ts, run_ts, schema_version, mode, poll_interval)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
-                 mode=EXCLUDED.mode""",
+                 mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval""",
             (
                 run_id, strategy, symbol, timeframe, sample, data_source,
                 _to_dt(start_ts), _to_dt(end_ts),
                 _to_dt(run_ts) or datetime.now(tz=timezone.utc),
-                SCHEMA_VERSION, mode,
+                SCHEMA_VERSION, mode, poll_interval,
             ),
+        )
+        cur.close()
+
+
+def update_heartbeat(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
+    """Update last_heartbeat timestamp for a running sim/live process."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE backtest_runs SET last_heartbeat = NOW() WHERE run_id = %s",
+            (run_id,),
         )
         cur.close()
 

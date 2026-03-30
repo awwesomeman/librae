@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     end_ts          TIMESTAMPTZ,
     run_ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     schema_version  TEXT,
-    mode            TEXT DEFAULT 'backtest'
+    mode            TEXT DEFAULT 'backtest',
+    poll_interval   INTEGER,          -- seconds between poll cycles (sim/live only)
+    last_heartbeat  TIMESTAMPTZ       -- updated every poll cycle (sim/live only)
 );
 
 -- equity curve（hypertable，chunk = 1 month）

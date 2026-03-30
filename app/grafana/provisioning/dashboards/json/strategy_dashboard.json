@@ -82,6 +82,80 @@
       "panels": []
     },
     {
+      "title": "Status",
+      "type": "stat",
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN last_heartbeat IS NULL THEN -1 WHEN last_heartbeat > now() - (COALESCE(poll_interval, 60) * 2) * interval '1 second' THEN 1 ELSE 0 END AS status FROM backtest_runs WHERE run_id = '${run_id}'",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "Online",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "Offline",
+                  "color": "red",
+                  "index": 1
+                },
+                "-1": {
+                  "text": "-",
+                  "color": "text",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "id": 2,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
+      }
+    },
+    {
       "title": "Unrealized PnL",
       "type": "stat",
       "targets": [
@@ -121,11 +195,11 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 2,
+      "id": 3,
       "gridPos": {
         "h": 4,
-        "w": 12,
-        "x": 0,
+        "w": 8,
+        "x": 8,
         "y": 1
       },
       "datasource": {
@@ -173,11 +247,11 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 3,
+      "id": 4,
       "gridPos": {
         "h": 4,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 1
       },
       "datasource": {
@@ -186,7 +260,7 @@
       }
     },
     {
-      "id": 4,
+      "id": 5,
       "type": "row",
       "title": "Performance Overview",
       "collapsed": false,
@@ -243,7 +317,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 5,
+      "id": 6,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -296,7 +370,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 6,
+      "id": 7,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -356,7 +430,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 7,
+      "id": 8,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -413,7 +487,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 8,
+      "id": 9,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -473,7 +547,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 9,
+      "id": 10,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -525,7 +599,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "id": 10,
+      "id": 11,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -602,7 +676,7 @@
           "placement": "bottom"
         }
       },
-      "id": 11,
+      "id": 12,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -653,7 +727,7 @@
           "placement": "bottom"
         }
       },
-      "id": 12,
+      "id": 13,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -713,7 +787,7 @@
           "placement": "bottom"
         }
       },
-      "id": 13,
+      "id": 14,
       "gridPos": {
         "h": 10,
         "w": 12,
@@ -783,7 +857,7 @@
           }
         ]
       },
-      "id": 14,
+      "id": 15,
       "gridPos": {
         "h": 15,
         "w": 12,
@@ -868,7 +942,7 @@
           "placement": "bottom"
         }
       },
-      "id": 15,
+      "id": 16,
       "gridPos": {
         "h": 5,
         "w": 12,

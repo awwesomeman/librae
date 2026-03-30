@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -82,7 +83,7 @@ def run_sim(args: argparse.Namespace) -> None:
     from librae.notifications.telegram import TelegramAdapter
     from librae.strategy import Action
     from db.timescale_writer import (
-        write_equity_point, write_ohlcv, write_performance,
+        update_heartbeat, write_equity_point, write_ohlcv, write_performance,
         write_run_metadata, write_signal, write_trade,
     )
 
@@ -102,29 +103,34 @@ def run_sim(args: argparse.Namespace) -> None:
             write_run_metadata(
                 run_id=run_id, strategy="trendpullback", symbol=symbols[0],
                 timeframe="H1", mode="sim", start_ts=now, data_source="binance",
+                poll_interval=args.poll_interval,
             )
         except Exception as e:
             _logger.warning("DB write_run_metadata failed: %s", e)
+
+    def _db_write(fn: Callable, *a: Any, **kw: Any) -> None:
+        """Guard DB writes: skip if --no-db, log warning on failure."""
+        if args.no_db:
+            return
+        try:
+            fn(*a, **kw)
+        except Exception as e:
+            _logger.warning("DB %s failed: %s", fn.__name__, e)
 
     def fetcher(symbol: str, timeframe: str, limit: int, **kwargs) -> pd.DataFrame:
         return adapter.fetch_ohlcv(symbol, timeframe, limit, **kwargs)
 
     def on_signal(symbol: str, action: Action, price: float, ts: datetime) -> None:
-        """Write signal to DB."""
-        if args.no_db:
-            return
-        try:
-            signal_type = "entry" if action.type in ("buy", "sell") else "exit"
-            strength = 1.0 if action.type == "buy" else (
-                -1.0 if action.type == "sell" else 0.0
-            )
-            write_signal(
-                ts=ts, run_id=run_id, strategy="trendpullback",
-                symbol=symbol, timeframe="H1", signal_type=signal_type,
-                source="sim", price=price, signal_strength=strength,
-            )
-        except Exception as e:
-            _logger.warning("DB write_signal failed: %s", e)
+        signal_type = "entry" if action.type in ("buy", "sell") else "exit"
+        strength = 1.0 if action.type == "buy" else (
+            -1.0 if action.type == "sell" else 0.0
+        )
+        _db_write(
+            write_signal,
+            ts=ts, run_id=run_id, strategy="trendpullback",
+            symbol=symbol, timeframe="H1", signal_type=signal_type,
+            source="sim", price=price, signal_strength=strength,
+        )
 
     strategy = TrendPullbackStrategy(max_hold_bars=args.max_hold_bars)
     executor = LiveExecutor(
@@ -133,43 +139,27 @@ def run_sim(args: argparse.Namespace) -> None:
     )
 
     def on_bar(rid: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
-        """Write equity point to DB on each completed bar."""
-        if args.no_db:
-            return
-        try:
-            write_equity_point(ts=ts, run_id=rid, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
-        except Exception as e:
-            _logger.warning("DB write_equity_point failed: %s", e)
+        _db_write(write_equity_point, ts=ts, run_id=rid, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
 
     def on_trade(trade: dict) -> None:
-        """Write trade to DB, then refresh KPI metrics."""
-        if args.no_db:
-            return
-        try:
-            write_trade(**trade)
-        except Exception as e:
-            _logger.warning("DB write_trade failed: %s", e)
+        _db_write(write_trade, **trade)
         _refresh_performance()
 
     def on_ohlcv(rid: str, symbol: str, timeframe: str, bar: dict, ts: datetime) -> None:
-        """Write single OHLCV bar to DB."""
-        if args.no_db:
-            return
-        try:
-            row = pd.DataFrame([{
-                "ts": ts,
-                "open": bar.get("open", 0),
-                "high": bar.get("high", 0),
-                "low": bar.get("low", 0),
-                "close": bar.get("close", 0),
-                "volume": bar.get("volume", 0),
-            }]).set_index("ts")
-            write_ohlcv(row, symbol, timeframe, rid, source="sim")
-        except Exception as e:
-            _logger.warning("DB write_ohlcv failed: %s", e)
+        row = pd.DataFrame([{
+            "ts": ts,
+            "open": bar.get("open", 0),
+            "high": bar.get("high", 0),
+            "low": bar.get("low", 0),
+            "close": bar.get("close", 0),
+            "volume": bar.get("volume", 0),
+        }]).set_index("ts")
+        _db_write(write_ohlcv, row, symbol, timeframe, rid, source="sim")
+
+    def on_heartbeat(rid: str) -> None:
+        _db_write(update_heartbeat, rid)
 
     def _refresh_performance() -> None:
-        """Recompute KPI metrics from equity curve and write to DB."""
         if args.no_db:
             return
         try:
@@ -221,6 +211,7 @@ def run_sim(args: argparse.Namespace) -> None:
         on_bar=on_bar,
         on_trade=on_trade,
         on_ohlcv=on_ohlcv,
+        on_heartbeat=on_heartbeat,
     )
 
     print(f"Sim started: symbols={symbols}, poll={args.poll_interval}s, run_id={run_id}")
@@ -301,7 +292,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", default="data/backtests")
     p.add_argument("--no-annualize", action="store_true",
                    help="skip annualized metrics (sharpe, sortino, calmar, CAGR)")
-    p.add_argument("--poll-interval", type=float, default=60.0,
+    p.add_argument("--poll-interval", type=int, default=60,
                    help="seconds between poll cycles (sim mode)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")

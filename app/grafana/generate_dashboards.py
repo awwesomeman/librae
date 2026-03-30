@@ -66,6 +66,44 @@ def _stat_panel(
     }
 
 
+# WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat)
+_STATUS_SQL = (
+    "SELECT CASE"
+    " WHEN last_heartbeat IS NULL THEN -1"
+    " WHEN last_heartbeat > now() - (COALESCE(poll_interval, 60) * 2) * interval '1 second' THEN 1"
+    " ELSE 0"
+    " END AS status"
+    " FROM backtest_runs WHERE run_id = '${run_id}'"
+)
+
+STATUS_PANEL: dict = {
+    "_type": "kpi",
+    "title": "Status",
+    "type": "stat",
+    "h": 4,
+    "w": 4,
+    "targets": [_stat_target(_STATUS_SQL)],
+    "fieldConfig": {
+        "defaults": {
+            "mappings": [
+                {"type": "value", "options": {
+                    "1": {"text": "Online", "color": "green", "index": 0},
+                    "0": {"text": "Offline", "color": "red", "index": 1},
+                    "-1": {"text": "-", "color": "text", "index": 2},
+                }},
+            ],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+            "color": {"mode": "fixed"},
+        },
+        "overrides": [],
+    },
+    "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+    },
+}
+
 BASE_PANELS_DEF: list[dict] = [
     {"_type": "row", "title": "Performance Overview"},
     _stat_panel(
@@ -282,21 +320,20 @@ BASE_PANELS_DEF: list[dict] = [
 
 EXTRA_PANELS: list[dict] = [
     {"_type": "row", "title": "Live / Sim Only"},
+    {**STATUS_PANEL, "w": 8},
     _stat_panel(
         "Unrealized PnL",
         "SELECT 0 AS \"Unrealized PnL\"  -- TODO: replace placeholder",
         None,
         [{"color": "blue", "value": None}],
-        layout="half",
-        w=12,
+        w=8,
     ),
     _stat_panel(
         "Current Position",
         "SELECT 'N/A' AS \"Position\"  -- TODO: replace placeholder",
         None,
         [{"color": "blue", "value": None}],
-        layout="half",
-        w=12,
+        w=8,
     ),
 ]
 

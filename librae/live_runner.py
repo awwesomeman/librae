@@ -41,6 +41,8 @@ class LiveRunner:
         on_trade: Optional callback(trade_dict) called on position close.
         on_ohlcv: Optional callback(run_id, symbol, timeframe, bar_dict, ts)
             called every completed bar for OHLCV persistence.
+        on_heartbeat: Optional callback(run_id) called every poll cycle
+            to update liveness status.
     """
 
     def __init__(
@@ -60,6 +62,7 @@ class LiveRunner:
         on_bar: Callable[..., None] | None = None,
         on_trade: Callable[..., None] | None = None,
         on_ohlcv: Callable[..., None] | None = None,
+        on_heartbeat: Callable[..., None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._symbols = symbols
@@ -74,6 +77,7 @@ class LiveRunner:
         self._on_bar = on_bar
         self._on_trade = on_trade
         self._on_ohlcv = on_ohlcv
+        self._on_heartbeat = on_heartbeat
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._last_bar_ts: dict[str, datetime] = {}
@@ -128,6 +132,9 @@ class LiveRunner:
 
     def _poll_cycle(self) -> None:
         """Single poll cycle: fetch data for each symbol, detect new bars, run strategy."""
+        if self._on_heartbeat:
+            self._on_heartbeat(self._run_id)
+
         for symbol in self._symbols:
             df = self._fetch_with_cache(symbol)
             if df is None or df.empty:
