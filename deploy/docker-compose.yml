@@ -43,7 +43,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
     command: >
-      python -m strategies.trendpullback.run
+      python -m strategies.${SIM_STRATEGY:-trendpullback}.run
       --mode sim
       --symbol ${SIM_SYMBOL:-BTCUSDT}
       --poll-interval ${SIM_POLL_INTERVAL:-60}
