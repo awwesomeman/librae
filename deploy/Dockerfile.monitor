@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY pyproject.toml .
+RUN pip install --no-cache-dir . ccxt
+
+# Copy source
+COPY librae/ librae/
+COPY strategies/ strategies/
+COPY brokers/ brokers/
+COPY pipeline/ pipeline/
+COPY db/ db/
+
+CMD ["python", "-m", "strategies.trendpullback.run", "--mode", "monitor"]
