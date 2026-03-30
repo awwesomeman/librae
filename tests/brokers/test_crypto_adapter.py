@@ -78,7 +78,7 @@ def test_fetch_ohlcv_dataframe_format(readonly_adapter, mock_ccxt_exchange):
         assert pd.api.types.is_numeric_dtype(df[col])
 
     # Exchange was called with correct args
-    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("BTC/USDT", timeframe="1h", limit=3)
+    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("BTC/USDT", timeframe="1h", limit=3, since=None)
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +88,11 @@ def test_fetch_ohlcv_dataframe_format(readonly_adapter, mock_ccxt_exchange):
 def test_symbol_passthrough(readonly_adapter, mock_ccxt_exchange):
     """CryptoAdapter passes symbol directly to CCXT (BTC/USDT format)."""
     readonly_adapter.fetch_ohlcv("BTC/USDT", "4h", limit=10)
-    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("BTC/USDT", timeframe="4h", limit=10)
+    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("BTC/USDT", timeframe="4h", limit=10, since=None)
 
     mock_ccxt_exchange.fetch_ohlcv.reset_mock()
     readonly_adapter.fetch_ohlcv("ETH/USDT", "1d", limit=50)
-    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("ETH/USDT", timeframe="1d", limit=50)
+    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("ETH/USDT", timeframe="1d", limit=50, since=None)
 
 
 # ---------------------------------------------------------------------------

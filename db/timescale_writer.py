@@ -1,7 +1,7 @@
-"""TimescaleDB writer for BacktestOutput.
+"""TimescaleDB writer for BacktestOutput and live signals.
 
 Writes to tables: backtest_runs, equity_curve, trade_blotter,
-strategy_signals, strategy_performance.
+strategy_signals, strategy_performance, ohlcv.
 """
 from __future__ import annotations
 
@@ -259,3 +259,42 @@ def write_ohlcv(
         cur.close()
 
     return len(rows)
+
+
+def write_signal(
+    ts: datetime,
+    run_id: str,
+    strategy: str,
+    symbol: str,
+    timeframe: str,
+    signal_type: str,
+    source: str,
+    price: float,
+    signal_strength: float = 1.0,
+    confidence: float = 0.5,
+    quantity: float = 0.0,
+    dsn: str = TIMESCALE_DSN,
+) -> bool:
+    """Write a single signal row to strategy_signals.
+
+    Uses ON CONFLICT DO NOTHING for idempotent re-inserts (e.g. monitor restart).
+    Returns True if a row was inserted, False if it was a duplicate.
+    """
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO strategy_signals
+               (ts, run_id, strategy, symbol, timeframe,
+                signal_type, source, price, signal_strength,
+                confidence, quantity)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (ts, run_id, symbol, signal_type) DO NOTHING""",
+            (
+                _to_dt(ts), run_id, strategy, symbol, timeframe,
+                signal_type, source, price, signal_strength,
+                confidence, quantity,
+            ),
+        )
+        inserted = cur.rowcount > 0
+        cur.close()
+    return inserted

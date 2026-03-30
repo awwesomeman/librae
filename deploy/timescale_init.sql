@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS strategy_signals (
 );
 SELECT create_hypertable('strategy_signals', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_signals_run_id ON strategy_signals(run_id, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_unique ON strategy_signals(ts, run_id, symbol, signal_type);
 
 -- strategy performance（one row per run）
 CREATE TABLE IF NOT EXISTS strategy_performance (

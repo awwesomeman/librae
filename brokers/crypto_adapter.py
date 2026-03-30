@@ -11,6 +11,7 @@ using the ``CRYPTO_`` prefix convention (``CRYPTO_API_KEY``,
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +19,8 @@ from typing import Any
 import pandas as pd
 
 from .base import AdapterInfo, CredentialConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _require_ccxt() -> object:
@@ -30,6 +33,14 @@ def _require_ccxt() -> object:
             "ccxt is required for CryptoAdapter. "
             "Install it with: pip install ccxt"
         ) from e
+
+
+def _timeframe_to_delta(timeframe: str) -> pd.Timedelta:
+    """Convert CCXT timeframe string to a pandas Timedelta."""
+    unit = timeframe[-1]
+    value = int(timeframe[:-1])
+    mapping = {"m": "min", "h": "h", "d": "D", "w": "W"}
+    return pd.Timedelta(value, unit=mapping.get(unit, unit))
 
 
 @dataclass
@@ -111,15 +122,44 @@ class CryptoAdapter:
         symbol: str,
         timeframe: str,
         limit: int = 200,
+        *,
+        since: int | None = None,
+        drop_incomplete: bool = False,
     ) -> pd.DataFrame:
         """Fetch OHLCV candles and return a standardised DataFrame.
+
+        Args:
+            symbol: Trading pair (e.g. "BTC/USDT").
+            timeframe: Candle interval (e.g. "1h", "1d").
+            limit: Max number of candles to fetch.
+            since: Start timestamp in milliseconds (CCXT convention).
+            drop_incomplete: If True, drop the last candle which may still
+                be forming. Essential for live monitoring to avoid computing
+                indicators on partial data.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is a UTC-aware ``datetime``.
         """
-        raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        raw = self._exchange.fetch_ohlcv(
+            symbol, timeframe=timeframe, limit=limit, since=since,
+        )
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+
+        if len(df) < limit and since is None:
+            logger.warning(
+                "fetch_ohlcv returned %d bars (requested %d) for %s %s",
+                len(df), limit, symbol, timeframe,
+            )
+
+        if drop_incomplete and len(df) > 0:
+            now = datetime.now(tz=timezone.utc)
+            last_ts = df["ts"].iloc[-1]
+            # WHY: if the last bar's timestamp is within the current candle
+            # interval, it's still forming and should be dropped
+            if last_ts.to_pydatetime() > now - _timeframe_to_delta(timeframe):
+                df = df.iloc[:-1]
+
         return df
 
     # ------------------------------------------------------------------
