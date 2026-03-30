@@ -82,31 +82,35 @@ python -m strategies.trendpullback.run --mode sim --symbol BTCUSDT
 #   --no-db                  不寫 DB（純測試）
 ```
 
-**Docker 部署（推薦）**：
+**Docker 部署**：
 
 ```bash
 cd deploy
-# .env 設定 Telegram 推播（選填）
-# TELEGRAM_ENABLED=true
-# TELEGRAM_BOT_TOKEN=<token>
-# TELEGRAM_CHAT_ID=<chat_id>
+cp .env.example .env
+# 編輯 .env 填入 Telegram credentials（選填）
 
-docker compose up -d sim    # 啟動 sim service
-docker logs -f quant_sim    # 查看運行狀態
+# 啟動 sim（支援多策略多標的同時跑）
+./sim_start.sh trendpullback BTCUSDT          # 起 TrendPullback 監控 BTC
+./sim_start.sh trendpullback ETHUSDT 120      # 同時起另一個監控 ETH，poll=120s
+
+# 停止
+./sim_stop.sh trendpullback BTCUSDT           # 停止指定策略+標的
+./sim_stop.sh --all                           # 停止所有 sim
 ```
 
-Sim service 環境變數：
+腳本參數：`sim_start.sh <strategy> [symbol] [poll_interval]`
 
-| 變數 | 預設值 | 說明 |
+| 參數 | 預設值 | 說明 |
 |------|--------|------|
-| `SIM_STRATEGY` | `trendpullback` | 策略名稱（對應 `strategies/<name>/run.py`） |
-| `SIM_SYMBOL` | `BTCUSDT` | 監控標的 |
-| `SIM_POLL_INTERVAL` | `60` | 輪詢間隔（秒） |
-| `TELEGRAM_ENABLED` | `false` | 啟用 Telegram 推播 |
+| `strategy` | （必填） | 策略名稱（對應 `strategies/<name>/run.py`） |
+| `symbol` | `BTCUSDT` | 監控標的（多標的用逗號分隔，如 `BTCUSDT,ETHUSDT`） |
+| `poll_interval` | `60` | 輪詢間隔（秒） |
 
-監控頻率說明：sim service 每 `poll_interval` 秒檢查一次是否有新的完成 bar。策略時間框架決定實際觸發頻率（如 H1 策略每小時觸發一次信號判斷）。Grafana Status panel 以 2 倍策略時間框架為閾值判斷 Online/Offline。
+Telegram 等環境變數從 `deploy/.env` 讀取。
 
-Grafana → Strategy Dashboard → 選 mode=sim 查看即時數據。
+**監控頻率**：sim service 每 `poll_interval` 秒檢查一次是否有新的完成 bar。策略時間框架決定實際信號觸發頻率（如 H1 策略每小時觸發一次）。Grafana Status panel 以 2 倍策略時間框架為閾值判斷 Online/Offline。
+
+**查看結果**：Grafana → Strategy Dashboard → 選 mode=sim → 選 run_id。
 
 ---
 
@@ -151,8 +155,8 @@ cd deploy
 # 只啟動基礎服務（DB + Grafana）
 docker compose up -d timescaledb grafana
 
-# 加上 sim service
-docker compose up -d sim
+# 加上 sim（用腳本）
+./sim_start.sh trendpullback BTCUSDT
 ```
 
 ---

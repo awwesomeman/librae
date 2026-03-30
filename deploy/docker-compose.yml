@@ -32,27 +32,6 @@ services:
     networks:
       - quant_network
 
-  sim:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.sim
-    container_name: quant_sim
-    environment:
-      - TIMESCALE_DSN=postgresql://quant:quant_secret@timescaledb:5432/quant
-      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-false}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-    command: >
-      python -m strategies.${SIM_STRATEGY:-trendpullback}.run
-      --mode sim
-      --symbol ${SIM_SYMBOL:-BTCUSDT}
-      --poll-interval ${SIM_POLL_INTERVAL:-60}
-    depends_on:
-      - timescaledb
-    restart: unless-stopped
-    networks:
-      - quant_network
-
   tailscale:
     image: tailscale/tailscale:latest
     container_name: tailscale
@@ -71,6 +50,7 @@ services:
 
 networks:
   quant_network:
+    name: quant_network
     driver: bridge
 
 volumes:

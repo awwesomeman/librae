@@ -14,5 +14,4 @@ COPY brokers/ brokers/
 COPY pipeline/ pipeline/
 COPY db/ db/
 
-CMD ["python", "-m", "strategies.trendpullback.run", "--mode", "sim"]
-# NOTE: docker-compose command overrides this CMD with SIM_STRATEGY env var
+# No CMD — sim_start.sh passes the command via docker run
