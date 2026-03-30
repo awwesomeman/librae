@@ -21,7 +21,7 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: quant_timescaledb
     ports:
-      - "100.123.243.93:5432:5432"
+      - "${TSDB_BIND:-127.0.0.1}:5432:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
     environment:
