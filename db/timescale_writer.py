@@ -322,3 +322,71 @@ def write_signal(
         inserted = cur.rowcount > 0
         cur.close()
     return inserted
+
+
+def write_equity_point(
+    ts: datetime,
+    run_id: str,
+    equity: float,
+    drawdown: float = 0.0,
+    ret_1d: float = 0.0,
+    benchmark_equity: float | None = None,
+    benchmark_ret_1d: float | None = None,
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Write a single equity curve point (upsert by ts + run_id)."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO equity_curve
+               (ts, run_id, equity, benchmark_equity, drawdown, ret_1d, benchmark_ret_1d)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id, ts) DO UPDATE SET
+                 equity=EXCLUDED.equity, drawdown=EXCLUDED.drawdown,
+                 ret_1d=EXCLUDED.ret_1d""",
+            (
+                _to_dt(ts), run_id, equity, benchmark_equity,
+                drawdown, ret_1d, benchmark_ret_1d,
+            ),
+        )
+        cur.close()
+
+
+def write_trade(
+    run_id: str,
+    trade_id: str,
+    entry_ts: datetime,
+    exit_ts: datetime,
+    symbol: str,
+    side: str,
+    entry_price: float,
+    exit_price: float,
+    quantity: float,
+    gross_pnl: float,
+    net_pnl: float,
+    gross_return: float,
+    net_return: float,
+    holding_bars: int,
+    commission: float = 0.0,
+    slippage: float = 0.0,
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Write a single trade to trade_blotter (upsert by trade_id)."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO trade_blotter
+               (trade_id, run_id, entry_ts, exit_ts, symbol, side,
+                entry_price, exit_price, quantity,
+                gross_pnl, net_pnl, gross_return, net_return,
+                commission, slippage, holding_bars)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (trade_id) DO NOTHING""",
+            (
+                trade_id, run_id, _to_dt(entry_ts), _to_dt(exit_ts),
+                symbol, side, entry_price, exit_price, quantity,
+                gross_pnl, net_pnl, gross_return, net_return,
+                commission, slippage, holding_bars,
+            ),
+        )
+        cur.close()

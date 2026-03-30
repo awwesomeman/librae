@@ -30,11 +30,15 @@ class LiveRunner:
         fetcher: Callable(symbol, timeframe, limit, drop_incomplete=True) -> DataFrame.
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         executor: LiveExecutor for handling actions.
+        run_id: Unique run identifier for DB writes.
         timeframe: Candle interval (e.g. "1h").
         warmup_bars: Number of historical bars for indicator warm-up.
         initial_balance: Starting cash for position sizing.
         poll_interval: Seconds between poll cycles.
         on_signal: Optional callback(symbol, action, price, ts).
+        on_bar: Optional callback(run_id, symbol, ts, bar, equity, drawdown)
+            called every completed bar for DB persistence.
+        on_trade: Optional callback(run_id, trade_dict) called on position close.
     """
 
     def __init__(
@@ -45,27 +49,37 @@ class LiveRunner:
         feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
         executor: LiveExecutor,
         *,
+        run_id: str = "",
         timeframe: str = "1h",
         warmup_bars: int = 720,
         initial_balance: float = 100_000.0,
         poll_interval: float = 60.0,
         on_signal: Callable[..., None] | None = None,
+        on_bar: Callable[..., None] | None = None,
+        on_trade: Callable[..., None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._symbols = symbols
         self._fetcher = fetcher
         self._feature_fn = feature_fn
         self._executor = executor
+        self._run_id = run_id
         self._timeframe = timeframe
         self._warmup_bars = warmup_bars
         self._poll_interval = poll_interval
         self._on_signal = on_signal
+        self._on_bar = on_bar
+        self._on_trade = on_trade
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._last_bar_ts: dict[str, datetime] = {}
+        self._last_prices: dict[str, float] = {}
         self._positions: dict[str, Position] = {}
         self._bars_held: dict[str, int] = {}
         self._cash: float = initial_balance
+        self._equity_peak: float = initial_balance
+        self._prev_equity: float = initial_balance
+        self._trade_count: int = 0
         self._bar_indices: dict[str, int] = {}
         self._running: bool = False
 
@@ -172,8 +186,9 @@ class LiveRunner:
             return
 
         last_row = featured.iloc[-1]
-        bar = {col: last_row[col] for col in featured.columns}
+        bar = last_row.to_dict()
         price = float(bar.get("close", 0.0))
+        self._last_prices[symbol] = price
 
         # Rebuild Position with updated bars_held and unrealized_pnl
         self._update_positions(symbol, price)
@@ -203,6 +218,7 @@ class LiveRunner:
                 self._cash += price * pos.quantity
                 self._executor.notify_exit(symbol, price)
                 logger.info("Position closed: %s @ %.2f", symbol, price)
+                self._record_trade(symbol, pos, price, ts)
                 if self._on_signal:
                     self._on_signal(symbol, action, price, ts)
                 continue
@@ -229,6 +245,9 @@ class LiveRunner:
                 if self._on_signal:
                     self._on_signal(symbol, action, price, ts)
 
+        # Record equity after processing all actions
+        self._record_equity(ts)
+
     def _update_positions(self, symbol: str, current_price: float) -> None:
         """Rebuild Position with current bars_held and unrealized_pnl."""
         if symbol not in self._positions:
@@ -248,3 +267,59 @@ class LiveRunner:
             bars_held=bars_held,
             unrealized_pnl=unrealized_pnl,
         )
+
+    def _calc_equity(self) -> float:
+        """Total equity = cash + market value of all positions (per-symbol prices)."""
+        cm = self._executor.cost_model
+        mtm = 0.0
+        for sym, pos in self._positions.items():
+            price = self._last_prices.get(sym, pos.entry_price)
+            mtm += price * pos.quantity * cm.multiplier
+        return self._cash + mtm
+
+    def _record_equity(self, ts: datetime) -> None:
+        """Calculate equity + drawdown and call on_bar callback."""
+        equity = self._calc_equity()
+        self._equity_peak = max(self._equity_peak, equity)
+        drawdown = (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
+        ret_1d = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
+        self._prev_equity = equity
+
+        if self._on_bar:
+            self._on_bar(self._run_id, ts, equity, drawdown, ret_1d)
+
+    def _record_trade(self, symbol: str, pos: Position, exit_price: float, ts: datetime) -> None:
+        """Calculate trade PnL using cost model and call on_trade callback."""
+        cm = self._executor.cost_model
+        direction = -1.0 if pos.side == "short" else 1.0
+        gross_pnl = (exit_price - pos.entry_price) * pos.quantity * cm.multiplier * direction
+        commission = cm.calc_commission(exit_price, pos.quantity) + cm.calc_commission(pos.entry_price, pos.quantity)
+        slippage = cm.calc_slippage(pos.quantity) * 2
+        net_pnl = gross_pnl - commission - slippage
+
+        entry_notional = pos.entry_price * pos.quantity * cm.multiplier
+        gross_return = (gross_pnl / entry_notional * 100) if entry_notional > 0 else 0.0
+        net_return = (net_pnl / entry_notional * 100) if entry_notional > 0 else 0.0
+
+        self._trade_count += 1
+        trade_id = f"{self._run_id}-t{self._trade_count:04d}"
+
+        if self._on_trade:
+            self._on_trade({
+                "run_id": self._run_id,
+                "trade_id": trade_id,
+                "entry_ts": pos.entry_ts,
+                "exit_ts": ts,
+                "symbol": symbol,
+                "side": pos.side,
+                "entry_price": pos.entry_price,
+                "exit_price": exit_price,
+                "quantity": pos.quantity,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "gross_return": gross_return,
+                "net_return": net_return,
+                "holding_bars": self._bars_held.get(symbol, 0),
+                "commission": commission,
+                "slippage": slippage,
+            })

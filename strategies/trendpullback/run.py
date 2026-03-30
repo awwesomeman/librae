@@ -78,7 +78,9 @@ def run_monitor(args: argparse.Namespace) -> None:
     from librae.live_runner import LiveRunner
     from librae.notifications.telegram import TelegramAdapter
     from librae.strategy import Action
-    from db.timescale_writer import write_run_metadata, write_signal
+    from db.timescale_writer import (
+        write_equity_point, write_run_metadata, write_signal, write_trade,
+    )
 
     from .utils import prepare_signals
 
@@ -126,17 +128,38 @@ def run_monitor(args: argparse.Namespace) -> None:
         strategy_name="TrendPullback",
     )
 
+    def on_bar(rid: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
+        """Write equity point to DB on each completed bar."""
+        if args.no_db:
+            return
+        try:
+            write_equity_point(ts=ts, run_id=rid, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
+        except Exception as e:
+            _logger.warning("DB write_equity_point failed: %s", e)
+
+    def on_trade(trade: dict) -> None:
+        """Write trade to DB on position close."""
+        if args.no_db:
+            return
+        try:
+            write_trade(**trade)
+        except Exception as e:
+            _logger.warning("DB write_trade failed: %s", e)
+
     runner = LiveRunner(
         strategy=strategy,
         symbols=symbols,
         fetcher=fetcher,
         feature_fn=prepare_signals,
         executor=executor,
+        run_id=run_id,
         timeframe="1h",
         warmup_bars=720,
         initial_balance=args.initial_balance,
         poll_interval=args.poll_interval,
         on_signal=on_signal,
+        on_bar=on_bar,
+        on_trade=on_trade,
     )
 
     print(f"Monitor started: symbols={symbols}, poll={args.poll_interval}s, run_id={run_id}")

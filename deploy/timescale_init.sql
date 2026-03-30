@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique ON equity_curve(ts, run_id);
 
 -- trade blotter
 CREATE TABLE IF NOT EXISTS trade_blotter (
