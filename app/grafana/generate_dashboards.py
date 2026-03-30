@@ -205,13 +205,14 @@ BASE_PANELS_DEF: list[dict] = [
                 " ROW_NUMBER() OVER (ORDER BY entry_ts) AS \"#\","
                 " entry_ts AS \"Entry Time\","
                 " exit_ts AS \"Exit Time\","
-                " CASE WHEN side='buy' THEN 'Long' ELSE 'Short' END AS \"Side\","
-                " ROUND(quantity::numeric,4) AS \"Qty\","
+                " CASE WHEN side='long' THEN ROUND(quantity::numeric,4)"
+                " ELSE -ROUND(quantity::numeric,4) END AS \"Qty\","
                 " ROUND(entry_price::numeric,2) AS \"Entry Price\","
                 " ROUND(exit_price::numeric,2) AS \"Exit Price\","
-                " holding_bars AS \"Bars\","
                 " ROUND(gross_return::numeric,2) AS \"Gross Return %\","
-                " ROUND(net_return::numeric,2) AS \"Net Return %\""
+                " ROUND(net_return::numeric,2) AS \"Net Return %\","
+                " holding_bars AS \"Periods\","
+                " SPLIT_PART(trade_id, '-t', 2)::int AS \"Order ID\""
                 " FROM trade_blotter WHERE run_id = '${run_id}'"
                 " AND ($__timeFilter(entry_ts) OR $__timeFilter(exit_ts))"
                 " ORDER BY entry_ts",
@@ -223,7 +224,7 @@ BASE_PANELS_DEF: list[dict] = [
             "defaults": {},
             "overrides": [
                 {
-                    "matcher": {"id": "byName", "options": "Gross Return %"},
+                    "matcher": {"id": "byName", "options": "Net Return %"},
                     "properties": [
                         {
                             "id": "thresholds",
