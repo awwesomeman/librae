@@ -1,8 +1,8 @@
 # quant-strategy-lab Implementation Plan
 
-> Updated: 2026-03-28
+> Updated: 2026-03-30
 > Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 1 完成，Phase 2 進行中，brokers/ adapter 重構完成
+> Status: Phase 2 接近完成（剩 ≥2 策略對比），Grafana 整合 + look-ahead bias 測試已完成
 
 ---
 
@@ -103,9 +103,9 @@ quant-strategy-lab/
 | Market Config | `librae/config/markets.yaml` | 兩層：MarketConfig + InstrumentConfig |
 | 執行層 | CCXT / Shioaji | brokers/ 三層 adapter + CryptoAdapter |
 | Time-series DB | TimescaleDB | 唯一資料源 |
-| Dashboards | Streamlit + Grafana | 統一在 app/ |
+| Dashboards | Streamlit + Grafana（單一 Strategy Dashboard，mode 篩選） | 統一在 app/ |
 | Deployment | docker-compose + Tailscale | VPS 或 GCE |
-| Testing | pytest 201 tests | 按模組分目錄 |
+| Testing | pytest 206 tests | 按模組分目錄（含 look-ahead bias） |
 
 ### 設計原則
 
@@ -135,7 +135,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | signal_engine pure function（trendpullback） | ✅ |
 | Market Config 兩層架構（markets.yaml） | ✅ |
 | TimescaleDB 完全取代 InfluxDB | ✅ |
-| Grafana 三板（Python generator） | ✅ |
+| Grafana 統一 Strategy Dashboard（Python generator + mode 篩選） | ✅ |
 | Streamlit（TimescaleDB 讀取） | ✅ |
 | Scheduler（APScheduler，mode=sim） | ✅ |
 
@@ -152,7 +152,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | runners.py make_backtest_fn() factory | ✅ |
 | 目錄重組：librae/ + strategies/ + pipeline/ + brokers/ + monitoring/ | ✅ |
 | tests 按模組分目錄 | ✅ |
-| 201 tests passed | ✅ |
+| 206 tests passed | ✅ |
 
 ### Phase 2 — E2E Backtest Pipeline（共同基礎）← 當前
 
@@ -168,8 +168,8 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | TrendPullback BaseStrategy 子類 | ✅ |
 | `strategies/trendpullback/run.py` CLI（backtest + DB write） | ✅ |
 | 端到端驗證：fetch → ETL → 策略 → 回測 → JSON → DB → 可讀回 | ✅ |
-| Grafana dashboard 確認可看 | ⏳ |
-| 補回 look-ahead bias 測試（新 API） | ⏳ |
+| Grafana 統一 Strategy Dashboard（mode 篩選 + 可摺疊 row + Trade Detail 修正） | ✅ |
+| 補回 look-ahead bias 測試（信號穩定性 + D1 merge + 引擎時機，9 tests） | ✅ |
 | ≥2 策略可比較（Backtest 板 run_id 對比） | ⏳ |
 
 ### Phase 3 — Signal Subscription（Goal 1 MVP）— 首個市場: Crypto (BTC)
