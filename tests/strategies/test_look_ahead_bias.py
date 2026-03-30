@@ -20,9 +20,8 @@ from librae.strategy import Action, BaseStrategy
 from strategies.trendpullback.utils import (
     _merge_daily_gate,
     compute_daily_gate,
-    compute_entry_conditions,
-    compute_exit_conditions,
     compute_features,
+    prepare_signals,
     resample_to_daily,
 )
 
@@ -53,22 +52,8 @@ def _make_ohlcv(n: int = N_BARS, seed: int = 42) -> pd.DataFrame:
 
 
 def _prepare_signals(h1_base: pd.DataFrame) -> pd.DataFrame:
-    """Run full feature + signal pipeline on H1 data.
-
-    Requires ≥480 H1 bars (20 days) so D1 EMA20 has enough data.
-    """
-    h1 = compute_features(h1_base)
-    d1 = resample_to_daily(h1_base)
-    if len(d1) < 20:
-        # WHY: pandas_ta EMA returns None when rows < period, causing TypeError
-        # in _merge_daily_gate. Skip daily gate when data is too short.
-        h1["daily_trend"] = True
-    else:
-        d1 = compute_daily_gate(d1)
-        h1 = _merge_daily_gate(h1, d1)
-    h1["entry_signal"] = compute_entry_conditions(h1).values
-    h1["exit_signal"] = compute_exit_conditions(h1).values
-    return h1
+    """Delegate to shared prepare_signals in utils."""
+    return prepare_signals(h1_base)
 
 
 def _zero_cost_executor() -> BacktestExecutor:

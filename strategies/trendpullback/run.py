@@ -69,8 +69,67 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 
 def run_monitor(args: argparse.Namespace) -> None:
-    """Run monitor mode (signal only, no orders). TODO: implement with LiveExecutor."""
-    raise NotImplementedError("Monitor mode not yet implemented. Use experiments/ for now.")
+    """Run monitor mode — poll for signals, send Telegram, write to DB."""
+    import logging as _logging
+
+    from brokers.crypto_adapter import CryptoAdapter
+    from librae.cost_model import CostModel
+    from librae.live_executor import LiveExecutor
+    from librae.live_runner import LiveRunner
+    from librae.notifications.telegram import TelegramAdapter
+    from librae.strategy import Action
+    from db.timescale_writer import write_signal
+
+    from .utils import prepare_signals
+
+    _logger = _logging.getLogger(__name__)
+    symbols = [s.strip() for s in args.symbol.split(",")]
+    adapter = CryptoAdapter()
+    telegram = TelegramAdapter()
+    cost_model = CostModel.from_instrument(f"crypto:{symbols[0]}")
+    run_id = generate_run_id(f"trendpullback_{args.market}", symbols[0])
+
+    def fetcher(symbol: str, timeframe: str, limit: int, **kwargs) -> pd.DataFrame:
+        return adapter.fetch_ohlcv(symbol, timeframe, limit, **kwargs)
+
+    def on_signal(symbol: str, action: Action, price: float, ts: datetime) -> None:
+        """Write signal to DB."""
+        if args.no_db:
+            return
+        try:
+            signal_type = "entry" if action.type in ("buy", "sell") else "exit"
+            strength = 1.0 if action.type == "buy" else (
+                -1.0 if action.type == "sell" else 0.0
+            )
+            write_signal(
+                ts=ts, run_id=run_id, strategy="trendpullback",
+                symbol=symbol, timeframe="H1", signal_type=signal_type,
+                source="live", price=price, signal_strength=strength,
+            )
+        except Exception as e:
+            _logger.warning("DB write_signal failed: %s", e)
+
+    strategy = TrendPullbackStrategy(max_hold_bars=args.max_hold_bars)
+    executor = LiveExecutor(
+        cost_model, simulation=True, telegram=telegram,
+        strategy_name="TrendPullback",
+    )
+
+    runner = LiveRunner(
+        strategy=strategy,
+        symbols=symbols,
+        fetcher=fetcher,
+        feature_fn=prepare_signals,
+        executor=executor,
+        timeframe="1h",
+        warmup_bars=720,
+        initial_balance=args.initial_balance,
+        poll_interval=args.poll_interval,
+        on_signal=on_signal,
+    )
+
+    print(f"Monitor started: symbols={symbols}, poll={args.poll_interval}s, run_id={run_id}")
+    runner.run()
 
 
 def run_live(args: argparse.Namespace) -> None:
@@ -147,6 +206,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", default="data/backtests")
     p.add_argument("--no-annualize", action="store_true",
                    help="skip annualized metrics (sharpe, sortino, calmar, CAGR)")
+    p.add_argument("--poll-interval", type=float, default=60.0,
+                   help="seconds between poll cycles (monitor mode)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     return p.parse_args()

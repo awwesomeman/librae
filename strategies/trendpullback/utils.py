@@ -117,6 +117,25 @@ def compute_exit_conditions(df: pd.DataFrame, params: dict | None = None) -> pd.
 # ---------------------------------------------------------------------------
 
 
+def prepare_signals(h1_base: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
+    """Add features + signals to an H1 OHLCV DataFrame.
+
+    Expects h1_base with DatetimeIndex named 'ts' and OHLCV columns.
+    Returns the same DataFrame with added indicator and signal columns.
+    Handles short datasets (< 20 D1 bars) by skipping daily gate.
+    """
+    h1 = compute_features(h1_base, params)
+    d1 = resample_to_daily(h1_base)
+    if len(d1) >= 20:
+        d1 = compute_daily_gate(d1, params)
+        h1 = _merge_daily_gate(h1, d1)
+    else:
+        h1["daily_trend"] = True
+    h1["entry_signal"] = compute_entry_conditions(h1, params).values
+    h1["exit_signal"] = compute_exit_conditions(h1, params).values
+    return h1
+
+
 def fetch_and_prepare(
     symbol: str = "BTCUSDT",
     months: int = 6,
