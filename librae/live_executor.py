@@ -1,7 +1,7 @@
-"""LiveExecutor — signal-only executor for live monitoring.
+"""LiveExecutor — executor for sim and live modes.
 
-simulation=True: logs signal, sends Telegram. No real orders.
-simulation=False: reserved for Phase 4 (raises NotImplementedError).
+simulation=True (sim): logs signal, sends Telegram. No real orders.
+simulation=False (live): reserved for Phase 4 (raises NotImplementedError).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class LiveExecutor:
-    """Executor for live/monitor mode.
+    """Executor for sim/live mode.
 
     Args:
         cost_model: Used for position sizing and simulated fill costs.
@@ -50,7 +50,7 @@ class LiveExecutor:
         if not self._simulation:
             raise NotImplementedError(
                 "Live order execution not yet implemented (Phase 4). "
-                "Use simulation=True for signal monitoring."
+                "Use simulation=True for sim mode."
             )
 
         fill = make_fill(action, price, cash, self._cost_model)

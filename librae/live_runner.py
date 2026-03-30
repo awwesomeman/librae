@@ -1,4 +1,4 @@
-"""LiveRunner — polling loop for live signal monitoring.
+"""LiveRunner — polling loop for sim and live modes.
 
 Detects completed bars, runs strategy, and routes actions to LiveExecutor.
 Supports multiple symbols. Caches OHLCV to avoid redundant fetches.
@@ -22,11 +22,11 @@ OHLCVFetcher = Callable[..., pd.DataFrame]
 
 
 class LiveRunner:
-    """Polling-based live signal monitor.
+    """Polling-based runner for sim/live modes.
 
     Args:
         strategy: Strategy instance (same as backtest).
-        symbols: List of symbols to monitor.
+        symbols: List of symbols to track.
         fetcher: Callable(symbol, timeframe, limit, drop_incomplete=True) -> DataFrame.
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         executor: LiveExecutor for handling actions.
@@ -36,9 +36,11 @@ class LiveRunner:
         initial_balance: Starting cash for position sizing.
         poll_interval: Seconds between poll cycles.
         on_signal: Optional callback(symbol, action, price, ts).
-        on_bar: Optional callback(run_id, symbol, ts, bar, equity, drawdown)
-            called every completed bar for DB persistence.
-        on_trade: Optional callback(run_id, trade_dict) called on position close.
+        on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
+            called every completed bar for equity persistence.
+        on_trade: Optional callback(trade_dict) called on position close.
+        on_ohlcv: Optional callback(run_id, symbol, timeframe, bar_dict, ts)
+            called every completed bar for OHLCV persistence.
     """
 
     def __init__(
@@ -57,6 +59,7 @@ class LiveRunner:
         on_signal: Callable[..., None] | None = None,
         on_bar: Callable[..., None] | None = None,
         on_trade: Callable[..., None] | None = None,
+        on_ohlcv: Callable[..., None] | None = None,
     ) -> None:
         self._strategy = strategy
         self._symbols = symbols
@@ -70,6 +73,7 @@ class LiveRunner:
         self._on_signal = on_signal
         self._on_bar = on_bar
         self._on_trade = on_trade
+        self._on_ohlcv = on_ohlcv
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._last_bar_ts: dict[str, datetime] = {}
@@ -245,8 +249,10 @@ class LiveRunner:
                 if self._on_signal:
                     self._on_signal(symbol, action, price, ts)
 
-        # Record equity after processing all actions
+        # Record equity and OHLCV after processing all actions
         self._record_equity(ts)
+        if self._on_ohlcv:
+            self._on_ohlcv(self._run_id, symbol, self._timeframe, bar, ts)
 
     def _update_positions(self, symbol: str, current_price: float) -> None:
         """Rebuild Position with current bars_held and unrealized_pnl."""

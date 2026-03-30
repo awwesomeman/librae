@@ -13,4 +13,4 @@ COPY brokers/ brokers/
 COPY pipeline/ pipeline/
 COPY db/ db/
 
-CMD ["python", "-m", "strategies.trendpullback.run", "--mode", "monitor"]
+CMD ["python", "-m", "strategies.trendpullback.run", "--mode", "sim"]

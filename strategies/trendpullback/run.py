@@ -4,7 +4,7 @@
 Usage:
     python -m strategies.trendpullback.run --mode backtest --dry-run
     python -m strategies.trendpullback.run --mode backtest --symbol BTCUSDT --months 3
-    python -m strategies.trendpullback.run --mode monitor   (future)
+    python -m strategies.trendpullback.run --mode sim
     python -m strategies.trendpullback.run --mode live      (future)
 """
 from __future__ import annotations
@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pandas as pd
 
 from librae import Backtest, compute_all
 from librae.persistence import save_backtest_output
@@ -68,18 +70,20 @@ def run_backtest(args: argparse.Namespace) -> None:
             print(f"       DB write skipped: {e}")
 
 
-def run_monitor(args: argparse.Namespace) -> None:
-    """Run monitor mode — poll for signals, send Telegram, write to DB."""
+def run_sim(args: argparse.Namespace) -> None:
+    """Run sim mode — paper trading with live data, Telegram alerts, DB writes."""
     import logging as _logging
 
     from brokers.crypto_adapter import CryptoAdapter
+    from librae.config.market_config import get_market
     from librae.cost_model import CostModel
     from librae.live_executor import LiveExecutor
     from librae.live_runner import LiveRunner
     from librae.notifications.telegram import TelegramAdapter
     from librae.strategy import Action
     from db.timescale_writer import (
-        write_equity_point, write_run_metadata, write_signal, write_trade,
+        write_equity_point, write_ohlcv, write_performance,
+        write_run_metadata, write_signal, write_trade,
     )
 
     from .utils import prepare_signals
@@ -88,7 +92,7 @@ def run_monitor(args: argparse.Namespace) -> None:
     symbols = [s.strip() for s in args.symbol.split(",")]
     adapter = CryptoAdapter()
     telegram = TelegramAdapter()
-    cost_model = CostModel.from_instrument(f"crypto:{symbols[0]}")
+    cost_model = CostModel.from_market(get_market(args.market))
     run_id = generate_run_id(f"trendpullback_{args.market}", symbols[0])
 
     # Register run in DB so Grafana mode='sim' dropdown picks it up
@@ -138,13 +142,69 @@ def run_monitor(args: argparse.Namespace) -> None:
             _logger.warning("DB write_equity_point failed: %s", e)
 
     def on_trade(trade: dict) -> None:
-        """Write trade to DB on position close."""
+        """Write trade to DB, then refresh KPI metrics."""
         if args.no_db:
             return
         try:
             write_trade(**trade)
         except Exception as e:
             _logger.warning("DB write_trade failed: %s", e)
+        _refresh_performance()
+
+    def on_ohlcv(rid: str, symbol: str, timeframe: str, bar: dict, ts: datetime) -> None:
+        """Write single OHLCV bar to DB."""
+        if args.no_db:
+            return
+        try:
+            row = pd.DataFrame([{
+                "ts": ts,
+                "open": bar.get("open", 0),
+                "high": bar.get("high", 0),
+                "low": bar.get("low", 0),
+                "close": bar.get("close", 0),
+                "volume": bar.get("volume", 0),
+            }]).set_index("ts")
+            write_ohlcv(row, symbol, timeframe, rid, source="sim")
+        except Exception as e:
+            _logger.warning("DB write_ohlcv failed: %s", e)
+
+    def _refresh_performance() -> None:
+        """Recompute KPI metrics from equity curve and write to DB."""
+        if args.no_db:
+            return
+        try:
+            from types import SimpleNamespace
+
+            from db.timescale_reader import load_equity_curve, load_trade_blotter
+
+            eq_df = load_equity_curve(run_id)
+            if eq_df.empty or len(eq_df) < 2:
+                return
+
+            # WHY: load_equity_curve returns _time as a column, not the index
+            start_ts = eq_df["_time"].iloc[0].to_pydatetime()
+            end_ts = eq_df["_time"].iloc[-1].to_pydatetime()
+
+            trades_df = load_trade_blotter(run_id)
+            trade_rows = trades_df.to_dict("records") if not trades_df.empty else []
+
+            # WHY: compute_all expects duck-typed objects with specific attributes.
+            # We build minimal shims from DB data rather than importing heavy types.
+            shim = SimpleNamespace(
+                equity_curve=[SimpleNamespace(ts=row["_time"], equity=row["equity"])
+                              for row in eq_df.to_dict("records")],
+                trades=[SimpleNamespace(
+                    gross_pnl=r.get("gross_pnl", 0), net_pnl=r.get("net_pnl", 0),
+                    commission=r.get("commission", 0), slippage=r.get("slippage", 0),
+                    tax=0, entry_ts=r.get("entry_ts"), exit_ts=r.get("exit_ts"),
+                    entry_price=r.get("entry_price", 0),
+                    holding_bars=r.get("holding_bars", 0),
+                ) for r in trade_rows],
+            )
+            metrics = compute_all(shim, start_ts, end_ts)
+            write_performance(run_id, metrics)
+        except Exception as e:
+            _logger.warning("_refresh_performance failed: %s", e)
 
     runner = LiveRunner(
         strategy=strategy,
@@ -160,9 +220,10 @@ def run_monitor(args: argparse.Namespace) -> None:
         on_signal=on_signal,
         on_bar=on_bar,
         on_trade=on_trade,
+        on_ohlcv=on_ohlcv,
     )
 
-    print(f"Monitor started: symbols={symbols}, poll={args.poll_interval}s, run_id={run_id}")
+    print(f"Sim started: symbols={symbols}, poll={args.poll_interval}s, run_id={run_id}")
     runner.run()
 
 
@@ -230,7 +291,7 @@ def _build_output(result, metrics, run_id, symbol, start_ts, end_ts, sample):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="TrendPullback strategy runner")
-    p.add_argument("--mode", default="backtest", choices=["backtest", "monitor", "live"])
+    p.add_argument("--mode", default="backtest", choices=["backtest", "sim", "live"])
     p.add_argument("--symbol", default="BTCUSDT")
     p.add_argument("--market", default="crypto")
     p.add_argument("--months", type=int, default=6)
@@ -241,7 +302,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-annualize", action="store_true",
                    help="skip annualized metrics (sharpe, sortino, calmar, CAGR)")
     p.add_argument("--poll-interval", type=float, default=60.0,
-                   help="seconds between poll cycles (monitor mode)")
+                   help="seconds between poll cycles (sim mode)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     return p.parse_args()
@@ -249,7 +310,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    dispatch = {"backtest": run_backtest, "monitor": run_monitor, "live": run_live}
+    dispatch = {"backtest": run_backtest, "sim": run_sim, "live": run_live}
     dispatch[args.mode](args)
 
 

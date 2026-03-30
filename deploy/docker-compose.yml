@@ -32,11 +32,11 @@ services:
     networks:
       - quant_network
 
-  monitor:
+  sim:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.monitor
-    container_name: quant_monitor
+      dockerfile: deploy/Dockerfile.sim
+    container_name: quant_sim
     environment:
       - TIMESCALE_DSN=postgresql://quant:quant_secret@timescaledb:5432/quant
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-false}
@@ -44,9 +44,9 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
     command: >
       python -m strategies.trendpullback.run
-      --mode monitor
-      --symbol ${MONITOR_SYMBOL:-BTCUSDT}
-      --poll-interval ${MONITOR_POLL_INTERVAL:-60}
+      --mode sim
+      --symbol ${SIM_SYMBOL:-BTCUSDT}
+      --poll-interval ${SIM_POLL_INTERVAL:-60}
     depends_on:
       - timescaledb
     restart: unless-stopped

@@ -195,40 +195,10 @@ def write_backtest_output(
             )
             counts["strategy_signals"] = len(signal_rows)
 
-        # strategy_performance (upsert — full column coverage)
-        cur.execute(
-            """INSERT INTO strategy_performance
-               (run_id, total_return, annual_return, sharpe, sortino, calmar,
-                max_drawdown, win_rate, profit_factor, trades,
-                avg_trade_return, exposure_ratio, benchmark_return,
-                total_commission, total_slippage)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id) DO UPDATE SET
-                 total_return=EXCLUDED.total_return,
-                 annual_return=EXCLUDED.annual_return,
-                 sharpe=EXCLUDED.sharpe,
-                 sortino=EXCLUDED.sortino,
-                 calmar=EXCLUDED.calmar,
-                 max_drawdown=EXCLUDED.max_drawdown,
-                 win_rate=EXCLUDED.win_rate,
-                 profit_factor=EXCLUDED.profit_factor,
-                 trades=EXCLUDED.trades,
-                 avg_trade_return=EXCLUDED.avg_trade_return,
-                 exposure_ratio=EXCLUDED.exposure_ratio,
-                 benchmark_return=EXCLUDED.benchmark_return,
-                 total_commission=EXCLUDED.total_commission,
-                 total_slippage=EXCLUDED.total_slippage""",
-            (
-                meta.run_id, m.total_return, m.annual_return,
-                m.sharpe, m.sortino, m.calmar,
-                m.max_drawdown, m.win_rate, m.profit_factor,
-                m.trades, m.avg_trade_return, m.exposure_ratio,
-                m.benchmark_return, m.total_commission, m.total_slippage,
-            ),
-        )
-        counts["strategy_performance"] = 1
-
         cur.close()
+
+    write_performance(meta.run_id, m, dsn=dsn)
+    counts["strategy_performance"] = 1
 
     return counts
 
@@ -301,7 +271,7 @@ def write_signal(
 ) -> bool:
     """Write a single signal row to strategy_signals.
 
-    Uses ON CONFLICT DO NOTHING for idempotent re-inserts (e.g. monitor restart).
+    Uses ON CONFLICT DO NOTHING for idempotent re-inserts (e.g. sim restart).
     Returns True if a row was inserted, False if it was a duplicate.
     """
     with get_conn(dsn) as conn:
@@ -387,6 +357,52 @@ def write_trade(
                 symbol, side, entry_price, exit_price, quantity,
                 gross_pnl, net_pnl, gross_return, net_return,
                 commission, slippage, holding_bars,
+            ),
+        )
+        cur.close()
+
+
+def write_performance(
+    run_id: str,
+    metrics: Any,
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Write/update strategy_performance for a run_id.
+
+    Args:
+        run_id: Run identifier.
+        metrics: StrategyMetrics dataclass (or any object with matching attributes).
+    """
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO strategy_performance
+               (run_id, total_return, annual_return, sharpe, sortino, calmar,
+                max_drawdown, win_rate, profit_factor, trades,
+                avg_trade_return, exposure_ratio, benchmark_return,
+                total_commission, total_slippage)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id) DO UPDATE SET
+                 total_return=EXCLUDED.total_return,
+                 annual_return=EXCLUDED.annual_return,
+                 sharpe=EXCLUDED.sharpe,
+                 sortino=EXCLUDED.sortino,
+                 calmar=EXCLUDED.calmar,
+                 max_drawdown=EXCLUDED.max_drawdown,
+                 win_rate=EXCLUDED.win_rate,
+                 profit_factor=EXCLUDED.profit_factor,
+                 trades=EXCLUDED.trades,
+                 avg_trade_return=EXCLUDED.avg_trade_return,
+                 exposure_ratio=EXCLUDED.exposure_ratio,
+                 benchmark_return=EXCLUDED.benchmark_return,
+                 total_commission=EXCLUDED.total_commission,
+                 total_slippage=EXCLUDED.total_slippage""",
+            (
+                run_id, metrics.total_return, metrics.annual_return,
+                metrics.sharpe, metrics.sortino, metrics.calmar,
+                metrics.max_drawdown, metrics.win_rate, metrics.profit_factor,
+                metrics.trades, metrics.avg_trade_return, metrics.exposure_ratio,
+                metrics.benchmark_return, metrics.total_commission, metrics.total_slippage,
             ),
         )
         cur.close()

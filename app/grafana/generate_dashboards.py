@@ -438,7 +438,7 @@ def render_unified_dashboard() -> dict:
 
     mode_var = _make_custom_variable(
         "mode",
-        [("Backtest", "backtest"), ("Monitor", "sim"), ("Live", "live")],
+        [("Backtest", "backtest"), ("Sim", "sim"), ("Live", "live")],
         label="Mode",
     )
     run_id_var = _make_query_variable(
