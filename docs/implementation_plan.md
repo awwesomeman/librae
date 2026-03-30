@@ -2,7 +2,7 @@
 
 > Updated: 2026-03-30
 > Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 3 進行中（LiveRunner + Docker 已完成，剩端到端驗證）
+> Status: Phase 3 接近完成（sim mode 程式碼就緒，剩 VPS 部署驗證）
 
 ---
 
@@ -172,26 +172,30 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | 補回 look-ahead bias 測試（信號穩定性 + D1 merge + 引擎時機，9 tests） | ✅ |
 | ≥2 策略可比較（Backtest 板 run_id 對比） | ⏳ |
 
-### Phase 3 — Signal Subscription（Goal 1 MVP）— 首個市場: Crypto (BTC) ← 當前
+### Phase 3 — Sim Mode（Goal 1 MVP）— 首個市場: Crypto (BTC) ← 當前
 
-> 完成標準：BTC TrendPullback 策略能即時偵測信號並推送 Telegram。
+> 完成標準：BTC TrendPullback 策略能即時偵測信號，寫入 DB，Grafana 可看，推送 Telegram。
 
 | 項目 | 狀態 |
 |------|------|
 | CryptoAdapter hardening（drop_incomplete, since, length warning） | ✅ |
 | Telegram retry + rate-limit + HTML escape | ✅ |
-| DB schema dedup（strategy_signals unique index） | ✅ |
-| write_signal() + write_run_metadata() 單筆寫入 | ✅ |
+| DB schema dedup（equity_curve + strategy_signals unique index） | ✅ |
+| write_signal() + write_run_metadata() + write_equity_point() + write_trade() + write_performance() | ✅ |
 | Executor 重構（make_fill/size_position 共用函式） | ✅ |
-| LiveRunner（polling + OHLCV cache + bars_held + unrealized PnL） | ✅ |
+| LiveRunner（polling + OHLCV cache + bars_held + unrealized PnL + equity/trade/ohlcv recording） | ✅ |
 | LiveExecutor(simulation=True) + notify_exit | ✅ |
 | prepare_signals() 共用 pipeline | ✅ |
-| run_monitor CLI（--mode monitor --symbol --poll-interval） | ✅ |
+| `--mode sim` CLI + on_bar/on_trade/on_ohlcv callbacks | ✅ |
 | LiveRunner + LiveExecutor 單元測試（14 tests） | ✅ |
-| Monitor run 註冊 backtest_runs（mode=sim） | ✅ |
-| Docker monitor service（Dockerfile + docker-compose） | ✅ |
-| Telegram bot 建立 + 端到端驗證 | ⏳ |
-| 多資產同時監控驗證 | ⏳ |
+| Sim run 註冊 backtest_runs（mode=sim） | ✅ |
+| Docker sim service（Dockerfile.sim + docker-compose） | ✅ |
+| Telegram bot 建立 + 本地端到端驗證 | ✅ |
+| 命名一致性 monitor→sim（CLI, Docker, Grafana, DB） | ✅ |
+| KPI 即時更新（_refresh_performance on trade close） | ✅ |
+| Grafana 三模式共用 Dashboard（backtest/sim/live 資料完整對齊） | ✅ |
+| **VPS 部署 + Grafana 端到端驗證** | ⏳ 需 VPS git pull + deploy |
+| **多資產同時 sim 驗證** | ⏳ |
 
 ### Phase 4 — Live Auto Trading（Goal 2 MVP）
 
@@ -203,6 +207,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | LiveExecutor(simulation=False) | 真下單 + fill 回報 |
 | 風控層 | 最大持倉、單筆上限、日虧損上限 |
 | Position monitor | 持倉追蹤 + PnL dashboard |
+| Signal Accuracy Dashboard | 信號品質監控（hit rate, regime breakdown） |
 | Alerting | 異常狀態（斷線、拒單、超時）→ Telegram 告警 |
 
 ### Phase 5 — Scale（多資產 + 訂閱平台）
