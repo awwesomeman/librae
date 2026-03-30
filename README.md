@@ -99,11 +99,12 @@ Sim service 環境變數：
 
 | 變數 | 預設值 | 說明 |
 |------|--------|------|
+| `SIM_STRATEGY` | `trendpullback` | 策略名稱（對應 `strategies/<name>/run.py`） |
 | `SIM_SYMBOL` | `BTCUSDT` | 監控標的 |
 | `SIM_POLL_INTERVAL` | `60` | 輪詢間隔（秒） |
 | `TELEGRAM_ENABLED` | `false` | 啟用 Telegram 推播 |
 
-監控頻率說明：策略使用 H1 時間框架，sim service 每 `poll_interval` 秒檢查一次是否有新的小時 bar 完成。新 bar 完成時才會觸發策略計算和信號判斷。
+監控頻率說明：sim service 每 `poll_interval` 秒檢查一次是否有新的完成 bar。策略時間框架決定實際觸發頻率（如 H1 策略每小時觸發一次信號判斷）。Grafana Status panel 以 2 倍策略時間框架為閾值判斷 Online/Offline。
 
 Grafana → Strategy Dashboard → 選 mode=sim 查看即時數據。
 

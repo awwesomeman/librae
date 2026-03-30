@@ -226,6 +226,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 ## 4) Key Decisions
 
 見 `docs/decisions/` 目錄：
+- `2026-03-30-tsdb-bind-configurable.md` — TimescaleDB port binding 環境變數化
 - `2026-03-28-strategy-folder-convention.md` — 策略目錄慣例
 - `2026-03-27-backtest-engine-refactor.md` — 統一回測引擎 + CostModel + QuantStats
 - `2026-03-26-platform-architecture.md`
@@ -259,7 +260,29 @@ BTC_USDT:
 
 ---
 
-## 6) Refactor 門檻
+## 6) 待辦：Dashboard 指標擴充
+
+目前 Performance Overview 只有 6 個 KPI（Total Return, Max DD, Sharpe, Win Rate, Profit Factor, Trades）。
+需要設計如何加入更多指標（例如 Active Period Return、年化報酬、Sortino、Calmar）同時保持版面整潔。
+
+### 考量
+
+- **KPI row 寬度有限**：目前 6 × w=4 = 24 剛好滿，再加就要換行或縮窄
+- **不同模式需求不同**：backtest 有完整歷史可算年化，sim 可能只跑幾天、年化無意義
+- **指標重要性分層**：核心 KPI（一眼要看到）vs 進階指標（展開才看）
+
+### 可能方向
+
+1. **分層展示**：核心 KPI 維持第一行，進階指標放可摺疊 row（類似 Live/Sim Only）
+2. **動態切換**：Grafana variable 選擇指標集（簡潔 / 完整），切換 KPI row 顯示內容
+3. **Tooltip 補充**：主 KPI 不變，hover 時顯示相關延伸指標（如 Total Return hover 顯示 CAGR）
+4. **Table panel**：一個表格列出所有指標，取代多個 stat panel，省空間
+
+等指標數量 >10 時再決定方案。
+
+---
+
+## 7) Refactor 門檻
 
 觸發任 2~3 條才考慮大幅重構：
 1. 策略 >10 且重複邏輯 >40%
