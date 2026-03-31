@@ -86,10 +86,12 @@ def compute_all(
 
     n_trades = len(trade_pnls)
     if n_trades == 0 or len(returns) < 2:
-        total_ret = _safe_qs(qs.stats.comp, returns) if len(returns) > 0 else 0.0
+        _comp = _safe_qs(qs.stats.comp, returns) if len(returns) > 0 else None
+        total_ret = _comp if _comp is not None else 0.0
         return StrategyMetrics(total_return=total_ret, trades=n_trades)
 
-    max_dd = _safe_qs(qs.stats.max_drawdown, returns)
+    _dd = _safe_qs(qs.stats.max_drawdown, returns)
+    max_dd = _dd if _dd is not None else 0.0
 
     sharpe: float | None = None
     sortino: float | None = None
@@ -106,19 +108,25 @@ def compute_all(
     net_pnls = np.array([t.net_pnl for t in trade_pnls], dtype=np.float64)
     commissions = np.array([t.commission for t in trade_pnls], dtype=np.float64)
     slippages = np.array([t.slippage for t in trade_pnls], dtype=np.float64)
+    taxes = np.array([t.tax for t in trade_pnls], dtype=np.float64)
 
     # WHY: use net_pnl (after costs) for all trade-level metrics
     # to stay consistent with total_return which is also net-of-costs.
     wins = net_pnls[net_pnls > 0]
     losses_abs = np.abs(net_pnls[net_pnls <= 0])
     win_rate = float(len(wins) / n_trades) if n_trades > 0 else 0.0
+    # WHY: profit_factor undefined when no losses (all wins) — return None,
+    # not 0.0 which misleadingly suggests worst performance.
     profit_factor = (
         float(wins.sum() / (losses_abs.sum() + EPSILON))
-        if len(losses_abs) > 0 else 0.0
+        if len(losses_abs) > 0 else None
     )
 
-    total_ret = _safe_qs(qs.stats.comp, returns)
-    avg_trade_return = float(np.mean([t.net_return for t in trade_pnls]))
+    _comp = _safe_qs(qs.stats.comp, returns)
+    total_ret = _comp if _comp is not None else 0.0
+    # WHY: TradePnL.net_return is percentage (*100); convert to ratio
+    # for consistency with other StrategyMetrics return fields.
+    avg_trade_return = float(np.mean([t.net_return for t in trade_pnls])) / 100.0
 
     exposure_ratio = 0.0
     if holding_bars and total_bars > 0:
@@ -143,16 +151,17 @@ def compute_all(
         benchmark_return=benchmark_return,
         total_commission=float(commissions.sum()),
         total_slippage=float(slippages.sum()),
+        total_tax=float(taxes.sum()),
     )
 
 
-def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: int | float) -> float:
-    """Call a QuantStats function, return 0.0 on error."""
+def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: int | float) -> float | None:
+    """Call a QuantStats function, return None if not computable."""
     try:
         val = fn(returns, **kwargs)
         if val is None or np.isnan(val) or np.isinf(val):
-            return 0.0
+            return None
         return float(val)
     except Exception:
-        logger.warning("QuantStats %s failed, returning 0.0", fn.__name__)
-        return 0.0
+        logger.warning("QuantStats %s failed, returning None", fn.__name__)
+        return None

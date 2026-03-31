@@ -68,6 +68,9 @@ def _make_blotter(**extra_cols):
         "quantity": [1.0],
         "holding_bars": [4],
         "net_pnl": [150.0],
+        "gross_pnl": [200.0],
+        "gross_return": [1.11],   # (18200-18000)/18000*100
+        "net_return": [0.83],     # 150/18000*100
     }
     base.update(extra_cols)
     return pd.DataFrame(base)
