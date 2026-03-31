@@ -21,10 +21,13 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Sequence
+from typing import TYPE_CHECKING, Literal, Sequence
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from librae.backtest.schema import BacktestOutput, EquityCurvePoint, StrategyMetrics
 
 from librae.config.market_config import MarketConfig
 from librae.core import EPSILON
@@ -78,7 +81,6 @@ class BacktestResult:
     equity_curve: Sequence[EquitySnapshot]
     initial_balance: float
     final_equity: float
-    benchmark_curve: Sequence[float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,7 @@ class Backtest:
         self._benchmark_prices: pd.Series | None = None
         self._run_id: str | None = None
         self._result: BacktestResult | None = None
+        self._metrics: StrategyMetrics | None = None
 
         if not isinstance(data.index, pd.MultiIndex):
             raise ValueError(
@@ -266,15 +269,11 @@ class Backtest:
                 cash += proceeds
                 del positions[inst]
 
-        # Compute benchmark
-        benchmark_curve = self._compute_benchmark()
-
         self._result = BacktestResult(
             trades=trades,
             equity_curve=equity_curve,
             initial_balance=self._initial_balance,
             final_equity=cash,
-            benchmark_curve=benchmark_curve,
         )
         return self._result
 
@@ -305,7 +304,6 @@ class Backtest:
         result = self._result
         run_id = self._run_id
 
-        # Auto-derive metadata
         timeline = self._timeline
         start_ts = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
         end_ts = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
@@ -313,10 +311,31 @@ class Backtest:
         # WHY: reuse self._timeline (already sorted) instead of re-extracting from index
         timeframe = infer_timeframe(pd.DatetimeIndex(timeline))
 
-        # Compute metrics
-        metrics = compute_all(result, start_ts, end_ts, annualize=annualize)
+        # Benchmark — computed here, not in run() (analysis config, not trade facts)
+        benchmark_curve = self._compute_benchmark()
 
-        # Build RunMetadata
+        # Build TradePnL list + holding_bars from TradeResult
+        trade_pnl_list = [
+            TradePnL(
+                gross_pnl=t.gross_pnl, net_pnl=t.net_pnl,
+                commission=t.commission, slippage=t.slippage, tax=t.tax,
+                gross_return=t.gross_return, net_return=t.net_return,
+                exit_commission=0.0, exit_slippage=0.0, exit_tax=t.tax,
+            )
+            for t in result.trades
+        ]
+        trade_holding_bars = [t.holding_bars for t in result.trades]
+
+        self._metrics = compute_all(
+            equity_values=[s.equity for s in result.equity_curve],
+            timestamps=[s.ts for s in result.equity_curve],
+            trade_pnls=trade_pnl_list,
+            total_bars=len(result.equity_curve),
+            annualize=annualize,
+            benchmark_values=benchmark_curve,
+            holding_bars=trade_holding_bars,
+        )
+
         run_metadata = RunMetadata(
             run_id=run_id,
             strategy=self._strategy_name,
@@ -327,8 +346,28 @@ class Backtest:
             run_ts=datetime.now(tz=timezone.utc),
         )
 
-        # Build TradeRecords
-        trade_records = [
+        trade_records = self._build_trade_records(result, run_id)
+        equity_points = self._enrich_equity_curve(result, benchmark_curve)
+
+        return BacktestOutput(
+            run_metadata=run_metadata,
+            equity_curve=equity_points,
+            trades=trade_records,
+            metrics=self._metrics,
+        )
+
+    @property
+    def metrics(self) -> "StrategyMetrics":
+        """Access StrategyMetrics. Raises RuntimeError if build_output not called."""
+        if self._metrics is None:
+            raise RuntimeError("Call build_output() before accessing metrics")
+        return self._metrics
+
+    @staticmethod
+    def _build_trade_records(result: BacktestResult, run_id: str) -> list:
+        """Map TradeResult → TradeRecord."""
+        from librae.backtest.schema import TradeRecord
+        return [
             TradeRecord(
                 trade_id=make_trade_id(run_id, i),
                 entry_ts=t.entry_ts, exit_ts=t.exit_ts,
@@ -343,21 +382,15 @@ class Backtest:
             for i, t in enumerate(result.trades)
         ]
 
-        # Enrich equity curve
-        equity_points = self._enrich_equity_curve(result)
-
-        return BacktestOutput(
-            run_metadata=run_metadata,
-            equity_curve=equity_points,
-            trades=trade_records,
-            metrics=metrics,
-        )
-
-    def _enrich_equity_curve(self, result: BacktestResult) -> list[EquityCurvePoint]:
+    @staticmethod
+    def _enrich_equity_curve(
+        result: BacktestResult,
+        benchmark_curve: list[float] | None,
+    ) -> list[EquityCurvePoint]:
         """Build EquityCurvePoints with drawdown, ret_1d, and benchmark alignment."""
         from librae.backtest.schema import EquityCurvePoint
 
-        has_bm = result.benchmark_curve is not None and len(result.benchmark_curve) > 0
+        has_bm = benchmark_curve is not None and len(benchmark_curve) > 0
         equity_points: list[EquityCurvePoint] = []
         peak = 0.0
         prev_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
@@ -370,8 +403,8 @@ class Backtest:
             prev_eq = eq
 
             bm_eq, bm_ret = None, None
-            if has_bm and i < len(result.benchmark_curve):
-                bm_eq = float(result.benchmark_curve[i])
+            if has_bm and i < len(benchmark_curve):
+                bm_eq = float(benchmark_curve[i])
                 bm_ret = (bm_eq / prev_bm - 1.0) if prev_bm > 0 else 0.0
                 prev_bm = bm_eq
 
