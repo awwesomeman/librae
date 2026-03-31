@@ -76,6 +76,13 @@ class TestBuildOutputValid:
         assert meta.timeframe == "H1"
         assert meta.strategy == "buy_bar5_close_bar15"
 
+    def test_explicit_strategy_name(self) -> None:
+        df = _make_df()
+        bt = Backtest(df, BuyBar5CloseBar15(), strategy_name="my_custom_name")
+        bt.run()
+        output = bt.build_output()
+        assert output.run_metadata.strategy == "my_custom_name"
+
     def test_has_trades(self) -> None:
         df = _make_df()
         bt = Backtest(df, BuyBar5CloseBar15())

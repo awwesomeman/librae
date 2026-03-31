@@ -70,6 +70,7 @@ class Backtest:
         strategy: BaseStrategy subclass.
         market_config: MarketConfig for cost model (mutually exclusive with cost_model).
         initial_balance: Starting cash.
+        strategy_name: Override strategy name (default: snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
     """
 
@@ -80,6 +81,7 @@ class Backtest:
         market_config: MarketConfig | None = None,
         initial_balance: float = 100_000.0,
         *,
+        strategy_name: str | None = None,
         cost_model: CostModel | None = None,
     ) -> None:
         self._data = data
@@ -108,9 +110,12 @@ class Backtest:
             resolved_cm = CostModel.zero()
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
 
-        # Auto-derive strategy_name from class name → snake_case
-        cls_name = type(strategy).__name__
-        self._strategy_name = re.sub(r"(?<!^)(?=[A-Z])", "_", cls_name).lower()
+        if strategy_name is not None:
+            self._strategy_name = strategy_name
+        else:
+            # Fallback: auto-derive from class name → snake_case
+            cls_name = type(strategy).__name__
+            self._strategy_name = re.sub(r"(?<!^)(?=[A-Z])", "_", cls_name).lower()
 
     # --- Public properties ---
 

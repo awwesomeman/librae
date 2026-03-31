@@ -268,7 +268,7 @@ def __init__(
 ) -> None:
 ```
 
-- `strategy_name`: **刪除** — 直接用 `type(strategy).__name__` 轉 snake_case，不允許 override
+- `strategy_name`: **可選 override** — 預設從 class name 轉 snake_case，建議由 run.py 傳入資料夾名稱 `Path(__file__).parent.name` 以統一 backtest/live 命名
 - `symbol`: **自動** — 從 `self._symbols[0]` 取
 - `timeframe`: **自動推導** — 從 data index 的 timedelta mode（眾數） 映射到標準 label（M1/M5/H1/D1/W1），推導失敗時 raise error
 - `data_source`: **刪除** — 資料來源追蹤不是 engine 的職責
@@ -486,7 +486,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 | `annualize` | `build_output()` 預設 `False` | opt-in，資料太短時年化 misleading |
 
 **已刪除的參數**：
-- `strategy_name`: 不需要 override，直接用 class name
+- `strategy_name`: 可選 override，建議傳入策略資料夾名稱以統一 backtest/live 命名
 - `data_source`: 資料來源追蹤不是 engine 職責
 - `sample` / `split`: 策略驗證流程不是 engine 職責
 - `mode`: engine 只做 backtest，不需要區分
@@ -513,9 +513,9 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 - **決定**：從 RunMetadata 移除
 - **原因**：`data_source` 是 data pipeline 的職責；`sample`/`split` 是策略研究流程的標籤；`mode` 永遠是 "backtest"（live/sim 是不同的 runtime path，不共用 BacktestOutput）
 
-### D5: strategy_name 不可 override
-- **決定**：直接用 `type(strategy).__name__`，不提供 override 參數
-- **原因**：同一 class 不同參數的區分靠 `run_id`，不需要另外取名
+### D5: strategy_name 以資料夾名稱為準
+- **決定**：`Backtest.__init__` 接受可選 `strategy_name` 參數，預設 fallback 到 class name 轉 snake_case。各策略 run.py 統一傳入 `Path(__file__).parent.name`
+- **原因**：backtest 和 live/sim 需要一致的 strategy 標識；資料夾名稱是最自然的單一真實來源，避免 class name 轉換與硬編碼字串不一致
 
 ### D6: add_benchmark(prices) 取代 set_benchmark("auto")
 - **決定**：benchmark 改為 explicit price series input，engine 在 build_output() 時計算 buy-and-hold

@@ -24,6 +24,7 @@ from .utils import fetch_and_prepare, prepare_signals
 
 logger = logging.getLogger("strategies.trendpullback_m5")
 
+STRATEGY_NAME = Path(__file__).parent.name
 TIMEFRAME = "M5"
 WARMUP_BARS = 720  # 720 M5 bars = 2.5 days
 
@@ -42,6 +43,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         strategy=strategy,
         market_config=market_config,
         initial_balance=args.initial_balance,
+        strategy_name=STRATEGY_NAME,
     )
     benchmark_prices = df.xs(args.symbol, level="symbol")["close"]
     bt.add_benchmark(benchmark_prices)
@@ -80,7 +82,7 @@ def run_sim(args: argparse.Namespace) -> None:
 
     trader = build_live_trader(
         strategy=strategy,
-        strategy_name="trendpullback_m5",
+        strategy_name=STRATEGY_NAME,
         feature_fn=prepare_signals,
         symbols=symbols,
         timeframe=TIMEFRAME,
@@ -90,8 +92,8 @@ def run_sim(args: argparse.Namespace) -> None:
         warmup_bars=WARMUP_BARS,
         no_db=args.no_db,
     )
-    logger.info("Sim started: strategy=trendpullback_m5, symbols=%s, timeframe=%s, poll=%ds",
-                symbols, TIMEFRAME, args.poll_interval)
+    logger.info("Sim started: strategy=%s, symbols=%s, timeframe=%s, poll=%ds",
+                STRATEGY_NAME, symbols, TIMEFRAME, args.poll_interval)
     trader.run()
 
 
