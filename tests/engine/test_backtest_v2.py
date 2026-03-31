@@ -15,14 +15,14 @@ from librae.core.strategy import Action, BaseStrategy, Context
 
 def _make_multiindex_df(
     prices: list[float],
-    instrument: str = "BTCUSDT",
+    symbol: str = "BTCUSDT",
 ) -> pd.DataFrame:
-    """Create a MultiIndex (instrument, datetime) OHLCV DataFrame."""
+    """Create a MultiIndex (symbol, datetime) OHLCV DataFrame."""
     n = len(prices)
     close = np.array(prices, dtype=np.float64)
     dt = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
     idx = pd.MultiIndex.from_arrays(
-        [[instrument] * n, dt], names=["instrument", "datetime"],
+        [[symbol] * n, dt], names=["symbol", "datetime"],
     )
     return pd.DataFrame(
         {
@@ -54,10 +54,10 @@ class HoldStrategy(BaseStrategy):
 class BuyBar2CloseBar4(BaseStrategy):
     """Buy at bar 2, close at bar 4."""
     def on_bar(self, ctx: Context) -> list[Action]:
-        if ctx.bar_index == 2 and ctx.instrument not in ctx.positions:
-            return [Action(type="buy", instrument=ctx.instrument)]
-        if ctx.bar_index == 4 and ctx.instrument in ctx.positions:
-            return [Action(type="close", instrument=ctx.instrument)]
+        if ctx.bar_index == 2 and ctx.symbol not in ctx.positions:
+            return [Action(type="buy", symbol=ctx.symbol)]
+        if ctx.bar_index == 4 and ctx.symbol in ctx.positions:
+            return [Action(type="close", symbol=ctx.symbol)]
         return []
 
 
@@ -67,12 +67,12 @@ class SignalDrivenStrategy(BaseStrategy):
         self.max_hold_bars = max_hold_bars
 
     def on_bar(self, ctx: Context) -> list[Action]:
-        pos = ctx.positions.get(ctx.instrument)
+        pos = ctx.positions.get(ctx.symbol)
         if pos:
             if ctx.bar["exit_signal"] or pos.bars_held >= self.max_hold_bars:
-                return [Action(type="close", instrument=ctx.instrument)]
+                return [Action(type="close", symbol=ctx.symbol)]
         elif ctx.bar["entry_signal"]:
-            return [Action(type="buy", instrument=ctx.instrument)]
+            return [Action(type="buy", symbol=ctx.symbol)]
         return []
 
 
@@ -102,7 +102,7 @@ class TestBacktestBasics:
         assert np.isclose(trade.entry_price, 100.0)
         assert np.isclose(trade.exit_price, 110.0)
         assert trade.gross_pnl > 0
-        assert trade.instrument == "BTCUSDT"
+        assert trade.symbol == "BTCUSDT"
 
     def test_force_close_at_end(self) -> None:
         prices = [100.0, 100.0, 100.0, 110.0, 120.0]
@@ -110,8 +110,8 @@ class TestBacktestBasics:
 
         class BuyBar2(BaseStrategy):
             def on_bar(self, ctx):
-                if ctx.bar_index == 2 and ctx.instrument not in ctx.positions:
-                    return [Action(type="buy", instrument=ctx.instrument)]
+                if ctx.bar_index == 2 and ctx.symbol not in ctx.positions:
+                    return [Action(type="buy", symbol=ctx.symbol)]
                 return []
 
         bt = Backtest(df, BuyBar2(), initial_balance=10_000,
@@ -157,15 +157,15 @@ class TestSignalDrivenStrategy:
 
 
 class TestMultiAsset:
-    def test_two_instruments(self) -> None:
+    def test_two_symbols(self) -> None:
         n = 10
         dt = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
 
         rows = []
-        for inst, base_price in [("AAA", 100.0), ("BBB", 200.0)]:
+        for sym, base_price in [("AAA", 100.0), ("BBB", 200.0)]:
             for i in range(n):
                 rows.append({
-                    "instrument": inst,
+                    "symbol": sym,
                     "datetime": dt[i],
                     "open": base_price,
                     "high": base_price * 1.001,
@@ -174,31 +174,31 @@ class TestMultiAsset:
                     "volume": 100.0,
                 })
 
-        df = pd.DataFrame(rows).set_index(["instrument", "datetime"])
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
 
         class BuyBothBar2(BaseStrategy):
             def on_bar(self, ctx):
                 actions = []
                 if ctx.bar_index == 2:
-                    n_instruments = len(ctx.instruments)
-                    for inst in ctx.instruments:
-                        if inst not in ctx.positions:
-                            bar = ctx.bars.get(inst, {})
+                    n_symbols = len(ctx.symbols)
+                    for sym in ctx.symbols:
+                        if sym not in ctx.positions:
+                            bar = ctx.bars.get(sym, {})
                             price = bar.get("close", 1.0)
-                            qty = (ctx.cash / n_instruments) / price if price > 0 else 0
-                            actions.append(Action(type="buy", instrument=inst, quantity=qty))
+                            qty = (ctx.cash / n_symbols) / price if price > 0 else 0
+                            actions.append(Action(type="buy", symbol=sym, quantity=qty))
                 if ctx.bar_index == 5:
-                    for inst in ctx.instruments:
-                        if inst in ctx.positions:
-                            actions.append(Action(type="close", instrument=inst))
+                    for sym in ctx.symbols:
+                        if sym in ctx.positions:
+                            actions.append(Action(type="close", symbol=sym))
                 return actions
 
         bt = Backtest(df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 2
-        instruments_traded = {t.instrument for t in result.trades}
-        assert instruments_traded == {"AAA", "BBB"}
+        symbols_traded = {t.symbol for t in result.trades}
+        assert symbols_traded == {"AAA", "BBB"}
 
 
 class TestWithCosts:
@@ -230,9 +230,9 @@ class TestContext:
             def on_bar(self, ctx):
                 seen_positions.append(dict(ctx.positions))
                 if ctx.bar_index == 1:
-                    return [Action(type="buy", instrument=ctx.instrument)]
+                    return [Action(type="buy", symbol=ctx.symbol)]
                 if ctx.bar_index == 4:
-                    return [Action(type="close", instrument=ctx.instrument)]
+                    return [Action(type="close", symbol=ctx.symbol)]
                 return []
 
         df = _make_multiindex_df([100.0] * 6)
@@ -255,13 +255,13 @@ class TestContext:
 
         class Tracker(BaseStrategy):
             def on_bar(self, ctx):
-                pos = ctx.positions.get(ctx.instrument)
+                pos = ctx.positions.get(ctx.symbol)
                 if pos:
                     held_values.append(pos.bars_held)
                 if ctx.bar_index == 1:
-                    return [Action(type="buy", instrument=ctx.instrument)]
+                    return [Action(type="buy", symbol=ctx.symbol)]
                 if ctx.bar_index == 5:
-                    return [Action(type="close", instrument=ctx.instrument)]
+                    return [Action(type="close", symbol=ctx.symbol)]
                 return []
 
         df = _make_multiindex_df([100.0] * 8)

@@ -75,6 +75,6 @@ def fetch_and_prepare(
     m5 = prepare_signals(m5_base, params)
 
     mi = pd.MultiIndex.from_arrays(
-        [[symbol] * len(m5), m5.index], names=["instrument", "datetime"],
+        [[symbol] * len(m5), m5.index], names=["symbol", "datetime"],
     )
     return m5.set_index(mi)

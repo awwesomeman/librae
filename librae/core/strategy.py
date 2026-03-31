@@ -17,7 +17,7 @@ from typing import Literal
 class Position:
     """Engine-owned position state, exposed to strategy via Context."""
 
-    instrument: str
+    symbol: str
     side: Literal["long", "short"]
     entry_price: float
     quantity: float
@@ -32,18 +32,18 @@ class Context:
 
     Attributes:
         ts: Current bar timestamp.
-        instrument: Primary instrument (single-asset convenience).
-        instruments: All instruments in the dataset.
+        symbol: Primary symbol (single-asset convenience).
+        symbols: All symbols in the dataset.
         bar: Current bar data as dict (OHLCV + features). Single-asset.
-        bars: Current bar data per instrument. Multi-asset.
-        positions: Open positions keyed by instrument.
+        bars: Current bar data per symbol. Multi-asset.
+        positions: Open positions keyed by symbol.
         cash: Available cash.
         bar_index: 0-based index into the timeline.
     """
 
     ts: datetime
-    instrument: str
-    instruments: list[str]
+    symbol: str
+    symbols: list[str]
     bar: dict[str, float]
     bars: dict[str, dict[str, float]]
     positions: dict[str, Position]
@@ -56,7 +56,7 @@ class Action:
     """What the strategy wants the engine to do."""
 
     type: Literal["buy", "sell", "close", "hold"]
-    instrument: str = ""
+    symbol: str = ""
     quantity: float | None = None
     reason: str = ""
 
@@ -65,7 +65,7 @@ class Action:
 class Fill:
     """Execution result from an Executor."""
 
-    instrument: str
+    symbol: str
     side: Literal["long", "short"]
     price: float
     quantity: float

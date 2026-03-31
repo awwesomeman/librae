@@ -57,10 +57,10 @@ class _AlwaysBuyStrategy(BaseStrategy):
     """Buy if no position, close if has position."""
 
     def on_bar(self, ctx: Context) -> list[Action]:
-        pos = ctx.positions.get(ctx.instrument)
+        pos = ctx.positions.get(ctx.symbol)
         if pos:
-            return [Action(type="close", instrument=ctx.instrument)]
-        return [Action(type="buy", instrument=ctx.instrument, quantity=1.0)]
+            return [Action(type="close", symbol=ctx.symbol)]
+        return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
 
 
 class _HoldStrategy(BaseStrategy):
@@ -78,7 +78,7 @@ class TestLiveExecutor:
 
     def test_execute_buy_returns_fill(self):
         executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="buy", instrument="BTCUSDT", quantity=0.5)
+        action = Action(type="buy", symbol="BTCUSDT", quantity=0.5)
         fill = executor.execute(action, price=100.0, cash=50_000.0)
 
         assert fill is not None
@@ -88,7 +88,7 @@ class TestLiveExecutor:
 
     def test_execute_sell_returns_short_fill(self):
         executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="sell", instrument="BTCUSDT", quantity=0.5)
+        action = Action(type="sell", symbol="BTCUSDT", quantity=0.5)
         fill = executor.execute(action, price=100.0, cash=50_000.0)
 
         assert fill is not None
@@ -96,18 +96,18 @@ class TestLiveExecutor:
 
     def test_execute_hold_returns_none(self):
         executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="hold", instrument="BTCUSDT")
+        action = Action(type="hold", symbol="BTCUSDT")
         assert executor.execute(action, 100.0, 50_000.0) is None
 
     def test_simulation_false_raises(self):
         executor = LiveExecutor(_zero_cost_model(), simulation=False)
-        action = Action(type="buy", instrument="BTCUSDT", quantity=1.0)
+        action = Action(type="buy", symbol="BTCUSDT", quantity=1.0)
         with pytest.raises(NotImplementedError, match="Phase 4"):
             executor.execute(action, 100.0, 50_000.0)
 
     def test_quantity_none_uses_cash_sizing(self):
         executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="buy", instrument="BTCUSDT")
+        action = Action(type="buy", symbol="BTCUSDT")
         fill = executor.execute(action, price=100.0, cash=500.0)
 
         assert fill is not None
@@ -115,7 +115,7 @@ class TestLiveExecutor:
 
     def test_zero_cash_returns_none(self):
         executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="buy", instrument="BTCUSDT")
+        action = Action(type="buy", symbol="BTCUSDT")
         fill = executor.execute(action, price=100.0, cash=0.0)
 
         assert fill is None
@@ -217,11 +217,11 @@ class TestLiveTrader:
 
         class TrackBarsHeld(BaseStrategy):
             def on_bar(self, ctx: Context) -> list[Action]:
-                pos = ctx.positions.get(ctx.instrument)
+                pos = ctx.positions.get(ctx.symbol)
                 if pos:
                     bars_held_values.append(pos.bars_held)
                     return []
-                return [Action(type="buy", instrument=ctx.instrument, quantity=1.0)]
+                return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
 
         call_num = 0
 
@@ -270,8 +270,8 @@ class TestLiveTrader:
         class TrackCash(BaseStrategy):
             def on_bar(self, ctx: Context) -> list[Action]:
                 cash_values.append(ctx.cash)
-                if not ctx.positions.get(ctx.instrument):
-                    return [Action(type="buy", instrument=ctx.instrument, quantity=1.0)]
+                if not ctx.positions.get(ctx.symbol):
+                    return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
         call_num = 0

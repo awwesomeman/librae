@@ -203,7 +203,7 @@ class TestCostModel:
 
         # Convert to MultiIndex
         mi = pd.MultiIndex.from_arrays(
-            [["TEST"] * len(merged), merged.index], names=["instrument", "datetime"],
+            [["TEST"] * len(merged), merged.index], names=["symbol", "datetime"],
         )
         merged_mi = merged.set_index(mi)
 
@@ -214,11 +214,11 @@ class TestCostModel:
 
         class SignalStrat(BaseStrategy):
             def on_bar(self, ctx):
-                pos = ctx.positions.get(ctx.instrument)
+                pos = ctx.positions.get(ctx.symbol)
                 if pos and (ctx.bar["exit_signal"] or pos.bars_held >= 24):
-                    return [Action(type="close", instrument=ctx.instrument)]
+                    return [Action(type="close", symbol=ctx.symbol)]
                 if not pos and ctx.bar["entry_signal"]:
-                    return [Action(type="buy", instrument=ctx.instrument)]
+                    return [Action(type="buy", symbol=ctx.symbol)]
                 return []
 
         cost_model = CostModel(
@@ -246,7 +246,7 @@ class TestCostModel:
         merged = _add_daily_trend_column(h1, d1)
 
         mi = pd.MultiIndex.from_arrays(
-            [["TEST"] * len(merged), merged.index], names=["instrument", "datetime"],
+            [["TEST"] * len(merged), merged.index], names=["symbol", "datetime"],
         )
         merged_mi = merged.set_index(mi)
 
@@ -256,11 +256,11 @@ class TestCostModel:
 
         class SignalStrat(BaseStrategy):
             def on_bar(self, ctx):
-                pos = ctx.positions.get(ctx.instrument)
+                pos = ctx.positions.get(ctx.symbol)
                 if pos and (ctx.bar["exit_signal"] or pos.bars_held >= 24):
-                    return [Action(type="close", instrument=ctx.instrument)]
+                    return [Action(type="close", symbol=ctx.symbol)]
                 if not pos and ctx.bar["entry_signal"]:
-                    return [Action(type="buy", instrument=ctx.instrument)]
+                    return [Action(type="buy", symbol=ctx.symbol)]
                 return []
 
         cost_model = CostModel(

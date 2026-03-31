@@ -209,8 +209,8 @@ class LiveTrader:
         bar_index = self._bar_indices.get(symbol, 0)
         ctx = Context(
             ts=ts,
-            instrument=symbol,
-            instruments=self._symbols,
+            symbol=symbol,
+            symbols=self._symbols,
             bar=bar,
             bars={symbol: bar},
             positions=self._positions,
@@ -242,7 +242,7 @@ class LiveTrader:
                     fill.price, fill.quantity,
                 )
                 self._positions[symbol] = Position(
-                    instrument=symbol,
+                    symbol=symbol,
                     side=fill.side,
                     entry_price=fill.price,
                     quantity=fill.quantity,
@@ -269,13 +269,13 @@ class LiveTrader:
             return
         old = self._positions[symbol]
         bars_held = self._bars_held.get(symbol, 0)
-        cm = self._executor.cost_model
+        cost_model = self._executor.cost_model
         # WHY: use CostModel.calc_pnl to account for multiplier (fixes futures bug)
-        unrealized_pnl = cm.calc_pnl(old.entry_price, current_price, old.quantity) * direction(old.side)
+        unrealized_pnl = cost_model.calc_pnl(old.entry_price, current_price, old.quantity) * direction(old.side)
 
         # WHY: Position is frozen, so we must recreate it with updated fields
         self._positions[symbol] = Position(
-            instrument=old.instrument,
+            symbol=old.symbol,
             side=old.side,
             entry_price=old.entry_price,
             quantity=old.quantity,
@@ -284,20 +284,20 @@ class LiveTrader:
             unrealized_pnl=unrealized_pnl,
         )
 
-    def _calc_equity(self) -> float:
+    def _eval_equity(self) -> float:
         """Total equity = cash + market value of all positions."""
-        cm = self._executor.cost_model
+        cost_model = self._executor.cost_model
         mtm = 0.0
         for sym, pos in self._positions.items():
             price = self._last_prices.get(sym, pos.entry_price)
             # WHY: same formula as backtest — PnL + entry notional (fixes direction bug)
-            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
-            mtm += pos.entry_price * pos.quantity * cm.multiplier
+            mtm += cost_model.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
+            mtm += pos.entry_price * pos.quantity * cost_model.multiplier
         return self._cash + mtm
 
     def _record_equity(self, ts: datetime) -> None:
         """Calculate equity + drawdown and call on_bar callback."""
-        equity = self._calc_equity()
+        equity = self._eval_equity()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
         ret_1d = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
@@ -308,18 +308,18 @@ class LiveTrader:
 
     def _record_trade(self, symbol: str, pos: Position, exit_price: float, ts: datetime) -> None:
         """Calculate trade PnL using shared calc_trade_pnl and call on_trade callback."""
-        cm = self._executor.cost_model
+        cost_model = self._executor.cost_model
         # WHY: use shared calc_trade_pnl for consistent PnL calculation with backtest.
         # Live doesn't track entry_commission/slippage on Position, so we re-derive them.
-        entry_commission = cm.calc_commission(pos.entry_price, pos.quantity)
-        entry_slippage = cm.calc_slippage(pos.quantity)
+        entry_commission = cost_model.calc_commission(pos.entry_price, pos.quantity)
+        entry_slippage = cost_model.calc_slippage(pos.quantity)
 
         pnl = calc_trade_pnl(
             entry_price=pos.entry_price,
             exit_price=exit_price,
             quantity=pos.quantity,
             side=pos.side,
-            cost_model=cm,
+            cost_model=cost_model,
             entry_commission=entry_commission,
             entry_slippage=entry_slippage,
         )

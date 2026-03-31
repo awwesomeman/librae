@@ -91,7 +91,7 @@ class TestCalcTradePnl:
         cm = _crypto_cost_model()
 
         pos = _PositionState(
-            instrument="TEST", side="long",
+            symbol="TEST", side="long",
             entry_price=100.0, quantity=10.0,
             entry_ts=None, bars_held=5,
             entry_commission=cm.calc_commission(100.0, 10.0),

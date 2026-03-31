@@ -4,7 +4,7 @@ Usage:
     from librae.config import get_market
 
     bt = Backtest(data=df, strategy=my_strategy, market_config=get_market("crypto"))
-    bt.add_benchmark(df.xs("BTCUSDT", level="instrument")["close"])
+    bt.add_benchmark(df.xs("BTCUSDT", level="symbol")["close"])
     bt.run()
     output = bt.build_output(annualize=True)
 
@@ -12,8 +12,8 @@ The engine owns all position state. Strategies only observe via Context.
 Execution uses make_fill() from core.executor.
 Shared PnL calculation uses calc_trade_pnl() from core.executor.
 
-Data format: MultiIndex DataFrame (instrument, datetime) with OHLCV + features.
-Single-asset is a special case where instruments has one element.
+Data format: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
+Single-asset is a special case where symbols has one element.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 class TradeResult:
     """Single completed trade from the engine."""
 
-    instrument: str
+    symbol: str
     entry_ts: datetime
     exit_ts: datetime
     side: Literal["long", "short"]
@@ -90,7 +90,7 @@ class BacktestResult:
 
 @dataclass
 class _PositionState:
-    instrument: str
+    symbol: str
     side: Literal["long", "short"]
     entry_price: float
     quantity: float
@@ -109,7 +109,7 @@ class Backtest:
     """Bar-by-bar backtest engine.
 
     Args:
-        data: MultiIndex DataFrame (instrument, datetime) with OHLCV + features.
+        data: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
               For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
         strategy: BaseStrategy subclass.
         market_config: MarketConfig for cost model (mutually exclusive with cost_model).
@@ -136,21 +136,21 @@ class Backtest:
 
         if not isinstance(data.index, pd.MultiIndex):
             raise ValueError(
-                "data must have MultiIndex (instrument, datetime). "
+                "data must have MultiIndex (symbol, datetime). "
                 "For single-asset: df.index = pd.MultiIndex.from_arrays([['SYM']*len(df), df.index])"
             )
 
-        self._instruments = data.index.get_level_values(0).unique().tolist()
+        self._symbols = data.index.get_level_values(0).unique().tolist()
         self._time_groups = data.groupby(level="datetime")
         self._timeline = sorted(self._time_groups.groups.keys())
 
         if cost_model is not None:
-            cm = cost_model
+            resolved_cm = cost_model
         elif market_config is not None:
-            cm = CostModel.from_market(market_config)
+            resolved_cm = CostModel.from_market(market_config)
         else:
-            cm = CostModel.zero()
-        self._cost_models: dict[str, CostModel] = {"__default__": cm}
+            resolved_cm = CostModel.zero()
+        self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
 
         # Auto-derive strategy_name from class name → snake_case
         cls_name = type(strategy).__name__
@@ -186,13 +186,13 @@ class Backtest:
 
     # --- Private helpers ---
 
-    def _get_cost_model(self, inst: str) -> CostModel:
-        """Get cost model for an instrument, falling back to __default__."""
-        return self._cost_models.get(inst) or self._cost_models.get("__default__", CostModel.zero())
+    def _get_cost_model(self, sym: str) -> CostModel:
+        """Get cost model for a symbol, falling back to __default__."""
+        return self._cost_models.get(sym) or self._cost_models.get("__default__", CostModel.zero())
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
-        self._run_id = generate_run_id(self._strategy_name, self._instruments[0])
+        self._run_id = generate_run_id(self._strategy_name, self._symbols[0])
         logger.info("Backtest started: run_id=%s", self._run_id)
 
         # WHY: pre-convert all bars once — avoids per-bar DataFrame.to_dict()
@@ -203,19 +203,19 @@ class Backtest:
         positions: dict[str, _PositionState] = {}
         trades: list[TradeResult] = []
         equity_curve: list[EquitySnapshot] = []
-        primary_inst = self._instruments[0]
+        primary_symbol = self._symbols[0]
 
         for step, ts in enumerate(self._timeline):
             bars = all_bars[ts]
 
-            mtm, pos_snapshot = self._eval_portfolio(cash, positions, bars)
+            mtm, pos_snapshot = self._eval_equity(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
 
             ctx = Context(
                 ts=ts,
-                instrument=primary_inst,
-                instruments=self._instruments,
-                bar=bars.get(primary_inst, {}),
+                symbol=primary_symbol,
+                symbols=self._symbols,
+                bar=bars.get(primary_symbol, {}),
                 bars=bars,
                 positions=pos_snapshot,
                 cash=cash,
@@ -225,20 +225,20 @@ class Backtest:
             actions = self._strategy.on_bar(ctx)
 
             for action in actions:
-                inst = action.instrument or primary_inst
-                cm = self._get_cost_model(inst)
-                bar_data = bars.get(inst)
+                sym = action.symbol or primary_symbol
+                cost_model = self._get_cost_model(sym)
+                bar_data = bars.get(sym)
                 price = bar_data["close"] if bar_data is not None else 0.0
                 if price <= 0:
-                    logger.warning("Invalid price %s for %s, skipping", price, inst)
+                    logger.warning("Invalid price %s for %s, skipping", price, sym)
                     continue
 
-                if action.type in ("buy", "sell") and inst not in positions:
-                    fill = make_fill(action, price, cash, cm)
+                if action.type in ("buy", "sell") and sym not in positions:
+                    fill = make_fill(action, price, cash, cost_model)
                     if fill and fill.quantity > 0:
-                        cash -= cm.estimate_entry_outlay(price, fill.quantity)
-                        positions[inst] = _PositionState(
-                            instrument=inst,
+                        cash -= cost_model.estimate_entry_outlay(price, fill.quantity)
+                        positions[sym] = _PositionState(
+                            symbol=sym,
                             side=fill.side,
                             entry_price=price,
                             quantity=fill.quantity,
@@ -248,12 +248,12 @@ class Backtest:
                             entry_slippage=fill.slippage,
                         )
 
-                elif action.type == "close" and inst in positions:
-                    pos = positions[inst]
-                    trade, proceeds = self._close_position(pos, ts, price, cm)
+                elif action.type == "close" and sym in positions:
+                    pos = positions[sym]
+                    trade, proceeds = self._close_position(pos, ts, price, cost_model)
                     trades.append(trade)
                     cash += proceeds
-                    del positions[inst]
+                    del positions[sym]
 
             self._increment_bars_held(positions)
 
@@ -261,15 +261,15 @@ class Backtest:
         if self._timeline:
             last_ts = self._timeline[-1]
             last_bars = all_bars[last_ts]
-            for inst in list(positions.keys()):
-                pos = positions[inst]
-                last_bar = last_bars.get(inst)
+            for sym in list(positions.keys()):
+                pos = positions[sym]
+                last_bar = last_bars.get(sym)
                 price = last_bar["close"] if last_bar is not None else pos.entry_price
-                cm = self._get_cost_model(inst)
-                trade, proceeds = self._close_position(pos, last_ts, price, cm)
+                cost_model = self._get_cost_model(sym)
+                trade, proceeds = self._close_position(pos, last_ts, price, cost_model)
                 trades.append(trade)
                 cash += proceeds
-                del positions[inst]
+                del positions[sym]
 
         self._result = BacktestResult(
             trades=trades,
@@ -289,7 +289,7 @@ class Backtest:
         All metadata is auto-derived from the engine state:
         - run_id: generated in run()
         - start_ts/end_ts: from self._timeline
-        - symbol: from self._instruments[0]
+        - symbol: from self._symbols[0]
         - strategy_name: from type(strategy).__name__
         - timeframe: inferred from data index
 
@@ -309,7 +309,7 @@ class Backtest:
         timeline = self._timeline
         start_ts = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
         end_ts = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
-        symbol = self._instruments[0]
+        symbol = self._symbols[0]
         # WHY: reuse self._timeline (already sorted) instead of re-extracting from index
         timeframe = infer_timeframe(pd.DatetimeIndex(timeline))
 
@@ -373,7 +373,7 @@ class Backtest:
             TradeRecord(
                 trade_id=make_trade_id(run_id, i),
                 entry_ts=t.entry_ts, exit_ts=t.exit_ts,
-                symbol=t.instrument, side=t.side,
+                symbol=t.symbol, side=t.side,
                 entry_price=float(t.entry_price), exit_price=float(t.exit_price),
                 quantity=float(t.quantity),
                 gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
@@ -443,7 +443,7 @@ class Backtest:
         for ps in positions.values():
             ps.bars_held += 1
 
-    def _eval_portfolio(
+    def _eval_equity(
         self,
         cash: float,
         positions: dict[str, _PositionState],
@@ -451,18 +451,18 @@ class Backtest:
     ) -> tuple[float, dict[str, Position]]:
         """Compute portfolio MTM value and position snapshot in a single pass.
 
-        Returns (mark_to_market, {instrument: Position}).
+        Returns (mark_to_market, {symbol: Position}).
         """
         mtm = cash
         snapshot: dict[str, Position] = {}
-        for inst, ps in positions.items():
-            bar = bars.get(inst)
+        for sym, ps in positions.items():
+            bar = bars.get(sym)
             price = bar["close"] if bar is not None else ps.entry_price
-            cm = self._get_cost_model(inst)
-            unrealized = cm.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
-            mtm += unrealized + ps.entry_price * ps.quantity * cm.multiplier
-            snapshot[inst] = Position(
-                instrument=inst,
+            cost_model = self._get_cost_model(sym)
+            unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
+            mtm += unrealized + ps.entry_price * ps.quantity * cost_model.multiplier
+            snapshot[sym] = Position(
+                symbol=sym,
                 side=ps.side,
                 entry_price=ps.entry_price,
                 quantity=ps.quantity,
@@ -477,7 +477,7 @@ class Backtest:
         pos: _PositionState,
         exit_ts: datetime,
         exit_price: float,
-        cm: CostModel,
+        cost_model: CostModel,
     ) -> tuple[TradeResult, float]:
         """Close a position using shared calc_trade_pnl. Returns (TradeResult, cash_proceeds)."""
         pnl = calc_trade_pnl(
@@ -485,16 +485,16 @@ class Backtest:
             exit_price=exit_price,
             quantity=pos.quantity,
             side=pos.side,
-            cost_model=cm,
+            cost_model=cost_model,
             entry_commission=pos.entry_commission,
             entry_slippage=pos.entry_slippage,
         )
 
-        notional = exit_price * pos.quantity * cm.multiplier
+        notional = exit_price * pos.quantity * cost_model.multiplier
         proceeds = notional - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
 
         trade = TradeResult(
-            instrument=pos.instrument,
+            symbol=pos.symbol,
             entry_ts=pos.entry_ts,
             exit_ts=exit_ts,
             side=pos.side,

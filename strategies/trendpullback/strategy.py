@@ -23,14 +23,14 @@ class TrendPullbackStrategy(BaseStrategy):
         self.max_hold_bars = max_hold_bars
 
     def on_bar(self, ctx: Context) -> list[Action]:
-        pos = ctx.positions.get(ctx.instrument)
+        pos = ctx.positions.get(ctx.symbol)
 
         if pos:
             if ctx.bar.get("exit_signal") or pos.bars_held >= self.max_hold_bars:
-                return [Action(type="close", instrument=ctx.instrument)]
+                return [Action(type="close", symbol=ctx.symbol)]
             return []
 
         if ctx.bar.get("entry_signal"):
-            return [Action(type="buy", instrument=ctx.instrument)]
+            return [Action(type="buy", symbol=ctx.symbol)]
 
         return []

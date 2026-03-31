@@ -42,7 +42,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         market_config=market_config,
         initial_balance=args.initial_balance,
     )
-    benchmark_prices = df.xs(args.symbol, level="instrument")["close"]
+    benchmark_prices = df.xs(args.symbol, level="symbol")["close"]
     bt.add_benchmark(benchmark_prices)
     bt.run()
 
@@ -62,7 +62,7 @@ def run_backtest(args: argparse.Namespace) -> None:
     if not args.no_db:
         try:
             counts = write_backtest_output(output)
-            ohlcv_df = df.droplevel("instrument")[["open", "high", "low", "close", "volume"]]
+            ohlcv_df = df.droplevel("symbol")[["open", "high", "low", "close", "volume"]]
             ohlcv_df.index.name = "ts"
             counts["ohlcv"] = write_ohlcv(ohlcv_df, args.symbol, TIMEFRAME, bt.run_id)
             logger.info("       DB: %s", counts)

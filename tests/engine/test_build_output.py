@@ -16,11 +16,11 @@ from librae.core.strategy import Action, BaseStrategy
 # ---------------------------------------------------------------------------
 
 
-def _make_df(n: int = 50, instrument: str = "BTCUSDT") -> pd.DataFrame:
+def _make_df(n: int = 50, symbol: str = "BTCUSDT") -> pd.DataFrame:
     close = 100.0 + np.cumsum(np.random.default_rng(42).normal(0.2, 1, n))
     dt = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
     idx = pd.MultiIndex.from_arrays(
-        [[instrument] * n, dt], names=["instrument", "datetime"],
+        [[symbol] * n, dt], names=["symbol", "datetime"],
     )
     return pd.DataFrame({
         "open": close, "high": close * 1.001,
@@ -31,10 +31,10 @@ def _make_df(n: int = 50, instrument: str = "BTCUSDT") -> pd.DataFrame:
 
 class BuyBar5CloseBar15(BaseStrategy):
     def on_bar(self, ctx):
-        if ctx.bar_index == 5 and ctx.instrument not in ctx.positions:
-            return [Action(type="buy", instrument=ctx.instrument)]
-        if ctx.bar_index == 15 and ctx.instrument in ctx.positions:
-            return [Action(type="close", instrument=ctx.instrument)]
+        if ctx.bar_index == 5 and ctx.symbol not in ctx.positions:
+            return [Action(type="buy", symbol=ctx.symbol)]
+        if ctx.bar_index == 15 and ctx.symbol in ctx.positions:
+            return [Action(type="close", symbol=ctx.symbol)]
         return []
 
 
@@ -130,7 +130,7 @@ class TestBenchmark:
 
     def test_with_benchmark(self) -> None:
         df = _make_df()
-        benchmark_prices = df.xs("BTCUSDT", level="instrument")["close"]
+        benchmark_prices = df.xs("BTCUSDT", level="symbol")["close"]
         bt = Backtest(df, BuyBar5CloseBar15())
         bt.add_benchmark(benchmark_prices)
         bt.run()

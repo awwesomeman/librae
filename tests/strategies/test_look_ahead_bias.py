@@ -186,11 +186,11 @@ class _BuyBar5Strategy(BaseStrategy):
     """Deterministic strategy: buy at bar 5, close at bar 10."""
 
     def on_bar(self, ctx) -> list[Action]:
-        pos = ctx.positions.get(ctx.instrument)
+        pos = ctx.positions.get(ctx.symbol)
         if pos and ctx.bar_index >= 10:
-            return [Action(type="close", instrument=ctx.instrument)]
+            return [Action(type="close", symbol=ctx.symbol)]
         if not pos and ctx.bar_index == 5:
-            return [Action(type="buy", instrument=ctx.instrument)]
+            return [Action(type="buy", symbol=ctx.symbol)]
         return []
 
 
@@ -211,7 +211,7 @@ class TestEngineExecutionTiming:
             "exit_signal": False,
         }, index=idx)
         mi = pd.MultiIndex.from_arrays(
-            [["TEST"] * n, idx], names=["instrument", "datetime"],
+            [["TEST"] * n, idx], names=["symbol", "datetime"],
         )
         return df.set_index(mi)
 

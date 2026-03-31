@@ -3,7 +3,7 @@
 Contains:
 - Executor Protocol: interface for trade execution (live implements this)
 - make_fill(): pure function for simulated fills (backtest uses directly)
-- size_position(): position sizing using all available cash
+- _size_position(): position sizing using all available cash
 - calc_trade_pnl(): shared PnL calculation for backtest + live
 - TradePnL: PnL breakdown dataclass
 
@@ -102,7 +102,7 @@ def calc_trade_pnl(
     )
 
 
-def size_position(cost_model: CostModel, price: float, cash: float) -> float:
+def _size_position(cost_model: CostModel, price: float, cash: float) -> float:
     """Compute position size using all available cash."""
     outlay_per_unit = cost_model.estimate_entry_outlay(price, 1.0)
     if outlay_per_unit < EPSILON:
@@ -117,12 +117,12 @@ def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) 
 
     qty = action.quantity
     if qty is None:
-        qty = size_position(cost_model, price, cash)
+        qty = _size_position(cost_model, price, cash)
     if qty <= 0:
         return None
 
     return Fill(
-        instrument=action.instrument,
+        symbol=action.symbol,
         side="long" if action.type == "buy" else "short",
         price=price,
         quantity=qty,

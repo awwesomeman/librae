@@ -130,7 +130,7 @@ class TestComputeAllWithEngine:
         idx = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
         prices = 100.0 + np.cumsum(np.random.default_rng(42).normal(0.5, 1, n))
         mi = pd.MultiIndex.from_arrays(
-            [["TEST"] * n, idx], names=["instrument", "datetime"],
+            [["TEST"] * n, idx], names=["symbol", "datetime"],
         )
         df = pd.DataFrame({
             "open": prices, "high": prices * 1.001,
@@ -140,10 +140,10 @@ class TestComputeAllWithEngine:
 
         class BuyBar10CloseBar30(BaseStrategy):
             def on_bar(self, ctx):
-                if ctx.bar_index == 10 and ctx.instrument not in ctx.positions:
-                    return [Action(type="buy", instrument=ctx.instrument)]
-                if ctx.bar_index == 30 and ctx.instrument in ctx.positions:
-                    return [Action(type="close", instrument=ctx.instrument)]
+                if ctx.bar_index == 10 and ctx.symbol not in ctx.positions:
+                    return [Action(type="buy", symbol=ctx.symbol)]
+                if ctx.bar_index == 30 and ctx.symbol in ctx.positions:
+                    return [Action(type="close", symbol=ctx.symbol)]
                 return []
 
         cost = CostModel(

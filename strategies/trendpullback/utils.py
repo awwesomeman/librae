@@ -137,7 +137,7 @@ def fetch_and_prepare(
 ) -> pd.DataFrame:
     """End-to-end data preparation: fetch OHLCV → features → signals → MultiIndex.
 
-    Returns a MultiIndex DataFrame (instrument, datetime) ready for Backtest.
+    Returns a MultiIndex DataFrame (symbol, datetime) ready for Backtest.
     """
     h1_raw = fetch_ohlcv(symbol=symbol, interval="1h", months=months)
     h1_base = h1_raw.set_index("timestamp")
@@ -156,7 +156,7 @@ def fetch_and_prepare(
 
     # MultiIndex
     mi = pd.MultiIndex.from_arrays(
-        [[symbol] * len(h1), h1.index], names=["instrument", "datetime"],
+        [[symbol] * len(h1), h1.index], names=["symbol", "datetime"],
     )
     return h1.set_index(mi)
 

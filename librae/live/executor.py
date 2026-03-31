@@ -58,13 +58,13 @@ class LiveExecutor:
             self._notify_signal(action, price)
         return fill
 
-    def notify_exit(self, instrument: str, price: float) -> None:
+    def notify_exit(self, symbol: str, price: float) -> None:
         """Send exit notification (called by LiveTrader on close action)."""
-        logger.info("SIGNAL EXIT %s @ %.2f", instrument, price)
+        logger.info("SIGNAL EXIT %s @ %.2f", symbol, price)
         if self._telegram and self._telegram.enabled:
             self._telegram.send_signal(
                 strategy=self._strategy_name,
-                symbol=instrument,
+                symbol=symbol,
                 side="EXIT",
                 price=price,
             )
@@ -74,12 +74,12 @@ class LiveExecutor:
         side = "BUY" if action.type == "buy" else "SELL"
         logger.info(
             "SIGNAL %s %s @ %.2f (reason: %s)",
-            side, action.instrument, price, action.reason or "n/a",
+            side, action.symbol, price, action.reason or "n/a",
         )
         if self._telegram and self._telegram.enabled:
             self._telegram.send_signal(
                 strategy=self._strategy_name,
-                symbol=action.instrument,
+                symbol=action.symbol,
                 side=side,
                 price=price,
             )
