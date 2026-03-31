@@ -232,11 +232,11 @@ def build_order_details(blotter: pd.DataFrame) -> pd.DataFrame:
         out["Entry Time"] = pd.Series(["—"] * len(df), index=df.index)
 
     out["Exit Time"] = pd.to_datetime(df["_time"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
-    side_raw = df.get("side", pd.Series(["buy"] * len(df))).astype(str).str.lower()
+    side_raw = df.get("side", pd.Series(["long"] * len(df))).astype(str).str.lower()
     qty = pd.to_numeric(df.get("quantity"), errors="coerce").round(4)
-    # Merge Side + Qty → Position with sign: Long(buy) → +qty, Short(sell) → -qty
+    # Merge Side + Qty → Position with sign: long → +qty, short → -qty
     out["Position"] = [
-        f"+{q:.2f}" if s == "buy" else f"-{q:.2f}"
+        f"+{q:.2f}" if s == "long" else f"-{q:.2f}"
         for s, q in zip(side_raw, qty)
     ]
     out["Entry Price"] = pd.to_numeric(df.get("entry_price"), errors="coerce").round(2)

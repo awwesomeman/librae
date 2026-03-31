@@ -42,7 +42,7 @@ def build_cost_settings(
 def build_strategy_output(
     *,
     strategy: str,
-    instrument: str,
+    symbol: str,
     data: str,
     periods,
     cost_settings: Dict[str, Any],
@@ -51,7 +51,7 @@ def build_strategy_output(
 ) -> Dict[str, Any]:
     """Build the canonical strategy output dict with deterministic key order.
 
-    Key order: strategy, instrument, data, sample_periods, cost_settings,
+    Key order: strategy, symbol, data, sample_periods, cost_settings,
     protocol, chosen_params, train, validation, validation_cost_stress,
     oos_final_once, ...extras
     """
@@ -59,7 +59,7 @@ def build_strategy_output(
 
     out: Dict[str, Any] = {}
     out['strategy'] = strategy
-    out['instrument'] = instrument
+    out['symbol'] = symbol
     out['data'] = data
     out['sample_periods'] = sample_periods
     out['cost_settings'] = cost_settings

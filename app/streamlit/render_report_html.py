@@ -276,7 +276,7 @@ def _period_range(p):
 
 def render_strategy_card(data):
     strat = esc(data.get('strategy', '-'))
-    instrument = esc(data.get('instrument', '-'))
+    symbol = esc(data.get('symbol', '-'))
     data_src = esc(data.get('data', '-'))
     protocol = esc(data.get('protocol', '-'))
     cost_display = _cost_text(data)
@@ -307,7 +307,7 @@ def render_strategy_card(data):
     return f"""<div class="card">
 <h2>{strat}</h2>
 <dl class="kv">
-<dt>Instrument:</dt><dd>{instrument}</dd>
+<dt>Symbol:</dt><dd>{symbol}</dd>
 <dt>Data:</dt><dd>{data_src}</dd>
 <dt>Cost:</dt><dd>{cost_display}</dd>
 <dt>Params:</dt><dd>{params}</dd>

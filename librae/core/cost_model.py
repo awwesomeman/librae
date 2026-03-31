@@ -64,38 +64,38 @@ class CostModel:
             transaction_tax=market.transaction_tax,
         )
 
-    def calc_pnl(self, entry_price: float, exit_price: float, qty: float) -> float:
+    def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
         """Gross PnL for a round-trip trade.
 
-        Spot:    (exit - entry) * qty * 1.0
-        Futures: (exit - entry) * qty * (tick_value / tick_size)
+        Spot:    (exit - entry) * quantity * 1.0
+        Futures: (exit - entry) * quantity * (tick_value / tick_size)
         """
-        return (exit_price - entry_price) * qty * self.multiplier
+        return (exit_price - entry_price) * quantity * self.multiplier
 
-    def calc_commission(self, price: float, qty: float) -> float:
+    def calc_commission(self, price: float, quantity: float) -> float:
         """Single-side commission with minimum floor."""
-        notional = price * qty * self.multiplier
+        notional = price * quantity * self.multiplier
         return max(abs(notional) * self.commission_rate, self.min_commission)
 
-    def calc_slippage(self, qty: float) -> float:
+    def calc_slippage(self, quantity: float) -> float:
         """Single-side slippage cost in quote currency."""
-        return self.slippage_ticks * self.tick_size * abs(qty) * self.multiplier
+        return self.slippage_ticks * self.tick_size * abs(quantity) * self.multiplier
 
-    def calc_tax(self, price: float, qty: float, *, is_sell: bool) -> float:
+    def calc_tax(self, price: float, quantity: float, *, is_sell: bool) -> float:
         """Transaction tax (applied on sell side only, e.g. TW stock/futures)."""
         if not is_sell or self.transaction_tax <= 0:
             return 0.0
-        notional = price * qty * self.multiplier
+        notional = price * quantity * self.multiplier
         return abs(notional) * self.transaction_tax
 
-    def total_cost(self, price: float, qty: float, *, is_sell: bool) -> float:
+    def total_cost(self, price: float, quantity: float, *, is_sell: bool) -> float:
         """Total single-side cost: commission + slippage + tax."""
         return (
-            self.calc_commission(price, qty)
-            + self.calc_slippage(qty)
-            + self.calc_tax(price, qty, is_sell=is_sell)
+            self.calc_commission(price, quantity)
+            + self.calc_slippage(quantity)
+            + self.calc_tax(price, quantity, is_sell=is_sell)
         )
 
-    def estimate_entry_outlay(self, price: float, qty: float) -> float:
+    def estimate_entry_outlay(self, price: float, quantity: float) -> float:
         """Estimate total cash outlay for entering a position (for sizing)."""
-        return price * qty * self.multiplier + self.total_cost(price, qty, is_sell=False)
+        return price * quantity * self.multiplier + self.total_cost(price, quantity, is_sell=False)

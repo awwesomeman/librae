@@ -48,7 +48,7 @@ def _make_sample_output(run_id: str = "test_strat-btcusdt-20260326t000000-abcd12
             entry_ts=datetime(2026, 1, 2, tzinfo=timezone.utc),
             exit_ts=datetime(2026, 1, 3, tzinfo=timezone.utc),
             symbol="BTCUSDT",
-            side="buy",
+            side="long",
             entry_price=40000.0,
             exit_price=41000.0,
             quantity=0.1,

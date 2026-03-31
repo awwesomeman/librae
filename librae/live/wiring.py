@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Callable
 
 import pandas as pd
 
 from librae.config.market_config import get_market
 from librae.core.cost_model import CostModel
+from librae.core.executor import TradeResult
 from librae.core.strategy import Action, BaseStrategy
 from librae.core.utils import generate_run_id, make_trade_id, to_ccxt
 from librae.notifications.telegram import TelegramAdapter
@@ -73,16 +74,16 @@ def build_live_trader(
         except Exception as e:
             logger.warning("DB write_run_metadata failed: %s", e)
 
-    def _db_write(fn: Callable, *a: Any, **kw: Any) -> None:
+    def _db_write(fn: Callable[..., object], *args: object, **kwargs: object) -> None:
         if no_db:
             return
         try:
-            fn(*a, **kw)
+            fn(*args, **kwargs)
         except Exception as e:
             logger.warning("DB %s failed: %s", fn.__name__, e)
 
-    def fetcher(symbol: str, tf: str, limit: int, **kwargs: Any) -> pd.DataFrame:
-        return adapter.fetch_ohlcv(symbol, tf, limit, **kwargs)
+    def fetcher(symbol: str, timeframe_ccxt_: str, limit: int, *, drop_incomplete: bool = False) -> pd.DataFrame:
+        return adapter.fetch_ohlcv(symbol, timeframe_ccxt_, limit, drop_incomplete=drop_incomplete)
 
     def on_signal(symbol: str, action: Action, price: float, ts: datetime) -> None:
         signal_type = "entry" if action.type in ("buy", "sell") else "exit"
@@ -96,12 +97,12 @@ def build_live_trader(
             source="sim", price=price, signal_strength=strength,
         )
 
-    def on_bar(rid: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
-        _db_write(write_equity_point, ts=ts, run_id=rid, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
+    def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
+        _db_write(write_equity_point, ts=ts, run_id=run_id_, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
 
     _trade_seq = 0
 
-    def on_trade(trade: object) -> None:
+    def on_trade(trade: TradeResult) -> None:
         nonlocal _trade_seq
         _trade_seq += 1
         _db_write(
@@ -125,7 +126,7 @@ def build_live_trader(
         )
         _db_write(refresh_performance, run_id)
 
-    def on_ohlcv(rid: str, symbol: str, tf: str, bar: dict, ts: datetime) -> None:
+    def on_ohlcv(run_id_: str, symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
         row = pd.DataFrame([{
             "ts": ts,
             "open": bar.get("open", 0),
@@ -134,10 +135,10 @@ def build_live_trader(
             "close": bar.get("close", 0),
             "volume": bar.get("volume", 0),
         }]).set_index("ts")
-        _db_write(write_ohlcv, row, symbol, tf, rid, source="sim")
+        _db_write(write_ohlcv, row, symbol, timeframe_, run_id_, source="sim")
 
-    def on_heartbeat(rid: str) -> None:
-        _db_write(update_heartbeat, rid)
+    def on_heartbeat(run_id_: str) -> None:
+        _db_write(update_heartbeat, run_id_)
 
     executor = LiveExecutor(
         cost_model, simulation=True, telegram=telegram,

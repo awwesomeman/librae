@@ -62,7 +62,7 @@ def _make_blotter(**extra_cols):
     """Helper: minimal blotter DataFrame for build_order_details tests."""
     base = {
         "_time": pd.to_datetime(["2026-03-04T08:00:00+00:00"]),
-        "side": ["buy"],
+        "side": ["long"],
         "entry_price": [18000.0],
         "exit_price": [18200.0],
         "quantity": [1.0],
@@ -115,15 +115,15 @@ def test_build_order_details_no_serial_side_qty_columns() -> None:
 
 
 def test_build_order_details_position_long() -> None:
-    """Long (buy) → +qty formatted to 4 decimals."""
-    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])  # side=buy, qty=1.0
+    """Long → +qty formatted to 4 decimals."""
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"])  # side=long, qty=1.0
     result = build_order_details(blotter)
     assert result["Position"].iloc[0] == "+1.00"
 
 
 def test_build_order_details_position_short() -> None:
-    """Short (sell) → -qty formatted to 4 decimals."""
-    blotter = _make_blotter(entry_time=["2026-03-04 06:00"], side=["sell"])
+    """Short → -qty formatted to 4 decimals."""
+    blotter = _make_blotter(entry_time=["2026-03-04 06:00"], side=["short"])
     result = build_order_details(blotter)
     assert result["Position"].iloc[0] == "-1.00"
 
