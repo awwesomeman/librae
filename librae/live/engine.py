@@ -9,14 +9,16 @@ import logging
 import signal
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable
 
 import pandas as pd
 
-from .executor import LiveExecutor
 from librae.core.executor import TradeResult, close_position, direction
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
+
+from .executor import LiveExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,9 @@ class LiveTrader:
             called every completed bar for OHLCV persistence.
         on_heartbeat: Optional callback(run_id) called every poll cycle
             to update liveness status.
+
+    Lifecycle notifications (startup/shutdown/error) are sent via the
+    executor's TelegramAdapter if configured.
     """
 
     def __init__(
@@ -82,6 +87,7 @@ class LiveTrader:
         self._on_heartbeat = on_heartbeat
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
+        self._consecutive_errors: int = 0
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -90,34 +96,92 @@ class LiveTrader:
         self._prev_equity: float = initial_balance
         self._trade_count: int = 0
         self._bar_indices: dict[str, int] = {}
+        self._symbols_str: str = ",".join(symbols)
+        self._status_bar_count: int = 0
         self._running: bool = False
+
+        # Cache status config to avoid property-chain lookups on every bar
+        tg = executor.telegram
+        self._status_enabled: bool = bool(tg and tg.notifications.status.enabled)
+        self._status_interval: int = tg.notifications.status.interval_bars if tg else 0
+
+        # WHY: Telegram API calls block (10s timeout + retries).  A bounded
+        # pool avoids spawning a new OS thread per notification while keeping
+        # the main poll loop unblocked.
+        self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tg")
+
+    # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
+    # unreachable), not a transient blip — worth alerting the operator.
+    CONSECUTIVE_ERROR_THRESHOLD = 3
+
+    def _notify(self, method: str, **kwargs: object) -> None:
+        """Submit a Telegram notification to the background thread pool."""
+        telegram = self._executor.telegram
+        if not telegram:
+            return
+        fn = getattr(telegram, method)
+        self._notify_pool.submit(fn, **kwargs)
 
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._running = True
         self._setup_signal_handlers()
         iteration = 0
+        strategy_name = self._executor.strategy_name
+        symbols_str = self._symbols_str
 
         logger.info(
             "LiveTrader started: symbols=%s, timeframe=%s, poll=%ss",
             self._symbols, self._timeframe, self._poll_interval,
         )
+        self._notify(
+            "send_startup",
+            strategy=strategy_name,
+            symbol=symbols_str,
+            mode="sim" if self._executor.simulation else "live",
+            run_id=self._run_id,
+        )
 
-        while self._running:
-            try:
-                self._poll_cycle()
-            except Exception:
-                logger.exception("Error in poll cycle, will retry next interval")
+        shutdown_reason = "normal"
+        try:
+            while self._running:
+                try:
+                    self._poll_cycle()
+                    self._consecutive_errors = 0
+                except Exception:
+                    self._consecutive_errors += 1
+                    logger.exception(
+                        "Error in poll cycle (%d consecutive), will retry next interval",
+                        self._consecutive_errors,
+                    )
+                    if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
+                        self._notify(
+                            "send_alert",
+                            title=f"[{strategy_name}] Poll Error",
+                            message=f"{self._consecutive_errors} consecutive failures. Check logs.",
+                        )
 
-            iteration += 1
-            if max_iterations is not None and iteration >= max_iterations:
-                logger.info("Reached max_iterations=%d, stopping", max_iterations)
-                break
+                iteration += 1
+                if max_iterations is not None and iteration >= max_iterations:
+                    logger.info("Reached max_iterations=%d, stopping", max_iterations)
+                    break
 
-            if self._running:
-                time.sleep(self._poll_interval)
-
-        logger.info("LiveTrader stopped")
+                if self._running:
+                    time.sleep(self._poll_interval)
+        except Exception:
+            shutdown_reason = "unhandled exception"
+            logger.exception("LiveTrader crashed")
+        finally:
+            self._notify(
+                "send_shutdown",
+                strategy=strategy_name,
+                symbol=symbols_str,
+                reason=shutdown_reason,
+            )
+            # WHY: wait=True ensures the shutdown notification is actually sent
+            # before the process exits; without it the pool's threads get killed.
+            self._notify_pool.shutdown(wait=True)
+            logger.info("LiveTrader stopped (reason: %s)", shutdown_reason)
 
     def stop(self) -> None:
         """Signal the runner to stop after the current cycle."""
@@ -308,7 +372,7 @@ class LiveTrader:
         return self._cash + mtm
 
     def _record_equity(self, ts: datetime) -> None:
-        """Calculate equity + drawdown and call on_bar callback."""
+        """Calculate equity + drawdown, call on_bar callback, and send periodic status."""
         equity = self._eval_equity()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
@@ -317,4 +381,23 @@ class LiveTrader:
 
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, ret_1d)
+
+        # Periodic status notification (flags cached at init)
+        if self._status_enabled:
+            self._status_bar_count += 1
+            if self._status_bar_count >= self._status_interval:
+                self._status_bar_count = 0
+                pos_str = "flat"
+                if self._positions:
+                    parts = [f"{ps.side} {sym}" for sym, ps in self._positions.items()]
+                    pos_str = ", ".join(parts)
+                self._notify(
+                    "send_status",
+                    strategy=self._executor.strategy_name,
+                    symbol=self._symbols_str,
+                    equity=equity,
+                    drawdown=drawdown,
+                    daily_pnl=ret_1d * equity,
+                    position=pos_str,
+                )
 
