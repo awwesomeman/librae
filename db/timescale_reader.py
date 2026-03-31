@@ -55,7 +55,8 @@ def load_trade_blotter(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     sql = """
         SELECT trade_id, entry_ts, exit_ts AS _time, side,
                entry_price, exit_price, quantity,
-               gross_pnl, net_pnl, commission, slippage, holding_bars, symbol
+               gross_pnl, net_pnl, gross_return, net_return,
+               commission, slippage, tax, holding_bars, symbol
         FROM trade_blotter
         WHERE run_id = %s
         ORDER BY entry_ts DESC
@@ -79,7 +80,7 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         SELECT sp.run_id, sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
                sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.trades,
                sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
-               sp.total_commission, sp.total_slippage,
+               sp.total_commission, sp.total_slippage, sp.total_tax,
                br.strategy, br.symbol, br.timeframe, br.sample
         FROM strategy_performance sp
         JOIN backtest_runs br ON sp.run_id = br.run_id

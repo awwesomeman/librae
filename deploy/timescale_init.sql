@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique ON equity_curve(ts, run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique ON equity_curve(run_id, ts);
 
 -- trade blotter
 CREATE TABLE IF NOT EXISTS trade_blotter (
@@ -52,13 +52,14 @@ CREATE TABLE IF NOT EXISTS trade_blotter (
     pnl_unit        TEXT DEFAULT 'USDT',
     commission      DOUBLE PRECISION DEFAULT 0,
     slippage        DOUBLE PRECISION DEFAULT 0,
+    tax             DOUBLE PRECISION DEFAULT 0,
     holding_bars    INTEGER
 );
 
 -- strategy signals（live + backtest, hypertable）
 CREATE TABLE IF NOT EXISTS strategy_signals (
     ts              TIMESTAMPTZ NOT NULL,
-    run_id          TEXT NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
     strategy        TEXT,
     symbol          TEXT,
     timeframe       TEXT,
@@ -89,7 +90,8 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     exposure_ratio  DOUBLE PRECISION,
     benchmark_return DOUBLE PRECISION,
     total_commission DOUBLE PRECISION DEFAULT 0,
-    total_slippage  DOUBLE PRECISION DEFAULT 0
+    total_slippage  DOUBLE PRECISION DEFAULT 0,
+    total_tax       DOUBLE PRECISION DEFAULT 0
 );
 
 -- ohlcv（hypertable）
@@ -97,7 +99,7 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
-    run_id          TEXT,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
     source          TEXT,   -- backtest / live
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,

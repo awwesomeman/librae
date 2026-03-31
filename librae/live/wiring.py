@@ -127,6 +127,7 @@ def build_live_trader(
             holding_bars=trade.holding_bars,
             commission=trade.commission,
             slippage=trade.slippage,
+            tax=trade.tax,
         )
         _db_write(refresh_performance, run_id)
 

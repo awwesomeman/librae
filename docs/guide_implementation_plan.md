@@ -253,24 +253,11 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 
 ---
 
-## 5) 待辦：Config 重構
+## 5) Config 重構 ✅
 
-目前 `librae/config/markets.yaml` 的 InstrumentConfig 混了不同關注點：
-
-```yaml
-BTC_USDT:
-  # 市場屬性（固定）— 保留
-  tick_size, tick_value, trade_unit, min_qty, qty_precision, margin_rate
-
-  # 成本參數（回測/實盤共用）— 保留
-  commission_rate, min_commission, transaction_tax, slippage_ticks
-
-  # 不該在這裡 — 未來拆出
-  warmup_bars, max_hold_bars  → 策略參數（在 Strategy 類別裡）
-  data_source, exchange       → 券商 config（brokers/ 或環境變數）
-```
-
-不在目前 Phase 做，等策略和券商模組穩定後再拆。
+已完成。`librae/config/markets.yaml` 現在只保留市場屬性 + 成本參數：
+- `warmup_bars`, `max_hold_bars` → 已移至策略層
+- `data_source`, `exchange` → 已移至 broker layer
 
 ---
 

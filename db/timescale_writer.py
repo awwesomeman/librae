@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg2
 import psycopg2.extras
+
+if TYPE_CHECKING:
+    from psycopg2.extensions import cursor as PgCursor
 
 import pandas as pd
 
@@ -43,27 +46,34 @@ def write_run_metadata(
     data_source: str = "binance",
     sample: str | None = None,
     poll_interval: int | None = None,
+    cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
-    """Write a single run record to backtest_runs (upsert)."""
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO backtest_runs
+    """Write a single run record to backtest_runs (upsert).
+
+    If ``cur`` is provided, executes on that cursor (caller owns the
+    transaction).  Otherwise opens its own connection and commits.
+    """
+    sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, sample, data_source,
                 start_ts, end_ts, run_ts, schema_version, mode, poll_interval)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
-                 mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval""",
-            (
-                run_id, strategy, symbol, timeframe, sample, data_source,
-                _to_dt(start_ts), _to_dt(end_ts),
-                _to_dt(run_ts) or datetime.now(tz=timezone.utc),
-                SCHEMA_VERSION, mode, poll_interval,
-            ),
-        )
-        cur.close()
+                 mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval"""
+    params = (
+        run_id, strategy, symbol, timeframe, sample, data_source,
+        _to_dt(start_ts), _to_dt(end_ts),
+        _to_dt(run_ts) or datetime.now(tz=timezone.utc),
+        SCHEMA_VERSION, mode, poll_interval,
+    )
+    if cur is not None:
+        cur.execute(sql, params)
+    else:
+        with get_conn(dsn) as conn:
+            c = conn.cursor()
+            c.execute(sql, params)
+            c.close()
 
 
 def update_heartbeat(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
@@ -94,16 +104,18 @@ def write_backtest_output(
     m = output.metrics
     counts: dict[str, int] = {}
 
-    write_run_metadata(
-        run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
-        timeframe=meta.timeframe, mode="backtest",
-        start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
-        dsn=dsn,
-    )
-    counts["backtest_runs"] = 1
-
+    # WHY: single transaction for atomicity — partial writes on failure
+    # would leave DB in inconsistent state (e.g. trades without metadata).
     with get_conn(dsn) as conn:
         cur = conn.cursor()
+
+        write_run_metadata(
+            run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
+            timeframe=meta.timeframe, mode="backtest",
+            start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
+            cur=cur,
+        )
+        counts["backtest_runs"] = 1
 
         # 清除舊資料（idempotent re-run）
         cur.execute("DELETE FROM strategy_signals WHERE run_id = %s", (meta.run_id,))
@@ -144,7 +156,7 @@ def write_backtest_output(
                     tr.price_unit,
                     tr.quantity_unit,
                     tr.pnl_unit,
-                    tr.commission, tr.slippage, tr.holding_bars,
+                    tr.commission, tr.slippage, tr.tax, tr.holding_bars,
                 )
                 for tr in output.trades
             ]
@@ -156,7 +168,7 @@ def write_backtest_output(
                     gross_pnl, net_pnl,
                     gross_return, net_return,
                     price_unit, quantity_unit, pnl_unit,
-                    commission, slippage, holding_bars)
+                    commission, slippage, tax, holding_bars)
                    VALUES %s
                    ON CONFLICT (trade_id) DO NOTHING""",
                 trade_rows,
@@ -193,10 +205,10 @@ def write_backtest_output(
             )
             counts["strategy_signals"] = len(signal_rows)
 
-        cur.close()
+        write_performance(meta.run_id, m, cur=cur)
+        counts["strategy_performance"] = 1
 
-    write_performance(meta.run_id, m, dsn=dsn)
-    counts["strategy_performance"] = 1
+        cur.close()
 
     return counts
 
@@ -337,6 +349,7 @@ def write_trade(
     holding_bars: int,
     commission: float = 0.0,
     slippage: float = 0.0,
+    tax: float = 0.0,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Write a single trade to trade_blotter (upsert by trade_id)."""
@@ -347,14 +360,14 @@ def write_trade(
                (trade_id, run_id, entry_ts, exit_ts, symbol, side,
                 entry_price, exit_price, quantity,
                 gross_pnl, net_pnl, gross_return, net_return,
-                commission, slippage, holding_bars)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                commission, slippage, tax, holding_bars)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (trade_id) DO NOTHING""",
             (
                 trade_id, run_id, _to_dt(entry_ts), _to_dt(exit_ts),
                 symbol, side, entry_price, exit_price, quantity,
                 gross_pnl, net_pnl, gross_return, net_return,
-                commission, slippage, holding_bars,
+                commission, slippage, tax, holding_bars,
             ),
         )
         cur.close()
@@ -363,23 +376,21 @@ def write_trade(
 def write_performance(
     run_id: str,
     metrics: Any,
+    *,
+    cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Write/update strategy_performance for a run_id.
 
-    Args:
-        run_id: Run identifier.
-        metrics: StrategyMetrics dataclass (or any object with matching attributes).
+    If ``cur`` is provided, executes on that cursor (caller owns the
+    transaction).  Otherwise opens its own connection and commits.
     """
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO strategy_performance
+    sql = """INSERT INTO strategy_performance
                (run_id, total_return, annual_return, sharpe, sortino, calmar,
                 max_drawdown, win_rate, profit_factor, trades,
                 avg_trade_return, exposure_ratio, benchmark_return,
-                total_commission, total_slippage)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                total_commission, total_slippage, total_tax)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  total_return=EXCLUDED.total_return,
                  annual_return=EXCLUDED.annual_return,
@@ -394,16 +405,23 @@ def write_performance(
                  exposure_ratio=EXCLUDED.exposure_ratio,
                  benchmark_return=EXCLUDED.benchmark_return,
                  total_commission=EXCLUDED.total_commission,
-                 total_slippage=EXCLUDED.total_slippage""",
-            (
-                run_id, metrics.total_return, metrics.annual_return,
-                metrics.sharpe, metrics.sortino, metrics.calmar,
-                metrics.max_drawdown, metrics.win_rate, metrics.profit_factor,
-                metrics.trades, metrics.avg_trade_return, metrics.exposure_ratio,
-                metrics.benchmark_return, metrics.total_commission, metrics.total_slippage,
-            ),
-        )
-        cur.close()
+                 total_slippage=EXCLUDED.total_slippage,
+                 total_tax=EXCLUDED.total_tax"""
+    params = (
+        run_id, metrics.total_return, metrics.annual_return,
+        metrics.sharpe, metrics.sortino, metrics.calmar,
+        metrics.max_drawdown, metrics.win_rate, metrics.profit_factor,
+        metrics.trades, metrics.avg_trade_return, metrics.exposure_ratio,
+        metrics.benchmark_return, metrics.total_commission, metrics.total_slippage,
+        metrics.total_tax,
+    )
+    if cur is not None:
+        cur.execute(sql, params)
+    else:
+        with get_conn(dsn) as conn:
+            c = conn.cursor()
+            c.execute(sql, params)
+            c.close()
 
 
 def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
@@ -431,7 +449,8 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
         _NS(
             gross_pnl=r.get("gross_pnl", 0), net_pnl=r.get("net_pnl", 0),
             commission=r.get("commission", 0), slippage=r.get("slippage", 0),
-            tax=0, gross_return=0.0, net_return=0.0,
+            tax=r.get("tax", 0), gross_return=r.get("gross_return", 0.0),
+            net_return=r.get("net_return", 0.0),
             exit_commission=0.0, exit_slippage=0.0, exit_tax=0.0,
         )
         for r in trade_rows

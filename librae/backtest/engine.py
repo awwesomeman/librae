@@ -340,7 +340,7 @@ class Backtest:
                 gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
                 gross_return=float(t.gross_return), net_return=float(t.net_return),
                 commission=float(t.commission), slippage=float(t.slippage),
-                holding_bars=int(t.holding_bars),
+                tax=float(t.tax), holding_bars=int(t.holding_bars),
             )
             for i, t in enumerate(result.trades)
         ]

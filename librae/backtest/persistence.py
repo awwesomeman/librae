@@ -222,7 +222,7 @@ def archive_backtest_parquet(
             columns=["trade_id", "entry_ts", "exit_ts", "symbol", "side",
                       "entry_price", "exit_price", "quantity",
                       "gross_pnl", "net_pnl",
-                      "commission", "slippage", "holding_bars"]
+                      "commission", "slippage", "tax", "holding_bars"]
         )
 
     trades_path = archive_dir / "trades.parquet"

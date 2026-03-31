@@ -104,6 +104,7 @@ class TradeRecord:
     pnl_unit: str = "USDT"
     commission: float | None = None
     slippage: float | None = None
+    tax: float | None = None
     holding_bars: int | None = None
 
 
@@ -141,6 +142,7 @@ class StrategyMetrics:
     # Cost breakdown
     total_commission: float | None = None
     total_slippage: float | None = None
+    total_tax: float | None = None
 
 
 @dataclass(frozen=True)
