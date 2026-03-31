@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import pandas as pd
-import quantstats as qs
 
 if TYPE_CHECKING:
     from librae.backtest.engine import BacktestResult
@@ -24,6 +23,8 @@ if TYPE_CHECKING:
 from librae.core import EPSILON
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ANNUAL_PERIODS = 252
 SECONDS_PER_YEAR = 365.25 * 86400
 
 
@@ -35,10 +36,10 @@ def _infer_annual_periods(index: pd.DatetimeIndex) -> int:
     futures) and any bar frequency (H1, D1, W1, etc.).
     """
     if len(index) < 2:
-        return 252  # safe fallback
+        return DEFAULT_ANNUAL_PERIODS  # safe fallback
     span_seconds = (index[-1] - index[0]).total_seconds()
     if span_seconds <= 0:
-        return 252
+        return DEFAULT_ANNUAL_PERIODS
     span_years = span_seconds / SECONDS_PER_YEAR
     return max(1, int(round(len(index) / span_years)))
 
@@ -62,7 +63,9 @@ def compute_all(
     Returns:
         StrategyMetrics dataclass for BacktestOutput.
     """
-    # WHY: import here to avoid circular dependency (metrics → schema → metrics)
+    # WHY: lazy imports — quantstats pulls in matplotlib/scipy (~1-3s),
+    # deferred so `import librae` stays fast. Circular dep also avoided.
+    import quantstats as qs
     from librae.backtest.schema import StrategyMetrics
 
     if not result.equity_curve:
@@ -156,7 +159,7 @@ def compute_all(
     )
 
 
-def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: float) -> float:
+def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: int | float) -> float:
     """Call a QuantStats function, return 0.0 on error."""
     try:
         val = fn(returns, **kwargs)

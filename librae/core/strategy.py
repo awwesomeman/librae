@@ -18,7 +18,7 @@ class Position:
     """Engine-owned position state, exposed to strategy via Context."""
 
     instrument: str
-    side: str  # "long" or "short"
+    side: Literal["long", "short"]
     entry_price: float
     quantity: float
     entry_ts: datetime
@@ -66,7 +66,7 @@ class Fill:
     """Execution result from an Executor."""
 
     instrument: str
-    side: str
+    side: Literal["long", "short"]
     price: float
     quantity: float
     commission: float
