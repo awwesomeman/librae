@@ -2,20 +2,20 @@
 
 Provides:
 - build_backtest_output(): Convert engine BacktestResult → canonical BacktestOutput
-- generate_run_id(): Deterministic-prefix run ID generation
+- generate_run_id(): Deterministic-prefix run ID generation (re-exported from core.utils)
 - metrics_dict_to_backtest_output(): Legacy dict adapter (deprecated)
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .engine import BacktestResult
-from .schema import (
+from librae.backtest.engine import BacktestResult
+from librae.backtest.schema import (
     BacktestOutput, EquityCurvePoint, RunMetadata, StrategyMetrics, TradeRecord,
+    parse_utc_timestamp,
 )
-from .contracts import parse_utc_timestamp
+from librae.core.utils import generate_run_id  # noqa: F401 — re-exported
 
 
 def build_backtest_output(
@@ -87,13 +87,6 @@ def build_backtest_output(
         run_metadata=run_metadata, equity_curve=equity_points,
         trades=trade_records, metrics=metrics,
     )
-
-
-def generate_run_id(strategy: str, symbol: str) -> str:
-    """Deterministic-prefix run_id: <strategy>-<symbol>-<ts>-<short_uuid>."""
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
-    short = uuid.uuid4().hex[:8]
-    return f"{strategy}-{symbol}-{ts}-{short}".lower().replace(" ", "_")
 
 
 def metrics_dict_to_backtest_output(

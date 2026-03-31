@@ -338,7 +338,7 @@ def build_output(
 
 Internally:
 1. 若有 `_benchmark_prices`，計算 buy-and-hold equity curve 並對齊到 backtest timeline
-2. Calls `core.metrics.compute_all(equity_curve, trades, start_ts, end_ts, annualize, benchmark_curve=...)`
+2. Calls `core.metrics.compute_all(equity_values, timestamps, trade_pnls, total_bars, annualize, benchmark_values=...)`
 3. Builds RunMetadata（所有欄位自動推導）
 4. Builds TradeRecords, enriched EquityCurvePoints (with ret_1d, drawdown, benchmark alignment)
 5. Returns `BacktestOutput`
@@ -500,7 +500,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 - **影響**：刪除對應測試（test_runners, test_backtest_adapter runner 部分, test_regression_baselines, test_research_modules）
 
 ### D2: timeframe 自動推導而非必填
-- **決定**：從 data index timedelta 的 **mode（眾數）** 推導，module-level private function `_infer_timeframe()`，推導失敗 raise error
+- **決定**：從 data index timedelta 的 **mode（眾數）** 推導，public function `infer_timeframe()`（在 `core/utils.py`），推導失敗 raise error
 - **原因**：`_infer_annual_periods` 已證明可從 bar 間隔推導年化週期，同理可映射到 label。用 mode 而非 median，因為「最常出現的 bar 間距」= 真實週期，對傳統金融（有長假、休市日）更穩健
 - **風險**：極端稀疏資料（< 5 根 bar）mode 不穩定 → bar count 不足時 raise error。推導後 log warning 供使用者確認
 
@@ -581,7 +581,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 ### 實作時注意（不需要改 plan，實作時遵循）
 
 - **`build_output()` 內部拆分**：5 個步驟（benchmark 計算 → compute_all → RunMetadata → TradeRecords → EquityCurvePoints enrichment）應拆成 private methods（`_compute_benchmark`, `_enrich_equity_curve` 等），`build_output` 只負責呼叫順序。符合 SRP：每個函式只做一件事
-- **型別標註完整**：所有新增 signature 不使用 `Any` 或 `Sequence[...]`，用具體型別（`Sequence[TradePnL]`, `Sequence[float]` 等）
+- **型別標註完整**：所有新增 signature 不使用 `Any` 或無參數的 `Sequence`，用具體型別（`Sequence[TradePnL]`, `Sequence[float]` 等）
 - **Live metrics 效能**：`compute_all` 接收 `Sequence[float]`，呼叫端（LiveTrader wiring）自行決定傳多少資料。長期運行時應截斷（如 `equity[-30*24:]` 取近 30 天），而非把全部歷史丟進去。框架不加 `window` 參數，保持介面純粹
 - **Live structured logging（輕量 event sourcing）**：LiveTrader 處理 action 時，用統一的 `order_id`（復用 `{run_id}-t{seq:04d}` 格式，在 action 階段即生成）串起三點 structured log：(1) Action emitted `logger.info("Action: order_id=%s symbol=%s type=%s", ...)` (2) Execution attempt `logger.info("Execute: order_id=%s price=%.2f qty=%.4f", ...)` (3) Fill result `logger.info("Fill: order_id=%s side=%s net_pnl=%.2f", ...)`。不需要 event store，純 logging 即可，用於 live debug
 

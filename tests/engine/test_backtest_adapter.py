@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from librae.schema import BacktestOutput, StrategyMetrics, RunMetadata
 from librae.utils import metrics_dict_to_backtest_output, generate_run_id as _generate_run_id
-from librae.runners import run_strict_protocol, Periods
 
 
 # ---------------------------------------------------------------------------
@@ -155,55 +154,6 @@ class TestGenerateRunId(unittest.TestCase):
     def test_run_ids_unique(self):
         ids = {_generate_run_id("s", "x") for _ in range(100)}
         self.assertEqual(len(ids), 100)
-
-
-class TestRunStrictProtocolWithBacktestOutput(unittest.TestCase):
-    """run_strict_protocol emits backtest_outputs when context is provided."""
-
-    def _dummy_backtest(self, start, end, **params):
-        return {
-            "trades": 20,
-            "win_rate": 0.5,
-            "avg_ret": 0.002,
-            "pf": 1.2,
-            "equity": 1.04,
-            "ann_return": 0.08,
-            "ann_sharpe": 1.0,
-            "ann_vol": 0.08,
-            "mdd": 0.05,
-        }
-
-    def test_no_outputs_without_context(self):
-        periods = Periods("2024-01-01", "2024-06-30", "2024-07-01", "2024-09-30", "2024-10-01", "2024-12-31")
-        result = run_strict_protocol(
-            self._dummy_backtest,
-            [{"cost": 2.0}],
-            periods,
-            min_trades_train=5,
-        )
-        self.assertNotIn("backtest_outputs", result)
-
-    def test_outputs_with_context(self):
-        periods = Periods("2024-01-01", "2024-06-30", "2024-07-01", "2024-09-30", "2024-10-01", "2024-12-31")
-        result = run_strict_protocol(
-            self._dummy_backtest,
-            [{"cost": 2.0}],
-            periods,
-            min_trades_train=5,
-            strategy="TestStrategy",
-            symbol="TEST",
-            timeframe="H1",
-        )
-        self.assertIn("backtest_outputs", result)
-        outputs = result["backtest_outputs"]
-        for sample in ("train", "validation", "oos"):
-            self.assertIn(sample, outputs)
-            self.assertIsInstance(outputs[sample], BacktestOutput)
-            outputs[sample].validate()
-            self.assertEqual(outputs[sample].run_metadata.sample, sample)
-        # All samples from one protocol run share the same run_id
-        run_ids = {outputs[s].run_metadata.run_id for s in ("train", "validation", "oos")}
-        self.assertEqual(len(run_ids), 1)
 
 
 if __name__ == "__main__":

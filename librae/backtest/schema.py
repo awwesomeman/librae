@@ -1,0 +1,291 @@
+"""Standardized backtest output schema + data contracts.
+
+All field names: strict snake_case.
+Unit fields stored alongside values for multi-market support (USDT, TWD, contracts, etc.).
+Cost/slippage fields are optional (may be None for simple backtests).
+
+Storage targets: JSON (Streamlit), CSV equity curve (Grafana/Streamlit).
+
+Also contains canonical backend data contracts (merged from contracts.py):
+- Schema version and validation constants
+- Parsing utilities (timestamps, snake_case)
+- Record validation functions
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from typing import Any, Optional, Sequence
+
+import pandas as pd
+
+# ---------------------------------------------------------------------------
+# Schema version and constants (from contracts.py)
+# ---------------------------------------------------------------------------
+
+SCHEMA_VERSION: str = "1.0.0"
+BACKTEST_SCHEMA_VERSION = SCHEMA_VERSION
+
+SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+VALID_SAMPLE_LABELS = frozenset({"train", "validation", "oos", "live"})
+
+RUN_ID_PATTERN = re.compile(
+    r"^[a-z0-9][a-z0-9_.\-]*-\d{8}t\d{6}-[a-f0-9]{8}$"
+)
+
+REQUIRED_SIGNAL_KEYS: tuple[str, ...] = (
+    "timestamp", "strategy", "symbol", "side", "timeframe",
+)
+REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
+    "full_sample_period", "train_period", "oos_period", "asset", "freq",
+)
+REQUIRED_PERF_FIELDS: tuple[str, ...] = (
+    "total_return", "max_drawdown", "sharpe", "sortino", "calmar",
+    "profit_factor", "win_rate", "avg_trade_return", "trades", "exposure_ratio",
+)
+REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
+    "benchmark", "data_source", "last_updated_utc", "summary",
+    "universe", "session_rules", "periods", "cost_model",
+    "risk_limits", "assumptions", "logic", "params",
+)
+REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
+    "schema_version", "run_metadata", "equity_curve", "trades", "metrics",
+)
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunMetadata:
+    """Identifies and describes a backtest run."""
+
+    run_id: str
+    strategy: str
+    symbol: str
+    timeframe: str
+    start_ts: datetime
+    end_ts: datetime
+    run_ts: datetime
+    data_source: str
+    schema_version: str = BACKTEST_SCHEMA_VERSION
+    mode: str = "backtest"
+    # Sample split label — must be one of VALID_SAMPLE_LABELS when set
+    sample: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class EquityCurvePoint:
+    """Single point on the equity curve."""
+
+    ts: datetime
+    equity: float
+    ret_1d: float
+    drawdown: float
+    benchmark_equity: Optional[float] = None
+    benchmark_ret_1d: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class TradeRecord:
+    """Single completed trade."""
+
+    trade_id: str
+    entry_ts: datetime
+    exit_ts: datetime
+    symbol: str
+    side: str
+    entry_price: float
+    exit_price: float
+    quantity: float
+    gross_pnl: float
+    net_pnl: float
+    gross_return: Optional[float] = None
+    net_return: Optional[float] = None
+    # Units for multi-market support
+    price_unit: str = "USDT"
+    quantity_unit: str = "asset"
+    pnl_unit: str = "USDT"
+    commission: Optional[float] = None
+    slippage: Optional[float] = None
+    holding_bars: Optional[int] = None
+
+
+@dataclass
+class StrategyMetrics:
+    """Aggregate performance metrics for a backtest run.
+
+    Units convention (not stored, documented here):
+    - return/drawdown fields: ratio (e.g. 0.05 = 5%)
+    - win_rate/exposure_ratio: ratio 0-1
+    - sharpe/sortino/calmar/profit_factor: score (dimensionless)
+    - trades: count
+    """
+
+    # Universal (all strategies produce these)
+    total_return: float
+    max_drawdown: float = 0.0
+    trades: int = 0
+
+    # Annualized (None when periods=0 or not computable)
+    annual_return: Optional[float] = None
+    sharpe: Optional[float] = None
+    sortino: Optional[float] = None
+    calmar: Optional[float] = None
+
+    # Most strategies (None if not applicable)
+    win_rate: Optional[float] = None
+    profit_factor: Optional[float] = None
+    avg_trade_return: Optional[float] = None
+    exposure_ratio: Optional[float] = None
+
+    # Benchmark
+    benchmark_return: Optional[float] = None
+
+    # Cost breakdown
+    total_commission: Optional[float] = None
+    total_slippage: Optional[float] = None
+
+
+@dataclass
+class BacktestOutput:
+    """Top-level backtest output container.
+
+    This is the canonical output object produced after a backtest run.
+    Persist via librae.backtest.persistence.
+    """
+
+    run_metadata: RunMetadata
+    equity_curve: Sequence[EquityCurvePoint]
+    trades: Sequence[TradeRecord]
+    metrics: StrategyMetrics
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict with ISO datetime strings."""
+        def _convert(obj: Any) -> Any:
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, dict):
+                return {k: _convert(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_convert(item) for item in obj]
+            return obj
+
+        return _convert(asdict(self))
+
+    def validate(self) -> None:
+        """Raise ValueError if required fields are empty/missing."""
+        if not self.run_metadata.run_id:
+            raise ValueError("run_metadata.run_id is required")
+        if not RUN_ID_PATTERN.match(self.run_metadata.run_id):
+            raise ValueError(
+                f"run_metadata.run_id must match pattern "
+                f"'<strategy>-<symbol>-<YYYYMMDDThhmmss>-<hex8>', "
+                f"got {self.run_metadata.run_id!r}"
+            )
+        if not self.run_metadata.strategy:
+            raise ValueError("run_metadata.strategy is required")
+        if not self.run_metadata.symbol:
+            raise ValueError("run_metadata.symbol is required")
+        if not self.run_metadata.timeframe:
+            raise ValueError("run_metadata.timeframe is required")
+        if self.equity_curve is None:
+            raise ValueError("equity_curve is required (may be empty list)")
+        if self.trades is None:
+            raise ValueError("trades is required (may be empty list)")
+        sample = self.run_metadata.sample
+        if sample is not None and sample not in VALID_SAMPLE_LABELS:
+            raise ValueError(
+                f"run_metadata.sample must be one of {sorted(VALID_SAMPLE_LABELS)}, got {sample!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Validation utilities (from contracts.py)
+# ---------------------------------------------------------------------------
+
+
+def parse_utc_timestamp(value: Any) -> datetime:
+    """Parse a timestamp value (ISO string or epoch number) to UTC datetime."""
+    if isinstance(value, str) and value:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e18:
+            ts = ts / 1e9
+        elif ts > 1e15:
+            ts = ts / 1e6
+        elif ts > 1e12:
+            ts = ts / 1e3
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    raise ValueError("timestamp must be ISO8601 string or epoch number")
+
+
+def ensure_snake_case_keys(keys: list[str] | tuple[str, ...], record_name: str) -> None:
+    """Validate that all keys are snake_case."""
+    invalid = [k for k in keys if not SNAKE_CASE_PATTERN.match(str(k))]
+    if invalid:
+        raise ValueError(f"{record_name} has non-snake_case keys: {invalid}")
+
+
+def require_keys(record: dict[str, Any], keys: tuple[str, ...], record_name: str) -> None:
+    """Validate that all required keys are present and non-empty."""
+    missing = [k for k in keys if k not in record or record[k] in (None, "")]
+    if missing:
+        raise ValueError(f"{record_name} missing required keys: {missing}")
+
+
+def validate_record_contract(record: dict[str, Any], required_keys: tuple[str, ...], record_name: str) -> None:
+    """Validate snake_case keys + required keys in a record."""
+    ensure_snake_case_keys(list(record.keys()), record_name)
+    require_keys(record, required_keys, record_name)
+
+
+def validate_signal_record(record: dict[str, Any]) -> None:
+    """Validate a strategy signal record."""
+    validate_record_contract(record, REQUIRED_SIGNAL_KEYS, "strategy_signals record")
+
+
+def validate_dataframe_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
+    """Validate that a DataFrame has all required columns."""
+    if df.empty:
+        return
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"{dataset} missing required columns: {', '.join(missing)}")
+
+
+def validate_perf_fields(perf_raw: pd.DataFrame) -> None:
+    """Validate required performance fields in a DataFrame."""
+    if perf_raw.empty:
+        return
+    columns = set(perf_raw.columns)
+    missing = sorted(set(REQUIRED_PERF_FIELDS) - columns)
+    if missing:
+        raise ValueError(f"strategy_performance missing required fields: {', '.join(missing)}")
+
+
+def validate_strategy_context(record: dict[str, Any], record_name: str) -> None:
+    """Validate a strategy context record."""
+    validate_record_contract(record, REQUIRED_STRATEGY_CONTEXT_KEYS, record_name)
+    summary = record.get("summary")
+    if not isinstance(summary, dict):
+        raise ValueError(f"{record_name}.summary must be an object")
+    validate_record_contract(summary, REQUIRED_SUMMARY_KEYS, f"{record_name}.summary")
+
+
+def is_schema_compatible(payload_schema_version: str, expected_schema_version: str = SCHEMA_VERSION) -> bool:
+    """Backward compatibility policy: only major version must match."""
+    try:
+        payload_major = int(str(payload_schema_version).split(".")[0])
+        expected_major = int(str(expected_schema_version).split(".")[0])
+        return payload_major == expected_major
+    except Exception:
+        return False
