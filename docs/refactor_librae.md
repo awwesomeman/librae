@@ -1,14 +1,14 @@
-# Backtest Engine Framework Optimization
+# Librae Framework Refactoring
 
 ## Context
 
-Two problems with the current design:
+Three problems with the current design:
 
 1. **Boilerplate in run.py**: Every strategy repeats a 6-step pipeline (`bt.run()` → `compute_all()` → `build_backtest_output()` → `save_backtest_output()` → `write_backtest_output()`), manually extracting `start_ts`/`end_ts` and passing intermediate objects.
 
 2. **Fragmented file structure**: Output-related logic is scattered across 5 small files (schema.py, utils.py, metrics.py, persistence.py, contracts.py — ~805 lines total). Understanding "how an output is produced" requires jumping across all of them.
 
-3. **Flat structure without domain boundaries**: backtest 和 live/sim 混在同一層，共用的 domain model 沒有明確分離，依賴方向不清楚。
+3. **Flat structure without domain boundaries**: backtest 和 live/sim 混在同一層，共用的 domain model 沒有明確分離，依賴方向不清楚。同樣的計算邏輯（trade PnL, drawdown）在 backtest 和 live 各寫一份，live 那份還有 bug（缺 tax、commission 不精確）。
 
 ## Design Principles
 
@@ -18,6 +18,7 @@ Two problems with the current design:
 4. **Consolidate files** — merge small single-purpose files into cohesive modules
 5. **Engine 只負責執行回測 + 轉接基礎設施** — 策略研究/穩健性檢測不是 engine 的職責
 6. **Package 結構反映 runtime 邊界** — `core/` (共用) / `backtest/` / `live/` 三層分離
+7. **共用計算邏輯集中管理** — trade PnL 在 `core/executor.py`，metrics 在 `core/metrics.py`，避免重複實作
 
 ### Python Coding Standards 對照（參照 python/coding-standards skill）
 
@@ -25,11 +26,11 @@ Two problems with the current design:
 |------|-------------|
 | **SRP** | `build_output()` 是 thin facade，只做編排（調用 `compute_all` + 組裝 output），不包含計算邏輯。Persistence 不放在 dataclass 上，由獨立函式負責。 |
 | **DI** | `write_output_db(output, dsn)` 透過參數傳入 DSN。`load_output(path)` 透過參數傳入路徑。domain model 不依賴 infrastructure。 |
-| **DRY / Rule of Three** | 6-step pipeline 已在 2 個 run.py 重複（還會增加），封裝為 `build_output()` 符合 Rule of Three。 |
+| **DRY / Rule of Three** | 6-step pipeline 已在 2 個 run.py 重複，封裝為 `build_output()`。Trade PnL 計算統一在 `core/executor.py`，metrics 統一在 `core/metrics.py`。 |
 | **YAGNI** | 不預先加入 Tidal 的 metrics gap（alpha/beta/drawdown analysis），指標缺口另案處理。不加 `trading_days_per_year` 到 MarketConfig，現有 `_infer_annual_periods` 已夠用。 |
 | **型別標註** | 所有新增方法完整標註參數 + 回傳型別，不使用 `Any`。 |
 | **# WHY 註解** | 合併檔案時保留原有 `# WHY:` 註解；新增的設計決策加上動機說明。 |
-| **命名** | 函式用動詞-名詞（`build_output`, `generate_run_id`），私有成員用 `_` 前綴（`_result`, `_benchmark_prices`）。subpackage 內 class name 不帶冗餘前綴（`Executor` 而非 `BacktestExecutor`）。 |
+| **命名** | 函式用動詞-名詞（`build_output`, `generate_run_id`），私有成員用 `_` 前綴。Domain-specific class name（`Backtest`, `LiveTrader`），不用 generic name。 |
 
 ## Part A: Package 結構重組 + File Consolidation + Runner 清理
 
@@ -43,22 +44,22 @@ librae/
 │   ├── __init__.py
 │   ├── strategy.py          BaseStrategy, Action, Context, Position, Fill
 │   ├── cost_model.py        CostModel
-│   ├── executor.py          make_fill（純計算，不含 IO）
+│   ├── executor.py          make_fill, calc_trade_pnl（平倉計算，執行邏輯）
+│   ├── metrics.py           compute_all（給定 equity curve + trades → 指標，共用）
 │   ├── data.py              fetch_ohlcv, resample, cache
 │   └── utils.py             generate_run_id（backtest + live 共用）
 │
 ├── backtest/                回測 runtime
 │   ├── __init__.py
 │   ├── engine.py            Backtest + build_output
-│   ├── schema.py            Output, RunMetadata, Metrics dataclasses + validation
-│   ├── metrics.py           compute_all
+│   ├── schema.py            Output, RunMetadata, StrategyMetrics dataclasses + validation
 │   └── persistence.py       save/load JSON+CSV+Parquet（合併 archive.py）
 │
 ├── live/                    live/sim runtime
 │   ├── __init__.py
-│   ├── engine.py            Runner（was LiveRunner）
-│   ├── executor.py          Executor（was LiveExecutor）
-│   └── wiring.py            build_runner（was build_sim_runner）
+│   ├── engine.py            LiveTrader（polling loop，即時交易引擎）
+│   ├── executor.py          Executor（wrap core.make_fill + Telegram 通知）
+│   └── wiring.py            build_live_trader
 │
 ├── config/
 │   ├── __init__.py
@@ -73,11 +74,68 @@ librae/
 
 ### 設計理由
 
-- **`core/`**：`strategy.py`, `cost_model.py`, `executor.py`, `data.py` 是 backtest 和 live 都依賴的 domain model。`utils.py` 放 `generate_run_id` 等共用小工具。
-- **`backtest/`**：回測專屬。schema（batch output 定義）、metrics（需完整 equity curve）、persistence（JSON/CSV/Parquet 序列化）都只有回測用。
-- **`live/`**：live/sim 專屬。streaming write，不用 BacktestOutput。
+- **`core/`**：`strategy.py`, `cost_model.py`, `executor.py`, `metrics.py`, `data.py` 是 backtest 和 live 都依賴的 domain model + 共用計算。`utils.py` 放 `generate_run_id` 等共用小工具。
+- **`backtest/`**：回測專屬。schema（batch output 定義）、persistence（JSON/CSV/Parquet 序列化）。不含 metrics（已上移到 core）。
+- **`live/`**：live/sim 專屬。LiveTrader polling loop，Executor 加通知 side effect。
 - **依賴方向**：`backtest/` 和 `live/` 都依賴 `core/`，彼此不互相依賴。
-- **命名一致性**：兩邊都有 `engine.py`（主引擎）和 `executor.py`（執行器）。class name 去掉冗餘前綴（subpackage 已提供 namespace）：`backtest.Backtest`, `backtest.Executor`, `live.Runner`, `live.Executor`。
+- **命名一致性**：兩邊都有 `engine.py`（主引擎）。class name 用 domain 語意：`Backtest`（回測器）、`LiveTrader`（即時交易引擎），不用 generic name。Live 有自己的 `executor.py`（加通知），backtest 直接用 `core.executor.make_fill`。
+
+### 共用計算模組
+
+**`core/executor.py`** — 執行邏輯（trade PnL）：
+```python
+def calc_trade_pnl(
+    entry_price: float,
+    exit_price: float,
+    quantity: float,
+    side: str,
+    cost_model: CostModel,
+    entry_commission: float,
+    entry_slippage: float,
+) -> TradePnL:
+    """Single trade PnL breakdown. Used by backtest + live."""
+```
+
+修復目前 live 的 bug：缺 tax 計算、commission 用 `* 2` 簡化不精確。
+
+**`core/metrics.py`** — 指標計算：
+```python
+def compute_all(
+    equity_curve: Sequence[float],
+    trades: Sequence[...],
+    start_ts: datetime,
+    end_ts: datetime,
+    annualize: bool = False,
+    benchmark_curve: Sequence[float] | None = None,
+) -> StrategyMetrics:
+    """Compute all metrics from equity curve + trades.
+
+    Called once by backtest (at build_output time).
+    Called periodically by live (based on monitoring frequency).
+    """
+```
+
+### Backtest workflow
+
+```
+Backtest.run()
+  ├── 每根 bar：記錄 raw equity value（只是數字，不算 metrics）
+  └── 平倉時：core.executor.calc_trade_pnl()
+
+Backtest.build_output()
+  ├── core.metrics.compute_all()          ← 一次算完所有指標
+  └── 組裝 BacktestOutput
+```
+
+### Live workflow
+
+```
+LiveTrader.run()  (polling loop)
+  ├── 每根 bar：記錄 raw equity value → on_bar callback → write DB
+  ├── 平倉時：core.executor.calc_trade_pnl() → on_trade callback → write DB
+  └── 定期（監控頻率）：core.metrics.compute_all(累積 equity + trades)
+      → 更新 dashboard / alert
+```
 
 ### Current → Target file mapping
 
@@ -86,20 +144,20 @@ CURRENT                               TARGET
 ───────                               ──────
 librae/strategy.py              ──→   librae/core/strategy.py
 librae/cost_model.py            ──→   librae/core/cost_model.py
-librae/executor.py              ──→   librae/core/executor.py
+librae/executor.py              ──→   librae/core/executor.py (+ calc_trade_pnl)
+librae/metrics.py               ──→   librae/core/metrics.py (共用，上移)
 librae/data.py                  ──→   librae/core/data.py
 librae/utils.py (generate_run_id) ──→ librae/core/utils.py
 
 librae/engine.py                ──→   librae/backtest/engine.py (+ build_output)
 librae/schema.py                ──→   librae/backtest/schema.py (+ contracts.py validation)
 librae/contracts.py             ─┘
-librae/metrics.py               ──→   librae/backtest/metrics.py
 librae/persistence.py           ──→   librae/backtest/persistence.py (+ archive.py)
 librae/archive.py               ─┘
 
-librae/live_runner.py           ──→   librae/live/engine.py (Runner)
+librae/live_runner.py           ──→   librae/live/engine.py (LiveTrader)
 librae/live_executor.py         ──→   librae/live/executor.py (Executor)
-librae/sim_wiring.py            ──→   librae/live/wiring.py
+librae/sim_wiring.py            ──→   librae/live/wiring.py (build_live_trader)
 
 librae/scoring.py               ──→   DELETE (only runner uses it)
 librae/runners.py               ──→   DELETE (研究階段用 vectorbt)
@@ -107,8 +165,17 @@ librae/runners.py               ──→   DELETE (研究階段用 vectorbt)
 
 **Files deleted**: `scoring.py`, `runners.py`
 **Files merged**: `contracts.py` → `backtest/schema.py`, `archive.py` → `backtest/persistence.py`
+**Files moved up**: `metrics.py` → `core/metrics.py`（backtest + live 共用）
 
 ### Migration details
+
+**`core/executor.py`** absorbs:
+- 新增 `calc_trade_pnl()`：從 backtest `_close_position()` 和 live `_record_trade()` 抽出共用的 PnL 計算邏輯
+- 新增 `TradePnL` dataclass：計算結果的回傳型別
+
+**`core/metrics.py`**（從 `librae/metrics.py` 上移）:
+- `compute_all()`：backtest 在 `build_output()` 時呼叫一次；live 根據監控頻率定期呼叫
+- `_infer_annual_periods()`：保留，年化推算邏輯
 
 **`backtest/schema.py`** absorbs:
 - `contracts.py`: `SCHEMA_VERSION`, `REQUIRED_BACKTEST_TOP_LEVEL_KEYS`, `parse_utc_timestamp()`, `check_schema_compat()`
@@ -121,6 +188,11 @@ librae/runners.py               ──→   DELETE (研究階段用 vectorbt)
 
 **`backtest/engine.py`** absorbs:
 - `utils.py`: `build_backtest_output()` logic → becomes `Backtest.build_output()` method
+- 平倉時呼叫 `core.executor.calc_trade_pnl()` 取代 inline 計算
+
+**`live/engine.py`**（LiveTrader）:
+- 平倉時呼叫 `core.executor.calc_trade_pnl()` 取代 inline 計算（修復 tax 遺漏 + commission 不精確）
+- 定期呼叫 `core.metrics.compute_all()` 取代 inline 算 drawdown/ret_1d
 
 **`core/utils.py`**:
 - `generate_run_id()`（backtest + live 共用）
@@ -179,7 +251,6 @@ def __init__(
     strategy: BaseStrategy,
     market_config: MarketConfig,
     initial_balance: float = 100_000.0,
-    executor: Executor | None = None,
 ) -> None:
 ```
 
@@ -188,6 +259,7 @@ def __init__(
 - `timeframe`: **自動推導** — 從 data index 的 median timedelta 映射到標準 label（M1/M5/H1/D1/W1），推導失敗時 raise error
 - `data_source`: **刪除** — 資料來源追蹤不是 engine 的職責
 - `market`: 改為 `market_config: MarketConfig` — 直接傳入配置物件
+- `executor`: **刪除** — backtest 直接用 `core.executor.make_fill`，不需要自訂 executor
 
 ### Step 4: Timeframe 自動推導
 
@@ -244,7 +316,7 @@ def build_output(
 
 Internally:
 1. 若有 `_benchmark_prices`，計算 buy-and-hold equity curve 並對齊到 backtest timeline
-2. Calls `compute_all(self._result, start_ts, end_ts, annualize, benchmark_curve=...)`
+2. Calls `core.metrics.compute_all(equity_curve, trades, start_ts, end_ts, annualize, benchmark_curve=...)`
 3. Builds RunMetadata（所有欄位自動推導）
 4. Builds TradeRecords, enriched EquityCurvePoints (with ret_1d, drawdown, benchmark alignment)
 5. Returns `BacktestOutput`
@@ -258,26 +330,7 @@ def result(self) -> BacktestResult: ...  # raises if not run yet
 def metrics(self) -> StrategyMetrics: ...  # raises if build_output not called yet
 ```
 
-### Step 7: Update compute_all signature
-
-**File: `librae/backtest/metrics.py`**
-
-```python
-def compute_all(
-    result: BacktestResult,
-    start_ts: datetime,
-    end_ts: datetime,
-    annualize: bool = False,          # 改預設 False
-    benchmark_curve: Sequence[float] | None = None,  # NEW: replaces result.benchmark_curve
-) -> StrategyMetrics:
-```
-
-annualize 預設改 False 的理由：
-- 資料太短時年化數字 misleading
-- 使用者要年化應明確 opt-in
-- 現有 `_infer_annual_periods` 用實際 bar 密度推算，對 crypto 24h 和有休市的市場都合理，暫不需要額外的 `trading_days_per_year` 配置
-
-### Step 8: Update RunMetadata — 瘦身
+### Step 7: Update RunMetadata — 瘦身
 
 **File: `librae/backtest/schema.py`**
 
@@ -295,7 +348,7 @@ class RunMetadata:
     # 已刪除: mode（engine 只做 backtest）, data_source（不是 engine 職責）, sample（不是 engine 職責）
 ```
 
-### Step 9: Simplify strategy run.py
+### Step 8: Simplify strategy run.py
 
 **Before** (10 lines of pipeline):
 ```python
@@ -334,7 +387,7 @@ if not args.no_db:
     write_ohlcv(...)  # stays separate — ohlcv is not part of backtest output
 ```
 
-### Step 10: Update `__init__.py` exports
+### Step 9: Update `__init__.py` exports
 
 **頂層 `librae/__init__.py` re-export（便利 shortcut）：**
 ```python
@@ -355,7 +408,7 @@ from librae.config.market_config import MarketConfig, get_market, load_market_co
 - `score`, `validate_metrics`, `REQUIRED_METRICS_KEYS` (deleted with scoring.py)
 - `Periods`, `WFWindow` (deleted with runners)
 
-### Step 11: Update tests
+### Step 10: Update tests
 
 - 透過 `build_output()` 的 output 驗證 benchmark 行為，不測試 private attribute `_benchmark_curve`
 - Add test: `bt.build_output()` produces valid `BacktestOutput`
@@ -363,6 +416,7 @@ from librae.config.market_config import MarketConfig, get_market, load_market_co
 - Add test: calling `build_output()` before `run()` raises RuntimeError
 - Add test: `_infer_timeframe` correctly maps known bar frequencies
 - Add test: `add_benchmark` → output 有 benchmark_return; 沒呼叫 → benchmark_return is None
+- Add test: `core.executor.calc_trade_pnl` 結果與現有 backtest `_close_position` 一致
 - Delete: `test_runners.py`, `test_backtest_adapter.py` (runner tests), `test_regression_baselines.py`, `test_research_modules.py`
 
 ## Output Structure Reference
@@ -401,7 +455,6 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 | `strategy` | `__init__()` | 必要依賴 |
 | `market_config` | `__init__()` | 必要依賴（成本模型 + market metadata） |
 | `initial_balance` | `__init__()` | 預設 100,000 |
-| `executor` | `__init__()` | 可選，預設 None（使用內建 executor） |
 | `symbol` | **自動** | 從 `data.index` instrument level 取 |
 | `start_ts` / `end_ts` | **自動** | 從 `self._timeline` 取 |
 | `strategy_name` | **自動** | 從 `type(strategy).__name__` 轉 snake_case |
@@ -415,6 +468,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 - `data_source`: 資料來源追蹤不是 engine 職責
 - `sample` / `split`: 策略驗證流程不是 engine 職責
 - `mode`: engine 只做 backtest，不需要區分
+- `executor`: backtest 直接用 core.executor.make_fill
 
 ## Design Decisions Log
 
@@ -459,26 +513,40 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 
 ### D10: Package 結構 — core / backtest / live 三層
 - **決定**：共用 domain model 抽到 `core/`，backtest 和 live 各自為 subpackage
-- **原因**：backtest（batch，一次跑完）和 live（polling loop，持續運行）是不同的 runtime path。class name 去掉冗餘前綴（subpackage 提供 namespace）。檔名對齊（都有 engine.py, executor.py）但 class name 保持語意差異（Backtest vs Runner）
+- **原因**：backtest（batch，一次跑完）和 live（polling loop，持續運行）是不同的 runtime path。檔名對齊（都有 engine.py），class name 用 domain 語意（Backtest / LiveTrader）
 
 ### D11: persistence.py 合併 archive.py
 - **決定**：`archive.py`（Parquet）併入 `backtest/persistence.py`（JSON+CSV+Parquet）
 - **原因**：都是「把 BacktestOutput 序列化到磁碟」，修改理由相同（schema 變了），~180 行合併後仍然精簡
 
+### D12: metrics.py 上移到 core/，calc_trade_pnl 放 core/executor.py
+- **決定**：`compute_all` 從 `backtest/metrics.py` 上移到 `core/metrics.py`；trade PnL 計算抽到 `core/executor.py` 的 `calc_trade_pnl()`
+- **原因**：
+  - `compute_all` 是共用的：backtest 在 `build_output()` 時一次算完，live 根據監控頻率定期算。同一個函式，不同觸發時機
+  - Trade PnL 是執行邏輯（平倉計算），不是 metrics。目前 backtest `_close_position()` 和 live `_record_trade()` 各寫一份，live 有 bug（缺 tax、commission `* 2` 不精確）
+  - `backtest/metrics.py` 刪除，不再需要
+
+### D13: LiveTrader 命名
+- **決定**：live 主引擎 class name 從 `Runner` 改為 `LiveTrader`
+- **原因**：`Runner` 太 generic。`LiveTrader` 明確表達「即時交易引擎」，sim 和 live 的差異只是 executor 的 `simulation` flag，主引擎相同。與 `Backtest` 同樣用 domain 語意命名
+
 ## Files to Modify (ordered)
 
-1. 建立 `librae/core/` — 搬入 strategy.py, cost_model.py, executor.py, data.py；新增 utils.py（generate_run_id）
-2. 建立 `librae/backtest/` — 搬入 engine.py, schema.py（+ contracts.py）, metrics.py, persistence.py（+ archive.py）
-3. 建立 `librae/live/` — 搬入 live_runner.py → engine.py, live_executor.py → executor.py, sim_wiring.py → wiring.py
-4. `librae/backtest/schema.py` — absorb contracts.py validation；瘦身 RunMetadata（刪 mode, data_source, sample）
-5. `librae/backtest/metrics.py` — add benchmark_curve param to compute_all; annualize 預設改 False
-6. `librae/backtest/engine.py` — remove benchmark from BacktestResult; 簡化 constructor; add _infer_timeframe + add_benchmark + build_output(); run_id 在 run() 生成
-7. `librae/backtest/persistence.py` — 合併 archive.py; 改為獨立函式 save_output/load_output
-8. `librae/__init__.py` — re-export from subpackages
-9. `strategies/trendpullback/run.py` — simplify to new API
-10. `strategies/trendpullback_m5/run.py` — simplify to new API
-11. `tests/` — update existing tests + delete runner/scoring tests
-12. Delete from root: `librae/utils.py`, `librae/contracts.py`, `librae/scoring.py`, `librae/runners.py`, `librae/archive.py`, `librae/live_runner.py`, `librae/live_executor.py`, `librae/sim_wiring.py`, `librae/persistence.py`, `librae/schema.py`, `librae/metrics.py`, `librae/engine.py`, `librae/strategy.py`, `librae/cost_model.py`, `librae/executor.py`, `librae/data.py`
+1. 建立 `librae/core/` — 搬入 strategy.py, cost_model.py, executor.py（+ calc_trade_pnl）, metrics.py（上移 + 共用化）, data.py；新增 utils.py（generate_run_id）
+2. 建立 `librae/backtest/` — 搬入 engine.py, schema.py（+ contracts.py）, persistence.py（+ archive.py）
+3. 建立 `librae/live/` — 搬入 live_runner.py → engine.py (LiveTrader), live_executor.py → executor.py, sim_wiring.py → wiring.py
+4. `librae/core/executor.py` — 新增 calc_trade_pnl + TradePnL dataclass
+5. `librae/core/metrics.py` — 調整 compute_all 為 backtest + live 共用介面
+6. `librae/backtest/schema.py` — absorb contracts.py validation；瘦身 RunMetadata（刪 mode, data_source, sample）
+7. `librae/backtest/engine.py` — remove benchmark from BacktestResult; 簡化 constructor; add _infer_timeframe + add_benchmark + build_output(); run_id 在 run() 生成; 平倉用 core.executor.calc_trade_pnl
+8. `librae/backtest/persistence.py` — 合併 archive.py; 改為獨立函式 save_output/load_output
+9. `librae/live/engine.py` — rename LiveRunner → LiveTrader; 平倉用 core.executor.calc_trade_pnl; 定期用 core.metrics.compute_all
+10. `librae/live/wiring.py` — rename build_sim_runner → build_live_trader
+11. `librae/__init__.py` — re-export from subpackages
+12. `strategies/trendpullback/run.py` — simplify to new API
+13. `strategies/trendpullback_m5/run.py` — simplify to new API
+14. `tests/` — update existing tests + delete runner/scoring tests + add calc_trade_pnl test
+15. Delete from root: all original files that were moved to subpackages
 
 ## Part C: README.md 策略開發範例更新
 
@@ -521,7 +589,7 @@ save_output(output, "results/")   # → JSON + CSV + Parquet
 
 ## Deliverables
 
-1. **程式碼**：librae 框架重構（package 結構重組 + 檔案合併 + 刪除 runner/scoring + API 改造 + 策略 run.py 簡化）
+1. **程式碼**：librae 框架重構（package 結構重組 + 共用計算模組 + 檔案合併 + 刪除 runner/scoring + API 改造 + 策略 run.py 簡化）
 2. **README.md**：策略開發範例更新為優化後版本
 
 ## Verification
@@ -533,3 +601,5 @@ save_output(output, "results/")   # → JSON + CSV + Parquet
 5. Verify `load_output()` roundtrip preserves all values
 6. Verify `_infer_timeframe` correctly maps M1/M5/H1/D1/W1
 7. Verify benchmark: `add_benchmark` → output 有 benchmark_return; 沒呼叫 → None
+8. Verify `core.executor.calc_trade_pnl` 結果與現有 backtest `_close_position` 一致
+9. Verify live `LiveTrader` 平倉計算含 tax（修復現有 bug）
