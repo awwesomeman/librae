@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Stop sim container(s).
 # Usage:
-#   ./deploy/sim_stop.sh <strategy> [symbol]   # stop one
-#   ./deploy/sim_stop.sh --all                 # stop all sim containers
+#   ./deploy/sim_stop.sh <strategy>   # stop one
+#   ./deploy/sim_stop.sh --all        # stop all sim containers
 set -euo pipefail
 
 if [[ "${1:-}" == "--all" ]]; then
@@ -15,9 +15,10 @@ if [[ "${1:-}" == "--all" ]]; then
     echo "${CONTAINERS}" | xargs docker rm -f
     echo "Done."
 else
-    STRATEGY="${1:?Usage: sim_stop.sh <strategy> [symbol] | --all}"
-    SYMBOL="${2:-BTCUSDT}"
-    CONTAINER="quant_sim_${STRATEGY}_${SYMBOL,,}"
+    STRATEGY="${1:?Usage: sim_stop.sh <strategy> | --all}"
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    SYMBOL=$(grep 'symbol:' "${SCRIPT_DIR}/../strategies/${STRATEGY}/config.yaml" | head -1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
+    CONTAINER="quant_sim_${STRATEGY}_${SYMBOL}"
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
         docker rm -f "${CONTAINER}" >/dev/null
         echo "Stopped ${CONTAINER}."

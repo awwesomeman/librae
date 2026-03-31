@@ -2,7 +2,7 @@
 
 > Updated: 2026-03-31
 > Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 2 Engine Refactor 完成；Phase 3 sim mode 程式碼就緒，剩 VPS 部署驗證
+> Status: Phase 3 sim mode 運行中；trendpullback_m5 已完成回測並正在監控
 
 ---
 
@@ -120,7 +120,7 @@ quant-strategy-lab/
 ## 3) Phase 進度
 
 ```
-Phase 0–1 ✅           Phase 2 ⏳            Phase 3              Phase 4              Phase 5
+Phase 0–1 ✅           Phase 2 ✅            Phase 3 ⏳            Phase 4              Phase 5
 Foundation +      ──→  E2E Backtest    ──→  Signal Sub     ──→  Live Trading    ──→  Scale
 Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)        (Multi-asset)
                         (共同基礎)             Crypto (BTC)        Binance testnet     + 訂閱平台
@@ -206,7 +206,8 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | 引擎 API 重構（build_output, build_live_trader, base_parser, config YAML） | ✅ |
 | TrendPullback M5 策略（M30 趨勢 + M5 進場，信號測試用） | ✅ |
 | 統一 logging（print → logger） | ✅ |
-| **VPS 部署 + Grafana 端到端驗證** | ⏳ 需 VPS git pull + deploy |
+| **VPS 部署 + Grafana 端到端驗證** | ✅ |
+| trendpullback_m5 回測完成 + sim 監控中 | ✅ 運行中 |
 | **多資產同時 sim 驗證** | ⏳ |
 
 ### Phase 4 — Live Auto Trading（Goal 2 MVP）
@@ -238,6 +239,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 ## 4) Key Decisions
 
 見 `docs/decisions/` 目錄：
+- `2026-03-31-database-schema-review.md` — Database schema review
 - `2026-03-30-tsdb-bind-configurable.md` — TimescaleDB port binding 環境變數化
 - `2026-03-28-strategy-folder-convention.md` — 策略目錄慣例
 - `2026-03-27-backtest-engine-refactor.md` — 統一回測引擎 + CostModel + QuantStats
@@ -316,6 +318,24 @@ BTC_USDT:
 - **為何不現在做**：YAGNI — 真正的 state recovery 需要考慮 partial fill、pending orders、order book state，預留簡化接口反而誤導
 - **延後成本**：低。加一個 optional 參數即可，不影響現有 API
 - **觸發條件**：Phase 4 真金白銀交易上線時
+
+### F3: Config Dataclass 自動化（from_dict → dacite / generic utility）
+
+- **現狀**：`TelegramConfig.from_dict()` / `NotificationConfig.from_dict()` 手動逐欄位 mapping，搭配 `bool()` 和 `.get()` fallback
+- **未來需求**：當策略設定變成多層巢狀（如 risk_params、execution_policy），手寫 `from_dict()` 會變繁瑣且容易遺漏新欄位
+- **候選方案**：`dacite`（輕量 dict-to-dataclass）、`dataclasses.replace` + 自寫 generic factory、或最終引入 `pydantic`
+- **為何不現在做**：目前只有 3 個 dataclass（StatusConfig、NotificationConfig、TelegramConfig），欄位少，手寫完全可控。引入 dacite/pydantic 增加依賴但收益不大
+- **延後成本**：低。`from_dict()` 是 classmethod，替換為 dacite 是 drop-in replacement，不影響呼叫端
+- **觸發條件**：config dataclass 數量 >5 或巢狀深度 >3 層
+
+### F4: Strategy Runner 共用模板（消除 run.py 重複）
+
+- **現狀**：`trendpullback/run.py` 和 `trendpullback_m5/run.py` 的 `run_backtest()` / `run_sim()` / `main()` 幾乎完全相同，差異僅策略類別和 logger name
+- **未來需求**：策略數量增加後，每新增一個策略需要 copy-paste 整份 run.py，bug fix 需多處同步
+- **需要的改動**：提取共用 runner template（如 `librae/runner.py`），策略只需提供 strategy class + feature_fn + config path
+- **為何不現在做**：目前只有 2 個策略，Rule of Three 尚未達標。且每個策略的 `fetch_and_prepare` / `prepare_signals` 有細微差異，過早抽象可能限制彈性
+- **延後成本**：低。runner 是 leaf code，不影響引擎 API
+- **觸發條件**：策略數量 ≥3 且 run.py 重複率 >80%
 
 ### 已評估但不納入規劃的項目
 

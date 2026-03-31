@@ -26,9 +26,15 @@ live/                       即時 / 模擬 runtime
 ├── executor.py             LiveExecutor（sim 通知 / live 下單）
 └── wiring.py               build_live_trader() — DB + Telegram + heartbeat 組裝
 
-config/                     markets.yaml（市場參數）
+config/                     設定管理
+├── markets.yaml            市場參數（成本模型、tick_size、乘數）
+├── market_config.py        MarketConfig dataclass + load helpers
+└── notification.py         TelegramConfig + NotificationConfig dataclass
+
 notifications/              Telegram 推播
-cli.py                      共用 CLI parser + config YAML 載入
+├── telegram.py             TelegramAdapter + TelegramCredentials
+
+cli.py                      共用 CLI parser + config YAML 合併
 ```
 
 ### 依賴方向
@@ -163,3 +169,59 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 - **PositionState in core**: backtest 和 live 共用同一個可變持倉型別，消除重複的 PnL / bars_held 邏輯。
 - **Pre-computed bars**: `_precompute_bars()` 一次性將 DataFrame 轉為 dict-of-dicts，避免 hot loop 中每 bar 呼叫 `to_dict()`。
 - **Frozen dataclasses**: `BacktestOutput`, `StrategyMetrics`, `TradeRecord`, `CostModel` 等皆為 frozen，確保不可變。
+
+---
+
+## Config API
+
+> 設定檔的完整說明（環境變數清單、YAML 範例、CLI 參數表）見 [根目錄 README — 設定檔總覽](../README.md#設定檔總覽)。
+> 以下僅說明引擎內部的程式碼調用方式。
+
+### MarketConfig（市場成本）
+
+來源：`librae/config/markets.yaml`（程式啟動時讀取）
+
+```python
+from librae.config.market_config import get_market
+from librae.core.cost_model import CostModel
+
+market = get_market("crypto")            # → MarketConfig (frozen dataclass)
+cost_model = CostModel.from_market(market)
+```
+
+### TelegramAdapter（通知）
+
+來源：行為設定從 `strategies/*/config.yaml` 的 `telegram:` 區塊，secrets 從環境變數。
+
+```python
+from librae.config.notification import TelegramConfig
+from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
+
+config = TelegramConfig.from_dict(yaml_dict.get("telegram", {}))
+creds = TelegramCredentials.from_env("TELEGRAM")
+adapter = TelegramAdapter(config=config, credentials=creds)
+```
+
+`TelegramAdapter` 方法與對應 flag（定義在 `librae/config/notification.py`）：
+
+| 方法 | Flag | 預設 |
+|------|------|------|
+| `send_signal()` | `notifications.signal` | `True` |
+| `send_startup()` / `send_shutdown()` | `notifications.startup` | `True` |
+| `send_alert()` | `notifications.error` | `True` |
+| `send_status()` | `notifications.status.enabled` | `False` |
+
+### parse_with_config（CLI + YAML 合併）
+
+策略 `run.py` 用這組函數處理 CLI 參數和 config.yaml 合併。
+`telegram` 等巢狀區塊自動分離為 dict，不經過 argparse。
+
+```python
+from librae.cli import base_parser, parse_with_config, setup_logging
+
+p = base_parser("My strategy")
+args = parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
+# args.mode, args.dry_run      ← runtime flags (argparse)
+# args.strategy                ← dict from config.yaml strategy: block
+# args.telegram                ← dict from config.yaml telegram: block
+```

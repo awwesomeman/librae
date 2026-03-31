@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Start a sim container for a given strategy.
-# Usage: ./deploy/sim_start.sh <strategy> [symbol] [poll_interval]
+# Strategy params (symbol, market, etc.) come from config.yaml.
+# Usage: ./deploy/sim_start.sh <strategy> [poll_interval]
 # Example:
-#   ./deploy/sim_start.sh trendpullback BTCUSDT
-#   ./deploy/sim_start.sh meanreversion ETHUSDT 120
+#   ./deploy/sim_start.sh trendpullback
+#   ./deploy/sim_start.sh trendpullback_m5 30
 set -euo pipefail
 
-STRATEGY="${1:?Usage: sim_start.sh <strategy> [symbol] [poll_interval]}"
-SYMBOL="${2:-BTCUSDT}"
-POLL_INTERVAL="${3:-60}"
-CONTAINER="quant_sim_${STRATEGY}_${SYMBOL,,}"
+STRATEGY="${1:?Usage: sim_start.sh <strategy> [poll_interval]}"
+POLL_INTERVAL="${2:-60}"
 IMAGE="quant-sim"
 NETWORK="quant_network"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYMBOL=$(grep 'symbol:' "${SCRIPT_DIR}/../strategies/${STRATEGY}/config.yaml" | head -1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
+CONTAINER="quant_sim_${STRATEGY}_${SYMBOL}"
 
 # Load .env if exists (for Telegram credentials etc.)
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then
@@ -42,13 +43,11 @@ docker run -d \
     --network "${NETWORK}" \
     --restart unless-stopped \
     -e TIMESCALE_DSN="${TIMESCALE_DSN:-postgresql://quant:quant_secret@timescaledb:5432/quant}" \
-    -e TELEGRAM_ENABLED="${TELEGRAM_ENABLED:-false}" \
     -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
     -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" \
     "${IMAGE}" \
     python -m "strategies.${STRATEGY}.run" \
     --mode sim \
-    --symbol "${SYMBOL}" \
     --poll-interval "${POLL_INTERVAL}"
 
 echo "Started. Logs: docker logs -f ${CONTAINER}"

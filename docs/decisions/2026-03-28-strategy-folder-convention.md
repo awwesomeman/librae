@@ -49,7 +49,7 @@ strategies/<strategy_name>/
   - `monitor`：串接 `LiveExecutor(simulation=True)`，只出訊號不下單
   - `live`：串接 `LiveExecutor(simulation=False)`，真實下單
 - 支援排程：`python -m strategies.trendpullback.run --mode monitor`
-- 支援 `--dry-run`、`--symbol`、`--market` 等通用參數
+- 支援 `--dry-run`、`--mode`、`--no-db` 等 runtime flags（策略參數從 config.yaml 讀取）
 
 ### 2. pipeline/ 遷移
 

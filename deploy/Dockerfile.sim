@@ -7,11 +7,7 @@ ENV PYTHONUNBUFFERED=1
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . ccxt
 
-# Copy source
-COPY librae/ librae/
-COPY strategies/ strategies/
-COPY brokers/ brokers/
-COPY pipeline/ pipeline/
-COPY db/ db/
+# Copy source (filtered by .dockerignore)
+COPY . .
 
 # No CMD — sim_start.sh passes the command via docker run

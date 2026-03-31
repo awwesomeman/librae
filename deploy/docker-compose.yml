@@ -11,9 +11,16 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
       - GF_AUTH_ANONYMOUS_ENABLED=false
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-quant_secret}
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - quant_network
 
@@ -24,11 +31,17 @@ services:
       - "${TSDB_BIND:-127.0.0.1}:5432:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
+      - ./timescale_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     environment:
       - POSTGRES_DB=quant
       - POSTGRES_USER=quant
-      - POSTGRES_PASSWORD=quant_secret
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-quant_secret}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quant -d quant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - quant_network
 

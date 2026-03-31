@@ -8,7 +8,7 @@ datasources:
     database: quant
     user: quant
     secureJsonData:
-      password: quant_secret
+      password: $__env{POSTGRES_PASSWORD}
     jsonData:
       database: quant
       sslmode: disable

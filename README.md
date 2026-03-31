@@ -12,12 +12,9 @@ git clone git@github-quant-strategy:awwesomeman/quant-strategy-lab.git
 cd quant-strategy-lab
 python3.12 -m venv .venv && .venv/bin/pip install -e .
 
-# 啟動基礎服務
-cd deploy && cp .env.example .env  # 依需求填入 Telegram / Tailscale 設定
+# 啟動基礎服務（DB schema 由 docker-entrypoint-initdb.d 自動初始化）
+cd deploy && cp ../.env.example .env  # 依需求填入 Telegram / Tailscale 設定
 docker compose up -d timescaledb grafana
-
-# 初始化 DB（首次）
-docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 
 # 部署 Grafana 儀表板（首次 / 更新後）
 cd .. && python deploy/setup_grafana.py
@@ -49,43 +46,54 @@ strategies/trendpullback/
 引擎 API、類型系統、架構設計詳見 **[librae/README.md](librae/README.md)**。
 
 ```bash
-# 回測
-python -m strategies.trendpullback.run --mode backtest --symbol BTCUSDT --months 6
-python -m strategies.trendpullback.run --config strategies/trendpullback/config.yaml --dry-run
+# 回測（策略參數從 config.yaml 讀取）
+python -m strategies.trendpullback.run --mode backtest
+python -m strategies.trendpullback.run --mode backtest --dry-run
 
 # 模擬監控
-python -m strategies.trendpullback.run --mode sim --symbol BTCUSDT
+python -m strategies.trendpullback.run --mode sim
 ```
 
 ### 3. Docker 部署 sim
 
 ```bash
 cd deploy
-cp .env.example .env
+cp ../.env.example .env
 # 編輯 .env 填入 Telegram credentials（選填）
 
-# 啟動 sim（支援多策略多標的同時跑）
-./sim_start.sh trendpullback BTCUSDT          # 起 TrendPullback 監控 BTC
-./sim_start.sh trendpullback_m5 BTCUSDT 30    # 同時起 M5 版本
+# 啟動 sim（symbol, market 等從 config.yaml 讀取，poll_interval 可指定）
+./sim_start.sh trendpullback          # 起 TrendPullback（預設 poll 60s）
+./sim_start.sh trendpullback_m5 30    # 起 M5 版本（poll 30s）
 
 # 停止
-./sim_stop.sh trendpullback BTCUSDT           # 停止指定策略+標的
-./sim_stop.sh --all                           # 停止所有 sim
+./sim_stop.sh trendpullback           # 停止指定策略
+./sim_stop.sh --all                   # 停止所有 sim
 ```
 
-腳本參數：`sim_start.sh <strategy> [symbol] [poll_interval]`
-
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `strategy` | （必填） | 策略名稱（對應 `strategies/<name>/run.py`） |
-| `symbol` | `BTCUSDT` | 監控標的（多標的用逗號分隔） |
-| `poll_interval` | `60` | 輪詢間隔（秒） |
-
-Telegram 等環境變數從 `deploy/.env` 讀取。
+腳本參數：`sim_start.sh <strategy> [poll_interval]`（預設 60s）。
+策略的 symbol、market 等從 `strategies/<name>/config.yaml` 讀取。
+Telegram 等 secrets 從 `deploy/.env` 讀取。
 
 **監控頻率**：sim service 每 `poll_interval` 秒檢查一次是否有新的完成 bar。策略時間框架決定實際信號觸發頻率（如 H1 策略每小時觸發一次）。Grafana Status panel 以 2 倍策略時間框架為閾值判斷 Online/Offline。
 
 **查看結果**：Grafana → Strategy Dashboard → 選 mode=sim → 選 run_id。
+
+### 4. Heartbeat 監控
+
+獨立於 sim 服務的外部監控腳本。查詢 DB 中所有 sim/live run 的 `last_heartbeat`，超過 3 倍 `poll_interval` 未更新就發 Telegram 告警。
+
+```bash
+# 一次性檢查
+python deploy/check_heartbeat.py
+
+# 持續監控（每 60 秒檢查一次）
+python deploy/check_heartbeat.py --loop --interval 60
+
+# cron（每 5 分鐘）
+*/5 * * * * cd /path/to/quant-strategy-lab && .venv/bin/python deploy/check_heartbeat.py
+```
+
+需要 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 環境變數。
 
 ---
 
@@ -96,11 +104,9 @@ Telegram 等環境變數從 `deploy/.env` 讀取。
 ```bash
 git clone git@github-quant-strategy:awwesomeman/quant-strategy-lab.git
 cd quant-strategy-lab/deploy
-cp .env.example .env   # 填入 Telegram / Tailscale 設定
+cp ../.env.example .env   # 填入 Telegram / Tailscale 設定
 
-docker compose up -d
-sleep 10
-docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
+docker compose up -d      # DB schema 由 initdb.d 自動初始化
 cd .. && python deploy/setup_grafana.py
 ```
 
@@ -156,6 +162,137 @@ quant-strategy-lab/
 
 ---
 
+## 設定檔總覽
+
+本專案有 3 種設定檔，各自負責不同的事：
+
+| 檔案 | 設定什麼 | 被誰讀取 | 是否進 git |
+|------|---------|---------|-----------|
+| `.env.example` → `.env.local` / `deploy/.env` | secrets + 基礎設施 | 環境變數（`os.environ`） | `.env.example` 進，`.env` 不進 |
+| `librae/config/markets.yaml` | 市場成本參數 | `get_market()` → `MarketConfig` | ✅ |
+| `strategies/*/config.yaml` | 策略參數 + 通知行為 | `parse_with_config()` → argparse + dataclass | ✅ |
+
+### 1. 環境變數（`.env`）
+
+存放 secrets 和基礎設施設定，**不進 git**。
+
+```bash
+# 本機開發
+cp .env.example .env.local && source .env.local
+
+# VPS / Docker
+cp .env.example deploy/.env   # 編輯後由 sim_start.sh / docker-compose 讀取
+```
+
+完整變數清單見 `.env.example`：
+
+| 變數 | 預設值 | 說明 |
+|------|--------|------|
+| `TIMESCALE_DSN` | `postgresql://quant:quant_secret@localhost:5432/quant` | TimescaleDB 連線字串 |
+| `POSTGRES_PASSWORD` | `quant_secret` | DB 密碼（docker-compose + Grafana datasource） |
+| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin 密碼 |
+| `TELEGRAM_BOT_TOKEN` | （空） | Telegram Bot API token |
+| `TELEGRAM_CHAT_ID` | （空） | Telegram chat/group ID |
+| `TSDB_BIND` | `127.0.0.1` | TimescaleDB 對外綁定 IP（docker-compose only） |
+| `TS_AUTHKEY` | （空） | Tailscale Auth Key（VPS only） |
+
+**調用方式**：各模組直接用 `os.environ.get()` 或 `CredentialConfig.from_env(prefix)` 讀取。
+
+### 2. 市場設定（`librae/config/markets.yaml`）
+
+定義每個市場的成本模型參數，被引擎在回測/sim 啟動時讀取。
+
+```yaml
+# librae/config/markets.yaml
+crypto:
+  asset_class: crypto
+  quote_currency: USDT
+  commission_rate: 0.001      # 手續費率
+  slippage_ticks: 2           # 滑價 tick 數
+  tick_size: 0.01             # 最小價格變動
+  multiplier: 1.0             # 合約乘數（現貨 = 1）
+  transaction_tax: 0.0        # 交易稅
+  # ...
+```
+
+新增市場只需在 `markets.yaml` 加一個區塊（已有 `crypto`、`tw_futures`、`us_equity`）。
+程式碼調用方式見 [librae/README — Config API](librae/README.md#config-api)。
+
+### 3. 策略設定（`strategies/*/config.yaml`）
+
+每個策略的參數和通知偏好。只需寫跟預設值不同的部分。
+
+**合併優先順序**：`config.yaml` → CLI args（CLI 最高優先）
+
+```yaml
+# strategies/trendpullback_m5/config.yaml
+strategy:
+  name: trendpullback_m5
+  symbol: BTCUSDT
+  market: crypto
+  initial_balance: 100000
+  timeframe: M5
+  params:
+    months: 1
+    max_hold_bars: 24
+    warmup_bars: 720
+
+telegram:
+  enabled: true
+  notifications:
+    status:
+      enabled: true
+```
+
+`strategy:` 區塊包含策略定義（標的、市場、資金、timeframe）和演算法參數（`params`）。
+`telegram:` 區塊控制通知行為。兩者以外沒有其他 YAML key。
+
+**調用方式**：
+
+```bash
+# 自動載入同目錄的 config.yaml
+python -m strategies.trendpullback_m5.run --mode sim
+python -m strategies.trendpullback_m5.run --mode backtest --dry-run
+
+# 指定其他設定檔
+python -m strategies.trendpullback_m5.run --config path/to/other.yaml --mode sim
+```
+
+#### CLI 參數（僅 runtime flags）
+
+| 參數 | 說明 |
+|------|------|
+| `--mode` | 執行模式：backtest / sim / live（預設 backtest） |
+| `--config` | 指定設定檔（預設同目錄 config.yaml） |
+| `--poll-interval` | sim 模式 poll 間隔秒數（預設 60） |
+| `--dry-run` | 只跑不存檔 |
+| `--no-db` | 跳過寫入 TimescaleDB |
+| `--no-annualize` | 跳過年化指標計算 |
+
+策略參數（symbol、market、timeframe、initial_balance、params.*）定義在 config.yaml 的 `strategy:` 區塊。
+
+#### Telegram 通知設定（structured key）
+
+寫在 config.yaml 的 `telegram:` 區塊，不經過 CLI。
+bot_token / chat_id 從環境變數讀取，不放在 config.yaml。
+
+```yaml
+telegram:
+  enabled: false              # 策略層開關
+  # chat_id: "xxx"            # 覆蓋全域 env var（可選，不填用全域）
+  notifications:
+    signal: true              # 進出場信號
+    startup: true             # 服務啟動/停止
+    error: true               # 連續 poll 失敗告警
+    status:
+      enabled: false          # 定期狀態摘要
+      interval_bars: 12       # 每 N 根 bar 發一次（M5×12=1h, H1×24=1d）
+```
+
+預設值定義在 `librae/config/notification.py` 的 dataclass。
+
+---
+
 ## 常用指令
 
 | 指令 | 說明 |
@@ -165,16 +302,6 @@ quant-strategy-lab/
 | `python -m strategies.trendpullback.run --mode sim` | 啟動模擬監控 |
 | `python app/grafana/generate_dashboards.py` | 重新產生 Grafana JSON |
 | `python deploy/setup_grafana.py` | 部署儀表板到 Grafana |
-
----
-
-## 環境變數
-
-| 變數 | 預設值 | 說明 |
-|------|--------|------|
-| `TIMESCALE_DSN` | `postgresql://quant:quant_secret@localhost:5432/quant` | TimescaleDB 連線 |
-| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin 密碼 |
-| `TS_AUTHKEY` | （VPS 部署用） | Tailscale Auth Key |
 
 ---
 

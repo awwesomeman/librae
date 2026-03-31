@@ -1,0 +1,32 @@
+# Git
+.git/
+.gitignore
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Tests & docs
+tests/
+docs/
+*.md
+
+# IDE
+.vscode/
+.idea/
+
+# Local secrets & config
+.env.local
+deploy/.env
+
+# Data cache
+data/cache/
+data/backtests/
+data/archive/
+logs/
+
+# Claude
+.claude/
+memory/
