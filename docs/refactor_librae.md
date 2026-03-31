@@ -40,14 +40,13 @@ Three problems with the current design:
 librae/
 ├── __init__.py              re-export 常用 API（Backtest, BaseStrategy, ...）
 │
-├── core/                    backtest + live 共用的 domain model
+├── core/                    backtest + live 共用的 domain model（純計算，無 I/O）
 │   ├── __init__.py
 │   ├── strategy.py          BaseStrategy, Action, Context, Position, Fill
 │   ├── cost_model.py        CostModel
 │   ├── executor.py          make_fill, calc_trade_pnl（平倉計算，執行邏輯）
 │   ├── metrics.py           compute_all（給定 equity curve + trades → 指標，共用）
-│   ├── data.py              fetch_ohlcv, resample, cache
-│   └── utils.py             generate_run_id（backtest + live 共用）
+│   └── utils.py             generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── backtest/                回測 runtime
 │   ├── __init__.py
@@ -74,21 +73,27 @@ librae/
 
 ### 設計理由
 
-- **`core/`**：`strategy.py`, `cost_model.py`, `executor.py`, `metrics.py`, `data.py` 是 backtest 和 live 都依賴的 domain model + 共用計算。`utils.py` 放 `generate_run_id` 等共用小工具。
-- **`backtest/`**：回測專屬。schema（batch output 定義）、persistence（JSON/CSV/Parquet 序列化）。不含 metrics（已上移到 core）。
+- **`core/`**：純計算，無 I/O。`strategy.py`, `cost_model.py`, `executor.py`, `metrics.py` 是 backtest 和 live 都依賴的 domain model + 共用計算。`utils.py` 放 `generate_run_id` 等共用小工具。**不含 `data.py`** — 資料取得是專案層的事，不是框架的事。
+- **`backtest/`**：回測專屬。schema（batch output 定義）、persistence（JSON/CSV/Parquet 序列化）。
 - **`live/`**：live/sim 專屬。LiveTrader polling loop，Executor 加通知 side effect。
-- **依賴方向**：`backtest/` 和 `live/` 都依賴 `core/`，彼此不互相依賴。
+- **依賴方向**：`backtest/` 和 `live/` 都依賴 `core/`，彼此不互相依賴。librae 不依賴 `brokers/` 或 `data/`（專案層依賴 librae，反過來不行）。
 - **命名一致性**：兩邊都有 `engine.py`（主引擎）。class name 用 domain 語意：`Backtest`（回測器）、`LiveTrader`（即時交易引擎），不用 generic name。Live 有自己的 `executor.py`（加通知），backtest 直接用 `core.executor.make_fill`。
 
 ### 共用計算模組
 
-**`core/executor.py`** — 執行邏輯（trade PnL）：
+**`core/executor.py`** — 執行邏輯 + Protocol：
+- `Executor` Protocol：保留，定義 `execute(action, price, cash) -> Fill | None` 介面。Live `Executor` 實作它
+- `make_fill()`：純計算，backtest engine 直接呼叫（不需要 BacktestExecutor class wrapper）
+- `BacktestExecutor`：刪除（只是 `make_fill` 的 thin wrapper，無附加邏輯）
+- 新增 `calc_trade_pnl()`：共用平倉計算
+- 新增 `TradePnL` dataclass：計算結果的回傳型別
+
 ```python
 def calc_trade_pnl(
     entry_price: float,
     exit_price: float,
     quantity: float,
-    side: str,
+    side: Literal["long", "short"],
     cost_model: CostModel,
     entry_commission: float,
     entry_slippage: float,
@@ -101,14 +106,22 @@ def calc_trade_pnl(
 **`core/metrics.py`** — 指標計算：
 ```python
 def compute_all(
-    equity_curve: Sequence[float],
-    trades: Sequence[...],
-    start_ts: datetime,
-    end_ts: datetime,
+    equity_values: Sequence[float],
+    timestamps: Sequence[datetime],
+    trade_pnls: Sequence[TradePnL],
+    total_bars: int,
     annualize: bool = False,
-    benchmark_curve: Sequence[float] | None = None,
+    benchmark_values: Sequence[float] | None = None,
 ) -> StrategyMetrics:
     """Compute all metrics from equity curve + trades.
+
+    Args:
+        equity_values: Raw equity values per bar.
+        timestamps: Corresponding timestamps (used for annualization).
+        trade_pnls: TradePnL from core.executor.calc_trade_pnl().
+        total_bars: Total bar count (for exposure_ratio).
+        annualize: If True, compute annualized metrics.
+        benchmark_values: Buy-and-hold equity values for benchmark comparison.
 
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
@@ -146,7 +159,7 @@ librae/strategy.py              ──→   librae/core/strategy.py
 librae/cost_model.py            ──→   librae/core/cost_model.py
 librae/executor.py              ──→   librae/core/executor.py (+ calc_trade_pnl)
 librae/metrics.py               ──→   librae/core/metrics.py (共用，上移)
-librae/data.py                  ──→   librae/core/data.py
+librae/data.py                  ──→   移出 librae，搬到專案頂層 data/（與 brokers/ 同層級）
 librae/utils.py (generate_run_id) ──→ librae/core/utils.py
 
 librae/engine.py                ──→   librae/backtest/engine.py (+ build_output)
@@ -166,6 +179,7 @@ librae/runners.py               ──→   DELETE (研究階段用 vectorbt)
 **Files deleted**: `scoring.py`, `runners.py`
 **Files merged**: `contracts.py` → `backtest/schema.py`, `archive.py` → `backtest/persistence.py`
 **Files moved up**: `metrics.py` → `core/metrics.py`（backtest + live 共用）
+**Files moved out**: `data.py` → 專案頂層 `data/`（資料取得不是框架職責）
 
 ### Migration details
 
@@ -256,27 +270,35 @@ def __init__(
 
 - `strategy_name`: **刪除** — 直接用 `type(strategy).__name__` 轉 snake_case，不允許 override
 - `symbol`: **自動** — 從 `self._instruments[0]` 取
-- `timeframe`: **自動推導** — 從 data index 的 median timedelta 映射到標準 label（M1/M5/H1/D1/W1），推導失敗時 raise error
+- `timeframe`: **自動推導** — 從 data index 的 timedelta mode（眾數） 映射到標準 label（M1/M5/H1/D1/W1），推導失敗時 raise error
 - `data_source`: **刪除** — 資料來源追蹤不是 engine 的職責
 - `market`: 改為 `market_config: MarketConfig` — 直接傳入配置物件
 - `executor`: **刪除** — backtest 直接用 `core.executor.make_fill`，不需要自訂 executor
 
-### Step 4: Timeframe 自動推導
+### Step 4: Timeframe 工具
 
-**File: `librae/backtest/engine.py`**（module-level private function）
+**File: `librae/core/utils.py`**
 
 ```python
-def _infer_timeframe(index: pd.DatetimeIndex) -> str:
-    """Infer bar frequency label from data index.
+# Canonical labels: M1, M5, M15, H1, H4, D1, W1
+# ccxt format:     1m, 5m, 15m, 1h, 4h, 1d, 1w
 
-    Uses median timedelta to map to standard labels.
-    Logs inferred result. Raises ValueError if not mappable.
+def infer_timeframe(index: pd.DatetimeIndex) -> str:
+    """Infer canonical timeframe label from data index.
+    Uses timedelta mode（眾數）. Raises ValueError if not mappable.
     """
-    # median delta → label mapping with tolerance
-    # e.g. ~60s → "M1", ~300s → "M5", ~3600s → "H1", ~86400s → "D1"
+
+def to_ccxt(timeframe: str) -> str:
+    """Convert canonical label to ccxt format. H1 → 1h"""
+
+def to_canonical(timeframe: str) -> str:
+    """Convert any format to canonical label. 1h → H1"""
 ```
 
-Module-level private function，不是 `@staticmethod` — 它是 utility，不需要掛在 class 上。
+- 放 `core/utils.py`（pure function，backtest + live 共用）
+- `infer_timeframe` 是 public — backtest engine 呼叫，live 未來也可能需要
+- 策略只需定義一個 `TIMEFRAME = "H1"`，需要 ccxt 格式時用 `to_ccxt(TIMEFRAME)` 轉換
+- 消除 `timeframe_ccxt` / `timeframe_db` 兩個常數手動同步的問題
 
 ### Step 5: `run()` 生成 run_id
 
@@ -458,7 +480,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 | `symbol` | **自動** | 從 `data.index` instrument level 取 |
 | `start_ts` / `end_ts` | **自動** | 從 `self._timeline` 取 |
 | `strategy_name` | **自動** | 從 `type(strategy).__name__` 轉 snake_case |
-| `timeframe` | **自動** | 從 data index median timedelta 推導 |
+| `timeframe` | **自動** | 從 data index timedelta mode（眾數） 推導 |
 | `run_id` | **自動** | `run()` 時生成（strategy + symbol + timestamp） |
 | `benchmark` | `add_benchmark(prices)` | optional method，接收 price series，build_output 時算 buy-and-hold |
 | `annualize` | `build_output()` 預設 `False` | opt-in，資料太短時年化 misleading |
@@ -478,9 +500,9 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 - **影響**：刪除對應測試（test_runners, test_backtest_adapter runner 部分, test_regression_baselines, test_research_modules）
 
 ### D2: timeframe 自動推導而非必填
-- **決定**：從 data index median timedelta 推導，module-level private function `_infer_timeframe()`，推導失敗 raise error
-- **原因**：`_infer_annual_periods` 已證明可從 bar 間隔推導年化週期，同理可映射到 label
-- **風險**：缺漏資料可能導致推導錯誤 → 推導後 log warning 供使用者確認
+- **決定**：從 data index timedelta 的 **mode（眾數）** 推導，module-level private function `_infer_timeframe()`，推導失敗 raise error
+- **原因**：`_infer_annual_periods` 已證明可從 bar 間隔推導年化週期，同理可映射到 label。用 mode 而非 median，因為「最常出現的 bar 間距」= 真實週期，對傳統金融（有長假、休市日）更穩健
+- **風險**：極端稀疏資料（< 5 根 bar）mode 不穩定 → bar count 不足時 raise error。推導後 log warning 供使用者確認
 
 ### D3: annualize 預設 False
 - **決定**：`compute_all` 和 `build_output` 的 annualize 預設改為 False
@@ -530,56 +552,146 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 - **決定**：live 主引擎 class name 從 `Runner` 改為 `LiveTrader`
 - **原因**：`Runner` 太 generic。`LiveTrader` 明確表達「即時交易引擎」，sim 和 live 的差異只是 executor 的 `simulation` flag，主引擎相同。與 `Backtest` 同樣用 domain 語意命名
 
+### D14: data.py 移出 librae
+- **決定**：`librae/data.py`（Binance fetch_ohlcv）移出 librae，搬到專案頂層 `data/` 模組
+- **原因**：librae 是純框架，接收 DataFrame / fetcher callable，不該知道資料從哪來。`data.py` hardcode Binance API URL，放在框架內破壞可攜性（換資料源要改框架）、增加 HTTP 測試負擔。專案層（strategies, brokers, data）依賴 librae，反過來不行
+
+### D15: compute_all 接收 primitive types
+- **決定**：`compute_all` 不再接收 `BacktestResult`，改為接收 `equity_values`, `timestamps`, `trade_pnls: Sequence[TradePnL]`, `total_bars`
+- **原因**：live 也要呼叫 `compute_all`，不能依賴 backtest 專屬的 `BacktestResult` dataclass。兩邊都透過 `calc_trade_pnl()` 產出 `TradePnL`，再餵進 `compute_all`
+
+### D16: 保留 Executor Protocol，刪除 BacktestExecutor
+- **決定**：`Executor` Protocol 保留在 `core/executor.py`；`BacktestExecutor` class 刪除
+- **原因**：Protocol 定義了 `execute()` 介面，Live `Executor` 實作它。Backtest 不需要獨立 executor class，直接呼叫 `make_fill` 就好（`BacktestExecutor` 只是 thin wrapper，無附加邏輯）
+
+### D17: Timeframe 統一為 canonical label + 轉換工具
+- **決定**：策略只定義一個 `TIMEFRAME = "H1"`（canonical label）。`core/utils.py` 提供 `infer_timeframe()`, `to_ccxt()`, `to_canonical()` 轉換
+- **原因**：消除 `timeframe_ccxt` / `timeframe_db` 兩個常數手動同步的問題。`build_live_trader` 改為接收單一 `timeframe` 參數，wiring 內部需要 ccxt 格式時自動轉換
+
+### D18: LiveTrader entry point 設計
+- **決定**：`build_live_trader()` 是 convenience factory（簡單用法），`LiveTrader()` 是直接建構（進階用法）
+- **原因**：Live 的 infrastructure 接線（DB callbacks, Telegram, CostModel）比 backtest 複雜得多，需要 factory 負責組裝。但 `LiveTrader` 本身也是 public class，進階使用者可以自己組裝。`Backtest` 和 `LiveTrader` 在概念上對等（都是主引擎 class）
+
+### D19: side 欄位用 Literal["long", "short"] 取代 str
+- **決定**：`Position.side`, `Fill.side`, `calc_trade_pnl(side=...)` 統一改為 `Literal["long", "short"]`
+- **原因**：型別安全，防止傳入非法字串（如 "buy"/"sell" 混用）。不引入獨立 Enum — 只有 2 個值且無 behavior，`Literal` 已夠用
+
+## Implementation Notes
+
+### 實作時注意（不需要改 plan，實作時遵循）
+
+- **`build_output()` 內部拆分**：5 個步驟（benchmark 計算 → compute_all → RunMetadata → TradeRecords → EquityCurvePoints enrichment）應拆成 private methods（`_compute_benchmark`, `_enrich_equity_curve` 等），`build_output` 只負責呼叫順序。符合 SRP：每個函式只做一件事
+- **型別標註完整**：所有新增 signature 不使用 `Any` 或 `Sequence[...]`，用具體型別（`Sequence[TradePnL]`, `Sequence[float]` 等）
+- **Live metrics 效能**：`compute_all` 接收 `Sequence[float]`，呼叫端（LiveTrader wiring）自行決定傳多少資料。長期運行時應截斷（如 `equity[-30*24:]` 取近 30 天），而非把全部歷史丟進去。框架不加 `window` 參數，保持介面純粹
+- **Live structured logging（輕量 event sourcing）**：LiveTrader 處理 action 時，用統一的 `order_id`（復用 `{run_id}-t{seq:04d}` 格式，在 action 階段即生成）串起三點 structured log：(1) Action emitted `logger.info("Action: order_id=%s symbol=%s type=%s", ...)` (2) Execution attempt `logger.info("Execute: order_id=%s price=%.2f qty=%.4f", ...)` (3) Fill result `logger.info("Fill: order_id=%s side=%s net_pnl=%.2f", ...)`。不需要 event store，純 logging 即可，用於 live debug
+
 ## Files to Modify (ordered)
 
-1. 建立 `librae/core/` — 搬入 strategy.py, cost_model.py, executor.py（+ calc_trade_pnl）, metrics.py（上移 + 共用化）, data.py；新增 utils.py（generate_run_id）
+1. 建立 `librae/core/` — 搬入 strategy.py, cost_model.py, executor.py（+ calc_trade_pnl + TradePnL + 保留 Executor Protocol，刪 BacktestExecutor）, metrics.py（上移 + compute_all 改接收 primitive types）；新增 utils.py（generate_run_id + infer_timeframe + to_ccxt + to_canonical）
 2. 建立 `librae/backtest/` — 搬入 engine.py, schema.py（+ contracts.py）, persistence.py（+ archive.py）
 3. 建立 `librae/live/` — 搬入 live_runner.py → engine.py (LiveTrader), live_executor.py → executor.py, sim_wiring.py → wiring.py
-4. `librae/core/executor.py` — 新增 calc_trade_pnl + TradePnL dataclass
-5. `librae/core/metrics.py` — 調整 compute_all 為 backtest + live 共用介面
-6. `librae/backtest/schema.py` — absorb contracts.py validation；瘦身 RunMetadata（刪 mode, data_source, sample）
-7. `librae/backtest/engine.py` — remove benchmark from BacktestResult; 簡化 constructor; add _infer_timeframe + add_benchmark + build_output(); run_id 在 run() 生成; 平倉用 core.executor.calc_trade_pnl
-8. `librae/backtest/persistence.py` — 合併 archive.py; 改為獨立函式 save_output/load_output
-9. `librae/live/engine.py` — rename LiveRunner → LiveTrader; 平倉用 core.executor.calc_trade_pnl; 定期用 core.metrics.compute_all
-10. `librae/live/wiring.py` — rename build_sim_runner → build_live_trader
-11. `librae/__init__.py` — re-export from subpackages
-12. `strategies/trendpullback/run.py` — simplify to new API
-13. `strategies/trendpullback_m5/run.py` — simplify to new API
-14. `tests/` — update existing tests + delete runner/scoring tests + add calc_trade_pnl test
-15. Delete from root: all original files that were moved to subpackages
+4. `librae/core/executor.py` — 新增 calc_trade_pnl + TradePnL；保留 Executor Protocol；刪除 BacktestExecutor
+5. `librae/core/metrics.py` — compute_all 改為接收 equity_values + timestamps + trade_pnls + total_bars（不依賴 BacktestResult）
+6. `librae/core/utils.py` — generate_run_id + infer_timeframe + to_ccxt / to_canonical
+7. `librae/backtest/schema.py` — absorb contracts.py validation；瘦身 RunMetadata（刪 mode, data_source, sample）
+8. `librae/backtest/engine.py` — remove benchmark from BacktestResult; 簡化 constructor（刪 executor 參數）; add add_benchmark + build_output(); run_id 在 run() 生成; 平倉用 core.executor.calc_trade_pnl; timeframe 用 core.utils.infer_timeframe
+9. `librae/backtest/persistence.py` — 合併 archive.py; 改為獨立函式 save_output/load_output
+10. `librae/live/engine.py` — rename LiveRunner → LiveTrader; 平倉用 core.executor.calc_trade_pnl; 定期用 core.metrics.compute_all
+11. `librae/live/wiring.py` — rename build_sim_runner → build_live_trader; timeframe 改為單一參數（canonical），內部用 to_ccxt 轉換; market 改為 market_config
+12. `librae/__init__.py` — re-export from subpackages
+13. `strategies/trendpullback/run.py` — simplify to new API; 合併 TIMEFRAME_CCXT + TIMEFRAME_DB 為單一 TIMEFRAME
+14. `strategies/trendpullback_m5/run.py` — simplify to new API; 同上
+15. `librae/data.py` → 搬到專案頂層 `data/binance.py`；更新所有 import（strategies utils.py 等）
+16. `tests/` — update existing tests + delete runner/scoring tests + add calc_trade_pnl test + add infer_timeframe/to_ccxt test
+17. Delete from root: all original files that were moved to subpackages
 
 ## Part C: README.md 策略開發範例更新
 
 **File: `README.md`**
 
-更新「策略開發範例」section，展示優化後的使用方式：
+更新「策略開發範例」section，展示優化後的使用方式。重點展示 librae 框架與外部模組（資料源、券商）的串接方式。
+
+### 回測模式
+
+資料在外部準備好，傳 DataFrame 進來。librae 不知道資料從哪來。
 
 ```python
-from librae import Backtest, BaseStrategy
+from data.binance import fetch_ohlcv          # 專案層：資料取得
+from librae import Backtest                    # 框架層：回測引擎
 from librae.backtest.persistence import save_output
 from librae.config import get_market
 
-# 1. 建立引擎
+# 1. 外部取得資料（不是 librae 的事）
+df = fetch_ohlcv("BTCUSDT", "1h", months=6)
+benchmark_prices = df.xs("BTCUSDT", level="instrument")["close"]
+
+# 2. 建立引擎（只接收 DataFrame + 配置）
 market_config = get_market("crypto")
 bt = Backtest(
     data=df,
     strategy=MyStrategy(),
     market_config=market_config,
 )
-bt.add_benchmark(btc_prices)   # optional: price series, engine computes buy & hold
+bt.add_benchmark(benchmark_prices)
 
-# 2. 執行回測
+# 3. 執行 + 產出
 bt.run()
-
-# 3. 產出完整結果（metrics + 規範化輸出，一步完成）
 output = bt.build_output()
-
-# 4. 查看結果
 print(output.metrics.sharpe, output.metrics.max_drawdown)
 
-# 5. 持久化（opt-in）
-save_output(output, "results/")   # → JSON + CSV + Parquet
+# 4. 持久化（opt-in）
+save_output(output, "results/")
 ```
+
+### Sim / Live 模式
+
+fetcher 和 adapter 在外部建好，透過 DI 注入。librae 不知道打哪個 API。
+
+**簡單用法**（大多數情境，wiring 幫你組裝）：
+```python
+from brokers.crypto_adapter import CryptoAdapter   # 專案層：券商 API
+from librae.live.wiring import build_live_trader    # 框架層：convenience factory
+from librae.config import get_market
+
+# 1. 外部建立券商 adapter（不是 librae 的事）
+adapter = CryptoAdapter()
+
+# 2. 組裝 LiveTrader（注入 fetcher + strategy）
+trader = build_live_trader(
+    strategy=MyStrategy(),
+    fetcher=adapter.fetch_ohlcv,        # DI: fetcher 是 callable
+    feature_fn=prepare_signals,
+    symbols=["BTCUSDT"],
+    timeframe="H1",                     # canonical，wiring 內部用 to_ccxt() 轉換
+    market_config=get_market("crypto"),  # MarketConfig 物件
+)
+
+# 3. 啟動 polling loop
+trader.run()
+```
+
+**進階用法**（需要自訂 callbacks 時，直接建構 LiveTrader）：
+```python
+from librae.live.engine import LiveTrader
+from librae.live.executor import Executor
+
+executor = Executor(cost_model=cost_model, simulation=True, telegram=telegram)
+trader = LiveTrader(
+    strategy=strategy,
+    symbols=["BTCUSDT"],
+    fetcher=adapter.fetch_ohlcv,
+    feature_fn=prepare_signals,
+    executor=executor,
+    timeframe="H1",
+    on_bar=my_custom_bar_callback,
+    on_trade=my_custom_trade_callback,
+)
+trader.run()
+```
+
+Entry point 設計：`Backtest` 和 `LiveTrader` 在概念上對等（都是主引擎 class）。`build_live_trader` 是 convenience factory，負責組裝 infrastructure（DB callbacks, Telegram 等），因為 live 的接線比 backtest 複雜得多。
+
+依賴方向：`strategies/` → `data/`, `brokers/` → `librae`。librae 本身不 import 任何外部資料源或券商模組。
 
 ## Git Workflow
 

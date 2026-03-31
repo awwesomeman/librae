@@ -292,7 +292,42 @@ BTC_USDT:
 
 ---
 
-## 7) Refactor 門檻
+## 7) Future Considerations（已評估、刻意延後）
+
+> 以下項目在 librae 重構時經過批判檢視，確認現階段不實作但未來機率不低。記錄延後原因與觸發條件，避免重複討論。
+> 參考框架：NautilusTrader, Zipline, Lumibot, vn.py, Backtrader, QSTrader, Freqtrade
+
+### F1: Order 型別（Limit/Stop Order 支援）
+
+- **現狀**：Action → `make_fill()` → Fill，1:1 mapping（market order only）
+- **未來需求**：真實實盤幾乎一定需要 limit order / stop-loss order
+- **需要的改動**：新增 `Order` dataclass 介於 Action 和 Fill 之間、partial fill 處理、order state tracking（Submitted → Filled / Cancelled）
+- **為何不現在做**：目前只有 sim mode，market order 夠用。加 Order 層會讓 backtest engine 也要配合改動，scope 膨脹
+- **延後成本**：低。在 `make_fill` 前插入 `Order` 層是 additive change，不需要重寫現有程式碼
+- **觸發條件**：Phase 4 LiveExecutor(simulation=False) 上線時
+
+### F2: Live State Recovery（重啟恢復部位）
+
+- **現狀**：LiveTrader 每次啟動從零開始（stateless restart），sim mode 合理
+- **未來需求**：production live trading 的 crash recovery 是剛需（重啟後需恢復當前部位、已實現淨值）
+- **需要的改動**：新增 `initial_state: LiveState | None` optional 參數，從 DB 讀取部位初始化
+- **為何不現在做**：YAGNI — 真正的 state recovery 需要考慮 partial fill、pending orders、order book state，預留簡化接口反而誤導
+- **延後成本**：低。加一個 optional 參數即可，不影響現有 API
+- **觸發條件**：Phase 4 真金白銀交易上線時
+
+### 已評估但不納入規劃的項目
+
+| 項目 | 來源框架 | 不採納原因 |
+|------|----------|-----------|
+| Lifecycle Hooks（initialize, before_market_opens, on_abrupt_close） | Lumibot | 現有 `on_bar` 已覆蓋；crypto 24/7 無 session 概念；額外 hooks 是 YAGNI |
+| Event Queue / Dispatcher | NautilusTrader, QSTrader | Python 單機回測效能殺手；直接 method call 已具事件驅動語意 |
+| Multi-subscriber Observer（register_callback pattern） | vn.py | Constructor injection 已實現解耦；5 個 callback 在可控範圍；超過 7 個再考慮 |
+| Event Sourcing Store | NautilusTrader | 過度設計；structured logging（Action → Order → Fill 三點 log）已足夠 |
+| Pipeline API（黑盒特徵計算） | Zipline | 特徵計算在策略外部完成（`feature_fn`），不需要框架內建 Pipeline |
+
+---
+
+## 8) Refactor 門檻
 
 觸發任 2~3 條才考慮大幅重構：
 1. 策略 >10 且重複邏輯 >40%
