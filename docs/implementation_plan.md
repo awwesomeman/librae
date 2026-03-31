@@ -61,10 +61,13 @@ quant-strategy-lab/
 │   ├── persistence.py       # save/load JSON/Parquet
 │   ├── runners.py           # walk-forward, stability, strict protocol
 │   ├── config/              # markets.yaml, market_config.py（引擎內部配置）
-│   └── schemas/             # canonical_schema.json
+│   ├── sim_wiring.py        # Sim mode 基礎設施封裝
+│   ├── cli.py               # 共用 CLI parser + config YAML
+│   └── schema.py            # BacktestOutput, TradeRecord, StrategyMetrics
 │
 ├── strategies/              ← 策略實作（BaseStrategy 子類 + 純信號函數）
-│   └── trendpullback/       # signals.py (entry/exit conditions), btc.py, mxfr1.py
+│   ├── trendpullback/       # H1 策略：D1 趨勢 + H1 回調（strategy.py + utils.py + run.py + config.yaml）
+│   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調（信號測試用，reuse H1 邏輯）
 │
 ├── pipeline/                ← 資料取得 + ETL
 │   ├── fetchers/            # binance_fetcher.py
@@ -94,10 +97,12 @@ quant-strategy-lab/
 
 | Area | Tool | 說明 |
 |------|------|------|
-| 回測引擎 | `librae/` | Backtest class, Strategy Protocol, Executor 分離 |
+| 回測引擎 | `librae/` | Backtest class, Strategy Protocol, Executor 分離, build_backtest_output |
+| Sim 封裝 | `librae/sim_wiring.py` | build_sim_runner()：DB callbacks + Telegram + heartbeat |
+| CLI 共用 | `librae/cli.py` | base_parser + config YAML 載入 + setup_logging |
 | 成本模型 | `librae/cost_model.py` | multiplier 統一現貨/期貨, CostModel.from_instrument() |
 | 績效指標 | QuantStats + 客製指標 | `librae/metrics.py` thin adapter |
-| 信號條件 | `strategies/trendpullback/signals.py` | compute_entry/exit_conditions（純布林 Series） |
+| 信號條件 | `strategies/trendpullback/utils.py` | compute_entry/exit_conditions（純布林 Series） |
 | 資料格式 | MultiIndex DataFrame (instrument, datetime) | 單資產是特例，多資產統一 |
 | 研究/參數掃描 | vectorbt（開源版） | Phase 5 |
 | Market Config | `librae/config/markets.yaml` | 兩層：MarketConfig + InstrumentConfig |
@@ -170,7 +175,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | 端到端驗證：fetch → ETL → 策略 → 回測 → JSON → DB → 可讀回 | ✅ |
 | Grafana 統一 Strategy Dashboard（mode 篩選 + 可摺疊 row + Trade Detail 修正） | ✅ |
 | 補回 look-ahead bias 測試（信號穩定性 + D1 merge + 引擎時機，9 tests） | ✅ |
-| ≥2 策略可比較（Backtest 板 run_id 對比） | ⏳ |
+| ≥2 策略可比較（Backtest 板 run_id 對比） | ✅ trendpullback + trendpullback_m5 |
 
 ### Phase 3 — Sim Mode（Goal 1 MVP）— 首個市場: Crypto (BTC) ← 當前
 
@@ -194,6 +199,11 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | 命名一致性 monitor→sim（CLI, Docker, Grafana, DB） | ✅ |
 | KPI 即時更新（_refresh_performance on trade close） | ✅ |
 | Grafana 三模式共用 Dashboard（backtest/sim/live 資料完整對齊） | ✅ |
+| Heartbeat liveness tracking（Status panel, Online/Offline） | ✅ |
+| sim 腳本化部署（sim_start.sh / sim_stop.sh，多策略多標的同時跑） | ✅ |
+| 引擎 API 重構（build_backtest_output, sim_wiring, base_parser, config YAML） | ✅ |
+| TrendPullback M5 策略（M30 趨勢 + M5 進場，信號測試用） | ✅ |
+| 統一 logging（print → logger） | ✅ |
 | **VPS 部署 + Grafana 端到端驗證** | ⏳ 需 VPS git pull + deploy |
 | **多資產同時 sim 驗證** | ⏳ |
 

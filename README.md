@@ -20,14 +20,14 @@ docker compose up -d timescaledb grafana
 docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 
 # 部署 Grafana 儀表板（首次 / 更新後）
-cd .. && python scripts/setup_grafana.py
+cd .. && python deploy/setup_grafana.py
 ```
 
 ---
 
 ## 策略開發流程
 
-以 TrendPullback 為例，完整流程分三階段：**撰寫 → 回測 → 模擬監控**。
+完整流程分三階段：**撰寫 → 回測 → 模擬監控**。
 
 ### 1. 撰寫策略
 
@@ -37,49 +37,70 @@ cd .. && python scripts/setup_grafana.py
 strategies/trendpullback/
 ├── strategy.py     # BaseStrategy 子類 — on_bar() 決策邏輯
 ├── utils.py        # 純函數：特徵工程 + 進出場條件計算
-└── run.py          # CLI 入口：backtest / sim / live 三模式
+├── run.py          # CLI 入口：backtest / sim / live 三模式
+└── config.yaml     # 預設參數（CLI 可覆蓋）
 ```
 
-**核心分工**：
-- `utils.py`：計算技術指標 (EMA, ATR) 和進出場信號 (`entry_signal`, `exit_signal`)，純函數、無狀態。
-- `strategy.py`：繼承 `BaseStrategy`，實作 `on_bar(ctx)`，根據信號欄位回傳 `Action`（buy / close / hold）。策略不追蹤持倉，持倉狀態由引擎管理。
-- `run.py`：串接資料取得 → ETL → 策略 → 引擎 → 輸出。
+策略開發者負責三件事：**ETL（utils.py）、決策邏輯（strategy.py）、參數配置（config.yaml）**。
+引擎負責其餘一切（持倉管理、成交模擬、績效計算、DB 寫入）。
 
-### 2. 回測 (backtest)
+### 2. 引擎使用範例
+
+#### 回測 (backtest)
+
+```python
+# --- utils.py: 資料準備（策略特有的 ETL） ---
+def prepare_signals(h1_base, params=None):
+    h1 = compute_features(h1_base, params)               # 技術指標
+    h1["entry_signal"] = compute_entry_conditions(h1)     # 進場信號
+    h1["exit_signal"] = compute_exit_conditions(h1)       # 出場信號
+    return h1
+
+# --- strategy.py: 決策邏輯 ---
+class MyStrategy(BaseStrategy):
+    def on_bar(self, ctx: Context) -> list[Action]:
+        if ctx.positions.get(ctx.instrument):             # 有持倉 → 檢查出場
+            if ctx.bar.get("exit_signal"):
+                return [Action(type="close", instrument=ctx.instrument)]
+            return []
+        if ctx.bar.get("entry_signal"):                   # 無持倉 → 檢查進場
+            return [Action(type="buy", instrument=ctx.instrument)]
+        return []
+
+# --- run.py: 串接引擎 ---
+df = fetch_and_prepare(symbol, months)                    # 1. ETL
+bt = Backtest(data=df, strategy=MyStrategy(), market="crypto")
+result = bt.run()                                         # 2. 跑引擎
+metrics = compute_all(result, start_ts, end_ts)           # 3. 績效指標
+output = build_backtest_output(result, metrics, ...)      # 4. 標準輸出
+save_backtest_output(output, Path("data/backtests"))      # 5. 存檔
+write_backtest_output(output)                             # 6. 寫 DB → Grafana
+```
 
 ```bash
-# 快速驗證（不寫 DB）
-python -m strategies.trendpullback.run --mode backtest --dry-run
-
-# 完整回測：取 6 個月資料 → 跑引擎 → 存 JSON + 寫 DB
 python -m strategies.trendpullback.run --mode backtest --symbol BTCUSDT --months 6
-
-# 常用參數
-#   --market crypto          市場類型（決定成本模型）
-#   --initial-balance 100000 初始資金
-#   --max-hold-bars 24       最大持倉 bar 數
-#   --sample oos             樣本標記（in-sample / out-of-sample）
-#   --no-annualize           不做年化（短期回測用）
-#   --no-db                  不寫 TimescaleDB
+python -m strategies.trendpullback.run --config strategies/trendpullback/config.yaml --dry-run
 ```
 
-回測結果寫入 TimescaleDB 後，開啟 Grafana → Strategy Dashboard → 選 mode=backtest 查看：
-- 權益曲線 + Benchmark 對比
-- KPI（Sharpe, MDD, Win Rate 等）
-- 完整交易明細
-- OHLCV + 進出場信號標記
+#### 模擬監控 (sim)
 
-### 3. 模擬監控 (sim)
-
-Sim mode = paper trading：即時抓取市場資料 → 策略判斷 → 模擬成交 → 寫入 DB + Telegram 推播。
+```python
+# --- run.py: 同一份策略，切換到 sim mode ---
+strategy = MyStrategy()
+runner = build_sim_runner(
+    strategy=strategy,
+    strategy_name="my_strategy",
+    feature_fn=prepare_signals,         # 同一個 ETL pipeline
+    symbols=["BTCUSDT"],
+    timeframe_ccxt="1h",
+    timeframe_db="H1",
+    poll_interval=60,
+)
+runner.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
+```
 
 ```bash
-# 本地執行
 python -m strategies.trendpullback.run --mode sim --symbol BTCUSDT
-
-# 常用參數
-#   --poll-interval 60       輪詢間隔（秒），預設 60s
-#   --no-db                  不寫 DB（純測試）
 ```
 
 **Docker 部署**：
@@ -91,7 +112,7 @@ cp .env.example .env
 
 # 啟動 sim（支援多策略多標的同時跑）
 ./sim_start.sh trendpullback BTCUSDT          # 起 TrendPullback 監控 BTC
-./sim_start.sh trendpullback ETHUSDT 120      # 同時起另一個監控 ETH，poll=120s
+./sim_start.sh trendpullback_m5 BTCUSDT 30    # 同時起 M5 版本
 
 # 停止
 ./sim_stop.sh trendpullback BTCUSDT           # 停止指定策略+標的
@@ -103,7 +124,7 @@ cp .env.example .env
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
 | `strategy` | （必填） | 策略名稱（對應 `strategies/<name>/run.py`） |
-| `symbol` | `BTCUSDT` | 監控標的（多標的用逗號分隔，如 `BTCUSDT,ETHUSDT`） |
+| `symbol` | `BTCUSDT` | 監控標的（多標的用逗號分隔） |
 | `poll_interval` | `60` | 輪詢間隔（秒） |
 
 Telegram 等環境變數從 `deploy/.env` 讀取。
@@ -126,7 +147,7 @@ cp .env.example .env   # 填入 Telegram / Tailscale 設定
 docker compose up -d
 sleep 10
 docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
-cd .. && python scripts/setup_grafana.py
+cd .. && python deploy/setup_grafana.py
 ```
 
 ### 更新（拉新程式碼後）
@@ -139,9 +160,9 @@ docker exec -i quant_timescaledb psql -U quant -d quant <<'SQL'
 ALTER TABLE <table> ADD COLUMN IF NOT EXISTS <column> <type>;
 SQL
 
-# 重建有程式碼變動的 service + 更新 Grafana
-cd deploy && docker compose up -d --build <service>
-cd .. && python scripts/setup_grafana.py
+# 更新 Grafana + 重建 sim image
+cd deploy && docker compose up -d --build
+cd .. && python deploy/setup_grafana.py
 
 # 確認 service 運行狀態
 docker logs -f <container_name>
@@ -164,9 +185,11 @@ docker compose up -d timescaledb grafana
 ## 架構
 
 ```
-ETL (pipeline/)        → DataFrame (MultiIndex + 信號欄位)
-Strategy (strategies/) → on_bar(ctx) → Action[]
-Engine (librae/)       → Executor.execute(action) → Fill → Result
+策略 ETL (strategies/*/utils.py) → DataFrame (MultiIndex + 信號欄位)
+策略邏輯 (strategies/*/strategy.py) → on_bar(ctx) → Action[]
+回測引擎 (librae/)               → Executor.execute(action) → Fill → Result
+Sim 封裝 (librae/sim_wiring.py)  → DB callbacks + Telegram + heartbeat
+CLI 共用 (librae/cli.py)         → base_parser + config YAML 載入
 ```
 
 **回測 vs 模擬 vs 實盤共用同一份策略，零修改**：
@@ -189,18 +212,22 @@ quant-strategy-lab/
 │   ├── executor.py         # BacktestExecutor + shared make_fill()
 │   ├── live_executor.py    # LiveExecutor（sim / live）
 │   ├── live_runner.py      # LiveRunner polling loop
+│   ├── sim_wiring.py       # Sim mode 基礎設施封裝
+│   ├── cli.py              # 共用 CLI parser + config YAML 載入
+│   ├── utils.py            # build_backtest_output, generate_run_id
 │   ├── cost_model.py       # 成本模型（手續費 / 滑價 / 稅）
 │   ├── metrics.py          # QuantStats adapter
 │   ├── schema.py           # BacktestOutput, TradeRecord, StrategyMetrics
 │   ├── notifications/      # Telegram 推播
 │   └── config/             # markets.yaml（市場 / 標的設定）
 ├── strategies/             # 策略實作
-│   └── trendpullback/      # strategy.py + utils.py + run.py
+│   ├── trendpullback/      # H1 策略：D1 趨勢 + H1 回調進場
+│   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調進場（測試用）
 ├── pipeline/               # 資料取得 + ETL
 ├── brokers/                # 券商 adapter（Binance / Shioaji）
 ├── db/                     # TimescaleDB 讀寫
 ├── app/grafana/            # Grafana 儀表板 generator
-├── deploy/                 # Docker Compose + SQL + Dockerfile
+├── deploy/                 # Docker Compose + SQL + sim 腳本
 ├── tests/                  # pytest（按模組分目錄）
 └── docs/                   # 文件 + 架構決策記錄 (ADR)
 ```
@@ -215,7 +242,7 @@ quant-strategy-lab/
 | `python -m strategies.trendpullback.run --mode backtest --dry-run` | 快速回測 |
 | `python -m strategies.trendpullback.run --mode sim` | 啟動模擬監控 |
 | `python app/grafana/generate_dashboards.py` | 重新產生 Grafana JSON |
-| `python scripts/setup_grafana.py` | 部署儀表板到 Grafana |
+| `python deploy/setup_grafana.py` | 部署儀表板到 Grafana |
 
 ---
 
