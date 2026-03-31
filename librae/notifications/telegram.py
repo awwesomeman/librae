@@ -1,63 +1,86 @@
-"""Telegram notification adapter with feature flag (on/off).
+"""Telegram notification adapter — secrets from env, behavior from YAML config.
 
-Feature flag: controlled via TELEGRAM_ENABLED env var or constructor arg.
-When disabled, all send operations are no-ops.
+Secrets (bot_token, chat_id): loaded via TelegramCredentials.from_env("TELEGRAM").
+Behavior (enabled, notification toggles): loaded via TelegramConfig.from_dict().
 
 Usage:
-    adapter = TelegramAdapter()  # reads env vars
-    adapter.send_signal("BUY BTCUSDT @ 65000")
-
-    # Or explicitly:
-    adapter = TelegramAdapter(enabled=True, bot_token="...", chat_id="...")
+    from librae.config.notification import TelegramConfig
+    config = TelegramConfig.from_dict({"enabled": True})
+    creds = TelegramCredentials.from_env("TELEGRAM")
+    adapter = TelegramAdapter(config=config, credentials=creds)
+    adapter.send_signal("strat", "BTCUSDT", "BUY", 65000.0)
 """
 from __future__ import annotations
 
 import html
 import logging
-import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
+
+from brokers.base import CredentialConfig
+from librae.config.notification import NotificationConfig, TelegramConfig
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.0  # seconds
+EMOJI_WARNING = "\u26a0\ufe0f"  # ⚠️
+EMOJI_SUCCESS = "\u2714\ufe0f"  # ✔️
 
 
 @dataclass
-class TelegramConfig:
-    enabled: bool = field(
-        default_factory=lambda: os.environ.get("TELEGRAM_ENABLED", "false").lower() in ("1", "true", "yes")
-    )
-    bot_token: str = field(default_factory=lambda: os.environ.get("TELEGRAM_BOT_TOKEN", ""))
-    chat_id: str = field(default_factory=lambda: os.environ.get("TELEGRAM_CHAT_ID", ""))
+class TelegramCredentials(CredentialConfig):
+    """Telegram API secrets from environment variables.
+
+    Env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+    """
+
+    bot_token: str = ""
+    chat_id: str = ""
 
 
 class TelegramAdapter:
-    """Sends messages to Telegram. No-op when disabled."""
+    """Sends messages to Telegram. No-op when disabled or credentials missing."""
 
     def __init__(
         self,
-        enabled: bool | None = None,
-        bot_token: str | None = None,
-        chat_id: str | None = None,
+        config: TelegramConfig | None = None,
+        credentials: TelegramCredentials | None = None,
     ) -> None:
-        cfg = TelegramConfig()
-        self._enabled = enabled if enabled is not None else cfg.enabled
-        self._token = bot_token or cfg.bot_token
-        self._chat_id = chat_id or cfg.chat_id
+        config = config or TelegramConfig()
+        creds = credentials or TelegramCredentials.from_env("TELEGRAM")
+
+        # WHY: config.chat_id (from YAML) can override the env-var chat_id,
+        # allowing per-strategy routing to different Telegram chats.
+        self._token = creds.bot_token
+        self._chat_id = config.chat_id or creds.chat_id
+        self._enabled = config.enabled
+        self._notifications = config.notifications
 
         if self._enabled and (not self._token or not self._chat_id):
             logger.warning(
-                "Telegram enabled but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing. "
+                "Telegram enabled but bot_token or chat_id missing. "
                 "Disabling notifications."
             )
             self._enabled = False
 
+        self._client: Any = None
+        if self._enabled:
+            try:
+                import httpx
+                self._client = httpx.Client(timeout=10)
+            except ImportError:
+                logger.error("httpx not installed — disabling Telegram notifications")
+                self._enabled = False
+
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def notifications(self) -> NotificationConfig:
+        return self._notifications
 
     def send_text(self, text: str, parse_mode: str = "HTML") -> bool:
         """Send a plain text message. Returns True if sent successfully."""
@@ -65,18 +88,12 @@ class TelegramAdapter:
             logger.debug("Telegram disabled, skipping message")
             return False
 
-        try:
-            import httpx
-        except ImportError:
-            logger.error("httpx not installed, cannot send Telegram message")
-            return False
-
         url = f"https://api.telegram.org/bot{self._token}/sendMessage"
         payload = {"chat_id": self._chat_id, "text": text, "parse_mode": parse_mode}
 
         for attempt in range(MAX_RETRIES):
             try:
-                resp = httpx.post(url, json=payload, timeout=10)
+                resp = self._client.post(url, json=payload)
                 if resp.status_code == 200:
                     return True
                 if resp.status_code == 429:
@@ -104,6 +121,8 @@ class TelegramAdapter:
         extra: dict[str, Any] | None = None,
     ) -> bool:
         """Send a formatted trading signal message."""
+        if not self._notifications.signal:
+            return False
         safe_strategy = html.escape(strategy)
         safe_symbol = html.escape(symbol)
         lines = [
@@ -120,5 +139,66 @@ class TelegramAdapter:
         return self.send_text("\n".join(lines))
 
     def send_alert(self, title: str, message: str) -> bool:
-        """Send a system alert."""
+        """Send a system alert (e.g. consecutive poll errors)."""
+        if not self._notifications.error:
+            return False
         return self.send_text(f"<b>{html.escape(title)}</b>\n{html.escape(message)}")
+
+    def send_startup(
+        self,
+        strategy: str,
+        symbol: str,
+        mode: str,
+        run_id: str = "",
+    ) -> bool:
+        """Send service startup notification."""
+        if not self._notifications.startup:
+            return False
+        lines = [
+            f"<b>[{html.escape(strategy)}] Started</b>",
+            f"Symbol: <code>{html.escape(symbol)}</code>",
+            f"Mode: <code>{html.escape(mode)}</code>",
+        ]
+        if run_id:
+            lines.append(f"Run ID: <code>{html.escape(run_id)}</code>")
+        return self.send_text("\n".join(lines))
+
+    def send_shutdown(
+        self,
+        strategy: str,
+        symbol: str,
+        reason: str = "normal",
+    ) -> bool:
+        """Send service shutdown notification."""
+        if not self._notifications.startup:
+            return False
+        icon = EMOJI_WARNING if reason != "normal" else EMOJI_SUCCESS
+        lines = [
+            f"<b>{icon} [{html.escape(strategy)}] Stopped</b>",
+            f"Symbol: <code>{html.escape(symbol)}</code>",
+            f"Reason: <code>{html.escape(reason)}</code>",
+        ]
+        return self.send_text("\n".join(lines))
+
+    def send_status(
+        self,
+        strategy: str,
+        symbol: str,
+        equity: float,
+        drawdown: float,
+        daily_pnl: float,
+        position: str = "flat",
+    ) -> bool:
+        """Send periodic status summary."""
+        if not self._notifications.status.enabled:
+            return False
+        lines = [
+            f"<b>[{html.escape(strategy)}] Status</b>",
+            f"Symbol: <code>{html.escape(symbol)}</code>",
+            f"Equity: <code>{equity:,.2f}</code>",
+            f"Drawdown: <code>{drawdown:+.2%}</code>",
+            f"Daily PnL: <code>{daily_pnl:+,.2f}</code>",
+            f"Position: <code>{html.escape(position)}</code>",
+        ]
+        return self.send_text("\n".join(lines))
+

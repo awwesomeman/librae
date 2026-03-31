@@ -1,10 +1,22 @@
-# TrendPullback H1 strategy configuration
-# CLI args override these values: --symbol ETHUSDT --mode sim
-strategy: trendpullback
-symbol: BTCUSDT
-market: crypto
-months: 6
-initial_balance: 100000
-max_hold_bars: 24
-sample: oos
-poll_interval: 60
+# TrendPullback H1 strategy config
+# CLI runtime flags：python -m strategies.trendpullback.run --help
+# Telegram 通知設定：見 librae/config/notification.py
+
+strategy:
+  name: trendpullback
+  symbol: BTCUSDT
+  market: crypto
+  initial_balance: 100000
+  timeframe: H1
+  params:
+    months: 6
+    max_hold_bars: 24
+    warmup_bars: 720
+    sample: oos
+
+telegram:
+  enabled: true
+  notifications:
+    status:
+      enabled: true
+      interval_bars: 24

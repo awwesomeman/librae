@@ -16,7 +16,8 @@ from librae.core.cost_model import CostModel
 from librae.core.executor import TradeResult
 from librae.core.strategy import Action, BaseStrategy
 from librae.core.utils import generate_run_id, make_trade_id, to_ccxt
-from librae.notifications.telegram import TelegramAdapter
+from librae.config.notification import TelegramConfig
+from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
 
 from .engine import LiveTrader
 from .executor import LiveExecutor
@@ -36,6 +37,7 @@ def build_live_trader(
     poll_interval: int = 60,
     warmup_bars: int = 720,
     no_db: bool = False,
+    telegram_config: dict | None = None,
 ) -> LiveTrader:
     """Build a fully wired LiveTrader for sim mode.
 
@@ -59,7 +61,9 @@ def build_live_trader(
     timeframe_ccxt = to_ccxt(timeframe)
 
     adapter = CryptoAdapter()
-    telegram = TelegramAdapter()
+    tg_config = TelegramConfig.from_dict(telegram_config or {})
+    tg_creds = TelegramCredentials.from_env("TELEGRAM")
+    telegram = TelegramAdapter(config=tg_config, credentials=tg_creds)
     cost_model = CostModel.from_market(get_market(market))
     run_id = generate_run_id(f"{strategy_name}_{market}", symbols[0])
 

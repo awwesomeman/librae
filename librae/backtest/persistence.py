@@ -29,6 +29,7 @@ from .schema import (
     require_keys,
 )
 
+_DEFAULT_OUT_DIR = Path("data/backtests")
 
 def _dt_to_iso(dt: datetime) -> str:
     return dt.isoformat()
@@ -108,7 +109,7 @@ def _dict_to_output(data: dict[str, Any]) -> BacktestOutput:
 
 def save_output(
     output: BacktestOutput,
-    directory: str | Path,
+    directory: str | Path = _DEFAULT_OUT_DIR,
     *,
     save_equity_csv: bool = True,
 ) -> dict[str, Path]:

@@ -6,7 +6,6 @@ M30 trend gate + M5 entry/exit. Same logic as trendpullback, faster signals.
 Usage:
     python -m strategies.trendpullback_m5.run --mode sim
     python -m strategies.trendpullback_m5.run --mode backtest --dry-run
-    python -m strategies.trendpullback_m5.run --config strategies/trendpullback_m5/config.yaml
 """
 from __future__ import annotations
 
@@ -25,27 +24,30 @@ from .utils import fetch_and_prepare, prepare_signals
 logger = logging.getLogger("strategies.trendpullback_m5")
 
 STRATEGY_NAME = Path(__file__).parent.name
-TIMEFRAME = "M5"
-WARMUP_BARS = 720  # 720 M5 bars = 2.5 days
 
 
 def run_backtest(args: argparse.Namespace) -> None:
     """Run backtest mode with M5 data."""
-    logger.info("[1/3] Fetching & preparing %s (%d months, M5)...", args.symbol, args.months)
-    df = fetch_and_prepare(args.symbol, args.months)
+    scfg = args.strategy
+    params = scfg["params"]
+    symbol = scfg["symbol"]
+    timeframe = scfg["timeframe"]
+
+    logger.info("[1/3] Fetching & preparing %s (%d months, %s)...", symbol, params["months"], timeframe)
+    df = fetch_and_prepare(symbol, params["months"])
     logger.info("       bars=%d", len(df))
 
     logger.info("[2/3] Running backtest...")
-    strategy = TrendPullbackM5Strategy(max_hold_bars=args.max_hold_bars)
-    market_config = get_market(args.market)
+    strategy = TrendPullbackM5Strategy(max_hold_bars=params["max_hold_bars"])
+    market_config = get_market(scfg["market"])
     bt = Backtest(
         data=df,
         strategy=strategy,
         market_config=market_config,
-        initial_balance=args.initial_balance,
+        initial_balance=scfg["initial_balance"],
         strategy_name=STRATEGY_NAME,
     )
-    benchmark_prices = df.xs(args.symbol, level="symbol")["close"]
+    benchmark_prices = df.xs(symbol, level="symbol")["close"]
     bt.add_benchmark(benchmark_prices)
     bt.run()
 
@@ -59,7 +61,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         logger.info("[3/3] [DRY-RUN] Done.")
         return
 
-    paths = save_output(output, Path(args.out_dir))
+    paths = save_output(output)
     logger.info("[3/3] Saved: %s", paths['json'])
 
     if not args.no_db:
@@ -67,7 +69,7 @@ def run_backtest(args: argparse.Namespace) -> None:
             counts = write_backtest_output(output)
             ohlcv_df = df.droplevel("symbol")[["open", "high", "low", "close", "volume"]]
             ohlcv_df.index.name = "ts"
-            counts["ohlcv"] = write_ohlcv(ohlcv_df, args.symbol, TIMEFRAME, bt.run_id)
+            counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, bt.run_id)
             logger.info("       DB: %s", counts)
         except Exception as e:
             logger.warning("DB write skipped: %s", e)
@@ -77,23 +79,28 @@ def run_sim(args: argparse.Namespace) -> None:
     """Run sim mode — delegates infrastructure to sim_wiring."""
     from librae.live.wiring import build_live_trader
 
-    strategy = TrendPullbackM5Strategy(max_hold_bars=args.max_hold_bars)
-    symbols = [s.strip() for s in args.symbol.split(",")]
+    scfg = args.strategy
+    params = scfg["params"]
+    symbols = [s.strip() for s in scfg["symbol"].split(",")]
+    timeframe = scfg["timeframe"]
+
+    strategy = TrendPullbackM5Strategy(max_hold_bars=params["max_hold_bars"])
 
     trader = build_live_trader(
         strategy=strategy,
         strategy_name=STRATEGY_NAME,
         feature_fn=prepare_signals,
         symbols=symbols,
-        timeframe=TIMEFRAME,
-        market=args.market,
-        initial_balance=args.initial_balance,
+        timeframe=timeframe,
+        market=scfg["market"],
+        initial_balance=scfg["initial_balance"],
         poll_interval=args.poll_interval,
-        warmup_bars=WARMUP_BARS,
+        warmup_bars=params["warmup_bars"],
         no_db=args.no_db,
+        telegram_config=getattr(args, "telegram", None),
     )
     logger.info("Sim started: strategy=%s, symbols=%s, timeframe=%s, poll=%ds",
-                STRATEGY_NAME, symbols, TIMEFRAME, args.poll_interval)
+                STRATEGY_NAME, symbols, timeframe, args.poll_interval)
     trader.run()
 
 
@@ -105,9 +112,7 @@ def parse_args() -> argparse.Namespace:
     from librae.cli import base_parser, parse_with_config
 
     p = base_parser("TrendPullback M5 strategy")
-    p.set_defaults(mode="sim", months=1, poll_interval=30)
-    p.add_argument("--max-hold-bars", type=int, default=24)
-    return parse_with_config(p)
+    return parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
 
 
 def main() -> None:

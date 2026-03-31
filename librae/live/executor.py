@@ -42,6 +42,18 @@ class LiveExecutor:
     def cost_model(self) -> CostModel:
         return self._cost_model
 
+    @property
+    def simulation(self) -> bool:
+        return self._simulation
+
+    @property
+    def telegram(self) -> TelegramAdapter | None:
+        return self._telegram
+
+    @property
+    def strategy_name(self) -> str:
+        return self._strategy_name
+
     def execute(self, action: Action, price: float, cash: float) -> Fill | None:
         """Execute an action. In simulation mode, creates a simulated fill."""
         if action.type == "hold":
