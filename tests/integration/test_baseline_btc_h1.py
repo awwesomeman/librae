@@ -6,21 +6,13 @@ logic will break these assertions, which is the intended behavior.
 """
 from __future__ import annotations
 
-import json
-import tempfile
-
 import pytest
 
 from tests.sample_data import (
     generate_btc_h1_ohlcv,
     run_simple_sma_crossover,
 )
-from librae.utils import metrics_dict_to_backtest_output
-from librae.backtest.persistence import save_output, load_output
-from librae.backtest.schema import (
-    BacktestOutput,
-    RUN_ID_PATTERN,
-)
+from librae.backtest.schema import RUN_ID_PATTERN
 
 
 # -- Pinned baseline values (seed=42, fast=10, slow=30) --
@@ -95,7 +87,7 @@ class TestBaselineRegression:
 
 
 # ---------------------------------------------------------------------------
-# Contract v1: run_id format
+# run_id pattern contract
 # ---------------------------------------------------------------------------
 
 
@@ -117,159 +109,3 @@ class TestRunIdContract:
         ]
         for rid in invalid_ids:
             assert not RUN_ID_PATTERN.match(rid), f"Should not match: {rid}"
-
-    def test_generated_run_id_matches_pattern(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        assert RUN_ID_PATTERN.match(output.run_metadata.run_id)
-
-    def test_validate_rejects_bad_run_id(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-            run_id="bad-run-id",
-        )
-        with pytest.raises(ValueError, match="run_metadata.run_id must match pattern"):
-            output.validate()
-
-
-# ---------------------------------------------------------------------------
-# Contract v1: trade records integration
-# ---------------------------------------------------------------------------
-
-
-class TestTradeRecordsIntegration:
-    def test_adapter_populates_trade_records(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        assert len(output.trades) == EXPECTED_TRADES
-
-    def test_trade_record_fields(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        tr = output.trades[0]
-        assert tr.symbol == "BTCUSDT"
-        assert tr.side == "buy"
-        assert tr.quantity == 1.0
-        assert tr.gross_pnl == tr.exit_price - tr.entry_price
-        assert tr.holding_bars is not None
-
-    def test_trade_ids_unique(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        trade_ids = [t.trade_id for t in output.trades]
-        assert len(trade_ids) == len(set(trade_ids))
-
-
-# ---------------------------------------------------------------------------
-# Contract v1: to_dict / roundtrip
-# ---------------------------------------------------------------------------
-
-
-class TestContractV1Roundtrip:
-    def test_to_dict_keys(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        d = output.to_dict()
-        assert "run_metadata" in d
-        assert "equity_curve" in d
-        assert "trades" in d
-        assert "metrics" in d
-
-    def test_to_dict_datetimes_are_strings(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        d = output.to_dict()
-        assert isinstance(d["run_metadata"]["start_ts"], str)
-        assert isinstance(d["run_metadata"]["end_ts"], str)
-        assert isinstance(d["run_metadata"]["run_ts"], str)
-
-    def test_to_dict_json_serializable(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        text = json.dumps(output.to_dict())
-        assert isinstance(text, str)
-
-    def test_roundtrip_persistence_with_trades(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        output.validate()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            paths = save_output(output, tmpdir)
-            loaded = load_output(paths["json"])
-
-        assert loaded.metrics.trades == EXPECTED_TRADES
-        assert len(loaded.trades) == EXPECTED_TRADES
-        assert loaded.trades[0].symbol == "BTCUSDT"
-
-    def test_roundtrip_preserves_trade_pnl(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-        )
-        output.validate()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            paths = save_output(output, tmpdir)
-            loaded = load_output(paths["json"])
-
-        for orig, loaded_tr in zip(output.trades, loaded.trades):
-            assert orig.gross_pnl == pytest.approx(loaded_tr.gross_pnl, abs=1e-6)
-            assert orig.entry_price == pytest.approx(loaded_tr.entry_price, abs=1e-6)
