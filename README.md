@@ -68,13 +68,18 @@ class MyStrategy(BaseStrategy):
         return []
 
 # --- run.py: 串接引擎 ---
+from librae import Backtest
+from librae.backtest.persistence import save_output
+from librae.config import get_market
+
 df = fetch_and_prepare(symbol, months)                    # 1. ETL
-bt = Backtest(data=df, strategy=MyStrategy(), market="crypto")
-result = bt.run()                                         # 2. 跑引擎
-metrics = compute_all(result, start_ts, end_ts)           # 3. 績效指標
-output = build_backtest_output(result, metrics, ...)      # 4. 標準輸出
-save_backtest_output(output, Path("data/backtests"))      # 5. 存檔
-write_backtest_output(output)                             # 6. 寫 DB → Grafana
+market_config = get_market("crypto")
+bt = Backtest(data=df, strategy=MyStrategy(), market_config=market_config)
+bt.add_benchmark(df.xs(symbol, level="instrument")["close"])
+bt.run()                                                  # 2. 跑引擎
+output = bt.build_output(annualize=True)                  # 3. 指標 + 標準輸出
+save_output(output, Path("data/backtests"))               # 4. 存檔
+write_backtest_output(output)                             # 5. 寫 DB → Grafana
 ```
 
 ```bash
@@ -86,17 +91,18 @@ python -m strategies.trendpullback.run --config strategies/trendpullback/config.
 
 ```python
 # --- run.py: 同一份策略，切換到 sim mode ---
+from librae.live.wiring import build_live_trader
+
 strategy = MyStrategy()
-runner = build_sim_runner(
+trader = build_live_trader(
     strategy=strategy,
     strategy_name="my_strategy",
     feature_fn=prepare_signals,         # 同一個 ETL pipeline
     symbols=["BTCUSDT"],
-    timeframe_ccxt="1h",
-    timeframe_db="H1",
+    timeframe="H1",                     # canonical label，wiring 內部用 to_ccxt() 轉換
     poll_interval=60,
 )
-runner.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
+trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 ```
 
 ```bash
@@ -211,7 +217,7 @@ quant-strategy-lab/
 │   ├── strategy.py         # BaseStrategy ABC, Context, Action, Position
 │   ├── executor.py         # BacktestExecutor + shared make_fill()
 │   ├── live_executor.py    # LiveExecutor（sim / live）
-│   ├── live_runner.py      # LiveRunner polling loop
+│   ├── live_runner.py      # LiveTrader polling loop
 │   ├── sim_wiring.py       # Sim mode 基礎設施封裝
 │   ├── cli.py              # 共用 CLI parser + config YAML 載入
 │   ├── utils.py            # build_backtest_output, generate_run_id
