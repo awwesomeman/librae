@@ -1,6 +1,6 @@
 # quant-strategy-lab
 
-量化策略研究與即時監控平台。自建回測引擎 (librae) + 策略框架 + TimescaleDB + Grafana。
+量化策略研究與即時監控平台。自建回測引擎 ([librae](librae/README.md)) + 策略框架 + TimescaleDB + Grafana。
 
 ---
 
@@ -44,72 +44,20 @@ strategies/trendpullback/
 策略開發者負責三件事：**ETL（utils.py）、決策邏輯（strategy.py）、參數配置（config.yaml）**。
 引擎負責其餘一切（持倉管理、成交模擬、績效計算、DB 寫入）。
 
-### 2. 引擎使用範例
+### 2. 回測 + 模擬
 
-#### 回測 (backtest)
-
-```python
-# --- utils.py: 資料準備（策略特有的 ETL） ---
-def prepare_signals(h1_base, params=None):
-    h1 = compute_features(h1_base, params)               # 技術指標
-    h1["entry_signal"] = compute_entry_conditions(h1)     # 進場信號
-    h1["exit_signal"] = compute_exit_conditions(h1)       # 出場信號
-    return h1
-
-# --- strategy.py: 決策邏輯 ---
-class MyStrategy(BaseStrategy):
-    def on_bar(self, ctx: Context) -> list[Action]:
-        if ctx.positions.get(ctx.symbol):             # 有持倉 → 檢查出場
-            if ctx.bar.get("exit_signal"):
-                return [Action(type="close", symbol=ctx.symbol)]
-            return []
-        if ctx.bar.get("entry_signal"):                   # 無持倉 → 檢查進場
-            return [Action(type="buy", symbol=ctx.symbol)]
-        return []
-
-# --- run.py: 串接引擎 ---
-from librae import Backtest
-from librae.backtest.persistence import save_output
-from librae.config import get_market
-
-df = fetch_and_prepare(symbol, months)                    # 1. ETL
-market_config = get_market("crypto")
-bt = Backtest(data=df, strategy=MyStrategy(), market_config=market_config)
-bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
-bt.run()                                                  # 2. 跑引擎
-output = bt.build_output(annualize=True)                  # 3. 指標 + 標準輸出
-save_output(output, Path("data/backtests"))               # 4. 存檔
-write_backtest_output(output)                             # 5. 寫 DB → Grafana
-```
+引擎 API、類型系統、架構設計詳見 **[librae/README.md](librae/README.md)**。
 
 ```bash
+# 回測
 python -m strategies.trendpullback.run --mode backtest --symbol BTCUSDT --months 6
 python -m strategies.trendpullback.run --config strategies/trendpullback/config.yaml --dry-run
-```
 
-#### 模擬監控 (sim)
-
-```python
-# --- run.py: 同一份策略，切換到 sim mode ---
-from librae.live.wiring import build_live_trader
-
-strategy = MyStrategy()
-trader = build_live_trader(
-    strategy=strategy,
-    strategy_name="my_strategy",
-    feature_fn=prepare_signals,         # 同一個 ETL pipeline
-    symbols=["BTCUSDT"],
-    timeframe="H1",                     # canonical label，wiring 內部用 to_ccxt() 轉換
-    poll_interval=60,
-)
-trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
-```
-
-```bash
+# 模擬監控
 python -m strategies.trendpullback.run --mode sim --symbol BTCUSDT
 ```
 
-**Docker 部署**：
+### 3. Docker 部署 sim
 
 ```bash
 cd deploy
@@ -188,50 +136,12 @@ docker compose up -d timescaledb grafana
 
 ---
 
-## 架構
-
-```
-策略 ETL (strategies/*/utils.py) → DataFrame (MultiIndex + 信號欄位)
-策略邏輯 (strategies/*/strategy.py) → on_bar(ctx) → Action[]
-回測引擎 (librae/)               → Executor.execute(action) → Fill → Result
-Sim 封裝 (librae/sim_wiring.py)  → DB callbacks + Telegram + heartbeat
-CLI 共用 (librae/cli.py)         → base_parser + config YAML 載入
-```
-
-**回測 vs 模擬 vs 實盤共用同一份策略，零修改**：
-
-| | 回測 (backtest) | 模擬 (sim) | 實盤 (live) |
-|---|---|---|---|
-| 資料來源 | 歷史 OHLCV | 即時 OHLCV（polling） | 即時 OHLCV |
-| 執行器 | core.make_fill() | LiveExecutor(simulation=True) | LiveExecutor(simulation=False) |
-| 下單 | 模擬成交 | 模擬成交 + Telegram 通知 | 真實下單（Phase 4） |
-
----
-
 ## 目錄結構
 
 ```
 quant-strategy-lab/
-├── librae/                 # 回測引擎框架（可獨立抽出）
-│   ├── core/               # backtest + live 共用的 domain model（純計算，無 I/O）
-│   │   ├── strategy.py     # BaseStrategy, Action, Context, Position, PositionState, Fill
-│   │   ├── executor.py     # make_fill, calc_trade_pnl, close_position, TradeResult, TradePnL
-│   │   ├── cost_model.py   # CostModel（手續費 / 滑價 / 稅）
-│   │   ├── metrics.py      # compute_all（QuantStats adapter）
-│   │   └── utils.py        # generate_run_id, infer_timeframe, to_ccxt, to_canonical
-│   ├── backtest/           # 回測 runtime
-│   │   ├── engine.py       # Backtest + build_output
-│   │   ├── schema.py       # BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
-│   │   └── persistence.py  # save_output / load_output（JSON + CSV + Parquet）
-│   ├── live/               # live/sim runtime
-│   │   ├── engine.py       # LiveTrader（polling loop）
-│   │   ├── executor.py     # LiveExecutor（sim 通知 / live 下單）
-│   │   └── wiring.py       # build_live_trader（convenience factory）
-│   ├── config/             # markets.yaml（市場 / 標的設定）
-│   ├── notifications/      # Telegram 推播
-│   └── cli.py              # 共用 CLI parser + config YAML 載入
-├── data/                   # 專案層：資料取得
-│   └── binance.py          # Binance OHLCV fetcher + cache + resample
+├── librae/                 # 回測引擎框架 → 詳見 librae/README.md
+├── data/                   # 資料取得（Binance OHLCV fetcher）
 ├── strategies/             # 策略實作
 │   ├── trendpullback/      # H1 策略：D1 趨勢 + H1 回調進場
 │   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調進場（測試用）
@@ -270,6 +180,7 @@ quant-strategy-lab/
 
 ## 相關文件
 
+- [`librae/README.md`](librae/README.md) — 引擎架構、API、類型系統
 - [`docs/implementation_plan.md`](docs/implementation_plan.md) — 開發計劃與進度
 - [`docs/decisions/`](docs/decisions/) — 架構決策記錄 (ADR)
 - [`docs/learnings/`](docs/learnings/) — 開發筆記
