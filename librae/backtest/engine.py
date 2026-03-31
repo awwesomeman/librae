@@ -195,26 +195,29 @@ class Backtest:
         self._run_id = generate_run_id(self._strategy_name, self._instruments[0])
         logger.info("Backtest started: run_id=%s", self._run_id)
 
+        # WHY: pre-convert all bars once — avoids per-bar DataFrame.to_dict()
+        # which is the dominant cost in the hot loop.
+        all_bars = self._precompute_bars()
+
         cash = self._initial_balance
         positions: dict[str, _PositionState] = {}
         trades: list[TradeResult] = []
         equity_curve: list[EquitySnapshot] = []
+        primary_inst = self._instruments[0]
 
         for step, ts in enumerate(self._timeline):
-            cross = self._time_groups.get_group(ts)
-            bars = self._build_bars(cross)
+            bars = all_bars[ts]
 
-            mtm = self._calc_portfolio_value(cash, positions, bars)
+            mtm, pos_snapshot = self._eval_portfolio(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
 
-            primary_inst = self._instruments[0]
             ctx = Context(
                 ts=ts,
                 instrument=primary_inst,
                 instruments=self._instruments,
                 bar=bars.get(primary_inst, {}),
                 bars=bars,
-                positions=self._build_position_snapshot(positions, bars),
+                positions=pos_snapshot,
                 cash=cash,
                 bar_index=step,
             )
@@ -257,8 +260,7 @@ class Backtest:
         # Force-close all open positions at last bar
         if self._timeline:
             last_ts = self._timeline[-1]
-            last_cross = self._time_groups.get_group(last_ts)
-            last_bars = self._build_bars(last_cross)
+            last_bars = all_bars[last_ts]
             for inst in list(positions.keys()):
                 pos = positions[inst]
                 last_bar = last_bars.get(inst)
@@ -424,43 +426,41 @@ class Backtest:
             return None
         return [self._initial_balance * (p / prices.iloc[0]) for p in prices]
 
-    @staticmethod
-    def _build_bars(cross: pd.DataFrame) -> dict[str, dict[str, float]]:
-        """Convert cross-section DataFrame to {instrument: {col: val}} dict."""
-        raw = cross.to_dict(orient="index")
-        return {(k[0] if isinstance(k, tuple) else k): v for k, v in raw.items()}
+    def _precompute_bars(self) -> dict[pd.Timestamp, dict[str, dict[str, float]]]:
+        """Pre-convert all cross-sections to dicts once.
+
+        Eliminates per-bar DataFrame.to_dict() calls in the hot loop.
+        Trades O(N_bars) memory for O(1) per-bar lookup.
+        """
+        result: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
+        for ts, cross in self._time_groups:
+            raw = cross.to_dict(orient="index")
+            result[ts] = {(k[0] if isinstance(k, tuple) else k): v for k, v in raw.items()}
+        return result
 
     @staticmethod
     def _increment_bars_held(positions: dict[str, _PositionState]) -> None:
         for ps in positions.values():
             ps.bars_held += 1
 
-    def _calc_portfolio_value(
+    def _eval_portfolio(
         self,
         cash: float,
         positions: dict[str, _PositionState],
         bars: dict[str, dict[str, float]],
-    ) -> float:
-        mtm = cash
-        for inst, pos in positions.items():
-            bar = bars.get(inst)
-            price = bar["close"] if bar is not None else pos.entry_price
-            cm = self._get_cost_model(inst)
-            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
-            mtm += pos.entry_price * pos.quantity * cm.multiplier
-        return mtm
+    ) -> tuple[float, dict[str, Position]]:
+        """Compute portfolio MTM value and position snapshot in a single pass.
 
-    def _build_position_snapshot(
-        self,
-        positions: dict[str, _PositionState],
-        bars: dict[str, dict[str, float]],
-    ) -> dict[str, Position]:
-        """Convert mutable _PositionState to frozen Position for Context."""
+        Returns (mark_to_market, {instrument: Position}).
+        """
+        mtm = cash
         snapshot: dict[str, Position] = {}
         for inst, ps in positions.items():
             bar = bars.get(inst)
             price = bar["close"] if bar is not None else ps.entry_price
             cm = self._get_cost_model(inst)
+            unrealized = cm.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
+            mtm += unrealized + ps.entry_price * ps.quantity * cm.multiplier
             snapshot[inst] = Position(
                 instrument=inst,
                 side=ps.side,
@@ -468,9 +468,9 @@ class Backtest:
                 quantity=ps.quantity,
                 entry_ts=ps.entry_ts,
                 bars_held=ps.bars_held,
-                unrealized_pnl=cm.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side),
+                unrealized_pnl=unrealized,
             )
-        return snapshot
+        return mtm, snapshot
 
     @staticmethod
     def _close_position(
