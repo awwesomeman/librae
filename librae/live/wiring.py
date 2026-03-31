@@ -14,7 +14,7 @@ import pandas as pd
 from librae.config.market_config import get_market
 from librae.core.cost_model import CostModel
 from librae.core.strategy import Action, BaseStrategy
-from librae.core.utils import generate_run_id, to_ccxt
+from librae.core.utils import generate_run_id, make_trade_id, to_ccxt
 from librae.notifications.telegram import TelegramAdapter
 
 from .engine import LiveTrader
@@ -99,8 +99,30 @@ def build_live_trader(
     def on_bar(rid: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
         _db_write(write_equity_point, ts=ts, run_id=rid, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
 
-    def on_trade(trade: dict) -> None:
-        _db_write(write_trade, **trade)
+    _trade_seq = 0
+
+    def on_trade(trade: object) -> None:
+        nonlocal _trade_seq
+        _trade_seq += 1
+        _db_write(
+            write_trade,
+            run_id=run_id,
+            trade_id=make_trade_id(run_id, _trade_seq),
+            entry_ts=trade.entry_ts,
+            exit_ts=trade.exit_ts,
+            symbol=trade.symbol,
+            side=trade.side,
+            entry_price=trade.entry_price,
+            exit_price=trade.exit_price,
+            quantity=trade.quantity,
+            gross_pnl=trade.gross_pnl,
+            net_pnl=trade.net_pnl,
+            gross_return=trade.gross_return,
+            net_return=trade.net_return,
+            holding_bars=trade.holding_bars,
+            commission=trade.commission,
+            slippage=trade.slippage,
+        )
         _db_write(refresh_performance, run_id)
 
     def on_ohlcv(rid: str, symbol: str, tf: str, bar: dict, ts: datetime) -> None:

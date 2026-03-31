@@ -1,8 +1,8 @@
 # quant-strategy-lab Implementation Plan
 
-> Updated: 2026-03-30
+> Updated: 2026-03-31
 > Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 3 接近完成（sim mode 程式碼就緒，剩 VPS 部署驗證）
+> Status: Phase 2 Engine Refactor 完成；Phase 3 sim mode 程式碼就緒，剩 VPS 部署驗證
 
 ---
 
@@ -42,82 +42,75 @@ Engine (librae/)       → Executor.execute(action) → Fill → BacktestResult
                 ────                              ────
 Data:      fetcher → DataFrame              broker.stream_bars()
 Strategy:  strategy.on_bar(ctx) → Action[]  strategy.on_bar(ctx) → Action[]  ← 同一份
-Executor:  BacktestExecutor(CostModel)      LiveExecutor(broker, simulation)
-                                             ├─ simulation=True → 訊號通知
-                                             └─ simulation=False → 真下單
+Executor:  core.make_fill(CostModel)        LiveExecutor(simulation=True/False)
+Close:     core.close_position(PositionState, price, CostModel) → (TradePnL, proceeds)  ← 共用
 ```
 
 ### 專案結構
 
 ```
 quant-strategy-lab/
-├── librae/                  ← 回測引擎套件（純引擎，可獨立抽出）
-│   ├── engine.py            # Backtest class（MultiIndex, 多資產 positions dict）
-│   ├── strategy.py          # BaseStrategy ABC, Context, Action, Position, Fill
-│   ├── executor.py          # Executor Protocol, BacktestExecutor
-│   ├── cost_model.py        # CostModel（multiplier 統一現貨/期貨, commission+tax 分離）
-│   ├── metrics.py           # QuantStats adapter → StrategyMetrics
-│   ├── schema.py            # BacktestOutput, TradeRecord, EquityCurvePoint
-│   ├── persistence.py       # save/load JSON/Parquet
-│   ├── runners.py           # walk-forward, stability, strict protocol
-│   ├── config/              # markets.yaml, market_config.py（引擎內部配置）
-│   ├── sim_wiring.py        # Sim mode 基礎設施封裝
-│   ├── cli.py               # 共用 CLI parser + config YAML
-│   └── schema.py            # BacktestOutput, TradeRecord, StrategyMetrics
+├── librae/                  ← 回測引擎框架（純引擎，可獨立抽出）
+│   ├── core/               # backtest + live 共用 domain model（純計算，無 I/O）
+│   │   ├── strategy.py     # BaseStrategy, Action, Context, Position, PositionState, Fill
+│   │   ├── executor.py     # make_fill, calc_trade_pnl, close_position, TradeResult, TradePnL
+│   │   ├── cost_model.py   # CostModel（multiplier 統一現貨/期貨, commission+tax 分離）
+│   │   ├── metrics.py      # compute_all（QuantStats adapter）
+│   │   └── utils.py        # generate_run_id, infer_timeframe, to_ccxt, to_canonical
+│   ├── backtest/           # 回測 runtime
+│   │   ├── engine.py       # Backtest + build_output
+│   │   ├── schema.py       # BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
+│   │   └── persistence.py  # save_output / load_output（JSON + CSV + Parquet）
+│   ├── live/               # live/sim runtime
+│   │   ├── engine.py       # LiveTrader（polling loop）
+│   │   ├── executor.py     # LiveExecutor（sim 通知 / live 下單）
+│   │   └── wiring.py       # build_live_trader（convenience factory）
+│   ├── config/             # markets.yaml（市場 / 標的設定）
+│   ├── notifications/      # Telegram 推播
+│   └── cli.py              # 共用 CLI parser + config YAML 載入
+│
+├── data/                    ← 專案層：資料取得（librae 不依賴）
+│   └── binance.py          # Binance OHLCV fetcher + cache + resample
 │
 ├── strategies/              ← 策略實作（BaseStrategy 子類 + 純信號函數）
-│   ├── trendpullback/       # H1 策略：D1 趨勢 + H1 回調（strategy.py + utils.py + run.py + config.yaml）
-│   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調（信號測試用，reuse H1 邏輯）
+│   ├── trendpullback/       # H1 策略：D1 趨勢 + H1 回調
+│   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調
 │
 ├── pipeline/                ← 資料取得 + ETL
-│   ├── fetchers/            # binance_fetcher.py
-│   └── features/            # core_features.py, transforms
-│
 ├── brokers/                 ← 券商 adapter（三層分離：MarketData / Order / Account）
-│   ├── base.py              # ABCs + CredentialConfig + _ConnectableMixin
-│   ├── sim.py               # Sim adapters（paper/backtest 用）
-│   ├── binance.py           # Binance venue adapters（目前繼承 Sim）
-│   ├── shioaji.py           # Shioaji venue adapters（目前繼承 Sim）
-│   ├── crypto_adapter.py    # CCXT-based sync adapter（fetch_ohlcv, place_order）
-│   ├── market_hub.py        # Multi-market dispatcher
-│   └── wiring.py            # AdapterBundle + build_adapter_bundle() factory
-│
-├── monitoring/              ← 訊號監控 + 排程 + 通知（已遷移，僅剩 __pycache__）
-│
 ├── db/                      ← TimescaleDB 讀寫
 ├── app/                     ← UI（Streamlit + Grafana）
 ├── deploy/                  ← docker-compose, SQL
-├── scripts/                 ← CLI 入口
 ├── tests/                   ← 按模組分目錄（engine/, strategies/, pipeline/, ...）
-├── docs/                    ← 文件 + docs/decisions/（ADR）
-└── data/                    ← cache（gitignore）
+└── docs/                    ← 文件 + docs/decisions/（ADR）
 ```
 
 ### Tech Stack
 
 | Area | Tool | 說明 |
 |------|------|------|
-| 回測引擎 | `librae/` | Backtest class, Strategy Protocol, Executor 分離, build_backtest_output |
-| Sim 封裝 | `librae/sim_wiring.py` | build_sim_runner()：DB callbacks + Telegram + heartbeat |
+| 回測引擎 | `librae/backtest/` | Backtest class + build_output()，Strategy Protocol, core/ 共用 domain model |
+| Live/Sim | `librae/live/` | LiveTrader + build_live_trader()：DB callbacks + Telegram + heartbeat |
+| 共用計算 | `librae/core/` | calc_trade_pnl, close_position, compute_all, direction, PositionState |
 | CLI 共用 | `librae/cli.py` | base_parser + config YAML 載入 + setup_logging |
-| 成本模型 | `librae/cost_model.py` | multiplier 統一現貨/期貨, CostModel.from_instrument() |
-| 績效指標 | QuantStats + 客製指標 | `librae/metrics.py` thin adapter |
+| 成本模型 | `librae/core/cost_model.py` | multiplier 統一現貨/期貨, CostModel.from_market() |
+| 績效指標 | QuantStats + 客製指標 | `librae/core/metrics.py` compute_all（primitive types） |
 | 信號條件 | `strategies/trendpullback/utils.py` | compute_entry/exit_conditions（純布林 Series） |
-| 資料格式 | MultiIndex DataFrame (instrument, datetime) | 單資產是特例，多資產統一 |
+| 資料格式 | MultiIndex DataFrame (symbol, datetime) | 單資產是特例，多資產統一 |
 | 研究/參數掃描 | vectorbt（開源版） | Phase 5 |
 | Market Config | `librae/config/markets.yaml` | 兩層：MarketConfig + InstrumentConfig |
 | 執行層 | CCXT / Shioaji | brokers/ 三層 adapter + CryptoAdapter |
 | Time-series DB | TimescaleDB | 唯一資料源 |
 | Dashboards | Streamlit + Grafana（單一 Strategy Dashboard，mode 篩選） | 統一在 app/ |
 | Deployment | docker-compose + Tailscale | VPS 或 GCE |
-| Testing | pytest 220 tests | 按模組分目錄（含 look-ahead bias + LiveRunner） |
+| Testing | pytest 232 tests | 按模組分目錄（含 look-ahead bias + LiveTrader） |
 
 ### 設計原則
 
 - **三層解耦**：ETL / Strategy / Engine 各做各的事
 - **Strategy 不追蹤持倉**：看 `ctx.positions`（engine 擁有），用 `Action` 表達意圖
 - **Engine 擁有所有狀態**：positions, bars_held, cash
-- **Executor 可替換**：回測用 BacktestExecutor，實盤用 LiveExecutor
+- **Executor 可替換**：回測用 core.make_fill()，實盤用 LiveExecutor
 - **同一份 Strategy 跑回測和實盤**：零修改
 - **CostModel 內部實作**：使用者不需知道，Backtest 自動從 markets.yaml 建
 - **Python coding-standards skill**：所有程式碼遵循 `~/.claude/skills/python/coding-standards/` 規範（命名慣例、型別標註、錯誤處理、不過度設計）
@@ -150,14 +143,23 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 |------|------|
 | Backtest class（MultiIndex, 多資產 positions dict） | ✅ |
 | BaseStrategy ABC + Context/Action/Position/Fill | ✅ |
-| Executor Protocol + BacktestExecutor | ✅ |
+| Executor Protocol + make_fill() | ✅ |
 | CostModel（multiplier, commission+tax 分離, CostModel.zero()） | ✅ |
 | metrics.py → QuantStats adapter | ✅ |
 | trendpullback 拆為 compute_entry/exit_conditions（純函數） | ✅ |
-| runners.py make_backtest_fn() factory | ✅ |
+| runners.py make_backtest_fn() factory | ✅ → 已刪除（D1, vectorbt 取代） |
 | 目錄重組：librae/ + strategies/ + pipeline/ + brokers/ + monitoring/ | ✅ |
 | tests 按模組分目錄 | ✅ |
 | 206 tests passed | ✅ |
+| **Engine Framework Refactor（refactor_librae.md）** | ✅ |
+| ├─ Package 重組：core/ + backtest/ + live/ 三層分離 | ✅ |
+| ├─ 共用計算：calc_trade_pnl, close_position, PositionState, compute_all | ✅ |
+| ├─ API 簡化：Backtest.build_output(), add_benchmark(), infer_timeframe | ✅ |
+| ├─ 命名統一：instrument→symbol, cm→cost_model, LiveTrader, save_output | ✅ |
+| ├─ Bug fix：live multiplier, direction, missing tax | ✅ |
+| ├─ 效能：_precompute_bars, _eval_equity single-pass, lazy quantstats | ✅ |
+| ├─ 清理：刪 12 shim + BacktestExecutor + legacy adapter + data.py 搬出 | ✅ |
+| └─ 232 tests passed | ✅ |
 
 ### Phase 2 — E2E Backtest Pipeline（共同基礎）✅（剩 ≥2 策略對比）
 
@@ -188,11 +190,11 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | DB schema dedup（equity_curve + strategy_signals unique index） | ✅ |
 | write_signal() + write_run_metadata() + write_equity_point() + write_trade() + write_performance() | ✅ |
 | Executor 重構（make_fill/size_position 共用函式） | ✅ |
-| LiveRunner（polling + OHLCV cache + bars_held + unrealized PnL + equity/trade/ohlcv recording） | ✅ |
+| LiveTrader（polling + OHLCV cache + PositionState + equity/trade/ohlcv recording） | ✅ |
 | LiveExecutor(simulation=True) + notify_exit | ✅ |
 | prepare_signals() 共用 pipeline | ✅ |
 | `--mode sim` CLI + on_bar/on_trade/on_ohlcv callbacks | ✅ |
-| LiveRunner + LiveExecutor 單元測試（14 tests） | ✅ |
+| LiveTrader + LiveExecutor 單元測試（14 tests） | ✅ |
 | Sim run 註冊 backtest_runs（mode=sim） | ✅ |
 | Docker sim service（Dockerfile.sim + docker-compose） | ✅ |
 | Telegram bot 建立 + 本地端到端驗證 | ✅ |
@@ -201,7 +203,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 | Grafana 三模式共用 Dashboard（backtest/sim/live 資料完整對齊） | ✅ |
 | Heartbeat liveness tracking（Status panel, Online/Offline） | ✅ |
 | sim 腳本化部署（sim_start.sh / sim_stop.sh，多策略多標的同時跑） | ✅ |
-| 引擎 API 重構（build_backtest_output, sim_wiring, base_parser, config YAML） | ✅ |
+| 引擎 API 重構（build_output, build_live_trader, base_parser, config YAML） | ✅ |
 | TrendPullback M5 策略（M30 趨勢 + M5 進場，信號測試用） | ✅ |
 | 統一 logging（print → logger） | ✅ |
 | **VPS 部署 + Grafana 端到端驗證** | ⏳ 需 VPS git pull + deploy |

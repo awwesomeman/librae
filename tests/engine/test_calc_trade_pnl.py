@@ -86,18 +86,19 @@ class TestCalcTradePnl:
         assert pnl.net_pnl < pnl.gross_pnl - pnl.commission - pnl.slippage  # tax reduces further
 
     def test_consistent_with_backtest_close(self) -> None:
-        """calc_trade_pnl result matches backtest engine's _close_position."""
-        from librae.backtest.engine import Backtest, _PositionState
+        """calc_trade_pnl result matches backtest engine's _close_pos."""
+        from librae.backtest.engine import Backtest
+        from librae.core.strategy import PositionState
         cm = _crypto_cost_model()
 
-        pos = _PositionState(
+        pos = PositionState(
             symbol="TEST", side="long",
             entry_price=100.0, quantity=10.0,
             entry_ts=None, bars_held=5,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=cm.calc_slippage(10.0),
         )
-        trade, _ = Backtest._close_position(pos, None, 110.0, cm)
+        trade, _ = Backtest._close_pos(pos, None, 110.0, cm)
 
         pnl = calc_trade_pnl(
             entry_price=100.0, exit_price=110.0, quantity=10.0,

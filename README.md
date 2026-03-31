@@ -59,12 +59,12 @@ def prepare_signals(h1_base, params=None):
 # --- strategy.py: 決策邏輯 ---
 class MyStrategy(BaseStrategy):
     def on_bar(self, ctx: Context) -> list[Action]:
-        if ctx.positions.get(ctx.instrument):             # 有持倉 → 檢查出場
+        if ctx.positions.get(ctx.symbol):             # 有持倉 → 檢查出場
             if ctx.bar.get("exit_signal"):
-                return [Action(type="close", instrument=ctx.instrument)]
+                return [Action(type="close", symbol=ctx.symbol)]
             return []
         if ctx.bar.get("entry_signal"):                   # 無持倉 → 檢查進場
-            return [Action(type="buy", instrument=ctx.instrument)]
+            return [Action(type="buy", symbol=ctx.symbol)]
         return []
 
 # --- run.py: 串接引擎 ---
@@ -75,7 +75,7 @@ from librae.config import get_market
 df = fetch_and_prepare(symbol, months)                    # 1. ETL
 market_config = get_market("crypto")
 bt = Backtest(data=df, strategy=MyStrategy(), market_config=market_config)
-bt.add_benchmark(df.xs(symbol, level="instrument")["close"])
+bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
 bt.run()                                                  # 2. 跑引擎
 output = bt.build_output(annualize=True)                  # 3. 指標 + 標準輸出
 save_output(output, Path("data/backtests"))               # 4. 存檔
@@ -203,7 +203,7 @@ CLI 共用 (librae/cli.py)         → base_parser + config YAML 載入
 | | 回測 (backtest) | 模擬 (sim) | 實盤 (live) |
 |---|---|---|---|
 | 資料來源 | 歷史 OHLCV | 即時 OHLCV（polling） | 即時 OHLCV |
-| 執行器 | BacktestExecutor | LiveExecutor(simulation=True) | LiveExecutor(simulation=False) |
+| 執行器 | core.make_fill() | LiveExecutor(simulation=True) | LiveExecutor(simulation=False) |
 | 下單 | 模擬成交 | 模擬成交 + Telegram 通知 | 真實下單（Phase 4） |
 
 ---
@@ -212,20 +212,26 @@ CLI 共用 (librae/cli.py)         → base_parser + config YAML 載入
 
 ```
 quant-strategy-lab/
-├── librae/                 # 回測引擎（可獨立抽出）
-│   ├── engine.py           # Backtest class
-│   ├── strategy.py         # BaseStrategy ABC, Context, Action, Position
-│   ├── executor.py         # BacktestExecutor + shared make_fill()
-│   ├── live_executor.py    # LiveExecutor（sim / live）
-│   ├── live_runner.py      # LiveTrader polling loop
-│   ├── sim_wiring.py       # Sim mode 基礎設施封裝
-│   ├── cli.py              # 共用 CLI parser + config YAML 載入
-│   ├── utils.py            # build_backtest_output, generate_run_id
-│   ├── cost_model.py       # 成本模型（手續費 / 滑價 / 稅）
-│   ├── metrics.py          # QuantStats adapter
-│   ├── schema.py           # BacktestOutput, TradeRecord, StrategyMetrics
+├── librae/                 # 回測引擎框架（可獨立抽出）
+│   ├── core/               # backtest + live 共用的 domain model（純計算，無 I/O）
+│   │   ├── strategy.py     # BaseStrategy, Action, Context, Position, PositionState, Fill
+│   │   ├── executor.py     # make_fill, calc_trade_pnl, close_position, TradeResult, TradePnL
+│   │   ├── cost_model.py   # CostModel（手續費 / 滑價 / 稅）
+│   │   ├── metrics.py      # compute_all（QuantStats adapter）
+│   │   └── utils.py        # generate_run_id, infer_timeframe, to_ccxt, to_canonical
+│   ├── backtest/           # 回測 runtime
+│   │   ├── engine.py       # Backtest + build_output
+│   │   ├── schema.py       # BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
+│   │   └── persistence.py  # save_output / load_output（JSON + CSV + Parquet）
+│   ├── live/               # live/sim runtime
+│   │   ├── engine.py       # LiveTrader（polling loop）
+│   │   ├── executor.py     # LiveExecutor（sim 通知 / live 下單）
+│   │   └── wiring.py       # build_live_trader（convenience factory）
+│   ├── config/             # markets.yaml（市場 / 標的設定）
 │   ├── notifications/      # Telegram 推播
-│   └── config/             # markets.yaml（市場 / 標的設定）
+│   └── cli.py              # 共用 CLI parser + config YAML 載入
+├── data/                   # 專案層：資料取得
+│   └── binance.py          # Binance OHLCV fetcher + cache + resample
 ├── strategies/             # 策略實作
 │   ├── trendpullback/      # H1 策略：D1 趨勢 + H1 回調進場
 │   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調進場（測試用）

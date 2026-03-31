@@ -74,6 +74,24 @@ class Fill:
     tax: float
 
 
+@dataclass
+class PositionState:
+    """Mutable internal position state — used by backtest + live engines.
+
+    Not exposed to strategies (they see frozen Position via Context).
+    Tracks entry-side costs for accurate PnL on close.
+    """
+
+    symbol: str
+    side: Literal["long", "short"]
+    entry_price: float
+    quantity: float
+    entry_ts: datetime
+    bars_held: int
+    entry_commission: float
+    entry_slippage: float
+
+
 class BaseStrategy(ABC):
     """Abstract base for all strategies.
 

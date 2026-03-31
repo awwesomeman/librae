@@ -32,37 +32,11 @@ if TYPE_CHECKING:
 from librae.config.market_config import MarketConfig
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
-from librae.core.executor import TradePnL, calc_trade_pnl, direction, make_fill
-from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position
+from librae.core.executor import TradePnL, TradeResult, close_position, direction, make_fill
+from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_trade_id, to_ccxt
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Output dataclasses
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class TradeResult:
-    """Single completed trade from the engine."""
-
-    symbol: str
-    entry_ts: datetime
-    exit_ts: datetime
-    side: Literal["long", "short"]
-    entry_price: float
-    exit_price: float
-    quantity: float
-    gross_pnl: float
-    commission: float
-    slippage: float
-    tax: float
-    net_pnl: float
-    gross_return: float
-    net_return: float
-    holding_bars: int
 
 
 @dataclass(frozen=True)
@@ -81,23 +55,6 @@ class BacktestResult:
     equity_curve: Sequence[EquitySnapshot]
     initial_balance: float
     final_equity: float
-
-
-# ---------------------------------------------------------------------------
-# Internal mutable position state
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _PositionState:
-    symbol: str
-    side: Literal["long", "short"]
-    entry_price: float
-    quantity: float
-    entry_ts: datetime
-    bars_held: int
-    entry_commission: float
-    entry_slippage: float
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +157,7 @@ class Backtest:
         all_bars = self._precompute_bars()
 
         cash = self._initial_balance
-        positions: dict[str, _PositionState] = {}
+        positions: dict[str, PositionState] = {}
         trades: list[TradeResult] = []
         equity_curve: list[EquitySnapshot] = []
         primary_symbol = self._symbols[0]
@@ -237,7 +194,7 @@ class Backtest:
                     fill = make_fill(action, price, cash, cost_model)
                     if fill and fill.quantity > 0:
                         cash -= cost_model.estimate_entry_outlay(price, fill.quantity)
-                        positions[sym] = _PositionState(
+                        positions[sym] = PositionState(
                             symbol=sym,
                             side=fill.side,
                             entry_price=price,
@@ -250,7 +207,7 @@ class Backtest:
 
                 elif action.type == "close" and sym in positions:
                     pos = positions[sym]
-                    trade, proceeds = self._close_position(pos, ts, price, cost_model)
+                    trade, proceeds = self._close_pos(pos, ts, price, cost_model)
                     trades.append(trade)
                     cash += proceeds
                     del positions[sym]
@@ -266,7 +223,7 @@ class Backtest:
                 last_bar = last_bars.get(sym)
                 price = last_bar["close"] if last_bar is not None else pos.entry_price
                 cost_model = self._get_cost_model(sym)
-                trade, proceeds = self._close_position(pos, last_ts, price, cost_model)
+                trade, proceeds = self._close_pos(pos, last_ts, price, cost_model)
                 trades.append(trade)
                 cash += proceeds
                 del positions[sym]
@@ -439,14 +396,14 @@ class Backtest:
         return result
 
     @staticmethod
-    def _increment_bars_held(positions: dict[str, _PositionState]) -> None:
+    def _increment_bars_held(positions: dict[str, PositionState]) -> None:
         for ps in positions.values():
             ps.bars_held += 1
 
     def _eval_equity(
         self,
         cash: float,
-        positions: dict[str, _PositionState],
+        positions: dict[str, PositionState],
         bars: dict[str, dict[str, float]],
     ) -> tuple[float, dict[str, Position]]:
         """Compute portfolio MTM value and position snapshot in a single pass.
@@ -473,26 +430,14 @@ class Backtest:
         return mtm, snapshot
 
     @staticmethod
-    def _close_position(
-        pos: _PositionState,
+    def _close_pos(
+        pos: PositionState,
         exit_ts: datetime,
         exit_price: float,
         cost_model: CostModel,
     ) -> tuple[TradeResult, float]:
-        """Close a position using shared calc_trade_pnl. Returns (TradeResult, cash_proceeds)."""
-        pnl = calc_trade_pnl(
-            entry_price=pos.entry_price,
-            exit_price=exit_price,
-            quantity=pos.quantity,
-            side=pos.side,
-            cost_model=cost_model,
-            entry_commission=pos.entry_commission,
-            entry_slippage=pos.entry_slippage,
-        )
-
-        notional = exit_price * pos.quantity * cost_model.multiplier
-        proceeds = notional - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
-
+        """Close a position. Returns (TradeResult, cash_proceeds)."""
+        pnl, proceeds = close_position(pos, exit_price, cost_model)
         trade = TradeResult(
             symbol=pos.symbol,
             entry_ts=pos.entry_ts,

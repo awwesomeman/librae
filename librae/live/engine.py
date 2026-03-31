@@ -14,9 +14,8 @@ from typing import Any, Callable
 import pandas as pd
 
 from .executor import LiveExecutor
-from librae.core.executor import calc_trade_pnl, direction
-from librae.core.strategy import Action, BaseStrategy, Context, Position
-from librae.core.utils import make_trade_id
+from librae.core.executor import TradeResult, close_position, direction
+from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +83,7 @@ class LiveTrader:
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_prices: dict[str, float] = {}
-        self._positions: dict[str, Position] = {}
-        self._bars_held: dict[str, int] = {}
+        self._positions: dict[str, PositionState] = {}
         self._cash: float = initial_balance
         self._equity_peak: float = initial_balance
         self._prev_equity: float = initial_balance
@@ -151,9 +149,9 @@ class LiveTrader:
             self._last_bar_ts[symbol] = latest_ts
             logger.info("New bar detected: %s @ %s", symbol, latest_ts)
 
-            # Increment bars_held for existing positions
-            if symbol in self._bars_held:
-                self._bars_held[symbol] += 1
+            # Increment bars_held on PositionState directly
+            if symbol in self._positions:
+                self._positions[symbol].bars_held += 1
 
             self._process_bar(symbol, df, latest_ts)
 
@@ -203,9 +201,6 @@ class LiveTrader:
         price = float(bar.get("close", 0.0))
         self._last_prices[symbol] = price
 
-        # Rebuild Position with updated bars_held and unrealized_pnl
-        self._update_positions(symbol, price)
-
         bar_index = self._bar_indices.get(symbol, 0)
         ctx = Context(
             ts=ts,
@@ -213,7 +208,7 @@ class LiveTrader:
             symbols=self._symbols,
             bar=bar,
             bars={symbol: bar},
-            positions=self._positions,
+            positions=self._build_position_snapshot(),
             cash=self._cash,
             bar_index=bar_index,
         )
@@ -227,11 +222,30 @@ class LiveTrader:
 
             if action.type == "close" and symbol in self._positions:
                 pos = self._positions.pop(symbol)
-                self._bars_held.pop(symbol, None)
-                self._cash += price * pos.quantity
+                cost_model = self._executor.cost_model
+                pnl, proceeds = close_position(pos, price, cost_model)
+                self._cash += proceeds
                 self._executor.notify_exit(symbol, price)
                 logger.info("Position closed: %s @ %.2f", symbol, price)
-                self._record_trade(symbol, pos, price, ts)
+                self._trade_count += 1
+                if self._on_trade:
+                    self._on_trade(TradeResult(
+                        symbol=pos.symbol,
+                        entry_ts=pos.entry_ts,
+                        exit_ts=ts,
+                        side=pos.side,
+                        entry_price=pos.entry_price,
+                        exit_price=price,
+                        quantity=pos.quantity,
+                        gross_pnl=pnl.gross_pnl,
+                        commission=pnl.commission,
+                        slippage=pnl.slippage,
+                        tax=pnl.tax,
+                        net_pnl=pnl.net_pnl,
+                        gross_return=pnl.gross_return,
+                        net_return=pnl.net_return,
+                        holding_bars=pos.bars_held,
+                    ))
                 if self._on_signal:
                     self._on_signal(symbol, action, price, ts)
                 continue
@@ -241,16 +255,16 @@ class LiveTrader:
                 self._cash -= self._executor.cost_model.estimate_entry_outlay(
                     fill.price, fill.quantity,
                 )
-                self._positions[symbol] = Position(
+                self._positions[symbol] = PositionState(
                     symbol=symbol,
                     side=fill.side,
                     entry_price=fill.price,
                     quantity=fill.quantity,
                     entry_ts=ts,
                     bars_held=0,
-                    unrealized_pnl=0.0,
+                    entry_commission=fill.commission,
+                    entry_slippage=fill.slippage,
                 )
-                self._bars_held[symbol] = 0
                 logger.info(
                     "Position opened: %s %s @ %.2f qty=%.4f",
                     fill.side, symbol, fill.price, fill.quantity,
@@ -263,26 +277,23 @@ class LiveTrader:
         if self._on_ohlcv:
             self._on_ohlcv(self._run_id, symbol, self._timeframe, bar, ts)
 
-    def _update_positions(self, symbol: str, current_price: float) -> None:
-        """Rebuild Position with current bars_held and unrealized_pnl."""
-        if symbol not in self._positions:
-            return
-        old = self._positions[symbol]
-        bars_held = self._bars_held.get(symbol, 0)
+    def _build_position_snapshot(self) -> dict[str, Position]:
+        """Convert mutable PositionState to frozen Position for Context."""
         cost_model = self._executor.cost_model
-        # WHY: use CostModel.calc_pnl to account for multiplier (fixes futures bug)
-        unrealized_pnl = cost_model.calc_pnl(old.entry_price, current_price, old.quantity) * direction(old.side)
-
-        # WHY: Position is frozen, so we must recreate it with updated fields
-        self._positions[symbol] = Position(
-            symbol=old.symbol,
-            side=old.side,
-            entry_price=old.entry_price,
-            quantity=old.quantity,
-            entry_ts=old.entry_ts,
-            bars_held=bars_held,
-            unrealized_pnl=unrealized_pnl,
-        )
+        snapshot: dict[str, Position] = {}
+        for sym, ps in self._positions.items():
+            price = self._last_prices.get(sym, ps.entry_price)
+            unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
+            snapshot[sym] = Position(
+                symbol=ps.symbol,
+                side=ps.side,
+                entry_price=ps.entry_price,
+                quantity=ps.quantity,
+                entry_ts=ps.entry_ts,
+                bars_held=ps.bars_held,
+                unrealized_pnl=unrealized,
+            )
+        return snapshot
 
     def _eval_equity(self) -> float:
         """Total equity = cash + market value of all positions."""
@@ -306,43 +317,3 @@ class LiveTrader:
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, ret_1d)
 
-    def _record_trade(self, symbol: str, pos: Position, exit_price: float, ts: datetime) -> None:
-        """Calculate trade PnL using shared calc_trade_pnl and call on_trade callback."""
-        cost_model = self._executor.cost_model
-        # WHY: use shared calc_trade_pnl for consistent PnL calculation with backtest.
-        # Live doesn't track entry_commission/slippage on Position, so we re-derive them.
-        entry_commission = cost_model.calc_commission(pos.entry_price, pos.quantity)
-        entry_slippage = cost_model.calc_slippage(pos.quantity)
-
-        pnl = calc_trade_pnl(
-            entry_price=pos.entry_price,
-            exit_price=exit_price,
-            quantity=pos.quantity,
-            side=pos.side,
-            cost_model=cost_model,
-            entry_commission=entry_commission,
-            entry_slippage=entry_slippage,
-        )
-
-        self._trade_count += 1
-        trade_id = make_trade_id(self._run_id, self._trade_count)
-
-        if self._on_trade:
-            self._on_trade({
-                "run_id": self._run_id,
-                "trade_id": trade_id,
-                "entry_ts": pos.entry_ts,
-                "exit_ts": ts,
-                "symbol": symbol,
-                "side": pos.side,
-                "entry_price": pos.entry_price,
-                "exit_price": exit_price,
-                "quantity": pos.quantity,
-                "gross_pnl": pnl.gross_pnl,
-                "net_pnl": pnl.net_pnl,
-                "gross_return": pnl.gross_return,
-                "net_return": pnl.net_return,
-                "holding_bars": self._bars_held.get(symbol, 0),
-                "commission": pnl.commission,
-                "slippage": pnl.slippage,
-            })

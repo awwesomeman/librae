@@ -13,11 +13,12 @@ If strategy doesn't specify quantity, executor uses all available cash.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Protocol
 
 from librae.core import EPSILON
 from .cost_model import CostModel
-from .strategy import Action, Fill
+from .strategy import Action, Fill, PositionState
 
 
 class Executor(Protocol):
@@ -29,6 +30,27 @@ class Executor(Protocol):
         Returns Fill if executed, None if rejected (e.g. insufficient cash).
         """
         ...
+
+
+@dataclass(frozen=True)
+class TradeResult:
+    """Single completed trade — shared by backtest + live engines."""
+
+    symbol: str
+    entry_ts: datetime
+    exit_ts: datetime
+    side: Literal["long", "short"]
+    entry_price: float
+    exit_price: float
+    quantity: float
+    gross_pnl: float
+    commission: float
+    slippage: float
+    tax: float
+    net_pnl: float
+    gross_return: float
+    net_return: float
+    holding_bars: int
 
 
 @dataclass(frozen=True)
@@ -100,6 +122,29 @@ def calc_trade_pnl(
         gross_return=gross_return,
         net_return=net_return,
     )
+
+
+def close_position(
+    pos: PositionState,
+    exit_price: float,
+    cost_model: CostModel,
+) -> tuple[TradePnL, float]:
+    """Close a position — shared by backtest and live engines.
+
+    Returns (TradePnL, cash_proceeds).
+    """
+    pnl = calc_trade_pnl(
+        entry_price=pos.entry_price,
+        exit_price=exit_price,
+        quantity=pos.quantity,
+        side=pos.side,
+        cost_model=cost_model,
+        entry_commission=pos.entry_commission,
+        entry_slippage=pos.entry_slippage,
+    )
+    notional = exit_price * pos.quantity * cost_model.multiplier
+    proceeds = notional - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
+    return pnl, proceeds
 
 
 def _size_position(cost_model: CostModel, price: float, cash: float) -> float:

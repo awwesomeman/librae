@@ -269,7 +269,7 @@ def __init__(
 ```
 
 - `strategy_name`: **刪除** — 直接用 `type(strategy).__name__` 轉 snake_case，不允許 override
-- `symbol`: **自動** — 從 `self._instruments[0]` 取
+- `symbol`: **自動** — 從 `self._symbols[0]` 取
 - `timeframe`: **自動推導** — 從 data index 的 timedelta mode（眾數） 映射到標準 label（M1/M5/H1/D1/W1），推導失敗時 raise error
 - `data_source`: **刪除** — 資料來源追蹤不是 engine 的職責
 - `market`: 改為 `market_config: MarketConfig` — 直接傳入配置物件
@@ -328,7 +328,7 @@ def build_output(
 
     - run_id: 在 run() 時已生成
     - start_ts/end_ts: 從 self._timeline 取
-    - symbol: 從 self._instruments[0] 取
+    - symbol: 從 self._symbols[0] 取
     - strategy_name: 從 type(strategy).__name__ 取
     - timeframe: 從 data index 自動推導
     - benchmark: 若有 _benchmark_prices，計算 buy-and-hold equity curve
@@ -477,7 +477,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 | `strategy` | `__init__()` | 必要依賴 |
 | `market_config` | `__init__()` | 必要依賴（成本模型 + market metadata） |
 | `initial_balance` | `__init__()` | 預設 100,000 |
-| `symbol` | **自動** | 從 `data.index` instrument level 取 |
+| `symbol` | **自動** | 從 `data.index` symbol level 取 |
 | `start_ts` / `end_ts` | **自動** | 從 `self._timeline` 取 |
 | `strategy_name` | **自動** | 從 `type(strategy).__name__` 轉 snake_case |
 | `timeframe` | **自動** | 從 data index timedelta mode（眾數） 推導 |
@@ -585,6 +585,40 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 - **Live metrics 效能**：`compute_all` 接收 `Sequence[float]`，呼叫端（LiveTrader wiring）自行決定傳多少資料。長期運行時應截斷（如 `equity[-30*24:]` 取近 30 天），而非把全部歷史丟進去。框架不加 `window` 參數，保持介面純粹
 - **Live structured logging（輕量 event sourcing）**：LiveTrader 處理 action 時，用統一的 `order_id`（復用 `{run_id}-t{seq:04d}` 格式，在 action 階段即生成）串起三點 structured log：(1) Action emitted `logger.info("Action: order_id=%s symbol=%s type=%s", ...)` (2) Execution attempt `logger.info("Execute: order_id=%s price=%.2f qty=%.4f", ...)` (3) Fill result `logger.info("Fill: order_id=%s side=%s net_pnl=%.2f", ...)`。不需要 event store，純 logging 即可，用於 live debug
 
+## Execution Summary（實作完成後回顧）
+
+> 以下紀錄超出原始計劃的改進，每項都是在 /simplify code review 過程中發現的合理改進。
+
+### 超出計劃的結構改進
+
+| 改進 | 合理性 |
+|------|--------|
+| `PositionState` 從 backtest 私有提升到 `core/strategy.py` 共用 | backtest 和 live 都需要 mutable 內部持倉狀態（含 entry cost），避免 live 重新推導 entry commission |
+| `close_position()` 從 backtest 私有提升到 `core/executor.py` 共用 | 消除 backtest `_close_position` 和 live `_record_trade` 的 PnL 計算重複 |
+| `TradeResult` 從 `backtest/engine.py` 搬到 `core/executor.py` | live 也需要 typed TradeResult（取代 raw dict callback），避免 live→backtest 的跨層依賴 |
+| Live `on_trade` callback 從 `dict` 改為 `TradeResult` | 型別安全，caller 不用猜 key name |
+| Live `_bars_held` dict 消除 | `PositionState` 是 mutable，直接 `.bars_held += 1`，消除 double bookkeeping |
+| `direction()` 提升為 `core/executor.py` public function | 消除 4 處 inline `-1.0 if side == "short" else 1.0` |
+| `make_trade_id()` 抽到 `core/utils.py` | 消除 3 處 inline `f"{run_id}-t{i:04d}"` |
+
+### 超出計劃的效能改進
+
+| 改進 | 影響 |
+|------|------|
+| `_precompute_bars()` — 一次轉換所有 DataFrame→dict | 消除 per-bar `to_dict()` 呼叫（100k bars 的 dominant cost） |
+| `_eval_equity()` — 合併 MTM 計算 + position snapshot 為 single pass | 消除 per-position per-bar 的 2x `calc_pnl` |
+| Lazy `import quantstats` | `import librae` 從 ~3s 降到 ~0.6s |
+| `StrategyMetrics` frozen | 防止計算結果被意外修改 |
+
+### 超出計劃的命名統一
+
+| 改進 | 說明 |
+|------|------|
+| `instrument` → `symbol` 全域統一 | 包含 dataclass fields、MultiIndex level name、所有 local variables |
+| `cm` → `cost_model` | 11 處 local variable，與 parameter name 一致 |
+| `_eval_portfolio` / `_calc_equity` → `_eval_equity` | backtest 和 live 統一 |
+| `_record_trade` → `_close_position` → 最終內聯到 close 流程 | 消除 live 獨立的平倉方法 |
+
 ## Files to Modify (ordered)
 
 1. 建立 `librae/core/` — 搬入 strategy.py, cost_model.py, executor.py（+ calc_trade_pnl + TradePnL + 保留 Executor Protocol，刪 BacktestExecutor）, metrics.py（上移 + compute_all 改接收 primitive types）；新增 utils.py（generate_run_id + infer_timeframe + to_ccxt + to_canonical）
@@ -623,7 +657,7 @@ from librae.config import get_market
 
 # 1. 外部取得資料（不是 librae 的事）
 df = fetch_ohlcv("BTCUSDT", "1h", months=6)
-benchmark_prices = df.xs("BTCUSDT", level="instrument")["close"]
+benchmark_prices = df.xs("BTCUSDT", level="symbol")["close"]
 
 # 2. 建立引擎（只接收 DataFrame + 配置）
 market_config = get_market("crypto")
