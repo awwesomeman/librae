@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 
-from librae.data import fetch_ohlcv
+from librae.data import fetch_ohlcv, resample_ohlcv
 
 
 # ---------------------------------------------------------------------------
@@ -64,13 +64,7 @@ def compute_daily_gate(df_1d: pd.DataFrame, params: dict | None = None) -> pd.Da
 
 def resample_to_daily(df: pd.DataFrame) -> pd.DataFrame:
     """Resample H1 (or sub-daily) OHLCV to D1. Pure function."""
-    x = pd.DataFrame()
-    x["open"] = df["open"].resample("1D").first()
-    x["high"] = df["high"].resample("1D").max()
-    x["low"] = df["low"].resample("1D").min()
-    x["close"] = df["close"].resample("1D").last()
-    x["volume"] = df["volume"].resample("1D").sum()
-    return x.dropna()
+    return resample_ohlcv(df, "1D")
 
 
 # ---------------------------------------------------------------------------

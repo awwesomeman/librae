@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import subprocess
 import sys
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,11 +47,11 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
     new_ds = json.dumps({"type": ds_type, "uid": uid})
     updated = re.sub(r'DATASOURCE[^=]*= \{[^}]*\}', f'DATASOURCE: dict = {new_ds}', content)
     if updated == content:
-        print(f"WARNING: DATASOURCE pattern not found in {path}, no changes made")
+        logger.warning("DATASOURCE pattern not found in %s, no changes made", path)
         return
     with open(path, "w") as f:
         f.write(updated)
-    print(f"Updated DATASOURCE uid={uid} type={ds_type}")
+    logger.info("Updated DATASOURCE uid=%s type=%s", uid, ds_type)
 
 
 def delete_old_dashboards(base_url: str, auth: tuple[str, str]) -> None:
@@ -59,7 +62,7 @@ def delete_old_dashboards(base_url: str, auth: tuple[str, str]) -> None:
         if r.status_code == 404:
             continue
         r.raise_for_status()
-        print(f"  Deleted old dashboard: {uid}")
+        logger.info("Deleted old dashboard: %s", uid)
 
 
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
@@ -76,22 +79,23 @@ def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
         timeout=30,
     )
     r.raise_for_status()
-    print(f"  strategy_dashboard.json: {r.json().get('status', '?')}")
+    logger.info("strategy_dashboard.json: %s", r.json().get("status", "?"))
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args()
     auth = (args.grafana_user, args.grafana_password)
 
     uid, ds_type = get_timescaledb_uid(args.grafana_url, auth)
     if not uid:
-        print("ERROR: TimescaleDB datasource not found in Grafana")
+        logger.error("TimescaleDB datasource not found in Grafana")
         sys.exit(1)
 
     update_generate_dashboards(uid, ds_type)
     delete_old_dashboards(args.grafana_url, auth)
     deploy_dashboards(args.grafana_url, auth)
-    print("✅ Grafana setup complete")
+    logger.info("Grafana setup complete")
 
 
 if __name__ == "__main__":

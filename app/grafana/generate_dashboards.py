@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import pathlib
+
+logger = logging.getLogger(__name__)
 
 DATASOURCE: dict = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR: pathlib.Path = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
@@ -525,8 +528,9 @@ def main() -> None:
     dashboard = render_unified_dashboard()
     out_path = OUT_DIR / "strategy_dashboard.json"
     out_path.write_text(json.dumps(dashboard, indent=2, ensure_ascii=False))
-    print(f"  {out_path} — {len(dashboard['panels'])} panels")
+    logger.info("%s — %d panels", out_path, len(dashboard["panels"]))
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     main()

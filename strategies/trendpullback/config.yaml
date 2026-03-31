@@ -1,0 +1,10 @@
+# TrendPullback H1 strategy configuration
+# CLI args override these values: --symbol ETHUSDT --mode sim
+strategy: trendpullback
+symbol: BTCUSDT
+market: crypto
+months: 6
+initial_balance: 100000
+max_hold_bars: 24
+sample: oos
+poll_interval: 60
