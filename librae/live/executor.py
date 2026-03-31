@@ -59,7 +59,7 @@ class LiveExecutor:
         return fill
 
     def notify_exit(self, instrument: str, price: float) -> None:
-        """Send exit notification (called by LiveRunner on close action)."""
+        """Send exit notification (called by LiveTrader on close action)."""
         logger.info("SIGNAL EXIT %s @ %.2f", instrument, price)
         if self._telegram and self._telegram.enabled:
             self._telegram.send_signal(

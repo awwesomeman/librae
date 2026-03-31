@@ -1,4 +1,4 @@
-"""LiveRunner — polling loop for sim and live modes.
+"""LiveTrader — polling loop for sim and live modes.
 
 Detects completed bars, runs strategy, and routes actions to LiveExecutor.
 Supports multiple symbols. Caches OHLCV to avoid redundant fetches.
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 OHLCVFetcher = Callable[..., pd.DataFrame]
 
 
-class LiveRunner:
+class LiveTrader:
     """Polling-based runner for sim/live modes.
 
     Args:
@@ -100,7 +100,7 @@ class LiveRunner:
         iteration = 0
 
         logger.info(
-            "LiveRunner started: symbols=%s, timeframe=%s, poll=%ss",
+            "LiveTrader started: symbols=%s, timeframe=%s, poll=%ss",
             self._symbols, self._timeframe, self._poll_interval,
         )
 
@@ -118,7 +118,7 @@ class LiveRunner:
             if self._running:
                 time.sleep(self._poll_interval)
 
-        logger.info("LiveRunner stopped")
+        logger.info("LiveTrader stopped")
 
     def stop(self) -> None:
         """Signal the runner to stop after the current cycle."""
