@@ -9,15 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from librae.schema import (
-    BACKTEST_SCHEMA_VERSION,
+from librae.backtest.schema import (
+    SCHEMA_VERSION,
     BacktestOutput,
     EquityCurvePoint,
     RunMetadata,
     StrategyMetrics,
     TradeRecord,
 )
-from librae.persistence import save_backtest_output, load_backtest_output
+from librae.backtest.persistence import save_backtest_output, load_backtest_output
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
 START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -100,13 +100,13 @@ def _make_metrics() -> StrategyMetrics:
 
 
 def test_schema_version_constant() -> None:
-    assert BACKTEST_SCHEMA_VERSION == "1.0.0"
+    assert SCHEMA_VERSION == "1.0.0"
 
 
 def test_run_metadata_defaults() -> None:
     meta = _make_run_metadata()
     assert meta.schema_version == "1.0.0"
-    assert meta.mode == "backtest"
+    assert meta.mode is None  # mode no longer set by default (engine-only field removed)
 
 
 def test_backtest_output_validate_passes() -> None:

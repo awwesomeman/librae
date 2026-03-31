@@ -1,16 +1,16 @@
 """Backtest engine — bar-by-bar execution with Strategy + Executor pattern.
 
 Usage:
-    bt = Backtest(data=df, strategy=my_strategy, market="crypto")
-    result = bt.run()
+    from librae.config import get_market
 
-    # With builder
-    result = (Backtest(data=df, strategy=my_strategy, market="crypto")
-              .set_benchmark("auto")
-              .run())
+    bt = Backtest(data=df, strategy=my_strategy, market_config=get_market("crypto"))
+    bt.add_benchmark(df.xs("BTCUSDT", level="instrument")["close"])
+    bt.run()
+    output = bt.build_output(annualize=True)
 
 The engine owns all position state. Strategies only observe via Context.
-Execution is delegated to make_fill() from core.executor.
+Execution uses make_fill() from core.executor.
+Shared PnL calculation uses calc_trade_pnl() from core.executor.
 
 Data format: MultiIndex DataFrame (instrument, datetime) with OHLCV + features.
 Single-asset is a special case where instruments has one element.
@@ -18,17 +18,20 @@ Single-asset is a special case where instruments has one element.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Sequence
+from datetime import datetime, timezone
+from typing import Literal, Sequence
 
 import numpy as np
 import pandas as pd
 
+from librae.config.market_config import MarketConfig
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
-from librae.core.executor import make_fill
+from librae.core.executor import TradePnL, calc_trade_pnl, direction, make_fill
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position
+from librae.core.utils import generate_run_id, infer_timeframe, make_trade_id, to_ccxt
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +48,7 @@ class TradeResult:
     instrument: str
     entry_ts: datetime
     exit_ts: datetime
-    side: str
+    side: Literal["long", "short"]
     entry_price: float
     exit_price: float
     quantity: float
@@ -86,15 +89,11 @@ class BacktestResult:
 @dataclass
 class _PositionState:
     instrument: str
-    side: str
+    side: Literal["long", "short"]
     entry_price: float
     quantity: float
     entry_ts: datetime
     bars_held: int
-
-    @property
-    def direction(self) -> float:
-        return -1.0 if self.side == "short" else 1.0
     entry_commission: float
     entry_slippage: float
 
@@ -111,25 +110,27 @@ class Backtest:
         data: MultiIndex DataFrame (instrument, datetime) with OHLCV + features.
               For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
         strategy: BaseStrategy subclass.
-        market: Market key from markets.yaml (e.g. "crypto", "tw_futures").
+        market_config: MarketConfig for cost model (mutually exclusive with cost_model).
         initial_balance: Starting cash.
-        executor: Deprecated — ignored. Backtest uses core.executor.make_fill directly.
+        cost_model: CostModel directly (for tests or custom cost models).
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
         strategy: BaseStrategy,
-        market: str | None = None,
+        market_config: MarketConfig | None = None,
         initial_balance: float = 100_000.0,
-        executor: object | None = None,
+        *,
+        cost_model: CostModel | None = None,
     ) -> None:
         self._data = data
         self._strategy = strategy
         self._initial_balance = initial_balance
-        self._benchmark: str | pd.Series | None = "auto"
+        self._benchmark_prices: pd.Series | None = None
+        self._run_id: str | None = None
+        self._result: BacktestResult | None = None
 
-        # Parse instruments from MultiIndex
         if not isinstance(data.index, pd.MultiIndex):
             raise ValueError(
                 "data must have MultiIndex (instrument, datetime). "
@@ -140,51 +141,57 @@ class Backtest:
         self._time_groups = data.groupby(level="datetime")
         self._timeline = sorted(self._time_groups.groups.keys())
 
-        # Build cost models: market config > zero-cost fallback
-        if executor is not None:
-            # WHY: backward compat — extract cost_model from legacy BacktestExecutor
-            self._cost_models = self._extract_cost_models(executor)
-        elif market is not None:
-            self._cost_models = self._build_from_market(market)
+        if cost_model is not None:
+            cm = cost_model
+        elif market_config is not None:
+            cm = CostModel.from_market(market_config)
         else:
-            default_cm = CostModel.zero()
-            self._cost_models = {inst: default_cm for inst in self._instruments}
+            cm = CostModel.zero()
+        self._cost_models: dict[str, CostModel] = {"__default__": cm}
+
+        # Auto-derive strategy_name from class name → snake_case
+        cls_name = type(strategy).__name__
+        self._strategy_name = re.sub(r"(?<!^)(?=[A-Z])", "_", cls_name).lower()
+
+    # --- Public properties ---
+
+    @property
+    def result(self) -> BacktestResult:
+        """Access BacktestResult. Raises RuntimeError if run() not called."""
+        if self._result is None:
+            raise RuntimeError("Call run() before accessing result")
+        return self._result
+
+    @property
+    def run_id(self) -> str:
+        """Access run_id. Raises RuntimeError if run() not called."""
+        if self._run_id is None:
+            raise RuntimeError("Call run() before accessing run_id")
+        return self._run_id
 
     # --- Builder methods ---
 
-    def set_benchmark(self, val: str | pd.Series | None) -> Backtest:
-        """Set benchmark mode. Returns self for chaining.
+    def add_benchmark(self, prices: pd.Series) -> None:
+        """Set benchmark for comparison.
 
         Args:
-            val: "auto" (buy-and-hold for single asset), pd.Series (custom), or None (skip).
+            prices: Price series indexed by datetime. Engine computes
+                    buy-and-hold equity curve in build_output(), aligned
+                    to backtest timeline.
         """
-        self._benchmark = val
-        return self
+        self._benchmark_prices = prices
 
     # --- Private helpers ---
-
-    @staticmethod
-    def _build_from_market(market_name: str) -> dict[str, CostModel]:
-        """Build cost model from market config."""
-        from librae.config.market_config import get_market
-        config = get_market(market_name)
-        cm = CostModel.from_market(config)
-        return {"__default__": cm}
-
-    @staticmethod
-    def _extract_cost_models(executor: object) -> dict[str, CostModel]:
-        """Extract cost_model from legacy executor object for backward compat."""
-        cm = getattr(executor, "cost_model", None)
-        if cm is None:
-            cm = CostModel.zero()
-        return {"__default__": cm}
 
     def _get_cost_model(self, inst: str) -> CostModel:
         """Get cost model for an instrument, falling back to __default__."""
         return self._cost_models.get(inst) or self._cost_models.get("__default__", CostModel.zero())
 
     def run(self) -> BacktestResult:
-        """Execute the backtest. Returns BacktestResult."""
+        """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
+        self._run_id = generate_run_id(self._strategy_name, self._instruments[0])
+        logger.info("Backtest started: run_id=%s", self._run_id)
+
         cash = self._initial_balance
         positions: dict[str, _PositionState] = {}
         trades: list[TradeResult] = []
@@ -262,38 +269,127 @@ class Backtest:
         # Compute benchmark
         benchmark_curve = self._compute_benchmark()
 
-        return BacktestResult(
+        self._result = BacktestResult(
             trades=trades,
             equity_curve=equity_curve,
             initial_balance=self._initial_balance,
             final_equity=cash,
             benchmark_curve=benchmark_curve,
         )
+        return self._result
+
+    def build_output(
+        self,
+        *,
+        annualize: bool = False,
+    ) -> "BacktestOutput":
+        """Compute metrics + build canonical output in one call.
+
+        All metadata is auto-derived from the engine state:
+        - run_id: generated in run()
+        - start_ts/end_ts: from self._timeline
+        - symbol: from self._instruments[0]
+        - strategy_name: from type(strategy).__name__
+        - timeframe: inferred from data index
+
+        Raises RuntimeError if called before run().
+        """
+        from librae.backtest.schema import (
+            BacktestOutput, EquityCurvePoint, RunMetadata, TradeRecord,
+        )
+        from librae.core.metrics import compute_all
+
+        if self._result is None:
+            raise RuntimeError("Call run() before build_output()")
+
+        result = self._result
+        run_id = self._run_id
+
+        # Auto-derive metadata
+        timeline = self._timeline
+        start_ts = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
+        end_ts = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
+        symbol = self._instruments[0]
+        # WHY: reuse self._timeline (already sorted) instead of re-extracting from index
+        timeframe = infer_timeframe(pd.DatetimeIndex(timeline))
+
+        # Compute metrics
+        metrics = compute_all(result, start_ts, end_ts, annualize=annualize)
+
+        # Build RunMetadata
+        run_metadata = RunMetadata(
+            run_id=run_id,
+            strategy=self._strategy_name,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            run_ts=datetime.now(tz=timezone.utc),
+        )
+
+        # Build TradeRecords
+        trade_records = [
+            TradeRecord(
+                trade_id=make_trade_id(run_id, i),
+                entry_ts=t.entry_ts, exit_ts=t.exit_ts,
+                symbol=t.instrument, side=t.side,
+                entry_price=float(t.entry_price), exit_price=float(t.exit_price),
+                quantity=float(t.quantity),
+                gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
+                gross_return=float(t.gross_return), net_return=float(t.net_return),
+                commission=float(t.commission), slippage=float(t.slippage),
+                holding_bars=int(t.holding_bars),
+            )
+            for i, t in enumerate(result.trades)
+        ]
+
+        # Enrich equity curve
+        equity_points = self._enrich_equity_curve(result)
+
+        return BacktestOutput(
+            run_metadata=run_metadata,
+            equity_curve=equity_points,
+            trades=trade_records,
+            metrics=metrics,
+        )
+
+    def _enrich_equity_curve(self, result: BacktestResult) -> list[EquityCurvePoint]:
+        """Build EquityCurvePoints with drawdown, ret_1d, and benchmark alignment."""
+        from librae.backtest.schema import EquityCurvePoint
+
+        has_bm = result.benchmark_curve is not None and len(result.benchmark_curve) > 0
+        equity_points: list[EquityCurvePoint] = []
+        peak = 0.0
+        prev_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
+        prev_bm = 1.0
+        for i, snap in enumerate(result.equity_curve):
+            eq = snap.equity
+            peak = max(peak, eq)
+            drawdown = (eq - peak) / peak if peak > 0 else 0.0
+            ret_1d = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
+            prev_eq = eq
+
+            bm_eq, bm_ret = None, None
+            if has_bm and i < len(result.benchmark_curve):
+                bm_eq = float(result.benchmark_curve[i])
+                bm_ret = (bm_eq / prev_bm - 1.0) if prev_bm > 0 else 0.0
+                prev_bm = bm_eq
+
+            equity_points.append(EquityCurvePoint(
+                ts=snap.ts, equity=float(eq),
+                ret_1d=float(ret_1d), drawdown=float(drawdown),
+                benchmark_equity=bm_eq, benchmark_ret_1d=bm_ret,
+            ))
+        return equity_points
 
     def _compute_benchmark(self) -> list[float] | None:
-        """Compute benchmark equity curve based on self._benchmark setting."""
-        if self._benchmark is None:
+        """Compute benchmark buy-and-hold equity curve from benchmark prices."""
+        if self._benchmark_prices is None:
             return None
-
-        if isinstance(self._benchmark, pd.Series):
-            # User-provided return series → cumulative equity
-            cum = (1 + self._benchmark).cumprod() * self._initial_balance
-            return cum.tolist()
-
-        # "auto": buy-and-hold for single asset only
-        if self._benchmark == "auto" and len(self._instruments) == 1:
-            inst = self._instruments[0]
-            closes = []
-            for ts in self._timeline:
-                cross = self._time_groups.get_group(ts)
-                bars = self._build_bars(cross)
-                bar = bars.get(inst)
-                if bar is not None:
-                    closes.append(bar["close"])
-            if closes and closes[0] > 0:
-                return [self._initial_balance * (c / closes[0]) for c in closes]
-
-        return None
+        prices = self._benchmark_prices
+        if len(prices) == 0 or prices.iloc[0] <= 0:
+            return None
+        return [self._initial_balance * (p / prices.iloc[0]) for p in prices]
 
     @staticmethod
     def _build_bars(cross: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -317,7 +413,7 @@ class Backtest:
             bar = bars.get(inst)
             price = bar["close"] if bar is not None else pos.entry_price
             cm = self._get_cost_model(inst)
-            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity) * pos.direction
+            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
             mtm += pos.entry_price * pos.quantity * cm.multiplier
         return mtm
 
@@ -339,7 +435,7 @@ class Backtest:
                 quantity=ps.quantity,
                 entry_ts=ps.entry_ts,
                 bars_held=ps.bars_held,
-                unrealized_pnl=cm.calc_pnl(ps.entry_price, price, ps.quantity) * ps.direction,
+                unrealized_pnl=cm.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side),
             )
         return snapshot
 
@@ -350,22 +446,19 @@ class Backtest:
         exit_price: float,
         cm: CostModel,
     ) -> tuple[TradeResult, float]:
-        """Close a position. Returns (TradeResult, cash_proceeds)."""
-        gross_pnl = cm.calc_pnl(pos.entry_price, exit_price, pos.quantity) * pos.direction
-        exit_commission = cm.calc_commission(exit_price, pos.quantity)
-        exit_slippage = cm.calc_slippage(pos.quantity)
-        exit_tax = cm.calc_tax(exit_price, pos.quantity, is_sell=True)
-
-        total_commission = pos.entry_commission + exit_commission
-        total_slippage = pos.entry_slippage + exit_slippage
-        net_pnl = gross_pnl - total_commission - total_slippage - exit_tax
-
-        entry_notional = pos.entry_price * pos.quantity * cm.multiplier
-        gross_return = (gross_pnl / entry_notional * 100) if entry_notional > EPSILON else 0.0
-        net_return = (net_pnl / entry_notional * 100) if entry_notional > EPSILON else 0.0
+        """Close a position using shared calc_trade_pnl. Returns (TradeResult, cash_proceeds)."""
+        pnl = calc_trade_pnl(
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            quantity=pos.quantity,
+            side=pos.side,
+            cost_model=cm,
+            entry_commission=pos.entry_commission,
+            entry_slippage=pos.entry_slippage,
+        )
 
         notional = exit_price * pos.quantity * cm.multiplier
-        proceeds = notional - exit_commission - exit_slippage - exit_tax
+        proceeds = notional - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
 
         trade = TradeResult(
             instrument=pos.instrument,
@@ -375,13 +468,13 @@ class Backtest:
             entry_price=pos.entry_price,
             exit_price=exit_price,
             quantity=pos.quantity,
-            gross_pnl=gross_pnl,
-            commission=total_commission,
-            slippage=total_slippage,
-            tax=exit_tax,
-            net_pnl=net_pnl,
-            gross_return=gross_return,
-            net_return=net_return,
+            gross_pnl=pnl.gross_pnl,
+            commission=pnl.commission,
+            slippage=pnl.slippage,
+            tax=pnl.tax,
+            net_pnl=pnl.net_pnl,
+            gross_return=pnl.gross_return,
+            net_return=pnl.net_return,
             holding_bars=pos.bars_held,
         )
         return trade, proceeds

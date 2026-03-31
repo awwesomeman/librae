@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional, Sequence
+from typing import Any, Literal, Sequence
 
 import pandas as pd
 
@@ -25,7 +25,6 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION: str = "1.0.0"
-BACKTEST_SCHEMA_VERSION = SCHEMA_VERSION
 
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -70,11 +69,12 @@ class RunMetadata:
     start_ts: datetime
     end_ts: datetime
     run_ts: datetime
-    data_source: str
-    schema_version: str = BACKTEST_SCHEMA_VERSION
-    mode: str = "backtest"
-    # Sample split label — must be one of VALID_SAMPLE_LABELS when set
-    sample: Optional[str] = None
+    schema_version: str = SCHEMA_VERSION
+    # WHY: data_source, mode, sample kept as optional for backward compat
+    # (consumers may still pass them); engine no longer sets them automatically
+    data_source: str | None = None
+    mode: str | None = None
+    sample: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,8 +85,8 @@ class EquityCurvePoint:
     equity: float
     ret_1d: float
     drawdown: float
-    benchmark_equity: Optional[float] = None
-    benchmark_ret_1d: Optional[float] = None
+    benchmark_equity: float | None = None
+    benchmark_ret_1d: float | None = None
 
 
 @dataclass(frozen=True)
@@ -97,24 +97,24 @@ class TradeRecord:
     entry_ts: datetime
     exit_ts: datetime
     symbol: str
-    side: str
+    side: Literal["long", "short"]
     entry_price: float
     exit_price: float
     quantity: float
     gross_pnl: float
     net_pnl: float
-    gross_return: Optional[float] = None
-    net_return: Optional[float] = None
+    gross_return: float | None = None
+    net_return: float | None = None
     # Units for multi-market support
     price_unit: str = "USDT"
     quantity_unit: str = "asset"
     pnl_unit: str = "USDT"
-    commission: Optional[float] = None
-    slippage: Optional[float] = None
-    holding_bars: Optional[int] = None
+    commission: float | None = None
+    slippage: float | None = None
+    holding_bars: int | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class StrategyMetrics:
     """Aggregate performance metrics for a backtest run.
 
@@ -131,23 +131,23 @@ class StrategyMetrics:
     trades: int = 0
 
     # Annualized (None when periods=0 or not computable)
-    annual_return: Optional[float] = None
-    sharpe: Optional[float] = None
-    sortino: Optional[float] = None
-    calmar: Optional[float] = None
+    annual_return: float | None = None
+    sharpe: float | None = None
+    sortino: float | None = None
+    calmar: float | None = None
 
     # Most strategies (None if not applicable)
-    win_rate: Optional[float] = None
-    profit_factor: Optional[float] = None
-    avg_trade_return: Optional[float] = None
-    exposure_ratio: Optional[float] = None
+    win_rate: float | None = None
+    profit_factor: float | None = None
+    avg_trade_return: float | None = None
+    exposure_ratio: float | None = None
 
     # Benchmark
-    benchmark_return: Optional[float] = None
+    benchmark_return: float | None = None
 
     # Cost breakdown
-    total_commission: Optional[float] = None
-    total_slippage: Optional[float] = None
+    total_commission: float | None = None
+    total_slippage: float | None = None
 
 
 @dataclass
@@ -208,7 +208,7 @@ class BacktestOutput:
 # ---------------------------------------------------------------------------
 
 
-def parse_utc_timestamp(value: Any) -> datetime:
+def parse_utc_timestamp(value: str | int | float) -> datetime:
     """Parse a timestamp value (ISO string or epoch number) to UTC datetime."""
     if isinstance(value, str) and value:
         text = value.strip()
