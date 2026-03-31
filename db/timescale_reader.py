@@ -1,21 +1,9 @@
 """TimescaleDB reader for Streamlit dashboard."""
 from __future__ import annotations
 
-from contextlib import contextmanager
-
 import pandas as pd
 
-from db import TIMESCALE_DSN, get_pool
-
-
-@contextmanager
-def _conn(dsn: str = TIMESCALE_DSN):
-    pool = get_pool(dsn)
-    conn = pool.getconn()
-    try:
-        yield conn
-    finally:
-        pool.putconn(conn)
+from db import TIMESCALE_DSN, get_conn
 
 
 def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> str | None:
@@ -26,7 +14,7 @@ def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> 
         sql += " WHERE strategy = %s"
         params.append(strategy)
     sql += " ORDER BY run_ts DESC LIMIT 1"
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         cur = conn.cursor()
         cur.execute(sql, params)
         row = cur.fetchone()
@@ -43,7 +31,7 @@ def list_runs(limit: int = 20, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         ORDER BY run_ts DESC
         LIMIT %s
     """
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[limit])
     return df
 
@@ -56,7 +44,7 @@ def load_equity_curve(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         WHERE run_id = %s
         ORDER BY ts
     """
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
@@ -72,7 +60,7 @@ def load_trade_blotter(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         WHERE run_id = %s
         ORDER BY entry_ts DESC
     """
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
     if not df.empty:
         if "_time" in df.columns:
@@ -97,7 +85,7 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         JOIN backtest_runs br ON sp.run_id = br.run_id
         WHERE sp.run_id = %s
     """
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
     return df
 
@@ -105,13 +93,13 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
 def load_strategy_signals(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     sql = """
         SELECT ts AS _time, strategy, symbol, timeframe,
-               signal_type AS side, source, price,
+               signal_type, source, price,
                signal_strength, confidence, quantity, run_id
         FROM strategy_signals
         WHERE run_id = %s
         ORDER BY ts
     """
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
@@ -125,7 +113,7 @@ def load_ohlcv(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         WHERE run_id = %s
         ORDER BY ts
     """
-    with _conn(dsn) as conn:
+    with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
