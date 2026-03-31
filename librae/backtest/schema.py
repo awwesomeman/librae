@@ -28,8 +28,6 @@ SCHEMA_VERSION: str = "1.0.0"
 
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-VALID_SAMPLE_LABELS = frozenset({"train", "validation", "oos", "live"})
-
 RUN_ID_PATTERN = re.compile(
     r"^[a-z0-9][a-z0-9_.\-]*-\d{8}t\d{6}-[a-f0-9]{8}$"
 )
@@ -70,11 +68,6 @@ class RunMetadata:
     end_ts: datetime
     run_ts: datetime
     schema_version: str = SCHEMA_VERSION
-    # WHY: data_source, mode, sample kept as optional for backward compat
-    # (consumers may still pass them); engine no longer sets them automatically
-    data_source: str | None = None
-    mode: str | None = None
-    sample: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,11 +189,6 @@ class BacktestOutput:
             raise ValueError("equity_curve is required (may be empty list)")
         if self.trades is None:
             raise ValueError("trades is required (may be empty list)")
-        sample = self.run_metadata.sample
-        if sample is not None and sample not in VALID_SAMPLE_LABELS:
-            raise ValueError(
-                f"run_metadata.sample must be one of {sorted(VALID_SAMPLE_LABELS)}, got {sample!r}"
-            )
 
 
 # ---------------------------------------------------------------------------

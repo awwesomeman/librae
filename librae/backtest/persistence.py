@@ -106,7 +106,7 @@ def _dict_to_output(data: dict) -> BacktestOutput:
     )
 
 
-def save_backtest_output(
+def save_output(
     output: BacktestOutput,
     directory: str | Path,
     *,
@@ -158,8 +158,8 @@ def save_backtest_output(
     return paths
 
 
-def load_backtest_output(path: str | Path) -> BacktestOutput:
-    """Load a BacktestOutput from a JSON file written by save_backtest_output."""
+def load_output(path: str | Path) -> BacktestOutput:
+    """Load a BacktestOutput from a JSON file written by save_output."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return _dict_to_output(data)
 

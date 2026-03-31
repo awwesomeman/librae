@@ -32,7 +32,6 @@ def _make_sample_output(run_id: str = "test_strat-btcusdt-20260326t000000-abcd12
         start_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
         end_ts=datetime(2026, 3, 1, tzinfo=timezone.utc),
         run_ts=now,
-        data_source="test",
     )
     equity = [
         EquityCurvePoint(

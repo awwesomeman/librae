@@ -24,9 +24,8 @@ def metrics_dict_to_backtest_output(
     timeframe: str,
     start: str,
     end: str,
-    data_source: str = "unknown",
     run_id: str | None = None,
-    sample: str | None = None,
+    **_kwargs: Any,
 ) -> BacktestOutput:
     """Convert a legacy flat metrics dict to a BacktestOutput.
 
@@ -38,12 +37,11 @@ def metrics_dict_to_backtest_output(
         Backtest context identifiers.
     start, end : str
         ISO date strings for the backtest window.
-    data_source : str
-        Origin of market data (e.g. "Shioaji", "Binance", "synthetic").
     run_id : str | None
         If None, one is auto-generated.
-    sample : str | None
-        Sample label (e.g. "train", "validation", "oos").
+    **_kwargs
+        Accepts (and ignores) legacy keyword arguments such as
+        ``data_source`` and ``sample`` for backward compatibility.
 
     Returns
     -------
@@ -66,8 +64,6 @@ def metrics_dict_to_backtest_output(
         start_ts=start_dt,
         end_ts=end_dt,
         run_ts=now,
-        data_source=data_source,
-        sample=sample,
     )
 
     n_trades = metrics.get("trades", 0)

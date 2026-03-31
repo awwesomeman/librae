@@ -9,18 +9,17 @@ from .backtest.schema import (
     RunMetadata,
     StrategyMetrics,
     TradeRecord,
-    VALID_SAMPLE_LABELS,
     RUN_ID_PATTERN,
     SCHEMA_VERSION,
 )
-from .backtest.persistence import save_backtest_output, load_backtest_output
+from .backtest.persistence import save_output, load_output
 from .backtest.engine import Backtest, BacktestResult, EquitySnapshot, TradeResult
 from .core.cost_model import CostModel
 from .core.strategy import Action, BaseStrategy, Context, Fill, Position
 from .core.executor import Executor, TradePnL, calc_trade_pnl, direction, make_fill
 from .core.metrics import compute_all
 from .core.utils import generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
-from .utils import metrics_dict_to_backtest_output
+from .config.market_config import MarketConfig, get_market
 
 __all__ = [
     "BacktestOutput",
@@ -28,13 +27,13 @@ __all__ = [
     "RunMetadata",
     "StrategyMetrics",
     "TradeRecord",
-    "VALID_SAMPLE_LABELS",
     "RUN_ID_PATTERN",
     "SCHEMA_VERSION",
-    "save_backtest_output",
-    "load_backtest_output",
-    "metrics_dict_to_backtest_output",
+    "save_output",
+    "load_output",
     "CostModel",
+    "MarketConfig",
+    "get_market",
     "Action",
     "BaseStrategy",
     "Context",

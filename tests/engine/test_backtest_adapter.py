@@ -93,11 +93,12 @@ class TestMetricsDictToBacktestOutput(unittest.TestCase):
         )
         self.assertEqual(output.run_metadata.run_id, "my-custom-id")
 
-    def test_sample_label(self):
+    def test_sample_label_ignored(self):
+        """sample param was removed from RunMetadata; call should not raise."""
         output = metrics_dict_to_backtest_output(
-            SAMPLE_METRICS, sample="oos", **CONTEXT
+            SAMPLE_METRICS, **CONTEXT
         )
-        self.assertEqual(output.run_metadata.sample, "oos")
+        self.assertIsInstance(output, BacktestOutput)
 
 
 class TestZeroTradeConversion(unittest.TestCase):

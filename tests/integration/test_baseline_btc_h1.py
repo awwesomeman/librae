@@ -16,11 +16,10 @@ from tests.sample_data import (
     run_simple_sma_crossover,
 )
 from librae.utils import metrics_dict_to_backtest_output
-from librae.backtest.persistence import save_backtest_output, load_backtest_output
+from librae.backtest.persistence import save_output, load_output
 from librae.backtest.schema import (
     BacktestOutput,
     RUN_ID_PATTERN,
-    VALID_SAMPLE_LABELS,
 )
 
 
@@ -127,8 +126,6 @@ class TestRunIdContract:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="train",
         )
         assert RUN_ID_PATTERN.match(output.run_metadata.run_id)
 
@@ -140,49 +137,9 @@ class TestRunIdContract:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
             run_id="bad-run-id",
         )
         with pytest.raises(ValueError, match="run_metadata.run_id must match pattern"):
-            output.validate()
-
-
-# ---------------------------------------------------------------------------
-# Contract v1: sample labels (train/oos/live)
-# ---------------------------------------------------------------------------
-
-
-class TestSampleLabels:
-    def test_valid_sample_labels(self):
-        assert VALID_SAMPLE_LABELS == frozenset({"train", "validation", "oos", "live"})
-
-    def test_backtest_output_with_each_sample(self, baseline_metrics):
-        for sample in ("train", "validation", "oos", "live"):
-            output = metrics_dict_to_backtest_output(
-                baseline_metrics,
-                strategy="sma_crossover_baseline",
-                symbol="BTCUSDT",
-                timeframe="H1",
-                start="2024-01-01",
-                end="2024-01-31",
-                data_source="synthetic_seed42",
-                sample=sample,
-            )
-            output.validate()
-            assert output.run_metadata.sample == sample
-
-    def test_invalid_sample_raises(self, baseline_metrics):
-        output = metrics_dict_to_backtest_output(
-            baseline_metrics,
-            strategy="sma_crossover_baseline",
-            symbol="BTCUSDT",
-            timeframe="H1",
-            start="2024-01-01",
-            end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="bad_label",
-        )
-        with pytest.raises(ValueError, match="sample must be one of"):
             output.validate()
 
 
@@ -200,8 +157,6 @@ class TestTradeRecordsIntegration:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="train",
         )
         assert len(output.trades) == EXPECTED_TRADES
 
@@ -213,8 +168,6 @@ class TestTradeRecordsIntegration:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="oos",
         )
         tr = output.trades[0]
         assert tr.symbol == "BTCUSDT"
@@ -231,8 +184,6 @@ class TestTradeRecordsIntegration:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="oos",
         )
         trade_ids = [t.trade_id for t in output.trades]
         assert len(trade_ids) == len(set(trade_ids))
@@ -252,15 +203,12 @@ class TestContractV1Roundtrip:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="oos",
         )
         d = output.to_dict()
         assert "run_metadata" in d
         assert "equity_curve" in d
         assert "trades" in d
         assert "metrics" in d
-        assert d["run_metadata"]["sample"] == "oos"
 
     def test_to_dict_datetimes_are_strings(self, baseline_metrics):
         output = metrics_dict_to_backtest_output(
@@ -270,8 +218,6 @@ class TestContractV1Roundtrip:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="train",
         )
         d = output.to_dict()
         assert isinstance(d["run_metadata"]["start_ts"], str)
@@ -286,8 +232,6 @@ class TestContractV1Roundtrip:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="oos",
         )
         text = json.dumps(output.to_dict())
         assert isinstance(text, str)
@@ -300,16 +244,13 @@ class TestContractV1Roundtrip:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="oos",
         )
         output.validate()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = save_backtest_output(output, tmpdir)
-            loaded = load_backtest_output(paths["json"])
+            paths = save_output(output, tmpdir)
+            loaded = load_output(paths["json"])
 
-        assert loaded.run_metadata.sample == "oos"
         assert loaded.metrics.trades == EXPECTED_TRADES
         assert len(loaded.trades) == EXPECTED_TRADES
         assert loaded.trades[0].symbol == "BTCUSDT"
@@ -322,14 +263,12 @@ class TestContractV1Roundtrip:
             timeframe="H1",
             start="2024-01-01",
             end="2024-01-31",
-            data_source="synthetic_seed42",
-            sample="train",
         )
         output.validate()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = save_backtest_output(output, tmpdir)
-            loaded = load_backtest_output(paths["json"])
+            paths = save_output(output, tmpdir)
+            loaded = load_output(paths["json"])
 
         for orig, loaded_tr in zip(output.trades, loaded.trades):
             assert orig.gross_pnl == pytest.approx(loaded_tr.gross_pnl, abs=1e-6)

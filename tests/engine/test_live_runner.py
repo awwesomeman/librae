@@ -1,4 +1,4 @@
-"""Unit tests for LiveRunner and LiveExecutor.
+"""Unit tests for LiveTrader and LiveExecutor.
 
 All tests use mocks — no real API calls, no DB, no Telegram.
 
@@ -15,7 +15,7 @@ import pytest
 
 from librae.core.cost_model import CostModel
 from librae.live.executor import LiveExecutor
-from librae.live.engine import LiveRunner
+from librae.live.engine import LiveTrader
 from librae.core.strategy import Action, BaseStrategy, Context
 
 
@@ -135,10 +135,10 @@ class TestLiveExecutor:
 
 
 # ---------------------------------------------------------------------------
-# LiveRunner tests
+# LiveTrader tests
 # ---------------------------------------------------------------------------
 
-class TestLiveRunner:
+class TestLiveTrader:
 
     def _make_runner(
         self,
@@ -147,8 +147,8 @@ class TestLiveRunner:
         feature_fn=None,
         executor: LiveExecutor | None = None,
         **kwargs,
-    ) -> LiveRunner:
-        return LiveRunner(
+    ) -> LiveTrader:
+        return LiveTrader(
             strategy=strategy or _HoldStrategy(),
             symbols=["BTCUSDT"],
             fetcher=fetcher or (lambda *a, **kw: _make_ohlcv_df()),

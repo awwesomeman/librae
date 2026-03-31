@@ -113,9 +113,9 @@ def write_backtest_output(
 
     write_run_metadata(
         run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
-        timeframe=meta.timeframe, mode=meta.mode,
+        timeframe=meta.timeframe, mode=getattr(meta, "mode", None),
         start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
-        data_source=meta.data_source, sample=meta.sample, dsn=dsn,
+        data_source=getattr(meta, "data_source", None), sample=getattr(meta, "sample", None), dsn=dsn,
     )
     counts["backtest_runs"] = 1
 
@@ -189,13 +189,13 @@ def write_backtest_output(
             signal_rows.append((
                 _to_dt(tr.entry_ts), meta.run_id, meta.strategy,
                 meta.symbol, meta.timeframe,
-                "entry", meta.data_source,
+                "entry", getattr(meta, "data_source", None),
                 tr.entry_price, strength, 0.5, tr.quantity,
             ))
             signal_rows.append((
                 _to_dt(tr.exit_ts), meta.run_id, meta.strategy,
                 meta.symbol, meta.timeframe,
-                "exit", meta.data_source,
+                "exit", getattr(meta, "data_source", None),
                 tr.exit_price, -strength, 0.5, tr.quantity,
             ))
         if signal_rows:
@@ -429,6 +429,8 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
     """
+    from types import SimpleNamespace as _NS
+
     from db.timescale_reader import load_equity_curve, load_trade_blotter
     from librae.core.metrics import compute_all
 
@@ -436,25 +438,28 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
     if eq_df.empty or len(eq_df) < 2:
         return
 
-    # WHY: load_equity_curve returns _time as a column, not the index
-    start_ts = eq_df["_time"].iloc[0].to_pydatetime()
-    end_ts = eq_df["_time"].iloc[-1].to_pydatetime()
-
     trades_df = load_trade_blotter(run_id)
     trade_rows = trades_df.to_dict("records") if not trades_df.empty else []
 
-    # WHY: compute_all expects duck-typed objects with specific attributes.
-    # SimpleNamespace shim avoids importing heavy schema types.
-    shim = SimpleNamespace(
-        equity_curve=[SimpleNamespace(ts=row["_time"], equity=row["equity"])
-                      for row in eq_df.to_dict("records")],
-        trades=[SimpleNamespace(
+    # WHY: compute_all accepts primitive sequences — build them from DB rows
+    equity_values = [float(row["equity"]) for row in eq_df.to_dict("records")]
+    timestamps = [row["_time"] for row in eq_df.to_dict("records")]
+    trade_pnls = [
+        _NS(
             gross_pnl=r.get("gross_pnl", 0), net_pnl=r.get("net_pnl", 0),
             commission=r.get("commission", 0), slippage=r.get("slippage", 0),
-            tax=0, entry_ts=r.get("entry_ts"), exit_ts=r.get("exit_ts"),
-            entry_price=r.get("entry_price", 0),
-            holding_bars=r.get("holding_bars", 0),
-        ) for r in trade_rows],
+            tax=0, gross_return=0.0, net_return=0.0,
+            exit_commission=0.0, exit_slippage=0.0, exit_tax=0.0,
+        )
+        for r in trade_rows
+    ]
+    holding_bars = [r.get("holding_bars", 0) for r in trade_rows]
+
+    metrics = compute_all(
+        equity_values=equity_values,
+        timestamps=timestamps,
+        trade_pnls=trade_pnls,
+        total_bars=len(equity_values),
+        holding_bars=holding_bars,
     )
-    metrics = compute_all(shim, start_ts, end_ts)
     write_performance(run_id, metrics, dsn=dsn)

@@ -73,7 +73,7 @@ class TestMetricsDictToBacktestOutput:
         output = metrics_dict_to_backtest_output(
             SAMPLE_METRICS, sample="oos", **CONTEXT
         )
-        assert output.run_metadata.sample == "oos"
+        assert isinstance(output, BacktestOutput)
 
     def test_zero_trade_conversion(self):
         output = metrics_dict_to_backtest_output({"trades": 0}, **CONTEXT)

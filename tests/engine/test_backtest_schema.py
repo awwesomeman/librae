@@ -17,7 +17,7 @@ from librae.backtest.schema import (
     StrategyMetrics,
     TradeRecord,
 )
-from librae.backtest.persistence import save_backtest_output, load_backtest_output
+from librae.backtest.persistence import save_output, load_output
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
 START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -33,7 +33,6 @@ def _make_run_metadata(**kwargs) -> RunMetadata:
         start_ts=START,
         end_ts=END,
         run_ts=NOW,
-        data_source="seed-v1",
     )
     defaults.update(kwargs)
     return RunMetadata(**defaults)
@@ -106,7 +105,7 @@ def test_schema_version_constant() -> None:
 def test_run_metadata_defaults() -> None:
     meta = _make_run_metadata()
     assert meta.schema_version == "1.0.0"
-    assert meta.mode is None  # mode no longer set by default (engine-only field removed)
+    assert meta.schema_version  # basic sanity check
 
 
 def test_backtest_output_validate_passes() -> None:
@@ -195,13 +194,13 @@ def _make_full_output(**kwargs) -> BacktestOutput:
 def test_save_and_load_roundtrip() -> None:
     output = _make_full_output()
     with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_backtest_output(output, tmpdir)
+        paths = save_output(output, tmpdir)
         assert "json" in paths
         assert "csv" in paths
         assert paths["json"].exists()
         assert paths["csv"].exists()
 
-        loaded = load_backtest_output(paths["json"])
+        loaded = load_output(paths["json"])
         assert loaded.run_metadata.run_id == output.run_metadata.run_id
         assert loaded.run_metadata.strategy == output.run_metadata.strategy
         assert loaded.metrics.total_return == output.metrics.total_return
@@ -212,7 +211,7 @@ def test_save_and_load_roundtrip() -> None:
 def test_save_json_has_required_top_level_keys() -> None:
     output = _make_full_output()
     with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_backtest_output(output, tmpdir)
+        paths = save_output(output, tmpdir)
         data = json.loads(paths["json"].read_text())
     assert set(data.keys()) == {"schema_version", "run_metadata", "equity_curve", "trades", "metrics"}
 
@@ -220,7 +219,7 @@ def test_save_json_has_required_top_level_keys() -> None:
 def test_save_equity_csv_has_correct_columns() -> None:
     output = _make_full_output()
     with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_backtest_output(output, tmpdir)
+        paths = save_output(output, tmpdir)
         lines = paths["csv"].read_text().splitlines()
     header = lines[0].split(",")
     assert "ts" in header
@@ -232,15 +231,15 @@ def test_save_equity_csv_has_correct_columns() -> None:
 def test_save_no_csv_when_flag_false() -> None:
     output = _make_full_output()
     with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_backtest_output(output, tmpdir, save_equity_csv=False)
+        paths = save_output(output, tmpdir, save_equity_csv=False)
     assert "csv" not in paths
 
 
 def test_load_roundtrip_preserves_cost_fields() -> None:
     output = _make_full_output()
     with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_backtest_output(output, tmpdir)
-        loaded = load_backtest_output(paths["json"])
+        paths = save_output(output, tmpdir)
+        loaded = load_output(paths["json"])
     t = loaded.trades[0]
     assert t.commission == 20.0
     assert t.slippage == 0.0
@@ -250,6 +249,6 @@ def test_load_roundtrip_preserves_cost_fields() -> None:
 def test_equity_curve_ts_roundtrip_iso() -> None:
     output = _make_full_output()
     with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_backtest_output(output, tmpdir)
-        loaded = load_backtest_output(paths["json"])
+        paths = save_output(output, tmpdir)
+        loaded = load_output(paths["json"])
     assert loaded.equity_curve[0].ts == output.equity_curve[0].ts

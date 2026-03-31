@@ -15,9 +15,8 @@ import logging
 from pathlib import Path
 
 from librae import Backtest
-from librae.backtest.persistence import save_backtest_output
+from librae.backtest.persistence import save_output
 from librae.config.market_config import get_market
-from librae.core.utils import to_ccxt
 from db.timescale_writer import write_backtest_output, write_ohlcv
 
 from .strategy import TrendPullbackM5Strategy
@@ -58,7 +57,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         logger.info("[3/3] [DRY-RUN] Done.")
         return
 
-    paths = save_backtest_output(output, Path(args.out_dir))
+    paths = save_output(output, Path(args.out_dir))
     logger.info("[3/3] Saved: %s", paths['json'])
 
     if not args.no_db:
@@ -74,18 +73,17 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 def run_sim(args: argparse.Namespace) -> None:
     """Run sim mode — delegates infrastructure to sim_wiring."""
-    from librae.live.wiring import build_sim_runner
+    from librae.live.wiring import build_live_trader
 
     strategy = TrendPullbackM5Strategy(max_hold_bars=args.max_hold_bars)
     symbols = [s.strip() for s in args.symbol.split(",")]
 
-    runner = build_sim_runner(
+    trader = build_live_trader(
         strategy=strategy,
         strategy_name="trendpullback_m5",
         feature_fn=prepare_signals,
         symbols=symbols,
-        timeframe_ccxt=to_ccxt(TIMEFRAME),
-        timeframe_db=TIMEFRAME,
+        timeframe=TIMEFRAME,
         market=args.market,
         initial_balance=args.initial_balance,
         poll_interval=args.poll_interval,
@@ -94,7 +92,7 @@ def run_sim(args: argparse.Namespace) -> None:
     )
     logger.info("Sim started: strategy=trendpullback_m5, symbols=%s, timeframe=%s, poll=%ds",
                 symbols, TIMEFRAME, args.poll_interval)
-    runner.run()
+    trader.run()
 
 
 def run_live(args: argparse.Namespace) -> None:
