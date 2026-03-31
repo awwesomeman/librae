@@ -1,10 +1,9 @@
-"""Adapter: convert legacy backtest dict output -> BacktestOutput schema.
+"""Utility functions for backtest output construction and run ID generation.
 
-Legacy run_backtest() returns a flat dict like:
-    {trades, win_rate, avg_ret, pf, equity, ann_return, ann_sharpe, ann_vol, mdd}
-
-This module maps that dict + caller-supplied metadata into a BacktestOutput
-object that can be persisted via librae.persistence.
+Provides:
+- build_backtest_output(): Convert engine BacktestResult → canonical BacktestOutput
+- generate_run_id(): Deterministic-prefix run ID generation
+- metrics_dict_to_backtest_output(): Legacy dict adapter (deprecated)
 """
 from __future__ import annotations
 
@@ -12,8 +11,82 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .schema import BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
+from .engine import BacktestResult
+from .schema import (
+    BacktestOutput, EquityCurvePoint, RunMetadata, StrategyMetrics, TradeRecord,
+)
 from .contracts import parse_utc_timestamp
+
+
+def build_backtest_output(
+    result: BacktestResult,
+    metrics: StrategyMetrics,
+    *,
+    run_id: str,
+    strategy: str,
+    symbol: str,
+    timeframe: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    mode: str = "backtest",
+    data_source: str = "binance",
+    sample: str | None = None,
+) -> BacktestOutput:
+    """Convert engine BacktestResult + metrics into canonical BacktestOutput.
+
+    Handles TradeResult→TradeRecord mapping, equity curve enhancement
+    (drawdown, ret_1d), and benchmark alignment.
+    """
+    now = datetime.now(tz=timezone.utc)
+    run_metadata = RunMetadata(
+        run_id=run_id, strategy=strategy, symbol=symbol,
+        timeframe=timeframe, start_ts=start_ts, end_ts=end_ts,
+        run_ts=now, data_source=data_source, mode=mode, sample=sample,
+    )
+
+    trade_records = [
+        TradeRecord(
+            trade_id=f"{run_id}-t{i:04d}",
+            entry_ts=t.entry_ts, exit_ts=t.exit_ts,
+            symbol=symbol, side=t.side,
+            entry_price=float(t.entry_price), exit_price=float(t.exit_price),
+            quantity=float(t.quantity),
+            gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
+            gross_return=float(t.gross_return), net_return=float(t.net_return),
+            commission=float(t.commission), slippage=float(t.slippage),
+            holding_bars=int(t.holding_bars),
+        )
+        for i, t in enumerate(result.trades)
+    ]
+
+    has_bm = result.benchmark_curve is not None and len(result.benchmark_curve) > 0
+    equity_points: list[EquityCurvePoint] = []
+    peak = 0.0
+    prev_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
+    prev_bm = 1.0
+    for i, snap in enumerate(result.equity_curve):
+        eq = snap.equity
+        peak = max(peak, eq)
+        drawdown = (eq - peak) / peak if peak > 0 else 0.0
+        ret_1d = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
+        prev_eq = eq
+
+        bm_eq, bm_ret = None, None
+        if has_bm and i < len(result.benchmark_curve):
+            bm_eq = float(result.benchmark_curve[i])
+            bm_ret = (bm_eq / prev_bm - 1.0) if prev_bm > 0 else 0.0
+            prev_bm = bm_eq
+
+        equity_points.append(EquityCurvePoint(
+            ts=snap.ts, equity=float(eq),
+            ret_1d=float(ret_1d), drawdown=float(drawdown),
+            benchmark_equity=bm_eq, benchmark_ret_1d=bm_ret,
+        ))
+
+    return BacktestOutput(
+        run_metadata=run_metadata, equity_curve=equity_points,
+        trades=trade_records, metrics=metrics,
+    )
 
 
 def generate_run_id(strategy: str, symbol: str) -> str:

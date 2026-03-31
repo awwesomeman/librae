@@ -5,8 +5,10 @@ strategy_signals, strategy_performance, ohlcv.
 """
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg2
@@ -17,6 +19,8 @@ import pandas as pd
 from librae.schema import BacktestOutput
 from librae.contracts import SCHEMA_VERSION
 from db import TIMESCALE_DSN, get_pool
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -418,3 +422,39 @@ def write_performance(
             ),
         )
         cur.close()
+
+
+def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
+    """Recompute KPI metrics from DB equity_curve + trade_blotter and upsert.
+
+    Called after each trade close in sim mode to keep Grafana KPIs up to date.
+    """
+    from db.timescale_reader import load_equity_curve, load_trade_blotter
+    from librae.metrics import compute_all
+
+    eq_df = load_equity_curve(run_id)
+    if eq_df.empty or len(eq_df) < 2:
+        return
+
+    # WHY: load_equity_curve returns _time as a column, not the index
+    start_ts = eq_df["_time"].iloc[0].to_pydatetime()
+    end_ts = eq_df["_time"].iloc[-1].to_pydatetime()
+
+    trades_df = load_trade_blotter(run_id)
+    trade_rows = trades_df.to_dict("records") if not trades_df.empty else []
+
+    # WHY: compute_all expects duck-typed objects with specific attributes.
+    # SimpleNamespace shim avoids importing heavy schema types.
+    shim = SimpleNamespace(
+        equity_curve=[SimpleNamespace(ts=row["_time"], equity=row["equity"])
+                      for row in eq_df.to_dict("records")],
+        trades=[SimpleNamespace(
+            gross_pnl=r.get("gross_pnl", 0), net_pnl=r.get("net_pnl", 0),
+            commission=r.get("commission", 0), slippage=r.get("slippage", 0),
+            tax=0, entry_ts=r.get("entry_ts"), exit_ts=r.get("exit_ts"),
+            entry_price=r.get("entry_price", 0),
+            holding_bars=r.get("holding_bars", 0),
+        ) for r in trade_rows],
+    )
+    metrics = compute_all(shim, start_ts, end_ts)
+    write_performance(run_id, metrics, dsn=dsn)
