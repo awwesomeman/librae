@@ -14,7 +14,9 @@ from typing import Any, Callable
 import pandas as pd
 
 from .executor import LiveExecutor
+from librae.core.executor import calc_trade_pnl, direction
 from librae.core.strategy import Action, BaseStrategy, Context, Position
+from librae.core.utils import make_trade_id
 
 logger = logging.getLogger(__name__)
 
@@ -267,8 +269,9 @@ class LiveRunner:
             return
         old = self._positions[symbol]
         bars_held = self._bars_held.get(symbol, 0)
-        direction = -1.0 if old.side == "short" else 1.0
-        unrealized_pnl = (current_price - old.entry_price) * old.quantity * direction
+        cm = self._executor.cost_model
+        # WHY: use CostModel.calc_pnl to account for multiplier (fixes futures bug)
+        unrealized_pnl = cm.calc_pnl(old.entry_price, current_price, old.quantity) * direction(old.side)
 
         # WHY: Position is frozen, so we must recreate it with updated fields
         self._positions[symbol] = Position(
@@ -282,12 +285,14 @@ class LiveRunner:
         )
 
     def _calc_equity(self) -> float:
-        """Total equity = cash + market value of all positions (per-symbol prices)."""
+        """Total equity = cash + market value of all positions."""
         cm = self._executor.cost_model
         mtm = 0.0
         for sym, pos in self._positions.items():
             price = self._last_prices.get(sym, pos.entry_price)
-            mtm += price * pos.quantity * cm.multiplier
+            # WHY: same formula as backtest — PnL + entry notional (fixes direction bug)
+            mtm += cm.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
+            mtm += pos.entry_price * pos.quantity * cm.multiplier
         return self._cash + mtm
 
     def _record_equity(self, ts: datetime) -> None:
@@ -302,20 +307,25 @@ class LiveRunner:
             self._on_bar(self._run_id, ts, equity, drawdown, ret_1d)
 
     def _record_trade(self, symbol: str, pos: Position, exit_price: float, ts: datetime) -> None:
-        """Calculate trade PnL using cost model and call on_trade callback."""
+        """Calculate trade PnL using shared calc_trade_pnl and call on_trade callback."""
         cm = self._executor.cost_model
-        direction = -1.0 if pos.side == "short" else 1.0
-        gross_pnl = (exit_price - pos.entry_price) * pos.quantity * cm.multiplier * direction
-        commission = cm.calc_commission(exit_price, pos.quantity) + cm.calc_commission(pos.entry_price, pos.quantity)
-        slippage = cm.calc_slippage(pos.quantity) * 2
-        net_pnl = gross_pnl - commission - slippage
+        # WHY: use shared calc_trade_pnl for consistent PnL calculation with backtest.
+        # Live doesn't track entry_commission/slippage on Position, so we re-derive them.
+        entry_commission = cm.calc_commission(pos.entry_price, pos.quantity)
+        entry_slippage = cm.calc_slippage(pos.quantity)
 
-        entry_notional = pos.entry_price * pos.quantity * cm.multiplier
-        gross_return = (gross_pnl / entry_notional * 100) if entry_notional > 0 else 0.0
-        net_return = (net_pnl / entry_notional * 100) if entry_notional > 0 else 0.0
+        pnl = calc_trade_pnl(
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            quantity=pos.quantity,
+            side=pos.side,
+            cost_model=cm,
+            entry_commission=entry_commission,
+            entry_slippage=entry_slippage,
+        )
 
         self._trade_count += 1
-        trade_id = f"{self._run_id}-t{self._trade_count:04d}"
+        trade_id = make_trade_id(self._run_id, self._trade_count)
 
         if self._on_trade:
             self._on_trade({
@@ -328,11 +338,11 @@ class LiveRunner:
                 "entry_price": pos.entry_price,
                 "exit_price": exit_price,
                 "quantity": pos.quantity,
-                "gross_pnl": gross_pnl,
-                "net_pnl": net_pnl,
-                "gross_return": gross_return,
-                "net_return": net_return,
+                "gross_pnl": pnl.gross_pnl,
+                "net_pnl": pnl.net_pnl,
+                "gross_return": pnl.gross_return,
+                "net_return": pnl.net_return,
                 "holding_bars": self._bars_held.get(symbol, 0),
-                "commission": commission,
-                "slippage": slippage,
+                "commission": pnl.commission,
+                "slippage": pnl.slippage,
             })
