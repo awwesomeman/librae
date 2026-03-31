@@ -1,0 +1,9 @@
+# TrendPullback M5 strategy configuration — low-timeframe variant for signal testing
+# M30 trend gate + M5 entry/exit. CLI args override these values.
+strategy: trendpullback_m5
+symbol: BTCUSDT
+market: crypto
+months: 1
+initial_balance: 100000
+max_hold_bars: 24
+poll_interval: 30
