@@ -13,10 +13,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from librae.cost_model import CostModel
-from librae.live_executor import LiveExecutor
-from librae.live_runner import LiveRunner
-from librae.strategy import Action, BaseStrategy, Context
+from librae.core.cost_model import CostModel
+from librae.live.executor import LiveExecutor
+from librae.live.engine import LiveRunner
+from librae.core.strategy import Action, BaseStrategy, Context
 
 
 # ---------------------------------------------------------------------------

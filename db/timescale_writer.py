@@ -16,8 +16,8 @@ import psycopg2.extras
 
 import pandas as pd
 
-from librae.schema import BacktestOutput
-from librae.contracts import SCHEMA_VERSION
+from librae.backtest.schema import BacktestOutput
+from librae.backtest.schema import SCHEMA_VERSION
 from db import TIMESCALE_DSN, get_pool
 
 logger = logging.getLogger(__name__)
@@ -430,7 +430,7 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
     """
     from db.timescale_reader import load_equity_curve, load_trade_blotter
-    from librae.metrics import compute_all
+    from librae.core.metrics import compute_all
 
     eq_df = load_equity_curve(run_id)
     if eq_df.empty or len(eq_df) < 2:

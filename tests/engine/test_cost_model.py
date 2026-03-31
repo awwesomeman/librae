@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from librae.cost_model import CostModel
+from librae.core.cost_model import CostModel
 from librae.config.market_config import get_market
 
 

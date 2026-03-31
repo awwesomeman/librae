@@ -16,8 +16,8 @@ from tests.sample_data import (
     run_simple_sma_crossover,
 )
 from librae.utils import metrics_dict_to_backtest_output
-from librae.persistence import save_backtest_output, load_backtest_output
-from librae.schema import (
+from librae.backtest.persistence import save_backtest_output, load_backtest_output
+from librae.backtest.schema import (
     BacktestOutput,
     RUN_ID_PATTERN,
     VALID_SAMPLE_LABELS,

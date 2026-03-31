@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from librae.contracts import (
+from librae.backtest.schema import (
     REQUIRED_BACKTEST_TOP_LEVEL_KEYS,
     SCHEMA_VERSION,
     ensure_snake_case_keys,

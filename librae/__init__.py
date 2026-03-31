@@ -17,13 +17,10 @@ from .backtest.persistence import save_backtest_output, load_backtest_output
 from .backtest.engine import Backtest, BacktestResult, EquitySnapshot, TradeResult
 from .core.cost_model import CostModel
 from .core.strategy import Action, BaseStrategy, Context, Fill, Position
-from .core.executor import Executor, make_fill
+from .core.executor import Executor, TradePnL, calc_trade_pnl, direction, make_fill
 from .core.metrics import compute_all
-from .core.utils import generate_run_id
-
-# WHY: backward compat — build_backtest_output is still used by strategy run.py
-# until Part B converts to Backtest.build_output()
-from .utils import build_backtest_output, metrics_dict_to_backtest_output
+from .core.utils import generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
+from .utils import metrics_dict_to_backtest_output
 
 __all__ = [
     "BacktestOutput",
@@ -36,8 +33,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "save_backtest_output",
     "load_backtest_output",
-    "build_backtest_output",
-    "generate_run_id",
     "metrics_dict_to_backtest_output",
     "CostModel",
     "Action",
@@ -46,10 +41,18 @@ __all__ = [
     "Fill",
     "Position",
     "Executor",
+    "TradePnL",
+    "calc_trade_pnl",
+    "direction",
     "make_fill",
     "Backtest",
     "BacktestResult",
     "EquitySnapshot",
     "TradeResult",
     "compute_all",
+    "generate_run_id",
+    "make_trade_id",
+    "infer_timeframe",
+    "to_ccxt",
+    "to_canonical",
 ]

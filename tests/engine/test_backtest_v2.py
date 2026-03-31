@@ -5,10 +5,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from librae.cost_model import CostModel
-from librae.engine import Backtest, BacktestResult
-from librae.executor import BacktestExecutor
-from librae.strategy import Action, BaseStrategy, Context
+from librae.core.cost_model import CostModel
+from librae.backtest.engine import Backtest, BacktestResult
+from librae.core.strategy import Action, BaseStrategy, Context
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -39,11 +38,8 @@ def _make_multiindex_df(
     )
 
 
-def _zero_cost_executor() -> BacktestExecutor:
-    return BacktestExecutor(CostModel(
-        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
-    ))
+def _zero_cost() -> CostModel:
+    return CostModel.zero()
 
 
 # ── Strategies for testing ───────────────────────────────────────────────
@@ -87,7 +83,7 @@ class TestBacktestBasics:
     def test_no_trades_flat_equity(self) -> None:
         df = _make_multiindex_df([100.0] * 10)
         bt = Backtest(df, HoldStrategy(), initial_balance=10_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 0
@@ -98,7 +94,7 @@ class TestBacktestBasics:
         prices = [100.0, 100.0, 100.0, 110.0, 110.0, 110.0]
         df = _make_multiindex_df(prices)
         bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -119,7 +115,7 @@ class TestBacktestBasics:
                 return []
 
         bt = Backtest(df, BuyBar2(), initial_balance=10_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -140,7 +136,7 @@ class TestSignalDrivenStrategy:
         df.iloc[6, df.columns.get_loc("exit_signal")] = True
 
         bt = Backtest(df, SignalDrivenStrategy(), initial_balance=10_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -153,7 +149,7 @@ class TestSignalDrivenStrategy:
         # No exit signal — should force close at max_hold_bars
 
         bt = Backtest(df, SignalDrivenStrategy(max_hold_bars=5),
-                      initial_balance=10_000, executor=_zero_cost_executor())
+                      initial_balance=10_000, cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) >= 1
@@ -197,8 +193,7 @@ class TestMultiAsset:
                             actions.append(Action(type="close", instrument=inst))
                 return actions
 
-        executor = _zero_cost_executor()
-        bt = Backtest(df, BuyBothBar2(), initial_balance=100_000, executor=executor)
+        bt = Backtest(df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 2
@@ -211,13 +206,13 @@ class TestWithCosts:
         prices = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
         df = _make_multiindex_df(prices)
 
-        cost_executor = BacktestExecutor(CostModel(
+        cost = CostModel(
             multiplier=1.0, commission_rate=0.01, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
-        ))
+        )
 
         bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
-                      executor=cost_executor)
+                      cost_model=cost)
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -242,7 +237,7 @@ class TestContext:
 
         df = _make_multiindex_df([100.0] * 6)
         bt = Backtest(df, Spy(), initial_balance=10_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         bt.run()
 
         # Bar 0-1: no position
@@ -271,7 +266,7 @@ class TestContext:
 
         df = _make_multiindex_df([100.0] * 8)
         bt = Backtest(df, Tracker(), initial_balance=10_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         bt.run()
 
         # bars_held should increment: 1, 2, 3, 4 (bars 2,3,4,5)

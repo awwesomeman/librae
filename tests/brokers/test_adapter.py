@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from librae.utils import generate_run_id, metrics_dict_to_backtest_output
-from librae.schema import BacktestOutput
+from librae.core.utils import generate_run_id
+from librae.utils import metrics_dict_to_backtest_output
+from librae.backtest.schema import BacktestOutput
 
 
 SAMPLE_METRICS = {

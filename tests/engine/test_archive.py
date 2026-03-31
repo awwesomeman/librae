@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from librae.archive import archive_backtest_parquet
-from librae.schema import (
+from librae.backtest.persistence import archive_backtest_parquet
+from librae.backtest.schema import (
     BacktestOutput,
     EquityCurvePoint,
     RunMetadata,

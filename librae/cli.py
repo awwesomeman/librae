@@ -48,7 +48,7 @@ def parse_with_config(parser: argparse.ArgumentParser) -> argparse.Namespace:
         config_path = Path(args.config)
         if not config_path.exists():
             logging.getLogger(__name__).warning("Config file not found: %s", config_path)
-        elif config_path.exists():
+        else:
             with open(config_path) as f:
                 config = yaml.safe_load(f) or {}
             # Map YAML keys (underscore) to argparse dest names

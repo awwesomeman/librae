@@ -9,12 +9,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from librae.cost_model import CostModel
-from librae.engine import Backtest, BacktestResult, EquitySnapshot, TradeResult
-from librae.executor import BacktestExecutor
-from librae.strategy import Action, BaseStrategy
-from librae.metrics import compute_all
-from librae.schema import StrategyMetrics
+from librae.core.cost_model import CostModel
+from librae.backtest.engine import Backtest, BacktestResult, EquitySnapshot, TradeResult
+from librae.core.strategy import Action, BaseStrategy
+from librae.core.metrics import compute_all
+from librae.backtest.schema import StrategyMetrics
 
 import pandas as pd
 
@@ -153,7 +152,7 @@ class TestComputeAllWithEngine:
             tick_size=0.01, transaction_tax=0.0,
         )
         bt = Backtest(df, BuyBar10CloseBar30(), initial_balance=10_000,
-                      executor=BacktestExecutor(cost))
+                      cost_model=cost)
         result = bt.run()
         m = compute_all(result, idx[0].to_pydatetime(), idx[-1].to_pydatetime())
 

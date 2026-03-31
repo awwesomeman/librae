@@ -13,10 +13,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from librae.cost_model import CostModel
-from librae.engine import Backtest
-from librae.executor import BacktestExecutor
-from librae.strategy import Action, BaseStrategy
+from librae.core.cost_model import CostModel
+from librae.backtest.engine import Backtest
+from librae.core.strategy import Action, BaseStrategy
 from strategies.trendpullback.utils import (
     _merge_daily_gate,
     compute_daily_gate,
@@ -56,11 +55,8 @@ def _prepare_signals(h1_base: pd.DataFrame) -> pd.DataFrame:
     return prepare_signals(h1_base)
 
 
-def _zero_cost_executor() -> BacktestExecutor:
-    return BacktestExecutor(CostModel(
-        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
-    ))
+def _zero_cost() -> CostModel:
+    return CostModel.zero()
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +219,7 @@ class TestEngineExecutionTiming:
         """Trade entry price must equal close[i] where signal fired."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -236,7 +232,7 @@ class TestEngineExecutionTiming:
         """Trade exit price must equal close[j] where exit signal fired."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -249,7 +245,7 @@ class TestEngineExecutionTiming:
         """gross_pnl must equal (exit - entry) * quantity * direction."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         trade = result.trades[0]
@@ -260,7 +256,7 @@ class TestEngineExecutionTiming:
         """holding_bars must equal number of bars from entry to exit."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         trade = result.trades[0]
@@ -272,7 +268,7 @@ class TestEngineExecutionTiming:
         """Equity should not jump before the trade entry."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      executor=_zero_cost_executor())
+                      cost_model=_zero_cost())
         result = bt.run()
 
         eq = result.equity_curve

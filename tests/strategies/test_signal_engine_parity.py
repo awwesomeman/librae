@@ -192,10 +192,9 @@ class TestSignalConditions:
 class TestCostModel:
 
     def test_cost_deducted_from_pnl(self):
-        from librae.cost_model import CostModel
-        from librae.engine import Backtest
-        from librae.executor import BacktestExecutor
-        from librae.strategy import Action, BaseStrategy
+        from librae.core.cost_model import CostModel
+        from librae.backtest.engine import Backtest
+        from librae.core.strategy import Action, BaseStrategy
 
         h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
@@ -228,7 +227,7 @@ class TestCostModel:
             tick_size=0.01, transaction_tax=0.0,
         )
         bt = Backtest(merged_mi, SignalStrat(), initial_balance=100_000,
-                      executor=BacktestExecutor(cost_model))
+                      cost_model=cost_model)
         result = bt.run()
 
         for t in result.trades:
@@ -237,10 +236,9 @@ class TestCostModel:
             assert abs(t.net_pnl - (t.gross_pnl - total_cost)) < 1e-6
 
     def test_zero_cost(self):
-        from librae.cost_model import CostModel
-        from librae.engine import Backtest
-        from librae.executor import BacktestExecutor
-        from librae.strategy import Action, BaseStrategy
+        from librae.core.cost_model import CostModel
+        from librae.backtest.engine import Backtest
+        from librae.core.strategy import Action, BaseStrategy
 
         h1_base = _make_ohlcv(n=500, seed=42)
         h1 = compute_features(h1_base)
@@ -271,7 +269,7 @@ class TestCostModel:
             tick_size=0.01, transaction_tax=0.0,
         )
         bt = Backtest(merged_mi, SignalStrat(), initial_balance=100_000,
-                      executor=BacktestExecutor(cost_model))
+                      cost_model=cost_model)
         result = bt.run()
 
         for t in result.trades:

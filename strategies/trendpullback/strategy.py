@@ -5,7 +5,7 @@ Strategy only does decision-making, not signal computation.
 """
 from __future__ import annotations
 
-from librae.strategy import Action, BaseStrategy, Context
+from librae.core.strategy import Action, BaseStrategy, Context
 
 
 class TrendPullbackStrategy(BaseStrategy):

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from librae.contracts import SCHEMA_VERSION, validate_dataframe_columns, validate_perf_fields, validate_strategy_context
+from librae.backtest.schema import SCHEMA_VERSION, validate_dataframe_columns, validate_perf_fields, validate_strategy_context
 
 
 class SchemaValidationError(ValueError):
