@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from librae.data import fetch_ohlcv, resample_ohlcv
+from data.binance import fetch_ohlcv, resample_ohlcv
 from strategies.trendpullback.utils import (
     compute_daily_gate,
     compute_entry_conditions,

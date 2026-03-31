@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 
-from librae.data import fetch_ohlcv, resample_ohlcv
+from data.binance import fetch_ohlcv, resample_ohlcv
 
 
 # ---------------------------------------------------------------------------

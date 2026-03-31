@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from librae.data import (
+from data.binance import (
     _cache_path,
     _is_cache_fresh,
     _CACHE_MAX_AGE,

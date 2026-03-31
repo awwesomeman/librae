@@ -24,7 +24,7 @@ from strategies.trendpullback.utils import (
     compute_features,
     resample_to_daily,
 )
-from librae.data import resample_ohlcv
+from data.binance import resample_ohlcv
 from pipeline.features.core_features import (
     add_daily_trend_gate,
     add_trendpullback_features,

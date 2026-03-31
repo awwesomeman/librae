@@ -13,7 +13,7 @@ import httpx
 import pandas as pd
 import pytest
 
-from librae.data import (
+from data.binance import (
     BINANCE_KLINES_URL,
     fetch_ohlcv,
     _parse_dt,
