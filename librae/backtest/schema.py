@@ -143,7 +143,7 @@ class StrategyMetrics:
     total_slippage: float | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class BacktestOutput:
     """Top-level backtest output container.
 

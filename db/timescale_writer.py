@@ -6,9 +6,7 @@ strategy_signals, strategy_performance, ohlcv.
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Any
 
 import psycopg2
@@ -18,24 +16,9 @@ import pandas as pd
 
 from librae.backtest.schema import BacktestOutput
 from librae.backtest.schema import SCHEMA_VERSION
-from db import TIMESCALE_DSN, get_pool
+from db import TIMESCALE_DSN, get_conn
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def get_conn(dsn: str = TIMESCALE_DSN):
-    """Yield a psycopg2 connection from the pool with auto-commit/rollback."""
-    pool = get_pool(dsn)
-    conn = pool.getconn()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
 
 
 def _to_dt(ts: Any) -> datetime | None:
@@ -113,9 +96,9 @@ def write_backtest_output(
 
     write_run_metadata(
         run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
-        timeframe=meta.timeframe, mode=getattr(meta, "mode", None),
+        timeframe=meta.timeframe, mode="backtest",
         start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
-        data_source=getattr(meta, "data_source", None), sample=getattr(meta, "sample", None), dsn=dsn,
+        dsn=dsn,
     )
     counts["backtest_runs"] = 1
 
@@ -184,18 +167,17 @@ def write_backtest_output(
         # strategy_signals (derived from trades: entry + exit)
         signal_rows = []
         for tr in output.trades:
-            side = str(tr.side).lower()
-            strength = 1.0 if side in {"buy", "long"} else -1.0
+            strength = 1.0 if tr.side == "long" else -1.0
             signal_rows.append((
                 _to_dt(tr.entry_ts), meta.run_id, meta.strategy,
                 meta.symbol, meta.timeframe,
-                "entry", getattr(meta, "data_source", None),
+                "entry", "backtest",
                 tr.entry_price, strength, 0.5, tr.quantity,
             ))
             signal_rows.append((
                 _to_dt(tr.exit_ts), meta.run_id, meta.strategy,
                 meta.symbol, meta.timeframe,
-                "exit", getattr(meta, "data_source", None),
+                "exit", "backtest",
                 tr.exit_price, -strength, 0.5, tr.quantity,
             ))
         if signal_rows:
@@ -442,8 +424,9 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
     trade_rows = trades_df.to_dict("records") if not trades_df.empty else []
 
     # WHY: compute_all accepts primitive sequences — build them from DB rows
-    equity_values = [float(row["equity"]) for row in eq_df.to_dict("records")]
-    timestamps = [row["_time"] for row in eq_df.to_dict("records")]
+    eq_records = eq_df.to_dict("records")
+    equity_values = [float(r["equity"]) for r in eq_records]
+    timestamps = [r["_time"] for r in eq_records]
     trade_pnls = [
         _NS(
             gross_pnl=r.get("gross_pnl", 0), net_pnl=r.get("net_pnl", 0),

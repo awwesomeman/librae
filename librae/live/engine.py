@@ -8,8 +8,9 @@ from __future__ import annotations
 import logging
 import signal
 import time
+import types
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Callable
 
 import pandas as pd
 
@@ -124,7 +125,7 @@ class LiveTrader:
 
     def _setup_signal_handlers(self) -> None:
         """Handle SIGTERM/SIGINT for graceful shutdown."""
-        def _handler(signum: int, frame: Any) -> None:
+        def _handler(signum: int, frame: types.FrameType | None) -> None:
             logger.info("Received signal %d, shutting down gracefully", signum)
             self.stop()
         signal.signal(signal.SIGTERM, _handler)

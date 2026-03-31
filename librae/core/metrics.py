@@ -10,6 +10,7 @@ delta between consecutive bars), so the same code works for H1, D1, W1, etc.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
@@ -45,7 +46,7 @@ def _infer_annual_periods(index: pd.DatetimeIndex) -> int:
 
 def compute_all(
     equity_values: Sequence[float],
-    timestamps: Sequence,
+    timestamps: Sequence[datetime],
     trade_pnls: Sequence[TradePnL],
     total_bars: int,
     annualize: bool = False,

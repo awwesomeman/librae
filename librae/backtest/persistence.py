@@ -13,7 +13,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import pandas as pd
 
@@ -38,7 +38,7 @@ def _iso_to_dt(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def _output_to_dict(output: BacktestOutput) -> dict:
+def _output_to_dict(output: BacktestOutput) -> dict[str, Any]:
     """Serialize BacktestOutput to a plain dict (JSON-safe)."""
     meta = asdict(output.run_metadata)
     # datetime → ISO string
@@ -68,7 +68,7 @@ def _output_to_dict(output: BacktestOutput) -> dict:
     }
 
 
-def _dict_to_output(data: dict) -> BacktestOutput:
+def _dict_to_output(data: dict[str, Any]) -> BacktestOutput:
     """Deserialize a plain dict back to BacktestOutput."""
     require_keys(data, REQUIRED_BACKTEST_TOP_LEVEL_KEYS, "backtest_output")
     payload_version = str(data.get("schema_version", ""))

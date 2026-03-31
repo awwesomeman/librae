@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Sequence
 
-import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -34,7 +33,7 @@ from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import TradePnL, TradeResult, close_position, direction, make_fill
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
-from librae.core.utils import generate_run_id, infer_timeframe, make_trade_id, to_ccxt
+from librae.core.utils import generate_run_id, infer_timeframe, make_trade_id
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +142,9 @@ class Backtest:
 
     # --- Private helpers ---
 
-    def _get_cost_model(self, sym: str) -> CostModel:
+    def _get_cost_model(self, symbol: str) -> CostModel:
         """Get cost model for a symbol, falling back to __default__."""
-        return self._cost_models.get(sym) or self._cost_models.get("__default__", CostModel.zero())
+        return self._cost_models.get(symbol) or self._cost_models.get("__default__", CostModel.zero())
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
@@ -310,8 +309,8 @@ class Backtest:
 
         return BacktestOutput(
             run_metadata=run_metadata,
-            equity_curve=equity_points,
-            trades=trade_records,
+            equity_curve=tuple(equity_points),
+            trades=tuple(trade_records),
             metrics=self._metrics,
         )
 
@@ -323,7 +322,7 @@ class Backtest:
         return self._metrics
 
     @staticmethod
-    def _build_trade_records(result: BacktestResult, run_id: str) -> list:
+    def _build_trade_records(result: BacktestResult, run_id: str) -> list[TradeRecord]:
         """Map TradeResult → TradeRecord."""
         from librae.backtest.schema import TradeRecord
         return [
