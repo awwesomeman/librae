@@ -1,6 +1,7 @@
 # 2026-03-31 — 資料庫 Schema 現況與優化方向
 
 > 狀態：accepted
+> 更新 2026-04-01：補充 TrendMaster 實驗中發現的實際問題（schema 同步、params 缺失、OHLCV 重複寫入）
 
 ## 現況概覽
 
@@ -117,6 +118,16 @@ backtest_runs  ← 中心表 (PK: run_id)
 
 ## 待優化方向
 
+### P0 — 實際遇到的問題
+
+> 以下問題在 TrendMaster 實驗（2026-04-01）中實際觸發，非理論推演。
+
+| 項目 | 現況 | 影響 | 建議 |
+|------|------|------|------|
+| Schema migration 無自動化 | `timescale_init.sql` 加了 `tax` / `total_tax` 欄位，但 VPS 已存在的 DB 不會自動更新 | `write_backtest_output` 直接報錯 `column "tax" does not exist`，需手動 ALTER TABLE 才能寫入 | 加 `db/migrate.py`，用 `ALTER TABLE ADD COLUMN IF NOT EXISTS` 確保欄位齊全；writer 啟動前自動執行 |
+| backtest_runs 不存參數 | DB 有 run_id 和 metrics，但不知道該次 run 用了什麼參數 | Grafana 上只能看曲線，無法比較不同配置（例：MA(9,21) vs MA(9,26) 的 equity 差異） | `backtest_runs` 加 `params JSONB` 欄位，寫入完整 config dict；Grafana 用 `params->>'key'` 篩選 |
+| OHLCV 每次 run 重複寫入 | 同一段 BTCUSDT H1 跑 4 次 → 4 × 13K = 52K 行重複 | 儲存浪費、查詢變慢 | ohlcv unique key 改為 `(ts, symbol, timeframe)`（移除 run_id），寫入改 `INSERT ON CONFLICT DO NOTHING` |
+
 ### P1 — 短期可改善
 
 | 項目 | 現況 | 建議 | 原因 |
@@ -124,12 +135,13 @@ backtest_runs  ← 中心表 (PK: run_id)
 | trade_blotter 缺 run_id 索引 | 僅 PK(trade_id) | `CREATE INDEX ON trade_blotter(run_id)` | 按 run 查交易是高頻操作，目前走 seq scan |
 | TEXT 欄位無約束 | mode, side, signal_type 皆 TEXT | 加 `CHECK` 約束 (e.g. `side IN ('long','short')`) | 防止髒資料寫入 |
 | strategy_signals 無 FK | run_id 無 FK 約束 | 加 `REFERENCES backtest_runs(run_id) ON DELETE CASCADE` | 與其他表一致，避免孤兒資料 |
+| equity_curve 缺 strategy_name | 只有 run_id，無法直接辨識策略 | 加 `strategy_name TEXT`，或 Grafana JOIN backtest_runs | 方便在 Grafana 疊多條 equity curve 做 overlay 比較 |
 
 ### P2 — 中期規模化
 
 | 項目 | 現況 | 建議 | 原因 |
 |------|------|------|------|
-| ohlcv 綁 run_id | 每次 run 重複存同一段行情 | 拆為獨立 market data 表 `(symbol, timeframe, ts)` 為 PK，run 只引用 | 避免重複儲存，節省空間 |
+| ohlcv 綁 run_id | 每次 run 重複存同一段行情 | 見 P0 OHLCV 去重方案 | 避免重複儲存，節省空間 |
 | SimpleConnectionPool | 不支援多執行緒 | 若需多 worker 併發寫入，換 `ThreadedConnectionPool` | 當前單執行緒無問題，併發時會出錯 |
 | trade_blotter 非 hypertable | 普通表 | 若單策略交易量超過數十萬筆，轉 hypertable | 利用 TimescaleDB 壓縮和分區查詢優化 |
 
@@ -145,3 +157,4 @@ backtest_runs  ← 中心表 (PK: run_id)
 
 - [2026-03-06 核心決策整理](2026-03-06-core-tooling-and-schema.md) — Schema 命名規範 (snake_case)
 - [2026-03-30 TSDB bind 可配置](2026-03-30-tsdb-bind-configurable.md) — 部署彈性
+- [2026-04-01 回測引擎優化](2026-04-01-backtest-engine-optimization.md) — 引擎層優化（SL/TP、cache、效能）
