@@ -160,32 +160,23 @@ data/market_data.py    ← 統一入口：get_ohlcv()
 
 ---
 
-### Step 3：統一資料抓取層 ✅（部分）
+### Step 3：統一資料抓取層 ✅
 
 **目標：** 整合兩套 fetcher + 兩層 cache 為統一入口。
 
 **依據：** [2026-04-01 OHLCV 遷移](../decisions/2026-04-01-ohlcv-migrate-to-timescaledb.md) 架構設計
 
-#### 已完成
-
-| 動作 | 檔案 | 狀態 |
-|---|---|---|
-| 新建 `data/market_data.py` — `get_ohlcv()` 統一入口 | 新建 | ✅ |
-| `strategies/trendpullback/utils.py` 改用 `get_ohlcv()` | 修改 | ✅ |
-| `strategies/trendpullback_m5/utils.py` 改用 `get_ohlcv()` | 修改 | ✅ |
-| `persist_backtest()` 保留 `write_ohlcv()` 作為 safety net | 修改 | ✅ |
-
-`get_ohlcv()` 流程：DB 查詢 → 找缺口 → API 補齊 → upsert DB → 回傳。DB 不可用時 fallback 直接打 API。
-
-`data/binance.py` 保留為底層 API fetcher（`get_ohlcv()` 內部委派），`resample_ohlcv()` 仍被策略使用。
-
-#### 未來再做
-
-| 動作 | 說明 |
+| 動作 | 狀態 |
 |---|---|
-| Sim warmup 改從 DB 讀取 | `librae/live/wiring.py` 的 fetcher 改用 `get_ohlcv()` |
-| 整合 `pipeline/fetchers/` retry 邏輯 | 吸收 exponential backoff 到 `market_data.py` |
-| 移除 `pipeline/features/cache_store.py` | JSON cache 被 DB cache 取代 |
+| 新建 `data/market_data.py` — `get_ohlcv()` 統一入口（DB → API gap-fill → DB） | ✅ |
+| `strategies/*/utils.py` 改用 `get_ohlcv()` | ✅ |
+| `persist_backtest()` 保留 `write_ohlcv()` 作為 safety net | ✅ |
+| Sim warmup 從 DB 讀取（`warmup_fetcher`，動態計算 months） | ✅ |
+| `data/binance.py` 加入 exponential backoff + Retry-After | ✅ |
+| `interval_to_timedelta()` 提取到 `librae/core/utils.py` 共用 | ✅ |
+| 刪除 `pipeline/fetchers/binance_fetcher.py`（重複） | ✅ |
+| 刪除 `pipeline/features/cache_store.py`（JSON cache 被 DB 取代） | ✅ |
+| `core_data_sources.py` spot/futures 委派 `get_ohlcv()` | ✅ |
 
 **驗收（部署後）：**
 - [ ] `get_ohlcv()` 首次呼叫 → API + DB 寫入
@@ -201,7 +192,7 @@ Step 1 (Schema + Code) ✅
   │
   ├──→ Step 2 (Dashboard) ✅
   │
-  └──→ Step 3 (統一資料層) ✅ 核心完成，sim warmup + pipeline 整合未來再做
+  └──→ Step 3 (統一資料層) ✅
 ```
 
 ## 部署流程（Step 1）
