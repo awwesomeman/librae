@@ -1,5 +1,5 @@
 {
-  "uid": "signal-monitor-v1",
+  "uid": "signal-monitor-v2",
   "title": "Signal Monitor",
   "tags": [
     "signal",
@@ -10,16 +10,6 @@
   "schemaVersion": 39,
   "templating": {
     "list": [
-      {
-        "name": "mode",
-        "label": "Mode",
-        "type": "custom",
-        "query": "backtest,sim",
-        "current": {
-          "text": "backtest",
-          "value": "backtest"
-        }
-      },
       {
         "name": "strategy",
         "type": "query",
@@ -49,34 +39,46 @@
         "label": "Symbol"
       },
       {
-        "name": "window",
-        "type": "custom",
-        "query": "30,50,100",
-        "current": {
-          "text": "30",
-          "value": "30"
-        },
-        "label": "Rolling Window"
-      },
-      {
-        "name": "obs_window",
-        "label": "MFE/MAE Window",
+        "name": "timeframe",
+        "label": "Timeframe",
         "type": "query",
-        "query": "SELECT DISTINCT regexp_replace(column_name, '^mfe_', '')::int AS window FROM information_schema.columns WHERE table_name='signal_outcomes' AND column_name LIKE 'mfe_%' ORDER BY 1",
-        "current": {
-          "text": "24",
-          "value": "24"
-        },
         "datasource": {
           "uid": "P40AE60E18F02DE32"
         },
+        "query": "SELECT DISTINCT timeframe FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
+        "current": {
+          "text": "H1",
+          "value": "H1"
+        },
         "refresh": 1
+      },
+      {
+        "name": "n",
+        "label": "Forward Horizon (bars)",
+        "type": "textbox",
+        "query": "24"
+      },
+      {
+        "name": "k",
+        "label": "Rolling Window (signals)",
+        "type": "textbox",
+        "query": "50"
+      },
+      {
+        "name": "expected_direction",
+        "label": "Signal Direction",
+        "type": "custom",
+        "query": "1,-1",
+        "current": {
+          "text": "1",
+          "value": "1"
+        }
       }
     ]
   },
   "panels": [
     {
-      "title": "Summary",
+      "title": "Snapshot",
       "type": "row",
       "gridPos": {
         "h": 1,
@@ -88,7 +90,7 @@
     },
     {
       "title": "Unrealized PnL",
-      "description": "Latest signal: (current_price - entry_price) / entry_price \u00d7 signal_value. Sim only, N/A for backtest.",
+      "description": "expected_direction × (current_price − entry_price) / entry_price. Entry = price at signal firing.",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -136,17 +138,18 @@
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "SELECT NULL::double precision AS \"PnL\"",
+          "rawSql": "WITH latest_signal AS (\n  SELECT signal_ts, signal_value,\n    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' ORDER BY ts DESC LIMIT 1) AS current_close,\n    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) AS signal_price\n  FROM signal_outcomes s\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='sim'\n  ORDER BY signal_ts DESC LIMIT 1\n)\nSELECT $expected_direction * (current_close - signal_price) / NULLIF(signal_price, 0) AS \"PnL\"\nFROM latest_signal\nWHERE current_close IS NOT NULL AND signal_price IS NOT NULL",
           "format": "table"
         }
       ]
     },
     {
-      "title": "Signals",
+      "title": "Mean Fwd Return (T+$n)",
+      "description": "expected_direction × AVG(forward return over n bars). Positive = edge aligned with expected direction.",
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 3,
+        "w": 4,
         "x": 4,
         "y": 1
       },
@@ -155,43 +158,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "fixedColor": "blue",
-            "mode": "fixed"
-          }
-        }
-      },
-      "options": {
-        "graphMode": "none",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "SELECT COUNT(*) AS \"Signals\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND $__timeFilter(signal_ts)",
-          "format": "table"
-        }
-      ],
-      "description": "Total signal count in selected time range."
-    },
-    {
-      "title": "Win Rate",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 7,
-        "y": 1
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
           "unit": "percentunit",
-          "decimals": 1,
+          "decimals": 3,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -201,15 +169,15 @@
               },
               {
                 "color": "red",
-                "value": 0.35
+                "value": -0.005
               },
               {
                 "color": "yellow",
-                "value": 0.45
+                "value": 0
               },
               {
                 "color": "green",
-                "value": 0.5
+                "value": 0.001
               }
             ]
           }
@@ -224,93 +192,19 @@
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "SELECT AVG(CASE WHEN sign(signal_value) = sign(fwd_return_24) THEN 1.0 ELSE 0.0 END) AS \"WR\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND $__timeFilter(signal_ts) AND fwd_return_24 IS NOT NULL",
+          "rawSql": "WITH fwd AS (\n  SELECT (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n    ORDER BY ts LIMIT 1 OFFSET ($n - 1)\n  ) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT $expected_direction * AVG(ret) AS \"Mean Ret\" FROM fwd",
           "format": "table"
         }
-      ],
-      "description": "sign(signal_value) == sign(fwd_return_24). Typical: 40-55% for trend-following."
+      ]
     },
     {
-      "title": "MFE (Avg)",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 10,
-        "y": 1
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 3,
-          "color": {
-            "fixedColor": "green",
-            "mode": "fixed"
-          }
-        }
-      },
-      "options": {
-        "graphMode": "none",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "SELECT AVG(mfe_24) AS \"MFE\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND $__timeFilter(signal_ts) AND mfe_24 IS NOT NULL",
-          "format": "table"
-        }
-      ],
-      "description": "Mean Maximum Favorable Excursion within 24 bars. Higher = signal catches larger moves."
-    },
-    {
-      "title": "MAE (Avg)",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 13,
-        "y": 1
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 3,
-          "color": {
-            "fixedColor": "red",
-            "mode": "fixed"
-          }
-        }
-      },
-      "options": {
-        "graphMode": "none",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "SELECT AVG(mae_24) AS \"MAE\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND $__timeFilter(signal_ts) AND mae_24 IS NOT NULL",
-          "format": "table"
-        }
-      ],
-      "description": "Mean Maximum Adverse Excursion within 24 bars. Lower = cleaner entries."
-    },
-    {
-      "title": "MFE/MAE",
+      "title": "Edge Ratio (T+$n)",
+      "description": "AVG(MFE) / AVG(MAE) over n bars. MFE = max favorable excursion from entry, MAE = max adverse excursion from entry. >2 = healthy, <1 = adverse exceeds favorable.",
       "type": "stat",
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 16,
+        "x": 8,
         "y": 1
       },
       "datasource": {
@@ -351,19 +245,19 @@
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "SELECT AVG(mfe_24) / NULLIF(AVG(mae_24), 0) AS \"Ratio\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND $__timeFilter(signal_ts) AND mfe_24 IS NOT NULL AND mae_24 IS NOT NULL",
+          "rawSql": "WITH exc AS (\n  SELECT exc.mfe, exc.mae\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close AS entry_close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
           "format": "table"
         }
-      ],
-      "description": "MFE_avg / MAE_avg. >2 = healthy edge. <1 = risk exceeds reward."
+      ]
     },
     {
-      "title": "Bars to MFE",
+      "title": "Last Signal Age",
+      "description": "Hours since last signal. >48hr may indicate system failure or regime change.",
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 20,
+        "w": 3,
+        "x": 12,
         "y": 1
       },
       "datasource": {
@@ -371,9 +265,58 @@
       },
       "fieldConfig": {
         "defaults": {
+          "unit": "h",
           "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 24
+              },
+              {
+                "color": "red",
+                "value": 48
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "uid": "P40AE60E18F02DE32"
+          },
+          "rawSql": "SELECT EXTRACT(EPOCH FROM NOW() - MAX(signal_ts)) / 3600.0 AS \"Age\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='sim'",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "title": "N (Signals)",
+      "description": "Total signal count in selected time range.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
+      "datasource": {
+        "uid": "P40AE60E18F02DE32"
+      },
+      "fieldConfig": {
+        "defaults": {
           "color": {
-            "fixedColor": "purple",
+            "fixedColor": "blue",
             "mode": "fixed"
           }
         }
@@ -387,14 +330,85 @@
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "SELECT AVG(bars_to_mfe) AS \"Bars\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND $__timeFilter(signal_ts) AND bars_to_mfe IS NOT NULL",
+          "rawSql": "SELECT COUNT(*) AS \"N\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='sim' AND $__timeFilter(signal_ts)",
           "format": "table"
         }
-      ],
-      "description": "Mean bars to reach MFE. Shorter = faster payoff, informs holding period."
+      ]
     },
     {
-      "title": "Signal Quality",
+      "title": "Signal Value",
+      "description": "Latest signal_value. Boolean signals = always 1. Continuous signals = model output magnitude.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 1
+      },
+      "datasource": {
+        "uid": "P40AE60E18F02DE32"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "noValue": "N/A",
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          }
+        }
+      },
+      "options": {
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "uid": "P40AE60E18F02DE32"
+          },
+          "rawSql": "SELECT signal_value AS \"Value\" FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='sim' ORDER BY signal_ts DESC LIMIT 1",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "title": "Timeframe",
+      "description": "Signal monitoring frequency. Derived from signal_outcomes.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "datasource": {
+        "uid": "P40AE60E18F02DE32"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          }
+        }
+      },
+      "options": {
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "uid": "P40AE60E18F02DE32"
+          },
+          "rawSql": "SELECT '$timeframe' AS \"Timeframe\"",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "title": "Trend",
       "type": "row",
       "gridPos": {
         "h": 1,
@@ -405,11 +419,12 @@
       "collapsed": false
     },
     {
-      "title": "IC Around Event (T-6 to T+24)",
-      "type": "barchart",
+      "title": "Price & Signals",
+      "description": "Price (left axis) with signal firing points (right axis, orange dots).",
+      "type": "timeseries",
       "gridPos": {
         "h": 8,
-        "w": 6,
+        "w": 12,
         "x": 0,
         "y": 6
       },
@@ -418,103 +433,72 @@
       },
       "fieldConfig": {
         "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "axisPlacement": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Signal"
+            },
+            "properties": [
               {
-                "color": "red",
-                "value": null
+                "id": "custom.axisPlacement",
+                "value": "right"
               },
               {
-                "color": "red",
-                "value": -0.05
+                "id": "custom.drawStyle",
+                "value": "points"
               },
               {
-                "color": "yellow",
+                "id": "custom.pointSize",
+                "value": 8
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
                 "value": 0
-              },
-              {
-                "color": "green",
-                "value": 0.05
               }
             ]
           }
-        }
-      },
-      "options": {
-        "orientation": "vertical",
-        "groupWidth": 0.7,
-        "barWidth": 0.8
+        ]
       },
       "targets": [
         {
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "WITH base AS (\n  SELECT signal_value,\n    pre_return_6, pre_return_3, pre_return_1,\n    fwd_return_1, fwd_return_6, fwd_return_12, fwd_return_24\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND $__timeFilter(signal_ts)\n    AND fwd_return_1 IS NOT NULL\n)\nSELECT 'T-6' AS horizon, corr(signal_value, pre_return_6) AS \"IC\" FROM base\nUNION ALL SELECT 'T-3', corr(signal_value, pre_return_3) FROM base\nUNION ALL SELECT 'T-1', corr(signal_value, pre_return_1) FROM base\nUNION ALL SELECT 'T+1', corr(signal_value, fwd_return_1) FROM base\nUNION ALL SELECT 'T+6', corr(signal_value, fwd_return_6) FROM base\nUNION ALL SELECT 'T+12', corr(signal_value, fwd_return_12) FROM base\nUNION ALL SELECT 'T+24', corr(signal_value, fwd_return_24) FROM base",
-          "format": "table"
+          "rawSql": "SELECT ts AS time, close AS \"Close\"\nFROM ohlcv\nWHERE symbol='$symbol' AND timeframe='$timeframe'\n  AND $__timeFilter(ts)\nORDER BY ts",
+          "format": "time_series",
+          "refId": "price"
+        },
+        {
+          "datasource": {
+            "uid": "P40AE60E18F02DE32"
+          },
+          "rawSql": "SELECT signal_ts AS time, signal_value AS \"Signal\"\nFROM signal_outcomes\nWHERE strategy='$strategy' AND symbol='$symbol' AND source='sim'\n  AND $__timeFilter(signal_ts)\nORDER BY signal_ts",
+          "format": "time_series",
+          "refId": "signals"
         }
-      ],
-      "description": "corr(signal_value, return) at each horizon. Pre-event IC > 0 suggests lagging signal (chasing price)."
+      ]
     },
     {
-      "title": "Rolling IC ($window signals)",
+      "title": "Cumulative Signal Return (T+$n)",
+      "description": "Cumulative expected_direction × forward return over n bars. Pure signal edge accumulation — no position sizing, slippage, or fees.",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 6
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": -0.1
-              },
-              {
-                "color": "yellow",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 0.1
-              }
-            ]
-          }
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH ranked AS (\n  SELECT signal_ts, signal_value, fwd_return_24,\n    ROW_NUMBER() OVER (ORDER BY signal_ts) AS rn\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND fwd_return_24 IS NOT NULL\n)\nSELECT a.signal_ts AS time,\n  corr(b.signal_value, b.fwd_return_24) AS \"Rolling IC\"\nFROM ranked a\nJOIN ranked b ON b.rn BETWEEN a.rn - $window + 1 AND a.rn\nWHERE a.rn >= $window\nGROUP BY a.signal_ts, a.rn\nORDER BY a.signal_ts",
-          "format": "time_series"
-        }
-      ],
-      "description": "Rolling corr(signal_value, fwd_return_24). Typical crypto H1: 0.03-0.10. Sustained <0 = signal broken."
-    },
-    {
-      "title": "Win Rate by Horizon",
-      "type": "barchart",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
+        "w": 12,
         "x": 12,
         "y": 6
       },
@@ -524,84 +508,9 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0,
-          "max": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.4
-              },
-              {
-                "color": "green",
-                "value": 0.5
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "orientation": "vertical",
-        "groupWidth": 0.7,
-        "barWidth": 0.8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH base AS (\n  SELECT signal_value, fwd_return_1, fwd_return_6, fwd_return_12, fwd_return_24\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND $__timeFilter(signal_ts) AND fwd_return_1 IS NOT NULL\n),\nstats AS (\n  SELECT\n    AVG(CASE WHEN sign(signal_value) = sign(fwd_return_1) THEN 1.0 ELSE 0.0 END) AS wr1,\n    AVG(CASE WHEN sign(signal_value) = sign(fwd_return_6) THEN 1.0 ELSE 0.0 END) AS wr6,\n    AVG(CASE WHEN sign(signal_value) = sign(fwd_return_12) THEN 1.0 ELSE 0.0 END) AS wr12,\n    AVG(CASE WHEN sign(signal_value) = sign(fwd_return_24) THEN 1.0 ELSE 0.0 END) AS wr24\n  FROM base\n)\nSELECT v.horizon, v.\"Win Rate\"\nFROM stats, LATERAL (\n  VALUES ('T+1', wr1), ('T+6', wr6), ('T+12', wr12), ('T+24', wr24)\n) AS v(horizon, \"Win Rate\")",
-          "format": "table"
-        }
-      ],
-      "description": "sign(signal_value) == sign(fwd_return) at T+1/6/12/24. Reveals optimal holding period."
-    },
-    {
-      "title": "Rolling Win Rate ($window signals)",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 6
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1,
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.3
-              },
-              {
-                "color": "yellow",
-                "value": 0.4
-              },
-              {
-                "color": "green",
-                "value": 0.5
-              }
-            ]
           }
         }
       },
@@ -610,16 +519,15 @@
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "WITH base AS (\n  SELECT signal_ts,\n    CASE WHEN sign(signal_value) = sign(fwd_return_24) THEN 1.0 ELSE 0.0 END AS win,\n    ROW_NUMBER() OVER (ORDER BY signal_ts) AS rn\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND fwd_return_24 IS NOT NULL\n)\nSELECT signal_ts AS time,\n  AVG(win) OVER (ORDER BY signal_ts ROWS BETWEEN ($window - 1) PRECEDING AND CURRENT ROW) AS \"Win Rate\"\nFROM base\nWHERE rn >= $window\nORDER BY signal_ts",
+          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n    ORDER BY ts LIMIT 1 OFFSET ($n - 1)\n  ) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  SUM($expected_direction * ret) OVER (ORDER BY signal_ts) AS \"Cumulative Return\"\nFROM fwd\nORDER BY signal_ts",
           "format": "time_series"
         }
-      ],
-      "description": "Rolling directional accuracy over $window signals. Typical: 40-55%. Drop below 35% = regime shift."
+      ]
     },
     {
-      "title": "Return per Bar (T-6 to T+24)",
-      "description": "Per-bar adjusted return (return/n) at each horizon. Normalized for cross-horizon comparison. Pre-event bars detect price chasing.",
-      "type": "barchart",
+      "title": "Rolling $k Mean Return (T+$n)",
+      "description": "Rolling k-signal average of expected_direction × forward return over n bars. Declining trend = signal edge weakening.",
+      "type": "timeseries",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -631,253 +539,53 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "P25"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 20
-              }
-            ]
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
           },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "P75"
-            },
-            "properties": [
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
+                "color": "red",
+                "value": null
               },
               {
-                "id": "custom.fillOpacity",
-                "value": 20
+                "color": "red",
+                "value": -0.005
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.001
               }
             ]
           }
-        ]
-      },
-      "options": {
-        "orientation": "vertical",
-        "groupWidth": 0.7,
-        "barWidth": 0.9,
-        "stacking": "none"
+        }
       },
       "targets": [
         {
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "WITH adj AS (\n  SELECT\n    signal_value * pre_return_6 / 6.0 AS r_neg6,\n    signal_value * pre_return_3 / 3.0 AS r_neg3,\n    signal_value * pre_return_1 / 1.0 AS r_neg1,\n    signal_value * fwd_return_1 / 1.0 AS r1,\n    signal_value * fwd_return_6 / 6.0 AS r6,\n    signal_value * fwd_return_12 / 12.0 AS r12,\n    signal_value * fwd_return_24 / 24.0 AS r24\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND $__timeFilter(signal_ts) AND fwd_return_1 IS NOT NULL\n)\nSELECT 'T-6' AS horizon, AVG(r_neg6) AS \"Mean\",\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r_neg6) AS \"Median\",\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r_neg6) AS \"P25\",\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r_neg6) AS \"P75\" FROM adj\nUNION ALL\nSELECT 'T-3', AVG(r_neg3),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r_neg3),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r_neg3),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r_neg3) FROM adj\nUNION ALL\nSELECT 'T-1', AVG(r_neg1),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r_neg1),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r_neg1),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r_neg1) FROM adj\nUNION ALL\nSELECT 'T+1', AVG(r1),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r1),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r1),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r1) FROM adj\nUNION ALL\nSELECT 'T+6', AVG(r6),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r6),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r6),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r6) FROM adj\nUNION ALL\nSELECT 'T+12', AVG(r12),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r12),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r12),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r12) FROM adj\nUNION ALL\nSELECT 'T+24', AVG(r24),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r24),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r24),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r24) FROM adj",
-          "format": "table"
+          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    $expected_direction * (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS adj_return,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n    ORDER BY ts LIMIT 1 OFFSET ($n - 1)\n  ) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(adj_return) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW) AS \"Mean Return\"\nFROM fwd\nWHERE rn >= $k\nORDER BY signal_ts",
+          "format": "time_series"
         }
       ]
     },
     {
-      "title": "Cumulative Return (T-6 to T+24)",
-      "description": "Total adjusted return at each horizon. Not normalized. Shows absolute payoff per signal.",
-      "type": "barchart",
+      "title": "Rolling $k Edge Ratio (T+$n)",
+      "description": "Rolling k-signal AVG(MFE) / AVG(MAE) over n bars. >2 = healthy, <1 = adverse exceeds favorable.",
+      "type": "timeseries",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
         "y": 14
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "P25"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 20
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "P75"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 20
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "orientation": "vertical",
-        "groupWidth": 0.7,
-        "barWidth": 0.9,
-        "stacking": "none"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH adj AS (\n  SELECT\n    signal_value * pre_return_6 AS r_neg6,\n    signal_value * pre_return_3 AS r_neg3,\n    signal_value * pre_return_1 AS r_neg1,\n    signal_value * fwd_return_1 AS r1,\n    signal_value * fwd_return_6 AS r6,\n    signal_value * fwd_return_12 AS r12,\n    signal_value * fwd_return_24 AS r24\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND $__timeFilter(signal_ts) AND fwd_return_1 IS NOT NULL\n)\nSELECT 'T-6' AS horizon, AVG(r_neg6) AS \"Mean\",\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r_neg6) AS \"Median\",\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r_neg6) AS \"P25\",\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r_neg6) AS \"P75\" FROM adj\nUNION ALL\nSELECT 'T-3', AVG(r_neg3),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r_neg3),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r_neg3),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r_neg3) FROM adj\nUNION ALL\nSELECT 'T-1', AVG(r_neg1),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r_neg1),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r_neg1),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r_neg1) FROM adj\nUNION ALL\nSELECT 'T+1', AVG(r1),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r1),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r1),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r1) FROM adj\nUNION ALL\nSELECT 'T+6', AVG(r6),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r6),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r6),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r6) FROM adj\nUNION ALL\nSELECT 'T+12', AVG(r12),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r12),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r12),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r12) FROM adj\nUNION ALL\nSELECT 'T+24', AVG(r24),\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r24),\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY r24),\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY r24) FROM adj",
-          "format": "table"
-        }
-      ]
-    },
-    {
-      "title": "Signal Equity Curve",
-      "description": "Cumulative PnL if entering every signal and holding for 1/6/12/24 bars. No SL/TP. Toggle horizons via legend.",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 22
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 5
-          }
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH base AS (\n  SELECT signal_ts,\n    signal_value * fwd_return_1 AS r1,\n    signal_value * fwd_return_6 AS r6,\n    signal_value * fwd_return_12 AS r12,\n    signal_value * fwd_return_24 AS r24\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND $__timeFilter(signal_ts)\n    AND fwd_return_1 IS NOT NULL\n  ORDER BY signal_ts\n)\nSELECT signal_ts AS time,\n  SUM(r1) OVER (ORDER BY signal_ts) AS \"Hold 1\",\n  SUM(r6) OVER (ORDER BY signal_ts) AS \"Hold 6\",\n  SUM(r12) OVER (ORDER BY signal_ts) AS \"Hold 12\",\n  SUM(r24) OVER (ORDER BY signal_ts) AS \"Hold 24\"\nFROM base",
-          "format": "time_series"
-        }
-      ]
-    },
-    {
-      "title": "Edge Profile",
-      "type": "row",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 31
-      },
-      "collapsed": false
-    },
-    {
-      "title": "Rolling MFE p50 ($obs_window bars)",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 0,
-        "y": 32
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10
-          }
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH signals AS (\n  SELECT signal_ts,\n    mfe_24 AS mfe,\n    ROW_NUMBER() OVER (ORDER BY signal_ts) AS rn\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND mfe_24 IS NOT NULL\n)\nSELECT a.signal_ts AS time,\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY b.mfe) AS \"MFE p50\"\nFROM signals a\nJOIN signals b ON b.rn BETWEEN a.rn - $window + 1 AND a.rn\nWHERE a.rn >= $window\nGROUP BY a.signal_ts, a.rn\nORDER BY a.signal_ts",
-          "format": "time_series"
-        }
-      ],
-      "description": "Rolling median MFE(24). Declining = shrinking opportunity, trend weakening."
-    },
-    {
-      "title": "Rolling MAE p75/p95 ($obs_window bars)",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 32
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "lineWidth": 2
-          }
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH signals AS (\n  SELECT signal_ts,\n    mae_24 AS mae,\n    ROW_NUMBER() OVER (ORDER BY signal_ts) AS rn\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode' AND mae_24 IS NOT NULL\n)\nSELECT a.signal_ts AS time,\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY b.mae) AS \"MAE p75\",\n  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.mae) AS \"MAE p95\"\nFROM signals a\nJOIN signals b ON b.rn BETWEEN a.rn - $window + 1 AND a.rn\nWHERE a.rn >= $window\nGROUP BY a.signal_ts, a.rn\nORDER BY a.signal_ts",
-          "format": "time_series"
-        }
-      ],
-      "description": "Rolling 75th/95th percentile MAE(24). Rising = noisier entries, widen SL or pause."
-    },
-    {
-      "title": "MFE/MAE Ratio ($obs_window bars)",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 32
       },
       "datasource": {
         "uid": "P40AE60E18F02DE32"
@@ -916,43 +624,10 @@
           "datasource": {
             "uid": "P40AE60E18F02DE32"
           },
-          "rawSql": "WITH signals AS (\n  SELECT signal_ts,\n    mfe_24 AS mfe,\n    mae_24 AS mae,\n    ROW_NUMBER() OVER (ORDER BY signal_ts) AS rn\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND mfe_24 IS NOT NULL AND mae_24 IS NOT NULL AND mae_24 > 0\n)\nSELECT a.signal_ts AS time,\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY b.mfe)\n  / NULLIF(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY b.mae), 0) AS \"MFE_p50 / MAE_p75\",\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY b.mfe)\n  / NULLIF(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.mae), 0) AS \"MFE_p50 / MAE_p95\"\nFROM signals a\nJOIN signals b ON b.rn BETWEEN a.rn - $window + 1 AND a.rn\nWHERE a.rn >= $window\nGROUP BY a.signal_ts, a.rn\nORDER BY a.signal_ts",
+          "rawSql": "WITH exc AS (\n  SELECT s.signal_ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close AS entry_close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(mfe) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n  / NULLIF(AVG(mae) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n  AS \"Edge Ratio\"\nFROM exc\nWHERE rn >= $k\nORDER BY signal_ts",
           "format": "time_series"
         }
-      ],
-      "description": "Rolling MFE_p50/MAE_p75 (typical) and MFE_p50/MAE_p95 (conservative). >2 healthy, <1 not worth trading."
-    },
-    {
-      "title": "Signal Density (rolling $window)",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 32
-      },
-      "datasource": {
-        "uid": "P40AE60E18F02DE32"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "h",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10
-          }
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "uid": "P40AE60E18F02DE32"
-          },
-          "rawSql": "WITH base AS (\n  SELECT signal_ts,\n    EXTRACT(EPOCH FROM signal_ts - LAG(signal_ts) OVER (ORDER BY signal_ts)) / 3600.0 AS gap_hours,\n    ROW_NUMBER() OVER (ORDER BY signal_ts) AS rn\n  FROM signal_outcomes\n  WHERE strategy='$strategy' AND symbol='$symbol' AND source='$mode'\n    AND $__timeFilter(signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(gap_hours) OVER (ORDER BY signal_ts ROWS BETWEEN ($window - 1) PRECEDING AND CURRENT ROW) AS \"Avg Gap (hours)\"\nFROM base\nWHERE rn >= $window AND gap_hours IS NOT NULL\nORDER BY signal_ts",
-          "format": "time_series"
-        }
-      ],
-      "description": "Rolling avg inter-signal gap (hours). Shrinking = choppy market (more false signals). Expanding = quiet or signal logic inactive."
+      ]
     }
   ],
   "time": {
