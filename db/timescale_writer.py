@@ -39,6 +39,26 @@ def _to_dt(ts: Any) -> datetime | None:
     return ts
 
 
+def _extract_signals(
+    df: pd.DataFrame,
+    symbol: str,
+    signal_column: str = "entry_signal",
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Extract symbol slice and non-zero signal values from a DataFrame.
+
+    Returns (symbol_df, signal_series). Handles both MultiIndex and
+    single-level DatetimeIndex inputs.
+    """
+    if isinstance(df.index, pd.MultiIndex):
+        symbol_df = df.xs(symbol, level="symbol")
+    else:
+        symbol_df = df
+    raw = symbol_df[signal_column].astype(float)
+    signal_series = raw.dropna()
+    signal_series = signal_series[signal_series != 0]
+    return symbol_df, signal_series
+
+
 def write_run_metadata(
     run_id: str,
     strategy: str,
@@ -198,17 +218,18 @@ def write_backtest_output(
         # signal_outcomes (from feature-layer signal_series)
         if signal_series is not None and not signal_series.empty:
             # Idempotent re-run: clear signals within this backtest's time range
+            tf = to_canonical(meta.timeframe)
             cur.execute(
                 """DELETE FROM signal_outcomes
                    WHERE strategy = %s AND symbol = %s AND source = 'backtest'
                      AND timeframe = %s
                      AND signal_ts BETWEEN %s AND %s""",
-                (meta.strategy, meta.symbol, meta.timeframe,
+                (meta.strategy, meta.symbol, tf,
                  _to_dt(meta.start_ts), _to_dt(meta.end_ts)),
             )
             so_rows = [
                 (_to_dt(ts), meta.strategy, meta.symbol, "backtest",
-                 meta.timeframe, float(val), None)
+                 tf, float(val), None)
                 for ts, val in signal_series.items()
             ]
             psycopg2.extras.execute_values(
@@ -252,22 +273,21 @@ def write_ohlcv(
     timeframe = to_canonical(timeframe)
 
     # Normalise index → ts column
-    work = df.copy()
-    if "ts" not in work.columns and "timestamp" not in work.columns:
-        work = work.reset_index()
-    ts_col = "ts" if "ts" in work.columns else "timestamp"
+    if "ts" not in df.columns and "timestamp" not in df.columns:
+        df = df.reset_index()
+    ts_col = "ts" if "ts" in df.columns else "timestamp"
 
     rows = list(zip(
-        work[ts_col].apply(_to_dt),
-        [symbol] * len(work),
-        [timeframe] * len(work),
-        [run_id] * len(work),
-        [source] * len(work),
-        work["open"].astype(float),
-        work["high"].astype(float),
-        work["low"].astype(float),
-        work["close"].astype(float),
-        work.get("volume", pd.Series([0.0] * len(work))).astype(float),
+        df[ts_col].apply(_to_dt),
+        [symbol] * len(df),
+        [timeframe] * len(df),
+        [run_id] * len(df),
+        [source] * len(df),
+        df["open"].astype(float),
+        df["high"].astype(float),
+        df["low"].astype(float),
+        df["close"].astype(float),
+        df.get("volume", pd.Series([0.0] * len(df))).astype(float),
     ))
 
     with get_conn(dsn) as conn:
@@ -495,28 +515,9 @@ def save_signal_results(
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
     Use this for signal quality analysis without running a full backtest.
-    Extracts non-null, non-zero signal values from the featured DataFrame.
-
-    Args:
-        df: Featured DataFrame. Either MultiIndex (symbol, datetime) or
-            single-level DatetimeIndex.
-        symbol: Trading pair.
-        timeframe: Canonical timeframe (e.g. "H1").
-        strategy: Strategy name for signal_outcomes grouping.
-        source: "backtest" or "sim".
-        signal_column: Column name containing signal values.
     """
-    # Handle both MultiIndex and single-level DataFrames
-    if isinstance(df.index, pd.MultiIndex):
-        symbol_df = df.xs(symbol, level="symbol")
-    else:
-        symbol_df = df
-
-    raw = symbol_df[signal_column].astype(float)
-    # WHY: NaN = "no signal at this bar", 0 = "neutral" — both excluded.
-    signal_series = raw.dropna()
-    signal_series = signal_series[signal_series != 0]
-
+    symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
+    tf = to_canonical(timeframe)
     counts: dict[str, int] = {}
 
     if not signal_series.empty:
@@ -525,19 +526,16 @@ def save_signal_results(
 
         with get_conn() as conn:
             cur = conn.cursor()
-            # Idempotent: clear existing signals in this range
             cur.execute(
                 """DELETE FROM signal_outcomes
                    WHERE strategy = %s AND symbol = %s AND source = %s
                      AND timeframe = %s
                      AND signal_ts BETWEEN %s AND %s""",
-                (strategy, symbol, source,
-                 to_canonical(timeframe),
+                (strategy, symbol, source, tf,
                  _to_dt(start_ts), _to_dt(end_ts)),
             )
             so_rows = [
-                (_to_dt(ts), strategy, symbol, source,
-                 to_canonical(timeframe), float(val), None)
+                (_to_dt(ts), strategy, symbol, source, tf, float(val), None)
                 for ts, val in signal_series.items()
             ]
             psycopg2.extras.execute_values(
@@ -554,7 +552,6 @@ def save_signal_results(
             counts["signal_outcomes"] = len(so_rows)
             cur.close()
 
-    # OHLCV safety net
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
     counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
@@ -572,25 +569,12 @@ def save_strategy_results(
     """Write strategy backtest results + signal history to DB.
 
     Writes: backtest_runs, equity_curve, trade_blotter, strategy_performance,
-    signal_outcomes, ohlcv. Calls save_signal_results() internally.
+    signal_outcomes, ohlcv.
     """
-    # Handle MultiIndex
-    if isinstance(df.index, pd.MultiIndex):
-        symbol_df = df.xs(symbol, level="symbol")
-    else:
-        symbol_df = df
-
-    raw = symbol_df[signal_column].astype(float)
-    signal_series = raw.dropna()
-    signal_series = signal_series[signal_series != 0]
-
+    symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     counts = write_backtest_output(output, signal_series=signal_series, params=params)
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
     counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
     return counts
-
-
-# Backward compat alias
-persist_backtest = save_strategy_results
