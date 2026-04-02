@@ -48,10 +48,9 @@ class TestInferTimeframe:
         with pytest.raises(ValueError, match="minimum 5"):
             infer_timeframe(idx)
 
-    def test_unsupported_freq_raises(self) -> None:
+    def test_3h_freq_inferred_as_H3(self) -> None:
         idx = pd.date_range("2024-01-01", freq="3h", periods=10)
-        with pytest.raises(ValueError, match="Cannot map"):
-            infer_timeframe(idx)
+        assert infer_timeframe(idx) == "H3"
 
 
 # ---------------------------------------------------------------------------
@@ -74,12 +73,12 @@ class TestTimeframeConversion:
         assert to_canonical("H1") == "H1"
 
     def test_to_ccxt_unknown_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown timeframe"):
-            to_ccxt("3h")
+        with pytest.raises(ValueError, match="Cannot parse timeframe"):
+            to_ccxt("xyz")
 
     def test_to_canonical_unknown_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown timeframe"):
-            to_canonical("3h")
+        with pytest.raises(ValueError, match="Cannot parse timeframe"):
+            to_canonical("xyz")
 
 
 # ---------------------------------------------------------------------------

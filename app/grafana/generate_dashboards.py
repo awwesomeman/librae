@@ -42,31 +42,43 @@ def _stat_panel(
     *,
     layout: str = "kpi",
     w: int = 4,
+    description: str | None = None,
+    decimals: int | None = None,
+    no_value: str | None = None,
+    fixed_color: str | None = None,
 ) -> dict:
     """Build a Grafana stat panel definition."""
-    fc: dict = {
-        "defaults": {
-            "thresholds": {"mode": "absolute", "steps": thresholds},
-            "color": {"mode": "thresholds"},
-        },
-        "overrides": [],
+    defaults: dict = {
+        "thresholds": {"mode": "absolute", "steps": thresholds},
     }
+    if fixed_color:
+        defaults["color"] = {"fixedColor": fixed_color, "mode": "fixed"}
+    else:
+        defaults["color"] = {"mode": "thresholds"}
     if unit:
-        fc["defaults"]["unit"] = unit
-    return {
+        defaults["unit"] = unit
+    if decimals is not None:
+        defaults["decimals"] = decimals
+    if no_value:
+        defaults["noValue"] = no_value
+
+    panel: dict = {
         "_type": layout,
         "title": title,
         "type": "stat",
         "h": 4,
         "w": w,
         "targets": [_stat_target(sql)],
-        "fieldConfig": fc,
+        "fieldConfig": {"defaults": defaults, "overrides": []},
         "options": {
             "reduceOptions": {"calcs": ["lastNotNull"]},
             "colorMode": "value",
             "graphMode": "none",
         },
     }
+    if description:
+        panel["description"] = description
+    return panel
 
 
 # WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
@@ -523,12 +535,326 @@ def render_unified_dashboard() -> dict:
     }
 
 
+# ======================================================================
+# Signal Monitor Dashboard
+# ======================================================================
+
+# WHY: common SQL fragments for signal_outcomes LATERAL JOIN to ohlcv.
+# These are reused across multiple panels to compute forward return, MFE, MAE.
+_SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'"
+_ENTRY_BAR = (
+    "SELECT close FROM ohlcv"
+    " WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts"
+    " ORDER BY ts DESC LIMIT 1"
+)
+_EXIT_BAR = (
+    "SELECT close FROM ohlcv"
+    " WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts"
+    " ORDER BY ts LIMIT 1 OFFSET ($n - 1)"
+)
+_FWD_CTE = (
+    f"WITH fwd AS (\n"
+    f"  SELECT s.signal_ts,\n"
+    f"    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n"
+    f"  FROM signal_outcomes s\n"
+    f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
+    f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
+    f"  WHERE {_SIG_WHERE}\n"
+    f"    AND $__timeFilter(s.signal_ts)\n"
+    f")\n"
+)
+_EXC_CTE = (
+    "WITH exc AS (\n"
+    "  SELECT s.signal_ts, exc.mfe, exc.mae,\n"
+    "    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n"
+    "  FROM signal_outcomes s\n"
+    "  JOIN LATERAL (\n"
+    "    SELECT close AS entry_close FROM ohlcv\n"
+    "    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n"
+    "    ORDER BY ts DESC LIMIT 1\n"
+    "  ) entry_bar ON true\n"
+    "  JOIN LATERAL (\n"
+    "    SELECT\n"
+    "      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n"
+    "      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
+    "    FROM (\n"
+    "      SELECT high, low FROM ohlcv\n"
+    "      WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n"
+    "      ORDER BY ts LIMIT $n\n"
+    "    ) b\n"
+    "  ) exc ON true\n"
+    f"  WHERE {_SIG_WHERE}\n"
+    "    AND $__timeFilter(s.signal_ts)\n"
+    ")\n"
+)
+
+_TH_RED_YELLOW_GREEN = [
+    {"color": "red", "value": None},
+    {"color": "red", "value": -0.005},
+    {"color": "yellow", "value": 0},
+    {"color": "green", "value": 0.001},
+]
+_TH_EDGE = [
+    {"color": "red", "value": None},
+    {"color": "red", "value": 1},
+    {"color": "yellow", "value": 1.5},
+    {"color": "green", "value": 2},
+]
+
+SIGNAL_MONITOR_PANELS: list[dict] = [
+    # --- Snapshot row ---
+    {"_type": "row", "title": "Snapshot"},
+    _stat_panel(
+        "Unrealized PnL",
+        (
+            "WITH latest_signal AS (\n"
+            "  SELECT signal_ts, signal_value,\n"
+            "    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe'"
+            " ORDER BY ts DESC LIMIT 1) AS current_close,\n"
+            "    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe'"
+            " AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) AS signal_price\n"
+            f"  FROM signal_outcomes s\n  WHERE {_SIG_WHERE}\n"
+            "  ORDER BY signal_ts DESC LIMIT 1\n)\n"
+            "SELECT $expected_direction * (current_close - signal_price)"
+            " / NULLIF(signal_price, 0) AS \"PnL\"\n"
+            "FROM latest_signal\n"
+            "WHERE current_close IS NOT NULL AND signal_price IS NOT NULL"
+        ),
+        "percentunit",
+        [
+            {"color": "red", "value": None},
+            {"color": "red", "value": -0.01},
+            {"color": "yellow", "value": 0},
+            {"color": "green", "value": 0.01},
+        ],
+        w=4, decimals=3, no_value="N/A",
+        description="expected_direction x (current_price - entry_price) / entry_price.",
+    ),
+    _stat_panel(
+        "Mean Fwd Return (T+$n)",
+        _FWD_CTE + "SELECT $expected_direction * AVG(ret) AS \"Mean Ret\" FROM fwd",
+        "percentunit", _TH_RED_YELLOW_GREEN,
+        w=4, decimals=3,
+        description="expected_direction x AVG(forward return over n bars).",
+    ),
+    _stat_panel(
+        "Edge Ratio (T+$n)",
+        _EXC_CTE + "SELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
+        None, _TH_EDGE,
+        w=4, decimals=2,
+        description="AVG(MFE) / AVG(MAE) over n bars. >2 = healthy, <1 = adverse exceeds favorable.",
+    ),
+    _stat_panel(
+        "Last Signal Age",
+        f"SELECT EXTRACT(EPOCH FROM NOW() - MAX(signal_ts)) / 3600.0 AS \"Age\""
+        f" FROM signal_outcomes WHERE {_SIG_WHERE}",
+        "h",
+        [
+            {"color": "green", "value": None},
+            {"color": "yellow", "value": 24},
+            {"color": "red", "value": 48},
+        ],
+        w=3, decimals=1,
+        description="Hours since last signal. >48hr may indicate system failure.",
+    ),
+    _stat_panel(
+        "N (Signals)",
+        f"SELECT COUNT(*) AS \"N\" FROM signal_outcomes"
+        f" WHERE {_SIG_WHERE} AND $__timeFilter(signal_ts)",
+        None, [{"color": "blue", "value": None}],
+        w=3, fixed_color="blue",
+        description="Total signal count in selected time range.",
+    ),
+    _stat_panel(
+        "Signal Value",
+        f"SELECT signal_value AS \"Value\" FROM signal_outcomes"
+        f" WHERE {_SIG_WHERE} ORDER BY signal_ts DESC LIMIT 1",
+        None, [{"color": "blue", "value": None}],
+        w=3, decimals=3, no_value="N/A", fixed_color="blue",
+        description="Latest signal_value.",
+    ),
+    _stat_panel(
+        "Timeframe",
+        "SELECT '$timeframe' AS \"Timeframe\"",
+        None, [{"color": "text", "value": None}],
+        w=3, fixed_color="text",
+    ),
+
+    # --- Trend row ---
+    {"_type": "row", "title": "Trend"},
+    {
+        "_type": "half",
+        "title": "Price & Signals",
+        "description": "Price (left axis) with signal firing points (right axis, orange dots).",
+        "type": "timeseries",
+        "h": 8, "w": 12,
+        "targets": [
+            _target(
+                "SELECT ts AS time, close AS \"Close\" FROM ohlcv"
+                " WHERE symbol='$symbol' AND timeframe='$timeframe'"
+                " AND $__timeFilter(ts) ORDER BY ts",
+                "price",
+            ),
+            _target(
+                "SELECT signal_ts AS time, signal_value AS \"Signal\""
+                f" FROM signal_outcomes WHERE {_SIG_WHERE}"
+                " AND $__timeFilter(signal_ts) ORDER BY signal_ts",
+                "signals",
+            ),
+        ],
+        "fieldConfig": {
+            "defaults": {"custom": {"lineWidth": 1, "fillOpacity": 0, "axisPlacement": "left"}},
+            "overrides": [{
+                "matcher": {"id": "byName", "options": "Signal"},
+                "properties": [
+                    {"id": "custom.axisPlacement", "value": "right"},
+                    {"id": "custom.drawStyle", "value": "points"},
+                    {"id": "custom.pointSize", "value": 8},
+                    {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
+                    {"id": "custom.lineWidth", "value": 0},
+                ],
+            }],
+        },
+    },
+    {
+        "_type": "half",
+        "title": "Cumulative Signal Return (T+$n)",
+        "description": "Cumulative expected_direction x forward return. Pure signal edge accumulation.",
+        "type": "timeseries",
+        "h": 8, "w": 12,
+        "targets": [_target(
+            _FWD_CTE
+            + "SELECT signal_ts AS time,\n"
+            "  SUM($expected_direction * ret) OVER (ORDER BY signal_ts) AS \"Cumulative Return\"\n"
+            "FROM fwd ORDER BY signal_ts"
+        )],
+        "fieldConfig": {
+            "defaults": {"unit": "percentunit", "custom": {"lineWidth": 2, "fillOpacity": 10}},
+        },
+    },
+    {
+        "_type": "half",
+        "title": "Rolling $k Mean Return (T+$n)",
+        "description": "Rolling k-signal average of adjusted forward return. Declining = edge weakening.",
+        "type": "timeseries",
+        "h": 8, "w": 12,
+        "targets": [_target(
+            "WITH fwd AS (\n"
+            "  SELECT s.signal_ts,\n"
+            "    $expected_direction * (exit_bar.close - entry_bar.close)"
+            " / NULLIF(entry_bar.close, 0) AS adj_return,\n"
+            "    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n"
+            "  FROM signal_outcomes s\n"
+            f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
+            f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
+            f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.signal_ts)\n"
+            ")\n"
+            "SELECT signal_ts AS time,\n"
+            "  AVG(adj_return) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)"
+            " AS \"Mean Return\"\n"
+            "FROM fwd WHERE rn >= $k ORDER BY signal_ts"
+        )],
+        "fieldConfig": {
+            "defaults": {
+                "unit": "percentunit",
+                "custom": {"lineWidth": 2, "fillOpacity": 10},
+                "thresholds": {"mode": "absolute", "steps": _TH_RED_YELLOW_GREEN},
+            },
+        },
+    },
+    {
+        "_type": "half",
+        "title": "Rolling $k Edge Ratio (T+$n)",
+        "description": "Rolling k-signal AVG(MFE)/AVG(MAE). >2 = healthy, <1 = adverse exceeds favorable.",
+        "type": "timeseries",
+        "h": 8, "w": 12,
+        "targets": [_target(
+            _EXC_CTE
+            + "SELECT signal_ts AS time,\n"
+            "  AVG(mfe) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n"
+            "  / NULLIF(AVG(mae) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n"
+            "  AS \"Edge Ratio\"\n"
+            "FROM exc WHERE rn >= $k ORDER BY signal_ts"
+        )],
+        "fieldConfig": {
+            "defaults": {
+                "custom": {"lineWidth": 2, "fillOpacity": 10},
+                "thresholds": {"mode": "absolute", "steps": _TH_EDGE},
+            },
+        },
+    },
+]
+
+
+def _make_textbox_variable(name: str, default: str, *, label: str | None = None) -> dict:
+    v: dict = {"name": name, "type": "textbox", "query": default}
+    if label:
+        v["label"] = label
+    return v
+
+
+def render_signal_monitor() -> dict:
+    """Build the Signal Monitor dashboard."""
+    panels = build_panels(SIGNAL_MONITOR_PANELS)
+
+    variables = [
+        _make_query_variable(
+            "strategy",
+            "SELECT DISTINCT strategy FROM signal_outcomes ORDER BY 1",
+            label="Strategy",
+        ),
+        _make_query_variable(
+            "symbol",
+            "SELECT DISTINCT symbol FROM signal_outcomes WHERE strategy='$strategy' ORDER BY 1",
+            label="Symbol",
+        ),
+        _make_query_variable(
+            "timeframe",
+            "SELECT DISTINCT timeframe FROM signal_outcomes"
+            " WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
+            label="Timeframe",
+        ),
+        _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),
+        _make_textbox_variable("k", "50", label="Rolling Window (signals)"),
+        _make_custom_variable(
+            "expected_direction",
+            [("1", "1"), ("-1", "-1")],
+            label="Signal Direction",
+        ),
+    ]
+
+    return {
+        "uid": "signal-monitor-v2",
+        "title": "Signal Monitor",
+        "description": "Signal quality monitoring — generated by generate_dashboards.py",
+        "tags": ["signal", "monitoring"],
+        "timezone": "utc",
+        "editable": True,
+        "time": {"from": "now-6M", "to": "now"},
+        "refresh": "",
+        "templating": {"list": variables},
+        "graphTooltip": 1,
+        "annotations": {"list": []},
+        "panels": panels,
+        "schemaVersion": 39,
+        "version": 1,
+    }
+
+
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Strategy Dashboard
     dashboard = render_unified_dashboard()
     out_path = OUT_DIR / "strategy_dashboard.json"
     out_path.write_text(json.dumps(dashboard, indent=2, ensure_ascii=False))
     logger.info("%s — %d panels", out_path, len(dashboard["panels"]))
+
+    # Signal Monitor
+    sig_mon = render_signal_monitor()
+    sig_path = OUT_DIR / "signal_monitor.json"
+    sig_path.write_text(json.dumps(sig_mon, indent=2, ensure_ascii=False))
+    logger.info("%s — %d panels", sig_path, len(sig_mon["panels"]))
 
 
 if __name__ == "__main__":
