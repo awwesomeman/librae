@@ -1,6 +1,8 @@
 # 2026-03-26 — 回測效能優化策略
 
-> 狀態：accepted
+> 狀態：superseded
+> 取代者：04-01 backtest-engine-optimization
+> 注記：基於 Lumibot 引擎，已被 librae 取代。有效結論（降頻 H1、向量化預處理）已被 04-01 吸收；Ray 並行未實作也無計劃
 
 ## 背景
 

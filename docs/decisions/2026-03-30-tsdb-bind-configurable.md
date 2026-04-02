@@ -1,6 +1,7 @@
 # 2026-03-30 — TimescaleDB port binding 改為可配置
 
-> 狀態：accepted
+> 狀態：implemented
+> 注記：TSDB_BIND 環境變數已在 docker-compose.yml 落地
 
 ## 背景
 

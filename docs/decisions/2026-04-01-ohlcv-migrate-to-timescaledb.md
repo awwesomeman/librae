@@ -1,6 +1,8 @@
 # 2026-04-01 — OHLCV 從檔案快取遷移至 TimescaleDB
 
-> 狀態：accepted
+> 狀態：superseded（未實作）
+> 取代者：04-02 db-schema-consolidation
+> 注記：提出新建 market_data 表取代 ohlcv，但完全未落地（market_data 表不存在、data/market_data.py 未建）。04-02 consolidation 改為修改現有 ohlcv 表（移除 run_id），問題分析仍有參考價值
 
 ## Context
 

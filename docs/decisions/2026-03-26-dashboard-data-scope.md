@@ -1,6 +1,8 @@
 # 2026-03-26 — Dashboard 資料範圍定義
 
-> 狀態：accepted
+> 狀態：superseded
+> 取代者：04-02 db-schema-consolidation（資料寫入流程）、04-02 signal-monitor-dashboard-review（dashboard 設計）
+> 注記：整份基於 InfluxDB tag 機制（source=live/backtest），與現行 TimescaleDB schema 不符。Grafana=監控 / Streamlit=分析 的分工原則仍有效，已被 03-06 涵蓋
 
 ## 決策
 

@@ -1,6 +1,7 @@
 # 2026-03-28 — 策略資料夾結構規範 + 模組遷移
 
-> 狀態：accepted
+> 狀態：implemented
+> 注記：strategies/<name>/ 結構已落地，monitoring/ 目錄已清除
 
 ## 背景
 

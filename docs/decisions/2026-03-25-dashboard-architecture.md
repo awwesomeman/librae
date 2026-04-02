@@ -1,7 +1,9 @@
 # 002 — Dashboard Architecture（Streamlit vs Grafana 分工）
 
 > 日期：2026-03-25
-> 狀態：accepted
+> 狀態：superseded
+> 取代者：03-06 核心決策整理（分工原則）、04-02 signal-monitor-dashboard-review（Grafana 設計）
+> 注記：「Grafana 只讀 InfluxDB」已不適用，DB 已遷移至 TimescaleDB。Streamlit/Grafana 分工原則仍有效，已被 03-06 涵蓋
 
 ## 背景
 

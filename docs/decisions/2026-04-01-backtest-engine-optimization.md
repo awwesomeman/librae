@@ -1,7 +1,8 @@
 # 2026-04-01 — 回測引擎與資料層優化方向
 
-> 狀態：accepted
+> 狀態：accepted（大部分待實作）
 > 更新：補充 TrendMaster 實驗中發現的實際痛點（data cache、SL/TP、DB schema）
+> 注記：librae vs vectorbt 定位決策已確立。待實作項目：SL/TP 內建 (#4)、short proceeds bug fix、cache trim (#7)、效能優化 (#1-3)。DB 相關項目移至 04-02 consolidation
 
 ## 核心定位
 

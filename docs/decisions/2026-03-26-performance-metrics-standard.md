@@ -1,6 +1,7 @@
 # 2026-03-26 — 績效指標計算標準
 
 > 狀態：accepted（部分待實作）
+> ⚠️ 內文提及 InfluxDB 已不適用，DB 已遷移至 TimescaleDB，但計算層分工原則（trade-based metrics.py + quantstats equity-based）仍成立
 
 ## 問題背景
 

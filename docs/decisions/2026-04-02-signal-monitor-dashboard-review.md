@@ -273,26 +273,54 @@ quant-strategy-lab (交易系統)              factorlib (研究工具)
 
 只回答一個問題：**「現在需不需要介入？」**
 
-| Panel | 偵測什麼 | 來源 | 布林/連續都適用 |
-|-------|---------|------|----------------|
-| Mean Fwd Return (sparkline) | 訊號後市場走勢趨勢 | DB SQL: `AVG(fwd_return) OVER (rolling)` | 是 |
-| Rolling Win Rate | 訊號後上漲比例 | DB SQL: `AVG(CASE fwd_return > 0) OVER (rolling)` | 是 |
-| MFE/MAE Ratio | edge 還在嗎 | pipeline → signal_metrics 表 | 是 |
-| Last Signal Age | 系統還活嗎 | DB SQL: `NOW() - MAX(signal_ts)` | 是 |
+Mode 固定為 sim（hardcode `source='sim'`）。Strategy 代表訊號邏輯，可搭配不同 symbol，單選快速切換。
 
-4 個哨兵中 3 個純 SQL，只有 MFE/MAE 需要 pipeline 寫入。搭配 Grafana alerting → Telegram。
+**Template variables：**
 
-**方向無關的 Alerting：** 使用者部署時已知訊號是正指標或反指標，配置 `expected_direction`（+1 或 -1）。Alert 統一為 `expected_direction × metric` 偏離預期時觸發。
+| 變數 | 用途 | 預設 | 可選值 |
+|------|------|------|--------|
+| `$strategy` | 策略（訊號邏輯）篩選 | query from DB | — |
+| `$symbol` | 標的篩選（單選切換） | query from DB | — |
+| `$n` | Forward horizon (bars) | 24 | 6, 12, 24 |
+| `$k` | Rolling window (signals) | 50 | 30, 50, 100 |
+| `$expected_direction` | 正指標(1) / 反指標(-1) | 1 | 1, -1 |
+
+**Snapshot row (7 stat panels)：** 排列順序依 UX 優先級 — 左到右：最緊急 → 參考資訊，同寬度分組（重要 w=4，次要 w=3）。
+
+| 順序 | Panel | 寬度 | 計算 |
+|------|-------|------|------|
+| 1 | Unrealized PnL | w=4 | `$expected_direction × (current_close − entry_close) / entry_close` |
+| 2 | Mean Fwd Return (T+n) | w=4 | `$expected_direction × AVG(fwd_return_$n)` |
+| 3 | Edge Ratio (T+n) | w=4 | `AVG(mfe_$n) / AVG(mae_$n)`，MFE/MAE 從做多視角 |
+| 4 | Last Signal Age | w=3 | `NOW() - MAX(signal_ts)`，單位：小時 |
+| 5 | N (Signals) | w=3 | `COUNT(*)`，所有指標的樣本數 context |
+| 6 | Signal Value | w=3 | 最新一筆 signal_value |
+| 7 | Timeframe | w=3 | 固定顯示 H1（hardcode） |
+
+**Trend row (4 timeseries panels)：**
+
+| Panel | 寬度 | 計算 |
+|-------|------|------|
+| Price & Signals | w=12 | OHLCV close（左軸）+ signal_value scatter points（右軸，橘色） |
+| Cumulative Signal Return (T+n) | w=12 | `SUM($expected_direction × fwd_return_$n) OVER (ORDER BY signal_ts)` |
+| Rolling k Mean Return (T+n) | w=12 | `AVG($expected_direction × fwd_return_$n) OVER (ROWS $k PRECEDING)` |
+| Rolling k Edge Ratio (T+n) | w=12 | `AVG(mfe_$n) / AVG(mae_$n) OVER (ROWS $k PRECEDING)` |
+
+Price & Signals 和 Cumulative Signal Return 同一行並排；Rolling Mean Return 和 Rolling Edge Ratio 同一行並排。
+
+共 **11 panels**（7 stat + 4 timeseries）。全部純 SQL（window function），不需要 pipeline 額外寫入。
+
+**Alerting rules：**
+
+使用者部署時已知訊號是正指標或反指標，透過 `$expected_direction` 配置。
 
 | 指標 | Alert 條件 | 嚴重度 |
 |------|-----------|--------|
 | Last Signal Age | > 48hr | Critical — 系統可能掛了 |
-| Mean Fwd Return | `expected_direction × mean_fwd_return < 0` 持續 2 個 window | Warning — edge 反轉 |
-| MFE/MAE | < 1.0 持續 3 個 window | Warning — edge 消失 |
+| Mean Fwd Return | `$expected_direction × mean_fwd_return < 0` 持續 2 個 window | Warning — edge 反轉 |
+| Edge Ratio | < 1.0 持續 3 個 window | Warning — edge 消失 |
 
 > **IC 不放哨兵的理由：** 布林訊號（signal_value 無變異）時 IC = NaN。哨兵必須對所有訊號類型都有效。IC 系列指標保留在 factorlib 診斷頁，連續訊號時自動生效，布林訊號時顯示 NaN。
-
-**Grafana SQL 只做通用時序操作**（rolling avg、LAG、window function），不做領域指標計算。
 
 ### Streamlit 診斷層 (factorlib)
 

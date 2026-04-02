@@ -1,6 +1,7 @@
 # 2026-03-26 — 平台架構與 Signal Engine 設計
 
-> 狀態：accepted
+> 狀態：accepted（部分過時）
+> 注記：核心分層（signal_engine → vectorbt → bar-by-bar → 執行層）仍成立。執行層描述過時：Lumibot 已被 librae live engine 取代。Signal engine pure function 原則、pandas_ta 統一、warmup 規範仍有效
 
 ## 架構總覽（模組化分工）
 

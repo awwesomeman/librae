@@ -1,6 +1,8 @@
 # 2026-03-27 — 回測引擎重構：統一模組化 + 事件型架構
 
-> 狀態：accepted
+> 狀態：implemented
+> 注記：librae backtest engine 已全面落地，舊 Lumibot POC script 已移除
+> ⚠️ 引擎上線後發現的 bug 與功能缺口（short proceeds、SL/TP）見 [04-01 回測引擎優化](2026-04-01-backtest-engine-optimization.md)
 
 ## 背景
 
