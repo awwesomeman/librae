@@ -93,6 +93,24 @@ def build_live_trader(
     def fetcher(symbol: str, timeframe_ccxt_: str, limit: int, *, drop_incomplete: bool = False) -> pd.DataFrame:
         return adapter.fetch_ohlcv(symbol, timeframe_ccxt_, limit, drop_incomplete=drop_incomplete)
 
+    def warmup_fetcher(symbol: str, timeframe_ccxt_: str, limit: int) -> pd.DataFrame:
+        """DB-first warmup: reads historical bars from DB, fills gaps from API."""
+        from data.market_data import get_ohlcv
+        from librae.core.utils import to_ccxt
+
+        # WHY: get_ohlcv uses canonical interval (e.g. "1h") but engine passes
+        # ccxt format (also "1h" for Binance). Convert back if needed.
+        df = get_ohlcv(symbol=symbol, interval=timeframe, months=2)
+        if df.empty:
+            return fetcher(symbol, timeframe_ccxt_, limit, drop_incomplete=True)
+        # Normalise column: get_ohlcv returns "timestamp", engine expects "ts"
+        if "timestamp" in df.columns and "ts" not in df.columns:
+            df = df.rename(columns={"timestamp": "ts"})
+        # Keep only last `limit` bars
+        if len(df) > limit:
+            df = df.iloc[-limit:]
+        return df.reset_index(drop=True)
+
     def on_signal_outcome_cb(symbol: str, ts: datetime, signal_value: float, price: float) -> None:
         _db_write(
             write_signal_outcome,
@@ -170,4 +188,5 @@ def build_live_trader(
         on_heartbeat=on_heartbeat,
         on_signal_outcome=on_signal_outcome_cb if signal_column else None,
         signal_column=signal_column,
+        warmup_fetcher=warmup_fetcher if not no_db else None,
     )

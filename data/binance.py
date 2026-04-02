@@ -6,6 +6,7 @@ only call `fetch_ohlcv()` without knowing the data source details.
 """
 from __future__ import annotations
 
+import random
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 MAX_LIMIT = 1000
+_MAX_RETRIES = 5
+_BASE_SLEEP = 0.5
+_MAX_SLEEP = 30.0
 
 _DEFAULT_CACHE_DIR = Path("data/cache")
 _CACHE_MAX_AGE = timedelta(hours=6)
@@ -49,6 +53,39 @@ def _is_cache_fresh(path: Path, now: datetime | None = None) -> bool:
     except Exception as exc:
         logger.warning("Cache read failed for %s: %s", path, exc)
         return False
+
+
+def _request_with_retry(
+    client: httpx.Client,
+    url: str,
+    params: dict,
+    max_retries: int = _MAX_RETRIES,
+) -> list:
+    """GET with exponential backoff on 429/5xx. Respects Retry-After header."""
+    for attempt in range(1, max_retries + 1):
+        resp = client.get(url, params=params)
+        if resp.status_code == 200:
+            return resp.json()
+
+        if resp.status_code in (429, 418):
+            retry_after = resp.headers.get("Retry-After")
+            sleep_secs = (
+                min(float(retry_after), _MAX_SLEEP) if retry_after
+                else min(_BASE_SLEEP * (2 ** (attempt - 1)) + random.uniform(0, 0.3), _MAX_SLEEP)
+            )
+            logger.warning("Rate limited (attempt %d/%d), sleeping %.1fs", attempt, max_retries, sleep_secs)
+            time.sleep(sleep_secs)
+            continue
+
+        if 500 <= resp.status_code < 600:
+            sleep_secs = min(_BASE_SLEEP * (2 ** (attempt - 1)), _MAX_SLEEP)
+            logger.warning("Server error %d (attempt %d/%d), retrying in %.1fs", resp.status_code, attempt, max_retries, sleep_secs)
+            time.sleep(sleep_secs)
+            continue
+
+        resp.raise_for_status()
+
+    raise RuntimeError(f"Binance API retries exhausted: {url} after {max_retries} attempts")
 
 
 def fetch_ohlcv(
@@ -81,16 +118,14 @@ def fetch_ohlcv(
     with httpx.Client(timeout=timeout) as client:
         cursor_ms = start_ms
         while cursor_ms < end_ms:
-            params = {
+            req_params = {
                 "symbol": symbol,
                 "interval": interval,
                 "startTime": cursor_ms,
                 "endTime": end_ms,
                 "limit": MAX_LIMIT,
             }
-            resp = client.get(BINANCE_KLINES_URL, params=params)
-            resp.raise_for_status()
-            klines = resp.json()
+            klines = _request_with_retry(client, BINANCE_KLINES_URL, req_params)
             if not klines:
                 break
             all_rows.extend(klines)

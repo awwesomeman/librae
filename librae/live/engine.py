@@ -73,6 +73,7 @@ class LiveTrader:
         on_heartbeat: Callable[..., None] | None = None,
         on_signal_outcome: Callable[..., None] | None = None,
         signal_column: str | None = None,
+        warmup_fetcher: Callable[..., pd.DataFrame] | None = None,
     ) -> None:
         self._strategy = strategy
         self._symbols = symbols
@@ -83,6 +84,7 @@ class LiveTrader:
         self._timeframe = timeframe
         self._warmup_bars = warmup_bars
         self._poll_interval = poll_interval
+        self._warmup_fetcher = warmup_fetcher
         self._on_bar = on_bar
         self._on_trade = on_trade
         self._on_ohlcv = on_ohlcv
@@ -228,9 +230,14 @@ class LiveTrader:
         """Fetch OHLCV with caching. Full fetch on first call, incremental after."""
         try:
             if symbol not in self._ohlcv_cache:
-                df = self._fetcher(
-                    symbol, self._timeframe, self._warmup_bars, drop_incomplete=True,
-                )
+                if self._warmup_fetcher:
+                    # WHY: DB-first warmup avoids re-fetching 720 bars from
+                    # exchange API on every sim restart.
+                    df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_bars)
+                else:
+                    df = self._fetcher(
+                        symbol, self._timeframe, self._warmup_bars, drop_incomplete=True,
+                    )
                 self._ohlcv_cache[symbol] = df
                 return df
 
