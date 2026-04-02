@@ -37,10 +37,8 @@ def _require_ccxt() -> object:
 
 def _timeframe_to_delta(timeframe: str) -> pd.Timedelta:
     """Convert CCXT timeframe string to a pandas Timedelta."""
-    unit = timeframe[-1]
-    value = int(timeframe[:-1])
-    mapping = {"m": "min", "h": "h", "d": "D", "w": "W"}
-    return pd.Timedelta(value, unit=mapping.get(unit, unit))
+    from librae.core.utils import interval_to_timedelta
+    return interval_to_timedelta(timeframe)
 
 
 @dataclass

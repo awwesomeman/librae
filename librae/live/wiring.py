@@ -96,17 +96,18 @@ def build_live_trader(
     def warmup_fetcher(symbol: str, timeframe_ccxt_: str, limit: int) -> pd.DataFrame:
         """DB-first warmup: reads historical bars from DB, fills gaps from API."""
         from data.market_data import get_ohlcv
-        from librae.core.utils import to_ccxt
+        from librae.core.utils import interval_to_timedelta
+        import math
 
-        # WHY: get_ohlcv uses canonical interval (e.g. "1h") but engine passes
-        # ccxt format (also "1h" for Binance). Convert back if needed.
-        df = get_ohlcv(symbol=symbol, interval=timeframe, months=2)
+        # WHY: compute months from limit + timeframe to avoid over-fetching
+        bar_hours = interval_to_timedelta(timeframe).total_seconds() / 3600
+        months_needed = max(1, math.ceil(limit * bar_hours / 24 / 30))
+
+        df = get_ohlcv(symbol=symbol, interval=timeframe, months=months_needed)
         if df.empty:
             return fetcher(symbol, timeframe_ccxt_, limit, drop_incomplete=True)
-        # Normalise column: get_ohlcv returns "timestamp", engine expects "ts"
         if "timestamp" in df.columns and "ts" not in df.columns:
             df = df.rename(columns={"timestamp": "ts"})
-        # Keep only last `limit` bars
         if len(df) > limit:
             df = df.iloc[-limit:]
         return df.reset_index(drop=True)

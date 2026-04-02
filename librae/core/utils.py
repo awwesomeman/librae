@@ -89,6 +89,14 @@ def to_ccxt(timeframe: str) -> str:
     return result
 
 
+def interval_to_timedelta(interval: str) -> pd.Timedelta:
+    """Convert interval string to Timedelta (e.g. '1h' → 1 hour, '5m' → 5 min)."""
+    unit_map = {"m": "min", "h": "h", "d": "D", "w": "W"}
+    unit = interval[-1]
+    value = int(interval[:-1])
+    return pd.Timedelta(value, unit=unit_map.get(unit, unit))
+
+
 def to_canonical(timeframe: str) -> str:
     """Convert any format to canonical label. 1h → H1, H1 → H1."""
     upper = timeframe.upper()

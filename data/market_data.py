@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Column convention: all functions return DataFrames with these columns
 OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
@@ -61,18 +59,21 @@ def get_ohlcv(
         logger.info("DB miss: %s %s, fetching full range from API", symbol, interval)
 
     # 2. Fill gaps from API → upsert to DB
+    fetched_parts: list[pd.DataFrame] = []
     for gap_start, gap_end in gaps:
         api_df = _fetch_from_api(symbol, interval, gap_start, gap_end)
         if not api_df.empty:
+            fetched_parts.append(api_df)
             _upsert_db(api_df, symbol, interval, source)
 
-    # 3. Re-read from DB (now complete)
+    # 3. Re-read from DB (merges existing + newly upserted data)
     db_df = _query_db(symbol, interval, start_dt, end_dt)
     if db_df is not None and not db_df.empty:
         return db_df
 
-    # 4. Fallback: DB unavailable, return API data directly
-    logger.warning("DB unavailable, returning API data without persistence")
+    # 4. Fallback: DB unavailable, return already-fetched API data
+    if fetched_parts:
+        return pd.concat(fetched_parts, ignore_index=True)
     return _fetch_from_api(symbol, interval, start_dt, end_dt)
 
 
@@ -118,8 +119,7 @@ def _upsert_db(
     try:
         from db.timescale_writer import write_ohlcv
 
-        # write_ohlcv expects DatetimeIndex or ts/timestamp column
-        work = df.copy()
+        work = df
         if "timestamp" in work.columns:
             work = work.set_index("timestamp")
             work.index.name = "ts"
@@ -166,8 +166,6 @@ def _find_gaps(
 
 
 def _interval_to_timedelta(interval: str) -> pd.Timedelta:
-    """Convert interval string to timedelta (e.g. '1h' → 1 hour)."""
-    unit_map = {"m": "min", "h": "h", "d": "D", "w": "W"}
-    unit = interval[-1]
-    value = int(interval[:-1])
-    return pd.Timedelta(value, unit=unit_map.get(unit, unit))
+    """Convert interval string to timedelta. Delegates to shared utility."""
+    from librae.core.utils import interval_to_timedelta
+    return interval_to_timedelta(interval)
