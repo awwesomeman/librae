@@ -135,28 +135,28 @@ data/market_data.py    ← 統一入口：get_ohlcv()
 
 **驗收：**
 - [x] `tests/engine/` 102 passed
-- [ ] 重建 DB → 6 張表
-- [ ] backtest → signal_outcomes + params 有資料
-- [ ] sim → signal_outcomes 每 bar 寫入
-- [ ] grep `strategy_signals` → 0 結果
-- [ ] grep `write_signal[^_]` → 0 結果
+- [x] grep `write_signal[^_]` → 0 結果
+- [x] strategy_dashboard.json 重新生成，不再引用 strategy_signals
+- [ ] 重建 DB → 6 張表（部署時驗收）
+- [ ] backtest → signal_outcomes + params 有資料（部署時驗收）
+- [ ] sim → signal_outcomes 每 bar 寫入（部署時驗收）
 
 ---
 
-### Step 2：Signal Monitor Dashboard
+### Step 2：Signal Monitor Dashboard ✅
 
 **目標：** Signal Monitor dashboard 上線。
 
-**前置：** Step 1 部署且有 signal_outcomes 資料。
-
-| 檔案 | 動作 |
+| 項目 | 狀態 |
 |---|---|
-| `app/grafana/.../signal_monitor.json` | 確認 SQL 與 signal_outcomes schema 對齊 |
-| `app/grafana/generate_dashboards.py` | signal_monitor 生成邏輯 |
+| `signal_monitor.json` SQL 與 signal_outcomes schema 對齊 | ✅ 11 panels（7 stat + 4 timeseries），全部引用 signal_outcomes + ohlcv |
+| `strategy_dashboard.json` 重新生成（消除 strategy_signals 引用） | ✅ |
+| signal_monitor 不由 generate_dashboards.py 生成（手動維護 JSON） | 確認 |
+| Template variables: `$strategy`, `$symbol`, `$timeframe`, `$n`, `$k`, `$expected_direction` | ✅ 全部從 signal_outcomes 動態查詢 |
 
-**驗收：**
+**驗收（部署後）：**
 - [ ] Signal Monitor 全部 panel 有資料
-- [ ] 切換 `$strategy` / `$symbol` / `$n` / `$k` 正常
+- [ ] 切換變數正常
 
 ---
 
@@ -207,11 +207,11 @@ def get_ohlcv(symbol, timeframe, start, end, source="binance_spot"):
 ## 依賴關係
 
 ```
-Step 1 (Schema + Code) ✅ 已完成
+Step 1 (Schema + Code) ✅
   │
-  ├──→ Step 2 (Dashboard)
+  ├──→ Step 2 (Dashboard) ✅
   │
-  └──→ Step 3 (統一資料層) ← 獨立於 Step 2，可平行
+  └──→ Step 3 (統一資料層) ← 未來獨立執行
 ```
 
 ## 部署流程（Step 1）

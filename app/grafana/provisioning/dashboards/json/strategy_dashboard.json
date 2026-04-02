@@ -874,7 +874,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
+          "rawSql": "SELECT entry_ts AS time, entry_price AS \"Entry\" FROM trade_blotter WHERE run_id = '${run_id}' AND $__timeFilter(entry_ts)",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -883,7 +883,7 @@
           }
         },
         {
-          "rawSql": "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
+          "rawSql": "SELECT exit_ts AS time, exit_price AS \"Exit\" FROM trade_blotter WHERE run_id = '${run_id}' AND $__timeFilter(exit_ts)",
           "format": "time_series",
           "refId": "B",
           "datasource": {
