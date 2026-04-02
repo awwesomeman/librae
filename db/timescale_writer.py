@@ -297,7 +297,7 @@ def write_ohlcv(
             """INSERT INTO ohlcv (ts, symbol, timeframe, run_id, source,
                open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT (ts, symbol, timeframe) DO NOTHING""",
+               ON CONFLICT (ts, symbol, timeframe, source) DO NOTHING""",
             rows,
             page_size=2000,
         )

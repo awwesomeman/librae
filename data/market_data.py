@@ -114,7 +114,7 @@ def get_ohlcv(
     interval_ccxt = to_ccxt(interval)
 
     # 1. Try DB first
-    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt)
+    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, source)
 
     if db_df is not None and not db_df.empty:
         gaps = _find_gaps(db_df, start_dt, end_dt, interval_ccxt)
@@ -135,7 +135,7 @@ def get_ohlcv(
             _upsert_db(api_df, symbol, interval_ccxt, source)
 
     # 3. Re-read from DB (merges existing + newly upserted data)
-    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt)
+    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, source)
     if db_df is not None and not db_df.empty:
         return db_df
 
@@ -151,6 +151,7 @@ def get_ohlcv(
 
 def _query_db(
     symbol: str, interval: str, start_dt: datetime, end_dt: datetime,
+    source: str = "binance_spot",
 ) -> pd.DataFrame | None:
     """Query ohlcv table. Returns None if DB is unavailable."""
     try:
@@ -158,6 +159,7 @@ def _query_db(
 
         df = load_ohlcv(
             symbol=symbol, timeframe=to_canonical(interval),
+            source=source,
             start_ts=start_dt.isoformat(), end_ts=end_dt.isoformat(),
         )
         if df.empty:

@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     run_id          TEXT,           -- optional, no FK (shared market data)
-    source          TEXT,
+    source          TEXT NOT NULL DEFAULT 'binance_spot',
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,
     low             DOUBLE PRECISION,
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS ohlcv (
 );
 SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, source);
 
 -- ============================================================
 -- signal_outcomes — 訊號品質監控 (hypertable)

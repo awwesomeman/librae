@@ -123,14 +123,14 @@ def load_ohlcv(
     *,
     symbol: str | None = None,
     timeframe: str | None = None,
+    source: str | None = None,
     start_ts: str | None = None,
     end_ts: str | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> pd.DataFrame:
     """Load OHLCV data by symbol+timeframe+range, or by run_id (legacy).
 
-    Prefer symbol/timeframe/start_ts/end_ts for new code.
-    Legacy run_id path looks up the run's metadata first.
+    Prefer symbol/timeframe/source/start_ts/end_ts for new code.
     """
     if symbol and timeframe:
         sql = """
@@ -139,6 +139,9 @@ def load_ohlcv(
             WHERE symbol = %s AND timeframe = %s
         """
         params: list = [symbol, timeframe]
+        if source:
+            sql += " AND source = %s"
+            params.append(source)
         if start_ts:
             sql += " AND ts >= %s"
             params.append(start_ts)
