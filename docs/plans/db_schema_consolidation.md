@@ -160,47 +160,37 @@ data/market_data.py    ← 統一入口：get_ohlcv()
 
 ---
 
-### Step 3：統一資料抓取層（未來）
+### Step 3：統一資料抓取層 ✅（部分）
 
 **目標：** 整合兩套 fetcher + 兩層 cache 為統一入口。
 
 **依據：** [2026-04-01 OHLCV 遷移](../decisions/2026-04-01-ohlcv-migrate-to-timescaledb.md) 架構設計
 
-| 動作 | 檔案 |
+#### 已完成
+
+| 動作 | 檔案 | 狀態 |
+|---|---|---|
+| 新建 `data/market_data.py` — `get_ohlcv()` 統一入口 | 新建 | ✅ |
+| `strategies/trendpullback/utils.py` 改用 `get_ohlcv()` | 修改 | ✅ |
+| `strategies/trendpullback_m5/utils.py` 改用 `get_ohlcv()` | 修改 | ✅ |
+| `persist_backtest()` 保留 `write_ohlcv()` 作為 safety net | 修改 | ✅ |
+
+`get_ohlcv()` 流程：DB 查詢 → 找缺口 → API 補齊 → upsert DB → 回傳。DB 不可用時 fallback 直接打 API。
+
+`data/binance.py` 保留為底層 API fetcher（`get_ohlcv()` 內部委派），`resample_ohlcv()` 仍被策略使用。
+
+#### 未來再做
+
+| 動作 | 說明 |
 |---|---|
-| 新建 `data/market_data.py` — `get_ohlcv()` 統一入口 | 新建 |
-| 吸收 `data/binance.py` 的 HTTP 分頁 + `pipeline/fetchers/` 的 retry 邏輯 | 合併 |
-| `strategies/*/utils.py` 改用 `get_ohlcv()` | 修改 |
-| `persist_backtest()` 移除 `write_ohlcv()` — fetch 時已入 DB | 修改 |
-| Sim warmup 改從 DB 讀取 | `librae/live/wiring.py` |
-| 移除 `data/binance.py`、`pipeline/fetchers/`、`pipeline/features/cache_store.py` | 刪除 |
+| Sim warmup 改從 DB 讀取 | `librae/live/wiring.py` 的 fetcher 改用 `get_ohlcv()` |
+| 整合 `pipeline/fetchers/` retry 邏輯 | 吸收 exponential backoff 到 `market_data.py` |
+| 移除 `pipeline/features/cache_store.py` | JSON cache 被 DB cache 取代 |
 
-**`get_ohlcv()` 邏輯：**
-
-```python
-def get_ohlcv(symbol, timeframe, start, end, source="binance_spot"):
-    """統一市場資料入口：DB → API → DB。"""
-    # 1. 查 DB 已有範圍
-    db_df = _query_db(symbol, timeframe, start, end)
-    gaps = _find_gaps(db_df, start, end, timeframe)
-
-    # 2. 有缺口 → API 補齊 → upsert DB
-    if gaps:
-        for gap_start, gap_end in gaps:
-            api_df = _fetch_from_api(symbol, timeframe, gap_start, gap_end, source)
-            _upsert_db(api_df, symbol, timeframe, source)
-        db_df = _query_db(symbol, timeframe, start, end)
-
-    return db_df
-```
-
-**DB 不可用 fallback：** 直接打 API，寫 parquet 暫存，log warning。開發環境無 DB 時仍可運作。
-
-**驗收：**
+**驗收（部署後）：**
 - [ ] `get_ohlcv()` 首次呼叫 → API + DB 寫入
 - [ ] 第二次相同參數 → 純 DB 讀取，不打 API
-- [ ] DB 斷線 → fallback API + parquet，log warning
-- [ ] `data/binance.py` 刪除後無 import error
+- [ ] DB 斷線 → fallback API，log warning
 
 ---
 
@@ -211,7 +201,7 @@ Step 1 (Schema + Code) ✅
   │
   ├──→ Step 2 (Dashboard) ✅
   │
-  └──→ Step 3 (統一資料層) ← 未來獨立執行
+  └──→ Step 3 (統一資料層) ✅ 核心完成，sim warmup + pipeline 整合未來再做
 ```
 
 ## 部署流程（Step 1）

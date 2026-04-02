@@ -485,10 +485,13 @@ def persist_backtest(
     params: dict | None = None,
     signal_column: str = "entry_signal",
 ) -> dict:
-    """Write backtest results + signal outcomes + OHLCV to DB.
+    """Write backtest results + signal outcomes to DB.
 
     Shared helper for strategy run.py files. Extracts non-null signal values
     from the featured DataFrame, then writes everything in one call.
+
+    OHLCV is written as a safety net (ON CONFLICT DO NOTHING). When using
+    get_ohlcv() for data fetching, OHLCV is already in DB from the fetch step.
     """
     symbol_df = df.xs(symbol, level="symbol")
     raw = symbol_df[signal_column].astype(float)
@@ -499,6 +502,9 @@ def persist_backtest(
 
     counts = write_backtest_output(output, signal_series=signal_series, params=params)
 
+    # WHY: safety net — if get_ohlcv() already wrote to DB, this is a no-op
+    # (ON CONFLICT DO NOTHING). If DB was unavailable during fetch, this
+    # ensures OHLCV gets persisted with the backtest results.
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
     counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from data.binance import fetch_ohlcv, resample_ohlcv
+from data.binance import resample_ohlcv
+from data.market_data import get_ohlcv
 from strategies.trendpullback.utils import (
     compute_daily_gate,
     compute_entry_conditions,
@@ -68,7 +69,7 @@ def fetch_and_prepare(
     params: dict | None = None,
 ) -> pd.DataFrame:
     """Fetch M5 OHLCV → features → signals → MultiIndex for backtest."""
-    raw = fetch_ohlcv(symbol=symbol, interval="5m", months=months)
+    raw = get_ohlcv(symbol=symbol, interval="5m", months=months)
     m5_base = raw.set_index("timestamp")
     m5_base.index.name = "ts"
 

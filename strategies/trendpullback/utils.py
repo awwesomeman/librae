@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 
-from data.binance import fetch_ohlcv, resample_ohlcv
+from data.binance import resample_ohlcv
+from data.market_data import get_ohlcv
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +140,7 @@ def fetch_and_prepare(
 
     Returns a MultiIndex DataFrame (symbol, datetime) ready for Backtest.
     """
-    h1_raw = fetch_ohlcv(symbol=symbol, interval="1h", months=months)
+    h1_raw = get_ohlcv(symbol=symbol, interval="1h", months=months)
     h1_base = h1_raw.set_index("timestamp")
     h1_base.index.name = "ts"
 
