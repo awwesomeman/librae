@@ -1,6 +1,9 @@
-# 2026-03-27 — Strategy Protocol + Executor 分離
+# Strategy Protocol + Executor 分離
 
-> 狀態：implementing
+> 狀態：completed
+> 範圍：engine, strategy, executor
+> 建立日期：2026-03-27
+> 最後更新：2026-03-28
 
 ## 背景
 

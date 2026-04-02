@@ -1,5 +1,10 @@
 # Librae Framework Refactoring
 
+> 狀態：planning
+> 範圍：librae, backtest, schema
+> 建立日期：2026-03-27
+> 最後更新：2026-03-27
+
 ## Context
 
 Three problems with the current design:

@@ -1,5 +1,9 @@
 # DB Schema Consolidation — 執行計劃
 
+> 狀態：completed
+> 範圍：schema, db, engine, grafana, data
+> 建立日期：2026-04-02
+> 最後更新：2026-04-02
 > 依據：[2026-04-02 DB Schema 整合](../decisions/2026-04-02-db-schema-consolidation.md)、[2026-04-01 OHLCV 遷移](../decisions/2026-04-01-ohlcv-migrate-to-timescaledb.md)
 > 策略：**DROP + 重建**（現有資料為實驗用途，不需保留）
 

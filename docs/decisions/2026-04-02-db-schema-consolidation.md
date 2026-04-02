@@ -1,6 +1,7 @@
 # 2026-04-02 — DB Schema 整合：資料表精簡與寫入流程統一
 
-> 狀態：accepted
+> 狀態：implemented
+> 範圍：schema, db, timescale_writer, timescale_reader, engine, wiring, grafana
 > 前置決策：[2026-03-31 DB Schema 優化](2026-03-31-database-schema-optimization.md)、[2026-04-02 Signal Monitor 審查](2026-04-02-signal-monitor-dashboard-review.md)
 > 動機：新增訊號監控需求後，重新審視現有 6 張表 + 1 張計劃中表的資料流，發現冗餘與整合機會
 

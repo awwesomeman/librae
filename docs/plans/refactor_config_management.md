@@ -1,9 +1,10 @@
 # Config Management 重構計畫
 
-> Created: 2026-03-31
-> Status: Ready
-> Scope: Telegram 通知設定 + config pattern 統一
-> Review: 2026-03-31 批判檢視 5 點已整合（見 §8）
+> 狀態：planning
+> 範圍：config, telegram, notification
+> 建立日期：2026-03-31
+> 最後更新：2026-03-31
+> 備註：2026-03-31 批判檢視 5 點已整合（見 §8）
 
 ---
 

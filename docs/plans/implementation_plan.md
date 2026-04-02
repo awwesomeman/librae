@@ -1,8 +1,10 @@
 # quant-strategy-lab Implementation Plan
 
-> Updated: 2026-03-31
-> Architecture: Librae 回測引擎 + Strategy Protocol + Executor 分離
-> Status: Phase 3 sim mode 運行中；trendpullback_m5 已完成回測並正在監控
+> 狀態：in-progress
+> 範圍：全系統（engine, strategy, sim, grafana）
+> 建立日期：2026-03-06
+> 最後更新：2026-03-31
+> 進度：Phase 3 sim mode 運行中；trendpullback_m5 已完成回測並正在監控
 
 ---
 
