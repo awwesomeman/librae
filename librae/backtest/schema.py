@@ -68,6 +68,7 @@ class RunMetadata:
     end_ts: datetime
     run_ts: datetime
     schema_version: str = SCHEMA_VERSION
+    params: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class EquityCurvePoint:
     drawdown: float
     benchmark_equity: float | None = None
     benchmark_ret_1d: float | None = None
+    strategy_name: str | None = None
 
 
 @dataclass(frozen=True)

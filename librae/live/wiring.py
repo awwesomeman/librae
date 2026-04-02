@@ -38,6 +38,8 @@ def build_live_trader(
     warmup_bars: int = 720,
     no_db: bool = False,
     telegram_config: dict | None = None,
+    signal_column: str | None = None,
+    params: dict | None = None,
 ) -> LiveTrader:
     """Build a fully wired LiveTrader for sim mode.
 
@@ -52,7 +54,8 @@ def build_live_trader(
     from brokers.crypto_adapter import CryptoAdapter
     from db.timescale_writer import (
         refresh_performance, update_heartbeat, write_equity_point,
-        write_ohlcv, write_run_metadata, write_signal, write_trade,
+        write_ohlcv, write_run_metadata,
+        write_signal_outcome, write_trade,
     )
 
     if market != "crypto":
@@ -74,6 +77,7 @@ def build_live_trader(
                 timeframe=timeframe, mode="sim",
                 start_ts=datetime.now(tz=timezone.utc),
                 data_source="binance", poll_interval=poll_interval,
+                params_json=params,
             )
         except Exception as e:
             logger.warning("DB write_run_metadata failed: %s", e)
@@ -89,20 +93,19 @@ def build_live_trader(
     def fetcher(symbol: str, timeframe_ccxt_: str, limit: int, *, drop_incomplete: bool = False) -> pd.DataFrame:
         return adapter.fetch_ohlcv(symbol, timeframe_ccxt_, limit, drop_incomplete=drop_incomplete)
 
-    def on_signal(symbol: str, action: Action, price: float, ts: datetime) -> None:
-        signal_type = "entry" if action.type in ("buy", "sell") else "exit"
-        strength = 1.0 if action.type == "buy" else (
-            -1.0 if action.type == "sell" else 0.0
-        )
+    def on_signal_outcome_cb(symbol: str, ts: datetime, signal_value: float, price: float) -> None:
         _db_write(
-            write_signal,
-            ts=ts, run_id=run_id, strategy=strategy_name,
-            symbol=symbol, timeframe=timeframe, signal_type=signal_type,
-            source="sim", price=price, signal_strength=strength,
+            write_signal_outcome,
+            signal_ts=ts, strategy=strategy_name, symbol=symbol,
+            source="sim", timeframe=timeframe,
+            signal_value=signal_value, price=price,
         )
 
     def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
-        _db_write(write_equity_point, ts=ts, run_id=run_id_, equity=equity, drawdown=drawdown, ret_1d=ret_1d)
+        _db_write(
+            write_equity_point, ts=ts, run_id=run_id_, equity=equity,
+            drawdown=drawdown, ret_1d=ret_1d, strategy_name=strategy_name,
+        )
 
     _trade_seq = 0
 
@@ -140,7 +143,7 @@ def build_live_trader(
             "close": bar.get("close", 0),
             "volume": bar.get("volume", 0),
         }]).set_index("ts")
-        _db_write(write_ohlcv, row, symbol, timeframe_, run_id_, source="sim")
+        _db_write(write_ohlcv, row, symbol, timeframe_, source="sim")
 
     def on_heartbeat(run_id_: str) -> None:
         _db_write(update_heartbeat, run_id_)
@@ -161,9 +164,10 @@ def build_live_trader(
         warmup_bars=warmup_bars,
         initial_balance=initial_balance,
         poll_interval=poll_interval,
-        on_signal=on_signal,
         on_bar=on_bar,
         on_trade=on_trade,
         on_ohlcv=on_ohlcv,
         on_heartbeat=on_heartbeat,
+        on_signal_outcome=on_signal_outcome_cb if signal_column else None,
+        signal_column=signal_column,
     )

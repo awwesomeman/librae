@@ -310,13 +310,13 @@ BASE_PANELS_DEF: list[dict] = [
         "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, price AS \"Entry\" FROM strategy_signals"
-                " WHERE run_id = '${run_id}' AND signal_type = 'entry' AND $__timeFilter(ts)",
+                "SELECT entry_ts AS time, entry_price AS \"Entry\" FROM trade_blotter"
+                " WHERE run_id = '${run_id}' AND $__timeFilter(entry_ts)",
                 "A",
             ),
             _target(
-                "SELECT ts AS time, price AS \"Exit\" FROM strategy_signals"
-                " WHERE run_id = '${run_id}' AND signal_type = 'exit' AND $__timeFilter(ts)",
+                "SELECT exit_ts AS time, exit_price AS \"Exit\" FROM trade_blotter"
+                " WHERE run_id = '${run_id}' AND $__timeFilter(exit_ts)",
                 "B",
             ),
         ],

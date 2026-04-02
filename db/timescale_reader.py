@@ -92,13 +92,24 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
 
 
 def load_strategy_signals(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
+    """Load entry/exit signals from trade_blotter (replaces strategy_signals table)."""
     sql = """
-        SELECT ts AS _time, strategy, symbol, timeframe,
-               signal_type, source, price,
-               signal_strength, confidence, quantity, run_id
-        FROM strategy_signals
-        WHERE run_id = %s
-        ORDER BY ts
+        WITH t AS (
+            SELECT entry_ts, exit_ts, entry_price, exit_price, side, symbol, run_id
+            FROM trade_blotter WHERE run_id = %s
+        )
+        SELECT entry_ts AS _time, symbol, 'entry' AS signal_type,
+               entry_price AS price,
+               CASE WHEN side='long' THEN 1.0 ELSE -1.0 END AS signal_strength,
+               run_id
+        FROM t
+        UNION ALL
+        SELECT exit_ts AS _time, symbol, 'exit' AS signal_type,
+               exit_price AS price,
+               CASE WHEN side='long' THEN -1.0 ELSE 1.0 END AS signal_strength,
+               run_id
+        FROM t
+        ORDER BY _time
     """
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
@@ -107,15 +118,57 @@ def load_strategy_signals(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame
     return df
 
 
-def load_ohlcv(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
-    sql = """
-        SELECT ts AS _time, symbol, open, high, low, close, volume
-        FROM ohlcv
-        WHERE run_id = %s
-        ORDER BY ts
+def load_ohlcv(
+    run_id: str | None = None,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    start_ts: str | None = None,
+    end_ts: str | None = None,
+    dsn: str = TIMESCALE_DSN,
+) -> pd.DataFrame:
+    """Load OHLCV data by symbol+timeframe+range, or by run_id (legacy).
+
+    Prefer symbol/timeframe/start_ts/end_ts for new code.
+    Legacy run_id path looks up the run's metadata first.
     """
+    if symbol and timeframe:
+        sql = """
+            SELECT ts AS _time, symbol, open, high, low, close, volume
+            FROM ohlcv
+            WHERE symbol = %s AND timeframe = %s
+        """
+        params: list = [symbol, timeframe]
+        if start_ts:
+            sql += " AND ts >= %s"
+            params.append(start_ts)
+        if end_ts:
+            sql += " AND ts <= %s"
+            params.append(end_ts)
+        sql += " ORDER BY ts"
+    elif run_id:
+        # WHY: legacy path — look up run metadata then query ohlcv by its fields.
+        # backtest_runs.symbol may be comma-separated for multi-symbol runs,
+        # so we split and use ANY. Guard against NULL start_ts/end_ts.
+        sql = """
+            WITH meta AS (
+                SELECT symbol, timeframe, start_ts, end_ts
+                FROM backtest_runs WHERE run_id = %s
+            )
+            SELECT ts AS _time, o.symbol, open, high, low, close, volume
+            FROM ohlcv o, meta m
+            WHERE o.symbol = m.symbol
+              AND o.timeframe = m.timeframe
+              AND (m.start_ts IS NULL OR ts >= m.start_ts)
+              AND (m.end_ts IS NULL OR ts <= m.end_ts)
+            ORDER BY ts
+        """
+        params = [run_id]
+    else:
+        return pd.DataFrame()
+
     with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=[run_id])
+        df = pd.read_sql(sql, conn, params=params)
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df

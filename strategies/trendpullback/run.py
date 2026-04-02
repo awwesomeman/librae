@@ -14,7 +14,7 @@ from pathlib import Path
 from librae import Backtest
 from librae.backtest.persistence import save_output
 from librae.config.market_config import get_market
-from db.timescale_writer import write_backtest_output, write_ohlcv
+from db.timescale_writer import persist_backtest
 
 from .strategy import TrendPullbackStrategy
 from .utils import fetch_and_prepare
@@ -64,10 +64,7 @@ def run_backtest(args: argparse.Namespace) -> None:
 
     if not args.no_db:
         try:
-            counts = write_backtest_output(output)
-            ohlcv_df = df.droplevel("symbol")[["open", "high", "low", "close", "volume"]]
-            ohlcv_df.index.name = "ts"
-            counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, bt.run_id)
+            counts = persist_backtest(output, df, symbol, timeframe, params)
             logger.info("       DB: %s", counts)
         except Exception as e:
             logger.warning("DB write skipped: %s", e)
@@ -97,6 +94,8 @@ def run_sim(args: argparse.Namespace) -> None:
         warmup_bars=params["warmup_bars"],
         no_db=args.no_db,
         telegram_config=getattr(args, "telegram", None),
+        signal_column="entry_signal",
+        params=params,
     )
     logger.info("Sim started: strategy=%s, symbols=%s, poll=%ds",
                 STRATEGY_NAME, symbols, args.poll_interval)

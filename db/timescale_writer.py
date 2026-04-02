@@ -1,10 +1,11 @@
-"""TimescaleDB writer for BacktestOutput and live signals.
+"""TimescaleDB writer for BacktestOutput and live/sim signals.
 
 Writes to tables: backtest_runs, equity_curve, trade_blotter,
-strategy_signals, strategy_performance, ohlcv.
+strategy_performance, ohlcv, signal_outcomes.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -46,6 +47,7 @@ def write_run_metadata(
     data_source: str = "binance",
     sample: str | None = None,
     poll_interval: int | None = None,
+    params_json: dict | None = None,
     cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
@@ -56,23 +58,27 @@ def write_run_metadata(
     """
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, sample, data_source,
-                start_ts, end_ts, run_ts, schema_version, mode, poll_interval)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                start_ts, end_ts, run_ts, schema_version, mode, poll_interval,
+                params)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
-                 mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval"""
-    params = (
+                 mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval,
+                 params=EXCLUDED.params"""
+    params_val = json.dumps(params_json) if params_json is not None else None
+    values = (
         run_id, strategy, symbol, timeframe, sample, data_source,
         _to_dt(start_ts), _to_dt(end_ts),
         _to_dt(run_ts) or datetime.now(tz=timezone.utc),
         SCHEMA_VERSION, mode, poll_interval,
+        params_val,
     )
     if cur is not None:
-        cur.execute(sql, params)
+        cur.execute(sql, values)
     else:
         with get_conn(dsn) as conn:
             c = conn.cursor()
-            c.execute(sql, params)
+            c.execute(sql, values)
             c.close()
 
 
@@ -89,12 +95,18 @@ def update_heartbeat(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
 
 def write_backtest_output(
     output: BacktestOutput,
+    *,
+    signal_series: pd.Series | None = None,
+    params: dict | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
 
     Args:
         output: BacktestOutput to write.
+        signal_series: Optional Series (index=timestamp, values=signal_value)
+            to write to signal_outcomes. Only non-NaN values are written.
+        params: Optional strategy parameters dict to store as JSONB.
         dsn: TimescaleDB DSN.
 
     Returns:
@@ -113,12 +125,12 @@ def write_backtest_output(
             run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
             timeframe=meta.timeframe, mode="backtest",
             start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
+            params_json=params,
             cur=cur,
         )
         counts["backtest_runs"] = 1
 
-        # 清除舊資料（idempotent re-run）
-        cur.execute("DELETE FROM strategy_signals WHERE run_id = %s", (meta.run_id,))
+        # Clear old data (idempotent re-run)
         cur.execute("DELETE FROM equity_curve WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM trade_blotter WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
@@ -130,13 +142,15 @@ def write_backtest_output(
                     _to_dt(eq.ts), meta.run_id, eq.equity,
                     eq.benchmark_equity, eq.drawdown,
                     eq.ret_1d, eq.benchmark_ret_1d,
+                    meta.strategy,
                 )
                 for eq in output.equity_curve
             ]
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO equity_curve
-                   (ts, run_id, equity, benchmark_equity, drawdown, ret_1d, benchmark_ret_1d)
+                   (ts, run_id, equity, benchmark_equity, drawdown, ret_1d,
+                    benchmark_ret_1d, strategy_name)
                    VALUES %s""",
                 eq_rows,
                 page_size=1000,
@@ -176,34 +190,34 @@ def write_backtest_output(
             )
             counts["trade_blotter"] = len(trade_rows)
 
-        # strategy_signals (derived from trades: entry + exit)
-        signal_rows = []
-        for tr in output.trades:
-            strength = 1.0 if tr.side == "long" else -1.0
-            signal_rows.append((
-                _to_dt(tr.entry_ts), meta.run_id, meta.strategy,
-                meta.symbol, meta.timeframe,
-                "entry", "backtest",
-                tr.entry_price, strength, 0.5, tr.quantity,
-            ))
-            signal_rows.append((
-                _to_dt(tr.exit_ts), meta.run_id, meta.strategy,
-                meta.symbol, meta.timeframe,
-                "exit", "backtest",
-                tr.exit_price, -strength, 0.5, tr.quantity,
-            ))
-        if signal_rows:
+        # signal_outcomes (from feature-layer signal_series)
+        if signal_series is not None and not signal_series.empty:
+            # Idempotent re-run: clear signals within this backtest's time range
+            cur.execute(
+                """DELETE FROM signal_outcomes
+                   WHERE strategy = %s AND symbol = %s AND source = 'backtest'
+                     AND timeframe = %s
+                     AND signal_ts BETWEEN %s AND %s""",
+                (meta.strategy, meta.symbol, meta.timeframe,
+                 _to_dt(meta.start_ts), _to_dt(meta.end_ts)),
+            )
+            so_rows = [
+                (_to_dt(ts), meta.strategy, meta.symbol, "backtest",
+                 meta.timeframe, float(val), None)
+                for ts, val in signal_series.items()
+            ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO strategy_signals
-                   (ts, run_id, strategy, symbol, timeframe,
-                    signal_type, source, price, signal_strength,
-                    confidence, quantity)
-                   VALUES %s""",
-                signal_rows,
+                """INSERT INTO signal_outcomes
+                   (signal_ts, strategy, symbol, source, timeframe,
+                    signal_value, price)
+                   VALUES %s
+                   ON CONFLICT (signal_ts, strategy, symbol, source, timeframe)
+                   DO NOTHING""",
+                so_rows,
                 page_size=1000,
             )
-            counts["strategy_signals"] = len(signal_rows)
+            counts["signal_outcomes"] = len(so_rows)
 
         write_performance(meta.run_id, m, cur=cur)
         counts["strategy_performance"] = 1
@@ -217,7 +231,7 @@ def write_ohlcv(
     df: pd.DataFrame,
     symbol: str,
     timeframe: str,
-    run_id: str,
+    run_id: str | None = None,
     source: str = "backtest",
     dsn: str = TIMESCALE_DSN,
 ) -> int:
@@ -256,7 +270,7 @@ def write_ohlcv(
             """INSERT INTO ohlcv (ts, symbol, timeframe, run_id, source,
                open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT (ts, symbol, timeframe, run_id) DO NOTHING""",
+               ON CONFLICT (ts, symbol, timeframe) DO NOTHING""",
             rows,
             page_size=2000,
         )
@@ -265,43 +279,37 @@ def write_ohlcv(
     return len(rows)
 
 
-def write_signal(
-    ts: datetime,
-    run_id: str,
+def write_signal_outcome(
+    signal_ts: datetime,
     strategy: str,
     symbol: str,
-    timeframe: str,
-    signal_type: str,
     source: str,
-    price: float,
-    signal_strength: float = 1.0,
-    confidence: float = 0.5,
-    quantity: float = 0.0,
+    timeframe: str,
+    signal_value: float,
+    price: float | None = None,
+    *,
+    cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
-) -> bool:
-    """Write a single signal row to strategy_signals.
+) -> None:
+    """Write a single signal outcome row (upsert, idempotent).
 
-    Uses ON CONFLICT DO NOTHING for idempotent re-inserts (e.g. sim restart).
-    Returns True if a row was inserted, False if it was a duplicate.
+    If ``cur`` is provided, executes on that cursor (caller owns the
+    transaction).  Otherwise opens its own connection and commits.
     """
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO strategy_signals
-               (ts, run_id, strategy, symbol, timeframe,
-                signal_type, source, price, signal_strength,
-                confidence, quantity)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (ts, run_id, symbol, signal_type) DO NOTHING""",
-            (
-                _to_dt(ts), run_id, strategy, symbol, timeframe,
-                signal_type, source, price, signal_strength,
-                confidence, quantity,
-            ),
-        )
-        inserted = cur.rowcount > 0
-        cur.close()
-    return inserted
+    sql = """INSERT INTO signal_outcomes
+               (signal_ts, strategy, symbol, source, timeframe, signal_value, price)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (signal_ts, strategy, symbol, source, timeframe)
+               DO NOTHING"""
+    values = (_to_dt(signal_ts), strategy, symbol, source, timeframe,
+              signal_value, price)
+    if cur is not None:
+        cur.execute(sql, values)
+    else:
+        with get_conn(dsn) as conn:
+            c = conn.cursor()
+            c.execute(sql, values)
+            c.close()
 
 
 def write_equity_point(
@@ -312,6 +320,7 @@ def write_equity_point(
     ret_1d: float = 0.0,
     benchmark_equity: float | None = None,
     benchmark_ret_1d: float | None = None,
+    strategy_name: str | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Write a single equity curve point (upsert by ts + run_id)."""
@@ -319,14 +328,15 @@ def write_equity_point(
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO equity_curve
-               (ts, run_id, equity, benchmark_equity, drawdown, ret_1d, benchmark_ret_1d)
-               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               (ts, run_id, equity, benchmark_equity, drawdown, ret_1d,
+                benchmark_ret_1d, strategy_name)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, ts) DO UPDATE SET
                  equity=EXCLUDED.equity, drawdown=EXCLUDED.drawdown,
-                 ret_1d=EXCLUDED.ret_1d""",
+                 ret_1d=EXCLUDED.ret_1d, strategy_name=EXCLUDED.strategy_name""",
             (
                 _to_dt(ts), run_id, equity, benchmark_equity,
-                drawdown, ret_1d, benchmark_ret_1d,
+                drawdown, ret_1d, benchmark_ret_1d, strategy_name,
             ),
         )
         cur.close()
@@ -465,3 +475,31 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
         holding_bars=holding_bars,
     )
     write_performance(run_id, metrics, dsn=dsn)
+
+
+def persist_backtest(
+    output: BacktestOutput,
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    params: dict | None = None,
+    signal_column: str = "entry_signal",
+) -> dict:
+    """Write backtest results + signal outcomes + OHLCV to DB.
+
+    Shared helper for strategy run.py files. Extracts non-null signal values
+    from the featured DataFrame, then writes everything in one call.
+    """
+    symbol_df = df.xs(symbol, level="symbol")
+    raw = symbol_df[signal_column].astype(float)
+    # WHY: keep all non-NaN signal values (positive, negative, zero).
+    # NaN means "no signal at this bar" and is excluded from signal_outcomes.
+    signal_series = raw.dropna()
+    signal_series = signal_series[signal_series != 0]
+
+    counts = write_backtest_output(output, signal_series=signal_series, params=params)
+
+    ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
+    ohlcv_df.index.name = "ts"
+    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
+    return counts

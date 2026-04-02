@@ -39,7 +39,6 @@ class LiveTrader:
         warmup_bars: Number of historical bars for indicator warm-up.
         initial_balance: Starting cash for position sizing.
         poll_interval: Seconds between poll cycles.
-        on_signal: Optional callback(symbol, action, price, ts).
         on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
             called every completed bar for equity persistence.
         on_trade: Optional callback(trade_dict) called on position close.
@@ -47,6 +46,9 @@ class LiveTrader:
             called every completed bar for OHLCV persistence.
         on_heartbeat: Optional callback(run_id) called every poll cycle
             to update liveness status.
+        on_signal_outcome: Optional callback(symbol, ts, signal_value, price)
+            called when signal_column has a non-NaN value.
+        signal_column: Feature column name to capture as signal value.
 
     Lifecycle notifications (startup/shutdown/error) are sent via the
     executor's TelegramAdapter if configured.
@@ -65,11 +67,12 @@ class LiveTrader:
         warmup_bars: int = 720,
         initial_balance: float = 100_000.0,
         poll_interval: float = 60.0,
-        on_signal: Callable[..., None] | None = None,
         on_bar: Callable[..., None] | None = None,
         on_trade: Callable[..., None] | None = None,
         on_ohlcv: Callable[..., None] | None = None,
         on_heartbeat: Callable[..., None] | None = None,
+        on_signal_outcome: Callable[..., None] | None = None,
+        signal_column: str | None = None,
     ) -> None:
         self._strategy = strategy
         self._symbols = symbols
@@ -80,11 +83,12 @@ class LiveTrader:
         self._timeframe = timeframe
         self._warmup_bars = warmup_bars
         self._poll_interval = poll_interval
-        self._on_signal = on_signal
         self._on_bar = on_bar
         self._on_trade = on_trade
         self._on_ohlcv = on_ohlcv
         self._on_heartbeat = on_heartbeat
+        self._on_signal_outcome = on_signal_outcome
+        self._signal_column = signal_column
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
@@ -266,6 +270,12 @@ class LiveTrader:
         price = float(bar.get("close", 0.0))
         self._last_prices[symbol] = price
 
+        # Capture signal from feature layer (before strategy decision)
+        if self._signal_column and self._on_signal_outcome:
+            sig = bar.get(self._signal_column)
+            if sig is not None and not pd.isna(sig):
+                self._on_signal_outcome(symbol, ts, float(sig), price)
+
         bar_index = self._bar_indices.get(symbol, 0)
         ctx = Context(
             ts=ts,
@@ -311,8 +321,6 @@ class LiveTrader:
                         net_return=pnl.net_return,
                         holding_bars=pos.bars_held,
                     ))
-                if self._on_signal:
-                    self._on_signal(symbol, action, price, ts)
                 continue
 
             fill = self._executor.execute(action, price, self._cash)
@@ -334,8 +342,6 @@ class LiveTrader:
                     "Position opened: %s %s @ %.2f qty=%.4f",
                     fill.side, symbol, fill.price, fill.quantity,
                 )
-                if self._on_signal:
-                    self._on_signal(symbol, action, price, ts)
 
         # Record equity and OHLCV after processing all actions
         self._record_equity(ts)
