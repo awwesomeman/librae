@@ -100,10 +100,11 @@ def build_live_trader(
         import math
 
         # WHY: compute months from limit + timeframe to avoid over-fetching
-        bar_hours = interval_to_timedelta(timeframe).total_seconds() / 3600
+        timeframe_ccxt = to_ccxt(timeframe)
+        bar_hours = interval_to_timedelta(timeframe_ccxt).total_seconds() / 3600
         months_needed = max(1, math.ceil(limit * bar_hours / 24 / 30))
 
-        df = get_ohlcv(symbol=symbol, interval=timeframe, months=months_needed)
+        df = get_ohlcv(symbol=symbol, interval=timeframe_ccxt, months=months_needed)
         if df.empty:
             return fetcher(symbol, timeframe_ccxt_, limit, drop_incomplete=True)
         if "timestamp" in df.columns and "ts" not in df.columns:

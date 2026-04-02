@@ -5,18 +5,75 @@ Checks DB for existing data, fetches gaps from exchange API, and upserts
 results back to DB.
 
     df = get_ohlcv("BTCUSDT", "1h", months=6)
+    df = get_ohlcv("TXFR1", "5m", months=3, source="shioaji")
+
+Adding a new data source
+------------------------
+Register a fetcher function with ``register_ohlcv_fetcher`` before calling
+``get_ohlcv``.  The fetcher signature is::
+
+    def my_fetcher(
+        symbol: str,
+        interval: str,      # ccxt format, e.g. "1h", "5m"
+        start: datetime,
+        end: datetime,
+    ) -> pd.DataFrame:      # columns: timestamp, open, high, low, close, volume
+        ...
+
+    register_ohlcv_fetcher("my_source", my_fetcher)
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Callable
 
 import pandas as pd
+
+from data.binance import fetch_ohlcv as _binance_fetch_ohlcv
+from data.binance import _parse_dt, _subtract_months
+from librae.core.utils import interval_to_timedelta, to_canonical, to_ccxt
 
 logger = logging.getLogger(__name__)
 
 OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 
+# ---------------------------------------------------------------------------
+# Fetcher registry
+# ---------------------------------------------------------------------------
+
+# source_name → callable(symbol, interval, start, end) → DataFrame
+_OHLCV_FETCHERS: dict[str, Callable] = {}
+
+
+def register_ohlcv_fetcher(source: str, fn: Callable) -> None:
+    """Register a data-source fetcher under ``source`` name.
+
+    The fetcher will be called by ``get_ohlcv`` when ``source=source`` is
+    requested.  Registering a name that already exists overwrites it.
+
+    Args:
+        source: Identifier string (e.g. ``'binance_spot'``, ``'shioaji'``).
+        fn: ``fn(symbol, interval, start, end) -> DataFrame`` where
+            ``interval`` is in ccxt format (``'1h'``, ``'5m'`` …).
+    """
+    _OHLCV_FETCHERS[source] = fn
+
+
+def _binance_fetcher(
+    symbol: str, interval: str, start: datetime, end: datetime,
+) -> pd.DataFrame:
+    return _binance_fetch_ohlcv(symbol=symbol, interval=interval, start=start, end=end, use_cache=False)
+
+
+# Built-in: Binance spot (registered under two names for backward compat)
+register_ohlcv_fetcher("binance_spot", _binance_fetcher)
+register_ohlcv_fetcher("binance", _binance_fetcher)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def get_ohlcv(
     symbol: str,
@@ -30,52 +87,67 @@ def get_ohlcv(
     """Unified OHLCV fetch: DB → API gap-fill → DB.
 
     Args:
-        symbol: Trading pair (e.g. "BTCUSDT").
-        interval: Candle interval (e.g. "1h", "5m", "1d").
+        symbol:   Trading symbol (e.g. ``'BTCUSDT'``, ``'TXFR1'``).
+        interval: Candle interval in any supported format
+                  (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
         start/end: Time range. If omitted, uses ``months`` before now.
-        months: Lookback period when start is not specified.
-        source: Data source identifier for multi-exchange support.
+        months:   Lookback period when ``start`` is not specified.
+        source:   Data source key registered via ``register_ohlcv_fetcher``.
+                  Built-in: ``'binance_spot'`` / ``'binance'``.
 
     Returns:
         DataFrame with columns [timestamp, open, high, low, close, volume],
         timestamp is tz-aware UTC, sorted ascending.
+
+    Raises:
+        ValueError: If ``source`` has no registered fetcher.
     """
-    from data.binance import _parse_dt, _subtract_months
+    if source not in _OHLCV_FETCHERS:
+        raise ValueError(
+            f"No OHLCV fetcher registered for source='{source}'. "
+            f"Available: {sorted(_OHLCV_FETCHERS)}. "
+            "Register one with register_ohlcv_fetcher()."
+        )
 
     end_dt = _parse_dt(end) if end else datetime.now(timezone.utc)
     start_dt = _parse_dt(start) if start else _subtract_months(end_dt, months)
+    interval_ccxt = to_ccxt(interval)
 
     # 1. Try DB first
-    db_df = _query_db(symbol, interval, start_dt, end_dt)
+    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt)
 
     if db_df is not None and not db_df.empty:
-        gaps = _find_gaps(db_df, start_dt, end_dt, interval)
+        gaps = _find_gaps(db_df, start_dt, end_dt, interval_ccxt)
         if not gaps:
-            logger.debug("DB hit: %s %s (%d bars)", symbol, interval, len(db_df))
+            logger.debug("DB hit: %s %s (%d bars)", symbol, interval_ccxt, len(db_df))
             return db_df
-        logger.info("DB partial: %s %s, %d gaps to fill", symbol, interval, len(gaps))
+        logger.info("DB partial: %s %s, %d gaps to fill", symbol, interval_ccxt, len(gaps))
     else:
         gaps = [(start_dt, end_dt)]
-        logger.info("DB miss: %s %s, fetching full range from API", symbol, interval)
+        logger.info("DB miss: %s %s, fetching full range from API", symbol, interval_ccxt)
 
     # 2. Fill gaps from API → upsert to DB
     fetched_parts: list[pd.DataFrame] = []
     for gap_start, gap_end in gaps:
-        api_df = _fetch_from_api(symbol, interval, gap_start, gap_end)
+        api_df = _fetch_from_api(symbol, interval_ccxt, gap_start, gap_end, source=source)
         if not api_df.empty:
             fetched_parts.append(api_df)
-            _upsert_db(api_df, symbol, interval, source)
+            _upsert_db(api_df, symbol, interval_ccxt, source)
 
     # 3. Re-read from DB (merges existing + newly upserted data)
-    db_df = _query_db(symbol, interval, start_dt, end_dt)
+    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt)
     if db_df is not None and not db_df.empty:
         return db_df
 
     # 4. Fallback: DB unavailable, return already-fetched API data
     if fetched_parts:
         return pd.concat(fetched_parts, ignore_index=True)
-    return _fetch_from_api(symbol, interval, start_dt, end_dt)
+    return _fetch_from_api(symbol, interval_ccxt, start_dt, end_dt, source=source)
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _query_db(
     symbol: str, interval: str, start_dt: datetime, end_dt: datetime,
@@ -85,12 +157,11 @@ def _query_db(
         from db.timescale_reader import load_ohlcv
 
         df = load_ohlcv(
-            symbol=symbol, timeframe=interval,
+            symbol=symbol, timeframe=to_canonical(interval),
             start_ts=start_dt.isoformat(), end_ts=end_dt.isoformat(),
         )
         if df.empty:
             return df
-        # Normalise column name: _time → timestamp
         df = df.rename(columns={"_time": "timestamp"})
         return df[OHLCV_COLUMNS].reset_index(drop=True)
     except Exception as e:
@@ -99,17 +170,15 @@ def _query_db(
 
 
 def _fetch_from_api(
-    symbol: str, interval: str, start_dt: datetime, end_dt: datetime,
+    symbol: str,
+    interval: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    source: str = "binance_spot",
 ) -> pd.DataFrame:
-    """Fetch from Binance API with pagination."""
-    from data.binance import fetch_ohlcv
-
-    # WHY: use_cache=False because we manage caching via DB now
-    return fetch_ohlcv(
-        symbol=symbol, interval=interval,
-        start=start_dt, end=end_dt,
-        use_cache=False,
-    )
+    """Dispatch fetch to the registered fetcher for ``source``."""
+    fetcher = _OHLCV_FETCHERS[source]   # caller already validated source exists
+    return fetcher(symbol, interval, start_dt, end_dt)
 
 
 def _upsert_db(
@@ -145,27 +214,17 @@ def _find_gaps(
     db_min = pd.Timestamp(db_df[ts_col].min()).to_pydatetime()
     db_max = pd.Timestamp(db_df[ts_col].max()).to_pydatetime()
 
-    # Ensure timezone-aware
     if db_min.tzinfo is None:
         db_min = db_min.replace(tzinfo=timezone.utc)
     if db_max.tzinfo is None:
         db_max = db_max.replace(tzinfo=timezone.utc)
 
-    gaps: list[tuple[datetime, datetime]] = []
-    delta = _interval_to_timedelta(interval)
+    delta = interval_to_timedelta(interval)
 
-    # Gap at the start
+    gaps: list[tuple[datetime, datetime]] = []
     if db_min > start_dt + delta:
         gaps.append((start_dt, db_min))
-
-    # Gap at the end
     if db_max < end_dt - delta:
         gaps.append((db_max, end_dt))
 
     return gaps
-
-
-def _interval_to_timedelta(interval: str) -> pd.Timedelta:
-    """Convert interval string to timedelta. Delegates to shared utility."""
-    from librae.core.utils import interval_to_timedelta
-    return interval_to_timedelta(interval)

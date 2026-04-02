@@ -20,6 +20,7 @@ import pandas as pd
 
 from librae.backtest.schema import BacktestOutput
 from librae.backtest.schema import SCHEMA_VERSION
+from librae.core.utils import to_canonical
 from db import TIMESCALE_DSN, get_conn
 
 logger = logging.getLogger(__name__)
@@ -243,6 +244,8 @@ def write_ohlcv(
     """
     if df is None or df.empty:
         return 0
+
+    timeframe = to_canonical(timeframe)
 
     # Normalise index → ts column
     work = df.copy()
