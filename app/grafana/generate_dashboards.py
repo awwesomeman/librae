@@ -542,15 +542,16 @@ def render_unified_dashboard() -> dict:
 # WHY: common SQL fragments for signal_outcomes LATERAL JOIN to ohlcv.
 # These are reused across multiple panels to compute forward return, MFE, MAE.
 _SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'"
+_OHLCV_WHERE = "symbol='$symbol' AND timeframe='$timeframe' AND source='$source'"
 _ENTRY_BAR = (
-    "SELECT close FROM ohlcv"
-    " WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts"
-    " ORDER BY ts DESC LIMIT 1"
+    f"SELECT close FROM ohlcv"
+    f" WHERE {_OHLCV_WHERE} AND ts <= s.signal_ts"
+    f" ORDER BY ts DESC LIMIT 1"
 )
 _EXIT_BAR = (
-    "SELECT close FROM ohlcv"
-    " WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts"
-    " ORDER BY ts LIMIT 1 OFFSET ($n - 1)"
+    f"SELECT close FROM ohlcv"
+    f" WHERE {_OHLCV_WHERE} AND ts > s.signal_ts"
+    f" ORDER BY ts LIMIT 1 OFFSET ($n - 1)"
 )
 _FWD_CTE = (
     f"WITH fwd AS (\n"
@@ -570,7 +571,7 @@ _EXC_CTE = (
     f"  FROM signal_outcomes s\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT close AS entry_close FROM ohlcv\n"
-    f"    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n"
+    f"    WHERE {_OHLCV_WHERE} AND ts <= s.signal_ts\n"
     f"    ORDER BY ts DESC LIMIT 1\n"
     f"  ) entry_bar ON true\n"
     f"  JOIN LATERAL (\n"
@@ -579,7 +580,7 @@ _EXC_CTE = (
     f"      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
     f"    FROM (\n"
     f"      SELECT high, low FROM ohlcv\n"
-    f"      WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n"
+    f"      WHERE {_OHLCV_WHERE} AND ts > s.signal_ts\n"
     f"      ORDER BY ts LIMIT $n\n"
     f"    ) b\n"
     f"  ) exc ON true\n"
@@ -609,9 +610,9 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         (
             "WITH latest_signal AS (\n"
             "  SELECT signal_ts, signal_value,\n"
-            "    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe'"
+            f"    (SELECT close FROM ohlcv WHERE {_OHLCV_WHERE}"
             " ORDER BY ts DESC LIMIT 1) AS current_close,\n"
-            "    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe'"
+            f"    (SELECT close FROM ohlcv WHERE {_OHLCV_WHERE}"
             " AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) AS signal_price\n"
             f"  FROM signal_outcomes s\n  WHERE {_SIG_WHERE}\n"
             "  ORDER BY signal_ts DESC LIMIT 1\n)\n"
@@ -690,9 +691,9 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "h": 8, "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, close AS \"Close\" FROM ohlcv"
-                " WHERE symbol='$symbol' AND timeframe='$timeframe'"
-                " AND $__timeFilter(ts) ORDER BY ts",
+                f"SELECT ts AS time, close AS \"Close\" FROM ohlcv"
+                f" WHERE {_OHLCV_WHERE}"
+                f" AND $__timeFilter(ts) ORDER BY ts",
                 "price",
             ),
             _target(

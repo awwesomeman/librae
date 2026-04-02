@@ -258,7 +258,7 @@ def write_ohlcv(
     symbol: str,
     timeframe: str,
     run_id: str | None = None,
-    source: str = "backtest",
+    source: str = "binance_spot",
     dsn: str = TIMESCALE_DSN,
 ) -> int:
     """Write OHLCV DataFrame to TimescaleDB ohlcv table.
