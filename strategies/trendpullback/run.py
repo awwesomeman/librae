@@ -14,7 +14,7 @@ from pathlib import Path
 from librae import Backtest
 from librae.backtest.persistence import save_output
 from librae.config.market_config import get_market
-from db.timescale_writer import persist_backtest
+from db.timescale_writer import save_strategy_results
 
 from .strategy import TrendPullbackStrategy
 from .utils import fetch_and_prepare
@@ -64,7 +64,7 @@ def run_backtest(args: argparse.Namespace) -> None:
 
     if not args.no_db:
         try:
-            counts = persist_backtest(output, df, symbol, timeframe, params)
+            counts = save_strategy_results(output, df, symbol, timeframe, params)
             logger.info("       DB: %s", counts)
         except Exception as e:
             logger.warning("DB write skipped: %s", e)

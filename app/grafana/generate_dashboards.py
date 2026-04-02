@@ -541,7 +541,7 @@ def render_unified_dashboard() -> dict:
 
 # WHY: common SQL fragments for signal_outcomes LATERAL JOIN to ohlcv.
 # These are reused across multiple panels to compute forward return, MFE, MAE.
-_SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='sim'"
+_SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'"
 _ENTRY_BAR = (
     "SELECT close FROM ohlcv"
     " WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts"
@@ -647,7 +647,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     _stat_panel(
         "Last Signal Age",
         f"SELECT EXTRACT(EPOCH FROM NOW() - MAX(signal_ts)) / 3600.0 AS \"Age\""
-        f" FROM signal_outcomes WHERE {_SIG_WHERE}",
+        f" FROM signal_outcomes s WHERE {_SIG_WHERE}",
         "h",
         [
             {"color": "green", "value": None},
@@ -659,7 +659,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     ),
     _stat_panel(
         "N (Signals)",
-        f"SELECT COUNT(*) AS \"N\" FROM signal_outcomes"
+        f"SELECT COUNT(*) AS \"N\" FROM signal_outcomes s"
         f" WHERE {_SIG_WHERE} AND $__timeFilter(signal_ts)",
         None, [],
         w=3, fixed_color="blue",
@@ -667,7 +667,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     ),
     _stat_panel(
         "Signal Value",
-        f"SELECT signal_value AS \"Value\" FROM signal_outcomes"
+        f"SELECT signal_value AS \"Value\" FROM signal_outcomes s"
         f" WHERE {_SIG_WHERE} ORDER BY signal_ts DESC LIMIT 1",
         None, [],
         w=3, decimals=3, no_value="N/A", fixed_color="blue",
@@ -809,9 +809,15 @@ def render_signal_monitor() -> dict:
             label="Symbol",
         ),
         _make_query_variable(
+            "source",
+            "SELECT DISTINCT source FROM signal_outcomes"
+            " WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
+            label="Source",
+        ),
+        _make_query_variable(
             "timeframe",
             "SELECT DISTINCT timeframe FROM signal_outcomes"
-            " WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
+            " WHERE strategy='$strategy' AND symbol='$symbol' AND source='$source' ORDER BY 1",
             label="Timeframe",
         ),
         _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),

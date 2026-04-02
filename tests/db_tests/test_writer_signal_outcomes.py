@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from db.timescale_writer import persist_backtest, write_signal_outcome
+from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_outcome
 
 
 class TestWriteSignalOutcome:
@@ -50,7 +50,7 @@ class TestWriteSignalOutcome:
 
 
 class TestPersistBacktest:
-    """persist_backtest extracts signals and writes to DB."""
+    """save_strategy_results extracts signals and writes to DB."""
 
     def _make_featured_df(self, n: int = 20) -> tuple[pd.DataFrame, str]:
         """Create a MultiIndex DataFrame mimicking strategy output."""
@@ -78,7 +78,7 @@ class TestPersistBacktest:
         df, symbol = self._make_featured_df()
         mock_output = MagicMock()
 
-        counts = persist_backtest(mock_output, df, symbol, "H1", params={"a": 1})
+        counts = save_strategy_results(mock_output, df, symbol, "H1", params={"a": 1})
 
         mock_write_bt.assert_called_once()
         call_kwargs = mock_write_bt.call_args
@@ -107,9 +107,70 @@ class TestPersistBacktest:
             "entry_signal": signals,
         }, index=mi)
 
-        persist_backtest(MagicMock(), df, symbol, "H1")
+        save_strategy_results(MagicMock(), df, symbol, "H1")
 
         signal_series = mock_write_bt.call_args.kwargs["signal_series"]
         # Should keep: 1.0, -1.0, 1.0, -0.5, 1.0 (5 values, excluding NaN and 0)
         assert len(signal_series) == 5
         assert 0.0 not in signal_series.values
+
+
+class TestSaveSignalResults:
+    """save_signal_results writes signals independently of backtest."""
+
+    @patch("db.timescale_writer.write_ohlcv", return_value=10)
+    @patch("db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("db.timescale_writer.get_conn")
+    def test_writes_signal_outcomes_without_backtest(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+        """Can write signals without BacktestOutput."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn_ctx.return_value = mock_conn
+
+        n = 20
+        idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
+        df = pd.DataFrame({
+            "open": range(n), "high": range(n), "low": range(n),
+            "close": range(n), "volume": [100] * n,
+            "entry_signal": [1.0 if i % 5 == 0 else 0.0 for i in range(n)],
+        }, index=idx)
+
+        counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy")
+
+        assert counts["signal_outcomes"] == 4  # indices 0,5,10,15
+        assert counts["ohlcv"] == 10
+        # Verify DELETE was called
+        assert mock_cur.execute.call_count >= 1
+        # Verify batch INSERT was called
+        mock_exec_values.assert_called_once()
+
+    @patch("db.timescale_writer.write_ohlcv", return_value=0)
+    @patch("db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("db.timescale_writer.get_conn")
+    def test_handles_multiindex_df(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+        """Works with MultiIndex (symbol, datetime) DataFrames."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn_ctx.return_value = mock_conn
+
+        n = 10
+        idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
+        mi = pd.MultiIndex.from_arrays(
+            [["BTCUSDT"] * n, idx], names=["symbol", "datetime"],
+        )
+        df = pd.DataFrame({
+            "open": range(n), "high": range(n), "low": range(n),
+            "close": range(n), "volume": [100] * n,
+            "entry_signal": [1.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, -0.5],
+        }, index=mi)
+
+        counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy")
+
+        # 1.0, -1.0, 1.0, 1.0, -0.5 = 5 non-zero non-NaN
+        assert counts["signal_outcomes"] == 5

@@ -1,6 +1,10 @@
-"""TimescaleDB writer for BacktestOutput and live/sim signals.
+"""TimescaleDB writer — low-level writes and high-level save helpers.
 
-Writes to tables: backtest_runs, equity_curve, trade_blotter,
+Naming convention:
+    write_*  — single-table write, no data transformation
+    save_*   — multi-table orchestrator, may extract/transform data
+
+Tables: backtest_runs, equity_curve, trade_blotter,
 strategy_performance, ohlcv, signal_outcomes.
 """
 from __future__ import annotations
@@ -480,7 +484,84 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
     write_performance(run_id, metrics, dsn=dsn)
 
 
-def persist_backtest(
+def save_signal_results(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    strategy: str,
+    source: str = "backtest",
+    signal_column: str = "entry_signal",
+) -> dict:
+    """Write signal history + OHLCV to DB. Independent of backtest engine.
+
+    Use this for signal quality analysis without running a full backtest.
+    Extracts non-null, non-zero signal values from the featured DataFrame.
+
+    Args:
+        df: Featured DataFrame. Either MultiIndex (symbol, datetime) or
+            single-level DatetimeIndex.
+        symbol: Trading pair.
+        timeframe: Canonical timeframe (e.g. "H1").
+        strategy: Strategy name for signal_outcomes grouping.
+        source: "backtest" or "sim".
+        signal_column: Column name containing signal values.
+    """
+    # Handle both MultiIndex and single-level DataFrames
+    if isinstance(df.index, pd.MultiIndex):
+        symbol_df = df.xs(symbol, level="symbol")
+    else:
+        symbol_df = df
+
+    raw = symbol_df[signal_column].astype(float)
+    # WHY: NaN = "no signal at this bar", 0 = "neutral" — both excluded.
+    signal_series = raw.dropna()
+    signal_series = signal_series[signal_series != 0]
+
+    counts: dict[str, int] = {}
+
+    if not signal_series.empty:
+        start_ts = signal_series.index.min()
+        end_ts = signal_series.index.max()
+
+        with get_conn() as conn:
+            cur = conn.cursor()
+            # Idempotent: clear existing signals in this range
+            cur.execute(
+                """DELETE FROM signal_outcomes
+                   WHERE strategy = %s AND symbol = %s AND source = %s
+                     AND timeframe = %s
+                     AND signal_ts BETWEEN %s AND %s""",
+                (strategy, symbol, source,
+                 to_canonical(timeframe),
+                 _to_dt(start_ts), _to_dt(end_ts)),
+            )
+            so_rows = [
+                (_to_dt(ts), strategy, symbol, source,
+                 to_canonical(timeframe), float(val), None)
+                for ts, val in signal_series.items()
+            ]
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO signal_outcomes
+                   (signal_ts, strategy, symbol, source, timeframe,
+                    signal_value, price)
+                   VALUES %s
+                   ON CONFLICT (signal_ts, strategy, symbol, source, timeframe)
+                   DO NOTHING""",
+                so_rows,
+                page_size=1000,
+            )
+            counts["signal_outcomes"] = len(so_rows)
+            cur.close()
+
+    # OHLCV safety net
+    ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
+    ohlcv_df.index.name = "ts"
+    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
+    return counts
+
+
+def save_strategy_results(
     output: BacktestOutput,
     df: pd.DataFrame,
     symbol: str,
@@ -488,27 +569,28 @@ def persist_backtest(
     params: dict | None = None,
     signal_column: str = "entry_signal",
 ) -> dict:
-    """Write backtest results + signal outcomes to DB.
+    """Write strategy backtest results + signal history to DB.
 
-    Shared helper for strategy run.py files. Extracts non-null signal values
-    from the featured DataFrame, then writes everything in one call.
-
-    OHLCV is written as a safety net (ON CONFLICT DO NOTHING). When using
-    get_ohlcv() for data fetching, OHLCV is already in DB from the fetch step.
+    Writes: backtest_runs, equity_curve, trade_blotter, strategy_performance,
+    signal_outcomes, ohlcv. Calls save_signal_results() internally.
     """
-    symbol_df = df.xs(symbol, level="symbol")
+    # Handle MultiIndex
+    if isinstance(df.index, pd.MultiIndex):
+        symbol_df = df.xs(symbol, level="symbol")
+    else:
+        symbol_df = df
+
     raw = symbol_df[signal_column].astype(float)
-    # WHY: keep all non-NaN signal values (positive, negative, zero).
-    # NaN means "no signal at this bar" and is excluded from signal_outcomes.
     signal_series = raw.dropna()
     signal_series = signal_series[signal_series != 0]
 
     counts = write_backtest_output(output, signal_series=signal_series, params=params)
 
-    # WHY: safety net — if get_ohlcv() already wrote to DB, this is a no-op
-    # (ON CONFLICT DO NOTHING). If DB was unavailable during fetch, this
-    # ensures OHLCV gets persisted with the backtest results.
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
     counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
     return counts
+
+
+# Backward compat alias
+persist_backtest = save_strategy_results
