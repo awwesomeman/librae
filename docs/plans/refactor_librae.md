@@ -4,6 +4,7 @@
 > 範圍：librae, backtest, schema
 > 建立日期：2026-03-27
 > 最後更新：2026-03-27
+> 依據：[2026-03-27 回測引擎重構](../decisions/2026-03-27-backtest-engine-refactor.md)
 
 ## Context
 

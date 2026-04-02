@@ -4,6 +4,7 @@
 > 範圍：全系統（engine, strategy, sim, grafana）
 > 建立日期：2026-03-06
 > 最後更新：2026-03-31
+> 依據：[2026-03-06 核心決策](../decisions/2026-03-06-core-tooling-and-schema.md)
 > 進度：Phase 3 sim mode 運行中；trendpullback_m5 已完成回測並正在監控
 
 ---

@@ -8,7 +8,7 @@
 - 決策一旦寫下不回溯修改原文，保留當時的判斷脈絡
 - 若實作過程與原始規劃有差異，在文件末尾新增 `## 實作差異` section 記錄偏離原因與實際做法
 
-**文件開頭必填欄位：**
+**文件開頭必填欄位（每項獨立一行）：**
 
 ```
 > 狀態：proposed | accepted | implemented | superseded
@@ -34,7 +34,7 @@
 - 會引用相關 decisions 作為依據
 - 隨實作進展持續更新，每個 Step 標注 ✅ 或待驗收
 
-**文件開頭必填欄位：**
+**文件開頭必填欄位（每項獨立一行）：**
 
 ```
 > 狀態：planning | in-progress | completed | abandoned

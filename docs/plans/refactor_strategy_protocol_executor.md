@@ -4,6 +4,7 @@
 > 範圍：engine, strategy, executor
 > 建立日期：2026-03-27
 > 最後更新：2026-03-28
+> 依據：[2026-03-27 回測引擎重構](../decisions/2026-03-27-backtest-engine-refactor.md)
 
 ## 背景
 

@@ -4,6 +4,7 @@
 > 範圍：config, telegram, notification
 > 建立日期：2026-03-31
 > 最後更新：2026-03-31
+> 依據：[2026-03-30 TSDB bind 可配置](../decisions/2026-03-30-tsdb-bind-configurable.md)
 > 備註：2026-03-31 批判檢視 5 點已整合（見 §8）
 
 ---
