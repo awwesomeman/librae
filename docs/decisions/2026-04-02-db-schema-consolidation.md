@@ -1,6 +1,6 @@
 # 2026-04-02 — DB Schema 整合：資料表精簡與寫入流程統一
 
-> 狀態：proposed
+> 狀態：accepted
 > 前置決策：[2026-03-31 DB Schema 優化](2026-03-31-database-schema-optimization.md)、[2026-04-02 Signal Monitor 審查](2026-04-02-signal-monitor-dashboard-review.md)
 > 動機：新增訊號監控需求後，重新審視現有 6 張表 + 1 張計劃中表的資料流，發現冗餘與整合機會
 
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
 );
 SELECT create_hypertable('signal_outcomes', 'signal_ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_outcomes_unique
-    ON signal_outcomes (signal_ts, strategy, symbol, source);
+    ON signal_outcomes (signal_ts, strategy, symbol, source, timeframe);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_lookup
     ON signal_outcomes (strategy, symbol, source, signal_ts DESC);
 ```
@@ -100,9 +100,17 @@ CREATE INDEX IF NOT EXISTS idx_signal_outcomes_lookup
 ### `ohlcv` 變更
 
 ```sql
--- unique key 移除 run_id
+-- 1. 先 dedup（既有資料有 N×重複，直接建 unique index 會失敗）
+DELETE FROM ohlcv a USING ohlcv b
+  WHERE a.ts = b.ts AND a.symbol = b.symbol AND a.timeframe = b.timeframe
+    AND a.ctid > b.ctid;
+
+-- 2. 重建 unique key（移除 run_id）
 DROP INDEX IF EXISTS idx_ohlcv_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe);
+
+-- 3. run_id 改為可選，移除 FK
+-- 注意：刪 backtest_run 不再 CASCADE 清理 ohlcv（正確行為 — ohlcv 是共享市場資料）
 ALTER TABLE ohlcv ALTER COLUMN run_id DROP NOT NULL;
 ALTER TABLE ohlcv DROP CONSTRAINT IF EXISTS ohlcv_run_id_fkey;
 ```
@@ -117,7 +125,26 @@ ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS params JSONB;
 
 ```sql
 CREATE INDEX IF NOT EXISTS idx_trade_blotter_run_id ON trade_blotter(run_id);
+ALTER TABLE trade_blotter
+  ADD CONSTRAINT chk_side CHECK (side IN ('long', 'short')) NOT VALID;
+VALIDATE CONSTRAINT chk_side;
 ```
+
+### `backtest_runs` CHECK 約束
+
+```sql
+ALTER TABLE backtest_runs
+  ADD CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live')) NOT VALID;
+VALIDATE CONSTRAINT chk_mode;
+```
+
+### `equity_curve` 變更
+
+```sql
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS strategy_name TEXT;
+```
+
+> **用途：** Grafana 疊多條 equity curve 做 overlay 比較時，不需 JOIN backtest_runs 即可辨識策略名稱。寫入時從 backtest_runs.strategy 帶入。
 
 ---
 
@@ -264,7 +291,10 @@ CREATE TABLE signal_metrics_cache (
 | ALTER `backtest_runs` ADD `params JSONB` | 同上 |
 | ALTER `ohlcv` unique key 移除 run_id | 同上 |
 | CREATE INDEX on `trade_blotter(run_id)` | 同上 |
+| ADD CHECK 約束：`mode IN ('backtest','sim','live')`, `side IN ('long','short')` | 同上 |
+| ALTER `equity_curve` ADD `strategy_name TEXT` | 同上 |
 | 更新 `deploy/timescale_init.sql` 反映完整 schema | `deploy/timescale_init.sql` |
+| 實作 `db/migrate.py` — idempotent schema sync | `db/migrate.py` |
 
 ### Phase 2：新增寫入路徑（新舊並行）
 
@@ -274,6 +304,7 @@ CREATE TABLE signal_metrics_cache (
 | `write_backtest_output()` 加 signal_series, params 參數 | `db/timescale_writer.py` |
 | LiveTrader 新增 `on_signal_outcome` callback | `librae/live/engine.py` |
 | `wiring.py` 接線 + 加 `signal_column` 參數 | `librae/live/wiring.py` |
+| `write_equity_curve()` 帶入 strategy_name | `db/timescale_writer.py` |
 | 暫時保留 `on_signal` + strategy_signals（向後相容） | — |
 
 ### Phase 3：遷移讀取端
@@ -305,6 +336,27 @@ CREATE TABLE signal_metrics_cache (
 
 ---
 
+## Schema Migration 自動化
+
+> 承接 03-31 P0「Schema migration 無自動化」問題。該問題在 TrendMaster 實驗中實際觸發（VPS 上已存在的 DB 缺少新欄位，writer 直接報錯）。
+
+本次 consolidation 新增了更多 schema 變更（signal_outcomes 新表、ohlcv unique key 變更、CHECK 約束、equity_curve 新欄位），migration 自動化的需求更加迫切。
+
+**方案：** 在 Phase 1 一併實作 `db/migrate.py`，啟動時自動執行 `ALTER TABLE ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`，確保已部署的 DB 與 schema 同步。不引入 Alembic（P3 等規模化後再評估），用簡單的 idempotent SQL 即可。
+
+---
+
+## 暫不納入（來自 03-31 尚未覆蓋的項目）
+
+| 來源 | 項目 | 不納入理由 |
+|------|------|-----------|
+| P2 | `ThreadedConnectionPool` | 當前單執行緒架構無併發寫入需求 |
+| P2 | `trade_blotter` 轉 hypertable | 單策略交易量遠未達數十萬筆門檻 |
+| P3 | 引入 Alembic | 表結構變更頻率低，idempotent SQL 足夠 |
+| P3 | Retention policy | 資料量尚小，無儲存壓力 |
+
+---
+
 ## 驗證清單
 
 1. 現有 `tests/engine/` 測試通過
@@ -315,8 +367,12 @@ CREATE TABLE signal_metrics_cache (
 6. DB：`SELECT COUNT(*) FROM signal_outcomes` 確認資料量合理
 7. DB：確認 `strategy_signals` 可安全 DROP（無其他 consumer）
 
+## 執行計劃
+
+→ [db_schema_consolidation.md](../plans/db_schema_consolidation.md) — 經 review 修正後的最終執行計劃
+
 ## 相關決策
 
-- [2026-03-31 DB Schema 優化](2026-03-31-database-schema-optimization.md) — P0 items（OHLCV dedup、params JSONB）在此方案中一併處理
+- [2026-03-31 DB Schema 優化](2026-03-31-database-schema-optimization.md) — P0 全部吸收（OHLCV dedup、params JSONB、migration 自動化）；P1 吸收 trade_blotter index + CHECK 約束 + equity_curve strategy_name；strategy_signals FK 因刪表而不適用；P2/P3 規模化項目暫不納入
 - [2026-04-02 Signal Monitor 審查](2026-04-02-signal-monitor-dashboard-review.md) — signal_outcomes 表設計原則、訊號模型定義
 - [2026-04-01 回測引擎優化](2026-04-01-backtest-engine-optimization.md) — cache 機制、引擎層 bug fixes
