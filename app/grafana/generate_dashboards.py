@@ -564,28 +564,28 @@ _FWD_CTE = (
     f")\n"
 )
 _EXC_CTE = (
-    "WITH exc AS (\n"
-    "  SELECT s.signal_ts, exc.mfe, exc.mae,\n"
-    "    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n"
-    "  FROM signal_outcomes s\n"
-    "  JOIN LATERAL (\n"
-    "    SELECT close AS entry_close FROM ohlcv\n"
-    "    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n"
-    "    ORDER BY ts DESC LIMIT 1\n"
-    "  ) entry_bar ON true\n"
-    "  JOIN LATERAL (\n"
-    "    SELECT\n"
-    "      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n"
-    "      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
-    "    FROM (\n"
-    "      SELECT high, low FROM ohlcv\n"
-    "      WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n"
-    "      ORDER BY ts LIMIT $n\n"
-    "    ) b\n"
-    "  ) exc ON true\n"
+    f"WITH exc AS (\n"
+    f"  SELECT s.signal_ts, exc.mfe, exc.mae,\n"
+    f"    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n"
+    f"  FROM signal_outcomes s\n"
+    f"  JOIN LATERAL (\n"
+    f"    SELECT close AS entry_close FROM ohlcv\n"
+    f"    WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts <= s.signal_ts\n"
+    f"    ORDER BY ts DESC LIMIT 1\n"
+    f"  ) entry_bar ON true\n"
+    f"  JOIN LATERAL (\n"
+    f"    SELECT\n"
+    f"      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n"
+    f"      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
+    f"    FROM (\n"
+    f"      SELECT high, low FROM ohlcv\n"
+    f"      WHERE symbol='$symbol' AND timeframe='$timeframe' AND ts > s.signal_ts\n"
+    f"      ORDER BY ts LIMIT $n\n"
+    f"    ) b\n"
+    f"  ) exc ON true\n"
     f"  WHERE {_SIG_WHERE}\n"
-    "    AND $__timeFilter(s.signal_ts)\n"
-    ")\n"
+    f"    AND $__timeFilter(s.signal_ts)\n"
+    f")\n"
 )
 
 _TH_RED_YELLOW_GREEN = [
@@ -661,7 +661,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "N (Signals)",
         f"SELECT COUNT(*) AS \"N\" FROM signal_outcomes"
         f" WHERE {_SIG_WHERE} AND $__timeFilter(signal_ts)",
-        None, [{"color": "blue", "value": None}],
+        None, [],
         w=3, fixed_color="blue",
         description="Total signal count in selected time range.",
     ),
@@ -669,14 +669,14 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "Signal Value",
         f"SELECT signal_value AS \"Value\" FROM signal_outcomes"
         f" WHERE {_SIG_WHERE} ORDER BY signal_ts DESC LIMIT 1",
-        None, [{"color": "blue", "value": None}],
+        None, [],
         w=3, decimals=3, no_value="N/A", fixed_color="blue",
         description="Latest signal_value.",
     ),
     _stat_panel(
         "Timeframe",
         "SELECT '$timeframe' AS \"Timeframe\"",
-        None, [{"color": "text", "value": None}],
+        None, [],
         w=3, fixed_color="text",
     ),
 

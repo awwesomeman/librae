@@ -411,12 +411,7 @@
         "defaults": {
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
+            "steps": []
           },
           "color": {
             "fixedColor": "blue",
@@ -465,12 +460,7 @@
         "defaults": {
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
+            "steps": []
           },
           "color": {
             "fixedColor": "blue",
@@ -521,12 +511,7 @@
         "defaults": {
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
+            "steps": []
           },
           "color": {
             "fixedColor": "text",
