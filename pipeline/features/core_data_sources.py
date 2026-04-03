@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Data source adapters for reusable ETL pipelines.
 
-All Binance fetching delegates to data.market_data.get_ohlcv() which
+All Binance fetching delegates to data.ohlcv.get_ohlcv() which
 handles DB caching, gap-fill, and retry logic.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ def fetch_binance_spot_klines(
     **kwargs,
 ) -> pd.DataFrame:
     """Fetch Binance spot klines via unified get_ohlcv()."""
-    from data.market_data import get_ohlcv
+    from data.ohlcv import get_ohlcv
 
     start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
@@ -53,7 +53,7 @@ def fetch_binance_futures_klines(
     **kwargs,
 ) -> pd.DataFrame:
     """Fetch Binance futures klines via unified get_ohlcv()."""
-    from data.market_data import get_ohlcv
+    from data.ohlcv import get_ohlcv
 
     start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)

@@ -95,7 +95,7 @@ def build_live_trader(
 
     def warmup_fetcher(symbol: str, timeframe_ccxt_: str, limit: int) -> pd.DataFrame:
         """DB-first warmup: reads historical bars from DB, fills gaps from API."""
-        from data.market_data import get_ohlcv
+        from data.ohlcv import get_ohlcv
         from librae.core.utils import interval_to_timedelta
         import math
 

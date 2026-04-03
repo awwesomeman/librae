@@ -1,4 +1,4 @@
-"""Tests for data.market_data — unified OHLCV fetching with DB-first caching."""
+"""Tests for data.ohlcv — unified OHLCV fetching with DB-first caching."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from data.market_data import (
+from data.ohlcv import (
     OHLCV_COLUMNS,
     _find_gaps,
     get_ohlcv,
@@ -33,9 +33,9 @@ def _make_ohlcv_df(n: int = 5, start_ts: datetime | None = None) -> pd.DataFrame
 class TestGetOhlcv:
     """get_ohlcv DB-first with API gap-fill."""
 
-    @patch("data.market_data._upsert_db")
-    @patch("data.market_data._fetch_from_api")
-    @patch("data.market_data._query_db")
+    @patch("data.ohlcv._upsert_db")
+    @patch("data.ohlcv._fetch_from_api")
+    @patch("data.ohlcv._query_db")
     def test_db_hit_skips_api(self, mock_db, mock_api, mock_upsert):
         """Full DB hit → return DB data, never call API."""
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -48,9 +48,9 @@ class TestGetOhlcv:
         mock_api.assert_not_called()
         mock_upsert.assert_not_called()
 
-    @patch("data.market_data._upsert_db")
-    @patch("data.market_data._fetch_from_api")
-    @patch("data.market_data._query_db")
+    @patch("data.ohlcv._upsert_db")
+    @patch("data.ohlcv._fetch_from_api")
+    @patch("data.ohlcv._query_db")
     def test_db_miss_fetches_api_and_upserts(self, mock_db, mock_api, mock_upsert):
         """DB miss → fetch from API, upsert, re-read from DB."""
         api_df = _make_ohlcv_df(5)
@@ -63,9 +63,9 @@ class TestGetOhlcv:
         mock_upsert.assert_called_once()
         assert len(result) == 5
 
-    @patch("data.market_data._upsert_db")
-    @patch("data.market_data._fetch_from_api")
-    @patch("data.market_data._query_db")
+    @patch("data.ohlcv._upsert_db")
+    @patch("data.ohlcv._fetch_from_api")
+    @patch("data.ohlcv._query_db")
     def test_db_unavailable_returns_api_data(self, mock_db, mock_api, mock_upsert):
         """DB completely unavailable → return API data directly."""
         api_df = _make_ohlcv_df(3)
@@ -81,8 +81,8 @@ class TestGetOhlcv:
         with pytest.raises(ValueError, match="No OHLCV fetcher"):
             get_ohlcv("BTCUSDT", "1h", source="nonexistent_exchange")
 
-    @patch("data.market_data._upsert_db")
-    @patch("data.market_data._query_db")
+    @patch("data.ohlcv._upsert_db")
+    @patch("data.ohlcv._query_db")
     def test_custom_fetcher_registration(self, mock_db, mock_upsert):
         """Registered custom fetcher is used for its source name."""
         custom_df = _make_ohlcv_df(2)

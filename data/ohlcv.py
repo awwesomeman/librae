@@ -1,4 +1,4 @@
-"""Unified market data access — DB-first with API fallback.
+"""Unified OHLCV data access — DB-first with API fallback.
 
 Single entry point for all OHLCV data needs (backtest, sim, pipeline).
 Checks DB for existing data, fetches gaps from exchange API, and upserts

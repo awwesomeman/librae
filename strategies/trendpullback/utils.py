@@ -13,7 +13,7 @@ import pandas as pd
 import pandas_ta_classic as ta
 
 from data.binance import resample_ohlcv
-from data.market_data import get_ohlcv
+from data.ohlcv import get_ohlcv
 
 
 # ---------------------------------------------------------------------------

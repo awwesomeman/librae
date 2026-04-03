@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 
 from data.binance import resample_ohlcv
-from data.market_data import get_ohlcv
+from data.ohlcv import get_ohlcv
 from strategies.trendpullback.utils import (
     compute_daily_gate,
     compute_entry_conditions,
