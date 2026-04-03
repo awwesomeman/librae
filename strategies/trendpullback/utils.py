@@ -123,7 +123,7 @@ def prepare_signals(h1_base: pd.DataFrame, params: dict | None = None) -> pd.Dat
     d1 = resample_to_daily(h1_base)
     if len(d1) >= 20:
         d1 = compute_daily_gate(d1, params)
-        h1 = _merge_daily_gate(h1, d1)
+        h1 = merge_trend_gate(h1, d1)
     else:
         h1["daily_trend"] = True
     h1["entry_signal"] = compute_entry_conditions(h1, params).values
@@ -149,7 +149,7 @@ def fetch_and_prepare(
 
     # Daily gate
     d1 = compute_daily_gate(resample_to_daily(h1_base), params)
-    h1 = _merge_daily_gate(h1, d1)
+    h1 = merge_trend_gate(h1, d1)
 
     # Signals — .values strips index to avoid alignment mismatch after merge_asof
     h1["entry_signal"] = compute_entry_conditions(h1, params).values
@@ -162,28 +162,28 @@ def fetch_and_prepare(
     return h1.set_index(mi)
 
 
-def _merge_daily_gate(h1: pd.DataFrame, d1: pd.DataFrame) -> pd.DataFrame:
-    """Merge D1 daily_trend bool into H1 via merge_asof (no look-ahead)."""
-    h1_feat = h1.copy()
-    idx_name = h1_feat.index.name or "ts"
+def merge_trend_gate(detail: pd.DataFrame, gate: pd.DataFrame) -> pd.DataFrame:
+    """Merge higher-TF trend gate into lower-TF via merge_asof (no look-ahead)."""
+    out = detail.copy()
+    idx_name = out.index.name or "ts"
 
-    d1_trend = d1[["close", "ema20", "ema20_prev"]].copy()
-    d1_trend["daily_trend"] = (
-        (d1_trend["close"] > d1_trend["ema20"])
-        & (d1_trend["ema20"] > d1_trend["ema20_prev"])
+    trend = gate[["close", "ema20", "ema20_prev"]].copy()
+    trend["daily_trend"] = (
+        (trend["close"] > trend["ema20"])
+        & (trend["ema20"] > trend["ema20_prev"])
     )
 
-    d1_right = d1_trend[["daily_trend"]].copy()
-    d1_right["d1_ts"] = d1_right.index
-    d1_right = d1_right.reset_index(drop=True)
+    right = trend[["daily_trend"]].copy()
+    right["_gate_ts"] = right.index
+    right = right.reset_index(drop=True)
 
-    h1_feat = pd.merge_asof(
-        h1_feat.reset_index(),
-        d1_right,
+    out = pd.merge_asof(
+        out.reset_index(),
+        right,
         left_on=idx_name,
-        right_on="d1_ts",
+        right_on="_gate_ts",
         direction="backward",
-    ).set_index(idx_name).drop(columns=["d1_ts"], errors="ignore")
-    h1_feat["daily_trend"] = h1_feat["daily_trend"].fillna(False)
+    ).set_index(idx_name).drop(columns=["_gate_ts"], errors="ignore")
+    out["daily_trend"] = out["daily_trend"].fillna(False)
 
-    return h1_feat
+    return out

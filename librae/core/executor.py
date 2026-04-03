@@ -1,7 +1,6 @@
 """Execution layer — separates trade execution from engine logic.
 
 Contains:
-- Executor Protocol: interface for trade execution (live implements this)
 - make_fill(): pure function for simulated fills (backtest uses directly)
 - _size_position(): position sizing using all available cash
 - calc_trade_pnl(): shared PnL calculation for backtest + live
@@ -14,22 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Literal
 
 from librae.core import EPSILON
 from .cost_model import CostModel
 from .strategy import Action, Fill, PositionState
-
-
-class Executor(Protocol):
-    """Interface for trade execution."""
-
-    def execute(self, action: Action, price: float, cash: float) -> Fill | None:
-        """Attempt to execute an Action at given price.
-
-        Returns Fill if executed, None if rejected (e.g. insufficient cash).
-        """
-        ...
 
 
 @dataclass(frozen=True)

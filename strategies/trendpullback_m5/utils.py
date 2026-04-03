@@ -15,34 +15,8 @@ from strategies.trendpullback.utils import (
     compute_entry_conditions,
     compute_exit_conditions,
     compute_features,
+    merge_trend_gate,
 )
-
-
-def _merge_m30_gate(m5: pd.DataFrame, m30: pd.DataFrame) -> pd.DataFrame:
-    """Merge M30 trend gate into M5 via merge_asof (no look-ahead)."""
-    m5_feat = m5.copy()
-    idx_name = m5_feat.index.name or "ts"
-
-    m30_trend = m30[["close", "ema20", "ema20_prev"]].copy()
-    m30_trend["daily_trend"] = (
-        (m30_trend["close"] > m30_trend["ema20"])
-        & (m30_trend["ema20"] > m30_trend["ema20_prev"])
-    )
-
-    m30_right = m30_trend[["daily_trend"]].copy()
-    m30_right["m30_ts"] = m30_right.index
-    m30_right = m30_right.reset_index(drop=True)
-
-    m5_feat = pd.merge_asof(
-        m5_feat.reset_index(),
-        m30_right,
-        left_on=idx_name,
-        right_on="m30_ts",
-        direction="backward",
-    ).set_index(idx_name).drop(columns=["m30_ts"], errors="ignore")
-    m5_feat["daily_trend"] = m5_feat["daily_trend"].fillna(False)
-
-    return m5_feat
 
 
 def prepare_signals(m5_base: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
@@ -55,7 +29,7 @@ def prepare_signals(m5_base: pd.DataFrame, params: dict | None = None) -> pd.Dat
     m30 = resample_ohlcv(m5_base, "30min")
     if len(m30) >= 20:
         m30 = compute_daily_gate(m30, params)
-        m5 = _merge_m30_gate(m5, m30)
+        m5 = merge_trend_gate(m5, m30)
     else:
         m5["daily_trend"] = True
     m5["entry_signal"] = compute_entry_conditions(m5, params).values

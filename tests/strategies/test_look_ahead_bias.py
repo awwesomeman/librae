@@ -17,7 +17,7 @@ from librae.core.cost_model import CostModel
 from librae.backtest.engine import Backtest
 from librae.core.strategy import Action, BaseStrategy
 from strategies.trendpullback.utils import (
-    _merge_daily_gate,
+    merge_trend_gate,
     compute_daily_gate,
     compute_features,
     prepare_signals,
@@ -134,7 +134,7 @@ class TestDailyMergeNoLeak:
         h1 = compute_features(h1_base)
         d1 = compute_daily_gate(resample_to_daily(h1_base))
 
-        merged = _merge_daily_gate(h1, d1)
+        merged = merge_trend_gate(h1, d1)
 
         assert not merged["daily_trend"].isna().any()
 
@@ -151,7 +151,7 @@ class TestDailyMergeNoLeak:
         h1_base = _make_ohlcv()
         h1 = compute_features(h1_base)
         d1 = compute_daily_gate(resample_to_daily(h1_base))
-        merged = _merge_daily_gate(h1, d1)
+        merged = merge_trend_gate(h1, d1)
 
         # Find a day where daily_trend changes
         d1_trend = (
