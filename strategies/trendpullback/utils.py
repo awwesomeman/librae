@@ -13,6 +13,7 @@ import pandas as pd
 import pandas_ta_classic as ta
 
 from data.binance import resample_ohlcv
+from strategies.utils import merge_htf_column
 from data.ohlcv import get_ohlcv
 
 
@@ -162,24 +163,11 @@ def fetch_and_prepare(
     return h1.set_index(mi)
 
 
+def compute_trend_bool(gate: pd.DataFrame) -> pd.Series:
+    """EMA trend gate: close > ema20 and ema20 rising."""
+    return (gate["close"] > gate["ema20"]) & (gate["ema20"] > gate["ema20_prev"])
+
+
 def merge_trend_gate(detail: pd.DataFrame, gate: pd.DataFrame) -> pd.DataFrame:
-    """Merge higher-TF trend gate into lower-TF via merge_asof (no look-ahead)."""
-    idx_name = detail.index.name or "ts"
-
-    daily_trend = (
-        (gate["close"] > gate["ema20"])
-        & (gate["ema20"] > gate["ema20_prev"])
-    )
-    right = pd.DataFrame({"daily_trend": daily_trend, "_gate_ts": gate.index})
-    right = right.reset_index(drop=True)
-
-    out = pd.merge_asof(
-        detail.reset_index(),
-        right,
-        left_on=idx_name,
-        right_on="_gate_ts",
-        direction="backward",
-    ).set_index(idx_name).drop(columns=["_gate_ts"], errors="ignore")
-    out["daily_trend"] = out["daily_trend"].fillna(False)
-
-    return out
+    """Merge higher-TF EMA trend gate into lower-TF (no look-ahead)."""
+    return merge_htf_column(detail, compute_trend_bool(gate), column="daily_trend")
