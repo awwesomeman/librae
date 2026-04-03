@@ -330,6 +330,9 @@ class LiveTrader:
                     ))
                 continue
 
+            if action.type in ("buy", "sell") and symbol in self._positions:
+                continue
+
             fill = self._executor.execute(action, price, self._cash)
             if fill and action.type in ("buy", "sell"):
                 self._cash -= self._executor.cost_model.estimate_entry_outlay(

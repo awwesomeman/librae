@@ -357,7 +357,7 @@ class Backtest:
         equity_points: list[EquityCurvePoint] = []
         peak = 0.0
         prev_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
-        prev_bm = 1.0
+        prev_bm = float(benchmark_curve[0]) if has_bm and benchmark_curve else 1.0
         for i, snap in enumerate(result.equity_curve):
             eq = snap.equity
             peak = max(peak, eq)
