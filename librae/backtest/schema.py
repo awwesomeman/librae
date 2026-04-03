@@ -69,6 +69,9 @@ class RunMetadata:
     run_ts: datetime
     schema_version: str = SCHEMA_VERSION
     params: dict | None = None
+    mode: str = "backtest"
+    data_source: str = "binance"
+    sample: str | None = None
 
 
 @dataclass(frozen=True)

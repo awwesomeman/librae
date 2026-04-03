@@ -159,8 +159,9 @@ def write_backtest_output(
 
         write_run_metadata(
             run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
-            timeframe=meta.timeframe, mode="backtest",
+            timeframe=meta.timeframe, mode=meta.mode,
             start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
+            data_source=meta.data_source, sample=meta.sample,
             params_json=params,
             cur=cur,
         )
