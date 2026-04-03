@@ -18,7 +18,7 @@
       {
         "name": "mode",
         "type": "custom",
-        "query": "backtest,sim",
+        "query": "backtest,sim,live",
         "current": {
           "text": "Backtest",
           "value": "backtest"
@@ -32,6 +32,11 @@
           {
             "text": "Sim",
             "value": "sim",
+            "selected": false
+          },
+          {
+            "text": "Live",
+            "value": "live",
             "selected": false
           }
         ],

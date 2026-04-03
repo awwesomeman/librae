@@ -113,7 +113,7 @@ def compute_all(
     # WHY: use net_pnl (after costs) for all trade-level metrics
     # to stay consistent with total_return which is also net-of-costs.
     wins = net_pnls[net_pnls > 0]
-    losses_abs = np.abs(net_pnls[net_pnls <= 0])
+    losses_abs = np.abs(net_pnls[net_pnls < 0])
     win_rate = float(len(wins) / n_trades) if n_trades > 0 else 0.0
     # WHY: profit_factor undefined when no losses (all wins) — return None,
     # not 0.0 which misleadingly suggests worst performance.

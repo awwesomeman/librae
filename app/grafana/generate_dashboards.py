@@ -842,7 +842,7 @@ def render_signal_monitor() -> dict:
     variables = [
         _make_custom_variable(
             "mode",
-            [("Backtest", "backtest"), ("Sim", "sim")],
+            [("Backtest", "backtest"), ("Sim", "sim"), ("Live", "live")],
             label="Mode",
         ),
         _make_query_variable(

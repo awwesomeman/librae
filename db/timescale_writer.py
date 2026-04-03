@@ -281,6 +281,7 @@ def write_ohlcv(
         return 0
 
     timeframe = to_canonical(timeframe)
+    df = df.copy()
 
     # Normalise index → ts column
     if "ts" not in df.columns and "timestamp" not in df.columns:
@@ -406,6 +407,9 @@ def write_trade(
     commission: float = 0.0,
     slippage: float = 0.0,
     tax: float = 0.0,
+    price_unit: str = "USDT",
+    quantity_unit: str = "asset",
+    pnl_unit: str = "USDT",
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Write a single trade to trade_blotter (upsert by trade_id)."""
@@ -416,13 +420,15 @@ def write_trade(
                (trade_id, run_id, entry_ts, exit_ts, symbol, side,
                 entry_price, exit_price, quantity,
                 gross_pnl, net_pnl, gross_return, net_return,
+                price_unit, quantity_unit, pnl_unit,
                 commission, slippage, tax, holding_bars)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (trade_id) DO NOTHING""",
             (
                 trade_id, run_id, _to_dt(entry_ts), _to_dt(exit_ts),
                 symbol, side, entry_price, exit_price, quantity,
                 gross_pnl, net_pnl, gross_return, net_return,
+                price_unit, quantity_unit, pnl_unit,
                 commission, slippage, tax, holding_bars,
             ),
         )
