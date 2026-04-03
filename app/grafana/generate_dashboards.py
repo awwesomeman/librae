@@ -572,8 +572,8 @@ def render_unified_dashboard() -> dict:
 
 # WHY: common SQL fragments for signal_outcomes LATERAL JOIN to ohlcv.
 # These are reused across multiple panels to compute forward return, MFE, MAE.
-_SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'"
-_OHLCV_WHERE = "symbol='$symbol' AND timeframe='$timeframe' AND source='$source'"
+_SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'"
+_OHLCV_WHERE = "symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source'"
 _ENTRY_BAR = (
     f"SELECT close FROM ohlcv"
     f" WHERE {_OHLCV_WHERE} AND ts <= s.signal_ts"
@@ -729,7 +729,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             ),
             _target(
                 "SELECT signal_ts AS time, signal_value AS \"Signal\""
-                f" FROM signal_outcomes WHERE {_SIG_WHERE}"
+                f" FROM signal_outcomes s WHERE {_SIG_WHERE}"
                 " AND $__timeFilter(signal_ts) ORDER BY signal_ts",
                 "signals",
             ),
@@ -830,27 +830,33 @@ def render_signal_monitor() -> dict:
     panels = build_panels(SIGNAL_MONITOR_PANELS)
 
     variables = [
+        _make_custom_variable(
+            "mode",
+            [("Backtest", "backtest"), ("Sim", "sim")],
+            label="Mode",
+        ),
         _make_query_variable(
             "strategy",
-            "SELECT DISTINCT strategy FROM signal_outcomes ORDER BY 1",
+            "SELECT DISTINCT strategy FROM signal_outcomes WHERE mode='$mode' ORDER BY 1",
             label="Strategy",
         ),
         _make_query_variable(
             "symbol",
-            "SELECT DISTINCT symbol FROM signal_outcomes WHERE strategy='$strategy' ORDER BY 1",
+            "SELECT DISTINCT symbol FROM signal_outcomes"
+            " WHERE mode='$mode' AND strategy='$strategy' ORDER BY 1",
             label="Symbol",
-        ),
-        _make_query_variable(
-            "source",
-            "SELECT DISTINCT source FROM signal_outcomes"
-            " WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
-            label="Source",
         ),
         _make_query_variable(
             "timeframe",
             "SELECT DISTINCT timeframe FROM signal_outcomes"
-            " WHERE strategy='$strategy' AND symbol='$symbol' AND source='$source' ORDER BY 1",
+            " WHERE mode='$mode' AND strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
             label="Timeframe",
+        ),
+        _make_query_variable(
+            "data_source",
+            "SELECT DISTINCT source FROM ohlcv"
+            " WHERE symbol='$symbol' AND timeframe='$timeframe' ORDER BY 1",
+            label="Data Source",
         ),
         _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),
         _make_textbox_variable("k", "50", label="Rolling Window (signals)"),

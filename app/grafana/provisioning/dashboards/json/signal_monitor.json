@@ -16,14 +16,39 @@
   "templating": {
     "list": [
       {
+        "name": "mode",
+        "type": "custom",
+        "query": "backtest,sim",
+        "current": {
+          "text": "Backtest",
+          "value": "backtest"
+        },
+        "options": [
+          {
+            "text": "Backtest",
+            "value": "backtest",
+            "selected": true
+          },
+          {
+            "text": "Sim",
+            "value": "sim",
+            "selected": false
+          }
+        ],
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "label": "Mode"
+      },
+      {
         "name": "strategy",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT DISTINCT strategy FROM signal_outcomes ORDER BY 1",
-        "query": "SELECT DISTINCT strategy FROM signal_outcomes ORDER BY 1",
+        "definition": "SELECT DISTINCT strategy FROM signal_outcomes WHERE mode='$mode' ORDER BY 1",
+        "query": "SELECT DISTINCT strategy FROM signal_outcomes WHERE mode='$mode' ORDER BY 1",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -41,8 +66,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT DISTINCT symbol FROM signal_outcomes WHERE strategy='$strategy' ORDER BY 1",
-        "query": "SELECT DISTINCT symbol FROM signal_outcomes WHERE strategy='$strategy' ORDER BY 1",
+        "definition": "SELECT DISTINCT symbol FROM signal_outcomes WHERE mode='$mode' AND strategy='$strategy' ORDER BY 1",
+        "query": "SELECT DISTINCT symbol FROM signal_outcomes WHERE mode='$mode' AND strategy='$strategy' ORDER BY 1",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -54,33 +79,14 @@
         "label": "Symbol"
       },
       {
-        "name": "source",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-postgresql-datasource",
-          "uid": "P40AE60E18F02DE32"
-        },
-        "definition": "SELECT DISTINCT source FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
-        "query": "SELECT DISTINCT source FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
-        "rawQuery": true,
-        "refresh": 2,
-        "regex": "",
-        "includeAll": false,
-        "sort": 0,
-        "current": {},
-        "hide": 0,
-        "multi": false,
-        "label": "Source"
-      },
-      {
         "name": "timeframe",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT DISTINCT timeframe FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$source' ORDER BY 1",
-        "query": "SELECT DISTINCT timeframe FROM signal_outcomes WHERE strategy='$strategy' AND symbol='$symbol' AND source='$source' ORDER BY 1",
+        "definition": "SELECT DISTINCT timeframe FROM signal_outcomes WHERE mode='$mode' AND strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
+        "query": "SELECT DISTINCT timeframe FROM signal_outcomes WHERE mode='$mode' AND strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -90,6 +96,25 @@
         "hide": 0,
         "multi": false,
         "label": "Timeframe"
+      },
+      {
+        "name": "data_source",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT DISTINCT source FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' ORDER BY 1",
+        "query": "SELECT DISTINCT source FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' ORDER BY 1",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 0,
+        "multi": false,
+        "label": "Data Source"
       },
       {
         "name": "n",
@@ -153,7 +178,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH latest_signal AS (\n  SELECT signal_ts, signal_value,\n    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' ORDER BY ts DESC LIMIT 1) AS current_close,\n    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) AS signal_price\n  FROM signal_outcomes s\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'\n  ORDER BY signal_ts DESC LIMIT 1\n)\nSELECT $expected_direction * (current_close - signal_price) / NULLIF(signal_price, 0) AS \"PnL\"\nFROM latest_signal\nWHERE current_close IS NOT NULL AND signal_price IS NOT NULL",
+          "rawSql": "WITH latest_signal AS (\n  SELECT signal_ts, signal_value,\n    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' ORDER BY ts DESC LIMIT 1) AS current_close,\n    (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) AS signal_price\n  FROM signal_outcomes s\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'\n  ORDER BY signal_ts DESC LIMIT 1\n)\nSELECT $expected_direction * (current_close - signal_price) / NULLIF(signal_price, 0) AS \"PnL\"\nFROM latest_signal\nWHERE current_close IS NOT NULL AND signal_price IS NOT NULL",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -221,7 +246,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n  FROM signal_outcomes s\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) entry_bar ON true\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts > s.signal_ts ORDER BY ts LIMIT 1 OFFSET ($n - 1)) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT $expected_direction * AVG(ret) AS \"Mean Ret\" FROM fwd",
+          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n  FROM signal_outcomes s\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) entry_bar ON true\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts > s.signal_ts ORDER BY ts LIMIT 1 OFFSET ($n - 1)) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT $expected_direction * AVG(ret) AS \"Mean Ret\" FROM fwd",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -288,7 +313,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH exc AS (\n  SELECT s.signal_ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close AS entry_close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts > s.signal_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
+          "rawSql": "WITH exc AS (\n  SELECT s.signal_ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close AS entry_close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts > s.signal_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -354,7 +379,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT EXTRACT(EPOCH FROM NOW() - MAX(signal_ts)) / 3600.0 AS \"Age\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'",
+          "rawSql": "SELECT EXTRACT(EPOCH FROM NOW() - MAX(signal_ts)) / 3600.0 AS \"Age\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -417,7 +442,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT COUNT(*) AS \"N\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source' AND $__timeFilter(signal_ts)",
+          "rawSql": "SELECT COUNT(*) AS \"N\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode' AND $__timeFilter(signal_ts)",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -466,7 +491,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT signal_value AS \"Value\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source' ORDER BY signal_ts DESC LIMIT 1",
+          "rawSql": "SELECT signal_value AS \"Value\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode' ORDER BY signal_ts DESC LIMIT 1",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -579,7 +604,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, close AS \"Close\" FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, close AS \"Close\" FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "price",
           "datasource": {
@@ -588,7 +613,7 @@
           }
         },
         {
-          "rawSql": "SELECT signal_ts AS time, signal_value AS \"Signal\" FROM signal_outcomes WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source' AND $__timeFilter(signal_ts) ORDER BY signal_ts",
+          "rawSql": "SELECT signal_ts AS time, signal_value AS \"Signal\" FROM signal_outcomes s WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode' AND $__timeFilter(signal_ts) ORDER BY signal_ts",
           "format": "time_series",
           "refId": "signals",
           "datasource": {
@@ -657,7 +682,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n  FROM signal_outcomes s\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) entry_bar ON true\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts > s.signal_ts ORDER BY ts LIMIT 1 OFFSET ($n - 1)) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  SUM($expected_direction * ret) OVER (ORDER BY signal_ts) AS \"Cumulative Return\"\nFROM fwd ORDER BY signal_ts",
+          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n  FROM signal_outcomes s\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) entry_bar ON true\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts > s.signal_ts ORDER BY ts LIMIT 1 OFFSET ($n - 1)) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  SUM($expected_direction * ret) OVER (ORDER BY signal_ts) AS \"Cumulative Return\"\nFROM fwd ORDER BY signal_ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -693,7 +718,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    $expected_direction * (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS adj_return,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) entry_bar ON true\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts > s.signal_ts ORDER BY ts LIMIT 1 OFFSET ($n - 1)) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source' AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(adj_return) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW) AS \"Mean Return\"\nFROM fwd WHERE rn >= $k ORDER BY signal_ts",
+          "rawSql": "WITH fwd AS (\n  SELECT s.signal_ts,\n    $expected_direction * (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS adj_return,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) entry_bar ON true\n  JOIN LATERAL (SELECT close FROM ohlcv WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts > s.signal_ts ORDER BY ts LIMIT 1 OFFSET ($n - 1)) exit_bar ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode' AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(adj_return) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW) AS \"Mean Return\"\nFROM fwd WHERE rn >= $k ORDER BY signal_ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -750,7 +775,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH exc AS (\n  SELECT s.signal_ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close AS entry_close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$source' AND ts > s.signal_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.source='$source'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(mfe) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n  / NULLIF(AVG(mae) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n  AS \"Edge Ratio\"\nFROM exc WHERE rn >= $k ORDER BY signal_ts",
+          "rawSql": "WITH exc AS (\n  SELECT s.signal_ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n  FROM signal_outcomes s\n  JOIN LATERAL (\n    SELECT close AS entry_close FROM ohlcv\n    WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts <= s.signal_ts\n    ORDER BY ts DESC LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source' AND ts > s.signal_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'\n    AND $__timeFilter(s.signal_ts)\n)\nSELECT signal_ts AS time,\n  AVG(mfe) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n  / NULLIF(AVG(mae) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n  AS \"Edge Ratio\"\nFROM exc WHERE rn >= $k ORDER BY signal_ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {

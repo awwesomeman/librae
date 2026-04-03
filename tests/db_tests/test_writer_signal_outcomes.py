@@ -25,7 +25,7 @@ class TestWriteSignalOutcome:
         ts = datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc)
         write_signal_outcome(
             signal_ts=ts, strategy="test_strat", symbol="BTCUSDT",
-            source="sim", timeframe="H1", signal_value=1.0, price=50000.0,
+            mode="sim", timeframe="H1", signal_value=1.0, price=50000.0,
         )
 
         mock_cur.execute.assert_called_once()
@@ -41,7 +41,7 @@ class TestWriteSignalOutcome:
         ts = datetime(2024, 6, 1, tzinfo=timezone.utc)
 
         write_signal_outcome(
-            signal_ts=ts, strategy="s", symbol="S", source="sim",
+            signal_ts=ts, strategy="s", symbol="S", mode="sim",
             timeframe="H1", signal_value=1.0, cur=mock_cur,
         )
 

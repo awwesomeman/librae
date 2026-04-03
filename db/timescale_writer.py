@@ -221,7 +221,7 @@ def write_backtest_output(
             tf = to_canonical(meta.timeframe)
             cur.execute(
                 """DELETE FROM signal_outcomes
-                   WHERE strategy = %s AND symbol = %s AND source = 'backtest'
+                   WHERE strategy = %s AND symbol = %s AND mode = 'backtest'
                      AND timeframe = %s
                      AND signal_ts BETWEEN %s AND %s""",
                 (meta.strategy, meta.symbol, tf,
@@ -235,10 +235,10 @@ def write_backtest_output(
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO signal_outcomes
-                   (signal_ts, strategy, symbol, source, timeframe,
+                   (signal_ts, strategy, symbol, mode, timeframe,
                     signal_value, price)
                    VALUES %s
-                   ON CONFLICT (signal_ts, strategy, symbol, source, timeframe)
+                   ON CONFLICT (signal_ts, strategy, symbol, mode, timeframe)
                    DO NOTHING""",
                 so_rows,
                 page_size=1000,
@@ -310,7 +310,7 @@ def write_signal_outcome(
     signal_ts: datetime,
     strategy: str,
     symbol: str,
-    source: str,
+    mode: str,
     timeframe: str,
     signal_value: float,
     price: float | None = None,
@@ -324,11 +324,11 @@ def write_signal_outcome(
     transaction).  Otherwise opens its own connection and commits.
     """
     sql = """INSERT INTO signal_outcomes
-               (signal_ts, strategy, symbol, source, timeframe, signal_value, price)
+               (signal_ts, strategy, symbol, mode, timeframe, signal_value, price)
                VALUES (%s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (signal_ts, strategy, symbol, source, timeframe)
+               ON CONFLICT (signal_ts, strategy, symbol, mode, timeframe)
                DO NOTHING"""
-    values = (_to_dt(signal_ts), strategy, symbol, source, timeframe,
+    values = (_to_dt(signal_ts), strategy, symbol, mode, timeframe,
               signal_value, price)
     if cur is not None:
         cur.execute(sql, values)
@@ -509,7 +509,7 @@ def save_signal_results(
     symbol: str,
     timeframe: str,
     strategy: str,
-    source: str = "backtest",
+    mode: str = "backtest",
     signal_column: str = "entry_signal",
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
@@ -528,23 +528,23 @@ def save_signal_results(
             cur = conn.cursor()
             cur.execute(
                 """DELETE FROM signal_outcomes
-                   WHERE strategy = %s AND symbol = %s AND source = %s
+                   WHERE strategy = %s AND symbol = %s AND mode = %s
                      AND timeframe = %s
                      AND signal_ts BETWEEN %s AND %s""",
-                (strategy, symbol, source, tf,
+                (strategy, symbol, mode, tf,
                  _to_dt(start_ts), _to_dt(end_ts)),
             )
             so_rows = [
-                (_to_dt(ts), strategy, symbol, source, tf, float(val), None)
+                (_to_dt(ts), strategy, symbol, mode, tf, float(val), None)
                 for ts, val in signal_series.items()
             ]
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO signal_outcomes
-                   (signal_ts, strategy, symbol, source, timeframe,
+                   (signal_ts, strategy, symbol, mode, timeframe,
                     signal_value, price)
                    VALUES %s
-                   ON CONFLICT (signal_ts, strategy, symbol, source, timeframe)
+                   ON CONFLICT (signal_ts, strategy, symbol, mode, timeframe)
                    DO NOTHING""",
                 so_rows,
                 page_size=1000,

@@ -50,7 +50,8 @@ class TestRenderSignalMonitor:
         assert "strategy" in var_names
         assert "symbol" in var_names
         assert "timeframe" in var_names
-        assert "source" in var_names
+        assert "mode" in var_names
+        assert "data_source" in var_names
         assert "n" in var_names
         assert "k" in var_names
         assert "expected_direction" in var_names

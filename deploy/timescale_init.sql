@@ -116,14 +116,14 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     signal_ts       TIMESTAMPTZ NOT NULL,
     strategy        TEXT NOT NULL,
     symbol          TEXT NOT NULL,
-    source          TEXT NOT NULL,
+    mode            TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     signal_value    DOUBLE PRECISION NOT NULL,
     price           DOUBLE PRECISION,
-    CONSTRAINT chk_signal_source CHECK (source IN ('backtest', 'sim', 'live'))
+    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
 SELECT create_hypertable('signal_outcomes', 'signal_ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_outcomes_unique
-    ON signal_outcomes (signal_ts, strategy, symbol, source, timeframe);
+    ON signal_outcomes (signal_ts, strategy, symbol, mode, timeframe);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_lookup
-    ON signal_outcomes (strategy, symbol, source, signal_ts DESC);
+    ON signal_outcomes (strategy, symbol, mode, signal_ts DESC);

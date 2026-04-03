@@ -117,7 +117,7 @@ def build_live_trader(
         _db_write(
             write_signal_outcome,
             signal_ts=ts, strategy=strategy_name, symbol=symbol,
-            source="sim", timeframe=timeframe,
+            mode="sim", timeframe=timeframe,
             signal_value=signal_value, price=price,
         )
 
