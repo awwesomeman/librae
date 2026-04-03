@@ -163,7 +163,7 @@ def build_live_trader(
             "close": bar.get("close", 0),
             "volume": bar.get("volume", 0),
         }]).set_index("ts")
-        _db_write(write_ohlcv, row, symbol, timeframe_, source="sim")
+        _db_write(write_ohlcv, row, symbol, timeframe_, source="binance_spot")
 
     def on_heartbeat(run_id_: str) -> None:
         _db_write(update_heartbeat, run_id_)
