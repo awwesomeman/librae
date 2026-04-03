@@ -24,3 +24,4 @@ quant-research-lab/
 deploy/.env
 .env.local
 logs/
+experiments/
