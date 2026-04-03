@@ -160,7 +160,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT 0 AS \"Unrealized PnL\"  -- TODO: replace placeholder",
+          "rawSql": "WITH pos AS (\n  SELECT side, entry_price, quantity\n  FROM trade_blotter\n  WHERE run_id = '${run_id}' AND exit_ts IS NULL\n  ORDER BY entry_ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv\n  WHERE symbol = (SELECT symbol FROM backtest_runs WHERE run_id='${run_id}')\n    AND timeframe = (SELECT timeframe FROM backtest_runs WHERE run_id='${run_id}')\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.side='long'\n  THEN (l.close - p.entry_price) * p.quantity\n  ELSE (p.entry_price - l.close) * p.quantity\n  END AS \"PnL\"\nFROM pos p, latest l",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -175,14 +175,28 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "red",
+                "value": -100
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 100
               }
             ]
           },
           "color": {
             "mode": "thresholds"
-          }
+          },
+          "decimals": 2,
+          "noValue": "No Position"
         },
         "overrides": []
       },
@@ -195,6 +209,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "Unrealized P&L of the current open position.",
       "id": 3,
       "gridPos": {
         "h": 4,
@@ -212,7 +227,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT 'N/A' AS \"Position\"  -- TODO: replace placeholder",
+          "rawSql": "SELECT CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2) AS \"Position\"\nFROM trade_blotter\nWHERE run_id = '${run_id}' AND exit_ts IS NULL\nORDER BY entry_ts DESC LIMIT 1",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -225,16 +240,13 @@
         "defaults": {
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
+            "steps": []
           },
           "color": {
-            "mode": "thresholds"
-          }
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "noValue": "Flat"
         },
         "overrides": []
       },
@@ -247,6 +259,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "Current open position: direction, size, entry price.",
       "id": 4,
       "gridPos": {
         "h": 4,

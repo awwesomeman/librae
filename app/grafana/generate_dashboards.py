@@ -353,17 +353,48 @@ EXTRA_PANELS: list[dict] = [
     {**STATUS_PANEL, "w": 8},
     _stat_panel(
         "Unrealized PnL",
-        "SELECT 0 AS \"Unrealized PnL\"  -- TODO: replace placeholder",
+        (
+            "WITH pos AS (\n"
+            "  SELECT side, entry_price, quantity\n"
+            "  FROM trade_blotter\n"
+            "  WHERE run_id = '${run_id}' AND exit_ts IS NULL\n"
+            "  ORDER BY entry_ts DESC LIMIT 1\n"
+            "),\n"
+            "latest AS (\n"
+            "  SELECT close FROM ohlcv\n"
+            "  WHERE symbol = (SELECT symbol FROM backtest_runs WHERE run_id='${run_id}')\n"
+            "    AND timeframe = (SELECT timeframe FROM backtest_runs WHERE run_id='${run_id}')\n"
+            "  ORDER BY ts DESC LIMIT 1\n"
+            ")\n"
+            "SELECT CASE WHEN p.side='long'\n"
+            "  THEN (l.close - p.entry_price) * p.quantity\n"
+            "  ELSE (p.entry_price - l.close) * p.quantity\n"
+            "  END AS \"PnL\"\n"
+            "FROM pos p, latest l"
+        ),
         None,
-        [{"color": "blue", "value": None}],
-        w=8,
+        [
+            {"color": "red", "value": None},
+            {"color": "red", "value": -100},
+            {"color": "yellow", "value": 0},
+            {"color": "green", "value": 100},
+        ],
+        w=8, decimals=2, no_value="No Position",
+        description="Unrealized P&L of the current open position.",
     ),
     _stat_panel(
         "Current Position",
-        "SELECT 'N/A' AS \"Position\"  -- TODO: replace placeholder",
-        None,
-        [{"color": "blue", "value": None}],
-        w=8,
+        (
+            "SELECT CASE WHEN side='long' THEN '+' ELSE '-' END\n"
+            "  || ROUND(quantity::numeric, 4) || ' @ '\n"
+            "  || ROUND(entry_price::numeric, 2) AS \"Position\"\n"
+            "FROM trade_blotter\n"
+            "WHERE run_id = '${run_id}' AND exit_ts IS NULL\n"
+            "ORDER BY entry_ts DESC LIMIT 1"
+        ),
+        None, [],
+        w=8, no_value="Flat", fixed_color="blue",
+        description="Current open position: direction, size, entry price.",
     ),
 ]
 

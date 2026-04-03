@@ -213,15 +213,15 @@ python -m strategies.trendpullback.run --mode backtest
 python -m strategies.trendpullback.run --mode sim
 ```
 
-## 命名慣例：`xxx_data`
+## 命名慣例：`xxx`
 
-時間序列資料表統一採用 `xxx_data` 命名。每張表獨立負責自己的 cache + persistent store。
+時間序列資料表統一採用 `xxx` 命名。每張表獨立負責自己的 cache + persistent store。
 
 | 表名 | 用途 | 建立時機 |
 |---|---|---|
-| `ohlcv_data` | 價格資料（現 `ohlcv`，Step 3 rename） | Step 3 |
-| `macro_data` | 總經指標 `(ts, indicator, source, value)` | 第一次需要存總經數據時 |
-| `factor_data` | 因子值（若需 dashboard） | 因子研究穩定且需要 dashboard 時 |
+| `ohlcv` | 價格資料（現 `ohlcv`，Step 3 rename） | Step 3 |
+| `macro` | 總經指標 `(ts, indicator, source, value)` | 第一次需要存總經數據時 |
+| `factor` | 因子值（若需 dashboard） | 因子研究穩定且需要 dashboard 時 |
 
 每張表各自有 `(ts, identifier, source)` 的 unique key，各自管 TTL 和 gap-fill。不用萬用表塞所有時間序列 — schema、更新頻率、查詢模式不同，分開更乾淨。
 
