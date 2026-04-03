@@ -1,4 +1,4 @@
-# GCE 部署指南（TimescaleDB + Grafana）
+# GCE 部署指南（TimescaleDB + Sim）
 
 > 與 `windows_server_deploy.md` 對應，改在 Google Compute Engine Linux VM 上部署。
 > 差異：Docker 原生運行、IAP 取代 VPN、無 WSL2 相關坑。
@@ -13,15 +13,17 @@
 │                                         │
 │  Docker                                 │
 │  ├── quant_timescaledb  :5432           │
-│  └── quant_grafana      :3000           │
+│  └── sim / signal monitor processes    │
 └──────────────┬──────────────────────────┘
-               │ IAP TCP Tunnel
+               │ IAP TCP Tunnel / TIMESCALE_DSN
 ┌──────────────┴──────────────────────────┐
 │  開發機（Mac / Linux）                   │
-│  gcloud ssh tunnel → localhost:5432     │
-│  Python：回測、Streamlit                │
+│  ├── 回測 / 訊號研究 → 寫入遠端 DB      │
+│  └── Grafana :3000 → 查詢遠端 DB        │
 └─────────────────────────────────────────┘
 ```
+
+> Grafana 建議在本機開啟（幾乎不吃資源），直接連 VPS 的 TimescaleDB。
 
 ---
 
