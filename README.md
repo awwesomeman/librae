@@ -62,7 +62,7 @@ python -m experiments.signals.kdj_oversold.run
 python -m experiments.signals.kdj_oversold.run --sim
 ```
 
-**Grafana**：Signal Monitor → `$strategy=kdj_oversold` → `$source=backtest` 或 `sim`
+**Grafana**：Signal Monitor → `$mode=backtest` 或 `sim` → `$strategy=kdj_oversold`
 
 **寫新訊號**：複製 `kdj_oversold/` 資料夾，改 `signal.py` 的指標計算和 `run.py` 的 config。
 
@@ -128,7 +128,7 @@ psql -U quant -d quant -f deploy/timescale_init.sql
 
 | Dashboard | 用途 | 切換變數 |
 |---|---|---|
-| **Signal Monitor** | 訊號預測力：forward return, MFE/MAE, cumulative return | `$strategy`, `$symbol`, `$source`, `$n`, `$k` |
+| **Signal Monitor** | 訊號預測力：forward return, MFE/MAE, cumulative return | `$mode`, `$strategy`, `$symbol`, `$timeframe`, `$data_source`, `$n`, `$k` |
 | **Strategy Dashboard** | 策略績效：equity curve, drawdown, trades | `$mode`, `$run_id` |
 
 兩個 dashboard 都由 `generate_dashboards.py` 生成：
@@ -259,6 +259,37 @@ quant-strategy-lab/
 ├── tests/                  # pytest
 └── docs/                   # 決策記錄 + 執行計劃 + 部署指南
 ```
+
+---
+
+## 連線與 Cache
+
+### 確認 DB 連線
+
+```bash
+# 方法 1：用 Python（走跟程式碼相同的連線池）
+python -c "from db import get_conn; c=get_conn().__enter__(); cur=c.cursor(); cur.execute('SELECT 1'); print('OK:', cur.fetchone())"
+
+# 方法 2：用 psql 直連
+psql "$TIMESCALE_DSN" -c "SELECT 1"
+```
+
+預設 DSN 為 `postgresql://quant:quant_secret@localhost:5432/quant`（`db/__init__.py`）。
+遠端 DB 需設定 `TIMESCALE_DSN` 環境變數，或透過 SSH tunnel / Tailscale 映射到 localhost:5432。
+
+### OHLCV Local Cache
+
+從 Binance API 抓取的市場資料會 cache 在本機：
+
+```
+data/cache/{SYMBOL}_{INTERVAL}_{SOURCE}.parquet    # 例：data/cache/BTCUSDT_1h_binance_spot.parquet
+```
+
+- 格式：Parquet
+- 過期策略：最新一筆資料超過 **6 小時**即視為 stale，重新從 API 拉取
+- 定義在 `data/binance.py`（`_DEFAULT_CACHE_DIR`、`_CACHE_MAX_AGE`）
+
+> 只有 Binance OHLCV 有 local cache。DB 寫入（signal_outcomes、equity_curve 等）無 cache，斷線會直接報錯。
 
 ---
 

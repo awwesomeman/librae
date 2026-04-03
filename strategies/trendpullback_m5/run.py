@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 
 from librae import Backtest
-from librae.backtest.persistence import save_output
 from librae.config.market_config import get_market
 from db.timescale_writer import save_strategy_results
 
@@ -58,11 +57,8 @@ def run_backtest(args: argparse.Namespace) -> None:
                 metrics.trades, sharpe_str, metrics.max_drawdown, metrics.total_return)
 
     if args.dry_run:
-        logger.info("[3/3] [DRY-RUN] Done.")
+        logger.info("[DRY-RUN] Done.")
         return
-
-    paths = save_output(output)
-    logger.info("[3/3] Saved: %s", paths['json'])
 
     if not args.no_db:
         try:

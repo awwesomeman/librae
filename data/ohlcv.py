@@ -66,9 +66,7 @@ def _binance_fetcher(
     return _binance_fetch_ohlcv(symbol=symbol, interval=interval, start=start, end=end, use_cache=False)
 
 
-# Built-in: Binance spot (registered under two names for backward compat)
 register_ohlcv_fetcher("binance_spot", _binance_fetcher)
-register_ohlcv_fetcher("binance", _binance_fetcher)
 
 
 # ---------------------------------------------------------------------------

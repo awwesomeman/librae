@@ -32,10 +32,10 @@ _DEFAULT_CACHE_DIR = Path("data/cache")
 _CACHE_MAX_AGE = timedelta(hours=6)
 
 
-def _cache_path(symbol: str, interval: str, cache_dir: Path | None = None) -> Path:
+def _cache_path(symbol: str, interval: str, source: str = "binance_spot", cache_dir: Path | None = None) -> Path:
     d = cache_dir or _DEFAULT_CACHE_DIR
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{symbol}_{interval}.parquet"
+    return d / f"{symbol}_{interval}_{source}.parquet"
 
 
 def _is_cache_fresh(path: Path, now: datetime | None = None) -> bool:
@@ -97,13 +97,14 @@ def fetch_ohlcv(
     timeout: float = 30.0,
     use_cache: bool = True,
     cache_dir: Path | None = None,
+    source: str = "binance_spot",
 ) -> pd.DataFrame:
     """Fetch OHLCV klines from Binance REST API.
 
     Returns DataFrame with columns: timestamp, open, high, low, close, volume.
     timestamp is tz-aware UTC.
     """
-    cpath = _cache_path(symbol, interval, cache_dir)
+    cpath = _cache_path(symbol, interval, source, cache_dir)
     if use_cache and _is_cache_fresh(cpath):
         return pd.read_parquet(cpath)
 

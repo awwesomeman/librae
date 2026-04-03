@@ -4,9 +4,9 @@ All field names: strict snake_case.
 Unit fields stored alongside values for multi-market support (USDT, TWD, contracts, etc.).
 Cost/slippage fields are optional (may be None for simple backtests).
 
-Storage targets: JSON (Streamlit), CSV equity curve (Grafana/Streamlit).
+Storage target: TimescaleDB via db.timescale_writer.
 
-Also contains canonical backend data contracts (merged from contracts.py):
+Also contains canonical backend data contracts:
 - Schema version and validation constants
 - Parsing utilities (timestamps, snake_case)
 - Record validation functions
@@ -152,7 +152,7 @@ class BacktestOutput:
     """Top-level backtest output container.
 
     This is the canonical output object produced after a backtest run.
-    Persist via librae.backtest.persistence.
+    Persist via db.timescale_writer.save_strategy_results().
     """
 
     run_metadata: RunMetadata
@@ -273,11 +273,3 @@ def validate_strategy_context(record: dict[str, Any], record_name: str) -> None:
     validate_record_contract(summary, REQUIRED_SUMMARY_KEYS, f"{record_name}.summary")
 
 
-def is_schema_compatible(payload_schema_version: str, expected_schema_version: str = SCHEMA_VERSION) -> bool:
-    """Backward compatibility policy: only major version must match."""
-    try:
-        payload_major = int(str(payload_schema_version).split(".")[0])
-        expected_major = int(str(expected_schema_version).split(".")[0])
-        return payload_major == expected_major
-    except Exception:
-        return False

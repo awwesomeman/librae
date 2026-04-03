@@ -1,4 +1,4 @@
-"""Backtest engine, strategy protocol, cost model, metrics, and persistence.
+"""Backtest engine, strategy protocol, cost model, and metrics.
 
 Re-exports from subpackages for convenience.
 """
@@ -12,7 +12,6 @@ from .backtest.schema import (
     RUN_ID_PATTERN,
     SCHEMA_VERSION,
 )
-from .backtest.persistence import save_output, load_output
 from .backtest.engine import Backtest, BacktestResult, EquitySnapshot
 from .core.cost_model import CostModel
 from .core.strategy import Action, BaseStrategy, Context, Fill, Position
@@ -29,8 +28,6 @@ __all__ = [
     "TradeRecord",
     "RUN_ID_PATTERN",
     "SCHEMA_VERSION",
-    "save_output",
-    "load_output",
     "CostModel",
     "MarketConfig",
     "get_market",

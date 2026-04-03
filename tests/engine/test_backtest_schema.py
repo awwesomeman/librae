@@ -1,11 +1,8 @@
-"""Tests for backtest output schema and persistence."""
+"""Tests for backtest output schema."""
 
 from __future__ import annotations
 
-import json
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -17,7 +14,6 @@ from librae.backtest.schema import (
     StrategyMetrics,
     TradeRecord,
 )
-from librae.backtest.persistence import save_output, load_output
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
 START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -177,78 +173,3 @@ def test_equity_curve_point_benchmark_optional() -> None:
     assert pt.benchmark_ret_1d is None
 
 
-# ---------------------------------------------------------------------------
-# Persistence tests
-# ---------------------------------------------------------------------------
-
-
-def _make_full_output(**kwargs) -> BacktestOutput:
-    return BacktestOutput(
-        run_metadata=_make_run_metadata(**kwargs),
-        equity_curve=_make_equity_curve(),
-        trades=_make_trades(),
-        metrics=_make_metrics(),
-    )
-
-
-def test_save_and_load_roundtrip() -> None:
-    output = _make_full_output()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_output(output, tmpdir)
-        assert "json" in paths
-        assert "csv" in paths
-        assert paths["json"].exists()
-        assert paths["csv"].exists()
-
-        loaded = load_output(paths["json"])
-        assert loaded.run_metadata.run_id == output.run_metadata.run_id
-        assert loaded.run_metadata.strategy == output.run_metadata.strategy
-        assert loaded.metrics.total_return == output.metrics.total_return
-        assert len(loaded.equity_curve) == len(output.equity_curve)
-        assert len(loaded.trades) == len(output.trades)
-
-
-def test_save_json_has_required_top_level_keys() -> None:
-    output = _make_full_output()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_output(output, tmpdir)
-        data = json.loads(paths["json"].read_text())
-    assert set(data.keys()) == {"schema_version", "run_metadata", "equity_curve", "trades", "metrics"}
-
-
-def test_save_equity_csv_has_correct_columns() -> None:
-    output = _make_full_output()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_output(output, tmpdir)
-        lines = paths["csv"].read_text().splitlines()
-    header = lines[0].split(",")
-    assert "ts" in header
-    assert "equity" in header
-    assert "ret_1d" in header
-    assert "drawdown" in header
-
-
-def test_save_no_csv_when_flag_false() -> None:
-    output = _make_full_output()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_output(output, tmpdir, save_equity_csv=False)
-    assert "csv" not in paths
-
-
-def test_load_roundtrip_preserves_cost_fields() -> None:
-    output = _make_full_output()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_output(output, tmpdir)
-        loaded = load_output(paths["json"])
-    t = loaded.trades[0]
-    assert t.commission == 20.0
-    assert t.slippage == 0.0
-    assert t.holding_bars == 6
-
-
-def test_equity_curve_ts_roundtrip_iso() -> None:
-    output = _make_full_output()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = save_output(output, tmpdir)
-        loaded = load_output(paths["json"])
-    assert loaded.equity_curve[0].ts == output.equity_curve[0].ts

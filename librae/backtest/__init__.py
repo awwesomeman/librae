@@ -1,1 +1,1 @@
-"""Backtest runtime — batch execution engine, output schema, persistence."""
+"""Backtest runtime — batch execution engine and output schema."""

@@ -18,8 +18,7 @@ core/                       共用 domain model（純計算，無 I/O）
 
 backtest/                   回測 runtime
 ├── engine.py               Backtest — bar-by-bar 執行 + build_output()
-├── schema.py               BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
-└── persistence.py          save_output / load_output（JSON + CSV + Parquet）
+└── schema.py               BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
 
 live/                       即時 / 模擬 runtime
 ├── engine.py               LiveTrader — polling loop + 信號偵測
