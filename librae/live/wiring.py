@@ -90,23 +90,22 @@ def build_live_trader(
         except Exception as e:
             logger.warning("DB %s failed: %s", fn.__name__, e)
 
-    def fetcher(symbol: str, timeframe_ccxt_: str, limit: int, *, drop_incomplete: bool = False) -> pd.DataFrame:
-        return adapter.fetch_ohlcv(symbol, timeframe_ccxt_, limit, drop_incomplete=drop_incomplete)
+    def fetcher(symbol: str, tf_ccxt: str, limit: int, *, drop_incomplete: bool = False) -> pd.DataFrame:
+        return adapter.fetch_ohlcv(symbol, tf_ccxt, limit, drop_incomplete=drop_incomplete)
 
-    def warmup_fetcher(symbol: str, timeframe_ccxt_: str, limit: int) -> pd.DataFrame:
+    def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
         """DB-first warmup: reads historical bars from DB, fills gaps from API."""
         from data.ohlcv import get_ohlcv
         from librae.core.utils import interval_to_timedelta
         import math
 
         # WHY: compute months from limit + timeframe to avoid over-fetching
-        timeframe_ccxt = to_ccxt(timeframe)
-        bar_hours = interval_to_timedelta(timeframe_ccxt).total_seconds() / 3600
+        bar_hours = interval_to_timedelta(tf_ccxt).total_seconds() / 3600
         months_needed = max(1, math.ceil(limit * bar_hours / 24 / 30))
 
-        df = get_ohlcv(symbol=symbol, interval=timeframe_ccxt, months=months_needed)
+        df = get_ohlcv(symbol=symbol, interval=tf_ccxt, months=months_needed)
         if df.empty:
-            return fetcher(symbol, timeframe_ccxt_, limit, drop_incomplete=True)
+            return fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
         if "timestamp" in df.columns and "ts" not in df.columns:
             df = df.rename(columns={"timestamp": "ts"})
         if len(df) > limit:
