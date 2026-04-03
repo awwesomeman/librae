@@ -153,7 +153,7 @@ def build_live_trader(
         )
         _db_write(refresh_performance, run_id)
 
-    def on_ohlcv(run_id_: str, symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
+    def on_ohlcv(symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
         row = pd.DataFrame([{
             "ts": ts,
             "open": bar.get("open", 0),

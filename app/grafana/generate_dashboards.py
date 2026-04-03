@@ -245,8 +245,18 @@ BASE_PANELS_DEF: list[dict] = [
         "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, close FROM ohlcv"
-                " WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+                "WITH meta AS ("
+                " SELECT symbol, timeframe, data_source, start_ts, end_ts"
+                " FROM backtest_runs WHERE run_id = '${run_id}')"
+                " SELECT o.ts AS time, o.close"
+                " FROM ohlcv o, meta m"
+                " WHERE o.symbol = m.symbol"
+                " AND o.timeframe = m.timeframe"
+                " AND (m.data_source IS NULL OR o.source = m.data_source)"
+                " AND (m.start_ts IS NULL OR o.ts >= m.start_ts)"
+                " AND (m.end_ts IS NULL OR o.ts <= m.end_ts)"
+                " AND $__timeFilter(o.ts)"
+                " ORDER BY o.ts",
                 "A",
             ),
         ],

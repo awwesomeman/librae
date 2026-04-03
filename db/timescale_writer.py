@@ -268,7 +268,6 @@ def write_ohlcv(
     df: pd.DataFrame,
     symbol: str,
     timeframe: str,
-    run_id: str | None = None,
     source: str = "binance_spot",
     dsn: str = TIMESCALE_DSN,
 ) -> int:
@@ -302,7 +301,6 @@ def write_ohlcv(
         df[ts_col].apply(_to_dt),
         [symbol] * len(df),
         [timeframe] * len(df),
-        [run_id] * len(df),
         [source] * len(df),
         df["open"].astype(float),
         df["high"].astype(float),
@@ -315,7 +313,7 @@ def write_ohlcv(
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO ohlcv (ts, symbol, timeframe, run_id, source,
+            """INSERT INTO ohlcv (ts, symbol, timeframe, source,
                open, high, low, close, volume)
                VALUES %s
                ON CONFLICT (ts, symbol, timeframe, source) DO NOTHING""",

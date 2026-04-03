@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
-    run_id          TEXT,           -- optional, no FK (shared market data)
     source          TEXT NOT NULL,
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,

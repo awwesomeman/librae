@@ -42,7 +42,7 @@ class LiveTrader:
         on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
             called every completed bar for equity persistence.
         on_trade: Optional callback(trade_dict) called on position close.
-        on_ohlcv: Optional callback(run_id, symbol, timeframe, bar_dict, ts)
+        on_ohlcv: Optional callback(symbol, timeframe, bar_dict, ts)
             called every completed bar for OHLCV persistence.
         on_heartbeat: Optional callback(run_id) called every poll cycle
             to update liveness status.
@@ -353,7 +353,7 @@ class LiveTrader:
         # Record equity and OHLCV after processing all actions
         self._record_equity(ts)
         if self._on_ohlcv:
-            self._on_ohlcv(self._run_id, symbol, self._timeframe, bar, ts)
+            self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
     def _build_position_snapshot(self) -> dict[str, Position]:
         """Convert mutable PositionState to frozen Position for Context."""

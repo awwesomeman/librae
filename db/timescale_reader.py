@@ -128,9 +128,10 @@ def load_ohlcv(
     end_ts: str | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> pd.DataFrame:
-    """Load OHLCV data by symbol+timeframe+range, or by run_id (legacy).
+    """Load OHLCV data by symbol+timeframe+range, or by run_id.
 
-    Prefer symbol/timeframe/source/start_ts/end_ts for new code.
+    When *run_id* is given (without symbol/timeframe), the run's metadata
+    is used to derive symbol, timeframe, and date range.
     """
     if symbol and timeframe:
         sql = """
@@ -150,9 +151,6 @@ def load_ohlcv(
             params.append(end_ts)
         sql += " ORDER BY ts"
     elif run_id:
-        # WHY: legacy path — look up run metadata then query ohlcv by its fields.
-        # backtest_runs.symbol may be comma-separated for multi-symbol runs,
-        # so we split and use ANY. Guard against NULL start_ts/end_ts.
         sql = """
             WITH meta AS (
                 SELECT symbol, timeframe, start_ts, end_ts
