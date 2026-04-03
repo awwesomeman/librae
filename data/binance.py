@@ -195,7 +195,7 @@ def resample_ohlcv(df: pd.DataFrame, rule: str = "1D") -> pd.DataFrame:
 
 def _parse_dt(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
     dt = datetime.fromisoformat(value)
     return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 

@@ -164,21 +164,17 @@ def fetch_and_prepare(
 
 def merge_trend_gate(detail: pd.DataFrame, gate: pd.DataFrame) -> pd.DataFrame:
     """Merge higher-TF trend gate into lower-TF via merge_asof (no look-ahead)."""
-    out = detail.copy()
-    idx_name = out.index.name or "ts"
+    idx_name = detail.index.name or "ts"
 
-    trend = gate[["close", "ema20", "ema20_prev"]].copy()
-    trend["daily_trend"] = (
-        (trend["close"] > trend["ema20"])
-        & (trend["ema20"] > trend["ema20_prev"])
+    daily_trend = (
+        (gate["close"] > gate["ema20"])
+        & (gate["ema20"] > gate["ema20_prev"])
     )
-
-    right = trend[["daily_trend"]].copy()
-    right["_gate_ts"] = right.index
+    right = pd.DataFrame({"daily_trend": daily_trend, "_gate_ts": gate.index})
     right = right.reset_index(drop=True)
 
     out = pd.merge_asof(
-        out.reset_index(),
+        detail.reset_index(),
         right,
         left_on=idx_name,
         right_on="_gate_ts",

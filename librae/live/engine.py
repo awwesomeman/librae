@@ -331,6 +331,7 @@ class LiveTrader:
                 continue
 
             if action.type in ("buy", "sell") and symbol in self._positions:
+                logger.debug("Skipping %s %s — position already open", action.type, symbol)
                 continue
 
             fill = self._executor.execute(action, price, self._cash)

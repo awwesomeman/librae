@@ -281,9 +281,8 @@ def write_ohlcv(
         return 0
 
     timeframe = to_canonical(timeframe)
-    df = df.copy()
 
-    # Normalise index → ts column
+    # Normalise index → ts column (reset_index returns a new DataFrame)
     if "ts" not in df.columns and "timestamp" not in df.columns:
         df = df.reset_index()
     ts_col = "ts" if "ts" in df.columns else "timestamp"
@@ -296,10 +295,10 @@ def write_ohlcv(
             "fetcher must provide tz-aware datetimes "
             "(e.g. pd.to_datetime(..., utc=True))"
         )
-    df[ts_col] = ts_series.dt.tz_convert("UTC")
+    ts_utc = ts_series.dt.tz_convert("UTC")
 
     rows = list(zip(
-        df[ts_col].apply(_to_dt),
+        ts_utc.apply(_to_dt),
         [symbol] * len(df),
         [timeframe] * len(df),
         [source] * len(df),
