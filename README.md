@@ -137,13 +137,33 @@ psql -U quant -d quant -f deploy/timescale_init.sql
 python -m app.grafana.generate_dashboards
 ```
 
-### Grafana 連線設定
+### 本機開發儀表板
 
-本機 Grafana 連遠端 VPS 的 DB：
-1. Add datasource → PostgreSQL
-2. Host: `your-vps-ip:5432`
-3. Database: `quant`, User: `quant`, Password: 同 `.env`
-4. TLS/SSL: 依 VPS 設定
+本機只開 Grafana（Docker），連遠端 VPS 的 DB：
+
+```bash
+cd deploy
+export VPS_DB_HOST=your-vps-ip
+export POSTGRES_PASSWORD=your-password
+docker compose -f docker-compose.local.yml up -d
+```
+
+開啟 http://localhost:3000（admin / admin），然後：
+1. Settings → Data Sources → TimescaleDB
+2. Host URL 改成 `your-vps-ip:5432`
+3. Save & Test
+
+Dashboard JSON 每 30 秒自動重載。跑完 `python -m app.grafana.generate_dashboards` 後不需要重啟 Grafana。
+
+### VPS 全套（DB + Grafana + Sim）
+
+VPS 上跑完整 docker-compose（DB + Grafana 在同一個 Docker network）：
+
+```bash
+cd deploy && docker compose up -d
+```
+
+此模式 datasource URL 自動指向 `quant_timescaledb:5432`（Docker 內部 hostname）。
 
 ---
 

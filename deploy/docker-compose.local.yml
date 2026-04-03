@@ -1,0 +1,31 @@
+# Local development: Grafana only, connecting to remote VPS DB.
+#
+# Usage:
+#   cd deploy
+#   export VPS_DB_HOST=your-vps-ip
+#   export POSTGRES_PASSWORD=your-password
+#   docker compose -f docker-compose.local.yml up -d
+#
+# Then open http://localhost:3000 (admin / $GF_SECURITY_ADMIN_PASSWORD)
+# Dashboards auto-refresh every 30 seconds from provisioning directory.
+# After running `python -m app.grafana.generate_dashboards`, dashboards
+# update automatically — no restart needed.
+
+version: '3.8'
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quant_grafana_local
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_local_data:/var/lib/grafana
+      - ../app/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - VPS_DB_HOST=${VPS_DB_HOST:-localhost}
+
+volumes:
+  grafana_local_data:
