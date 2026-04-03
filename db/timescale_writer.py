@@ -31,11 +31,22 @@ logger = logging.getLogger(__name__)
 
 
 def _to_dt(ts: Any) -> datetime | None:
-    """Normalise timestamp to datetime (handles pandas Timestamp)."""
+    """Normalise timestamp to tz-aware UTC datetime.
+
+    Raises ValueError if a timezone-naive datetime is provided — callers
+    must supply tz-aware timestamps so the DB stores correct UTC values.
+    """
     if ts is None:
         return None
     if hasattr(ts, "to_pydatetime"):
-        return ts.to_pydatetime()
+        ts = ts.to_pydatetime()
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            raise ValueError(
+                f"Timezone-naive datetime {ts!r} — "
+                "provide tz-aware timestamps (e.g. with tzinfo=timezone.utc)"
+            )
+        return ts.astimezone(timezone.utc)
     return ts
 
 
@@ -276,6 +287,16 @@ def write_ohlcv(
     if "ts" not in df.columns and "timestamp" not in df.columns:
         df = df.reset_index()
     ts_col = "ts" if "ts" in df.columns else "timestamp"
+
+    # Ensure tz-aware UTC — reject naive timestamps early
+    ts_series = pd.to_datetime(df[ts_col])
+    if ts_series.dt.tz is None:
+        raise ValueError(
+            "OHLCV timestamps are timezone-naive — "
+            "fetcher must provide tz-aware datetimes "
+            "(e.g. pd.to_datetime(..., utc=True))"
+        )
+    df[ts_col] = ts_series.dt.tz_convert("UTC")
 
     rows = list(zip(
         df[ts_col].apply(_to_dt),
