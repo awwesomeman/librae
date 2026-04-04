@@ -1,6 +1,6 @@
 # Position Lifecycle：Short + Scaling + Partial Close
 
-> 狀態：proposed
+> 狀態：implemented
 > 範圍：engine, executor
 > 建立日期：2026-04-04
 > 依據：
