@@ -8,7 +8,7 @@
 | 計畫 | 範圍 | 依賴 | 狀態 |
 |------|------|------|------|
 | [Position Lifecycle](enhance_position_lifecycle.md) | short fix, scaling, partial close | 無 | proposed |
-| [Engine Performance](enhance_engine_performance.md) | Context slots, cache trim (look-ahead fix) | 無 | proposed |
+| [Engine Performance](enhance_engine_performance.md) | Context slots, cache trim (look-ahead fix) | 無 | implemented |
 
 ### 未來階段（不在此次）
 
