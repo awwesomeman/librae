@@ -1,8 +1,8 @@
 # 2026-04-01 — 回測引擎與資料層優化方向
 
-> 狀態：accepted（大部分待實作）
-> 更新：補充 TrendMaster 實驗中發現的實際痛點（data cache、SL/TP、DB schema）
-> 注記：librae vs vectorbt 定位決策已確立。待實作項目：SL/TP 內建 (#4)、short proceeds bug fix、cache trim (#7)、效能優化 (#1-3)。DB 相關項目移至 04-02 consolidation
+> 狀態：accepted（部分已實作）
+> 更新：2026-04-04 大部分項目已落地
+> 注記：已完成項目：short bugs（proceeds + exit tax + ctx.cash）、cache trim (#7)、Context slots (#3)、position scaling + partial close。待實作：SL/TP 內建 (#4)、precompute bars numpy (#2)、ctx.bars_back (#5)、dry-run 增強 (#6)。詳見 [enhance_librae_engine](../plans/enhance_librae_engine.md)
 
 ## 核心定位
 
@@ -88,51 +88,37 @@
 
 ## 發現的潛在問題
 
-### BUG: Short position 的 close proceeds 計算錯誤
-- **位置**：`librae/core/executor.py` `close_position()` line 127-147
-- **嚴重度**：Medium（目前所有正式策略都是 long-only，但 TrendMaster 已使用 short）
-- **問題**：
-  ```python
-  proceeds = exit_price * pos.quantity * cost_model.multiplier - exit_costs
-  ```
-  這對 long 正確（賣出收回 exit notional），但 short 應該是退回 margin + PnL：
-  ```python
-  entry_notional = pos.entry_price * pos.quantity * cost_model.multiplier
-  dir_mult = direction(pos.side)
-  proceeds = entry_notional + pnl.gross_pnl - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
-  ```
-- **復現**：Short 1 unit at 100, close at 90 → 應得 10010，實得 9990
-- **MTM 期間是對的**：`_eval_equity()` 的 unrealized 計算正確（direction 有乘），只有 close 結算時 proceeds 公式缺 direction 修正
+### ✅ BUG: Short position 的 close proceeds 計算錯誤
+- **已修復**：`38e450d` — `close_position` 對 short 改用 `entry_notional + gross_pnl - exit_costs`
+- 同時修復 exit tax bug：`is_sell=(side == "long")`，buy-to-cover 不再課稅
 
-### BUG: Short position 期間 ctx.cash 偏低
-- **位置**：`librae/backtest/engine.py` line 200 (`estimate_entry_outlay`)
-- **嚴重度**：Low（目前所有策略 long-only）
-- **問題**：`estimate_entry_outlay` 對 short 也扣全額 notional（應該是收到賣出所得）。equity 計算有用 `_eval_equity()` 補償所以總權益正確，但策略在持倉期間看到的 `ctx.cash` 偏低。若策略用 `ctx.cash` 做 position sizing 會導致偏保守
-- **修復時機**：與上方 short proceeds bug 一起處理
+### ✅ BUG: Short position 期間 ctx.cash 偏低
+- **設計決策**：維持 collateral 模式（扣全額當保證金）。這是 QuantConnect 的做法，保守但安全。
+- equity 計算正確，ctx.cash 偏低是此模式的預期行為，已在 plan 中文件化。
 
-### 缺少 Short position 測試
-- **位置**：`tests/engine/test_backtest_v2.py`
-- **現狀**：所有測試都是 buy (long-only)，沒有任何 sell/short 測試
-- **風險**：上述 bug 正是因為缺少 short 測試而未被發現
+### ✅ 缺少 Short position 測試
+- **已修復**：`38e450d` — 新增 25 個測試（`tests/engine/test_position_scaling.py`），涵蓋 short PnL、scaling、partial close、edge cases
 
 ### 缺少效能 benchmark
-- **現狀**：沒有 pytest-benchmark 或任何效能回歸測試
-- **建議**：加一個基本的 benchmark test（4300 bars / 52k bars），作為優化前後的對照基線
+- **現狀**：仍未建立 pytest-benchmark 基線
+- **原因**：本次聚焦功能正確性（short/scaling），效能優化留待 Phase 3
+- **前置條件**：需安裝 pytest-benchmark，選定標準 dataset（4300 bars / 52k bars）
 
 ---
 
 ## 優先順序（引擎 + 資料層）
 
-| 優先 | 項目 | 類型 | 預估工作量 |
-|------|------|------|-----------|
-| P0 | #7 cache trim date range | Bug fix | 0.5h |
-| P1 | #4 引擎內建 SL/TP/Trailing | 功能 | 4-6h |
-| P1 | Short proceeds bug | Bug fix | 1h |
-| P2 | #1 Position snapshot reuse | 效能 | 2h |
-| P3 | #2 precompute bars numpy | 效能 | 3h |
-| P3 | #3 Context slots | 效能 | 0.5h |
-| P3 | #5 ctx.bars_back | 功能 | 2h |
-| P3 | #6 dry-run 輸出增強 | UX | 1h |
+| 優先 | 項目 | 類型 | 狀態 | 未做原因 |
+|------|------|------|------|---------|
+| P0 | #7 cache trim date range | Bug fix | ✅ `66c727e` | |
+| P1 | #4 引擎內建 SL/TP/Trailing | 功能 | 待實作 | 需擴展 Action（sl/tp/trail 欄位）+ 引擎 stop state，獨立專案 |
+| P1 | Short proceeds + exit tax + ctx.cash | Bug fix | ✅ `38e450d` | |
+| P2 | #1 Position snapshot reuse | 效能 | 移除 | Position 是 frozen dataclass，unrealized_pnl 每 bar 都變，無法有效 reuse |
+| P3 | #2 precompute bars numpy | 效能 | 待實作 | 需先建 pytest-benchmark 基線驗證收益 |
+| P3 | #3 Context slots | 效能 | ✅ `66c727e` | |
+| P3 | #5 ctx.bars_back | 功能 | 待實作 | 獨立功能，目前策略不需要 lookback |
+| P3 | #6 dry-run 輸出增強 | UX | 待實作 | 非核心，等使用需求出現 |
+| — | Position scaling + partial close | 功能 | ✅ `38e450d` | |
 
 > DB 相關優先順序見 `2026-03-31-database-schema-optimization.md`。
 
