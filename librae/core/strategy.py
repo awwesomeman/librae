@@ -26,7 +26,7 @@ class Position:
     unrealized_pnl: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Context:
     """Immutable snapshot passed to strategy on each bar.
 

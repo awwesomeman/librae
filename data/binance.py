@@ -55,6 +55,14 @@ def _is_cache_fresh(path: Path, now: datetime | None = None) -> bool:
         return False
 
 
+def _trim_range(df: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    """Trim DataFrame to [start_dt, end_dt] range. Prevents look-ahead bias from cache."""
+    if df.empty:
+        return df
+    ts = pd.to_datetime(df["timestamp"], utc=True)
+    return df[(ts >= start_dt) & (ts <= end_dt)].reset_index(drop=True)
+
+
 def _request_with_retry(
     client: httpx.Client,
     url: str,
@@ -104,12 +112,12 @@ def fetch_ohlcv(
     Returns DataFrame with columns: timestamp, open, high, low, close, volume.
     timestamp is tz-aware UTC.
     """
-    cpath = _cache_path(symbol, interval, source, cache_dir)
-    if use_cache and _is_cache_fresh(cpath):
-        return pd.read_parquet(cpath)
-
     end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
     start_dt = parse_dt(start) if start else subtract_months(end_dt, months)
+
+    cpath = _cache_path(symbol, interval, source, cache_dir)
+    if use_cache and _is_cache_fresh(cpath):
+        return _trim_range(pd.read_parquet(cpath), start_dt, end_dt)
 
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(end_dt.timestamp() * 1000)
@@ -164,4 +172,4 @@ def fetch_ohlcv(
         except Exception as exc:
             logger.warning("Cache write failed: %s", exc)
 
-    return df
+    return _trim_range(df, start_dt, end_dt)
