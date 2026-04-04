@@ -104,6 +104,12 @@
 - **復現**：Short 1 unit at 100, close at 90 → 應得 10010，實得 9990
 - **MTM 期間是對的**：`_eval_equity()` 的 unrealized 計算正確（direction 有乘），只有 close 結算時 proceeds 公式缺 direction 修正
 
+### BUG: Short position 期間 ctx.cash 偏低
+- **位置**：`librae/backtest/engine.py` line 200 (`estimate_entry_outlay`)
+- **嚴重度**：Low（目前所有策略 long-only）
+- **問題**：`estimate_entry_outlay` 對 short 也扣全額 notional（應該是收到賣出所得）。equity 計算有用 `_eval_equity()` 補償所以總權益正確，但策略在持倉期間看到的 `ctx.cash` 偏低。若策略用 `ctx.cash` 做 position sizing 會導致偏保守
+- **修復時機**：與上方 short proceeds bug 一起處理
+
 ### 缺少 Short position 測試
 - **位置**：`tests/engine/test_backtest_v2.py`
 - **現狀**：所有測試都是 buy (long-only)，沒有任何 sell/short 測試
