@@ -26,7 +26,7 @@ def list_runs(limit: int = 20, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """List recent backtest runs."""
     sql = """
         SELECT run_id, strategy, symbol, timeframe, sample,
-               start_ts, end_ts, run_ts
+               mode, data_source, start_ts, end_ts, run_ts
         FROM backtest_runs
         ORDER BY run_ts DESC
         LIMIT %s
@@ -56,6 +56,7 @@ def load_trade_blotter(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
         SELECT trade_id, entry_ts, exit_ts AS _time, side,
                entry_price, exit_price, quantity,
                gross_pnl, net_pnl, gross_return, net_return,
+               price_unit, quantity_unit, pnl_unit,
                commission, slippage, tax, holding_bars, symbol
         FROM trade_blotter
         WHERE run_id = %s
