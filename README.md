@@ -68,7 +68,7 @@ python -m experiments.signals.kdj_oversold.run --sim
 
 ### 策略回測（需要回測引擎）
 
-完整的進出場邏輯 + 部位管理 + 成本模擬。
+完整的進出場邏輯 + 部位管理 + 成本模擬。支援 long/short、同方向加碼（scaling）、部分平倉。
 
 ```
 strategies/trendpullback/
@@ -242,22 +242,46 @@ python -m experiments.signals.kdj_oversold.run --sim
 ```
 quant-strategy-lab/
 ├── librae/                 # 回測引擎框架 → 詳見 librae/README.md
+│   └── core/               #   策略協議、執行器、成本模型、指標
 ├── data/
 │   ├── ohlcv.py            # 統一 OHLCV 入口：get_ohlcv()（DB-first + API fallback）
-│   └── binance.py          # Binance API fetcher（底層，被 ohlcv.py 委派）
+│   ├── binance.py          # Binance 公開 API fetcher（不需認證）
+│   └── utils.py            # 共用工具：resample_ohlcv, parse_dt
+├── brokers/
+│   ├── crypto_adapter.py   # CCXT adapter（Binance/OKX/Bybit，需認證）
+│   └── shioaji_adapter.py  # 永豐 Shioaji adapter（台灣期貨/股票，需認證）
 ├── db/
 │   ├── timescale_writer.py # write_* (單表) + save_* (多表 orchestrator)
 │   └── timescale_reader.py # load_* 查詢函式
-├── strategies/             # 策略實作（需要回測引擎）
-│   ├── trendpullback/
-│   └── trendpullback_m5/
-├── experiments/
-│   └── signals/            # 訊號實驗（不需要回測引擎）
-│       └── kdj_oversold/
+├── strategies/
+│   ├── utils.py            # 共用特徵工具：merge_htf_column
+│   ├── trendpullback/      # H1 趨勢回踩策略
+│   └── trendpullback_m5/   # M5 變體
 ├── app/grafana/            # Grafana 儀表板 generator
 ├── deploy/                 # Docker Compose + SQL + sim 腳本
 ├── tests/                  # pytest
 └── docs/                   # 決策記錄 + 執行計劃 + 部署指南
+```
+
+---
+
+## 資料來源
+
+| 層 | 用途 | 認證 |
+|---|---|---|
+| `data/` | 公開市場資料（OHLCV）— Binance REST API | 不需要 |
+| `brokers/` | 需認證交易所 — 即時資料 + 下單 | 需要 API key |
+
+`data/ohlcv.py` 是統一入口，支援 fetcher 註冊機制。
+公開資料源（Binance）內建；需認證的（Shioaji）在 strategy 的 `run.py` 中註冊：
+
+```python
+from brokers.shioaji_adapter import ShioajiAdapter
+from data.ohlcv import register_ohlcv_fetcher
+
+adapter = ShioajiAdapter()
+register_ohlcv_fetcher("shioaji", adapter.fetch_ohlcv)
+df = get_ohlcv("TXFR1", "5m", months=1, source="shioaji")
 ```
 
 ---
