@@ -31,7 +31,10 @@ if TYPE_CHECKING:
 from librae.config.market_config import MarketConfig
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
-from librae.core.executor import TradePnL, TradeResult, close_position, direction, make_fill
+from librae.core.executor import (
+    TradePnL, TradeResult, build_trade_result,
+    close_position, direction, process_actions,
+)
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_trade_id
 
@@ -185,36 +188,14 @@ class Backtest:
 
             actions = self._strategy.on_bar(ctx)
 
-            for action in actions:
-                sym = action.symbol or primary_symbol
-                cost_model = self._get_cost_model(sym)
-                bar_data = bars.get(sym)
-                price = bar_data["close"] if bar_data is not None else 0.0
-                if price <= 0:
-                    logger.warning("Invalid price %s for %s, skipping", price, sym)
-                    continue
-
-                if action.type in ("buy", "sell") and sym not in positions:
-                    fill = make_fill(action, price, cash, cost_model)
-                    if fill and fill.quantity > 0:
-                        cash -= cost_model.estimate_entry_outlay(price, fill.quantity)
-                        positions[sym] = PositionState(
-                            symbol=sym,
-                            side=fill.side,
-                            entry_price=price,
-                            quantity=fill.quantity,
-                            entry_ts=ts,
-                            bars_held=0,
-                            entry_commission=fill.commission,
-                            entry_slippage=fill.slippage,
-                        )
-
-                elif action.type == "close" and sym in positions:
-                    pos = positions[sym]
-                    trade, proceeds = self._close_pos(pos, ts, price, cost_model)
-                    trades.append(trade)
-                    cash += proceeds
-                    del positions[sym]
+            result_actions = process_actions(
+                actions, positions, cash, ts,
+                get_price=lambda sym: bars.get(sym, {}).get("close"),
+                get_cost_model=self._get_cost_model,
+                primary_symbol=primary_symbol,
+            )
+            trades.extend(result_actions.trades)
+            cash += result_actions.cash_delta
 
             self._increment_bars_held(positions)
 
@@ -227,8 +208,8 @@ class Backtest:
                 last_bar = last_bars.get(sym)
                 price = last_bar["close"] if last_bar is not None else pos.entry_price
                 cost_model = self._get_cost_model(sym)
-                trade, proceeds = self._close_pos(pos, last_ts, price, cost_model)
-                trades.append(trade)
+                pnl, proceeds, _ = close_position(pos, price, cost_model)
+                trades.append(build_trade_result(pos, last_ts, price, pos.quantity, pnl))
                 cash += proceeds
                 del positions[sym]
 
@@ -433,30 +414,3 @@ class Backtest:
             )
         return mtm, snapshot
 
-    @staticmethod
-    def _close_pos(
-        pos: PositionState,
-        exit_ts: datetime,
-        exit_price: float,
-        cost_model: CostModel,
-    ) -> tuple[TradeResult, float]:
-        """Close a position. Returns (TradeResult, cash_proceeds)."""
-        pnl, proceeds = close_position(pos, exit_price, cost_model)
-        trade = TradeResult(
-            symbol=pos.symbol,
-            entry_ts=pos.entry_ts,
-            exit_ts=exit_ts,
-            side=pos.side,
-            entry_price=pos.entry_price,
-            exit_price=exit_price,
-            quantity=pos.quantity,
-            gross_pnl=pnl.gross_pnl,
-            commission=pnl.commission,
-            slippage=pnl.slippage,
-            tax=pnl.tax,
-            net_pnl=pnl.net_pnl,
-            gross_return=pnl.gross_return,
-            net_return=pnl.net_return,
-            holding_bars=pos.bars_held,
-        )
-        return trade, proceeds

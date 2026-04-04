@@ -79,7 +79,10 @@ class PositionState:
     """Mutable internal position state — used by backtest + live engines.
 
     Not exposed to strategies (they see frozen Position via Context).
-    Tracks entry-side costs for accurate PnL on close.
+    Tracks accumulated entry-side costs for accurate PnL on close.
+
+    On scaling: entry_price is derived from total_entry_cost / (quantity * multiplier).
+    Storing total_entry_cost avoids float drift on repeated add operations.
     """
 
     symbol: str
@@ -90,6 +93,7 @@ class PositionState:
     bars_held: int
     entry_commission: float
     entry_slippage: float
+    total_entry_cost: float
 
 
 class BaseStrategy(ABC):

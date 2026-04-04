@@ -15,7 +15,10 @@ from .backtest.schema import (
 from .backtest.engine import Backtest, BacktestResult, EquitySnapshot
 from .core.cost_model import CostModel
 from .core.strategy import Action, BaseStrategy, Context, Fill, Position
-from .core.executor import TradePnL, TradeResult, calc_trade_pnl, direction, make_fill
+from .core.executor import (
+    TradePnL, TradeResult, calc_trade_pnl, close_position, direction,
+    make_fill, process_actions, scale_into_position, reduce_position,
+)
 from .core.metrics import compute_all
 from .core.utils import generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market

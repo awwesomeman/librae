@@ -15,7 +15,7 @@ from typing import Callable
 
 import pandas as pd
 
-from librae.core.executor import TradeResult, close_position, direction
+from librae.core.executor import TradeResult, direction, process_actions
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
@@ -298,61 +298,20 @@ class LiveTrader:
         actions = self._strategy.on_bar(ctx)
         self._bar_indices[symbol] = bar_index + 1
 
-        for action in actions:
-            if action.type == "hold":
-                continue
+        result = process_actions(
+            actions, self._positions, self._cash, ts,
+            get_price=lambda s: self._last_prices.get(s),
+            get_cost_model=lambda s: self._executor.cost_model,
+            primary_symbol=symbol,
+        )
+        self._cash += result.cash_delta
 
-            if action.type == "close" and symbol in self._positions:
-                pos = self._positions.pop(symbol)
-                cost_model = self._executor.cost_model
-                pnl, proceeds = close_position(pos, price, cost_model)
-                self._cash += proceeds
-                self._executor.notify_exit(symbol, price)
-                logger.info("Position closed: %s @ %.2f", symbol, price)
-                self._trade_count += 1
-                if self._on_trade:
-                    self._on_trade(TradeResult(
-                        symbol=pos.symbol,
-                        entry_ts=pos.entry_ts,
-                        exit_ts=ts,
-                        side=pos.side,
-                        entry_price=pos.entry_price,
-                        exit_price=price,
-                        quantity=pos.quantity,
-                        gross_pnl=pnl.gross_pnl,
-                        commission=pnl.commission,
-                        slippage=pnl.slippage,
-                        tax=pnl.tax,
-                        net_pnl=pnl.net_pnl,
-                        gross_return=pnl.gross_return,
-                        net_return=pnl.net_return,
-                        holding_bars=pos.bars_held,
-                    ))
-                continue
-
-            if action.type in ("buy", "sell") and symbol in self._positions:
-                logger.debug("Skipping %s %s — position already open", action.type, symbol)
-                continue
-
-            fill = self._executor.execute(action, price, self._cash)
-            if fill and action.type in ("buy", "sell"):
-                self._cash -= self._executor.cost_model.estimate_entry_outlay(
-                    fill.price, fill.quantity,
-                )
-                self._positions[symbol] = PositionState(
-                    symbol=symbol,
-                    side=fill.side,
-                    entry_price=fill.price,
-                    quantity=fill.quantity,
-                    entry_ts=ts,
-                    bars_held=0,
-                    entry_commission=fill.commission,
-                    entry_slippage=fill.slippage,
-                )
-                logger.info(
-                    "Position opened: %s %s @ %.2f qty=%.4f",
-                    fill.side, symbol, fill.price, fill.quantity,
-                )
+        for trade in result.trades:
+            self._trade_count += 1
+            self._executor.notify_exit(trade.symbol, trade.exit_price)
+            logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
+            if self._on_trade:
+                self._on_trade(trade)
 
         # Record equity and OHLCV after processing all actions
         self._record_equity(ts)
