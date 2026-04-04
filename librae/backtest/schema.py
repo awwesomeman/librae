@@ -198,31 +198,6 @@ class BacktestOutput:
             raise ValueError("trades is required (may be empty list)")
 
 
-# ---------------------------------------------------------------------------
-# Validation utilities (from contracts.py)
-# ---------------------------------------------------------------------------
-
-
-def parse_utc_timestamp(value: str | int | float) -> datetime:
-    """Parse a timestamp value (ISO string or epoch number) to UTC datetime."""
-    if isinstance(value, str) and value:
-        text = value.strip()
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
-        dt = datetime.fromisoformat(text)
-        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        ts = float(value)
-        if ts > 1e18:
-            ts = ts / 1e9
-        elif ts > 1e15:
-            ts = ts / 1e6
-        elif ts > 1e12:
-            ts = ts / 1e3
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
-    raise ValueError("timestamp must be ISO8601 string or epoch number")
-
-
 def ensure_snake_case_keys(keys: list[str] | tuple[str, ...], record_name: str) -> None:
     """Validate that all keys are snake_case."""
     invalid = [k for k in keys if not SNAKE_CASE_PATTERN.match(str(k))]

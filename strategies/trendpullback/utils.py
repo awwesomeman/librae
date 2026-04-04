@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 
-from data.binance import resample_ohlcv
+from data.utils import resample_ohlcv
 from strategies.utils import merge_htf_column
 from data.ohlcv import get_ohlcv
 

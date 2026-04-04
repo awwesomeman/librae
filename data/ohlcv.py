@@ -31,7 +31,7 @@ from typing import Callable
 import pandas as pd
 
 from data.binance import fetch_ohlcv as _binance_fetch_ohlcv
-from data.binance import _parse_dt, _subtract_months
+from data.utils import parse_dt, subtract_months
 from librae.core.utils import interval_to_timedelta, to_canonical, to_ccxt
 
 logger = logging.getLogger(__name__)
@@ -107,8 +107,8 @@ def get_ohlcv(
             "Register one with register_ohlcv_fetcher()."
         )
 
-    end_dt = _parse_dt(end) if end else datetime.now(timezone.utc)
-    start_dt = _parse_dt(start) if start else _subtract_months(end_dt, months)
+    end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
+    start_dt = parse_dt(start) if start else subtract_months(end_dt, months)
     interval_ccxt = to_ccxt(interval)
 
     # 1. Try DB first

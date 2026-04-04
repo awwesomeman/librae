@@ -1,20 +1,20 @@
-"""Data utilities — fetch OHLCV, resample, cache.
+"""Binance public API — fetch OHLCV with local cache.
 
-Generic data operations used by strategy utils.py and tests.
-Exchange-specific logic (Binance API) is encapsulated here so strategies
-only call `fetch_ohlcv()` without knowing the data source details.
+Uses the unauthenticated ``/api/v3/klines`` endpoint.
+Generic utilities (resample, datetime parsing) live in ``data.utils``.
 """
 from __future__ import annotations
 
+import logging
 import random
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import logging
-
 import httpx
 import pandas as pd
+
+from data.utils import parse_dt, subtract_months
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +108,8 @@ def fetch_ohlcv(
     if use_cache and _is_cache_fresh(cpath):
         return pd.read_parquet(cpath)
 
-    end_dt = _parse_dt(end) if end else datetime.now(timezone.utc)
-    start_dt = _parse_dt(start) if start else _subtract_months(end_dt, months)
+    end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
+    start_dt = parse_dt(start) if start else subtract_months(end_dt, months)
 
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(end_dt.timestamp() * 1000)
@@ -165,46 +165,3 @@ def fetch_ohlcv(
             logger.warning("Cache write failed: %s", exc)
 
     return df
-
-
-# ---------------------------------------------------------------------------
-# OHLCV resampling
-# ---------------------------------------------------------------------------
-
-
-def resample_ohlcv(df: pd.DataFrame, rule: str = "1D") -> pd.DataFrame:
-    """Resample OHLCV DataFrame to a different timeframe.
-
-    Args:
-        df: DataFrame with DatetimeIndex and open/high/low/close/volume columns.
-        rule: Pandas resample rule (e.g. "1D", "4h", "1W").
-    """
-    x = pd.DataFrame()
-    x["open"] = df["open"].resample(rule).first()
-    x["high"] = df["high"].resample(rule).max()
-    x["low"] = df["low"].resample(rule).min()
-    x["close"] = df["close"].resample(rule).last()
-    x["volume"] = df["volume"].resample(rule).sum()
-    return x.dropna()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _parse_dt(value: str | datetime) -> datetime:
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    dt = datetime.fromisoformat(value)
-    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def _subtract_months(dt: datetime, months: int) -> datetime:
-    month = dt.month - months
-    year = dt.year
-    while month <= 0:
-        month += 12
-        year -= 1
-    day = min(dt.day, 28)
-    return dt.replace(year=year, month=month, day=day)
