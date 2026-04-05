@@ -4,8 +4,8 @@ Single entry point for all OHLCV data needs (backtest, sim, pipeline).
 Checks DB for existing data, fetches gaps from exchange API, and upserts
 results back to DB.
 
-    df = get_ohlcv("BTCUSDT", "1h", periods=4320)       # 4320 H1 bars ≈ 6 months
-    df = get_ohlcv("TXFR1", "5m", periods=26000, data_source="shioaji")
+    df = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start="2025-10-01", end="2026-04-01")
+    df = get_ohlcv("TXFR1", "5m", data_source="shioaji", start="2025-01-01", warmup_periods=200)
 
 Adding a new data source
 ------------------------
@@ -42,7 +42,7 @@ OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 # Fetcher registry
 # ---------------------------------------------------------------------------
 
-# source_name → callable(symbol, interval, start, end) → DataFrame
+# data_source → callable(symbol, interval, start, end) → DataFrame
 _OHLCV_FETCHERS: dict[str, Callable] = {}
 
 
@@ -75,24 +75,25 @@ register_ohlcv_fetcher("binance_spot", _binance_fetcher)
 
 def get_ohlcv(
     symbol: str,
-    interval: str,
+    timeframe: str,
     *,
-    start: str | datetime | None = None,
+    data_source: str,
+    start: str | datetime,
     end: str | datetime | None = None,
-    periods: int = 4320,
-    data_source: str = "binance_spot",
+    warmup_periods: int = 0,
 ) -> pd.DataFrame:
     """Unified OHLCV fetch: DB → API gap-fill → DB.
 
     Args:
-        symbol:      Trading symbol (e.g. ``'BTCUSDT'``, ``'TXFR1'``).
-        interval:    Candle interval in any supported format
-                     (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
-        start/end:   Time range. If omitted, uses ``periods * interval`` before now.
-        periods:     Number of bars to look back when ``start`` is not specified.
-                     Default 4320 (≈ 6 months of H1 bars).
-        data_source: Data source key registered via ``register_ohlcv_fetcher``.
-                     Built-in: ``'binance_spot'``.
+        symbol:          Trading symbol (e.g. ``'BTCUSDT'``, ``'TXFR1'``).
+        timeframe:       Candle interval in any supported format
+                         (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
+        data_source:     Data source key registered via ``register_ohlcv_fetcher``.
+                         Built-in: ``'binance_spot'``.
+        start:           Start of the requested time range.
+        end:             End of the requested time range. Defaults to now.
+        warmup_periods:  Extra bars to fetch before ``start`` for indicator warm-up.
+                         Default 0 (no warm-up).
 
     Returns:
         DataFrame with columns [timestamp, open, high, low, close, volume],
@@ -109,39 +110,43 @@ def get_ohlcv(
         )
 
     end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
-    interval_ccxt = to_ccxt(interval)
-    start_dt = parse_dt(start) if start else end_dt - interval_to_timedelta(interval_ccxt) * periods
+    tf_ccxt = to_ccxt(timeframe)
+    start_dt = parse_dt(start)
+
+    # Extend start backward for warm-up bars
+    if warmup_periods > 0:
+        start_dt = start_dt - interval_to_timedelta(tf_ccxt) * warmup_periods
 
     # 1. Try DB first
-    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, data_source)
+    db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
 
     if db_df is not None and not db_df.empty:
-        gaps = _find_gaps(db_df, start_dt, end_dt, interval_ccxt)
+        gaps = _find_gaps(db_df, start_dt, end_dt, tf_ccxt)
         if not gaps:
-            logger.debug("DB hit: %s %s (%d bars)", symbol, interval_ccxt, len(db_df))
+            logger.debug("DB hit: %s %s (%d bars)", symbol, tf_ccxt, len(db_df))
             return db_df
-        logger.info("DB partial: %s %s, %d gaps to fill", symbol, interval_ccxt, len(gaps))
+        logger.info("DB partial: %s %s, %d gaps to fill", symbol, tf_ccxt, len(gaps))
     else:
         gaps = [(start_dt, end_dt)]
-        logger.info("DB miss: %s %s, fetching full range from API", symbol, interval_ccxt)
+        logger.info("DB miss: %s %s, fetching full range from API", symbol, tf_ccxt)
 
     # 2. Fill gaps from API → upsert to DB
     fetched_parts: list[pd.DataFrame] = []
     for gap_start, gap_end in gaps:
-        api_df = _fetch_from_api(symbol, interval_ccxt, gap_start, gap_end, data_source)
+        api_df = _fetch_from_api(symbol, tf_ccxt, gap_start, gap_end, data_source)
         if not api_df.empty:
             fetched_parts.append(api_df)
-            _upsert_db(api_df, symbol, interval_ccxt, data_source)
+            _upsert_db(api_df, symbol, tf_ccxt, data_source)
 
     # 3. Re-read from DB (merges existing + newly upserted data)
-    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, data_source)
+    db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
     if db_df is not None and not db_df.empty:
         return db_df
 
     # 4. Fallback: DB unavailable, return already-fetched API data
     if fetched_parts:
         return pd.concat(fetched_parts, ignore_index=True)
-    return _fetch_from_api(symbol, interval_ccxt, start_dt, end_dt, data_source)
+    return _fetch_from_api(symbol, tf_ccxt, start_dt, end_dt, data_source)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +154,7 @@ def get_ohlcv(
 # ---------------------------------------------------------------------------
 
 def _query_db(
-    symbol: str, interval: str, start_dt: datetime, end_dt: datetime,
+    symbol: str, tf_ccxt: str, start_dt: datetime, end_dt: datetime,
     data_source: str,
 ) -> pd.DataFrame | None:
     """Query ohlcv table. Returns None if DB is unavailable."""
@@ -157,7 +162,7 @@ def _query_db(
         from db.timescale_reader import load_ohlcv
 
         df = load_ohlcv(
-            symbol=symbol, timeframe=to_canonical(interval),
+            symbol=symbol, timeframe=to_canonical(tf_ccxt),
             data_source=data_source,
             start_ts=start_dt.isoformat(), end_ts=end_dt.isoformat(),
         )
@@ -172,18 +177,18 @@ def _query_db(
 
 def _fetch_from_api(
     symbol: str,
-    interval: str,
+    tf_ccxt: str,
     start_dt: datetime,
     end_dt: datetime,
     data_source: str,
 ) -> pd.DataFrame:
     """Dispatch fetch to the registered fetcher for ``data_source``."""
     fetcher = _OHLCV_FETCHERS[data_source]
-    return fetcher(symbol, interval, start_dt, end_dt)
+    return fetcher(symbol, tf_ccxt, start_dt, end_dt)
 
 
 def _upsert_db(
-    df: pd.DataFrame, symbol: str, interval: str, data_source: str,
+    df: pd.DataFrame, symbol: str, tf_ccxt: str, data_source: str,
 ) -> None:
     """Write OHLCV to DB via existing writer."""
     try:
@@ -193,7 +198,7 @@ def _upsert_db(
         if "timestamp" in work.columns:
             work = work.set_index("timestamp")
             work.index.name = "ts"
-        write_ohlcv(work, symbol, interval, data_source=data_source)
+        write_ohlcv(work, symbol, tf_ccxt, data_source=data_source)
     except Exception as e:
         logger.warning("DB upsert failed: %s", e)
 
@@ -202,7 +207,7 @@ def _find_gaps(
     db_df: pd.DataFrame,
     start_dt: datetime,
     end_dt: datetime,
-    interval: str,
+    tf_ccxt: str,
 ) -> list[tuple[datetime, datetime]]:
     """Find missing time ranges in DB data.
 
@@ -220,7 +225,7 @@ def _find_gaps(
     if db_max.tzinfo is None:
         db_max = db_max.replace(tzinfo=timezone.utc)
 
-    delta = interval_to_timedelta(interval)
+    delta = interval_to_timedelta(tf_ccxt)
 
     gaps: list[tuple[datetime, datetime]] = []
     if db_min > start_dt + delta:

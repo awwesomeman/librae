@@ -36,7 +36,7 @@ def build_live_trader(
     timeframe: str,
     market: str = "crypto",
     initial_balance: float = 100_000.0,
-    poll_interval: int = 60,
+    poll_seconds: int = 60,
     warmup_bars: int = 720,
     no_db: bool = False,
     telegram_config: dict | None = None,
@@ -78,7 +78,7 @@ def build_live_trader(
                 run_id=run_id, strategy=strategy_name, symbol=symbols[0],
                 timeframe=timeframe, mode="sim",
                 start_ts=datetime.now(tz=timezone.utc),
-                data_source="binance_spot", poll_interval=poll_interval,
+                data_source="binance_spot", poll_seconds=poll_seconds,
                 params_json=params,
             )
         except Exception as e:
@@ -98,8 +98,10 @@ def build_live_trader(
     def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
         """DB-first warmup: reads historical bars from DB, fills gaps from API."""
         from data.ohlcv import get_ohlcv
+        from librae.core.utils import interval_to_timedelta
 
-        df = get_ohlcv(symbol=symbol, interval=tf_ccxt, periods=limit)
+        warmup_start = datetime.now(tz=timezone.utc) - interval_to_timedelta(tf_ccxt) * limit
+        df = get_ohlcv(symbol, tf_ccxt, data_source="binance_spot", start=warmup_start.isoformat())
         if df.empty:
             return fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
         if "timestamp" in df.columns and "ts" not in df.columns:
@@ -169,7 +171,7 @@ def build_live_trader(
         timeframe=timeframe_ccxt,
         warmup_bars=warmup_bars,
         initial_balance=initial_balance,
-        poll_interval=poll_interval,
+        poll_seconds=poll_seconds,
         on_bar=on_bar,
         on_order_event=on_order_event,
         on_ohlcv=on_ohlcv,

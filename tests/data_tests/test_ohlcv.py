@@ -15,10 +15,13 @@ from data.ohlcv import (
 )
 from librae.core.utils import interval_to_timedelta
 
+START = datetime(2024, 1, 1, tzinfo=timezone.utc)
+END = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
 
 def _make_ohlcv_df(n: int = 5, start_ts: datetime | None = None) -> pd.DataFrame:
     """Build a minimal OHLCV DataFrame for testing."""
-    start = start_ts or datetime(2024, 1, 1, tzinfo=timezone.utc)
+    start = start_ts or START
     ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
     return pd.DataFrame({
         "timestamp": ts,
@@ -38,11 +41,11 @@ class TestGetOhlcv:
     @patch("data.ohlcv._query_db")
     def test_db_hit_skips_api(self, mock_db, mock_api, mock_upsert):
         """Full DB hit → return DB data, never call API."""
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        db_df = _make_ohlcv_df(800, start_ts=start)
+        db_df = _make_ohlcv_df(800, start_ts=START)
         mock_db.return_value = db_df
 
-        result = get_ohlcv("BTCUSDT", "1h", start=start, end=start + pd.Timedelta(hours=799))
+        result = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot",
+                           start=START, end=START + pd.Timedelta(hours=799))
 
         assert len(result) == 800
         mock_api.assert_not_called()
@@ -57,7 +60,7 @@ class TestGetOhlcv:
         mock_db.side_effect = [pd.DataFrame(), api_df]  # miss, then hit after upsert
         mock_api.return_value = api_df
 
-        result = get_ohlcv("BTCUSDT", "1h", periods=720)
+        result = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start=START, end=END)
 
         mock_api.assert_called_once()
         mock_upsert.assert_called_once()
@@ -72,14 +75,14 @@ class TestGetOhlcv:
         mock_db.return_value = None  # DB unavailable on both reads
         mock_api.return_value = api_df
 
-        result = get_ohlcv("BTCUSDT", "1h", periods=720)
+        result = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start=START, end=END)
 
         assert len(result) == 3
         assert list(result.columns) == OHLCV_COLUMNS
 
     def test_unknown_source_raises(self):
         with pytest.raises(ValueError, match="No OHLCV fetcher"):
-            get_ohlcv("BTCUSDT", "1h", data_source="nonexistent_exchange")
+            get_ohlcv("BTCUSDT", "1h", data_source="nonexistent_exchange", start=START)
 
     @patch("data.ohlcv._upsert_db")
     @patch("data.ohlcv._query_db")
@@ -91,7 +94,7 @@ class TestGetOhlcv:
 
         mock_db.side_effect = [pd.DataFrame(), custom_df]
 
-        result = get_ohlcv("SYMBOL", "1h", data_source="test_exchange", periods=720)
+        result = get_ohlcv("SYMBOL", "1h", data_source="test_exchange", start=START, end=END)
 
         mock_fetcher.assert_called_once()
         assert len(result) == 2
