@@ -416,7 +416,21 @@ ohlcv (獨立)          signal_outcomes (獨立)
 
 **影響範圍**：`timescale_init.sql`、`timescale_writer.py`、`timescale_reader.py`、`generate_dashboards.py`、`refresh_performance()`
 
-### Issue 4：signal_outcomes CHECK constraint 過寬
+### Issue 5：order_events 應支援跨 run 累積
+
+signal_outcomes 已設計為跨 run 累積（無 FK，自帶 strategy/mode/symbol/timeframe），sim 重啟不影響歷史。但 order_events 綁定 run_id FK CASCADE — sim 重啟歷史斷裂，刪 run 會刪事件。
+
+**建議**：order_events 比照 signal_outcomes 設計：
+- 加自帶欄位：`strategy`, `mode`, `symbol`, `timeframe`
+- `run_id` 保留但改為普通欄位（非 FK CASCADE）
+- 刪 run 不刪事件
+- Grafana 查詢改用 `WHERE strategy='X' AND mode='sim'`（跨 run）
+
+**equity_curve**：重啟後 equity 重算會有斷層，但各段仍有參考價值。可考慮同樣改為非 CASCADE，但優先級較低。
+
+**strategy_performance**：聚合 KPI 是 per-run 快照，維持 FK CASCADE。
+
+### Issue 6：signal_outcomes CHECK constraint 過寬
 
 `signal_outcomes.mode` CHECK 允許 `('backtest', 'sim', 'live')`，但實際不會有 live 訊號。應改為 `('backtest', 'sim')`。
 
