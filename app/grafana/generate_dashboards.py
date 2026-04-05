@@ -525,8 +525,8 @@ EXTRA_PANELS: list[dict] = [
             "),\n"
             "latest AS (\n"
             "  SELECT close FROM ohlcv, meta\n"
-            "  WHERE symbol = meta.symbol AND timeframe = meta.timeframe\n"
-            "    AND (meta.data_source IS NULL OR data_source = meta.data_source)\n"
+            "  WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe\n"
+            "    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
             "SELECT CASE WHEN p.quantity > 0 THEN\n"
@@ -711,7 +711,9 @@ def render_unified_dashboard() -> dict:
     )
     run_id_var = _make_query_variable(
         "run_id",
-        "SELECT run_id FROM backtest_runs WHERE mode='${mode}'"
+        "SELECT run_id FROM backtest_runs"
+        " WHERE mode='${mode}'"
+        " AND run_id IN (SELECT run_id FROM strategy_performance)"
         " ORDER BY run_ts DESC LIMIT 20",
         label="Run ID",
     )
@@ -751,9 +753,9 @@ _META_INNER = (
     " FROM backtest_runs WHERE run_id='${run_id}'"
 )
 _OHLCV_WHERE = (
-    "symbol = meta.symbol"
-    " AND timeframe = meta.timeframe"
-    " AND (meta.data_source IS NULL OR data_source = meta.data_source)"
+    "ohlcv.symbol = meta.symbol"
+    " AND ohlcv.timeframe = meta.timeframe"
+    " AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)"
 )
 _ENTRY_BAR = (
     f"SELECT close FROM ohlcv, meta"
@@ -1018,7 +1020,9 @@ def render_signal_monitor() -> dict:
         ),
         _make_query_variable(
             "run_id",
-            "SELECT run_id FROM backtest_runs WHERE mode='${mode}'"
+            "SELECT run_id FROM backtest_runs"
+            " WHERE mode='${mode}'"
+            " AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL)"
             " ORDER BY run_ts DESC LIMIT 20",
             label="Run ID",
         ),

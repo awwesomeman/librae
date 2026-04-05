@@ -49,8 +49,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' ORDER BY run_ts DESC LIMIT 20",
-        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' ORDER BY run_ts DESC LIMIT 20",
+        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND run_id IN (SELECT run_id FROM strategy_performance) ORDER BY run_ts DESC LIMIT 20",
+        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND run_id IN (SELECT run_id FROM strategy_performance) ORDER BY run_ts DESC LIMIT 20",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -212,7 +212,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT side, entry_price, position_quantity AS quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta\n  WHERE symbol = meta.symbol AND timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.quantity\n    ELSE (p.entry_price - l.close) * p.quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT side, entry_price, position_quantity AS quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta\n  WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.quantity\n    ELSE (p.entry_price - l.close) * p.quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
           "format": "table",
           "refId": "A",
           "datasource": {

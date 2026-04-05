@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Config — edit these directly, no argparse needed for experiments
 # ---------------------------------------------------------------------------
 SYMBOL = "BTCUSDT"
+SOURCE = "binance_spot"
 TIMEFRAME = "1h"
 START = "2025-10-01"
 POLL_SECONDS = 60
@@ -30,7 +31,7 @@ WARMUP_PERIODS = 200       # bars (sim only)
 def run_backtest() -> None:
     """Fetch historical data → compute signals → save to DB."""
     logger.info("[1/3] Fetching %s %s from %s...", SYMBOL, TIMEFRAME, START)
-    raw = get_ohlcv(SYMBOL, TIMEFRAME, data_source="binance_spot", start=START)
+    raw = get_ohlcv(SYMBOL, TIMEFRAME, data_source=SOURCE, start=START)
     logger.info("       bars=%d", len(raw))
 
     logger.info("[2/3] Computing KDJ signal (J < %d)...", DEFAULT_PARAMS["j_threshold"])
@@ -43,7 +44,7 @@ def run_backtest() -> None:
     logger.info("[3/3] Saving to DB...")
     timeframe = to_canonical(TIMEFRAME)
     run_id = generate_run_id(SIGNAL_NAME, SYMBOL, timeframe)
-    counts = save_signal_results(df, SYMBOL, timeframe, SIGNAL_NAME, "binance_spot", run_id=run_id)
+    counts = save_signal_results(df, SYMBOL, timeframe, SIGNAL_NAME, SOURCE, run_id=run_id)
     logger.info("       run_id=%s", run_id)
     logger.info("       DB: %s", counts)
 
