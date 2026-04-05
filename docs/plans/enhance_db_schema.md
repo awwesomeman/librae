@@ -434,6 +434,26 @@ signal_outcomes 已設計為跨 run 累積（無 FK，自帶 strategy/mode/symbo
 
 同時修正 `signal_events` 的 CHECK constraint：`mode IN ('backtest', 'sim')`（移除 live）。
 
+### Issue 7：order_events 欄位命名不一致
+
+**冗餘/不對稱命名**：
+
+| 現在 | 改為 | 理由 |
+|------|------|------|
+| `realized_pnl` | `pnl` | 所有數值都是 realized，前綴冗餘；跟 `net_return` 風格不一致 |
+| `net_return` | `return` | 跟 `pnl` 對稱 |
+
+**跨表同概念不同名**：
+
+| 現在 | 改為 | 理由 |
+|------|------|------|
+| `avg_entry_price` | `entry_price` | trade_blotter 用 `entry_price`，語義相同（加碼後都是加權平均） |
+| `position_qty` | `position_quantity` | 其他欄位都用完整 `quantity`，不縮寫 |
+
+**可接受但值得標記**：
+- `entry_ts`（原始開倉時間）vs `ts`（事件時間）— 兩個 `_ts` 可能混淆，但改名收益不大
+- `event_id` 格式含 run_id 前綴 — 等 Issue 5 跨 run 時一起調整
+
 ### 目標架構（Issue 全部完成後）
 
 ```
