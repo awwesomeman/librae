@@ -366,14 +366,14 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
-    # -- Order Events (single table replacing old Trade Detail) --
+    # -- Trade Events (single table replacing old Trade Detail) --
     {
         "_type": "fixed", "_x": 12, "_dy": 0,
-        "title": "Order Events",
+        "title": "Trade Events",
         "description": (
             "Position lifecycle: open/add = entry side, reduce/close = exit side.\n"
             "P&L and return shown on reduce/close rows only (weighted-average entry price).\n"
-            "One full lifecycle = pos_qty goes from 0 → N → 0."
+            "One full lifecycle = position_quantity goes from 0 → N → 0."
         ),
         "type": "table",
         "h": 15,
@@ -495,22 +495,38 @@ BASE_PANELS_DEF: list[dict] = [
     },
 ]
 
+def _poll_interval_panel(w: int) -> dict:
+    return _stat_panel(
+        "Poll Interval",
+        "SELECT poll_interval AS \"Interval\""
+        " FROM backtest_runs WHERE run_id = '${run_id}'",
+        "s", [],
+        w=w, fixed_color="blue", no_value="N/A",
+        description="Polling interval in seconds. Only set for sim/live runs.",
+    )
+
+
 EXTRA_PANELS: list[dict] = [
     {"_type": "row", "title": "Live / Sim Only"},
-    {**STATUS_PANEL, "w": 8},
+    {**STATUS_PANEL, "w": 6},
+    _poll_interval_panel(w=6),
     _stat_panel(
         "Unrealized PnL",
         (
-            "WITH pos AS (\n"
+            "WITH meta AS ("
+            " SELECT symbol, timeframe, data_source"
+            " FROM backtest_runs WHERE run_id='${run_id}'"
+            "),\n"
+            "pos AS (\n"
             "  SELECT side, entry_price, position_quantity AS quantity\n"
             "  FROM trade_events\n"
             "  WHERE run_id = '${run_id}'\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             "),\n"
             "latest AS (\n"
-            "  SELECT close FROM ohlcv\n"
-            "  WHERE symbol = (SELECT symbol FROM backtest_runs WHERE run_id='${run_id}')\n"
-            "    AND timeframe = (SELECT timeframe FROM backtest_runs WHERE run_id='${run_id}')\n"
+            "  SELECT close FROM ohlcv, meta\n"
+            "  WHERE symbol = meta.symbol AND timeframe = meta.timeframe\n"
+            "    AND (meta.data_source IS NULL OR source = meta.data_source)\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
             "SELECT CASE WHEN p.quantity > 0 THEN\n"
@@ -527,7 +543,7 @@ EXTRA_PANELS: list[dict] = [
             {"color": "yellow", "value": 0},
             {"color": "green", "value": 100},
         ],
-        w=8, decimals=2, no_value="No Position",
+        w=6, decimals=2, no_value="No Position",
         description="Unrealized P&L of the current open position.",
     ),
     _stat_panel(
@@ -547,7 +563,7 @@ EXTRA_PANELS: list[dict] = [
             "FROM pos"
         ),
         None, [],
-        w=8, no_value="Flat", fixed_color="blue",
+        w=6, no_value="Flat", fixed_color="blue",
         description="Current open position: direction, size, entry price.",
     ),
 ]
@@ -726,23 +742,35 @@ def render_unified_dashboard() -> dict:
 
 # WHY: common SQL fragments for signal_events LATERAL JOIN to ohlcv.
 # These are reused across multiple panels to compute forward return, MFE, MAE.
-_SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'"
-_OHLCV_WHERE = "symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source'"
+# All filtering uses run_id — symbol/timeframe/source derived from backtest_runs.
+# _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
+# so symbol/timeframe/data_source are resolved once instead of once per column.
+_SIG_WHERE = "s.run_id = '${run_id}'"
+_META_INNER = (
+    " SELECT symbol, timeframe, data_source"
+    " FROM backtest_runs WHERE run_id='${run_id}'"
+)
+_OHLCV_WHERE = (
+    "symbol = meta.symbol"
+    " AND timeframe = meta.timeframe"
+    " AND (meta.data_source IS NULL OR source = meta.data_source)"
+)
 _ENTRY_BAR = (
-    f"SELECT close FROM ohlcv"
+    f"SELECT close FROM ohlcv, meta"
     f" WHERE {_OHLCV_WHERE} AND ts <= s.ts"
     f" ORDER BY ts DESC LIMIT 1"
 )
 _EXIT_BAR = (
-    f"SELECT close FROM ohlcv"
+    f"SELECT close FROM ohlcv, meta"
     f" WHERE {_OHLCV_WHERE} AND ts > s.ts"
     f" ORDER BY ts LIMIT 1 OFFSET ($n - 1)"
 )
 _FWD_CTE = (
-    f"WITH fwd AS (\n"
+    f"WITH meta AS ({_META_INNER}),\n"
+    f"fwd AS (\n"
     f"  SELECT s.ts,\n"
     f"    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n"
-    f"  FROM signal_events s\n"
+    f"  FROM signal_events s, meta\n"
     f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
     f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
     f"  WHERE {_SIG_WHERE}\n"
@@ -750,10 +778,11 @@ _FWD_CTE = (
     f")\n"
 )
 _EXC_CTE = (
-    f"WITH exc AS (\n"
+    f"WITH meta AS ({_META_INNER}),\n"
+    f"exc AS (\n"
     f"  SELECT s.ts, exc.mfe, exc.mae,\n"
     f"    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
-    f"  FROM signal_events s\n"
+    f"  FROM signal_events s, meta\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT close AS entry_close FROM ohlcv\n"
     f"    WHERE {_OHLCV_WHERE} AND ts <= s.ts\n"
@@ -793,11 +822,12 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     _stat_panel(
         "Unrealized PnL",
         (
-            "WITH latest_signal AS (\n"
+            f"WITH meta AS ({_META_INNER}),\n"
+            "latest_signal AS (\n"
             "  SELECT ts, signal_value,\n"
-            f"    (SELECT close FROM ohlcv WHERE {_OHLCV_WHERE}"
+            f"    (SELECT close FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
             " ORDER BY ts DESC LIMIT 1) AS current_close,\n"
-            f"    (SELECT close FROM ohlcv WHERE {_OHLCV_WHERE}"
+            f"    (SELECT close FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
             " AND ts <= s.ts ORDER BY ts DESC LIMIT 1) AS signal_price\n"
             f"  FROM signal_events s\n  WHERE {_SIG_WHERE}\n"
             "  ORDER BY ts DESC LIMIT 1\n)\n"
@@ -814,7 +844,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             {"color": "green", "value": 0.01},
         ],
         w=4, decimals=3, no_value="N/A",
-        description="expected_direction x (current_price - entry_price) / entry_price.",
+        description="Latest signal's unrealized return: expected_direction x (current_price - signal_price) / signal_price.",
     ),
     _stat_panel(
         "Mean Fwd Return (T+$n)",
@@ -859,12 +889,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         w=3, decimals=3, no_value="N/A", fixed_color="blue",
         description="Latest signal_value.",
     ),
-    _stat_panel(
-        "Timeframe",
-        "SELECT '$timeframe' AS \"Timeframe\"",
-        None, [],
-        w=3, fixed_color="text",
-    ),
+    _poll_interval_panel(w=3),
 
     # --- Trend row ---
     {"_type": "row", "title": "Trend"},
@@ -876,7 +901,8 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "h": 8, "w": 12,
         "targets": [
             _target(
-                f"SELECT ts AS time, close AS \"Close\" FROM ohlcv"
+                f"WITH meta AS ({_META_INNER})"
+                f" SELECT ts AS time, close AS \"Close\" FROM ohlcv, meta"
                 f" WHERE {_OHLCV_WHERE}"
                 f" AND $__timeFilter(ts) ORDER BY ts",
                 "price",
@@ -925,12 +951,13 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "type": "timeseries",
         "h": 8, "w": 12,
         "targets": [_target(
-            "WITH fwd AS (\n"
+            f"WITH meta AS ({_META_INNER}),\n"
+            "fwd AS (\n"
             "  SELECT s.ts,\n"
             "    $expected_direction * (exit_bar.close - entry_bar.close)"
             " / NULLIF(entry_bar.close, 0) AS adj_return,\n"
             "    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
-            "  FROM signal_events s\n"
+            "  FROM signal_events s, meta\n"
             f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
             f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
             f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.ts)\n"
@@ -990,27 +1017,10 @@ def render_signal_monitor() -> dict:
             label="Mode",
         ),
         _make_query_variable(
-            "strategy",
-            "SELECT DISTINCT strategy FROM signal_events WHERE mode='$mode' ORDER BY 1",
-            label="Strategy",
-        ),
-        _make_query_variable(
-            "symbol",
-            "SELECT DISTINCT symbol FROM signal_events"
-            " WHERE mode='$mode' AND strategy='$strategy' ORDER BY 1",
-            label="Symbol",
-        ),
-        _make_query_variable(
-            "timeframe",
-            "SELECT DISTINCT timeframe FROM signal_events"
-            " WHERE mode='$mode' AND strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
-            label="Timeframe",
-        ),
-        _make_query_variable(
-            "data_source",
-            "SELECT DISTINCT source FROM ohlcv"
-            " WHERE symbol='$symbol' AND timeframe='$timeframe' ORDER BY 1",
-            label="Data Source",
+            "run_id",
+            "SELECT run_id FROM backtest_runs WHERE mode='${mode}'"
+            " ORDER BY run_ts DESC LIMIT 20",
+            label="Run ID",
         ),
         _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),
         _make_textbox_variable("k", "50", label="Rolling Window (signals)"),
@@ -1025,7 +1035,7 @@ def render_signal_monitor() -> dict:
         "uid": "signal-monitor-v2",
         "title": "Signal",
         "description": "Signal quality monitoring — generated by generate_dashboards.py",
-        "tags": ["signal"],
+        "tags": [],
         "timezone": "utc",
         "editable": True,
         "time": {"from": "now-6M", "to": "now"},

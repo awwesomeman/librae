@@ -10,7 +10,7 @@ from app.grafana.generate_dashboards import (
 class TestRenderUnifiedDashboard:
     def test_panel_count(self):
         d = render_unified_dashboard()
-        assert len(d["panels"]) == 16
+        assert len(d["panels"]) == 17
 
     def test_has_required_fields(self):
         d = render_unified_dashboard()
@@ -42,16 +42,12 @@ class TestRenderSignalMonitor:
         d = render_signal_monitor()
         assert d["uid"] == "signal-monitor-v2"
         assert d["schemaVersion"] == 39
-        assert "signal" in d["tags"]
 
     def test_variables(self):
         d = render_signal_monitor()
         var_names = [v["name"] for v in d["templating"]["list"]]
-        assert "strategy" in var_names
-        assert "symbol" in var_names
-        assert "timeframe" in var_names
         assert "mode" in var_names
-        assert "data_source" in var_names
+        assert "run_id" in var_names
         assert "n" in var_names
         assert "k" in var_names
         assert "expected_direction" in var_names
@@ -82,7 +78,7 @@ class TestRenderSignalMonitor:
             assert "datasource" in p
 
     def test_snapshot_row_layout(self):
-        """7 stat panels should fit in one row (total width = 24)."""
+        """Stat panels should fit in one row (total width = 24)."""
         d = render_signal_monitor()
         stat_panels = [p for p in d["panels"] if p["type"] == "stat"]
         total_width = sum(p["gridPos"]["w"] for p in stat_panels)
