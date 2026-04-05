@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 );
 
 -- ============================================================
--- equity_curve — 每 bar 淨值 (hypertable)
+-- equity_curve — 每 bar 淨值 (hypertable, FK CASCADE)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS equity_curve (
     ts                  TIMESTAMPTZ NOT NULL,
@@ -32,72 +32,49 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     drawdown            DOUBLE PRECISION,
     ret_1d              DOUBLE PRECISION,
     benchmark_ret_1d    DOUBLE PRECISION,
-    strategy_name       TEXT
+    strategy            TEXT
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique ON equity_curve(run_id, ts);
 
 -- ============================================================
--- trade_blotter — 成交記錄 (1 row / trade)
+-- trade_events — 部位生命週期事件 (hypertable, 獨立)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS trade_blotter (
-    trade_id        TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
-    entry_ts        TIMESTAMPTZ,
-    exit_ts         TIMESTAMPTZ,
-    symbol          TEXT,
-    side            TEXT,
-    entry_price     DOUBLE PRECISION,
-    exit_price      DOUBLE PRECISION,
-    quantity        DOUBLE PRECISION,
-    gross_pnl       DOUBLE PRECISION,
-    net_pnl         DOUBLE PRECISION,
-    gross_return    DOUBLE PRECISION,
-    net_return      DOUBLE PRECISION,
-    price_unit      TEXT DEFAULT 'USDT',
-    quantity_unit   TEXT DEFAULT 'asset',
-    pnl_unit        TEXT DEFAULT 'USDT',
-    commission      DOUBLE PRECISION DEFAULT 0,
-    slippage        DOUBLE PRECISION DEFAULT 0,
-    tax             DOUBLE PRECISION DEFAULT 0,
-    holding_bars    INTEGER,
-    CONSTRAINT chk_side CHECK (side IN ('long', 'short'))
-);
-CREATE INDEX IF NOT EXISTS idx_trade_blotter_run_id ON trade_blotter(run_id);
-
--- ============================================================
--- order_events — 部位生命週期事件 (hypertable)
--- ============================================================
-CREATE TABLE IF NOT EXISTS order_events (
+CREATE TABLE IF NOT EXISTS trade_events (
     event_id        TEXT NOT NULL,
-    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    run_id          TEXT,
+    strategy        TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    timeframe       TEXT NOT NULL,
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT,
     side            TEXT,
     event_type      TEXT,
     quantity        DOUBLE PRECISION,
     price           DOUBLE PRECISION,
-    avg_entry_price DOUBLE PRECISION,
-    position_qty    DOUBLE PRECISION,
+    entry_price     DOUBLE PRECISION,
+    position_quantity DOUBLE PRECISION,
     notional        DOUBLE PRECISION,
     commission      DOUBLE PRECISION DEFAULT 0,
     slippage        DOUBLE PRECISION DEFAULT 0,
     tax             DOUBLE PRECISION DEFAULT 0,
-    realized_pnl    DOUBLE PRECISION,
+    pnl             DOUBLE PRECISION,
     net_return      DOUBLE PRECISION,
     entry_ts        TIMESTAMPTZ,
     holding_bars    INTEGER,
     reason          TEXT,
     CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
-    CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close'))
+    CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close')),
+    CONSTRAINT chk_event_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
-SELECT create_hypertable('order_events', 'ts', if_not_exists => TRUE);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_order_events_pk ON order_events(event_id, ts);
-CREATE INDEX IF NOT EXISTS idx_order_events_run_id ON order_events(run_id, ts DESC);
+SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);
+CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);
 
 -- ============================================================
--- strategy_performance — 聚合 KPI (1 row / run)
+-- strategy_performance — 聚合 KPI (1 row / run, FK CASCADE)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS strategy_performance (
     run_id          TEXT PRIMARY KEY REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
@@ -137,20 +114,22 @@ CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, source, 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, source);
 
 -- ============================================================
--- signal_outcomes — 訊號品質監控 (hypertable)
+-- signal_events — 訊號品質監控 (hypertable, 獨立)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS signal_outcomes (
-    signal_ts       TIMESTAMPTZ NOT NULL,
+CREATE TABLE IF NOT EXISTS signal_events (
+    ts              TIMESTAMPTZ NOT NULL,
+    run_id          TEXT,
     strategy        TEXT NOT NULL,
     symbol          TEXT NOT NULL,
     mode            TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     signal_value    DOUBLE PRECISION NOT NULL,
     price           DOUBLE PRECISION,
-    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim', 'live'))
+    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim'))
 );
-SELECT create_hypertable('signal_outcomes', 'signal_ts', if_not_exists => TRUE);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_outcomes_unique
-    ON signal_outcomes (signal_ts, strategy, symbol, mode, timeframe);
-CREATE INDEX IF NOT EXISTS idx_signal_outcomes_lookup
-    ON signal_outcomes (strategy, symbol, mode, signal_ts DESC);
+SELECT create_hypertable('signal_events', 'ts', if_not_exists => TRUE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_events_unique
+    ON signal_events (ts, strategy, symbol, mode, timeframe);
+CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
+    ON signal_events (strategy, symbol, mode, ts DESC);

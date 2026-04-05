@@ -57,7 +57,7 @@ class TestGetOhlcv:
         mock_db.side_effect = [pd.DataFrame(), api_df]  # miss, then hit after upsert
         mock_api.return_value = api_df
 
-        result = get_ohlcv("BTCUSDT", "1h", months=1)
+        result = get_ohlcv("BTCUSDT", "1h", periods=720)
 
         mock_api.assert_called_once()
         mock_upsert.assert_called_once()
@@ -72,7 +72,7 @@ class TestGetOhlcv:
         mock_db.return_value = None  # DB unavailable on both reads
         mock_api.return_value = api_df
 
-        result = get_ohlcv("BTCUSDT", "1h", months=1)
+        result = get_ohlcv("BTCUSDT", "1h", periods=720)
 
         assert len(result) == 3
         assert list(result.columns) == OHLCV_COLUMNS
@@ -91,7 +91,7 @@ class TestGetOhlcv:
 
         mock_db.side_effect = [pd.DataFrame(), custom_df]
 
-        result = get_ohlcv("SYMBOL", "1h", source="test_exchange", months=1)
+        result = get_ohlcv("SYMBOL", "1h", source="test_exchange", periods=720)
 
         mock_fetcher.assert_called_once()
         assert len(result) == 2

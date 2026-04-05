@@ -1,4 +1,4 @@
-"""TimescaleDB reader for Streamlit dashboard."""
+"""TimescaleDB reader — query helpers for dashboards and analysis."""
 from __future__ import annotations
 
 import pandas as pd
@@ -51,40 +51,32 @@ def load_equity_curve(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     return df
 
 
-def load_trade_blotter(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
-    sql = """
-        SELECT trade_id, entry_ts, exit_ts AS _time, side,
-               entry_price, exit_price, quantity,
-               gross_pnl, net_pnl, gross_return, net_return,
-               price_unit, quantity_unit, pnl_unit,
-               commission, slippage, tax, holding_bars, symbol
-        FROM trade_blotter
-        WHERE run_id = %s
-        ORDER BY entry_ts DESC
+def load_trade_events(
+    run_id: str,
+    *,
+    event_types: list[str] | None = None,
+    dsn: str = TIMESCALE_DSN,
+) -> pd.DataFrame:
+    """Load trade_events for a run, ordered by timestamp.
+
+    Args:
+        event_types: Optional filter, e.g. ["close", "reduce"] for closed trades only.
     """
-    with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=[run_id])
-    if not df.empty:
-        if "_time" in df.columns:
-            df["_time"] = pd.to_datetime(df["_time"], utc=True)
-        if "entry_ts" in df.columns:
-            df["entry_time"] = pd.to_datetime(df["entry_ts"], utc=True).dt.strftime("%Y-%m-%d %H:%M")
-    return df
-
-
-def load_order_events(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
-    """Load order_events for a run, ordered by timestamp."""
     sql = """
         SELECT event_id, ts AS _time, symbol, side, event_type,
-               quantity, price, avg_entry_price, position_qty, notional,
+               quantity, price, entry_price, position_quantity, notional,
                commission, slippage, tax,
-               realized_pnl, net_return, entry_ts, holding_bars, reason
-        FROM order_events
+               pnl, net_return, entry_ts, holding_bars, reason
+        FROM trade_events
         WHERE run_id = %s
-        ORDER BY ts
     """
+    params: list = [run_id]
+    if event_types:
+        sql += " AND event_type = ANY(%s)"
+        params.append(event_types)
+    sql += " ORDER BY ts"
     with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=[run_id])
+        df = pd.read_sql(sql, conn, params=params)
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df
@@ -111,24 +103,20 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
 
 
 def load_strategy_signals(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
-    """Load entry/exit signals from trade_blotter (replaces strategy_signals table)."""
+    """Load entry/exit signals from trade_events (open=entry, close=exit)."""
     sql = """
-        WITH t AS (
-            SELECT entry_ts, exit_ts, entry_price, exit_price, side, symbol, run_id
-            FROM trade_blotter WHERE run_id = %s
-        )
-        SELECT entry_ts AS _time, symbol, 'entry' AS signal_type,
-               entry_price AS price,
-               CASE WHEN side='long' THEN 1.0 ELSE -1.0 END AS signal_strength,
+        SELECT ts AS _time, symbol,
+               CASE WHEN event_type IN ('open', 'add') THEN 'entry' ELSE 'exit' END AS signal_type,
+               price,
+               CASE WHEN side='long' AND event_type IN ('open','add') THEN 1.0
+                    WHEN side='short' AND event_type IN ('open','add') THEN -1.0
+                    WHEN side='long' AND event_type IN ('reduce','close') THEN -1.0
+                    ELSE 1.0
+               END AS signal_strength,
                run_id
-        FROM t
-        UNION ALL
-        SELECT exit_ts AS _time, symbol, 'exit' AS signal_type,
-               exit_price AS price,
-               CASE WHEN side='long' THEN -1.0 ELSE 1.0 END AS signal_strength,
-               run_id
-        FROM t
-        ORDER BY _time
+        FROM trade_events
+        WHERE run_id = %s
+        ORDER BY ts
     """
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])

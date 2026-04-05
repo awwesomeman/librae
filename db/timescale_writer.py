@@ -4,8 +4,8 @@ Naming convention:
     write_*  — single-table write, no data transformation
     save_*   — multi-table orchestrator, may extract/transform data
 
-Tables: backtest_runs, equity_curve, trade_blotter,
-strategy_performance, ohlcv, signal_outcomes.
+Tables: backtest_runs, equity_curve, trade_events,
+strategy_performance, ohlcv, signal_events.
 """
 from __future__ import annotations
 
@@ -139,7 +139,7 @@ def write_backtest_output(
     Args:
         output: BacktestOutput to write.
         signal_series: Optional Series (index=timestamp, values=signal_value)
-            to write to signal_outcomes. Only non-NaN values are written.
+            to write to signal_events. Only non-NaN values are written.
         params: Optional strategy parameters dict to store as JSONB.
         dsn: TimescaleDB DSN.
 
@@ -165,10 +165,11 @@ def write_backtest_output(
         )
         counts["backtest_runs"] = 1
 
+        tf = to_canonical(meta.timeframe)
+
         # Clear old data (idempotent re-run)
         cur.execute("DELETE FROM equity_curve WHERE run_id = %s", (meta.run_id,))
-        cur.execute("DELETE FROM trade_blotter WHERE run_id = %s", (meta.run_id,))
-        cur.execute("DELETE FROM order_events WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM trade_events WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
         # equity_curve (batch)
@@ -186,56 +187,25 @@ def write_backtest_output(
                 cur,
                 """INSERT INTO equity_curve
                    (ts, run_id, equity, benchmark_equity, drawdown, ret_1d,
-                    benchmark_ret_1d, strategy_name)
+                    benchmark_ret_1d, strategy)
                    VALUES %s""",
                 eq_rows,
                 page_size=1000,
             )
             counts["equity_curve"] = len(eq_rows)
 
-        # trade_blotter (batch)
-        if output.trades:
-            trade_rows = [
-                (
-                    tr.trade_id, meta.run_id,
-                    _to_dt(tr.entry_ts), _to_dt(tr.exit_ts),
-                    tr.symbol, tr.side,
-                    tr.entry_price, tr.exit_price, tr.quantity,
-                    tr.gross_pnl, tr.net_pnl,
-                    tr.gross_return, tr.net_return,
-                    tr.price_unit,
-                    tr.quantity_unit,
-                    tr.pnl_unit,
-                    tr.commission, tr.slippage, tr.tax, tr.holding_bars,
-                )
-                for tr in output.trades
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO trade_blotter
-                   (trade_id, run_id, entry_ts, exit_ts, symbol, side,
-                    entry_price, exit_price, quantity,
-                    gross_pnl, net_pnl,
-                    gross_return, net_return,
-                    price_unit, quantity_unit, pnl_unit,
-                    commission, slippage, tax, holding_bars)
-                   VALUES %s
-                   ON CONFLICT (trade_id) DO NOTHING""",
-                trade_rows,
-                page_size=500,
-            )
-            counts["trade_blotter"] = len(trade_rows)
-
-        # order_events (batch)
+        # trade_events (batch)
         if output.order_events:
             event_rows = [
                 (
-                    ev.event_id, meta.run_id, _to_dt(ev.ts),
+                    ev.event_id, meta.run_id,
+                    meta.strategy, meta.mode, tf,
+                    _to_dt(ev.ts),
                     ev.symbol, ev.side, ev.event_type,
-                    ev.quantity, ev.price, ev.avg_entry_price,
-                    ev.position_qty, ev.notional,
+                    ev.quantity, ev.price, ev.entry_price,
+                    ev.position_quantity, ev.notional,
                     ev.commission, ev.slippage, ev.tax,
-                    ev.realized_pnl, ev.net_return,
+                    ev.pnl, ev.net_return,
                     _to_dt(ev.entry_ts) if ev.entry_ts else None,
                     ev.holding_bars, ev.reason,
                 )
@@ -243,49 +213,49 @@ def write_backtest_output(
             ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO order_events
-                   (event_id, run_id, ts, symbol, side, event_type,
-                    quantity, price, avg_entry_price,
-                    position_qty, notional,
+                """INSERT INTO trade_events
+                   (event_id, run_id,
+                    strategy, mode, timeframe,
+                    ts, symbol, side, event_type,
+                    quantity, price, entry_price,
+                    position_quantity, notional,
                     commission, slippage, tax,
-                    realized_pnl, net_return,
+                    pnl, net_return,
                     entry_ts, holding_bars, reason)
                    VALUES %s
                    ON CONFLICT (event_id, ts) DO NOTHING""",
                 event_rows,
                 page_size=500,
             )
-            counts["order_events"] = len(event_rows)
+            counts["trade_events"] = len(event_rows)
 
-        # signal_outcomes (from feature-layer signal_series)
+        # signal_events (from feature-layer signal_series)
         if signal_series is not None and not signal_series.empty:
-            # Idempotent re-run: clear signals within this backtest's time range
-            tf = to_canonical(meta.timeframe)
             cur.execute(
-                """DELETE FROM signal_outcomes
+                """DELETE FROM signal_events
                    WHERE strategy = %s AND symbol = %s AND mode = 'backtest'
                      AND timeframe = %s
-                     AND signal_ts BETWEEN %s AND %s""",
+                     AND ts BETWEEN %s AND %s""",
                 (meta.strategy, meta.symbol, tf,
                  _to_dt(meta.start_ts), _to_dt(meta.end_ts)),
             )
             so_rows = [
-                (_to_dt(ts), meta.strategy, meta.symbol, "backtest",
+                (_to_dt(ts), meta.run_id, meta.strategy, meta.symbol, "backtest",
                  tf, float(val), None)
                 for ts, val in signal_series.items()
             ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO signal_outcomes
-                   (signal_ts, strategy, symbol, mode, timeframe,
+                """INSERT INTO signal_events
+                   (ts, run_id, strategy, symbol, mode, timeframe,
                     signal_value, price)
                    VALUES %s
-                   ON CONFLICT (signal_ts, strategy, symbol, mode, timeframe)
+                   ON CONFLICT (ts, strategy, symbol, mode, timeframe)
                    DO NOTHING""",
                 so_rows,
                 page_size=1000,
             )
-            counts["signal_outcomes"] = len(so_rows)
+            counts["signal_events"] = len(so_rows)
 
         write_performance(meta.run_id, m, cur=cur)
         counts["strategy_performance"] = 1
@@ -356,8 +326,9 @@ def write_ohlcv(
     return len(rows)
 
 
-def write_signal_outcome(
-    signal_ts: datetime,
+def write_signal_event(
+    ts: datetime,
+    run_id: str,
     strategy: str,
     symbol: str,
     mode: str,
@@ -368,17 +339,17 @@ def write_signal_outcome(
     cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
-    """Write a single signal outcome row (upsert, idempotent).
+    """Write a single signal event row (upsert, idempotent).
 
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
     """
-    sql = """INSERT INTO signal_outcomes
-               (signal_ts, strategy, symbol, mode, timeframe, signal_value, price)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (signal_ts, strategy, symbol, mode, timeframe)
+    sql = """INSERT INTO signal_events
+               (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (ts, strategy, symbol, mode, timeframe)
                DO NOTHING"""
-    values = (_to_dt(signal_ts), strategy, symbol, mode, timeframe,
+    values = (_to_dt(ts), run_id, strategy, symbol, mode, timeframe,
               signal_value, price)
     if cur is not None:
         cur.execute(sql, values)
@@ -397,7 +368,7 @@ def write_equity_point(
     ret_1d: float = 0.0,
     benchmark_equity: float | None = None,
     benchmark_ret_1d: float | None = None,
-    strategy_name: str | None = None,
+    strategy: str | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Write a single equity curve point (upsert by ts + run_id)."""
@@ -406,106 +377,67 @@ def write_equity_point(
         cur.execute(
             """INSERT INTO equity_curve
                (ts, run_id, equity, benchmark_equity, drawdown, ret_1d,
-                benchmark_ret_1d, strategy_name)
+                benchmark_ret_1d, strategy)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, ts) DO UPDATE SET
                  equity=EXCLUDED.equity, drawdown=EXCLUDED.drawdown,
-                 ret_1d=EXCLUDED.ret_1d, strategy_name=EXCLUDED.strategy_name""",
+                 ret_1d=EXCLUDED.ret_1d, strategy=EXCLUDED.strategy""",
             (
                 _to_dt(ts), run_id, equity, benchmark_equity,
-                drawdown, ret_1d, benchmark_ret_1d, strategy_name,
+                drawdown, ret_1d, benchmark_ret_1d, strategy,
             ),
         )
         cur.close()
 
 
-def write_trade(
-    run_id: str,
-    trade_id: str,
-    entry_ts: datetime,
-    exit_ts: datetime,
-    symbol: str,
-    side: str,
-    entry_price: float,
-    exit_price: float,
-    quantity: float,
-    gross_pnl: float,
-    net_pnl: float,
-    gross_return: float,
-    net_return: float,
-    holding_bars: int,
-    commission: float = 0.0,
-    slippage: float = 0.0,
-    tax: float = 0.0,
-    price_unit: str = "USDT",
-    quantity_unit: str = "asset",
-    pnl_unit: str = "USDT",
-    dsn: str = TIMESCALE_DSN,
-) -> None:
-    """Write a single trade to trade_blotter (upsert by trade_id)."""
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO trade_blotter
-               (trade_id, run_id, entry_ts, exit_ts, symbol, side,
-                entry_price, exit_price, quantity,
-                gross_pnl, net_pnl, gross_return, net_return,
-                price_unit, quantity_unit, pnl_unit,
-                commission, slippage, tax, holding_bars)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (trade_id) DO NOTHING""",
-            (
-                trade_id, run_id, _to_dt(entry_ts), _to_dt(exit_ts),
-                symbol, side, entry_price, exit_price, quantity,
-                gross_pnl, net_pnl, gross_return, net_return,
-                price_unit, quantity_unit, pnl_unit,
-                commission, slippage, tax, holding_bars,
-            ),
-        )
-        cur.close()
-
-
-def write_order_event(
+def write_trade_event(
     event_id: str,
     run_id: str,
+    strategy: str,
+    mode: str,
+    timeframe: str,
     ts: datetime,
     symbol: str,
     side: str,
     event_type: str,
     quantity: float,
     price: float,
-    avg_entry_price: float,
-    position_qty: float,
+    entry_price: float,
+    position_quantity: float,
     notional: float,
     commission: float = 0.0,
     slippage: float = 0.0,
     tax: float = 0.0,
-    realized_pnl: float | None = None,
+    pnl: float | None = None,
     net_return: float | None = None,
     entry_ts: datetime | None = None,
     holding_bars: int | None = None,
     reason: str = "",
     dsn: str = TIMESCALE_DSN,
 ) -> None:
-    """Write a single order event (upsert by event_id + ts)."""
+    """Write a single trade event (upsert by event_id + ts)."""
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO order_events
-               (event_id, run_id, ts, symbol, side, event_type,
-                quantity, price, avg_entry_price,
-                position_qty, notional,
+            """INSERT INTO trade_events
+               (event_id, run_id,
+                strategy, mode, timeframe,
+                ts, symbol, side, event_type,
+                quantity, price, entry_price,
+                position_quantity, notional,
                 commission, slippage, tax,
-                realized_pnl, net_return,
+                pnl, net_return,
                 entry_ts, holding_bars, reason)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
-                event_id, run_id, _to_dt(ts), symbol, side, event_type,
-                quantity, price, avg_entry_price,
-                position_qty, notional,
+                event_id, run_id,
+                strategy, mode, timeframe,
+                _to_dt(ts), symbol, side, event_type,
+                quantity, price, entry_price,
+                position_quantity, notional,
                 commission, slippage, tax,
-                realized_pnl, net_return,
+                pnl, net_return,
                 _to_dt(entry_ts) if entry_ts else None,
                 holding_bars, reason,
             ),
@@ -565,21 +497,22 @@ def write_performance(
 
 
 def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
-    """Recompute KPI metrics from DB equity_curve + trade_blotter and upsert.
+    """Recompute KPI metrics from DB equity_curve + trade_events and upsert.
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
     """
     from types import SimpleNamespace as _NS
 
-    from db.timescale_reader import load_equity_curve, load_trade_blotter
+    from db.timescale_reader import load_equity_curve, load_trade_events
+    _CLOSE_TYPES = ["close", "reduce"]
     from librae.core.metrics import compute_all
 
     eq_df = load_equity_curve(run_id)
     if eq_df.empty or len(eq_df) < 2:
         return
 
-    trades_df = load_trade_blotter(run_id)
-    trade_rows = trades_df.to_dict("records") if not trades_df.empty else []
+    closed_df = load_trade_events(run_id, event_types=_CLOSE_TYPES)
+    trade_rows = closed_df.to_dict("records") if not closed_df.empty else []
 
     # WHY: compute_all accepts primitive sequences — build them from DB rows
     eq_records = eq_df.to_dict("records")
@@ -587,10 +520,14 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
     timestamps = [r["_time"] for r in eq_records]
     trade_pnls = [
         _NS(
-            gross_pnl=r.get("gross_pnl", 0), net_pnl=r.get("net_pnl", 0),
-            commission=r.get("commission", 0), slippage=r.get("slippage", 0),
-            tax=r.get("tax", 0), gross_return=r.get("gross_return", 0.0),
-            net_return=r.get("net_return", 0.0),
+            gross_pnl=(r.get("pnl", 0) or 0) + (r.get("commission", 0) or 0)
+                      + (r.get("slippage", 0) or 0) + (r.get("tax", 0) or 0),
+            net_pnl=r.get("pnl", 0) or 0,
+            commission=r.get("commission", 0) or 0,
+            slippage=r.get("slippage", 0) or 0,
+            tax=r.get("tax", 0) or 0,
+            gross_return=0.0,
+            net_return=r.get("net_return", 0.0) or 0.0,
             exit_commission=0.0, exit_slippage=0.0, exit_tax=0.0,
         )
         for r in trade_rows
@@ -612,6 +549,7 @@ def save_signal_results(
     symbol: str,
     timeframe: str,
     strategy: str,
+    run_id: str | None = None,
     mode: str = "backtest",
     signal_column: str = "entry_signal",
 ) -> dict:
@@ -630,29 +568,29 @@ def save_signal_results(
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
-                """DELETE FROM signal_outcomes
+                """DELETE FROM signal_events
                    WHERE strategy = %s AND symbol = %s AND mode = %s
                      AND timeframe = %s
-                     AND signal_ts BETWEEN %s AND %s""",
+                     AND ts BETWEEN %s AND %s""",
                 (strategy, symbol, mode, tf,
                  _to_dt(start_ts), _to_dt(end_ts)),
             )
             so_rows = [
-                (_to_dt(ts), strategy, symbol, mode, tf, float(val), None)
+                (_to_dt(ts), run_id, strategy, symbol, mode, tf, float(val), None)
                 for ts, val in signal_series.items()
             ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO signal_outcomes
-                   (signal_ts, strategy, symbol, mode, timeframe,
+                """INSERT INTO signal_events
+                   (ts, run_id, strategy, symbol, mode, timeframe,
                     signal_value, price)
                    VALUES %s
-                   ON CONFLICT (signal_ts, strategy, symbol, mode, timeframe)
+                   ON CONFLICT (ts, strategy, symbol, mode, timeframe)
                    DO NOTHING""",
                 so_rows,
                 page_size=1000,
             )
-            counts["signal_outcomes"] = len(so_rows)
+            counts["signal_events"] = len(so_rows)
             cur.close()
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
@@ -671,8 +609,8 @@ def save_strategy_results(
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 
-    Writes: backtest_runs, equity_curve, trade_blotter, strategy_performance,
-    signal_outcomes, ohlcv.
+    Writes: backtest_runs, equity_curve, trade_events, strategy_performance,
+    signal_events, ohlcv.
     """
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     counts = write_backtest_output(output, signal_series=signal_series, params=params)

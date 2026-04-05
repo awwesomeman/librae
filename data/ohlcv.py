@@ -4,8 +4,8 @@ Single entry point for all OHLCV data needs (backtest, sim, pipeline).
 Checks DB for existing data, fetches gaps from exchange API, and upserts
 results back to DB.
 
-    df = get_ohlcv("BTCUSDT", "1h", months=6)
-    df = get_ohlcv("TXFR1", "5m", months=3, source="shioaji")
+    df = get_ohlcv("BTCUSDT", "1h", periods=4320)       # 4320 H1 bars ≈ 6 months
+    df = get_ohlcv("TXFR1", "5m", periods=26000, source="shioaji")
 
 Adding a new data source
 ------------------------
@@ -31,7 +31,7 @@ from typing import Callable
 import pandas as pd
 
 from data.binance import fetch_ohlcv as _binance_fetch_ohlcv
-from data.utils import parse_dt, subtract_months
+from data.utils import parse_dt
 from librae.core.utils import interval_to_timedelta, to_canonical, to_ccxt
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ def get_ohlcv(
     *,
     start: str | datetime | None = None,
     end: str | datetime | None = None,
-    months: int = 6,
+    periods: int = 4320,
     source: str = "binance_spot",
 ) -> pd.DataFrame:
     """Unified OHLCV fetch: DB → API gap-fill → DB.
@@ -88,8 +88,9 @@ def get_ohlcv(
         symbol:   Trading symbol (e.g. ``'BTCUSDT'``, ``'TXFR1'``).
         interval: Candle interval in any supported format
                   (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
-        start/end: Time range. If omitted, uses ``months`` before now.
-        months:   Lookback period when ``start`` is not specified.
+        start/end: Time range. If omitted, uses ``periods * interval`` before now.
+        periods:  Number of bars to look back when ``start`` is not specified.
+                  Default 4320 (≈ 6 months of H1 bars).
         source:   Data source key registered via ``register_ohlcv_fetcher``.
                   Built-in: ``'binance_spot'`` / ``'binance'``.
 
@@ -108,8 +109,8 @@ def get_ohlcv(
         )
 
     end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
-    start_dt = parse_dt(start) if start else subtract_months(end_dt, months)
     interval_ccxt = to_ccxt(interval)
+    start_dt = parse_dt(start) if start else end_dt - interval_to_timedelta(interval_ccxt) * periods
 
     # 1. Try DB first
     db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, source)

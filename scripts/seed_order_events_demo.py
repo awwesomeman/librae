@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Seed comprehensive demo data for Strategy Dashboard.
 
-Populates all tables: backtest_runs, equity_curve, trade_blotter,
-order_events, strategy_performance, ohlcv. Covers multiple position
+Populates all tables: backtest_runs, equity_curve, trade_events,
+strategy_performance, ohlcv. Covers multiple position
 lifecycles with scaling, partial close, wins, losses, long and short.
 
 Usage:
@@ -22,8 +22,10 @@ import numpy as np
 import psycopg2
 from psycopg2.extras import execute_values
 
+from librae.core.utils import make_event_id, make_trade_id
+
 DSN = os.environ.get("TIMESCALE_DSN", "postgresql://quant:quant_secret@localhost:5432/quant")
-RUN_ID = "demo-full-001"
+RUN_ID = "demo_full-btcusdt-h1-20260310t0000-seed01"
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "H1"
 N_BARS = 200  # ~8 days of H1
@@ -39,25 +41,29 @@ def _ts(bar: int) -> datetime:
 # Schema bootstrap
 # ---------------------------------------------------------------------------
 
-def ensure_order_events_table(cur):
-    cur.execute("DROP TABLE IF EXISTS order_events CASCADE;")
+def ensure_trade_events_table(cur):
+    """Recreate trade_events table matching current schema (independent, no FK)."""
+    cur.execute("DROP TABLE IF EXISTS trade_events CASCADE;")
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS order_events (
+        CREATE TABLE IF NOT EXISTS trade_events (
             event_id        TEXT NOT NULL,
-            run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+            run_id          TEXT,
+            strategy        TEXT NOT NULL,
+            mode            TEXT NOT NULL,
+            timeframe       TEXT NOT NULL,
             ts              TIMESTAMPTZ NOT NULL,
             symbol          TEXT,
             side            TEXT,
             event_type      TEXT,
             quantity        DOUBLE PRECISION,
             price           DOUBLE PRECISION,
-            avg_entry_price DOUBLE PRECISION,
-            position_qty    DOUBLE PRECISION,
+            entry_price     DOUBLE PRECISION,
+            position_quantity DOUBLE PRECISION,
             notional        DOUBLE PRECISION,
             commission      DOUBLE PRECISION DEFAULT 0,
             slippage        DOUBLE PRECISION DEFAULT 0,
             tax             DOUBLE PRECISION DEFAULT 0,
-            realized_pnl    DOUBLE PRECISION,
+            pnl             DOUBLE PRECISION,
             net_return      DOUBLE PRECISION,
             entry_ts        TIMESTAMPTZ,
             holding_bars    INTEGER,
@@ -65,16 +71,18 @@ def ensure_order_events_table(cur):
             CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
             CONSTRAINT chk_event_type CHECK (
                 event_type IN ('open', 'add', 'reduce', 'close')
-            )
+            ),
+            CONSTRAINT chk_event_mode CHECK (mode IN ('backtest', 'sim', 'live'))
         );
     """)
-    cur.execute("SELECT create_hypertable('order_events', 'ts', if_not_exists => TRUE);")
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_events_pk ON order_events(event_id, ts);")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_order_events_run_id ON order_events(run_id, ts DESC);")
+    cur.execute("SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);")
 
 
 def clean(cur):
-    for tbl in ("order_events", "trade_blotter", "equity_curve",
+    for tbl in ("trade_events", "equity_curve",
                 "strategy_performance", "backtest_runs"):
         cur.execute(f"DELETE FROM {tbl} WHERE run_id = %s", (RUN_ID,))
     # ohlcv has no run_id — clean by symbol + time range + source
@@ -114,9 +122,9 @@ def generate_ohlcv() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def build_scenarios(ohlcv: list[dict]):
-    """Build order_events + trade_blotter rows from scripted scenarios.
+    """Build trade_events rows from scripted scenarios.
 
-    Returns (events, trades) tuples ready for DB insert.
+    Returns (events, trades) — trades used only for perf calculation, not DB insert.
     """
     def px(bar: int) -> float:
         return ohlcv[bar]["close"]
@@ -130,14 +138,14 @@ def build_scenarios(ohlcv: list[dict]):
                   realized=None, net_ret=None, entry_bar=None, hold=None, reason=""):
         nonlocal eidx
         events.append({
-            "event_id": f"{RUN_ID}-e{eidx}", "ts": _ts(bar), "symbol": symbol,
+            "event_id": make_event_id(RUN_ID, eidx), "ts": _ts(bar), "symbol": symbol,
             "side": side, "event_type": etype, "quantity": qty, "price": price,
-            "avg_entry_price": avg_entry, "position_qty": pos_qty,
+            "entry_price": avg_entry, "position_quantity": pos_qty,
             "notional": round(price * qty, 2),
             "commission": round(price * qty * 0.001, 2),
             "slippage": round(qty * 0.5, 2),
             "tax": 0.0,
-            "realized_pnl": realized, "net_return": net_ret,
+            "pnl": realized, "net_return": net_ret,
             "entry_ts": _ts(entry_bar) if entry_bar is not None else None,
             "holding_bars": hold, "reason": reason,
         })
@@ -147,7 +155,7 @@ def build_scenarios(ohlcv: list[dict]):
                   gross_pnl, net_pnl, gross_ret, net_ret, comm, slip, tax, hold):
         nonlocal tidx
         trades.append({
-            "trade_id": f"{RUN_ID}-t{tidx}",
+            "trade_id": make_trade_id(RUN_ID, tidx),
             "entry_ts": _ts(entry_bar), "exit_ts": _ts(exit_bar),
             "symbol": symbol, "side": side,
             "entry_price": entry_px, "exit_price": exit_px, "quantity": qty,
@@ -275,12 +283,12 @@ def build_equity_curve(ohlcv, events):
                     pos_side = ev["side"]
                     avg_entry = ev["price"]
                 else:
-                    avg_entry = ev["avg_entry_price"]
-                    pos_qty = ev["position_qty"]
+                    avg_entry = ev["entry_price"]
+                    pos_qty = ev["position_quantity"]
             elif et in ("reduce", "close"):
-                proceeds = ev["realized_pnl"] + ev["price"] * ev["quantity"] - ev["commission"] - ev["slippage"]
+                proceeds = ev["pnl"] + ev["price"] * ev["quantity"] - ev["commission"] - ev["slippage"]
                 cash += proceeds
-                pos_qty = ev["position_qty"]
+                pos_qty = ev["position_quantity"]
                 if pos_qty == 0:
                     pos_side = None
 
@@ -360,35 +368,22 @@ def seed(cur):
           o["open"], o["high"], o["low"], o["close"], o["volume"]) for o in ohlcv],
     )
 
-    # order_events
+    # trade_events
     execute_values(
         cur,
-        "INSERT INTO order_events"
-        " (event_id, run_id, ts, symbol, side, event_type,"
-        "  quantity, price, avg_entry_price, position_qty, notional,"
-        "  commission, slippage, tax, realized_pnl, net_return,"
+        "INSERT INTO trade_events"
+        " (event_id, run_id, strategy, mode, timeframe,"
+        "  ts, symbol, side, event_type,"
+        "  quantity, price, entry_price, position_quantity, notional,"
+        "  commission, slippage, tax, pnl, net_return,"
         "  entry_ts, holding_bars, reason)"
         " VALUES %s ON CONFLICT (event_id, ts) DO NOTHING",
-        [(e["event_id"], RUN_ID, e["ts"], e["symbol"], e["side"], e["event_type"],
-          e["quantity"], e["price"], e["avg_entry_price"], e["position_qty"],
+        [(e["event_id"], RUN_ID, "demo_full", "backtest", TIMEFRAME,
+          e["ts"], e["symbol"], e["side"], e["event_type"],
+          e["quantity"], e["price"], e["entry_price"], e["position_quantity"],
           e["notional"], e["commission"], e["slippage"], e["tax"],
-          e["realized_pnl"], e["net_return"], e["entry_ts"], e["holding_bars"],
+          e["pnl"], e["net_return"], e["entry_ts"], e["holding_bars"],
           e["reason"]) for e in events],
-    )
-
-    # trade_blotter
-    execute_values(
-        cur,
-        "INSERT INTO trade_blotter"
-        " (trade_id, run_id, entry_ts, exit_ts, symbol, side,"
-        "  entry_price, exit_price, quantity,"
-        "  gross_pnl, net_pnl, gross_return, net_return,"
-        "  commission, slippage, tax, holding_bars)"
-        " VALUES %s ON CONFLICT (trade_id) DO NOTHING",
-        [(t["trade_id"], RUN_ID, t["entry_ts"], t["exit_ts"], t["symbol"], t["side"],
-          t["entry_price"], t["exit_price"], t["quantity"],
-          t["gross_pnl"], t["net_pnl"], t["gross_return"], t["net_return"],
-          t["commission"], t["slippage"], t["tax"], t["holding_bars"]) for t in trades],
     )
 
     # equity_curve
@@ -418,8 +413,8 @@ def seed(cur):
 
     print(f"Seeded run_id={RUN_ID}")
     print(f"  {len(ohlcv)} ohlcv bars ({SYMBOL} {TIMEFRAME})")
-    print(f"  {len(events)} order_events (4 lifecycles)")
-    print(f"  {len(trades)} trade_blotter records")
+    print(f"  {len(events)} trade_events (4 lifecycles)")
+    print(f"  {len(trades)} close/reduce events (for perf calc)")
     print(f"  {len(equity_curve)} equity_curve points")
     print(f"  Performance: return={perf['total_return']:.4%}, "
           f"MDD={perf['max_drawdown']:.4%}, "
@@ -432,7 +427,7 @@ def main():
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
-            ensure_order_events_table(cur)
+            ensure_trade_events_table(cur)
             if "--clean" in sys.argv:
                 clean(cur)
             else:

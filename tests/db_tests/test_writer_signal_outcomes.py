@@ -1,4 +1,4 @@
-"""Tests for signal_outcomes write path in timescale_writer."""
+"""Tests for signal_events write path in timescale_writer."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,11 +7,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_outcome
+from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_event
 
 
-class TestWriteSignalOutcome:
-    """write_signal_outcome single-row upsert."""
+class TestWriteSignalEvent:
+    """write_signal_event single-row upsert."""
 
     @patch("db.timescale_writer.get_conn")
     def test_inserts_row(self, mock_conn_ctx):
@@ -23,14 +23,14 @@ class TestWriteSignalOutcome:
         mock_conn_ctx.return_value = mock_conn
 
         ts = datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc)
-        write_signal_outcome(
-            signal_ts=ts, strategy="test_strat", symbol="BTCUSDT",
+        write_signal_event(
+            ts=ts, run_id="test-run-001", strategy="test_strat", symbol="BTCUSDT",
             mode="sim", timeframe="H1", signal_value=1.0, price=50000.0,
         )
 
         mock_cur.execute.assert_called_once()
         sql = mock_cur.execute.call_args[0][0]
-        assert "signal_outcomes" in sql
+        assert "signal_events" in sql
         assert "ON CONFLICT" in sql
         assert "DO NOTHING" in sql
 
@@ -40,8 +40,8 @@ class TestWriteSignalOutcome:
         mock_cur = MagicMock()
         ts = datetime(2024, 6, 1, tzinfo=timezone.utc)
 
-        write_signal_outcome(
-            signal_ts=ts, strategy="s", symbol="S", mode="sim",
+        write_signal_event(
+            ts=ts, run_id="test-run-001", strategy="s", symbol="S", mode="sim",
             timeframe="H1", signal_value=1.0, cur=mock_cur,
         )
 
@@ -121,7 +121,7 @@ class TestSaveSignalResults:
     @patch("db.timescale_writer.write_ohlcv", return_value=10)
     @patch("db.timescale_writer.psycopg2.extras.execute_values")
     @patch("db.timescale_writer.get_conn")
-    def test_writes_signal_outcomes_without_backtest(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+    def test_writes_signal_events_without_backtest(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
         """Can write signals without BacktestOutput."""
         mock_conn = MagicMock()
         mock_cur = MagicMock()
@@ -140,7 +140,7 @@ class TestSaveSignalResults:
 
         counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy")
 
-        assert counts["signal_outcomes"] == 4  # indices 0,5,10,15
+        assert counts["signal_events"] == 4  # indices 0,5,10,15
         assert counts["ohlcv"] == 10
         # Verify DELETE was called
         assert mock_cur.execute.call_count >= 1
@@ -173,4 +173,4 @@ class TestSaveSignalResults:
         counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy")
 
         # 1.0, -1.0, 1.0, 1.0, -0.5 = 5 non-zero non-NaN
-        assert counts["signal_outcomes"] == 5
+        assert counts["signal_events"] == 5
