@@ -404,7 +404,19 @@ ohlcv (獨立)          signal_outcomes (獨立)
 - 或維持兩種模式但明確文件化？（FK 表 vs 獨立表）
 - equity_curve 也是 per-run 但多了 `strategy_name` 冗餘欄位，是否移除改用 JOIN？
 
-### Issue 3：signal_outcomes CHECK constraint 過寬
+### Issue 3：trade_blotter 與 order_events 可合併
+
+`order_events` 的 close/reduce 事件已包含 `trade_blotter` 的所有資訊（entry_price、exit_price、PnL、costs、holding_bars）。目前每次平倉同時寫兩張表，資料重複。
+
+**合併方案**：刪除 `trade_blotter`，7 表 → 6 表。
+- `refresh_performance()` 改查 `order_events WHERE event_type IN ('close', 'reduce')`
+- Grafana Trade Distribution 改查 order_events
+- `trade_id` 由 `event_id` 替代
+- 寫入路徑簡化，不再重複寫
+
+**影響範圍**：`timescale_init.sql`、`timescale_writer.py`、`timescale_reader.py`、`generate_dashboards.py`、`refresh_performance()`
+
+### Issue 4：signal_outcomes CHECK constraint 過寬
 
 `signal_outcomes.mode` CHECK 允許 `('backtest', 'sim', 'live')`，但實際不會有 live 訊號。應改為 `('backtest', 'sim')`。
 
