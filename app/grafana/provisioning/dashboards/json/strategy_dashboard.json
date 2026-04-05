@@ -161,7 +161,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH pos AS (\n  SELECT side, entry_price, quantity\n  FROM trade_blotter\n  WHERE run_id = '${run_id}' AND exit_ts IS NULL\n  ORDER BY entry_ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv\n  WHERE symbol = (SELECT symbol FROM backtest_runs WHERE run_id='${run_id}')\n    AND timeframe = (SELECT timeframe FROM backtest_runs WHERE run_id='${run_id}')\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.side='long'\n  THEN (l.close - p.entry_price) * p.quantity\n  ELSE (p.entry_price - l.close) * p.quantity\n  END AS \"PnL\"\nFROM pos p, latest l",
+          "rawSql": "WITH pos AS (\n  SELECT side, entry_price, position_quantity AS quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv\n  WHERE symbol = (SELECT symbol FROM backtest_runs WHERE run_id='${run_id}')\n    AND timeframe = (SELECT timeframe FROM backtest_runs WHERE run_id='${run_id}')\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.quantity\n    ELSE (p.entry_price - l.close) * p.quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -228,7 +228,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2) AS \"Position\"\nFROM trade_blotter\nWHERE run_id = '${run_id}' AND exit_ts IS NULL\nORDER BY entry_ts DESC LIMIT 1",
+          "rawSql": "WITH pos AS (\n  SELECT side, position_quantity AS quantity, entry_price\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN quantity > 0 THEN\n  CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2)\nELSE NULL END AS \"Position\"\nFROM pos",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -828,7 +828,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(avg_entry_price::numeric,2) AS \"Avg Entry\", ROUND(position_qty::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(realized_pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_ts AS \"Entry Time\", holding_bars AS \"Periods\", reason AS \"Reason\" FROM order_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(position_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_ts AS \"Entry Time\", holding_bars AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -979,11 +979,11 @@
     },
     {
       "title": "Entry / Exit Signals",
-      "description": "Entry = open/add (green/blue), Exit = reduce/close (orange/red). From order_events table.",
+      "description": "Entry = open/add (green/blue), Exit = reduce/close (orange/red). From trade_events table.",
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, price AS \"Open\" FROM order_events WHERE run_id = '${run_id}' AND event_type = 'open' AND $__timeFilter(ts)",
+          "rawSql": "SELECT ts AS time, price AS \"Open\" FROM trade_events WHERE run_id = '${run_id}' AND event_type = 'open' AND $__timeFilter(ts)",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -992,7 +992,7 @@
           }
         },
         {
-          "rawSql": "SELECT ts AS time, price AS \"Add\" FROM order_events WHERE run_id = '${run_id}' AND event_type = 'add' AND $__timeFilter(ts)",
+          "rawSql": "SELECT ts AS time, price AS \"Add\" FROM trade_events WHERE run_id = '${run_id}' AND event_type = 'add' AND $__timeFilter(ts)",
           "format": "time_series",
           "refId": "B",
           "datasource": {
@@ -1001,7 +1001,7 @@
           }
         },
         {
-          "rawSql": "SELECT ts AS time, price AS \"Reduce\" FROM order_events WHERE run_id = '${run_id}' AND event_type = 'reduce' AND $__timeFilter(ts)",
+          "rawSql": "SELECT ts AS time, price AS \"Reduce\" FROM trade_events WHERE run_id = '${run_id}' AND event_type = 'reduce' AND $__timeFilter(ts)",
           "format": "time_series",
           "refId": "C",
           "datasource": {
@@ -1010,7 +1010,7 @@
           }
         },
         {
-          "rawSql": "SELECT ts AS time, price AS \"Close\" FROM order_events WHERE run_id = '${run_id}' AND event_type = 'close' AND $__timeFilter(ts)",
+          "rawSql": "SELECT ts AS time, price AS \"Close\" FROM trade_events WHERE run_id = '${run_id}' AND event_type = 'close' AND $__timeFilter(ts)",
           "format": "time_series",
           "refId": "D",
           "datasource": {

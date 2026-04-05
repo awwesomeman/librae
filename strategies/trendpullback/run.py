@@ -30,8 +30,8 @@ def run_backtest(args: argparse.Namespace) -> None:
     symbol = scfg["symbol"]
     timeframe = scfg["timeframe"]
 
-    logger.info("[1/3] Fetching & preparing %s (%d months, %s)...", symbol, params["months"], timeframe)
-    df = fetch_and_prepare(symbol, params["months"])
+    logger.info("[1/3] Fetching & preparing %s (%d periods, %s)...", symbol, params["periods"], timeframe)
+    df = fetch_and_prepare(symbol, params["periods"])
     logger.info("       bars=%d", len(df))
 
     logger.info("[2/3] Running backtest...")

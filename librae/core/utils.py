@@ -20,11 +20,17 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 
-def generate_run_id(strategy: str, symbol: str) -> str:
-    """Deterministic-prefix run_id: <strategy>-<symbol>-<ts>-<short_uuid>."""
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
-    short = uuid.uuid4().hex[:8]
-    return f"{strategy}-{symbol}-{ts}-{short}".lower().replace(" ", "_")
+def _sanitize_slug(name: str) -> str:
+    """Lowercase and replace spaces with underscores for use in IDs."""
+    return name.lower().replace(" ", "_")
+
+
+def generate_run_id(strategy: str, symbol: str, timeframe: str | None = None) -> str:
+    """Deterministic-prefix run_id: <strategy>-<symbol>[-<timeframe>]-<ts>-<short_uuid>."""
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dt%H%M")
+    short = uuid.uuid4().hex[:6]
+    tf = f"-{_sanitize_slug(timeframe)}" if timeframe is not None else ""
+    return f"{_sanitize_slug(strategy)}-{_sanitize_slug(symbol)}{tf}-{ts}-{short}"
 
 
 def make_trade_id(run_id: str, index: int) -> str:

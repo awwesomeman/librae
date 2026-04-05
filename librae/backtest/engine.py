@@ -94,6 +94,7 @@ class Backtest:
         self._initial_balance = initial_balance
         self._benchmark_prices: pd.Series | None = None
         self._run_id: str | None = None
+        self._timeframe: str | None = None
         self._result: BacktestResult | None = None
         self._metrics: StrategyMetrics | None = None
 
@@ -116,7 +117,7 @@ class Backtest:
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
 
         if strategy_name is not None:
-            self._strategy_name = strategy_name
+            self._strategy_name = strategy_name.lower().replace(" ", "_")
         else:
             # Fallback: auto-derive from class name → snake_case
             cls_name = type(strategy).__name__
@@ -158,7 +159,8 @@ class Backtest:
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
-        self._run_id = generate_run_id(self._strategy_name, self._symbols[0])
+        self._timeframe = infer_timeframe(pd.DatetimeIndex(self._timeline[:20]))
+        self._run_id = generate_run_id(self._strategy_name, self._symbols[0], self._timeframe)
         logger.info("Backtest started: run_id=%s", self._run_id)
 
         # WHY: pre-convert all bars once — avoids per-bar DataFrame.to_dict()
@@ -221,10 +223,10 @@ class Backtest:
                 all_events.append(OrderEvent(
                     ts=last_ts, symbol=sym, side=pos.side, event_type="close",
                     quantity=pos.quantity, price=price,
-                    avg_entry_price=pos.entry_price, position_qty=0.0,
+                    entry_price=pos.entry_price, position_quantity=0.0,
                     notional=price * pos.quantity * cost_model.multiplier,
                     commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
-                    realized_pnl=pnl.net_pnl, net_return=pnl.net_return,
+                    pnl=pnl.net_pnl, net_return=pnl.net_return,
                     entry_ts=pos.entry_ts, holding_bars=pos.bars_held,
                     reason="force_close",
                 ))
@@ -272,8 +274,7 @@ class Backtest:
         start_ts = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
         end_ts = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
         symbol = self._symbols[0]
-        # WHY: reuse self._timeline (already sorted) instead of re-extracting from index
-        timeframe = infer_timeframe(pd.DatetimeIndex(timeline))
+        timeframe = self._timeframe
 
         # Benchmark — computed here, not in run() (analysis config, not trade facts)
         benchmark_curve = self._compute_benchmark()
@@ -358,12 +359,12 @@ class Backtest:
                 event_id=make_event_id(run_id, i),
                 ts=e.ts, symbol=e.symbol, side=e.side, event_type=e.event_type,
                 quantity=float(e.quantity), price=float(e.price),
-                avg_entry_price=float(e.avg_entry_price),
-                position_qty=float(e.position_qty),
+                entry_price=float(e.entry_price),
+                position_quantity=float(e.position_quantity),
                 notional=float(e.notional),
                 commission=float(e.commission), slippage=float(e.slippage),
                 tax=float(e.tax),
-                realized_pnl=float(e.realized_pnl) if e.realized_pnl is not None else None,
+                pnl=float(e.pnl) if e.pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
                 entry_ts=e.entry_ts, holding_bars=e.holding_bars,
                 reason=e.reason,

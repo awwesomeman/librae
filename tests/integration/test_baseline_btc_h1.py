@@ -94,8 +94,10 @@ class TestBaselineRegression:
 class TestRunIdContract:
     def test_run_id_pattern_valid(self):
         valid_ids = [
-            "sma_crossover-btcusdt-20240101t000000-abcd1234",
-            "mean_reversion-ethusdt-20260325t120000-deadbeef",
+            "sma_crossover-btcusdt-h1-20240101t0000-abcd12",
+            "mean_reversion-ethusdt-m5-20260325t1200-deadbe",
+            "sma_crossover-btcusdt-20240101t0000-abcd12",
+            "sma_crossover-btcusdt-20240101t000000-abcd1234",  # old format
         ]
         for rid in valid_ids:
             assert RUN_ID_PATTERN.match(rid), f"Should match: {rid}"

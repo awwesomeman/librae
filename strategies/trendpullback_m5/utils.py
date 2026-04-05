@@ -39,11 +39,11 @@ def prepare_signals(m5_base: pd.DataFrame, params: dict | None = None) -> pd.Dat
 
 def fetch_and_prepare(
     symbol: str = "BTCUSDT",
-    months: int = 1,
+    periods: int = 8640,
     params: dict | None = None,
 ) -> pd.DataFrame:
     """Fetch M5 OHLCV → features → signals → MultiIndex for backtest."""
-    raw = get_ohlcv(symbol=symbol, interval="5m", months=months)
+    raw = get_ohlcv(symbol=symbol, interval="5m", periods=periods)
     m5_base = raw.set_index("timestamp")
     m5_base.index.name = "ts"
 

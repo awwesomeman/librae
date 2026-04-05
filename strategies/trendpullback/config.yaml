@@ -9,7 +9,7 @@ strategy:
   initial_balance: 100000
   timeframe: H1
   params:
-    months: 6
+    periods: 4320
     max_hold_bars: 24
     warmup_bars: 720
     sample: oos

@@ -64,14 +64,14 @@ class TestRenderSignalMonitor:
             assert len(p["targets"]) >= 1
             assert "rawSql" in p["targets"][0]
 
-    def test_timeseries_panels_query_signal_outcomes(self):
+    def test_timeseries_panels_query_signal_events(self):
         d = render_signal_monitor()
         ts_panels = [p for p in d["panels"] if p["type"] == "timeseries"]
         assert len(ts_panels) == 4
         for p in ts_panels:
             sqls = [t["rawSql"] for t in p["targets"]]
             combined = " ".join(sqls)
-            assert "signal_outcomes" in combined or "ohlcv" in combined
+            assert "signal_events" in combined or "ohlcv" in combined
 
     def test_no_hardcoded_datasource_uid_in_panels(self):
         """All panels should get datasource from build_panels, not hardcoded."""

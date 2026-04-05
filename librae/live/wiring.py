@@ -15,9 +15,9 @@ from librae.config.market_config import get_market
 from librae.core.cost_model import CostModel
 from dataclasses import asdict
 
-from librae.core.executor import OrderEvent, TradeResult
+from librae.core.executor import OrderEvent
 from librae.core.strategy import Action, BaseStrategy
-from librae.core.utils import generate_run_id, make_event_id, make_trade_id, to_ccxt
+from librae.core.utils import generate_run_id, make_event_id, to_ccxt
 from librae.config.notification import TelegramConfig
 from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
 
@@ -56,8 +56,8 @@ def build_live_trader(
     from brokers.crypto_adapter import CryptoAdapter
     from db.timescale_writer import (
         refresh_performance, update_heartbeat, write_equity_point,
-        write_ohlcv, write_order_event, write_run_metadata,
-        write_signal_outcome, write_trade,
+        write_ohlcv, write_trade_event, write_run_metadata,
+        write_signal_event,
     )
 
     if market != "crypto":
@@ -70,7 +70,7 @@ def build_live_trader(
     tg_creds = TelegramCredentials.from_env("TELEGRAM")
     telegram = TelegramAdapter(config=tg_config, credentials=tg_creds)
     cost_model = CostModel.from_market(get_market(market))
-    run_id = generate_run_id(f"{strategy_name}_{market}", symbols[0])
+    run_id = generate_run_id(f"{strategy_name}_{market}", symbols[0], timeframe)
 
     if not no_db:
         try:
@@ -98,14 +98,8 @@ def build_live_trader(
     def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
         """DB-first warmup: reads historical bars from DB, fills gaps from API."""
         from data.ohlcv import get_ohlcv
-        from librae.core.utils import interval_to_timedelta
-        import math
 
-        # WHY: compute months from limit + timeframe to avoid over-fetching
-        bar_hours = interval_to_timedelta(tf_ccxt).total_seconds() / 3600
-        months_needed = max(1, math.ceil(limit * bar_hours / 24 / 30))
-
-        df = get_ohlcv(symbol=symbol, interval=tf_ccxt, months=months_needed)
+        df = get_ohlcv(symbol=symbol, interval=tf_ccxt, periods=limit)
         if df.empty:
             return fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
         if "timestamp" in df.columns and "ts" not in df.columns:
@@ -114,10 +108,10 @@ def build_live_trader(
             df = df.iloc[-limit:]
         return df.reset_index(drop=True)
 
-    def on_signal_outcome_cb(symbol: str, ts: datetime, signal_value: float, price: float) -> None:
+    def on_signal_event_cb(symbol: str, ts: datetime, signal_value: float, price: float) -> None:
         _db_write(
-            write_signal_outcome,
-            signal_ts=ts, strategy=strategy_name, symbol=symbol,
+            write_signal_event,
+            ts=ts, run_id=run_id, strategy=strategy_name, symbol=symbol,
             mode="sim", timeframe=timeframe,
             signal_value=signal_value, price=price,
         )
@@ -125,7 +119,7 @@ def build_live_trader(
     def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
         _db_write(
             write_equity_point, ts=ts, run_id=run_id_, equity=equity,
-            drawdown=drawdown, ret_1d=ret_1d, strategy_name=strategy_name,
+            drawdown=drawdown, ret_1d=ret_1d, strategy=strategy_name,
         )
 
     _event_seq = 0
@@ -134,38 +128,17 @@ def build_live_trader(
         nonlocal _event_seq
         _event_seq += 1
         # WHY: asdict avoids field-by-field duplication.
-        # event_id and run_id are added here (not known at executor level).
+        # event_id, run_id, and metadata are added here (not known at executor level).
         fields = asdict(event)
         fields["event_id"] = make_event_id(run_id, _event_seq)
         fields["run_id"] = run_id
-        _db_write(write_order_event, **fields)
-
-    _trade_seq = 0
-
-    def on_trade(trade: TradeResult) -> None:
-        nonlocal _trade_seq
-        _trade_seq += 1
-        _db_write(
-            write_trade,
-            run_id=run_id,
-            trade_id=make_trade_id(run_id, _trade_seq),
-            entry_ts=trade.entry_ts,
-            exit_ts=trade.exit_ts,
-            symbol=trade.symbol,
-            side=trade.side,
-            entry_price=trade.entry_price,
-            exit_price=trade.exit_price,
-            quantity=trade.quantity,
-            gross_pnl=trade.gross_pnl,
-            net_pnl=trade.net_pnl,
-            gross_return=trade.gross_return,
-            net_return=trade.net_return,
-            holding_bars=trade.holding_bars,
-            commission=trade.commission,
-            slippage=trade.slippage,
-            tax=trade.tax,
-        )
-        _db_write(refresh_performance, run_id)
+        fields["strategy"] = strategy_name
+        fields["mode"] = "sim"
+        fields["timeframe"] = timeframe
+        _db_write(write_trade_event, **fields)
+        # WHY: refresh KPIs on close/reduce so Grafana stays up to date
+        if event.event_type in ("close", "reduce"):
+            _db_write(refresh_performance, run_id)
 
     def on_ohlcv(symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
         row = pd.DataFrame([{
@@ -198,11 +171,10 @@ def build_live_trader(
         initial_balance=initial_balance,
         poll_interval=poll_interval,
         on_bar=on_bar,
-        on_trade=on_trade,
         on_order_event=on_order_event,
         on_ohlcv=on_ohlcv,
         on_heartbeat=on_heartbeat,
-        on_signal_outcome=on_signal_outcome_cb if signal_column else None,
+        on_signal_outcome=on_signal_event_cb if signal_column else None,
         signal_column=signal_column,
         warmup_fetcher=warmup_fetcher if not no_db else None,
     )

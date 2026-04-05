@@ -388,15 +388,15 @@ BASE_PANELS_DEF: list[dict] = [
                 " side AS \"Side\","
                 " ROUND(quantity::numeric,4) AS \"Qty\","
                 " ROUND(price::numeric,2) AS \"Price\","
-                " ROUND(avg_entry_price::numeric,2) AS \"Avg Entry\","
-                " ROUND(position_qty::numeric,4) AS \"Pos Qty\","
+                " ROUND(entry_price::numeric,2) AS \"Avg Entry\","
+                " ROUND(position_quantity::numeric,4) AS \"Pos Qty\","
                 " ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\","
-                " ROUND(realized_pnl::numeric,2) AS \"Net P&L\","
+                " ROUND(pnl::numeric,2) AS \"Net P&L\","
                 " ROUND(net_return::numeric,2) AS \"Net Return %\","
                 " entry_ts AS \"Entry Time\","
                 " holding_bars AS \"Periods\","
                 " reason AS \"Reason\""
-                " FROM order_events WHERE run_id = '${run_id}'"
+                " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
                 "A",
@@ -443,35 +443,35 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed", "_x": 0, "_dy": 10,
         "title": "Entry / Exit Signals",
-        "description": "Entry = open/add (green/blue), Exit = reduce/close (orange/red). From order_events table.",
+        "description": "Entry = open/add (green/blue), Exit = reduce/close (orange/red). From trade_events table.",
         "type": "timeseries",
         "h": 5,
         "w": 12,
         "targets": [
             _target(
                 "SELECT ts AS time, price AS \"Open\""
-                " FROM order_events"
+                " FROM trade_events"
                 " WHERE run_id = '${run_id}' AND event_type = 'open'"
                 " AND $__timeFilter(ts)",
                 "A",
             ),
             _target(
                 "SELECT ts AS time, price AS \"Add\""
-                " FROM order_events"
+                " FROM trade_events"
                 " WHERE run_id = '${run_id}' AND event_type = 'add'"
                 " AND $__timeFilter(ts)",
                 "B",
             ),
             _target(
                 "SELECT ts AS time, price AS \"Reduce\""
-                " FROM order_events"
+                " FROM trade_events"
                 " WHERE run_id = '${run_id}' AND event_type = 'reduce'"
                 " AND $__timeFilter(ts)",
                 "C",
             ),
             _target(
                 "SELECT ts AS time, price AS \"Close\""
-                " FROM order_events"
+                " FROM trade_events"
                 " WHERE run_id = '${run_id}' AND event_type = 'close'"
                 " AND $__timeFilter(ts)",
                 "D",
@@ -502,10 +502,10 @@ EXTRA_PANELS: list[dict] = [
         "Unrealized PnL",
         (
             "WITH pos AS (\n"
-            "  SELECT side, entry_price, quantity\n"
-            "  FROM trade_blotter\n"
-            "  WHERE run_id = '${run_id}' AND exit_ts IS NULL\n"
-            "  ORDER BY entry_ts DESC LIMIT 1\n"
+            "  SELECT side, entry_price, position_quantity AS quantity\n"
+            "  FROM trade_events\n"
+            "  WHERE run_id = '${run_id}'\n"
+            "  ORDER BY ts DESC LIMIT 1\n"
             "),\n"
             "latest AS (\n"
             "  SELECT close FROM ohlcv\n"
@@ -513,10 +513,11 @@ EXTRA_PANELS: list[dict] = [
             "    AND timeframe = (SELECT timeframe FROM backtest_runs WHERE run_id='${run_id}')\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
-            "SELECT CASE WHEN p.side='long'\n"
-            "  THEN (l.close - p.entry_price) * p.quantity\n"
-            "  ELSE (p.entry_price - l.close) * p.quantity\n"
-            "  END AS \"PnL\"\n"
+            "SELECT CASE WHEN p.quantity > 0 THEN\n"
+            "  CASE WHEN p.side='long'\n"
+            "    THEN (l.close - p.entry_price) * p.quantity\n"
+            "    ELSE (p.entry_price - l.close) * p.quantity\n"
+            "  END ELSE NULL END AS \"PnL\"\n"
             "FROM pos p, latest l"
         ),
         None,
@@ -532,12 +533,18 @@ EXTRA_PANELS: list[dict] = [
     _stat_panel(
         "Current Position",
         (
-            "SELECT CASE WHEN side='long' THEN '+' ELSE '-' END\n"
+            "WITH pos AS (\n"
+            "  SELECT side, position_quantity AS quantity, entry_price\n"
+            "  FROM trade_events\n"
+            "  WHERE run_id = '${run_id}'\n"
+            "  ORDER BY ts DESC LIMIT 1\n"
+            ")\n"
+            "SELECT CASE WHEN quantity > 0 THEN\n"
+            "  CASE WHEN side='long' THEN '+' ELSE '-' END\n"
             "  || ROUND(quantity::numeric, 4) || ' @ '\n"
-            "  || ROUND(entry_price::numeric, 2) AS \"Position\"\n"
-            "FROM trade_blotter\n"
-            "WHERE run_id = '${run_id}' AND exit_ts IS NULL\n"
-            "ORDER BY entry_ts DESC LIMIT 1"
+            "  || ROUND(entry_price::numeric, 2)\n"
+            "ELSE NULL END AS \"Position\"\n"
+            "FROM pos"
         ),
         None, [],
         w=8, no_value="Flat", fixed_color="blue",
@@ -717,39 +724,39 @@ def render_unified_dashboard() -> dict:
 # Signal Monitor Dashboard
 # ======================================================================
 
-# WHY: common SQL fragments for signal_outcomes LATERAL JOIN to ohlcv.
+# WHY: common SQL fragments for signal_events LATERAL JOIN to ohlcv.
 # These are reused across multiple panels to compute forward return, MFE, MAE.
 _SIG_WHERE = "s.strategy='$strategy' AND s.symbol='$symbol' AND s.mode='$mode'"
 _OHLCV_WHERE = "symbol='$symbol' AND timeframe='$timeframe' AND source='$data_source'"
 _ENTRY_BAR = (
     f"SELECT close FROM ohlcv"
-    f" WHERE {_OHLCV_WHERE} AND ts <= s.signal_ts"
+    f" WHERE {_OHLCV_WHERE} AND ts <= s.ts"
     f" ORDER BY ts DESC LIMIT 1"
 )
 _EXIT_BAR = (
     f"SELECT close FROM ohlcv"
-    f" WHERE {_OHLCV_WHERE} AND ts > s.signal_ts"
+    f" WHERE {_OHLCV_WHERE} AND ts > s.ts"
     f" ORDER BY ts LIMIT 1 OFFSET ($n - 1)"
 )
 _FWD_CTE = (
     f"WITH fwd AS (\n"
-    f"  SELECT s.signal_ts,\n"
+    f"  SELECT s.ts,\n"
     f"    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n"
-    f"  FROM signal_outcomes s\n"
+    f"  FROM signal_events s\n"
     f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
     f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
     f"  WHERE {_SIG_WHERE}\n"
-    f"    AND $__timeFilter(s.signal_ts)\n"
+    f"    AND $__timeFilter(s.ts)\n"
     f")\n"
 )
 _EXC_CTE = (
     f"WITH exc AS (\n"
-    f"  SELECT s.signal_ts, exc.mfe, exc.mae,\n"
-    f"    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n"
-    f"  FROM signal_outcomes s\n"
+    f"  SELECT s.ts, exc.mfe, exc.mae,\n"
+    f"    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
+    f"  FROM signal_events s\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT close AS entry_close FROM ohlcv\n"
-    f"    WHERE {_OHLCV_WHERE} AND ts <= s.signal_ts\n"
+    f"    WHERE {_OHLCV_WHERE} AND ts <= s.ts\n"
     f"    ORDER BY ts DESC LIMIT 1\n"
     f"  ) entry_bar ON true\n"
     f"  JOIN LATERAL (\n"
@@ -758,12 +765,12 @@ _EXC_CTE = (
     f"      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
     f"    FROM (\n"
     f"      SELECT high, low FROM ohlcv\n"
-    f"      WHERE {_OHLCV_WHERE} AND ts > s.signal_ts\n"
+    f"      WHERE {_OHLCV_WHERE} AND ts > s.ts\n"
     f"      ORDER BY ts LIMIT $n\n"
     f"    ) b\n"
     f"  ) exc ON true\n"
     f"  WHERE {_SIG_WHERE}\n"
-    f"    AND $__timeFilter(s.signal_ts)\n"
+    f"    AND $__timeFilter(s.ts)\n"
     f")\n"
 )
 
@@ -787,13 +794,13 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "Unrealized PnL",
         (
             "WITH latest_signal AS (\n"
-            "  SELECT signal_ts, signal_value,\n"
+            "  SELECT ts, signal_value,\n"
             f"    (SELECT close FROM ohlcv WHERE {_OHLCV_WHERE}"
             " ORDER BY ts DESC LIMIT 1) AS current_close,\n"
             f"    (SELECT close FROM ohlcv WHERE {_OHLCV_WHERE}"
-            " AND ts <= s.signal_ts ORDER BY ts DESC LIMIT 1) AS signal_price\n"
-            f"  FROM signal_outcomes s\n  WHERE {_SIG_WHERE}\n"
-            "  ORDER BY signal_ts DESC LIMIT 1\n)\n"
+            " AND ts <= s.ts ORDER BY ts DESC LIMIT 1) AS signal_price\n"
+            f"  FROM signal_events s\n  WHERE {_SIG_WHERE}\n"
+            "  ORDER BY ts DESC LIMIT 1\n)\n"
             "SELECT $expected_direction * (current_close - signal_price)"
             " / NULLIF(signal_price, 0) AS \"PnL\"\n"
             "FROM latest_signal\n"
@@ -825,8 +832,8 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     ),
     _stat_panel(
         "Last Signal Age",
-        f"SELECT EXTRACT(EPOCH FROM NOW() - MAX(signal_ts)) / 3600.0 AS \"Age\""
-        f" FROM signal_outcomes s WHERE {_SIG_WHERE}",
+        f"SELECT EXTRACT(EPOCH FROM NOW() - MAX(ts)) / 3600.0 AS \"Age\""
+        f" FROM signal_events s WHERE {_SIG_WHERE}",
         "h",
         [
             {"color": "green", "value": None},
@@ -838,16 +845,16 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     ),
     _stat_panel(
         "N (Signals)",
-        f"SELECT COUNT(*) AS \"N\" FROM signal_outcomes s"
-        f" WHERE {_SIG_WHERE} AND $__timeFilter(signal_ts)",
+        f"SELECT COUNT(*) AS \"N\" FROM signal_events s"
+        f" WHERE {_SIG_WHERE} AND $__timeFilter(ts)",
         None, [],
         w=3, fixed_color="blue",
         description="Total signal count in selected time range.",
     ),
     _stat_panel(
         "Signal Value",
-        f"SELECT signal_value AS \"Value\" FROM signal_outcomes s"
-        f" WHERE {_SIG_WHERE} ORDER BY signal_ts DESC LIMIT 1",
+        f"SELECT signal_value AS \"Value\" FROM signal_events s"
+        f" WHERE {_SIG_WHERE} ORDER BY ts DESC LIMIT 1",
         None, [],
         w=3, decimals=3, no_value="N/A", fixed_color="blue",
         description="Latest signal_value.",
@@ -875,9 +882,9 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
                 "price",
             ),
             _target(
-                "SELECT signal_ts AS time, signal_value AS \"Signal\""
-                f" FROM signal_outcomes s WHERE {_SIG_WHERE}"
-                " AND $__timeFilter(signal_ts) ORDER BY signal_ts",
+                "SELECT ts AS time, signal_value AS \"Signal\""
+                f" FROM signal_events s WHERE {_SIG_WHERE}"
+                " AND $__timeFilter(ts) ORDER BY ts",
                 "signals",
             ),
         ],
@@ -903,9 +910,9 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "h": 8, "w": 12,
         "targets": [_target(
             _FWD_CTE
-            + "SELECT signal_ts AS time,\n"
-            "  SUM($expected_direction * ret) OVER (ORDER BY signal_ts) AS \"Cumulative Return\"\n"
-            "FROM fwd ORDER BY signal_ts"
+            + "SELECT ts AS time,\n"
+            "  SUM($expected_direction * ret) OVER (ORDER BY ts) AS \"Cumulative Return\"\n"
+            "FROM fwd ORDER BY ts"
         )],
         "fieldConfig": {
             "defaults": {"unit": "percentunit", "custom": {"lineWidth": 2, "fillOpacity": 10}},
@@ -919,19 +926,19 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "h": 8, "w": 12,
         "targets": [_target(
             "WITH fwd AS (\n"
-            "  SELECT s.signal_ts,\n"
+            "  SELECT s.ts,\n"
             "    $expected_direction * (exit_bar.close - entry_bar.close)"
             " / NULLIF(entry_bar.close, 0) AS adj_return,\n"
-            "    ROW_NUMBER() OVER (ORDER BY s.signal_ts) AS rn\n"
-            "  FROM signal_outcomes s\n"
+            "    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
+            "  FROM signal_events s\n"
             f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
             f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
-            f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.signal_ts)\n"
+            f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.ts)\n"
             ")\n"
-            "SELECT signal_ts AS time,\n"
-            "  AVG(adj_return) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)"
+            "SELECT ts AS time,\n"
+            "  AVG(adj_return) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)"
             " AS \"Mean Return\"\n"
-            "FROM fwd WHERE rn >= $k ORDER BY signal_ts"
+            "FROM fwd WHERE rn >= $k ORDER BY ts"
         )],
         "fieldConfig": {
             "defaults": {
@@ -949,11 +956,11 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "h": 8, "w": 12,
         "targets": [_target(
             _EXC_CTE
-            + "SELECT signal_ts AS time,\n"
-            "  AVG(mfe) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n"
-            "  / NULLIF(AVG(mae) OVER (ORDER BY signal_ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n"
+            + "SELECT ts AS time,\n"
+            "  AVG(mfe) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n"
+            "  / NULLIF(AVG(mae) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n"
             "  AS \"Edge Ratio\"\n"
-            "FROM exc WHERE rn >= $k ORDER BY signal_ts"
+            "FROM exc WHERE rn >= $k ORDER BY ts"
         )],
         "fieldConfig": {
             "defaults": {
@@ -984,18 +991,18 @@ def render_signal_monitor() -> dict:
         ),
         _make_query_variable(
             "strategy",
-            "SELECT DISTINCT strategy FROM signal_outcomes WHERE mode='$mode' ORDER BY 1",
+            "SELECT DISTINCT strategy FROM signal_events WHERE mode='$mode' ORDER BY 1",
             label="Strategy",
         ),
         _make_query_variable(
             "symbol",
-            "SELECT DISTINCT symbol FROM signal_outcomes"
+            "SELECT DISTINCT symbol FROM signal_events"
             " WHERE mode='$mode' AND strategy='$strategy' ORDER BY 1",
             label="Symbol",
         ),
         _make_query_variable(
             "timeframe",
-            "SELECT DISTINCT timeframe FROM signal_outcomes"
+            "SELECT DISTINCT timeframe FROM signal_events"
             " WHERE mode='$mode' AND strategy='$strategy' AND symbol='$symbol' ORDER BY 1",
             label="Timeframe",
         ),

@@ -26,8 +26,10 @@ import pandas as pd
 
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# WHY {4,6} and {6,8}: generator now produces %H%M (4-digit) + hex6,
+# but we accept old IDs with %H%M%S (6-digit) + hex8 still in the DB.
 RUN_ID_PATTERN = re.compile(
-    r"^[a-z0-9][a-z0-9_.\-]*-\d{8}t\d{6}-[a-f0-9]{8}$"
+    r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$"
 )
 
 REQUIRED_SIGNAL_KEYS: tuple[str, ...] = (
@@ -80,7 +82,7 @@ class EquityCurvePoint:
     drawdown: float
     benchmark_equity: float | None = None
     benchmark_ret_1d: float | None = None
-    strategy_name: str | None = None
+    strategy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,13 +122,13 @@ class OrderEventRecord:
     event_type: Literal["open", "add", "reduce", "close"]
     quantity: float
     price: float
-    avg_entry_price: float
-    position_qty: float
+    entry_price: float
+    position_quantity: float
     notional: float
     commission: float = 0.0
     slippage: float = 0.0
     tax: float = 0.0
-    realized_pnl: float | None = None
+    pnl: float | None = None
     net_return: float | None = None
     entry_ts: datetime | None = None
     holding_bars: int | None = None
@@ -206,7 +208,7 @@ class BacktestOutput:
         if not RUN_ID_PATTERN.match(self.run_metadata.run_id):
             raise ValueError(
                 f"run_metadata.run_id must match pattern "
-                f"'<strategy>-<symbol>-<YYYYMMDDThhmmss>-<hex8>', "
+                f"'<strategy>-<symbol>[-<timeframe>]-<YYYYMMDDThhmm>-<hex6>', "
                 f"got {self.run_metadata.run_id!r}"
             )
         if not self.run_metadata.strategy:

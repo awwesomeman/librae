@@ -134,14 +134,14 @@ def prepare_signals(h1_base: pd.DataFrame, params: dict | None = None) -> pd.Dat
 
 def fetch_and_prepare(
     symbol: str = "BTCUSDT",
-    months: int = 6,
+    periods: int = 4320,
     params: dict | None = None,
 ) -> pd.DataFrame:
     """End-to-end data preparation: fetch OHLCV → features → signals → MultiIndex.
 
     Returns a MultiIndex DataFrame (symbol, datetime) ready for Backtest.
     """
-    h1_raw = get_ohlcv(symbol=symbol, interval="1h", months=months)
+    h1_raw = get_ohlcv(symbol=symbol, interval="1h", periods=periods)
     h1_base = h1_raw.set_index("timestamp")
     h1_base.index.name = "ts"
 

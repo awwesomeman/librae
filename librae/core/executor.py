@@ -76,13 +76,13 @@ class OrderEvent:
     event_type: Literal["open", "add", "reduce", "close"]
     quantity: float
     price: float
-    avg_entry_price: float
-    position_qty: float
+    entry_price: float
+    position_quantity: float
     notional: float
     commission: float
     slippage: float
     tax: float
-    realized_pnl: float | None = None
+    pnl: float | None = None
     net_return: float | None = None
     entry_ts: datetime | None = None
     holding_bars: int | None = None
@@ -365,7 +365,7 @@ def process_actions(
                     events.append(OrderEvent(
                         ts=ts, symbol=sym, side=fill.side, event_type="open",
                         quantity=fill.quantity, price=price,
-                        avg_entry_price=price, position_qty=fill.quantity,
+                        entry_price=price, position_quantity=fill.quantity,
                         notional=price * fill.quantity * cost_model.multiplier,
                         commission=fill.commission, slippage=fill.slippage,
                         tax=fill.tax, reason=reason,
@@ -384,7 +384,7 @@ def process_actions(
                     events.append(OrderEvent(
                         ts=ts, symbol=sym, side=pos.side, event_type="add",
                         quantity=fill.quantity, price=price,
-                        avg_entry_price=pos.entry_price, position_qty=pos.quantity,
+                        entry_price=pos.entry_price, position_quantity=pos.quantity,
                         notional=price * fill.quantity * cost_model.multiplier,
                         commission=fill.commission, slippage=fill.slippage,
                         tax=fill.tax, reason=reason,
@@ -417,10 +417,10 @@ def process_actions(
                 ts=ts, symbol=sym, side=pos.side,
                 event_type="close" if fully_closed else "reduce",
                 quantity=actual_close_qty, price=price,
-                avg_entry_price=pos.entry_price, position_qty=remaining_qty,
+                entry_price=pos.entry_price, position_quantity=remaining_qty,
                 notional=price * actual_close_qty * cost_model.multiplier,
                 commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
-                realized_pnl=pnl.net_pnl, net_return=pnl.net_return,
+                pnl=pnl.net_pnl, net_return=pnl.net_return,
                 entry_ts=pos.entry_ts, holding_bars=pos.bars_held,
                 reason=reason,
             ))
