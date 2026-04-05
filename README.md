@@ -55,14 +55,14 @@ experiments/signals/kdj_oversold/
 ```
 
 ```bash
-# 回測：跑歷史訊號 → 寫 DB → Grafana Signal Monitor 看結果
+# 回測：跑歷史訊號 → 寫 DB → Grafana Signal 看結果
 python -m experiments.signals.kdj_oversold.run
 
 # 即時監控：每根 bar 寫入 signal_events
 python -m experiments.signals.kdj_oversold.run --sim
 ```
 
-**Grafana**：Signal Monitor → `$mode=backtest` 或 `sim` → `$strategy=kdj_oversold`
+**Grafana**：Signal → `$mode=backtest` 或 `sim` → `$run_id`
 
 **寫新訊號**：複製 `kdj_oversold/` 資料夾，改 `signal.py` 的指標計算和 `run.py` 的 config。
 
@@ -86,7 +86,7 @@ python -m strategies.trendpullback.run --mode backtest
 python -m strategies.trendpullback.run --mode sim
 ```
 
-**Grafana**：Strategy Dashboard → `$mode=backtest` 或 `sim` → `$run_id`
+**Grafana**：Strategy → `$mode=backtest` 或 `sim` → `$run_id`
 
 ---
 
@@ -100,10 +100,10 @@ get_ohlcv()                    save_signal_results()       save_strategy_results
   └→ DB 不可用 → API fallback                                ├→ trade_events
                                                              ├→ strategy_performance
 Sim callbacks (wiring.py)                                    ├→ signal_events
-  ├→ on_order_event  → trade_events                          └→ ohlcv
-  ├→ on_signal_event → signal_events
-  ├→ on_bar          → equity_curve
-  └→ on_ohlcv        → ohlcv
+  ├→ on_order_event   → trade_events                         └→ ohlcv
+  ├→ on_signal_outcome → signal_events
+  ├→ on_bar            → equity_curve
+  └→ on_ohlcv          → ohlcv
 ```
 
 ---
@@ -131,7 +131,7 @@ psql -U quant -d quant -f deploy/timescale_init.sql
 
 | Dashboard | 用途 | 切換變數 |
 |---|---|---|
-| **Signal** | 訊號預測力：forward return, MFE/MAE, cumulative return | `$mode`, `$strategy`, `$symbol`, `$timeframe`, `$data_source`, `$n`, `$k` |
+| **Signal** | 訊號預測力：forward return, MFE/MAE, cumulative return | `$mode`, `$run_id`, `$n`, `$k` |
 | **Strategy** | 策略績效：equity curve, drawdown, trades | `$mode`, `$run_id` |
 
 兩個 dashboard 都由 `generate_dashboards.py` 生成：
@@ -284,7 +284,7 @@ from data.ohlcv import register_ohlcv_fetcher
 
 adapter = ShioajiAdapter()
 register_ohlcv_fetcher("shioaji", adapter.fetch_ohlcv)
-df = get_ohlcv("TXFR1", "5m", months=1, source="shioaji")
+df = get_ohlcv("TXFR1", "5m", periods=1, source="shioaji")
 ```
 
 ---

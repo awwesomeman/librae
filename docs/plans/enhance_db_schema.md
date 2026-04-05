@@ -12,26 +12,25 @@
 
 ---
 
-## 現行 Schema：7 張表
+## 現行 Schema：6 張表
 
 ```
-backtest_runs  ← 中心表
+backtest_runs              ← 中樞（per-run metadata）
   ├── equity_curve         (hypertable, FK CASCADE)
-  ├── trade_blotter        (普通表, FK CASCADE)
-  ├── order_events         (hypertable, FK CASCADE)    ← 2026-04-05 新增
-  ├── strategy_performance (1 row/run, FK CASCADE)
-  │
-  ohlcv                    (hypertable, 獨立)
-  signal_outcomes          (hypertable, 獨立)
+  └── strategy_performance (1 row/run, FK CASCADE)
+
+trade_events               (hypertable, 獨立，自帶 strategy/mode/timeframe)
+signal_events              (hypertable, 獨立，自帶 strategy/mode/timeframe)
+ohlcv                      (hypertable, 獨立)
 ```
 
-三個資料域，各自獨立：
+三個資料域：
 
 | 域 | 表 | 用途 |
 |---|---|---|
 | **市場資料** | `ohlcv` | 共享價格資料，不綁 run，cache + dashboard 共用 |
-| **策略績效** | `backtest_runs` + `equity_curve` + `trade_blotter` + `strategy_performance` | 回測/sim/live 的完整結果 |
-| **訊號監控** | `signal_outcomes` | feature-layer 訊號記錄，搭配 ohlcv on-demand 計算 forward metrics |
+| **策略績效** | `backtest_runs` + `equity_curve` + `trade_events` + `strategy_performance` | 回測/sim/live 的完整結果 |
+| **訊號監控** | `signal_events` | feature-layer 訊號記錄，搭配 ohlcv on-demand 計算 forward metrics |
 
 ---
 
@@ -158,8 +157,8 @@ data/market_data.py    ← 統一入口：get_ohlcv()
 |---|---|
 | `signal_monitor.json` SQL 與 signal_outcomes schema 對齊 | ✅ 11 panels（7 stat + 4 timeseries），全部引用 signal_outcomes + ohlcv |
 | `strategy_dashboard.json` 重新生成（消除 strategy_signals 引用） | ✅ |
-| signal_monitor 不由 generate_dashboards.py 生成（手動維護 JSON） | 確認 |
-| Template variables: `$strategy`, `$symbol`, `$timeframe`, `$n`, `$k`, `$expected_direction` | ✅ 全部從 signal_outcomes 動態查詢 |
+| signal_monitor 由 generate_dashboards.py 統一生成 | ✅ |
+| Template variables: `$mode`, `$run_id`, `$n`, `$k`, `$expected_direction` | ✅ 與 Strategy dashboard 統一 run_id 篩選 |
 
 **驗收（部署後）：**
 - [ ] Signal Monitor 全部 panel 有資料
@@ -233,24 +232,25 @@ python -m strategies.trendpullback.run --mode sim
 ### 表間關聯
 
 ```
-        backtest_runs (PK: run_id)
-             │ FK: run_id (ON DELETE CASCADE)
-     ┌───────┼───────────┬──────────┐
-     ▼       ▼           ▼          ▼
-equity_   trade_      strategy_   order_
-curve     blotter     performance events
+backtest_runs (PK: run_id)
+  │ FK: run_id (ON DELETE CASCADE)
+  ├── equity_curve
+  └── strategy_performance
 
-ohlcv (獨立)          signal_outcomes (獨立)
+trade_events   (獨立，run_id 為普通欄位)
+signal_events  (獨立，run_id 為普通欄位)
+ohlcv          (獨立)
 ```
 
-- 5 張表靠 `run_id` FK 串聯，刪 run 自動 CASCADE 清除子表
-- `ohlcv`、`signal_outcomes` 獨立，無 FK，跨 run 共享
+- 2 張表靠 FK CASCADE 管理生命週期
+- 3 張獨立表自帶 strategy/mode/timeframe，刪 run 不影響
+- 所有 dashboard 統一用 `run_id` 篩選
 
 ### backtest_runs（中樞，1 row / run）
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
-| `run_id` | TEXT PK | `{strategy}_{symbol}_{timestamp}` |
+| `run_id` | TEXT PK | `{strategy}-{symbol}[-{timeframe}]-{ts}-{hex6}` |
 | `strategy` | TEXT NOT NULL | 策略名稱 |
 | `symbol` | TEXT NOT NULL | 交易標的 |
 | `timeframe` | TEXT NOT NULL | K 線週期 |
@@ -262,7 +262,7 @@ ohlcv (獨立)          signal_outcomes (獨立)
 | `poll_interval` | INTEGER | sim/live polling 秒數 |
 | `last_heartbeat` | TIMESTAMPTZ | sim/live 心跳 |
 
-### equity_curve（hypertable，每 bar 一筆）
+### equity_curve（hypertable, FK CASCADE，每 bar 一筆）
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
@@ -273,48 +273,34 @@ ohlcv (獨立)          signal_outcomes (獨立)
 | `drawdown` | DOUBLE | 回撤比例 |
 | `ret_1d` | DOUBLE | 單 bar 報酬率 |
 | `benchmark_ret_1d` | DOUBLE | benchmark 報酬率 |
-| `strategy_name` | TEXT | 策略名（⚠️ 應改名 `strategy` 以統一） |
+| `strategy` | TEXT | 策略名（冗餘，便於 ad-hoc 查詢） |
 
-### trade_blotter（每筆交易一筆）
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| `trade_id` | TEXT PK | `{run_id}_{seq}` |
-| `run_id` | TEXT FK | 歸屬 run |
-| `entry_ts` / `exit_ts` | TIMESTAMPTZ | 進出場時間 |
-| `symbol` | TEXT | 交易標的 |
-| `side` | TEXT | long / short（CHECK） |
-| `entry_price` / `exit_price` | DOUBLE | 進出場價格 |
-| `quantity` | DOUBLE | 平倉數量 |
-| `gross_pnl` / `net_pnl` | DOUBLE | 毛利 / 淨利 |
-| `gross_return` / `net_return` | DOUBLE | 報酬率（%） |
-| `price_unit` / `quantity_unit` / `pnl_unit` | TEXT | 單位 |
-| `commission` / `slippage` / `tax` | DOUBLE | 成本 |
-| `holding_bars` | INTEGER | 持倉 bar 數 |
-
-### order_events（hypertable，部位生命週期事件）
+### trade_events（hypertable，獨立，部位生命週期事件）
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
-| `event_id` | TEXT | `{run_id}_evt_{seq}` |
-| `run_id` | TEXT FK | 歸屬 run |
+| `event_id` | TEXT | `{run_id}-e{seq:04d}` |
+| `run_id` | TEXT | 歸屬 run（非 FK） |
+| `strategy` | TEXT NOT NULL | 策略名稱 |
+| `mode` | TEXT NOT NULL | backtest / sim / live（CHECK） |
+| `timeframe` | TEXT NOT NULL | K 線週期 |
 | `ts` | TIMESTAMPTZ | 事件時間 |
 | `symbol` | TEXT | 交易標的 |
 | `side` | TEXT | long / short（CHECK） |
 | `event_type` | TEXT | open / add / reduce / close（CHECK） |
 | `quantity` | DOUBLE | 本次成交量 |
 | `price` | DOUBLE | 成交價 |
-| `avg_entry_price` | DOUBLE | 加權平均入場價 |
-| `position_qty` | DOUBLE | 事件後剩餘持倉量 |
+| `entry_price` | DOUBLE | 加權平均入場價 |
+| `position_quantity` | DOUBLE | 事件後剩餘持倉量 |
 | `notional` | DOUBLE | 本次名目金額 |
 | `commission` / `slippage` / `tax` | DOUBLE | 成本 |
-| `realized_pnl` | DOUBLE | 已實現損益（reduce/close） |
+| `pnl` | DOUBLE | 已實現損益（reduce/close） |
 | `net_return` | DOUBLE | 淨報酬率（reduce/close） |
 | `entry_ts` | TIMESTAMPTZ | 原始入場時間 |
 | `holding_bars` | INTEGER | 持倉 bar 數 |
 | `reason` | TEXT | 原因（strategy / force_close） |
 
-### strategy_performance（每 run 一筆，聚合 KPI）
+### strategy_performance（每 run 一筆, FK CASCADE，聚合 KPI）
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
@@ -330,7 +316,7 @@ ohlcv (獨立)          signal_outcomes (獨立)
 | `benchmark_return` | DOUBLE | benchmark 報酬率 |
 | `total_commission` / `total_slippage` / `total_tax` | DOUBLE | 累計成本 |
 
-### ohlcv（hypertable，共用市場資料）
+### ohlcv（hypertable，獨立，共用市場資料）
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
@@ -342,11 +328,12 @@ ohlcv (獨立)          signal_outcomes (獨立)
 
 唯一鍵：`(ts, symbol, timeframe, source)`
 
-### signal_outcomes（hypertable，訊號品質）
+### signal_events（hypertable，獨立，訊號品質）
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
-| `signal_ts` | TIMESTAMPTZ | 訊號時間（⚠️ 應改名 `ts` 以統一） |
+| `ts` | TIMESTAMPTZ | 訊號時間 |
+| `run_id` | TEXT | 歸屬 run（非 FK） |
 | `strategy` | TEXT NOT NULL | 策略/訊號名稱 |
 | `symbol` | TEXT NOT NULL | 交易標的 |
 | `mode` | TEXT NOT NULL | backtest / sim（CHECK） |
@@ -354,7 +341,7 @@ ohlcv (獨立)          signal_outcomes (獨立)
 | `signal_value` | DOUBLE NOT NULL | 訊號值 |
 | `price` | DOUBLE | 訊號發生時價格 |
 
-唯一鍵：`(signal_ts, strategy, symbol, mode, timeframe)`
+唯一鍵：`(ts, strategy, symbol, mode, timeframe)`
 
 ## Schema 演進歷程
 
@@ -372,112 +359,7 @@ ohlcv (獨立)          signal_outcomes (獨立)
 
 ## 待處理
 
-### Issue 1：欄位命名不一致
-
-| 問題 | 現在 | 應改為 | 影響範圍 |
-|------|------|--------|---------|
-| signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） |
-| equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） |
-
-### Issue 2：結果表設計模式不一致
-
-三張「結果表」的 metadata 攜帶方式不同：
-
-| 特性 | trade_blotter | order_events | signal_outcomes |
-|------|:---:|:---:|:---:|
-| 有 `run_id` FK | ✅ | ✅ | ❌ 獨立 |
-| 自帶 `mode` | ❌ 靠 JOIN | ❌ 靠 JOIN | ✅ |
-| 自帶 `strategy` | ❌ 靠 JOIN | ❌ 靠 JOIN | ✅ |
-| 自帶 `timeframe` | ❌ 靠 JOIN | ❌ 靠 JOIN | ✅ |
-
-**原因**：signal_outcomes 設計為「跨 run 累積」— sim 重啟換 run_id 不影響歷史可見性，所以刻意不綁 FK。trade_blotter/order_events 是「per-run」資料，跟著 run 生命週期 CASCADE。
-
-**待討論**：
-- 是否讓 signal_outcomes 也加 run_id FK？（會破壞跨 run 累積特性）
-- 或維持兩種模式但明確文件化？（FK 表 vs 獨立表）
-- equity_curve 也是 per-run 但多了 `strategy_name` 冗餘欄位，是否移除改用 JOIN？
-
-### Issue 3：trade_blotter 與 order_events 可合併
-
-`order_events` 的 close/reduce 事件已包含 `trade_blotter` 的所有資訊（entry_price、exit_price、PnL、costs、holding_bars）。目前每次平倉同時寫兩張表，資料重複。
-
-**合併方案**：刪除 `trade_blotter`，7 表 → 6 表。
-- `refresh_performance()` 改查 `order_events WHERE event_type IN ('close', 'reduce')`
-- Grafana Trade Distribution 改查 order_events
-- `trade_id` 由 `event_id` 替代
-- 寫入路徑簡化，不再重複寫
-
-**影響範圍**：`timescale_init.sql`、`timescale_writer.py`、`timescale_reader.py`、`generate_dashboards.py`、`refresh_performance()`
-
-### Issue 5：order_events 應支援跨 run 累積
-
-signal_outcomes 已設計為跨 run 累積（無 FK，自帶 strategy/mode/symbol/timeframe），sim 重啟不影響歷史。但 order_events 綁定 run_id FK CASCADE — sim 重啟歷史斷裂，刪 run 會刪事件。
-
-**建議**：order_events 比照 signal_outcomes 設計：
-- 加自帶欄位：`strategy`, `mode`, `symbol`, `timeframe`
-- `run_id` 保留但改為普通欄位（非 FK CASCADE）
-- 刪 run 不刪事件
-- Grafana 查詢改用 `WHERE strategy='X' AND mode='sim'`（跨 run）
-
-**equity_curve**：重啟後 equity 重算會有斷層，但各段仍有參考價值。可考慮同樣改為非 CASCADE，但優先級較低。
-
-**strategy_performance**：聚合 KPI 是 per-run 快照，維持 FK CASCADE。
-
-### Issue 6：統一命名 `trade_events` / `signal_events`
-
-合併 trade_blotter + order_events 後，兩張獨立表角色對稱，應統一命名：
-
-| 現在 | 改為 | 用途 |
-|------|------|------|
-| `order_events` + `trade_blotter` | **`trade_events`** | 策略端：每次交易操作（open/add/reduce/close） |
-| `signal_outcomes` | **`signal_events`** | 訊號端：每次訊號發射 |
-
-同時修正 `signal_events` 的 CHECK constraint：`mode IN ('backtest', 'sim')`（移除 live）。
-
-### Issue 7：order_events 欄位命名不一致
-
-**冗餘/不對稱命名**：
-
-| 現在 | 改為 | 理由 |
-|------|------|------|
-| `realized_pnl` | `pnl` | 所有數值都是 realized，前綴冗餘；跟 `net_return` 風格不一致 |
-| `net_return` | `return` | 跟 `pnl` 對稱 |
-
-**跨表同概念不同名**：
-
-| 現在 | 改為 | 理由 |
-|------|------|------|
-| `avg_entry_price` | `entry_price` | trade_blotter 用 `entry_price`，語義相同（加碼後都是加權平均） |
-| `position_qty` | `position_quantity` | 其他欄位都用完整 `quantity`，不縮寫 |
-
-**可接受但值得標記**：
-- `entry_ts`（原始開倉時間）vs `ts`（事件時間）— 兩個 `_ts` 可能混淆，但改名收益不大
-- `event_id` 格式含 run_id 前綴 — 等 Issue 5 跨 run 時一起調整
-
-### 目標架構（Issue 全部完成後）
-
-```
-backtest_runs              ← 中樞（per-run metadata）
-  ├── equity_curve         ← FK CASCADE（per-run 淨值）
-  └── strategy_performance ← FK CASCADE（per-run KPI）
-
-trade_events               ← 獨立（跨 run 交易事件，原 order_events + trade_blotter）
-signal_events              ← 獨立（跨 run 訊號事件，原 signal_outcomes）
-ohlcv                      ← 獨立（共用市場資料）
-```
-
-6 張表。per-run 表靠 FK CASCADE 管理生命週期；事件表獨立跨 run 累積。
-
-### Issue 執行順序建議
-
-```
-Issue 5（order_events 改獨立） + Issue 3（合併 trade_blotter）
-  → Issue 6（統一命名 trade_events / signal_events）
-    → Issue 1（欄位命名 signal_ts → ts）
-      → Issue 4（CHECK constraint）
-```
-
-Issue 2（FK vs 獨立模式）被 Issue 5 解決。
+所有 Issue（1-7）已完成，見下方「Issue 完成紀錄」。目前無待處理項目。
 
 ---
 
@@ -543,14 +425,26 @@ Issue 2（FK vs 獨立模式）被 Issue 5 解決。
 - `avg_entry_price`：`brokers/base.py` Position dataclass — broker domain
 - `realized_pnl` / `unrealized_pnl`：broker domain Position fields
 
+### Signal Monitor 統一 run_id 篩選 ✅
+
+Signal dashboard 原本用 `strategy/symbol/timeframe/data_source` 四層篩選，與 Strategy dashboard（`mode/run_id`）不一致。
+
+變更：
+- 變數改為 `mode → run_id`（與 Strategy dashboard 對齊）
+- SQL WHERE 從 `strategy='$strategy' AND symbol='$symbol'` → `run_id='${run_id}'`
+- ohlcv LATERAL JOIN 的 symbol/timeframe/source 改從 `backtest_runs` 子查詢取得
+- 移除 Timeframe stat panel（run_id 已包含 timeframe 資訊）
+- 多標的對比：用迴圈跑各 symbol 產生獨立 run_id，Grafana 切換 run_id 即可
+
 ### 驗收
 
-- [x] 212 tests passed
+- [x] 213 tests passed
 - [x] 12 個舊名模式 grep → DB/Grafana 層零殘留
 - [x] DDL ↔ Writer 欄位對齊：6 張表全部 MATCH
 - [x] 資料流端到端一致性：3 條寫入路徑 `entry_price/position_quantity/pnl` 全鏈路一致
 - [x] Grafana SQL 所有表名、欄位名對齊 DDL
 - [x] strategy_dashboard.json + signal_monitor.json 重新生成/更新
+- [x] 兩個 dashboard 篩選維度統一：`mode → run_id`
 
 ---
 
