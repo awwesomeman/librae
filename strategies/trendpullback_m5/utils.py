@@ -9,7 +9,6 @@ from __future__ import annotations
 import pandas as pd
 
 from data.utils import resample_ohlcv
-from data.ohlcv import get_ohlcv
 from strategies.trendpullback.utils import (
     compute_daily_gate,
     compute_entry_conditions,
@@ -37,19 +36,3 @@ def prepare_signals(m5_base: pd.DataFrame, params: dict | None = None) -> pd.Dat
     return m5
 
 
-def fetch_and_prepare(
-    symbol: str = "BTCUSDT",
-    periods: int = 8640,
-    params: dict | None = None,
-) -> pd.DataFrame:
-    """Fetch M5 OHLCV → features → signals → MultiIndex for backtest."""
-    raw = get_ohlcv(symbol=symbol, interval="5m", periods=periods)
-    m5_base = raw.set_index("timestamp")
-    m5_base.index.name = "ts"
-
-    m5 = prepare_signals(m5_base, params)
-
-    mi = pd.MultiIndex.from_arrays(
-        [[symbol] * len(m5), m5.index], names=["symbol", "datetime"],
-    )
-    return m5.set_index(mi)

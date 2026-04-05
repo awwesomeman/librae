@@ -14,7 +14,6 @@ import pandas_ta_classic as ta
 
 from data.utils import resample_ohlcv
 from strategies.utils import merge_htf_column
-from data.ohlcv import get_ohlcv
 
 
 # ---------------------------------------------------------------------------
@@ -131,36 +130,6 @@ def prepare_signals(h1_base: pd.DataFrame, params: dict | None = None) -> pd.Dat
     h1["exit_signal"] = compute_exit_conditions(h1, params).values
     return h1
 
-
-def fetch_and_prepare(
-    symbol: str = "BTCUSDT",
-    periods: int = 4320,
-    params: dict | None = None,
-) -> pd.DataFrame:
-    """End-to-end data preparation: fetch OHLCV → features → signals → MultiIndex.
-
-    Returns a MultiIndex DataFrame (symbol, datetime) ready for Backtest.
-    """
-    h1_raw = get_ohlcv(symbol=symbol, interval="1h", periods=periods)
-    h1_base = h1_raw.set_index("timestamp")
-    h1_base.index.name = "ts"
-
-    # Features
-    h1 = compute_features(h1_base, params)
-
-    # Daily gate
-    d1 = compute_daily_gate(resample_to_daily(h1_base), params)
-    h1 = merge_trend_gate(h1, d1)
-
-    # Signals — .values strips index to avoid alignment mismatch after merge_asof
-    h1["entry_signal"] = compute_entry_conditions(h1, params).values
-    h1["exit_signal"] = compute_exit_conditions(h1, params).values
-
-    # MultiIndex
-    mi = pd.MultiIndex.from_arrays(
-        [[symbol] * len(h1), h1.index], names=["symbol", "datetime"],
-    )
-    return h1.set_index(mi)
 
 
 def compute_trend_bool(gate: pd.DataFrame) -> pd.Series:
