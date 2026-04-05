@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import pytest
 
 from librae.backtest.schema import (
-    SCHEMA_VERSION,
     BacktestOutput,
     EquityCurvePoint,
     RunMetadata,
@@ -94,14 +93,10 @@ def _make_metrics() -> StrategyMetrics:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_constant() -> None:
-    assert SCHEMA_VERSION == "1.0.0"
-
-
 def test_run_metadata_defaults() -> None:
     meta = _make_run_metadata()
-    assert meta.schema_version == "1.0.0"
-    assert meta.schema_version  # basic sanity check
+    assert meta.mode == "backtest"
+    assert meta.data_source == "binance"
 
 
 def test_backtest_output_validate_passes() -> None:

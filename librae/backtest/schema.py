@@ -21,10 +21,8 @@ from typing import Any, Literal, Sequence
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Schema version and constants (from contracts.py)
+# Constants (from contracts.py)
 # ---------------------------------------------------------------------------
-
-SCHEMA_VERSION: str = "1.0.0"
 
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -48,7 +46,7 @@ REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
     "risk_limits", "assumptions", "logic", "params",
 )
 REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
-    "schema_version", "run_metadata", "equity_curve", "trades", "metrics",
+    "run_metadata", "equity_curve", "trades", "metrics",
 )
 
 # ---------------------------------------------------------------------------
@@ -67,11 +65,9 @@ class RunMetadata:
     start_ts: datetime
     end_ts: datetime
     run_ts: datetime
-    schema_version: str = SCHEMA_VERSION
     params: dict | None = None
     mode: str = "backtest"
     data_source: str = "binance"
-    sample: str | None = None
 
 
 @dataclass(frozen=True)

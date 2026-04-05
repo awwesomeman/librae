@@ -10,7 +10,6 @@ from .backtest.schema import (
     StrategyMetrics,
     TradeRecord,
     RUN_ID_PATTERN,
-    SCHEMA_VERSION,
 )
 from .backtest.engine import Backtest, BacktestResult, EquitySnapshot
 from .core.cost_model import CostModel
@@ -30,7 +29,6 @@ __all__ = [
     "StrategyMetrics",
     "TradeRecord",
     "RUN_ID_PATTERN",
-    "SCHEMA_VERSION",
     "CostModel",
     "MarketConfig",
     "get_market",

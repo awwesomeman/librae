@@ -25,7 +25,7 @@ def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> 
 def list_runs(limit: int = 20, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """List recent backtest runs."""
     sql = """
-        SELECT run_id, strategy, symbol, timeframe, sample,
+        SELECT run_id, strategy, symbol, timeframe,
                mode, data_source, start_ts, end_ts, run_ts
         FROM backtest_runs
         ORDER BY run_ts DESC
@@ -100,7 +100,7 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
                sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.trades,
                sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
                sp.total_commission, sp.total_slippage, sp.total_tax,
-               br.strategy, br.symbol, br.timeframe, br.sample
+               br.strategy, br.symbol, br.timeframe
         FROM strategy_performance sp
         JOIN backtest_runs br ON sp.run_id = br.run_id
         WHERE sp.run_id = %s

@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 import pandas as pd
 
 from librae.backtest.schema import BacktestOutput
-from librae.backtest.schema import SCHEMA_VERSION
 from librae.core.utils import to_canonical
 from db import TIMESCALE_DSN, get_conn
 
@@ -81,7 +80,6 @@ def write_run_metadata(
     end_ts: datetime | None = None,
     run_ts: datetime | None = None,
     data_source: str = "binance",
-    sample: str | None = None,
     poll_interval: int | None = None,
     params_json: dict | None = None,
     cur: PgCursor | None = None,
@@ -93,20 +91,20 @@ def write_run_metadata(
     transaction).  Otherwise opens its own connection and commits.
     """
     sql = """INSERT INTO backtest_runs
-               (run_id, strategy, symbol, timeframe, sample, data_source,
-                start_ts, end_ts, run_ts, schema_version, mode, poll_interval,
+               (run_id, strategy, symbol, timeframe, data_source,
+                start_ts, end_ts, run_ts, mode, poll_interval,
                 params)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
                  mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval,
                  params=EXCLUDED.params"""
     params_val = json.dumps(params_json) if params_json is not None else None
     values = (
-        run_id, strategy, symbol, timeframe, sample, data_source,
+        run_id, strategy, symbol, timeframe, data_source,
         _to_dt(start_ts), _to_dt(end_ts),
         _to_dt(run_ts) or datetime.now(tz=timezone.utc),
-        SCHEMA_VERSION, mode, poll_interval,
+        mode, poll_interval,
         params_val,
     )
     if cur is not None:
@@ -161,7 +159,7 @@ def write_backtest_output(
             run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
             timeframe=meta.timeframe, mode=meta.mode,
             start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
-            data_source=meta.data_source, sample=meta.sample,
+            data_source=meta.data_source,
             params_json=params,
             cur=cur,
         )
