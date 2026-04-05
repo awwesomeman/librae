@@ -4,16 +4,12 @@ datasources:
     uid: P40AE60E18F02DE32
     orgId: 1
     type: grafana-postgresql-datasource
-    # WHY: Docker internal hostname for VPS full-stack deploy.
-    # Local dev: Grafana UI 改 Host URL 即可（editable=true），
-    # Grafana 會保留 UI 修改，不會被 provisioning 蓋回去。
-    url: quant_timescaledb:5432
+    url: $__env{VPS_DB_HOST}:5432
     database: quant
     user: quant
     secureJsonData:
       password: $__env{POSTGRES_PASSWORD}
     jsonData:
-      database: quant
       sslmode: disable
       maxOpenConns: 5
       postgresVersion: 1600

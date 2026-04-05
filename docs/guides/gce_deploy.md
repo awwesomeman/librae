@@ -79,7 +79,7 @@ docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 
 ```bash
 cd ..
-python3 deploy/dev_push_dashboard.py --grafana-password <密碼>
+python3 scripts/dev_push_dashboard.py --grafana-password <密碼>
 ```
 
 ---

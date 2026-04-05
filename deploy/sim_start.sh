@@ -13,22 +13,21 @@ IMAGE="quant-sim"
 NETWORK="quant_network"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SYMBOL=$(grep 'symbol:' "${SCRIPT_DIR}/../strategies/${STRATEGY}/config.yaml" | head -1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
-CONTAINER="quant_sim_${STRATEGY}_${SYMBOL}"
+source "${SCRIPT_DIR}/_common.sh"
+CONTAINER=$(sim_container_name "${STRATEGY}")
 
-# Load .env if exists (for Telegram credentials etc.)
-if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+# Load .env from project root (for Telegram credentials etc.)
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     set -a
     # shellcheck source=/dev/null
-    source "${SCRIPT_DIR}/.env"
+    source "${PROJECT_ROOT}/.env"
     set +a
 fi
 
-# Build image if not exists
-if ! docker image inspect "${IMAGE}" &>/dev/null; then
-    echo "Building sim image..."
-    docker build -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile.sim" "${SCRIPT_DIR}/.."
-fi
+# Always rebuild to pick up code changes
+echo "Building sim image..."
+docker build -q -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile.sim" "${SCRIPT_DIR}/.." >/dev/null
 
 # Stop existing container with same name
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -42,7 +41,7 @@ docker run -d \
     --name "${CONTAINER}" \
     --network "${NETWORK}" \
     --restart unless-stopped \
-    -e TIMESCALE_DSN="${TIMESCALE_DSN:-postgresql://quant:quant_secret@timescaledb:5432/quant}" \
+    -e TIMESCALE_DSN="${TIMESCALE_DSN:?Set TIMESCALE_DSN in .env}" \
     -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
     -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" \
     "${IMAGE}" \

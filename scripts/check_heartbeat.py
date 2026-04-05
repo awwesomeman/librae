@@ -7,13 +7,13 @@ job or standalone watchdog, independent of the monitored services.
 
 Usage:
     # One-shot check
-    python deploy/check_heartbeat.py
+    python scripts/check_heartbeat.py
 
     # Continuous polling (every 60s)
-    python deploy/check_heartbeat.py --loop --interval 60
+    python scripts/check_heartbeat.py --loop --interval 60
 
     # Cron (every 5 minutes)
-    */5 * * * * cd /path/to/quant-strategy-lab && .venv/bin/python deploy/check_heartbeat.py
+    */5 * * * * cd /path/to/quant-strategy-lab && .venv/bin/python scripts/check_heartbeat.py
 """
 from __future__ import annotations
 

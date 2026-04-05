@@ -29,8 +29,8 @@ git clone git@github-quant-strategy:awwesomeman/quant-strategy-lab.git
 cd quant-strategy-lab
 python3.12 -m venv .venv && .venv/bin/pip install -e .
 
-# 設定 DB 連線（連遠端 VPS）
-export TIMESCALE_DSN="postgresql://quant:password@your-vps-ip:5432/quant"
+# 設定環境變數
+cp .env.example .env   # 編輯 .env 填入 VPS_DB_HOST、POSTGRES_PASSWORD 等
 
 # VPS 端：啟動 DB（首次會自動建表）
 cd deploy && docker compose up -d timescaledb
@@ -142,41 +142,17 @@ python -m app.grafana.generate_dashboards
 
 ### 本機開發儀表板
 
-本機只跑 Grafana，連遠端 VPS 的 TimescaleDB。
+本機只跑 Grafana，透過 `.env` 中的 `VPS_DB_HOST` 連遠端 TimescaleDB。
 
 **啟動：**
 
 ```bash
+# 確認 .env 已設定 VPS_DB_HOST=你的VPS-IP
 cd deploy
-export POSTGRES_PASSWORD=your-password
 docker compose -f docker-compose.local.yml up -d
 ```
 
-**設定 datasource 連到 VPS（每次重建 container 需執行一次）：**
-
-```bash
-# 等 Grafana 啟動完成
-sleep 5
-
-# 用 API 把 datasource URL 改成 VPS IP
-curl -X PUT -u admin:admin -H "Content-Type: application/json" \
-  "http://localhost:3000/api/datasources/uid/P40AE60E18F02DE32" \
-  -d '{
-    "name": "TimescaleDB",
-    "uid": "P40AE60E18F02DE32",
-    "type": "grafana-postgresql-datasource",
-    "url": "your-vps-ip:5432",
-    "database": "quant",
-    "user": "quant",
-    "secureJsonData": {"password": "your-password"},
-    "jsonData": {"database":"quant","sslmode":"disable","postgresVersion":1600,"timescaledb":true},
-    "isDefault": true,
-    "access": "proxy"
-  }'
-```
-
-> `docker restart` 不需要重跑（Grafana volume 會保留）。
-> 只有 `docker compose down -v`（刪 volume）後才需要重新設定。
+Datasource 由 provisioning 自動設定（讀 `VPS_DB_HOST` 環境變數），不需手動用 API 改。
 
 **開發流程：**
 
@@ -192,7 +168,7 @@ VPS 上跑完整 docker-compose（DB + Grafana + Sim 在同一個 Docker network
 cd deploy && docker compose up -d
 ```
 
-此模式 datasource 自動連到 `quant_timescaledb:5432`（Docker 內部 hostname），不需額外設定。
+VPS 的 `VPS_DB_HOST` 預設為 `quant_timescaledb`（Docker 內部 hostname），不需額外設定。
 
 ---
 
@@ -200,14 +176,8 @@ cd deploy && docker compose up -d
 
 ### 環境變數
 
-```bash
-# 必填：DB 連線
-export TIMESCALE_DSN="postgresql://quant:password@your-vps-ip:5432/quant"
-
-# 選填：Telegram 通知
-export TELEGRAM_BOT_TOKEN="..."
-export TELEGRAM_CHAT_ID="..."
-```
+所有環境變數統一放在專案根目錄的 `.env`（從 `.env.example` 複製）。
+Docker Compose 和 shell 腳本都從同一份 `.env` 讀取。
 
 完整變數清單見 `.env.example`。
 
@@ -215,14 +185,14 @@ export TELEGRAM_CHAT_ID="..."
 
 ```bash
 # 首次
-cd deploy && cp ../.env.example .env  # 編輯填入密碼
-docker compose up -d timescaledb
+cp .env.example .env  # 編輯填入密碼、TIMESCALE_DSN 等
+cd deploy && docker compose up -d
 
 # 更新程式碼後
 git pull && docker compose up -d --build
 
 # 重建 DB（清除所有資料）
-docker exec -i quant_timescaledb psql -U quant -d quant < ../deploy/timescale_init.sql
+docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 ```
 
 ### Sim 服務管理
@@ -262,6 +232,7 @@ quant-strategy-lab/
 │   └── trendpullback_m5/   # M5 變體
 ├── app/grafana/            # Grafana 儀表板 generator
 ├── deploy/                 # Docker Compose + SQL + sim 腳本
+├── scripts/                # 開發 / 運維工具腳本
 ├── tests/                  # pytest
 └── docs/                   # 決策記錄 + 執行計劃 + 部署指南
 ```
@@ -337,7 +308,7 @@ data/cache/{SYMBOL}_{INTERVAL}_{SOURCE}.parquet    # 例：data/cache/BTCUSDT_1h
 
 | 檔案 | 設定什麼 | 是否進 git |
 |------|---------|-----------|
-| `.env.example` → `.env` | secrets + DB 連線 | `.env.example` 進，`.env` 不進 |
+| `.env.example` → `.env`（專案根目錄） | secrets + DB 連線 + Grafana + Telegram | `.env.example` 進，`.env` 不進 |
 | `librae/config/markets.yaml` | 市場成本參數 | ✅ |
 | `strategies/*/config.yaml` | 策略參數 + 通知 | ✅ |
 | `deploy/timescale_init.sql` | DB schema | ✅ |

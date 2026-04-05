@@ -21,7 +21,7 @@ quant-research-lab/
 *.egg-info/
 
 # Secrets
-deploy/.env
+.env
 .env.local
 logs/
 experiments/

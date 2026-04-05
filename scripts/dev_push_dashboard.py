@@ -6,14 +6,15 @@ Changes are overwritten on Grafana restart by provisioning.
 Source of truth: app/grafana/provisioning/dashboards/json/*.json
 
 Usage:
-    python deploy/dev_push_dashboard.py
-    python deploy/dev_push_dashboard.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
+    python scripts/dev_push_dashboard.py
+    python scripts/dev_push_dashboard.py --grafana-url http://host:3000 --grafana-password secret
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -26,9 +27,9 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Setup Grafana datasource uid and deploy dashboards")
-    p.add_argument("--grafana-url", default="http://localhost:3000", help="Grafana base URL")
+    p.add_argument("--grafana-url", default=os.environ.get("GRAFANA_URL", "http://localhost:3000"), help="Grafana base URL")
     p.add_argument("--grafana-user", default="admin", help="Grafana admin username")
-    p.add_argument("--grafana-password", default="admin", help="Grafana admin password")
+    p.add_argument("--grafana-password", default=os.environ.get("GRAFANA_PASSWORD", "admin"), help="Grafana admin password")
     return p.parse_args()
 
 

@@ -17,8 +17,8 @@ if [[ "${1:-}" == "--all" ]]; then
 else
     STRATEGY="${1:?Usage: sim_stop.sh <strategy> | --all}"
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    SYMBOL=$(grep 'symbol:' "${SCRIPT_DIR}/../strategies/${STRATEGY}/config.yaml" | head -1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
-    CONTAINER="quant_sim_${STRATEGY}_${SYMBOL}"
+    source "${SCRIPT_DIR}/_common.sh"
+    CONTAINER=$(sim_container_name "${STRATEGY}")
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
         docker rm -f "${CONTAINER}" >/dev/null
         echo "Stopped ${CONTAINER}."
