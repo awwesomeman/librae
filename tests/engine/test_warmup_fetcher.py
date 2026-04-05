@@ -44,7 +44,7 @@ class TestWarmupFetcher:
             feature_fn=lambda x: x,
             executor=mock_executor,
             warmup_fetcher=mock_warmup,
-            warmup_bars=50,
+            warmup_periods=50,
         )
 
         result = trader._fetch_with_cache("BTCUSDT")
@@ -74,7 +74,7 @@ class TestWarmupFetcher:
             feature_fn=lambda x: x,
             executor=mock_executor,
             warmup_fetcher=None,
-            warmup_bars=10,
+            warmup_periods=10,
         )
 
         result = trader._fetch_with_cache("BTCUSDT")

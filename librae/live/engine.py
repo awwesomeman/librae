@@ -36,7 +36,7 @@ class LiveTrader:
         executor: LiveExecutor for handling actions.
         run_id: Unique run identifier for DB writes.
         timeframe: Candle interval (e.g. "1h").
-        warmup_bars: Number of historical bars for indicator warm-up.
+        warmup_periods: Number of historical bars for indicator warm-up.
         initial_balance: Starting cash for position sizing.
         poll_seconds: Seconds between poll cycles.
         on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
@@ -65,7 +65,7 @@ class LiveTrader:
         *,
         run_id: str = "",
         timeframe: str = "1h",
-        warmup_bars: int = 720,
+        warmup_periods: int = 720,
         initial_balance: float = 100_000.0,
         poll_seconds: float = 60.0,
         on_bar: Callable[..., None] | None = None,
@@ -83,7 +83,7 @@ class LiveTrader:
         self._executor = executor
         self._run_id = run_id
         self._timeframe = timeframe
-        self._warmup_bars = warmup_bars
+        self._warmup_periods = warmup_periods
         self._poll_seconds = poll_seconds
         self._warmup_fetcher = warmup_fetcher
         self._on_bar = on_bar
@@ -234,10 +234,10 @@ class LiveTrader:
                 if self._warmup_fetcher:
                     # WHY: DB-first warmup avoids re-fetching 720 bars from
                     # exchange API on every sim restart.
-                    df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_bars)
+                    df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
                 else:
                     df = self._fetcher(
-                        symbol, self._timeframe, self._warmup_bars, drop_incomplete=True,
+                        symbol, self._timeframe, self._warmup_periods, drop_incomplete=True,
                     )
                 self._ohlcv_cache[symbol] = df
                 return df
@@ -253,9 +253,9 @@ class LiveTrader:
 
             if not new_bars.empty:
                 cached = pd.concat([cached, new_bars], ignore_index=True)
-                # Trim to keep only warmup_bars
-                if len(cached) > self._warmup_bars:
-                    cached = cached.iloc[-self._warmup_bars:]
+                # Trim to keep only warmup_periods
+                if len(cached) > self._warmup_periods:
+                    cached = cached.iloc[-self._warmup_periods:]
                 self._ohlcv_cache[symbol] = cached
 
             return cached

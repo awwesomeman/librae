@@ -1,0 +1,82 @@
+# TrendMaster Pro 2.3 experiment config
+# Refactored from Pine Script — see reference.md for original source
+# CLI: python -m experiments.trendmaster.run --mode backtest --dry-run
+#
+# === 切換 IS / OOS 只需改 start / end ===
+# IS  (樣本內):  2024-01-01 ~ 2025-06-30  (18 個月，調參用)
+# OOS (樣本外):  2025-07-01 ~ 2026-03-31  ( 9 個月，驗證用)
+
+strategy:
+  name: trendmaster
+  symbol: BTCUSDT
+  market: crypto
+  initial_balance: 100000
+  timeframe: H1
+  params:
+    # --- 資料期間 (start/end 優先於 months) ---
+    start: "2024-01-01"
+    end: "2025-06-30"
+    months: 18                  # fallback if start/end removed
+    warmup_periods: 200
+
+    # --- MA Crossover (primary signal) ---
+    ma_type: SMA                # EMA | SMA | SMMA
+    short_ma_length: 9
+    long_ma_length: 26          # IS Exp 2: MA(9,26) > MA(9,21)
+
+    # --- Higher-TF Trend Filter (H1→D1 gate) ---
+    enable_trend_filter: true
+    trend_ma_type: EMA
+    trend_ma_length: 50
+    htf_resample_rule: "1D"     # H1→D1; if M5 use "30min"
+
+    # --- Bollinger Bands Volatility Filter ---
+    use_volatility_filter: true
+    use_bb_trend_filter: true
+    bb_length: 20
+    bb_multiplier: 2.0
+
+    # --- RSI Momentum Filter ---
+    use_rsi: false              # IS 結論：邊際貢獻為負
+    rsi_length: 14
+    rsi_long_threshold: 55
+    rsi_short_threshold: 45
+
+    # --- MACD Trend Confirmation ---
+    use_macd: false             # IS 結論：與 MA cross 高度冗餘
+    macd_fast_length: 12
+    macd_slow_length: 26
+    macd_signal_smoothing: 9
+
+    # --- Stochastic Oscillator ---
+    use_stochastic: false       # IS 結論：邊際貢獻為負
+    stoch_length: 14
+    stoch_smoothing: 3
+    stoch_overbought: 80
+    stoch_oversold: 20
+
+    # --- ADX Strength Filter ---
+    use_adx: true
+    adx_length: 14
+    adx_threshold: 25
+
+    # --- Band Power ---
+    band_length: 20
+    band_type: 2                # 1=EMA(fast) 2=SMA(balanced) 3=SMMA(slow)
+
+    # --- ATR ---
+    atr_length: 14
+    atr_multiplier_sl: 2.0
+
+    # --- TP / SL (IS Exp D3 最佳) ---
+    sl_percent: 3.0             # trailing stop distance
+    tp_percent: 15.0            # profit cap
+    sl_trail: true              # trailing stop enabled
+    max_hold_bars: 144          # 6 天 (H1)
+
+    # --- Daily Limits ---
+    tp_reached_limit: 3
+    sl_reached_limit: 3
+
+telegram:
+  enabled: false

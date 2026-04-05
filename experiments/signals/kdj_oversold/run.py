@@ -24,7 +24,7 @@ SYMBOL = "BTCUSDT"
 TIMEFRAME = "1h"
 START = "2025-10-01"
 POLL_SECONDS = 60
-WARMUP_BARS = 200       # bars (sim only)
+WARMUP_PERIODS = 200       # bars (sim only)
 
 
 def run_backtest() -> None:
@@ -62,7 +62,7 @@ def run_sim() -> None:
         market="crypto",
         initial_balance=0,
         poll_seconds=POLL_SECONDS,
-        warmup_bars=WARMUP_BARS,
+        warmup_periods=WARMUP_PERIODS,
         no_db=False,
         signal_column="entry_signal",
         params=DEFAULT_PARAMS,

@@ -155,7 +155,7 @@ class TestLiveTrader:
             feature_fn=feature_fn or _simple_feature_fn,
             executor=executor or LiveExecutor(_zero_cost_model(), simulation=True),
             timeframe="1h",
-            warmup_bars=5,
+            warmup_periods=5,
             initial_balance=100_000.0,
             poll_seconds=0.0,
             **kwargs,
@@ -207,7 +207,7 @@ class TestLiveTrader:
         runner = self._make_runner(fetcher=tracking_fetcher)
         runner.run(max_iterations=3)
 
-        assert calls[0]["limit"] == 5  # warmup_bars (full fetch)
+        assert calls[0]["limit"] == 5  # warmup_periods (full fetch)
         for c in calls[1:]:
             assert c["limit"] == 2  # incremental
 

@@ -100,7 +100,7 @@ def run_sim(args: argparse.Namespace) -> None:
         market=scfg["market"],
         initial_balance=scfg["initial_balance"],
         poll_seconds=args.poll_seconds,
-        warmup_bars=params["warmup_bars"],
+        warmup_periods=params["warmup_periods"],
         no_db=args.no_db,
         telegram_config=getattr(args, "telegram", None),
         signal_column="entry_signal",
