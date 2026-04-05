@@ -130,7 +130,7 @@ def load_ohlcv(
     *,
     symbol: str | None = None,
     timeframe: str | None = None,
-    source: str | None = None,
+    data_source: str | None = None,
     start_ts: str | None = None,
     end_ts: str | None = None,
     dsn: str = TIMESCALE_DSN,
@@ -147,9 +147,9 @@ def load_ohlcv(
             WHERE symbol = %s AND timeframe = %s
         """
         params: list = [symbol, timeframe]
-        if source:
-            sql += " AND source = %s"
-            params.append(source)
+        if data_source:
+            sql += " AND data_source = %s"
+            params.append(data_source)
         if start_ts:
             sql += " AND ts >= %s"
             params.append(start_ts)

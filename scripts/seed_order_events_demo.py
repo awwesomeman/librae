@@ -85,9 +85,9 @@ def clean(cur):
     for tbl in ("trade_events", "equity_curve",
                 "strategy_performance", "backtest_runs"):
         cur.execute(f"DELETE FROM {tbl} WHERE run_id = %s", (RUN_ID,))
-    # ohlcv has no run_id — clean by symbol + time range + source
+    # ohlcv has no run_id — clean by symbol + time range + data_source
     cur.execute(
-        "DELETE FROM ohlcv WHERE symbol = %s AND source = 'seed' AND ts >= %s AND ts < %s",
+        "DELETE FROM ohlcv WHERE symbol = %s AND data_source = 'seed' AND ts >= %s AND ts < %s",
         (SYMBOL, START, _ts(N_BARS)),
     )
     print(f"Cleaned run_id={RUN_ID}")
@@ -362,8 +362,8 @@ def seed(cur):
     # ohlcv
     execute_values(
         cur,
-        "INSERT INTO ohlcv (ts, symbol, timeframe, source, open, high, low, close, volume)"
-        " VALUES %s ON CONFLICT (ts, symbol, timeframe) DO NOTHING",
+        "INSERT INTO ohlcv (ts, symbol, timeframe, data_source, open, high, low, close, volume)"
+        " VALUES %s ON CONFLICT (ts, symbol, timeframe, data_source) DO NOTHING",
         [(o["ts"], SYMBOL, TIMEFRAME, "seed",
           o["open"], o["high"], o["low"], o["close"], o["volume"]) for o in ohlcv],
     )

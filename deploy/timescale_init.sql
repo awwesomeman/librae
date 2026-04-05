@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
-    source          TEXT NOT NULL,
+    data_source     TEXT NOT NULL,
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,
     low             DOUBLE PRECISION,
@@ -110,8 +110,8 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     volume          DOUBLE PRECISION
 );
 SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, source);
+CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, data_source, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, data_source);
 
 -- ============================================================
 -- signal_events — 訊號品質監控 (hypertable, 獨立)

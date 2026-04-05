@@ -5,7 +5,7 @@ Checks DB for existing data, fetches gaps from exchange API, and upserts
 results back to DB.
 
     df = get_ohlcv("BTCUSDT", "1h", periods=4320)       # 4320 H1 bars ≈ 6 months
-    df = get_ohlcv("TXFR1", "5m", periods=26000, source="shioaji")
+    df = get_ohlcv("TXFR1", "5m", periods=26000, data_source="shioaji")
 
 Adding a new data source
 ------------------------
@@ -20,7 +20,7 @@ Register a fetcher function with ``register_ohlcv_fetcher`` before calling
     ) -> pd.DataFrame:      # columns: timestamp, open, high, low, close, volume
         ...
 
-    register_ohlcv_fetcher("my_source", my_fetcher)
+    register_ohlcv_fetcher("custom_exchange", my_fetcher)
 """
 from __future__ import annotations
 
@@ -46,18 +46,18 @@ OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 _OHLCV_FETCHERS: dict[str, Callable] = {}
 
 
-def register_ohlcv_fetcher(source: str, fn: Callable) -> None:
-    """Register a data-source fetcher under ``source`` name.
+def register_ohlcv_fetcher(data_source: str, fn: Callable) -> None:
+    """Register a data-source fetcher under ``data_source`` name.
 
-    The fetcher will be called by ``get_ohlcv`` when ``source=source`` is
-    requested.  Registering a name that already exists overwrites it.
+    The fetcher will be called by ``get_ohlcv`` when ``data_source=data_source``
+    is requested.  Registering a name that already exists overwrites it.
 
     Args:
-        source: Identifier string (e.g. ``'binance_spot'``, ``'shioaji'``).
+        data_source: Identifier string (e.g. ``'binance_spot'``, ``'shioaji'``).
         fn: ``fn(symbol, interval, start, end) -> DataFrame`` where
             ``interval`` is in ccxt format (``'1h'``, ``'5m'`` …).
     """
-    _OHLCV_FETCHERS[source] = fn
+    _OHLCV_FETCHERS[data_source] = fn
 
 
 def _binance_fetcher(
@@ -80,30 +80,30 @@ def get_ohlcv(
     start: str | datetime | None = None,
     end: str | datetime | None = None,
     periods: int = 4320,
-    source: str = "binance_spot",
+    data_source: str = "binance_spot",
 ) -> pd.DataFrame:
     """Unified OHLCV fetch: DB → API gap-fill → DB.
 
     Args:
-        symbol:   Trading symbol (e.g. ``'BTCUSDT'``, ``'TXFR1'``).
-        interval: Candle interval in any supported format
-                  (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
-        start/end: Time range. If omitted, uses ``periods * interval`` before now.
-        periods:  Number of bars to look back when ``start`` is not specified.
-                  Default 4320 (≈ 6 months of H1 bars).
-        source:   Data source key registered via ``register_ohlcv_fetcher``.
-                  Built-in: ``'binance_spot'`` / ``'binance'``.
+        symbol:      Trading symbol (e.g. ``'BTCUSDT'``, ``'TXFR1'``).
+        interval:    Candle interval in any supported format
+                     (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
+        start/end:   Time range. If omitted, uses ``periods * interval`` before now.
+        periods:     Number of bars to look back when ``start`` is not specified.
+                     Default 4320 (≈ 6 months of H1 bars).
+        data_source: Data source key registered via ``register_ohlcv_fetcher``.
+                     Built-in: ``'binance_spot'``.
 
     Returns:
         DataFrame with columns [timestamp, open, high, low, close, volume],
         timestamp is tz-aware UTC, sorted ascending.
 
     Raises:
-        ValueError: If ``source`` has no registered fetcher.
+        ValueError: If ``data_source`` has no registered fetcher.
     """
-    if source not in _OHLCV_FETCHERS:
+    if data_source not in _OHLCV_FETCHERS:
         raise ValueError(
-            f"No OHLCV fetcher registered for source='{source}'. "
+            f"No OHLCV fetcher registered for data_source='{data_source}'. "
             f"Available: {sorted(_OHLCV_FETCHERS)}. "
             "Register one with register_ohlcv_fetcher()."
         )
@@ -113,7 +113,7 @@ def get_ohlcv(
     start_dt = parse_dt(start) if start else end_dt - interval_to_timedelta(interval_ccxt) * periods
 
     # 1. Try DB first
-    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, source)
+    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, data_source)
 
     if db_df is not None and not db_df.empty:
         gaps = _find_gaps(db_df, start_dt, end_dt, interval_ccxt)
@@ -128,20 +128,20 @@ def get_ohlcv(
     # 2. Fill gaps from API → upsert to DB
     fetched_parts: list[pd.DataFrame] = []
     for gap_start, gap_end in gaps:
-        api_df = _fetch_from_api(symbol, interval_ccxt, gap_start, gap_end, source=source)
+        api_df = _fetch_from_api(symbol, interval_ccxt, gap_start, gap_end, data_source)
         if not api_df.empty:
             fetched_parts.append(api_df)
-            _upsert_db(api_df, symbol, interval_ccxt, source)
+            _upsert_db(api_df, symbol, interval_ccxt, data_source)
 
     # 3. Re-read from DB (merges existing + newly upserted data)
-    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, source)
+    db_df = _query_db(symbol, interval_ccxt, start_dt, end_dt, data_source)
     if db_df is not None and not db_df.empty:
         return db_df
 
     # 4. Fallback: DB unavailable, return already-fetched API data
     if fetched_parts:
         return pd.concat(fetched_parts, ignore_index=True)
-    return _fetch_from_api(symbol, interval_ccxt, start_dt, end_dt, source=source)
+    return _fetch_from_api(symbol, interval_ccxt, start_dt, end_dt, data_source)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ def get_ohlcv(
 
 def _query_db(
     symbol: str, interval: str, start_dt: datetime, end_dt: datetime,
-    source: str = "binance_spot",
+    data_source: str,
 ) -> pd.DataFrame | None:
     """Query ohlcv table. Returns None if DB is unavailable."""
     try:
@@ -158,7 +158,7 @@ def _query_db(
 
         df = load_ohlcv(
             symbol=symbol, timeframe=to_canonical(interval),
-            source=source,
+            data_source=data_source,
             start_ts=start_dt.isoformat(), end_ts=end_dt.isoformat(),
         )
         if df.empty:
@@ -175,15 +175,15 @@ def _fetch_from_api(
     interval: str,
     start_dt: datetime,
     end_dt: datetime,
-    source: str = "binance_spot",
+    data_source: str,
 ) -> pd.DataFrame:
-    """Dispatch fetch to the registered fetcher for ``source``."""
-    fetcher = _OHLCV_FETCHERS[source]   # caller already validated source exists
+    """Dispatch fetch to the registered fetcher for ``data_source``."""
+    fetcher = _OHLCV_FETCHERS[data_source]
     return fetcher(symbol, interval, start_dt, end_dt)
 
 
 def _upsert_db(
-    df: pd.DataFrame, symbol: str, interval: str, source: str,
+    df: pd.DataFrame, symbol: str, interval: str, data_source: str,
 ) -> None:
     """Write OHLCV to DB via existing writer."""
     try:
@@ -193,7 +193,7 @@ def _upsert_db(
         if "timestamp" in work.columns:
             work = work.set_index("timestamp")
             work.index.name = "ts"
-        write_ohlcv(work, symbol, interval, source=source)
+        write_ohlcv(work, symbol, interval, data_source=data_source)
     except Exception as e:
         logger.warning("DB upsert failed: %s", e)
 

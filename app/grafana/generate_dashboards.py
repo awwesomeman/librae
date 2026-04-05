@@ -347,7 +347,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " FROM ohlcv o, meta m"
                 " WHERE o.symbol = m.symbol"
                 " AND o.timeframe = m.timeframe"
-                " AND (m.data_source IS NULL OR o.source = m.data_source)"
+                " AND (m.data_source IS NULL OR o.data_source = m.data_source)"
                 " AND (m.start_ts IS NULL OR o.ts >= m.start_ts)"
                 " AND (m.end_ts IS NULL OR o.ts <= m.end_ts)"
                 " AND $__timeFilter(o.ts)"
@@ -526,7 +526,7 @@ EXTRA_PANELS: list[dict] = [
             "latest AS (\n"
             "  SELECT close FROM ohlcv, meta\n"
             "  WHERE symbol = meta.symbol AND timeframe = meta.timeframe\n"
-            "    AND (meta.data_source IS NULL OR source = meta.data_source)\n"
+            "    AND (meta.data_source IS NULL OR data_source = meta.data_source)\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
             "SELECT CASE WHEN p.quantity > 0 THEN\n"
@@ -753,7 +753,7 @@ _META_INNER = (
 _OHLCV_WHERE = (
     "symbol = meta.symbol"
     " AND timeframe = meta.timeframe"
-    " AND (meta.data_source IS NULL OR source = meta.data_source)"
+    " AND (meta.data_source IS NULL OR data_source = meta.data_source)"
 )
 _ENTRY_BAR = (
     f"SELECT close FROM ohlcv, meta"

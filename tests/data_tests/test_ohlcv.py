@@ -79,7 +79,7 @@ class TestGetOhlcv:
 
     def test_unknown_source_raises(self):
         with pytest.raises(ValueError, match="No OHLCV fetcher"):
-            get_ohlcv("BTCUSDT", "1h", source="nonexistent_exchange")
+            get_ohlcv("BTCUSDT", "1h", data_source="nonexistent_exchange")
 
     @patch("data.ohlcv._upsert_db")
     @patch("data.ohlcv._query_db")
@@ -91,7 +91,7 @@ class TestGetOhlcv:
 
         mock_db.side_effect = [pd.DataFrame(), custom_df]
 
-        result = get_ohlcv("SYMBOL", "1h", source="test_exchange", periods=720)
+        result = get_ohlcv("SYMBOL", "1h", data_source="test_exchange", periods=720)
 
         mock_fetcher.assert_called_once()
         assert len(result) == 2

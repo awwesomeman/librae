@@ -212,7 +212,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT side, entry_price, position_quantity AS quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta\n  WHERE symbol = meta.symbol AND timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.quantity\n    ELSE (p.entry_price - l.close) * p.quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT side, entry_price, position_quantity AS quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta\n  WHERE symbol = meta.symbol AND timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.quantity\n    ELSE (p.entry_price - l.close) * p.quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -818,7 +818,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source, start_ts, end_ts FROM backtest_runs WHERE run_id = '${run_id}') SELECT o.ts AS time, o.close FROM ohlcv o, meta m WHERE o.symbol = m.symbol AND o.timeframe = m.timeframe AND (m.data_source IS NULL OR o.source = m.data_source) AND (m.start_ts IS NULL OR o.ts >= m.start_ts) AND (m.end_ts IS NULL OR o.ts <= m.end_ts) AND $__timeFilter(o.ts) ORDER BY o.ts",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source, start_ts, end_ts FROM backtest_runs WHERE run_id = '${run_id}') SELECT o.ts AS time, o.close FROM ohlcv o, meta m WHERE o.symbol = m.symbol AND o.timeframe = m.timeframe AND (m.data_source IS NULL OR o.data_source = m.data_source) AND (m.start_ts IS NULL OR o.ts >= m.start_ts) AND (m.end_ts IS NULL OR o.ts <= m.end_ts) AND $__timeFilter(o.ts) ORDER BY o.ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {

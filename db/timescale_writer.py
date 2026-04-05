@@ -79,7 +79,7 @@ def write_run_metadata(
     start_ts: datetime | None = None,
     end_ts: datetime | None = None,
     run_ts: datetime | None = None,
-    data_source: str = "binance",
+    data_source: str | None = None,
     poll_interval: int | None = None,
     params_json: dict | None = None,
     cur: PgCursor | None = None,
@@ -269,7 +269,7 @@ def write_ohlcv(
     df: pd.DataFrame,
     symbol: str,
     timeframe: str,
-    source: str = "binance_spot",
+    data_source: str,
     dsn: str = TIMESCALE_DSN,
 ) -> int:
     """Write OHLCV DataFrame to TimescaleDB ohlcv table.
@@ -302,7 +302,7 @@ def write_ohlcv(
         ts_utc.apply(_to_dt),
         [symbol] * len(df),
         [timeframe] * len(df),
-        [source] * len(df),
+        [data_source] * len(df),
         df["open"].astype(float),
         df["high"].astype(float),
         df["low"].astype(float),
@@ -314,10 +314,10 @@ def write_ohlcv(
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO ohlcv (ts, symbol, timeframe, source,
+            """INSERT INTO ohlcv (ts, symbol, timeframe, data_source,
                open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT (ts, symbol, timeframe, source) DO NOTHING""",
+               ON CONFLICT (ts, symbol, timeframe, data_source) DO NOTHING""",
             rows,
             page_size=2000,
         )
@@ -552,6 +552,7 @@ def save_signal_results(
     run_id: str | None = None,
     mode: str = "backtest",
     signal_column: str = "entry_signal",
+    data_source: str = "binance_spot",
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
@@ -567,6 +568,15 @@ def save_signal_results(
 
         with get_conn() as conn:
             cur = conn.cursor()
+
+            if run_id is not None:
+                write_run_metadata(
+                    run_id, strategy, symbol, tf, mode,
+                    start_ts=_to_dt(start_ts), end_ts=_to_dt(end_ts),
+                    data_source=data_source,
+                    cur=cur,
+                )
+
             cur.execute(
                 """DELETE FROM signal_events
                    WHERE strategy = %s AND symbol = %s AND mode = %s
@@ -595,7 +605,7 @@ def save_signal_results(
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
-    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
+    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, data_source=data_source)
     return counts
 
 
@@ -606,6 +616,7 @@ def save_strategy_results(
     timeframe: str,
     params: dict | None = None,
     signal_column: str = "entry_signal",
+    data_source: str = "binance_spot",
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 
@@ -617,5 +628,5 @@ def save_strategy_results(
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
-    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe)
+    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, data_source=data_source)
     return counts

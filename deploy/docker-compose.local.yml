@@ -23,7 +23,6 @@ services:
       - ../app/grafana/provisioning:/etc/grafana/provisioning
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=false
-      - VPS_DB_HOST=${VPS_DB_HOST:?Set VPS_DB_HOST to your VPS IP in .env}
 
 volumes:
   grafana_local_data:
