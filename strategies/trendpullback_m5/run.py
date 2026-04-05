@@ -11,14 +11,19 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
+from data.ohlcv import get_ohlcv
 from librae import Backtest
 from librae.config.market_config import get_market
+from librae.core.utils import interval_to_timedelta
 from db.timescale_writer import save_strategy_results
 
 from .strategy import TrendPullbackM5Strategy
-from .utils import fetch_and_prepare, prepare_signals
+from .utils import prepare_signals
 
 logger = logging.getLogger("strategies.trendpullback_m5")
 
@@ -33,7 +38,13 @@ def run_backtest(args: argparse.Namespace) -> None:
     timeframe = scfg["timeframe"]
 
     logger.info("[1/3] Fetching & preparing %s (%d periods, %s)...", symbol, params["periods"], timeframe)
-    df = fetch_and_prepare(symbol, params["periods"])
+    fetch_start = datetime.now(timezone.utc) - interval_to_timedelta(timeframe) * params["periods"]
+    raw = get_ohlcv(symbol, timeframe, data_source="binance_spot", start=fetch_start.isoformat())
+    m5 = raw.set_index("timestamp")
+    m5.index.name = "ts"
+    m5 = prepare_signals(m5, params)
+    mi = pd.MultiIndex.from_arrays([[symbol] * len(m5), m5.index], names=["symbol", "datetime"])
+    df = m5.set_index(mi)
     logger.info("       bars=%d", len(df))
 
     logger.info("[2/3] Running backtest...")
@@ -45,6 +56,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         market_config=market_config,
         initial_balance=scfg["initial_balance"],
         strategy_name=STRATEGY_NAME,
+        data_source="binance_spot",
     )
     benchmark_prices = df.xs(symbol, level="symbol")["close"]
     bt.add_benchmark(benchmark_prices)
@@ -62,7 +74,7 @@ def run_backtest(args: argparse.Namespace) -> None:
 
     if not args.no_db:
         try:
-            counts = save_strategy_results(output, df, symbol, timeframe, params)
+            counts = save_strategy_results(output, df, symbol, timeframe, "binance_spot", params)
             logger.info("       DB: %s", counts)
         except Exception as e:
             logger.warning("DB write skipped: %s", e)
@@ -87,7 +99,7 @@ def run_sim(args: argparse.Namespace) -> None:
         timeframe=timeframe,
         market=scfg["market"],
         initial_balance=scfg["initial_balance"],
-        poll_interval=args.poll_interval,
+        poll_seconds=args.poll_seconds,
         warmup_bars=params["warmup_bars"],
         no_db=args.no_db,
         telegram_config=getattr(args, "telegram", None),
@@ -95,7 +107,7 @@ def run_sim(args: argparse.Namespace) -> None:
         params=params,
     )
     logger.info("Sim started: strategy=%s, symbols=%s, timeframe=%s, poll=%ds",
-                STRATEGY_NAME, symbols, timeframe, args.poll_interval)
+                STRATEGY_NAME, symbols, timeframe, args.poll_seconds)
     trader.run()
 
 

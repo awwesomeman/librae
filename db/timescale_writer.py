@@ -80,7 +80,7 @@ def write_run_metadata(
     end_ts: datetime | None = None,
     run_ts: datetime | None = None,
     data_source: str | None = None,
-    poll_interval: int | None = None,
+    poll_seconds: int | None = None,
     params_json: dict | None = None,
     cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
@@ -92,19 +92,19 @@ def write_run_metadata(
     """
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, data_source,
-                start_ts, end_ts, run_ts, mode, poll_interval,
+                start_ts, end_ts, run_ts, mode, poll_seconds,
                 params)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
-                 mode=EXCLUDED.mode, poll_interval=EXCLUDED.poll_interval,
+                 mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params"""
     params_val = json.dumps(params_json) if params_json is not None else None
     values = (
         run_id, strategy, symbol, timeframe, data_source,
         _to_dt(start_ts), _to_dt(end_ts),
         _to_dt(run_ts) or datetime.now(tz=timezone.utc),
-        mode, poll_interval,
+        mode, poll_seconds,
         params_val,
     )
     if cur is not None:
@@ -549,10 +549,10 @@ def save_signal_results(
     symbol: str,
     timeframe: str,
     strategy: str,
+    data_source: str,
     run_id: str | None = None,
     mode: str = "backtest",
     signal_column: str = "entry_signal",
-    data_source: str = "binance_spot",
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
@@ -614,9 +614,9 @@ def save_strategy_results(
     df: pd.DataFrame,
     symbol: str,
     timeframe: str,
+    data_source: str,
     params: dict | None = None,
     signal_column: str = "entry_signal",
-    data_source: str = "binance_spot",
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 

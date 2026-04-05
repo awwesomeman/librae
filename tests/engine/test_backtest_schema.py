@@ -25,6 +25,7 @@ def _make_run_metadata(**kwargs) -> RunMetadata:
         strategy="DemoBreakout_v1",
         symbol="MXFR1",
         timeframe="H1",
+        data_source="binance_spot",
         start_ts=START,
         end_ts=END,
         run_ts=NOW,
@@ -96,7 +97,7 @@ def _make_metrics() -> StrategyMetrics:
 def test_run_metadata_defaults() -> None:
     meta = _make_run_metadata()
     assert meta.mode == "backtest"
-    assert meta.data_source == "binance"
+    assert meta.data_source == "binance_spot"
 
 
 def test_backtest_output_validate_passes() -> None:

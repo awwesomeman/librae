@@ -153,7 +153,7 @@ class TestComputeAllWithEngine:
             tick_size=0.01, transaction_tax=0.0,
         )
         bt = Backtest(df, BuyBar10CloseBar30(), initial_balance=10_000,
-                      cost_model=cost)
+                      cost_model=cost, data_source="test")
         bt.run()
         output = bt.build_output()
 

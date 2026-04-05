@@ -53,21 +53,21 @@ class TestBuildOutputValid:
 
     def test_returns_backtest_output(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         assert isinstance(output, BacktestOutput)
 
     def test_validate_passes(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         output.validate()
 
     def test_has_run_metadata(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         meta = output.run_metadata
@@ -78,28 +78,28 @@ class TestBuildOutputValid:
 
     def test_explicit_strategy_name(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), strategy_name="my_custom_name")
+        bt = Backtest(df, BuyBar5CloseBar15(), strategy_name="my_custom_name", data_source="test")
         bt.run()
         output = bt.build_output()
         assert output.run_metadata.strategy == "my_custom_name"
 
     def test_has_trades(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         assert len(output.trades) >= 1
 
     def test_has_equity_curve(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         assert len(output.equity_curve) == 50
 
     def test_metrics_accessible(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         assert isinstance(output.metrics, StrategyMetrics)
@@ -111,13 +111,13 @@ class TestBuildOutputBeforeRun:
 
     def test_raises_runtime_error(self) -> None:
         df = _make_df()
-        bt = Backtest(df, HoldStrategy())
+        bt = Backtest(df, HoldStrategy(), data_source="test")
         with pytest.raises(RuntimeError, match="Call run"):
             bt.build_output()
 
     def test_metrics_before_build_raises(self) -> None:
         df = _make_df()
-        bt = Backtest(df, HoldStrategy())
+        bt = Backtest(df, HoldStrategy(), data_source="test")
         bt.run()
         with pytest.raises(RuntimeError, match="build_output"):
             _ = bt.metrics
@@ -128,7 +128,7 @@ class TestBenchmark:
 
     def test_no_benchmark(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         assert output.metrics.benchmark_return is None
@@ -138,7 +138,7 @@ class TestBenchmark:
     def test_with_benchmark(self) -> None:
         df = _make_df()
         benchmark_prices = df.xs("BTCUSDT", level="symbol")["close"]
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.add_benchmark(benchmark_prices)
         bt.run()
         output = bt.build_output()
@@ -150,7 +150,7 @@ class TestBenchmark:
 
     def test_annualize_false_by_default(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
         assert output.metrics.sharpe is None
@@ -158,7 +158,7 @@ class TestBenchmark:
 
     def test_annualize_true(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15())
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output(annualize=True)
         assert output.metrics.sharpe is not None

@@ -64,12 +64,12 @@ class RunMetadata:
     strategy: str
     symbol: str
     timeframe: str
+    data_source: str
     start_ts: datetime
     end_ts: datetime
     run_ts: datetime
     params: dict | None = None
     mode: str = "backtest"
-    data_source: str = "binance_spot"
 
 
 @dataclass(frozen=True)

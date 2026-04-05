@@ -60,6 +60,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         market_config=market_config,
         initial_balance=scfg["initial_balance"],
         strategy_name=STRATEGY_NAME,
+        data_source="binance_spot",
     )
     benchmark_prices = df.xs(symbol, level="symbol")["close"]
     bt.add_benchmark(benchmark_prices)
@@ -105,13 +106,13 @@ def run_sim(args: argparse.Namespace) -> None:
         timeframe=timeframe,
         market=scfg["market"],
         initial_balance=scfg["initial_balance"],
-        poll_interval=args.poll_interval,
+        poll_seconds=args.poll_seconds,
         warmup_bars=params["warmup_bars"],
         no_db=args.no_db,
         telegram_config=getattr(args, "telegram", None),
     )
     logger.info("Sim started: strategy=%s, symbols=%s, timeframe=%s, poll=%ds",
-                STRATEGY_NAME, symbols, timeframe, args.poll_interval)
+                STRATEGY_NAME, symbols, timeframe, args.poll_seconds)
     trader.run()
 
 

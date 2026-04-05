@@ -3,7 +3,7 @@
 Usage:
     from librae.config import get_market
 
-    bt = Backtest(data=df, strategy=my_strategy, market_config=get_market("crypto"))
+    bt = Backtest(data=df, strategy=my_strategy, market_config=get_market("crypto"), data_source="binance_spot")
     bt.add_benchmark(df.xs("BTCUSDT", level="symbol")["close"])
     bt.run()
     output = bt.build_output(annualize=True)
@@ -88,10 +88,12 @@ class Backtest:
         *,
         strategy_name: str | None = None,
         cost_model: CostModel | None = None,
+        data_source: str,
     ) -> None:
         self._data = data
         self._strategy = strategy
         self._initial_balance = initial_balance
+        self._data_source = data_source
         self._benchmark_prices: pd.Series | None = None
         self._run_id: str | None = None
         self._timeframe: str | None = None
@@ -307,6 +309,7 @@ class Backtest:
             strategy=self._strategy_name,
             symbol=symbol,
             timeframe=timeframe,
+            data_source=self._data_source,
             start_ts=start_ts,
             end_ts=end_ts,
             run_ts=datetime.now(tz=timezone.utc),

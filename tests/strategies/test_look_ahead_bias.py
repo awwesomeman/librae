@@ -219,7 +219,7 @@ class TestEngineExecutionTiming:
         """Trade entry price must equal close[i] where signal fired."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -232,7 +232,7 @@ class TestEngineExecutionTiming:
         """Trade exit price must equal close[j] where exit signal fired."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -245,7 +245,7 @@ class TestEngineExecutionTiming:
         """gross_pnl must equal (exit - entry) * quantity * direction."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         trade = result.trades[0]
@@ -256,7 +256,7 @@ class TestEngineExecutionTiming:
         """holding_bars must equal number of bars from entry to exit."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         trade = result.trades[0]
@@ -268,7 +268,7 @@ class TestEngineExecutionTiming:
         """Equity should not jump before the trade entry."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         eq = result.equity_curve

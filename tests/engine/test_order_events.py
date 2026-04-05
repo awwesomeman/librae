@@ -265,7 +265,7 @@ class TestEngineIntegration:
                 return []
 
         bt = Backtest(df, BuyBar5CloseBar20(), initial_balance=10_000,
-                      cost_model=ZERO_COST)
+                      cost_model=ZERO_COST, data_source="test")
         result = bt.run()
 
         # Should have open + close events (+ possible force_close at end)

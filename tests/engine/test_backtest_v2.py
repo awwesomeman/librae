@@ -83,7 +83,7 @@ class TestBacktestBasics:
     def test_no_trades_flat_equity(self) -> None:
         df = _make_multiindex_df([100.0] * 10)
         bt = Backtest(df, HoldStrategy(), initial_balance=10_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 0
@@ -94,7 +94,7 @@ class TestBacktestBasics:
         prices = [100.0, 100.0, 100.0, 110.0, 110.0, 110.0]
         df = _make_multiindex_df(prices)
         bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -115,7 +115,7 @@ class TestBacktestBasics:
                 return []
 
         bt = Backtest(df, BuyBar2(), initial_balance=10_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -124,7 +124,7 @@ class TestBacktestBasics:
     def test_requires_multiindex(self) -> None:
         df = pd.DataFrame({"close": [100.0]}, index=pd.date_range("2025-01-01", periods=1))
         with pytest.raises(ValueError, match="MultiIndex"):
-            Backtest(df, HoldStrategy())
+            Backtest(df, HoldStrategy(), data_source="test")
 
 
 class TestSignalDrivenStrategy:
@@ -136,7 +136,7 @@ class TestSignalDrivenStrategy:
         df.iloc[6, df.columns.get_loc("exit_signal")] = True
 
         bt = Backtest(df, SignalDrivenStrategy(), initial_balance=10_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -149,7 +149,7 @@ class TestSignalDrivenStrategy:
         # No exit signal — should force close at max_hold_bars
 
         bt = Backtest(df, SignalDrivenStrategy(max_hold_bars=5),
-                      initial_balance=10_000, cost_model=_zero_cost())
+                      initial_balance=10_000, cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) >= 1
@@ -193,7 +193,7 @@ class TestMultiAsset:
                             actions.append(Action(type="close", symbol=sym))
                 return actions
 
-        bt = Backtest(df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost())
+        bt = Backtest(df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 2
@@ -212,7 +212,7 @@ class TestWithCosts:
         )
 
         bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
-                      cost_model=cost)
+                      cost_model=cost, data_source="test")
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -237,7 +237,7 @@ class TestContext:
 
         df = _make_multiindex_df([100.0] * 6)
         bt = Backtest(df, Spy(), initial_balance=10_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         bt.run()
 
         # Bar 0-1: no position
@@ -266,7 +266,7 @@ class TestContext:
 
         df = _make_multiindex_df([100.0] * 8)
         bt = Backtest(df, Tracker(), initial_balance=10_000,
-                      cost_model=_zero_cost())
+                      cost_model=_zero_cost(), data_source="test")
         bt.run()
 
         # bars_held should increment: 1, 2, 3, 4 (bars 2,3,4,5)
