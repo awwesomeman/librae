@@ -32,6 +32,11 @@ def make_trade_id(run_id: str, index: int) -> str:
     return f"{run_id}-t{index:04d}"
 
 
+def make_event_id(run_id: str, index: int) -> str:
+    """Canonical event ID: {run_id}-e{index:04d}."""
+    return f"{run_id}-e{index:04d}"
+
+
 # ---------------------------------------------------------------------------
 # Timeframe utilities
 # ---------------------------------------------------------------------------

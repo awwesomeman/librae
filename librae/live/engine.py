@@ -42,6 +42,8 @@ class LiveTrader:
         on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
             called every completed bar for equity persistence.
         on_trade: Optional callback(trade_dict) called on position close.
+        on_order_event: Optional callback(OrderEvent) called on every
+            position lifecycle event (open/add/reduce/close).
         on_ohlcv: Optional callback(symbol, timeframe, bar_dict, ts)
             called every completed bar for OHLCV persistence.
         on_heartbeat: Optional callback(run_id) called every poll cycle
@@ -69,6 +71,7 @@ class LiveTrader:
         poll_interval: float = 60.0,
         on_bar: Callable[..., None] | None = None,
         on_trade: Callable[..., None] | None = None,
+        on_order_event: Callable[..., None] | None = None,
         on_ohlcv: Callable[..., None] | None = None,
         on_heartbeat: Callable[..., None] | None = None,
         on_signal_outcome: Callable[..., None] | None = None,
@@ -87,6 +90,7 @@ class LiveTrader:
         self._warmup_fetcher = warmup_fetcher
         self._on_bar = on_bar
         self._on_trade = on_trade
+        self._on_order_event = on_order_event
         self._on_ohlcv = on_ohlcv
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
@@ -305,6 +309,13 @@ class LiveTrader:
             primary_symbol=symbol,
         )
         self._cash += result.cash_delta
+
+        for event in result.events:
+            logger.info("Order event: %s %s %s %.4f @ %.2f",
+                        event.event_type, event.side, event.symbol,
+                        event.quantity, event.price)
+            if self._on_order_event:
+                self._on_order_event(event)
 
         for trade in result.trades:
             self._trade_count += 1

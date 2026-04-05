@@ -1,7 +1,7 @@
 # Position Lifecycle：Short + Scaling + Partial Close
 
-> 狀態：implemented
-> 範圍：engine, executor
+> 狀態：implemented (Phase 2: order events added 2026-04-05)
+> 範圍：engine, executor, schema, db, grafana
 > 建立日期：2026-04-04
 > 依據：
 > - [2026-04-01 回測引擎優化](../decisions/2026-04-01-backtest-engine-optimization.md) — Short proceeds bug, ctx.cash bug, exit tax bug
@@ -72,6 +72,30 @@ collateral 模式下 `estimate_entry_outlay` 對 short 扣全額是設計決策�
 - Margin model / borrow cost
 - Max position size guard（follow-up）
 - FillRecord dataclass（無 consumer，等 fill_log DB 表需求時再加）
+
+---
+
+## Phase 2：Order Events（2026-04-05 實作）
+
+> 詳見 `docs/plans/refactor_grafana_strategy.md` 和 `docs/decisions/2026-04-04-order-detail-panel-research.md`
+
+### 新增內容
+
+| 項目 | 狀態 |
+|------|------|
+| `OrderEvent` dataclass（executor.py） | done |
+| `process_actions()` 產出 open/add/reduce/close 事件 | done |
+| `OrderEventRecord` dataclass（schema.py） | done |
+| `BacktestResult` / `BacktestOutput` 攜帶 events | done |
+| `order_events` hypertable（timescale_init.sql） | done |
+| `write_order_events()` 批次寫入（timescale_writer.py） | done |
+| `load_order_events()` 讀取（timescale_reader.py） | done |
+| Grafana Order Events 面板取代舊 Trade Detail | done |
+| KPI catalogue + configurable DEFAULT_KPIS | done |
+| `test_order_events.py`（11 tests） | done |
+| metrics.py 修正（MDD abs / exposure_ratio / qty-weighted avg） | done |
+| Live engine 消費 order_events | deferred — live 目前忽略 events |
+| VPS DB migration（order_events 表） | deferred — seed script 已建表，正式 migration 待排 |
 
 ---
 

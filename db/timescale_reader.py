@@ -72,6 +72,24 @@ def load_trade_blotter(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     return df
 
 
+def load_order_events(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
+    """Load order_events for a run, ordered by timestamp."""
+    sql = """
+        SELECT event_id, ts AS _time, symbol, side, event_type,
+               quantity, price, avg_entry_price, position_qty, notional,
+               commission, slippage, tax,
+               realized_pnl, net_return, entry_ts, holding_bars, reason
+        FROM order_events
+        WHERE run_id = %s
+        ORDER BY ts
+    """
+    with get_conn(dsn) as conn:
+        df = pd.read_sql(sql, conn, params=[run_id])
+    if not df.empty and "_time" in df.columns:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    return df
+
+
 def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """Load strategy_performance joined with backtest_runs.
 

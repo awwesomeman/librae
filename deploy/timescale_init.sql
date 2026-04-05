@@ -69,6 +69,36 @@ CREATE TABLE IF NOT EXISTS trade_blotter (
 CREATE INDEX IF NOT EXISTS idx_trade_blotter_run_id ON trade_blotter(run_id);
 
 -- ============================================================
+-- order_events — 部位生命週期事件 (hypertable)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS order_events (
+    event_id        TEXT NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    ts              TIMESTAMPTZ NOT NULL,
+    symbol          TEXT,
+    side            TEXT,
+    event_type      TEXT,
+    quantity        DOUBLE PRECISION,
+    price           DOUBLE PRECISION,
+    avg_entry_price DOUBLE PRECISION,
+    position_qty    DOUBLE PRECISION,
+    notional        DOUBLE PRECISION,
+    commission      DOUBLE PRECISION DEFAULT 0,
+    slippage        DOUBLE PRECISION DEFAULT 0,
+    tax             DOUBLE PRECISION DEFAULT 0,
+    realized_pnl    DOUBLE PRECISION,
+    net_return      DOUBLE PRECISION,
+    entry_ts        TIMESTAMPTZ,
+    holding_bars    INTEGER,
+    reason          TEXT,
+    CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
+    CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close'))
+);
+SELECT create_hypertable('order_events', 'ts', if_not_exists => TRUE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_order_events_pk ON order_events(event_id, ts);
+CREATE INDEX IF NOT EXISTS idx_order_events_run_id ON order_events(run_id, ts DESC);
+
+-- ============================================================
 -- strategy_performance — 聚合 KPI (1 row / run)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS strategy_performance (

@@ -13,9 +13,11 @@ import pandas as pd
 
 from librae.config.market_config import get_market
 from librae.core.cost_model import CostModel
-from librae.core.executor import TradeResult
+from dataclasses import asdict
+
+from librae.core.executor import OrderEvent, TradeResult
 from librae.core.strategy import Action, BaseStrategy
-from librae.core.utils import generate_run_id, make_trade_id, to_ccxt
+from librae.core.utils import generate_run_id, make_event_id, make_trade_id, to_ccxt
 from librae.config.notification import TelegramConfig
 from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
 
@@ -54,7 +56,7 @@ def build_live_trader(
     from brokers.crypto_adapter import CryptoAdapter
     from db.timescale_writer import (
         refresh_performance, update_heartbeat, write_equity_point,
-        write_ohlcv, write_run_metadata,
+        write_ohlcv, write_order_event, write_run_metadata,
         write_signal_outcome, write_trade,
     )
 
@@ -126,6 +128,18 @@ def build_live_trader(
             drawdown=drawdown, ret_1d=ret_1d, strategy_name=strategy_name,
         )
 
+    _event_seq = 0
+
+    def on_order_event(event: OrderEvent) -> None:
+        nonlocal _event_seq
+        _event_seq += 1
+        # WHY: asdict avoids field-by-field duplication.
+        # event_id and run_id are added here (not known at executor level).
+        fields = asdict(event)
+        fields["event_id"] = make_event_id(run_id, _event_seq)
+        fields["run_id"] = run_id
+        _db_write(write_order_event, **fields)
+
     _trade_seq = 0
 
     def on_trade(trade: TradeResult) -> None:
@@ -185,6 +199,7 @@ def build_live_trader(
         poll_interval=poll_interval,
         on_bar=on_bar,
         on_trade=on_trade,
+        on_order_event=on_order_event,
         on_ohlcv=on_ohlcv,
         on_heartbeat=on_heartbeat,
         on_signal_outcome=on_signal_outcome_cb if signal_column else None,

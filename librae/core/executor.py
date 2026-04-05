@@ -66,11 +66,35 @@ class TradePnL:
     exit_tax: float
 
 
+@dataclass(frozen=True)
+class OrderEvent:
+    """Single position lifecycle event — open/add/reduce/close."""
+
+    ts: datetime
+    symbol: str
+    side: Literal["long", "short"]
+    event_type: Literal["open", "add", "reduce", "close"]
+    quantity: float
+    price: float
+    avg_entry_price: float
+    position_qty: float
+    notional: float
+    commission: float
+    slippage: float
+    tax: float
+    realized_pnl: float | None = None
+    net_return: float | None = None
+    entry_ts: datetime | None = None
+    holding_bars: int | None = None
+    reason: str = ""
+
+
 @dataclass
 class ActionResults:
     """Results from processing one bar's actions."""
 
     trades: list[TradeResult]
+    events: list[OrderEvent]
     cash_delta: float
 
 
@@ -301,9 +325,10 @@ def process_actions(
     """Process a bar's actions: open, scale, partial/full close.
 
     Shared by backtest and live engines to avoid logic duplication.
-    Mutates *positions* dict in place. Returns trades and cash delta.
+    Mutates *positions* dict in place. Returns trades, events, and cash delta.
     """
     trades: list[TradeResult] = []
+    events: list[OrderEvent] = []
     cash_delta = 0.0
 
     for action in actions:
@@ -316,6 +341,7 @@ def process_actions(
             continue
         price = float(price_raw)
         cost_model = get_cost_model(sym)
+        reason = action.reason
 
         if action.type in ("buy", "sell"):
             desired_side: Literal["long", "short"] = "long" if action.type == "buy" else "short"
@@ -336,6 +362,14 @@ def process_actions(
                         entry_slippage=fill.slippage,
                         total_entry_cost=price * fill.quantity * cost_model.multiplier,
                     )
+                    events.append(OrderEvent(
+                        ts=ts, symbol=sym, side=fill.side, event_type="open",
+                        quantity=fill.quantity, price=price,
+                        avg_entry_price=price, position_qty=fill.quantity,
+                        notional=price * fill.quantity * cost_model.multiplier,
+                        commission=fill.commission, slippage=fill.slippage,
+                        tax=fill.tax, reason=reason,
+                    ))
 
             elif positions[sym].side == desired_side:
                 # SCALE IN — must specify quantity
@@ -346,6 +380,15 @@ def process_actions(
                 if fill:
                     cash_delta -= outlay
                     scale_into_position(positions[sym], fill, cost_model)
+                    pos = positions[sym]
+                    events.append(OrderEvent(
+                        ts=ts, symbol=sym, side=pos.side, event_type="add",
+                        quantity=fill.quantity, price=price,
+                        avg_entry_price=pos.entry_price, position_qty=pos.quantity,
+                        notional=price * fill.quantity * cost_model.multiplier,
+                        commission=fill.commission, slippage=fill.slippage,
+                        tax=fill.tax, reason=reason,
+                    ))
 
             else:
                 # OPPOSITE SIDE — reject
@@ -362,15 +405,29 @@ def process_actions(
             if close_qty is not None and close_qty <= 0:
                 continue
 
+            actual_close_qty = min(close_qty, pos.quantity) if close_qty else pos.quantity
             pnl, proceeds, fully_closed = close_position(
                 pos, price, cost_model, quantity=close_qty,
             )
-            trades.append(build_trade_result(pos, ts, price, close_qty or pos.quantity, pnl))
+            trades.append(build_trade_result(pos, ts, price, actual_close_qty, pnl))
             cash_delta += proceeds
+
+            remaining_qty = 0.0 if fully_closed else max(0.0, pos.quantity - actual_close_qty)
+            events.append(OrderEvent(
+                ts=ts, symbol=sym, side=pos.side,
+                event_type="close" if fully_closed else "reduce",
+                quantity=actual_close_qty, price=price,
+                avg_entry_price=pos.entry_price, position_qty=remaining_qty,
+                notional=price * actual_close_qty * cost_model.multiplier,
+                commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
+                realized_pnl=pnl.net_pnl, net_return=pnl.net_return,
+                entry_ts=pos.entry_ts, holding_bars=pos.bars_held,
+                reason=reason,
+            ))
 
             if fully_closed:
                 del positions[sym]
             else:
-                reduce_position(pos, close_qty)
+                reduce_position(pos, actual_close_qty)
 
-    return ActionResults(trades=trades, cash_delta=cash_delta)
+    return ActionResults(trades=trades, events=events, cash_delta=cash_delta)

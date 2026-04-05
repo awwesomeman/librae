@@ -114,6 +114,30 @@ class TradeRecord:
 
 
 @dataclass(frozen=True)
+class OrderEventRecord:
+    """Single position lifecycle event for DB persistence."""
+
+    event_id: str
+    ts: datetime
+    symbol: str
+    side: Literal["long", "short"]
+    event_type: Literal["open", "add", "reduce", "close"]
+    quantity: float
+    price: float
+    avg_entry_price: float
+    position_qty: float
+    notional: float
+    commission: float = 0.0
+    slippage: float = 0.0
+    tax: float = 0.0
+    realized_pnl: float | None = None
+    net_return: float | None = None
+    entry_ts: datetime | None = None
+    holding_bars: int | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class StrategyMetrics:
     """Aggregate performance metrics for a backtest run.
 
@@ -163,6 +187,7 @@ class BacktestOutput:
     run_metadata: RunMetadata
     equity_curve: Sequence[EquityCurvePoint]
     trades: Sequence[TradeRecord]
+    order_events: Sequence[OrderEventRecord]
     metrics: StrategyMetrics
 
     def to_dict(self) -> dict[str, Any]:

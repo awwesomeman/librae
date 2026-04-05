@@ -1,4 +1,4 @@
-# Order Detail 面板重新規劃（v3）
+# Order Detail 面板重新規劃（v3 — implemented）
 
 ## Context
 

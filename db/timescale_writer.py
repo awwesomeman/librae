@@ -170,6 +170,7 @@ def write_backtest_output(
         # Clear old data (idempotent re-run)
         cur.execute("DELETE FROM equity_curve WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM trade_blotter WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM order_events WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
         # equity_curve (batch)
@@ -226,6 +227,37 @@ def write_backtest_output(
                 page_size=500,
             )
             counts["trade_blotter"] = len(trade_rows)
+
+        # order_events (batch)
+        if output.order_events:
+            event_rows = [
+                (
+                    ev.event_id, meta.run_id, _to_dt(ev.ts),
+                    ev.symbol, ev.side, ev.event_type,
+                    ev.quantity, ev.price, ev.avg_entry_price,
+                    ev.position_qty, ev.notional,
+                    ev.commission, ev.slippage, ev.tax,
+                    ev.realized_pnl, ev.net_return,
+                    _to_dt(ev.entry_ts) if ev.entry_ts else None,
+                    ev.holding_bars, ev.reason,
+                )
+                for ev in output.order_events
+            ]
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO order_events
+                   (event_id, run_id, ts, symbol, side, event_type,
+                    quantity, price, avg_entry_price,
+                    position_qty, notional,
+                    commission, slippage, tax,
+                    realized_pnl, net_return,
+                    entry_ts, holding_bars, reason)
+                   VALUES %s
+                   ON CONFLICT (event_id, ts) DO NOTHING""",
+                event_rows,
+                page_size=500,
+            )
+            counts["order_events"] = len(event_rows)
 
         # signal_outcomes (from feature-layer signal_series)
         if signal_series is not None and not signal_series.empty:
@@ -430,6 +462,54 @@ def write_trade(
                 gross_pnl, net_pnl, gross_return, net_return,
                 price_unit, quantity_unit, pnl_unit,
                 commission, slippage, tax, holding_bars,
+            ),
+        )
+        cur.close()
+
+
+def write_order_event(
+    event_id: str,
+    run_id: str,
+    ts: datetime,
+    symbol: str,
+    side: str,
+    event_type: str,
+    quantity: float,
+    price: float,
+    avg_entry_price: float,
+    position_qty: float,
+    notional: float,
+    commission: float = 0.0,
+    slippage: float = 0.0,
+    tax: float = 0.0,
+    realized_pnl: float | None = None,
+    net_return: float | None = None,
+    entry_ts: datetime | None = None,
+    holding_bars: int | None = None,
+    reason: str = "",
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Write a single order event (upsert by event_id + ts)."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO order_events
+               (event_id, run_id, ts, symbol, side, event_type,
+                quantity, price, avg_entry_price,
+                position_qty, notional,
+                commission, slippage, tax,
+                realized_pnl, net_return,
+                entry_ts, holding_bars, reason)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (event_id, ts) DO NOTHING""",
+            (
+                event_id, run_id, _to_dt(ts), symbol, side, event_type,
+                quantity, price, avg_entry_price,
+                position_qty, notional,
+                commission, slippage, tax,
+                realized_pnl, net_return,
+                _to_dt(entry_ts) if entry_ts else None,
+                holding_bars, reason,
             ),
         )
         cur.close()

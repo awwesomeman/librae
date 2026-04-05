@@ -32,11 +32,11 @@ from librae.config.market_config import MarketConfig
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
-    TradePnL, TradeResult, build_trade_result,
+    OrderEvent, TradePnL, TradeResult, build_trade_result,
     close_position, direction, process_actions,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
-from librae.core.utils import generate_run_id, infer_timeframe, make_trade_id
+from librae.core.utils import generate_run_id, infer_timeframe, make_event_id, make_trade_id
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ class BacktestResult:
     """Raw output from engine — no metrics, just facts."""
 
     trades: Sequence[TradeResult]
+    order_events: Sequence[OrderEvent]
     equity_curve: Sequence[EquitySnapshot]
     initial_balance: float
     final_equity: float
@@ -167,6 +168,7 @@ class Backtest:
         cash = self._initial_balance
         positions: dict[str, PositionState] = {}
         trades: list[TradeResult] = []
+        all_events: list[OrderEvent] = []
         equity_curve: list[EquitySnapshot] = []
         exposed_bars = 0
         primary_symbol = self._symbols[0]
@@ -200,6 +202,7 @@ class Backtest:
                 primary_symbol=primary_symbol,
             )
             trades.extend(result_actions.trades)
+            all_events.extend(result_actions.events)
             cash += result_actions.cash_delta
 
             self._increment_bars_held(positions)
@@ -215,11 +218,22 @@ class Backtest:
                 cost_model = self._get_cost_model(sym)
                 pnl, proceeds, _ = close_position(pos, price, cost_model)
                 trades.append(build_trade_result(pos, last_ts, price, pos.quantity, pnl))
+                all_events.append(OrderEvent(
+                    ts=last_ts, symbol=sym, side=pos.side, event_type="close",
+                    quantity=pos.quantity, price=price,
+                    avg_entry_price=pos.entry_price, position_qty=0.0,
+                    notional=price * pos.quantity * cost_model.multiplier,
+                    commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
+                    realized_pnl=pnl.net_pnl, net_return=pnl.net_return,
+                    entry_ts=pos.entry_ts, holding_bars=pos.bars_held,
+                    reason="force_close",
+                ))
                 cash += proceeds
                 del positions[sym]
 
         self._result = BacktestResult(
             trades=trades,
+            order_events=all_events,
             equity_curve=equity_curve,
             initial_balance=self._initial_balance,
             final_equity=cash,
@@ -244,7 +258,7 @@ class Backtest:
         Raises RuntimeError if called before run().
         """
         from librae.backtest.schema import (
-            BacktestOutput, EquityCurvePoint, RunMetadata, TradeRecord,
+            BacktestOutput, EquityCurvePoint, OrderEventRecord, RunMetadata, TradeRecord,
         )
         from librae.core.metrics import compute_all
 
@@ -298,12 +312,14 @@ class Backtest:
         )
 
         trade_records = self._build_trade_records(result, run_id)
+        event_records = self._build_event_records(result, run_id)
         equity_points = self._enrich_equity_curve(result, benchmark_curve)
 
         return BacktestOutput(
             run_metadata=run_metadata,
             equity_curve=tuple(equity_points),
             trades=tuple(trade_records),
+            order_events=tuple(event_records),
             metrics=self._metrics,
         )
 
@@ -331,6 +347,28 @@ class Backtest:
                 tax=float(t.tax), holding_bars=int(t.holding_bars),
             )
             for i, t in enumerate(result.trades)
+        ]
+
+    @staticmethod
+    def _build_event_records(result: BacktestResult, run_id: str) -> list["OrderEventRecord"]:
+        """Map OrderEvent → OrderEventRecord."""
+        from librae.backtest.schema import OrderEventRecord
+        return [
+            OrderEventRecord(
+                event_id=make_event_id(run_id, i),
+                ts=e.ts, symbol=e.symbol, side=e.side, event_type=e.event_type,
+                quantity=float(e.quantity), price=float(e.price),
+                avg_entry_price=float(e.avg_entry_price),
+                position_qty=float(e.position_qty),
+                notional=float(e.notional),
+                commission=float(e.commission), slippage=float(e.slippage),
+                tax=float(e.tax),
+                realized_pnl=float(e.realized_pnl) if e.realized_pnl is not None else None,
+                net_return=float(e.net_return) if e.net_return is not None else None,
+                entry_ts=e.entry_ts, holding_bars=e.holding_bars,
+                reason=e.reason,
+            )
+            for i, e in enumerate(result.order_events)
         ]
 
     @staticmethod
