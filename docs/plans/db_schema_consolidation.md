@@ -225,6 +225,143 @@ python -m strategies.trendpullback.run --mode sim
 
 每張表各自有 `(ts, identifier, source)` 的 unique key，各自管 TTL 和 gap-fill。不用萬用表塞所有時間序列 — schema、更新頻率、查詢模式不同，分開更乾淨。
 
+## 現行 Schema 欄位參考（2026-04-05 更新）
+
+### 表間關聯
+
+```
+        backtest_runs (PK: run_id)
+             │ FK: run_id (ON DELETE CASCADE)
+     ┌───────┼───────────┐
+     ▼       ▼           ▼
+equity_   trade_      strategy_      order_
+curve     blotter     performance    events
+
+ohlcv (獨立)          signal_outcomes (獨立)
+```
+
+- 1-4-5 靠 `run_id` FK 串聯，刪 run 自動 CASCADE 清除子表
+- `ohlcv`、`signal_outcomes` 獨立，無 FK，跨 run 共享
+
+### backtest_runs（中樞，1 row / run）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `run_id` | TEXT PK | `{strategy}_{symbol}_{timestamp}` |
+| `strategy` | TEXT NOT NULL | 策略名稱 |
+| `symbol` | TEXT NOT NULL | 交易標的 |
+| `timeframe` | TEXT NOT NULL | K 線週期 |
+| `mode` | TEXT | backtest / sim / live（CHECK） |
+| `data_source` | TEXT | binance, shioaji 等 |
+| `sample` | TEXT | IS/OOS 標記 |
+| `start_ts` / `end_ts` | TIMESTAMPTZ | 回測時間範圍 |
+| `run_ts` | TIMESTAMPTZ | 執行時間 |
+| `params` | JSONB | 策略參數快照 |
+| `poll_interval` | INTEGER | sim/live polling 秒數 |
+| `last_heartbeat` | TIMESTAMPTZ | sim/live 心跳 |
+| `schema_version` | TEXT | schema 版本 |
+
+### equity_curve（hypertable，每 bar 一筆）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `ts` | TIMESTAMPTZ | bar 時間戳 |
+| `run_id` | TEXT FK | 歸屬 run |
+| `equity` | DOUBLE | 淨值 |
+| `benchmark_equity` | DOUBLE | benchmark 淨值 |
+| `drawdown` | DOUBLE | 回撤比例 |
+| `ret_1d` | DOUBLE | 單 bar 報酬率 |
+| `benchmark_ret_1d` | DOUBLE | benchmark 報酬率 |
+| `strategy_name` | TEXT | 策略名（⚠️ 應改名 `strategy` 以統一） |
+
+### trade_blotter（每筆交易一筆）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `trade_id` | TEXT PK | `{run_id}_{seq}` |
+| `run_id` | TEXT FK | 歸屬 run |
+| `entry_ts` / `exit_ts` | TIMESTAMPTZ | 進出場時間 |
+| `symbol` | TEXT | 交易標的 |
+| `side` | TEXT | long / short（CHECK） |
+| `entry_price` / `exit_price` | DOUBLE | 進出場價格 |
+| `quantity` | DOUBLE | 平倉數量 |
+| `gross_pnl` / `net_pnl` | DOUBLE | 毛利 / 淨利 |
+| `gross_return` / `net_return` | DOUBLE | 報酬率（%） |
+| `price_unit` / `quantity_unit` / `pnl_unit` | TEXT | 單位 |
+| `commission` / `slippage` / `tax` | DOUBLE | 成本 |
+| `holding_bars` | INTEGER | 持倉 bar 數 |
+
+### order_events（hypertable，部位生命週期事件）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `event_id` | TEXT | `{run_id}_evt_{seq}` |
+| `run_id` | TEXT FK | 歸屬 run |
+| `ts` | TIMESTAMPTZ | 事件時間 |
+| `symbol` | TEXT | 交易標的 |
+| `side` | TEXT | long / short（CHECK） |
+| `event_type` | TEXT | open / add / reduce / close（CHECK） |
+| `quantity` | DOUBLE | 本次成交量 |
+| `price` | DOUBLE | 成交價 |
+| `avg_entry_price` | DOUBLE | 加權平均入場價 |
+| `position_qty` | DOUBLE | 事件後剩餘持倉量 |
+| `notional` | DOUBLE | 本次名目金額 |
+| `commission` / `slippage` / `tax` | DOUBLE | 成本 |
+| `realized_pnl` | DOUBLE | 已實現損益（reduce/close） |
+| `net_return` | DOUBLE | 淨報酬率（reduce/close） |
+| `entry_ts` | TIMESTAMPTZ | 原始入場時間 |
+| `holding_bars` | INTEGER | 持倉 bar 數 |
+| `reason` | TEXT | 原因（strategy / force_close） |
+
+### strategy_performance（每 run 一筆，聚合 KPI）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `run_id` | TEXT PK + FK | 1:1 對應 backtest_runs |
+| `total_return` / `annual_return` | DOUBLE | 累計 / 年化報酬率 |
+| `sharpe` / `sortino` / `calmar` | DOUBLE | 風險調整指標 |
+| `max_drawdown` | DOUBLE | 最大回撤 |
+| `win_rate` | DOUBLE | 勝率 |
+| `profit_factor` | DOUBLE | 獲利因子 |
+| `trades` | INTEGER | 交易筆數 |
+| `avg_trade_return` | DOUBLE | 平均交易報酬率 |
+| `exposure_ratio` | DOUBLE | 曝險比例 |
+| `benchmark_return` | DOUBLE | benchmark 報酬率 |
+| `total_commission` / `total_slippage` / `total_tax` | DOUBLE | 累計成本 |
+
+### ohlcv（hypertable，共用市場資料）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `ts` | TIMESTAMPTZ | K 線時間戳 |
+| `symbol` | TEXT NOT NULL | 交易標的 |
+| `timeframe` | TEXT NOT NULL | K 線週期 |
+| `source` | TEXT NOT NULL | 資料來源 |
+| `open` / `high` / `low` / `close` / `volume` | DOUBLE | OHLCV |
+
+唯一鍵：`(ts, symbol, timeframe, source)`
+
+### signal_outcomes（hypertable，訊號品質）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `signal_ts` | TIMESTAMPTZ | 訊號時間（⚠️ 應改名 `ts` 以統一） |
+| `strategy` | TEXT NOT NULL | 策略/訊號名稱 |
+| `symbol` | TEXT NOT NULL | 交易標的 |
+| `mode` | TEXT NOT NULL | backtest / sim（CHECK） |
+| `timeframe` | TEXT NOT NULL | K 線週期 |
+| `signal_value` | DOUBLE NOT NULL | 訊號值 |
+| `price` | DOUBLE | 訊號發生時價格 |
+
+唯一鍵：`(signal_ts, strategy, symbol, mode, timeframe)`
+
+### 待修正：欄位命名不一致
+
+| 問題 | 現在 | 應改為 | 影響範圍 |
+|------|------|--------|---------|
+| signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） |
+| equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） |
+
 ## 不在範圍
 
 - 總經/因子資料表 — 等有實際需求再設計
