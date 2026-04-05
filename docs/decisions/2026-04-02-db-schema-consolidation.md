@@ -1,9 +1,10 @@
 # 2026-04-02 — DB Schema 整合：資料表精簡與寫入流程統一
 
-> 狀態：implemented
+> 狀態：implemented（持續演進中）
 > 範圍：schema, db, timescale_writer, timescale_reader, engine, wiring, grafana
 > 前置決策：[2026-03-31 DB Schema 優化](2026-03-31-database-schema-optimization.md)、[2026-04-02 Signal Monitor 審查](2026-04-02-signal-monitor-dashboard-review.md)
 > 動機：新增訊號監控需求後，重新審視現有 6 張表 + 1 張計劃中表的資料流，發現冗餘與整合機會
+> 注記（2026-04-05）：原始 7→6 表整合已全部落地。後續演進：+order_events 表（7 表）、移除 schema_version/sample 欄位、ohlcv.run_id 移除、signal_ts/strategy_name 命名待統一。詳見 [enhance_db_schema](../plans/enhance_db_schema.md)
 
 ## 現況分析
 
@@ -75,16 +76,16 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     signal_ts       TIMESTAMPTZ NOT NULL,
     strategy        TEXT NOT NULL,
     symbol          TEXT NOT NULL,
-    source          TEXT NOT NULL,              -- 'backtest' / 'sim'
+    mode            TEXT NOT NULL,              -- 'backtest' / 'sim'
     timeframe       TEXT NOT NULL,              -- canonical 格式 (H1, M5)
     signal_value    DOUBLE PRECISION NOT NULL,  -- 任意實數
-    price           DOUBLE PRECISION            -- 訊號時的價格（便於驗證）
+    price           DOUBLE PRECISION            -- 訊號時的價格（便於��證）
 );
 SELECT create_hypertable('signal_outcomes', 'signal_ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_outcomes_unique
-    ON signal_outcomes (signal_ts, strategy, symbol, source, timeframe);
+    ON signal_outcomes (signal_ts, strategy, symbol, mode, timeframe);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_lookup
-    ON signal_outcomes (strategy, symbol, source, signal_ts DESC);
+    ON signal_outcomes (strategy, symbol, mode, signal_ts DESC);
 ```
 
 設計決策：
@@ -247,12 +248,13 @@ SELECT exit_ts AS time, exit_price AS "Exit" FROM trade_blotter
 
 ## Cache 策略
 
-### 現有 cache（保持不變）
+### 現有 cache
 
 | Cache | 位置 | TTL | 用途 |
 |-------|------|-----|------|
 | OHLCV parquet | `data/cache/{symbol}_{interval}.parquet` | 6h | 避免重複 API 呼叫 |
-| Feature JSON | `pipeline/features/cache_store.py` | configurable | 避免重複 feature 計算 |
+
+> 注：`pipeline/features/cache_store.py` 已刪除（2026-04-04），Feature JSON cache 被 DB-first 架構取代。
 
 ### Dashboard on-demand 查詢 cache（分層策略）
 
@@ -315,7 +317,7 @@ CREATE TABLE signal_metrics_cache (
 | `run.py` 傳遞 signal_series 和 params | `strategies/*/run.py` |
 | Strategy dashboard entry/exit 改查 trade_blotter | `app/grafana/generate_dashboards.py` |
 | `load_strategy_signals()` 改為查 trade_blotter | `db/timescale_reader.py` |
-| Streamlit 同步更新 | `app/streamlit/streamlit_performance.py` |
+| ~~Streamlit 同步更新~~ | ~~`app/streamlit/`~~ 已刪除（2026-04-04，遷移至 Grafana） |
 
 ### Phase 4：移除舊程式碼
 
@@ -343,7 +345,8 @@ CREATE TABLE signal_metrics_cache (
 
 本次 consolidation 新增了更多 schema 變更（signal_outcomes 新表、ohlcv unique key 變更、CHECK 約束、equity_curve 新欄位），migration 自動化的需求更加迫切。
 
-**方案：** 在 Phase 1 一併實作 `db/migrate.py`，啟動時自動執行 `ALTER TABLE ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`，確保已部署的 DB 與 schema 同步。不引入 Alembic（P3 等規模化後再評估），用簡單的 idempotent SQL 即可。
+**原始方案：** 實作 `db/migrate.py` idempotent SQL。
+**實際做法（2026-04-05）：** 改用 DROP + 重建策略。現有資料為實驗用途，不需保留。`db/migrate.py` 已刪除。
 
 ---
 
@@ -370,7 +373,7 @@ CREATE TABLE signal_metrics_cache (
 
 ## 執行計劃
 
-→ [db_schema_consolidation.md](../plans/db_schema_consolidation.md) — 經 review 修正後的最終執行計劃
+→ [enhance_db_schema.md](../plans/enhance_db_schema.md) — 執行計劃（含 Schema 演進歷程）
 
 ## 相關決策
 

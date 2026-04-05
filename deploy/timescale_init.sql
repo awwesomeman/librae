@@ -1,5 +1,5 @@
--- TimescaleDB Schema v1.1.0
--- For fresh deployments. Existing DBs use deploy/migrations/v1_1_0_consolidation.sql
+-- TimescaleDB Schema — fresh deployment (DROP + rebuild)
+-- See docs/plans/enhance_db_schema.md for schema evolution history
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- ============================================================

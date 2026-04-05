@@ -1,9 +1,14 @@
 # 2026-03-31 — 資料庫 Schema 現況與優化方向
 
-> 狀態：superseded（P0 tax 欄位已落地，其餘項目移至 04-02）
-> 取代者：04-02 db-schema-consolidation
-> 更新 2026-04-01：補充 TrendMaster 實驗中發現的實際問題（schema 同步、params 缺失、OHLCV 重複寫入）
-> 注記：P0 tax 欄位已由 deploy/migrations/v1_0_0_tax.sql 落地。params JSONB、OHLCV 去重、trade_blotter 索引、signals FK 等項目全部被 04-02 consolidation 吸收並重新規劃
+> 狀態：superseded
+> 取代者：[04-02 db-schema-consolidation](2026-04-02-db-schema-consolidation.md)
+> 注記（2026-04-05）：本文件所有項目均已處理完畢。
+> - P0 全部落地：tax 欄位、params JSONB、OHLCV 去重（run_id 移除）、schema migration（改用 DROP+重建）
+> - P1 全部落地：trade_blotter index + CHECK、equity_curve strategy_name、strategy_signals 已刪除（被 trade_blotter + signal_outcomes 取代）
+> - P2 OHLCV 去重：已落地（unique key 改為 `(ts, symbol, timeframe, source)`）
+> - P2/P3 規模化項目：ThreadedConnectionPool、Alembic、retention policy 暫不需要
+> - 額外清理：schema_version、sample 欄位已移除（YAGNI）
+> - 後續演進見 [enhance_db_schema](../plans/enhance_db_schema.md)
 
 ## 現況概覽
 

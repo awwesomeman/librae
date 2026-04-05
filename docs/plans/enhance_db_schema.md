@@ -1,25 +1,28 @@
-# DB Schema Consolidation — 執行計劃
+# DB Schema 演進計畫
 
-> 狀態：completed
+> 狀態：active（持續維護）
 > 範圍：schema, db, engine, grafana, data
 > 建立日期：2026-04-02
-> 最後更新：2026-04-02
-> 依據：[2026-04-02 DB Schema 整合](../decisions/2026-04-02-db-schema-consolidation.md)、[2026-04-01 OHLCV 遷移](../decisions/2026-04-01-ohlcv-migrate-to-timescaledb.md)
+> 最後更新：2026-04-05
+> 依據：
+> - [2026-04-02 DB Schema 整合](../decisions/2026-04-02-db-schema-consolidation.md) — 原始 7→6 表整合
+> - [2026-03-31 DB Schema 優化](../decisions/2026-03-31-database-schema-optimization.md) — 初始優化方向（已 superseded）
+> - [2026-04-01 OHLCV 遷移](../decisions/2026-04-01-ohlcv-migrate-to-timescaledb.md)
 > 策略：**DROP + 重建**（現有資料為實驗用途，不需保留）
 
 ---
 
-## 最終 Schema：7 → 6 張表
+## 現行 Schema：7 張表
 
 ```
-backtest_runs  ← 中心表（+params JSONB, +CHECK mode）
-  ├── equity_curve         (hypertable, +strategy_name)
-  ├── trade_blotter        (普通表, +run_id index, +CHECK side)
-  ├── strategy_performance (1 row/run, 不變)
-  └── ohlcv                (hypertable, 移除 run_id 依賴)
-
-+ signal_outcomes          (hypertable, 新建)
-- strategy_signals         (刪除 — 被 trade_blotter + signal_outcomes 取代)
+backtest_runs  ← 中心表
+  ├── equity_curve         (hypertable, FK CASCADE)
+  ├── trade_blotter        (普通表, FK CASCADE)
+  ├── order_events         (hypertable, FK CASCADE)    ← 2026-04-05 新增
+  ├── strategy_performance (1 row/run, FK CASCADE)
+  │
+  ohlcv                    (hypertable, 獨立)
+  signal_outcomes          (hypertable, 獨立)
 ```
 
 三個資料域，各自獨立：
@@ -232,15 +235,15 @@ python -m strategies.trendpullback.run --mode sim
 ```
         backtest_runs (PK: run_id)
              │ FK: run_id (ON DELETE CASCADE)
-     ┌───────┼───────────┐
-     ▼       ▼           ▼
-equity_   trade_      strategy_      order_
-curve     blotter     performance    events
+     ┌───────┼───────────┬──────────┐
+     ▼       ▼           ▼          ▼
+equity_   trade_      strategy_   order_
+curve     blotter     performance events
 
 ohlcv (獨立)          signal_outcomes (獨立)
 ```
 
-- 1-4-5 靠 `run_id` FK 串聯，刪 run 自動 CASCADE 清除子表
+- 5 張表靠 `run_id` FK 串聯，刪 run 自動 CASCADE 清除子表
 - `ohlcv`、`signal_outcomes` 獨立，無 FK，跨 run 共享
 
 ### backtest_runs（中樞，1 row / run）
@@ -253,13 +256,11 @@ ohlcv (獨立)          signal_outcomes (獨立)
 | `timeframe` | TEXT NOT NULL | K 線週期 |
 | `mode` | TEXT | backtest / sim / live（CHECK） |
 | `data_source` | TEXT | binance, shioaji 等 |
-| `sample` | TEXT | IS/OOS 標記 |
 | `start_ts` / `end_ts` | TIMESTAMPTZ | 回測時間範圍 |
 | `run_ts` | TIMESTAMPTZ | 執行時間 |
 | `params` | JSONB | 策略參數快照 |
 | `poll_interval` | INTEGER | sim/live polling 秒數 |
 | `last_heartbeat` | TIMESTAMPTZ | sim/live 心跳 |
-| `schema_version` | TEXT | schema 版本 |
 
 ### equity_curve（hypertable，每 bar 一筆）
 
@@ -361,6 +362,27 @@ ohlcv (獨立)          signal_outcomes (獨立)
 |------|------|--------|---------|
 | signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） |
 | equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） |
+
+## Schema 演進歷程
+
+| 日期 | 變更 | 來源 |
+|------|------|------|
+| 2026-04-02 | 7→6 表：刪 strategy_signals，新增 signal_outcomes | [04-02 consolidation](../decisions/2026-04-02-db-schema-consolidation.md) |
+| 2026-04-02 | ohlcv 移除 run_id 依賴，unique key 改 `(ts, symbol, timeframe, source)` | 同上 |
+| 2026-04-02 | backtest_runs +params JSONB, +CHECK mode | 同上 |
+| 2026-04-02 | trade_blotter +index(run_id), +CHECK side | 同上 |
+| 2026-04-02 | equity_curve +strategy_name | 同上 |
+| 2026-04-03 | ohlcv.run_id 欄位完全移除（schema + writer + reader） | 專案審計 |
+| 2026-04-04 | backtest_runs +mode/data_source 從 RunMetadata 傳遞 | 審計 #5 |
+| 2026-04-05 | +order_events hypertable（部位生命週期事件） | [position lifecycle](enhance_position_lifecycle.md) |
+| 2026-04-05 | 移除 backtest_runs.schema_version + sample（YAGNI） | 專案審計 |
+
+## 待處理
+
+| 問題 | 現在 | 應改為 | 影響範圍 | 優先級 |
+|------|------|--------|---------|--------|
+| signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） | 低 |
+| equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） | 低 |
 
 ## 不在範圍
 
