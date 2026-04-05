@@ -58,7 +58,7 @@ experiments/signals/kdj_oversold/
 # 回測：跑歷史訊號 → 寫 DB → Grafana Signal Monitor 看結果
 python -m experiments.signals.kdj_oversold.run
 
-# 即時監控：每根 bar 寫入 signal_outcomes
+# 即時監控：每根 bar 寫入 signal_events
 python -m experiments.signals.kdj_oversold.run --sim
 ```
 
@@ -95,12 +95,15 @@ python -m strategies.trendpullback.run --mode sim
 ```
 get_ohlcv()                    save_signal_results()       save_strategy_results()
   │                              │                            │
-  ├→ DB 有資料 → 直接回傳        ├→ signal_outcomes           ├→ backtest_runs
+  ├→ DB 有資料 → 直接回傳        ├→ signal_events            ├→ backtest_runs
   ├→ DB 缺口 → API 補齊 → DB    └→ ohlcv                    ├→ equity_curve
-  └→ DB 不可用 → API fallback                                ├→ trade_blotter
+  └→ DB 不可用 → API fallback                                ├→ trade_events
                                                              ├→ strategy_performance
-on_signal_outcome (sim 每 bar)                               ├→ signal_outcomes
-  └→ signal_outcomes                                         └→ ohlcv
+Sim callbacks (wiring.py)                                    ├→ signal_events
+  ├→ on_order_event  → trade_events                          └→ ohlcv
+  ├→ on_signal_event → signal_events
+  ├→ on_bar          → equity_curve
+  └→ on_ohlcv        → ohlcv
 ```
 
 ---
@@ -110,10 +113,10 @@ on_signal_outcome (sim 每 bar)                               ├→ signal_outc
 | 表 | 用途 | 寫入時機 |
 |---|---|---|
 | `ohlcv` | 共享市場資料（cache） | `get_ohlcv()` 自動寫入 |
-| `signal_outcomes` | 訊號發射記錄 | backtest: `save_signal_results()` / sim: `on_signal_outcome` |
+| `signal_events` | 訊號發射記錄 | backtest: `save_signal_results()` / sim: `on_signal_event` |
 | `backtest_runs` | Run metadata + params | `save_strategy_results()` |
 | `equity_curve` | 每 bar 淨值 | 同上 |
-| `trade_blotter` | 成交記錄 | 同上 |
+| `trade_events` | 部位生命週期事件（open/add/reduce/close） | 同上 |
 | `strategy_performance` | 聚合 KPI | 同上 |
 
 重建 DB：
@@ -128,8 +131,8 @@ psql -U quant -d quant -f deploy/timescale_init.sql
 
 | Dashboard | 用途 | 切換變數 |
 |---|---|---|
-| **Signal Monitor** | 訊號預測力：forward return, MFE/MAE, cumulative return | `$mode`, `$strategy`, `$symbol`, `$timeframe`, `$data_source`, `$n`, `$k` |
-| **Strategy Dashboard** | 策略績效：equity curve, drawdown, trades | `$mode`, `$run_id` |
+| **Signal** | 訊號預測力：forward return, MFE/MAE, cumulative return | `$mode`, `$strategy`, `$symbol`, `$timeframe`, `$data_source`, `$n`, `$k` |
+| **Strategy** | 策略績效：equity curve, drawdown, trades | `$mode`, `$run_id` |
 
 兩個 dashboard 都由 `generate_dashboards.py` 生成：
 
@@ -313,7 +316,7 @@ data/cache/{SYMBOL}_{INTERVAL}_{SOURCE}.parquet    # 例：data/cache/BTCUSDT_1h
 - 過期策略：最新一筆資料超過 **6 小時**即視為 stale，重新從 API 拉取
 - 定義在 `data/binance.py`（`_DEFAULT_CACHE_DIR`、`_CACHE_MAX_AGE`）
 
-> 只有 Binance OHLCV 有 local cache。DB 寫入（signal_outcomes、equity_curve 等）無 cache，斷線會直接報錯。
+> 只有 Binance OHLCV 有 local cache。DB 寫入（signal_events、equity_curve 等）無 cache，斷線會直接報錯。
 
 ---
 

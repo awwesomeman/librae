@@ -479,6 +479,81 @@ Issue 5（order_events 改獨立） + Issue 3（合併 trade_blotter）
 
 Issue 2（FK vs 獨立模式）被 Issue 5 解決。
 
+---
+
+## Issue 完成紀錄（2026-04-05）
+
+### Issue 5+3 ✅ — order_events 改獨立 + 合併 trade_blotter
+
+- trade_blotter 表刪除（7→6 表），close/reduce 事件完全取代
+- order_events 移除 FK CASCADE，`run_id` 改為普通欄位（非 FK）
+- order_events 新增 `strategy`, `mode`, `timeframe` 自帶欄位
+- `write_trade()` 刪除，`on_trade` callback 從 LiveTrader 移除
+- `refresh_performance()` 改查 `order_events WHERE event_type IN ('close', 'reduce')`
+- Grafana Unrealized PnL / Current Position 改查 `order_events.position_qty`
+- Issue 2 同時被解決
+
+### Issue 6+7+1 ✅ — 統一命名 + 欄位 rename + signal_events 加 run_id
+
+**表 rename：**
+- `order_events` → `trade_events`
+- `signal_outcomes` → `signal_events`
+
+**欄位 rename：**
+- `realized_pnl` → `pnl`（trade_events）
+- `avg_entry_price` → `entry_price`（trade_events）
+- `position_qty` → `position_quantity`（trade_events）
+- `signal_ts` → `ts`（signal_events）
+- `strategy_name` → `strategy`（equity_curve）
+- `net_return` — 維持不改（`return` 是 Python 保留字）
+
+**新增：**
+- signal_events 加 `run_id` 欄位（普通欄位，非 FK）
+- signal_events mode CHECK 移除 `live`（只允許 backtest/sim）
+
+**函式 rename：**
+- `write_signal_outcome()` → `write_signal_event()` + 新增 `run_id` 參數
+- `write_order_event()` → `write_trade_event()`
+- `write_trade()` → 刪除
+- `load_order_events()` → `load_trade_events()` + 新增 `event_types` 篩選參數
+- `load_trade_blotter()` → 刪除（由 `load_trade_events(event_types=...)` 取代）
+
+### 設計決策：統一 run_id 篩選
+
+**決策：所有表、所有 mode 都以 `run_id` 為主要篩選維度，不支援跨 run 累積。**
+
+原因：
+- 跨 run 累積假設「同一策略 = 同一配置」，但 sim 重啟常見原因是改參數/改邏輯，混在一起看無意義
+- signal_events 也有同樣問題 — 改了 SMA 週期，訊號品質完全不同
+- 統一 run_id 篩選：一個心智模型、無參數污染風險、壞資料一個 WHERE 隔離
+- 代價（sim 跨重啟不連續）實務影響小，需要時用 notebook 彌補
+
+### 刻意的設計（非 bug，不需修）
+
+**Reader 不 SELECT 冗餘欄位：**
+- `trade_events` 的 `strategy/mode/timeframe`：寫入時帶入（為 DB ad-hoc 查詢和 Grafana 提供彈性），但 Python reader 用 `run_id` 篩選、呼叫端已從 `backtest_runs` 知道這些資訊
+- `equity_curve` 的 `strategy`：同理
+
+**signal_events 無 Python reader：**
+- 目前只被 Grafana SQL 直接查詢，Python 層不需要讀取
+- 未來 notebook/分析需要時再加 `load_signal_events()`（YAGNI）
+
+**Python API 保留舊名（非 DB 欄位）：**
+- `strategy_name`：engine 參數名（`Backtest(strategy_name=...)`, `LiveExecutor.strategy_name`），寫入 DB 時映射為 `strategy=strategy_name`
+- `avg_entry_price`：`brokers/base.py` Position dataclass — broker domain
+- `realized_pnl` / `unrealized_pnl`：broker domain Position fields
+
+### 驗收
+
+- [x] 212 tests passed
+- [x] 12 個舊名模式 grep → DB/Grafana 層零殘留
+- [x] DDL ↔ Writer 欄位對齊：6 張表全部 MATCH
+- [x] 資料流端到端一致性：3 條寫入路徑 `entry_price/position_quantity/pnl` 全鏈路一致
+- [x] Grafana SQL 所有表名、欄位名對齊 DDL
+- [x] strategy_dashboard.json + signal_monitor.json 重新生成/更新
+
+---
+
 ## 不在範圍
 
 - 總經/因子資料表 — 等有實際需求再設計
