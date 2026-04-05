@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Grafana setup script — auto-detect datasource uid, update generator, deploy dashboards.
+"""Dev tool — push dashboard JSON to Grafana via HTTP API for instant preview.
+
+Writes to Grafana's internal DB (not provisioning files).
+Changes are overwritten on Grafana restart by provisioning.
+Source of truth: app/grafana/provisioning/dashboards/json/*.json
 
 Usage:
-    python deploy/setup_grafana.py
-    python deploy/setup_grafana.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
+    python deploy/dev_push_dashboard.py
+    python deploy/dev_push_dashboard.py --grafana-url http://host:3000 --grafana-user admin --grafana-password secret
 """
 from __future__ import annotations
 

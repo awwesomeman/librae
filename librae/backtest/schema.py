@@ -118,10 +118,12 @@ class StrategyMetrics:
     """Aggregate performance metrics for a backtest run.
 
     Units convention (not stored, documented here):
-    - return/drawdown fields: ratio (e.g. 0.05 = 5%)
+    - return fields: ratio (e.g. 0.05 = 5%)
+    - max_drawdown: negative ratio (e.g. -0.15 = 15% decline)
     - win_rate/exposure_ratio: ratio 0-1
     - sharpe/sortino/calmar/profit_factor: score (dimensionless)
     - trades: count
+    - avg_trade_return: quantity-weighted mean net return per closed trade
     """
 
     # Universal (all strategies produce these)

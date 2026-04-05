@@ -83,6 +83,7 @@
     },
     {
       "title": "Status",
+      "description": "Online if last_heartbeat within 2x timeframe. Offline = process may have stopped.",
       "type": "stat",
       "targets": [
         {
@@ -286,7 +287,7 @@
       "panels": []
     },
     {
-      "title": "Total Return",
+      "title": "Total Return %",
       "type": "stat",
       "targets": [
         {
@@ -330,6 +331,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "qs.stats.comp(returns). Cumulative compounded return, not annualized.",
       "id": 6,
       "gridPos": {
         "h": 4,
@@ -343,7 +345,7 @@
       }
     },
     {
-      "title": "Max Drawdown",
+      "title": "Max Drawdown %",
       "type": "stat",
       "targets": [
         {
@@ -383,6 +385,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "qs.stats.max_drawdown(returns). Negative ratio — largest peak-to-trough decline.",
       "id": 7,
       "gridPos": {
         "h": 4,
@@ -443,6 +446,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "qs.stats.sharpe(returns, periods=inferred). Annualized, rf=0. >1 acceptable, >2 strong.",
       "id": 8,
       "gridPos": {
         "h": 4,
@@ -456,7 +460,7 @@
       }
     },
     {
-      "title": "Win Rate",
+      "title": "Win Rate %",
       "type": "stat",
       "targets": [
         {
@@ -500,6 +504,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "Winning trades (net_pnl > 0) / total trades. Interpret with PF — low win rate + high PF = trend following.",
       "id": 9,
       "gridPos": {
         "h": 4,
@@ -560,6 +565,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "sum(winning net_pnl) / sum(losing net_pnl). None if no losses. >1.5 healthy, <1.0 losing.",
       "id": 10,
       "gridPos": {
         "h": 4,
@@ -612,6 +618,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
+      "description": "Total closed trades (reduce + close). Low count (<30) = metrics statistically unreliable.",
       "id": 11,
       "gridPos": {
         "h": 4,
@@ -626,6 +633,7 @@
     },
     {
       "title": "Equity Curve",
+      "description": "Portfolio equity over time vs benchmark. Divergence = strategy alpha (or negative alpha).",
       "type": "timeseries",
       "targets": [
         {
@@ -703,6 +711,7 @@
     },
     {
       "title": "Drawdown %",
+      "description": "Peak-to-trough drawdown over time. Depth = risk, duration = recovery speed.",
       "type": "timeseries",
       "targets": [
         {
@@ -754,6 +763,7 @@
     },
     {
       "title": "Price Trend",
+      "description": "Underlying asset close price. Matched to run's symbol, timeframe, and data source.",
       "type": "timeseries",
       "targets": [
         {
@@ -813,11 +823,12 @@
       }
     },
     {
-      "title": "Trade Detail",
+      "title": "Order Events",
+      "description": "Position lifecycle: open/add = entry side, reduce/close = exit side.\nP&L and return shown on reduce/close rows only (weighted-average entry price).\nOne full lifecycle = pos_qty goes from 0 → N → 0.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY entry_ts) AS \"#\", entry_ts AS \"Entry Time\", exit_ts AS \"Exit Time\", CASE WHEN side='long' THEN ROUND(quantity::numeric,4) ELSE -ROUND(quantity::numeric,4) END AS \"Qty\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(exit_price::numeric,2) AS \"Exit Price\", ROUND(gross_return::numeric,2) AS \"Gross Return %\", ROUND(net_return::numeric,2) AS \"Net Return %\", holding_bars AS \"Periods\", SPLIT_PART(trade_id, '-t', 2)::int AS \"Order ID\" FROM trade_blotter WHERE run_id = '${run_id}' AND ($__timeFilter(entry_ts) OR $__timeFilter(exit_ts)) ORDER BY entry_ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(avg_entry_price::numeric,2) AS \"Avg Entry\", ROUND(position_qty::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(realized_pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_ts AS \"Entry Time\", holding_bars AS \"Periods\", reason AS \"Reason\" FROM order_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -832,7 +843,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Net Return %"
+              "options": "Net P&L"
             },
             "properties": [
               {
@@ -858,6 +869,90 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Event"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "open": {
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "add": {
+                        "color": "super-light-blue",
+                        "index": 1
+                      },
+                      "reduce": {
+                        "color": "orange",
+                        "index": 2
+                      },
+                      "close": {
+                        "color": "semi-dark-orange",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Side"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "long": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "short": {
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Net Return %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
           }
         ]
       },
@@ -865,7 +960,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "Entry Time",
+            "displayName": "Time",
             "desc": false
           }
         ]
@@ -884,6 +979,7 @@
     },
     {
       "title": "Entry / Exit Signals",
+      "description": "Entry (green) and exit (red) points overlaid on timeline. Cross-reference with Order Events for details.",
       "type": "timeseries",
       "targets": [
         {

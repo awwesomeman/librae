@@ -43,7 +43,7 @@ def _make_trade_pnl(
 def _call_compute_all(
     equity: list[float],
     trade_pnls: list | None = None,
-    holding_bars: list[int] | None = None,
+    exposed_bars: int | None = None,
     annualize: bool = False,
 ) -> StrategyMetrics:
     """Helper to call compute_all with timestamps derived from equity length."""
@@ -54,7 +54,7 @@ def _call_compute_all(
         trade_pnls=trade_pnls or [],
         total_bars=len(equity),
         annualize=annualize,
-        holding_bars=holding_bars,
+        exposed_bars=exposed_bars,
     )
 
 
@@ -95,7 +95,7 @@ class TestComputeAllMetrics:
 
     def test_exposure_ratio(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
-        m = _call_compute_all([10_000.0] * 20, [pnl], holding_bars=[5])
+        m = _call_compute_all([10_000.0] * 20, [pnl], exposed_bars=5)
         assert np.isclose(m.exposure_ratio, 5 / 20)
 
     def test_cost_totals(self) -> None:
@@ -117,10 +117,10 @@ class TestComputeAllMetrics:
         m = _call_compute_all([10_000.0, 10_100.0, 10_180.0, 10_230.0], pnls, annualize=True)
         assert isinstance(m.sharpe, float)
 
-    def test_max_drawdown_positive(self) -> None:
+    def test_max_drawdown_negative(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
         m = _call_compute_all([10_000.0, 10_500.0, 9_800.0, 10_200.0], [pnl])
-        assert m.max_drawdown >= 0
+        assert m.max_drawdown <= 0
 
 
 class TestComputeAllWithEngine:

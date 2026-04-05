@@ -30,6 +30,25 @@ def _color_override(name: str, color: str) -> dict:
     }
 
 
+def _mapping_override(name: str, mappings: dict[str, str], cell_mode: str = "color-background") -> dict:
+    """Build a Grafana field override with value mappings and cell coloring."""
+    return {
+        "matcher": {"id": "byName", "options": name},
+        "properties": [
+            {
+                "id": "mappings",
+                "value": [
+                    {"type": "value", "options": {
+                        k: {"color": v, "index": i}
+                        for i, (k, v) in enumerate(mappings.items())
+                    }},
+                ],
+            },
+            {"id": "custom.cellOptions", "value": {"type": cell_mode}},
+        ],
+    }
+
+
 def _stat_target(sql: str) -> dict:
     return _target(sql, "A", "table")
 
@@ -109,6 +128,7 @@ _STATUS_SQL = (
 STATUS_PANEL: dict = {
     "_type": "kpi",
     "title": "Status",
+    "description": "Online if last_heartbeat within 2x timeframe. Offline = process may have stopped.",
     "type": "stat",
     "h": 4,
     "w": 4,
@@ -134,21 +154,27 @@ STATUS_PANEL: dict = {
     },
 }
 
-BASE_PANELS_DEF: list[dict] = [
-    {"_type": "row", "title": "Performance Overview"},
-    _stat_panel(
-        "Total Return",
+# ---------------------------------------------------------------------------
+# KPI catalogue — all available stat panels for Performance Overview.
+# Edit DEFAULT_KPIS to control which KPIs appear on the dashboard.
+# ---------------------------------------------------------------------------
+
+_KPI_CATALOGUE: dict[str, dict] = {
+    "total_return": _stat_panel(
+        "Total Return %",
         "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}'",
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
+        description="qs.stats.comp(returns). Cumulative compounded return, not annualized.",
     ),
-    _stat_panel(
-        "Max Drawdown",
+    "max_drawdown": _stat_panel(
+        "Max Drawdown %",
         "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}'",
         "percentunit",
         [{"color": "red", "value": None}],
+        description="qs.stats.max_drawdown(returns). Negative ratio — largest peak-to-trough decline.",
     ),
-    _stat_panel(
+    "sharpe": _stat_panel(
         "Sharpe Ratio",
         "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}'",
         None,
@@ -157,14 +183,38 @@ BASE_PANELS_DEF: list[dict] = [
             {"color": "yellow", "value": 0.5},
             {"color": "green", "value": 1.0},
         ],
+        description="qs.stats.sharpe(returns, periods=inferred). Annualized, rf=0. >1 acceptable, >2 strong.",
     ),
-    _stat_panel(
-        "Win Rate",
+    "sortino": _stat_panel(
+        "Sortino Ratio",
+        "SELECT sortino FROM strategy_performance WHERE run_id = '${run_id}'",
+        None,
+        [
+            {"color": "red", "value": None},
+            {"color": "yellow", "value": 0.5},
+            {"color": "green", "value": 1.0},
+        ],
+        description="qs.stats.sortino(returns, periods=inferred). Annualized. Penalizes downside volatility only.",
+    ),
+    "calmar": _stat_panel(
+        "Calmar Ratio",
+        "SELECT calmar FROM strategy_performance WHERE run_id = '${run_id}'",
+        None,
+        [
+            {"color": "red", "value": None},
+            {"color": "yellow", "value": 1.0},
+            {"color": "green", "value": 3.0},
+        ],
+        description="qs.stats.calmar(returns). CAGR / max_drawdown. Higher = better return per unit of drawdown risk.",
+    ),
+    "win_rate": _stat_panel(
+        "Win Rate %",
         "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}'",
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0.5}],
+        description="Winning trades (net_pnl > 0) / total trades. Interpret with PF — low win rate + high PF = trend following.",
     ),
-    _stat_panel(
+    "profit_factor": _stat_panel(
         "Profit Factor",
         "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}'",
         None,
@@ -173,16 +223,59 @@ BASE_PANELS_DEF: list[dict] = [
             {"color": "yellow", "value": 1.0},
             {"color": "green", "value": 1.5},
         ],
+        description="sum(winning net_pnl) / sum(losing net_pnl). None if no losses. >1.5 healthy, <1.0 losing.",
     ),
-    _stat_panel(
+    "trades": _stat_panel(
         "Trades",
         "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}'",
         None,
         [{"color": "blue", "value": None}],
+        description="Total closed trades (reduce + close). Low count (<30) = metrics statistically unreliable.",
     ),
+    "avg_trade_return": _stat_panel(
+        "Avg Trade Return %",
+        "SELECT avg_trade_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        "percentunit",
+        [{"color": "red", "value": None}, {"color": "green", "value": 0}],
+        description="Quantity-weighted mean net return per closed trade.",
+    ),
+    "exposure_ratio": _stat_panel(
+        "Exposure %",
+        "SELECT exposure_ratio FROM strategy_performance WHERE run_id = '${run_id}'",
+        "percentunit",
+        [{"color": "blue", "value": None}],
+        description="Bars with any open position / total bars. Multi-asset safe — overlapping positions counted once.",
+    ),
+    "annual_return": _stat_panel(
+        "Annual Return %",
+        "SELECT annual_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        "percentunit",
+        [{"color": "red", "value": None}, {"color": "green", "value": 0}],
+        description="qs.stats.cagr(returns, periods=inferred). Compound annual growth rate.",
+    ),
+    "benchmark_return": _stat_panel(
+        "Benchmark Return %",
+        "SELECT benchmark_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        "percentunit",
+        [{"color": "orange", "value": None}],
+        description="Buy-and-hold return over the same period. Compare with Total Return for alpha.",
+    ),
+}
+
+# WHY: edit this list to change which KPIs appear on the dashboard.
+# All metrics are always computed and stored in DB — this only controls display.
+DEFAULT_KPIS: list[str] = [
+    "total_return", "max_drawdown", "sharpe",
+    "win_rate", "profit_factor", "trades",
+]
+
+BASE_PANELS_DEF: list[dict] = [
+    {"_type": "row", "title": "Performance Overview"},
+    *[_KPI_CATALOGUE[k] for k in DEFAULT_KPIS],
     {
         "_type": "half",
         "title": "Equity Curve",
+        "description": "Portfolio equity over time vs benchmark. Divergence = strategy alpha (or negative alpha).",
         "type": "timeseries",
         "h": 8,
         "w": 12,
@@ -214,6 +307,7 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "half",
         "title": "Drawdown %",
+        "description": "Peak-to-trough drawdown over time. Depth = risk, duration = recovery speed.",
         "type": "timeseries",
         "h": 8,
         "w": 12,
@@ -240,6 +334,7 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed", "_x": 0, "_dy": 0,
         "title": "Price Trend",
+        "description": "Underlying asset close price. Matched to run's symbol, timeframe, and data source.",
         "type": "timeseries",
         "h": 10,
         "w": 12,
@@ -271,29 +366,39 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
+    # -- Order Events (single table replacing old Trade Detail) --
     {
         "_type": "fixed", "_x": 12, "_dy": 0,
-        "title": "Trade Detail",
+        "title": "Order Events",
+        "description": (
+            "Position lifecycle: open/add = entry side, reduce/close = exit side.\n"
+            "P&L and return shown on reduce/close rows only (weighted-average entry price).\n"
+            "One full lifecycle = pos_qty goes from 0 → N → 0."
+        ),
         "type": "table",
         "h": 15,
         "w": 12,
         "targets": [
             _target(
                 "SELECT"
-                " ROW_NUMBER() OVER (ORDER BY entry_ts) AS \"#\","
-                " entry_ts AS \"Entry Time\","
-                " exit_ts AS \"Exit Time\","
-                " CASE WHEN side='long' THEN ROUND(quantity::numeric,4)"
-                " ELSE -ROUND(quantity::numeric,4) END AS \"Qty\","
-                " ROUND(entry_price::numeric,2) AS \"Entry Price\","
-                " ROUND(exit_price::numeric,2) AS \"Exit Price\","
-                " ROUND(gross_return::numeric,2) AS \"Gross Return %\","
+                " ROW_NUMBER() OVER (ORDER BY ts) AS \"#\","
+                " ts AS \"Time\","
+                " event_type AS \"Event\","
+                " symbol AS \"Symbol\","
+                " side AS \"Side\","
+                " ROUND(quantity::numeric,4) AS \"Qty\","
+                " ROUND(price::numeric,2) AS \"Price\","
+                " ROUND(avg_entry_price::numeric,2) AS \"Avg Entry\","
+                " ROUND(position_qty::numeric,4) AS \"Pos Qty\","
+                " ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\","
+                " ROUND(realized_pnl::numeric,2) AS \"Net P&L\","
                 " ROUND(net_return::numeric,2) AS \"Net Return %\","
+                " entry_ts AS \"Entry Time\","
                 " holding_bars AS \"Periods\","
-                " SPLIT_PART(trade_id, '-t', 2)::int AS \"Order ID\""
-                " FROM trade_blotter WHERE run_id = '${run_id}'"
-                " AND ($__timeFilter(entry_ts) OR $__timeFilter(exit_ts))"
-                " ORDER BY entry_ts",
+                " reason AS \"Reason\""
+                " FROM order_events WHERE run_id = '${run_id}'"
+                " AND $__timeFilter(ts)"
+                " ORDER BY ts",
                 "A",
                 "table",
             )
@@ -302,7 +407,7 @@ BASE_PANELS_DEF: list[dict] = [
             "defaults": {},
             "overrides": [
                 {
-                    "matcher": {"id": "byName", "options": "Net Return %"},
+                    "matcher": {"id": "byName", "options": "Net P&L"},
                     "properties": [
                         {
                             "id": "thresholds",
@@ -316,17 +421,29 @@ BASE_PANELS_DEF: list[dict] = [
                         },
                         {"id": "custom.cellOptions", "value": {"type": "color-background"}},
                     ],
-                }
+                },
+                _mapping_override("Event", {
+                    "open": "blue", "add": "super-light-blue",
+                    "reduce": "orange", "close": "semi-dark-orange",
+                }),
+                _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
+                {
+                    "matcher": {"id": "byName", "options": "Net Return %"},
+                    "properties": [
+                        {"id": "unit", "value": "percent"},
+                    ],
+                },
             ],
         },
         "options": {
             "showHeader": True,
-            "sortBy": [{"displayName": "Entry Time", "desc": False}],
+            "sortBy": [{"displayName": "Time", "desc": False}],
         },
     },
     {
         "_type": "fixed", "_x": 0, "_dy": 10,
         "title": "Entry / Exit Signals",
+        "description": "Entry (green) and exit (red) points overlaid on timeline. Cross-reference with Order Events for details.",
         "type": "timeseries",
         "h": 5,
         "w": 12,

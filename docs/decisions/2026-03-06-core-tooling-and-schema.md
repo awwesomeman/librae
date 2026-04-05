@@ -1,6 +1,6 @@
 # 2026-03 核心決策整理
 
-> 狀態：implemented
+> ｘ：implemented
 > 注記：工具分工、績效九指標、snake_case 命名皆已落地
 
 ## 1) 工具分工

@@ -51,7 +51,8 @@ def compute_all(
     total_bars: int,
     annualize: bool = False,
     benchmark_values: Sequence[float] | None = None,
-    holding_bars: Sequence[int] | None = None,
+    exposed_bars: int | None = None,
+    trade_quantities: Sequence[float] | None = None,
 ) -> StrategyMetrics:
     """Compute all metrics from equity curve + trades.
 
@@ -62,7 +63,8 @@ def compute_all(
         total_bars: Total bar count (for exposure_ratio).
         annualize: If True, compute annualized metrics.
         benchmark_values: Buy-and-hold equity values for benchmark comparison.
-        holding_bars: Per-trade holding bar counts (for exposure_ratio).
+        exposed_bars: Number of bars with at least one open position.
+        trade_quantities: Per-trade closed quantity (for quantity-weighted avg return).
 
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
@@ -110,8 +112,6 @@ def compute_all(
     slippages = np.array([t.slippage for t in trade_pnls], dtype=np.float64)
     taxes = np.array([t.tax for t in trade_pnls], dtype=np.float64)
 
-    # WHY: use net_pnl (after costs) for all trade-level metrics
-    # to stay consistent with total_return which is also net-of-costs.
     wins = net_pnls[net_pnls > 0]
     losses_abs = np.abs(net_pnls[net_pnls < 0])
     win_rate = float(len(wins) / n_trades) if n_trades > 0 else 0.0
@@ -126,11 +126,23 @@ def compute_all(
     total_ret = _comp if _comp is not None else 0.0
     # WHY: TradePnL.net_return is percentage (*100); convert to ratio
     # for consistency with other StrategyMetrics return fields.
-    avg_trade_return = float(np.mean([t.net_return for t in trade_pnls])) / 100.0
+    # Use quantity-weighted average when quantities are available
+    # to correctly handle partial closes with different sizes.
+    trade_returns = np.array([t.net_return for t in trade_pnls], dtype=np.float64)
+    if trade_quantities is not None:
+        if len(trade_quantities) != n_trades:
+            raise ValueError(
+                f"trade_quantities length ({len(trade_quantities)}) "
+                f"must match trade_pnls length ({n_trades})"
+            )
+        qty_weights = np.array(trade_quantities, dtype=np.float64)
+        avg_trade_return = float(np.average(trade_returns, weights=qty_weights)) / 100.0
+    else:
+        avg_trade_return = float(np.mean(trade_returns)) / 100.0
 
     exposure_ratio = 0.0
-    if holding_bars and total_bars > 0:
-        exposure_ratio = float(sum(holding_bars) / total_bars)
+    if exposed_bars is not None and total_bars > 0:
+        exposure_ratio = float(exposed_bars / total_bars)
 
     benchmark_return: float | None = None
     if benchmark_values and len(benchmark_values) >= 2:
@@ -142,7 +154,7 @@ def compute_all(
         sharpe=sharpe,
         sortino=sortino,
         calmar=calmar,
-        max_drawdown=abs(max_dd),
+        max_drawdown=max_dd,
         trades=n_trades,
         win_rate=win_rate,
         profit_factor=profit_factor,

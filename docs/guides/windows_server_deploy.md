@@ -96,12 +96,12 @@ docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 
 ```powershell
 cd ..
-python scripts/setup_grafana.py --grafana-password <你設的密碼>
+python deploy/dev_push_dashboard.py --grafana-password <你設的密碼>
 ```
 
 > **踩坑：Grafana datasource uid 不匹配**
 >
-> 每個 Grafana 實例的 datasource uid 不同。`setup_grafana.py` 會自動偵測並更新。
+> 每個 Grafana 實例的 datasource uid 不同。`dev_push_dashboard.py` 會自動偵測並更新。
 > 如果儀表板空白，重跑這個腳本即可。
 > 如果 Grafana volume 重建過，要先清除再啟動：
 > ```powershell
@@ -109,7 +109,7 @@ python scripts/setup_grafana.py --grafana-password <你設的密碼>
 > docker volume rm deploy_grafana_data
 > docker compose up -d
 > # 等 10 秒後重跑
-> python scripts/setup_grafana.py --grafana-password <密碼>
+> python deploy/dev_push_dashboard.py --grafana-password <密碼>
 > ```
 
 ### 1.5 Windows 防火牆
@@ -219,7 +219,7 @@ conn.close()
 |------|------|------|
 | `schemas/canonical_schema.json` 被誤刪 | `import quant_lab` 直接 crash：`RuntimeError: Canonical schema not found` | `git show 9a3d1c6^:schemas/canonical_schema.json > schemas/canonical_schema.json` 恢復 |
 | `docker exec` hang | 命令不回傳，timeout | 改用 host 端 `psycopg2` 直接連 DB 執行 SQL |
-| Grafana 儀表板空白 | datasource uid 不匹配 | 跑 `python scripts/setup_grafana.py`，會自動偵測並修正 |
+| Grafana 儀表板空白 | datasource uid 不匹配 | 跑 `python deploy/dev_push_dashboard.py`，會自動偵測並修正 |
 | Grafana volume 殘留舊 uid | provisioning 衝突，Grafana crash | `docker volume rm deploy_grafana_data` 後重啟 |
 | `streamlit` 未安裝 | `No module named streamlit` | `pip install streamlit`（未列在 pyproject.toml） |
 | TimescaleDB 只 bind 127.0.0.1 | 遠端機連不上 5432 | docker-compose.yml 改為 `0.0.0.0:5432:5432` |

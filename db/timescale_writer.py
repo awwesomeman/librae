@@ -517,14 +517,14 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
         )
         for r in trade_rows
     ]
-    holding_bars = [r.get("holding_bars", 0) for r in trade_rows]
+    trade_quantities = [float(r.get("quantity", 1.0)) for r in trade_rows]
 
     metrics = compute_all(
         equity_values=equity_values,
         timestamps=timestamps,
         trade_pnls=trade_pnls,
         total_bars=len(equity_values),
-        holding_bars=holding_bars,
+        trade_quantities=trade_quantities,
     )
     write_performance(run_id, metrics, dsn=dsn)
 

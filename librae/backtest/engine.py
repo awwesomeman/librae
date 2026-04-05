@@ -57,6 +57,7 @@ class BacktestResult:
     equity_curve: Sequence[EquitySnapshot]
     initial_balance: float
     final_equity: float
+    exposed_bars: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +168,7 @@ class Backtest:
         positions: dict[str, PositionState] = {}
         trades: list[TradeResult] = []
         equity_curve: list[EquitySnapshot] = []
+        exposed_bars = 0
         primary_symbol = self._symbols[0]
 
         for step, ts in enumerate(self._timeline):
@@ -174,6 +176,9 @@ class Backtest:
 
             mtm, pos_snapshot = self._eval_equity(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
+
+            if positions:
+                exposed_bars += 1
 
             ctx = Context(
                 ts=ts,
@@ -218,6 +223,7 @@ class Backtest:
             equity_curve=equity_curve,
             initial_balance=self._initial_balance,
             final_equity=cash,
+            exposed_bars=exposed_bars,
         )
         return self._result
 
@@ -268,7 +274,7 @@ class Backtest:
             )
             for t in result.trades
         ]
-        trade_holding_bars = [t.holding_bars for t in result.trades]
+        trade_quantities = [t.quantity for t in result.trades]
 
         self._metrics = compute_all(
             equity_values=[s.equity for s in result.equity_curve],
@@ -277,7 +283,8 @@ class Backtest:
             total_bars=len(result.equity_curve),
             annualize=annualize,
             benchmark_values=benchmark_curve,
-            holding_bars=trade_holding_bars,
+            exposed_bars=result.exposed_bars,
+            trade_quantities=trade_quantities,
         )
 
         run_metadata = RunMetadata(

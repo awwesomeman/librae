@@ -117,7 +117,7 @@ experiments/                # 策略研究實驗（獨立可執行）
 db/                         # TimescaleDB 讀寫
 app/                        # Streamlit UI
 brokers/                    # 券商 API adapter
-scripts/                    # 通用工具（setup_grafana）
+scripts/                    # 通用工具（seed、demo）
 deploy/                     # Docker + 部署腳本
 ```
 
