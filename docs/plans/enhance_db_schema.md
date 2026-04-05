@@ -356,13 +356,6 @@ ohlcv (獨立)          signal_outcomes (獨立)
 
 唯一鍵：`(signal_ts, strategy, symbol, mode, timeframe)`
 
-### 待修正：欄位命名不一致
-
-| 問題 | 現在 | 應改為 | 影響範圍 |
-|------|------|--------|---------|
-| signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） |
-| equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） |
-
 ## Schema 演進歷程
 
 | 日期 | 變更 | 來源 |
@@ -430,9 +423,41 @@ signal_outcomes 已設計為跨 run 累積（無 FK，自帶 strategy/mode/symbo
 
 **strategy_performance**：聚合 KPI 是 per-run 快照，維持 FK CASCADE。
 
-### Issue 6：signal_outcomes CHECK constraint 過寬
+### Issue 6：統一命名 `trade_events` / `signal_events`
 
-`signal_outcomes.mode` CHECK 允許 `('backtest', 'sim', 'live')`，但實際不會有 live 訊號。應改為 `('backtest', 'sim')`。
+合併 trade_blotter + order_events 後，兩張獨立表角色對稱，應統一命名：
+
+| 現在 | 改為 | 用途 |
+|------|------|------|
+| `order_events` + `trade_blotter` | **`trade_events`** | 策略端：每次交易操作（open/add/reduce/close） |
+| `signal_outcomes` | **`signal_events`** | 訊號端：每次訊號發射 |
+
+同時修正 `signal_events` 的 CHECK constraint：`mode IN ('backtest', 'sim')`（移除 live）。
+
+### 目標架構（Issue 全部完成後）
+
+```
+backtest_runs              ← 中樞（per-run metadata）
+  ├── equity_curve         ← FK CASCADE（per-run 淨值）
+  └── strategy_performance ← FK CASCADE（per-run KPI）
+
+trade_events               ← 獨立（跨 run 交易事件，原 order_events + trade_blotter）
+signal_events              ← 獨立（跨 run 訊號事件，原 signal_outcomes）
+ohlcv                      ← 獨立（共用市場資料）
+```
+
+6 張表。per-run 表靠 FK CASCADE 管理生命週期；事件表獨立跨 run 累積。
+
+### Issue 執行順序建議
+
+```
+Issue 5（order_events 改獨立） + Issue 3（合併 trade_blotter）
+  → Issue 6（統一命名 trade_events / signal_events）
+    → Issue 1（欄位命名 signal_ts → ts）
+      → Issue 4（CHECK constraint）
+```
+
+Issue 2（FK vs 獨立模式）被 Issue 5 解決。
 
 ## 不在範圍
 
