@@ -78,7 +78,7 @@ def build_live_trader(
                 run_id=run_id, strategy=strategy_name, symbol=symbols[0],
                 timeframe=timeframe, mode="sim",
                 start_ts=datetime.now(tz=timezone.utc),
-                data_source="binance", poll_interval=poll_interval,
+                data_source="binance_spot", poll_interval=poll_interval,
                 params_json=params,
             )
         except Exception as e:

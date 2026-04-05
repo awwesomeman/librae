@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import pathlib
 import re
 import subprocess
 import sys
@@ -49,9 +50,12 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
     with open(path) as f:
         content = f.read()
     new_ds = json.dumps({"type": ds_type, "uid": uid})
-    updated = re.sub(r'DATASOURCE[^=]*= \{[^}]*\}', f'DATASOURCE: dict = {new_ds}', content)
+    updated = re.sub(r'DATASOURCE\s*:\s*dict\s*=\s*\{[^}]*\}', f'DATASOURCE: dict = {new_ds}', content)
     if updated == content:
-        logger.warning("DATASOURCE pattern not found in %s, no changes made", path)
+        if not re.search(r'DATASOURCE\s*:\s*dict\s*=\s*\{[^}]*\}', content):
+            logger.warning("DATASOURCE pattern not found in %s", path)
+        else:
+            logger.info("DATASOURCE already up-to-date in %s", path)
         return
     with open(path, "w") as f:
         f.write(updated)
@@ -72,18 +76,19 @@ def delete_old_dashboards(base_url: str, auth: tuple[str, str]) -> None:
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Re-generate dashboard JSON and deploy to Grafana."""
     subprocess.run([sys.executable, "app/grafana/generate_dashboards.py"], check=True)
-    fpath = "app/grafana/provisioning/dashboards/json/strategy_dashboard.json"
-    with open(fpath) as f:
-        d = json.load(f)
-    d.pop("id", None)
-    r = requests.post(
-        f"{base_url}/api/dashboards/db",
-        json={"dashboard": d, "folderId": 0, "overwrite": True},
-        auth=auth,
-        timeout=30,
-    )
-    r.raise_for_status()
-    logger.info("strategy_dashboard.json: %s", r.json().get("status", "?"))
+    dashboard_dir = "app/grafana/provisioning/dashboards/json"
+    for fpath in sorted(pathlib.Path(dashboard_dir).glob("*.json")):
+        with open(fpath) as f:
+            d = json.load(f)
+        d.pop("id", None)
+        r = requests.post(
+            f"{base_url}/api/dashboards/db",
+            json={"dashboard": d, "folderId": 0, "overwrite": True},
+            auth=auth,
+            timeout=30,
+        )
+        r.raise_for_status()
+        logger.info("%s: %s", fpath.name, r.json().get("status", "?"))
 
 
 def main() -> None:

@@ -69,7 +69,7 @@ class RunMetadata:
     run_ts: datetime
     params: dict | None = None
     mode: str = "backtest"
-    data_source: str = "binance"
+    data_source: str = "binance_spot"
 
 
 @dataclass(frozen=True)
