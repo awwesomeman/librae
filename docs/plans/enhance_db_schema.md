@@ -379,10 +379,34 @@ ohlcv (獨立)          signal_outcomes (獨立)
 
 ## 待處理
 
-| 問題 | 現在 | 應改為 | 影響範圍 | 優先級 |
-|------|------|--------|---------|--------|
-| signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） | 低 |
-| equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） | 低 |
+### Issue 1：欄位命名不一致
+
+| 問題 | 現在 | 應改為 | 影響範圍 |
+|------|------|--------|---------|
+| signal_outcomes 時間戳 | `signal_ts` | `ts` | schema + writer + reader + Grafana（~53 處） |
+| equity_curve 策略名 | `strategy_name` | `strategy` | schema + writer（~6 處 DB 欄位相關） |
+
+### Issue 2：結果表設計模式不一致
+
+三張「結果表」的 metadata 攜帶方式不同：
+
+| 特性 | trade_blotter | order_events | signal_outcomes |
+|------|:---:|:---:|:---:|
+| 有 `run_id` FK | ✅ | ✅ | ❌ 獨立 |
+| 自帶 `mode` | ❌ 靠 JOIN | ❌ 靠 JOIN | ✅ |
+| 自帶 `strategy` | ❌ 靠 JOIN | ❌ 靠 JOIN | ✅ |
+| 自帶 `timeframe` | ❌ 靠 JOIN | ❌ 靠 JOIN | ✅ |
+
+**原因**：signal_outcomes 設計為「跨 run 累積」— sim 重啟換 run_id 不影響歷史可見性，所以刻意不綁 FK。trade_blotter/order_events 是「per-run」資料，跟著 run 生命週期 CASCADE。
+
+**待討論**：
+- 是否讓 signal_outcomes 也加 run_id FK？（會破壞跨 run 累積特性）
+- 或維持兩種模式但明確文件化？（FK 表 vs 獨立表）
+- equity_curve 也是 per-run 但多了 `strategy_name` 冗餘欄位，是否移除改用 JOIN？
+
+### Issue 3：signal_outcomes CHECK constraint 過寬
+
+`signal_outcomes.mode` CHECK 允許 `('backtest', 'sim', 'live')`，但實際不會有 live 訊號。應改為 `('backtest', 'sim')`。
 
 ## 不在範圍
 
