@@ -38,7 +38,7 @@ class LiveTrader:
         timeframe: Candle interval (e.g. "1h").
         warmup_bars: Number of historical bars for indicator warm-up.
         initial_balance: Starting cash for position sizing.
-        poll_interval: Seconds between poll cycles.
+        poll_seconds: Seconds between poll cycles.
         on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
             called every completed bar for equity persistence.
         on_order_event: Optional callback(OrderEvent) called on every
@@ -67,7 +67,7 @@ class LiveTrader:
         timeframe: str = "1h",
         warmup_bars: int = 720,
         initial_balance: float = 100_000.0,
-        poll_interval: float = 60.0,
+        poll_seconds: float = 60.0,
         on_bar: Callable[..., None] | None = None,
         on_order_event: Callable[..., None] | None = None,
         on_ohlcv: Callable[..., None] | None = None,
@@ -84,7 +84,7 @@ class LiveTrader:
         self._run_id = run_id
         self._timeframe = timeframe
         self._warmup_bars = warmup_bars
-        self._poll_interval = poll_interval
+        self._poll_seconds = poll_seconds
         self._warmup_fetcher = warmup_fetcher
         self._on_bar = on_bar
         self._on_order_event = on_order_event
@@ -139,7 +139,7 @@ class LiveTrader:
 
         logger.info(
             "LiveTrader started: symbols=%s, timeframe=%s, poll=%ss",
-            self._symbols, self._timeframe, self._poll_interval,
+            self._symbols, self._timeframe, self._poll_seconds,
         )
         self._notify(
             "send_startup",
@@ -174,7 +174,7 @@ class LiveTrader:
                     break
 
                 if self._running:
-                    time.sleep(self._poll_interval)
+                    time.sleep(self._poll_seconds)
         except Exception:
             shutdown_reason = "unhandled exception"
             logger.exception("LiveTrader crashed")

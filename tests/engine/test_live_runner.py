@@ -157,7 +157,7 @@ class TestLiveTrader:
             timeframe="1h",
             warmup_bars=5,
             initial_balance=100_000.0,
-            poll_interval=0.0,
+            poll_seconds=0.0,
             **kwargs,
         )
 

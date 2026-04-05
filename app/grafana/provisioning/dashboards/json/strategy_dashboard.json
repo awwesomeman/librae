@@ -157,11 +157,11 @@
       }
     },
     {
-      "title": "Poll Interval",
+      "title": "Poll Seconds",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT poll_interval AS \"Interval\" FROM backtest_runs WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT poll_seconds AS \"Seconds\" FROM backtest_runs WHERE run_id = '${run_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {

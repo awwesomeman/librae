@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Start a sim container for a given strategy.
 # Strategy params (symbol, market, etc.) come from config.yaml.
-# Usage: ./deploy/sim_start.sh <strategy> [poll_interval]
+# Usage: ./deploy/sim_start.sh <strategy> [poll_seconds]
 # Example:
 #   ./deploy/sim_start.sh trendpullback
 #   ./deploy/sim_start.sh trendpullback_m5 30
 set -euo pipefail
 
-STRATEGY="${1:?Usage: sim_start.sh <strategy> [poll_interval]}"
-POLL_INTERVAL="${2:-60}"
+STRATEGY="${1:?Usage: sim_start.sh <strategy> [poll_seconds]}"
+POLL_SECONDS="${2:-60}"
 IMAGE="quant-sim"
 NETWORK="quant_network"
 
@@ -35,7 +35,7 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     docker rm -f "${CONTAINER}" >/dev/null
 fi
 
-echo "Starting ${CONTAINER}: strategy=${STRATEGY}, symbol=${SYMBOL}, poll=${POLL_INTERVAL}s"
+echo "Starting ${CONTAINER}: strategy=${STRATEGY}, symbol=${SYMBOL}, poll=${POLL_SECONDS}s"
 
 docker run -d \
     --name "${CONTAINER}" \
@@ -47,6 +47,6 @@ docker run -d \
     "${IMAGE}" \
     python -m "strategies.${STRATEGY}.run" \
     --mode sim \
-    --poll-interval "${POLL_INTERVAL}"
+    --poll-seconds "${POLL_SECONDS}"
 
 echo "Started. Logs: docker logs -f ${CONTAINER}"

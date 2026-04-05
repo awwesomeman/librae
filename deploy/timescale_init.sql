@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     end_ts          TIMESTAMPTZ,
     run_ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     mode            TEXT DEFAULT 'backtest',
-    poll_interval   INTEGER,
+    poll_seconds    INTEGER,
     last_heartbeat  TIMESTAMPTZ,
     params          JSONB,
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))

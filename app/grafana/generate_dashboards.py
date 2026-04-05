@@ -101,7 +101,7 @@ def _stat_panel(
 
 
 # WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
-# Threshold = 2x strategy timeframe (not poll_interval) to avoid false Offline on brief delays.
+# Threshold = 2x strategy timeframe (not poll_seconds) to avoid false Offline on brief delays.
 _STATUS_SQL = (
     "SELECT CASE"
     " WHEN last_heartbeat IS NULL THEN -1"
@@ -495,10 +495,10 @@ BASE_PANELS_DEF: list[dict] = [
     },
 ]
 
-def _poll_interval_panel(w: int) -> dict:
+def _poll_seconds_panel(w: int) -> dict:
     return _stat_panel(
-        "Poll Interval",
-        "SELECT poll_interval AS \"Interval\""
+        "Poll Seconds",
+        "SELECT poll_seconds AS \"Seconds\""
         " FROM backtest_runs WHERE run_id = '${run_id}'",
         "s", [],
         w=w, fixed_color="blue", no_value="N/A",
@@ -509,7 +509,7 @@ def _poll_interval_panel(w: int) -> dict:
 EXTRA_PANELS: list[dict] = [
     {"_type": "row", "title": "Live / Sim Only"},
     {**STATUS_PANEL, "w": 6},
-    _poll_interval_panel(w=6),
+    _poll_seconds_panel(w=6),
     _stat_panel(
         "Unrealized PnL",
         (
@@ -889,7 +889,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         w=3, decimals=3, no_value="N/A", fixed_color="blue",
         description="Latest signal_value.",
     ),
-    _poll_interval_panel(w=3),
+    _poll_seconds_panel(w=3),
 
     # --- Trend row ---
     {"_type": "row", "title": "Trend"},

@@ -27,9 +27,9 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--config", type=str, default=None,
                    help="path to strategy config YAML (overrides built-in config)")
     # Runtime flags only — things that genuinely change per-run.
-    # Everything else (symbol, market, poll_interval, etc.) lives in config.yaml.
+    # Everything else (symbol, market, poll_seconds, etc.) lives in config.yaml.
     p.add_argument("--mode", default="backtest", choices=["backtest", "sim", "live"])
-    p.add_argument("--poll-interval", type=int, default=60,
+    p.add_argument("--poll-seconds", type=int, default=60,
                    help="seconds between poll cycles (sim mode)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")

@@ -2,7 +2,7 @@
 """Heartbeat monitor — alerts via Telegram when sim/live services go stale.
 
 Queries backtest_runs for active sim/live runs whose last_heartbeat exceeds
-the expected interval (default: 3× poll_interval). Designed to run as a cron
+the expected interval (default: 3× poll_seconds). Designed to run as a cron
 job or standalone watchdog, independent of the monitored services.
 
 Usage:
@@ -28,7 +28,7 @@ from librae.notifications.telegram import EMOJI_WARNING, TelegramAdapter, Telegr
 
 logger = logging.getLogger(__name__)
 
-# WHY: 3× poll_interval allows for transient delays (network blips, GC pauses)
+# WHY: 3× poll_seconds allows for transient delays (network blips, GC pauses)
 # without false alarms. A single missed heartbeat is normal; 3 consecutive
 # misses strongly indicates the service is down.
 STALE_MULTIPLIER = 3
@@ -39,11 +39,11 @@ def find_stale_runs() -> list[dict[str, str]]:
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT run_id, strategy, symbol, mode, poll_interval, last_heartbeat
+            SELECT run_id, strategy, symbol, mode, poll_seconds, last_heartbeat
             FROM backtest_runs
             WHERE mode IN ('sim', 'live')
               AND last_heartbeat IS NOT NULL
-              AND last_heartbeat < NOW() - (poll_interval * %s || ' seconds')::interval
+              AND last_heartbeat < NOW() - (poll_seconds * %s || ' seconds')::interval
         """, (STALE_MULTIPLIER,))
         rows = cur.fetchall()
         cur.close()
@@ -54,7 +54,7 @@ def find_stale_runs() -> list[dict[str, str]]:
             "strategy": r[1],
             "symbol": r[2],
             "mode": r[3],
-            "poll_interval": r[4],
+            "poll_seconds": r[4],
             "last_heartbeat": r[5].isoformat() if r[5] else "unknown",
         }
         for r in rows
