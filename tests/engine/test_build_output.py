@@ -31,9 +31,9 @@ def _make_df(n: int = 50, symbol: str = "BTCUSDT") -> pd.DataFrame:
 
 class BuyBar5CloseBar15(BaseStrategy):
     def on_bar(self, ctx):
-        if ctx.bar_index == 5 and ctx.symbol not in ctx.positions:
+        if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
             return [Action(type="buy", symbol=ctx.symbol)]
-        if ctx.bar_index == 15 and ctx.symbol in ctx.positions:
+        if ctx.period_index == 15 and ctx.symbol in ctx.positions:
             return [Action(type="close", symbol=ctx.symbol)]
         return []
 

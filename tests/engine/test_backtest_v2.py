@@ -54,9 +54,9 @@ class HoldStrategy(BaseStrategy):
 class BuyBar2CloseBar4(BaseStrategy):
     """Buy at bar 2, close at bar 4."""
     def on_bar(self, ctx: Context) -> list[Action]:
-        if ctx.bar_index == 2 and ctx.symbol not in ctx.positions:
+        if ctx.period_index == 2 and ctx.symbol not in ctx.positions:
             return [Action(type="buy", symbol=ctx.symbol)]
-        if ctx.bar_index == 4 and ctx.symbol in ctx.positions:
+        if ctx.period_index == 4 and ctx.symbol in ctx.positions:
             return [Action(type="close", symbol=ctx.symbol)]
         return []
 
@@ -112,7 +112,7 @@ class TestBacktestBasics:
 
         class BuyBar2(BaseStrategy):
             def on_bar(self, ctx):
-                if ctx.bar_index == 2 and ctx.symbol not in ctx.positions:
+                if ctx.period_index == 2 and ctx.symbol not in ctx.positions:
                     return [Action(type="buy", symbol=ctx.symbol)]
                 return []
 
@@ -182,7 +182,7 @@ class TestMultiAsset:
         class BuyBothBar2(BaseStrategy):
             def on_bar(self, ctx):
                 actions = []
-                if ctx.bar_index == 2:
+                if ctx.period_index == 2:
                     n_symbols = len(ctx.symbols)
                     for sym in ctx.symbols:
                         if sym not in ctx.positions:
@@ -190,7 +190,7 @@ class TestMultiAsset:
                             price = bar.get("close", 1.0)
                             qty = (ctx.cash / n_symbols) / price if price > 0 else 0
                             actions.append(Action(type="buy", symbol=sym, quantity=qty))
-                if ctx.bar_index == 5:
+                if ctx.period_index == 5:
                     for sym in ctx.symbols:
                         if sym in ctx.positions:
                             actions.append(Action(type="close", symbol=sym))
@@ -232,9 +232,9 @@ class TestContext:
         class Spy(BaseStrategy):
             def on_bar(self, ctx):
                 seen_positions.append(dict(ctx.positions))
-                if ctx.bar_index == 1:
+                if ctx.period_index == 1:
                     return [Action(type="buy", symbol=ctx.symbol)]
-                if ctx.bar_index == 4:
+                if ctx.period_index == 4:
                     return [Action(type="close", symbol=ctx.symbol)]
                 return []
 
@@ -261,9 +261,9 @@ class TestContext:
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
                     held_values.append(pos.periods_held)
-                if ctx.bar_index == 1:
+                if ctx.period_index == 1:
                     return [Action(type="buy", symbol=ctx.symbol)]
-                if ctx.bar_index == 5:
+                if ctx.period_index == 5:
                     return [Action(type="close", symbol=ctx.symbol)]
                 return []
 

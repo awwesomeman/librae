@@ -38,7 +38,7 @@ class Context:
         bars: Current bar data per symbol. Multi-asset.
         positions: Open positions keyed by symbol.
         cash: Available cash.
-        bar_index: 0-based index into the timeline.
+        period_index: 0-based index into the timeline.
     """
 
     ts: datetime
@@ -48,7 +48,7 @@ class Context:
     bars: dict[str, dict[str, float]]
     positions: dict[str, Position]
     cash: float
-    bar_index: int
+    period_index: int
 
 
 @dataclass(frozen=True)

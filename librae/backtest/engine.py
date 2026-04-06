@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Sequence
 
@@ -29,12 +29,12 @@ if TYPE_CHECKING:
     from librae.backtest.schema import BacktestOutput, EquityCurvePoint, StrategyMetrics
     from librae.core.run_config import RunConfig
 
-from librae.config.market_config import MarketConfig, get_market
+from librae.config.market_config import MarketConfig
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     OrderEvent, TradePnL, TradeResult, build_trade_result,
-    close_position, direction, process_actions, resolve_fill_price,
+    close_position, direction, eval_equity, process_actions, resolve_fill_price,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id, make_trade_id
@@ -118,15 +118,7 @@ class Backtest:
             self._initial_balance = cfg.initial_balance
             self._data_source = cfg.data_source
             resolved_name = cfg.strategy_name
-            if cost_model is not None:
-                resolved_cm = cost_model
-            elif cfg.cost_overrides:
-                mc = get_market(cfg.market)
-                base = asdict(CostModel.from_market(mc))
-                base.update(cfg.cost_overrides)
-                resolved_cm = CostModel(**base)
-            else:
-                resolved_cm = CostModel.from_market(get_market(cfg.market))
+            resolved_cm = CostModel.from_config(cfg, override=cost_model)
         else:
             self._initial_balance = initial_balance
             self._data_source = data_source
@@ -235,7 +227,7 @@ class Backtest:
                 bars=bars,
                 positions=pos_snapshot,
                 cash=cash,
-                bar_index=step,
+                period_index=step,
             )
             pending_actions = self._strategy.on_bar(ctx)
 
@@ -483,25 +475,13 @@ class Backtest:
         positions: dict[str, PositionState],
         bars: dict[str, dict[str, float]],
     ) -> tuple[float, dict[str, Position]]:
-        """Compute portfolio MTM value and position snapshot in a single pass.
-
-        Returns (mark_to_market, {symbol: Position}).
-        """
-        mtm = cash
-        snapshot: dict[str, Position] = {}
-        for sym, ps in positions.items():
+        """Compute portfolio MTM value and position snapshot in a single pass."""
+        def _price(sym: str, ps: PositionState) -> float:
             bar = bars.get(sym)
-            price = bar["close"] if bar is not None else ps.entry_price
-            cost_model = self._get_cost_model(sym)
-            unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
-            mtm += unrealized + ps.entry_price * ps.quantity * cost_model.multiplier
-            snapshot[sym] = Position(
-                symbol=sym,
-                side=ps.side,
-                entry_price=ps.entry_price,
-                quantity=ps.quantity,
-                entry_ts=ps.entry_ts,
-                periods_held=ps.periods_held,
-                unrealized_pnl=unrealized,
-            )
-        return mtm, snapshot
+            return bar["close"] if bar is not None else ps.entry_price
+
+        return eval_equity(
+            cash, positions,
+            get_price=_price,
+            get_cost_model=self._get_cost_model,
+        )

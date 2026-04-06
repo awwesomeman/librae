@@ -7,24 +7,14 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from librae.core.run_config import RunConfig
 from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_event
+from tests.conftest import make_test_cfg
 
 
-def _test_cfg(**overrides) -> RunConfig:
-    defaults = dict(
-        strategy_name="test",
-        symbols=["BTCUSDT"],
-        timeframe="H1",
-        market="crypto",
-        data_source="binance_spot",
-        initial_balance=100_000.0,
-        mode="backtest",
-        no_db=True,
-        params={"a": 1},
-    )
-    defaults.update(overrides)
-    return RunConfig(**defaults)
+def _test_cfg(**overrides) -> "RunConfig":
+    overrides.setdefault("mode", "backtest")
+    overrides.setdefault("params", {"a": 1})
+    return make_test_cfg(**overrides)
 
 
 class TestWriteSignalEvent:

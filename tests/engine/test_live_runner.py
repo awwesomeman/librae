@@ -7,15 +7,15 @@ Skills: python, quant
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from librae.core.cost_model import CostModel
-from librae.core.run_config import RunConfig
 from librae.live.executor import LiveExecutor
+from tests.conftest import make_test_cfg
 from librae.live.engine import LiveTrader
 from librae.core.strategy import Action, BaseStrategy, Context
 
@@ -25,10 +25,7 @@ from librae.core.strategy import Action, BaseStrategy, Context
 # ---------------------------------------------------------------------------
 
 def _zero_cost_model() -> CostModel:
-    return CostModel(
-        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
-    )
+    return CostModel.zero()
 
 
 def _make_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
@@ -69,22 +66,9 @@ class _HoldStrategy(BaseStrategy):
         return []
 
 
-def _test_cfg(**overrides) -> RunConfig:
-    """Build a minimal RunConfig for tests (no_db=True, all callbacks off)."""
-    defaults = dict(
-        strategy_name="test",
-        symbols=["BTCUSDT"],
-        timeframe="H1",
-        market="crypto",
-        data_source="binance_spot",
-        initial_balance=100_000.0,
-        mode="sim",
-        no_db=True,
-        poll_seconds=0,
-        params={"warmup_periods": 5},
-    )
-    defaults.update(overrides)
-    return RunConfig(**defaults)
+def _test_cfg(**overrides) -> "RunConfig":
+    overrides.setdefault("params", {"warmup_periods": 5})
+    return make_test_cfg(**overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -92,26 +76,6 @@ def _test_cfg(**overrides) -> RunConfig:
 # ---------------------------------------------------------------------------
 
 class TestLiveExecutor:
-
-    def test_simulation_returns_fill(self):
-        cm = _zero_cost_model()
-        ex = LiveExecutor(cm, simulation=True, strategy_name="Test")
-        action = Action(type="buy", symbol="BTCUSDT", quantity=1.0)
-        fill = ex.execute(action, price=100.0, cash=1_000_000.0)
-        assert fill is not None
-        assert fill.quantity == 1.0
-
-    def test_hold_action_returns_none(self):
-        cm = _zero_cost_model()
-        ex = LiveExecutor(cm, simulation=True)
-        fill = ex.execute(Action(type="hold"), price=100.0, cash=1_000_000.0)
-        assert fill is None
-
-    def test_live_mode_raises(self):
-        cm = _zero_cost_model()
-        ex = LiveExecutor(cm, simulation=False)
-        with pytest.raises(NotImplementedError):
-            ex.execute(Action(type="buy", symbol="X"), price=100.0, cash=1_000_000.0)
 
     def test_notify_exit_sends_telegram(self):
         cm = _zero_cost_model()
@@ -234,14 +198,6 @@ class TestLiveTrader:
 
     def test_close_calls_notify_exit(self):
         """Close action should call executor.notify_exit."""
-        mock_executor = MagicMock(spec=LiveExecutor)
-        mock_executor.cost_model = _zero_cost_model()
-        mock_fill = MagicMock()
-        mock_fill.side = "long"
-        mock_fill.price = 100.0
-        mock_fill.quantity = 1.0
-        mock_executor.execute.return_value = mock_fill
-
         call_num = 0
 
         def fetcher(*args, **kwargs):

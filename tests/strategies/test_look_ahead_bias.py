@@ -187,9 +187,9 @@ class _BuyBar5Strategy(BaseStrategy):
 
     def on_bar(self, ctx) -> list[Action]:
         pos = ctx.positions.get(ctx.symbol)
-        if pos and ctx.bar_index >= 10:
+        if pos and ctx.period_index >= 10:
             return [Action(type="close", symbol=ctx.symbol)]
-        if not pos and ctx.bar_index == 5:
+        if not pos and ctx.period_index == 5:
             return [Action(type="buy", symbol=ctx.symbol)]
         return []
 

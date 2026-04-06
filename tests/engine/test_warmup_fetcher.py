@@ -7,24 +7,12 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from librae.core.run_config import RunConfig
+from tests.conftest import make_test_cfg
 
 
-def _test_cfg(**overrides) -> RunConfig:
-    defaults = dict(
-        strategy_name="test",
-        symbols=["BTCUSDT"],
-        timeframe="H1",
-        market="crypto",
-        data_source="binance_spot",
-        initial_balance=100_000.0,
-        mode="sim",
-        no_db=True,
-        poll_seconds=0,
-        params={"warmup_periods": 50},
-    )
-    defaults.update(overrides)
-    return RunConfig(**defaults)
+def _test_cfg(**overrides) -> "RunConfig":
+    overrides.setdefault("params", {"warmup_periods": 50})
+    return make_test_cfg(**overrides)
 
 
 class TestWarmupFetcher:

@@ -17,10 +17,7 @@ from librae.core.strategy import Action, BaseStrategy, PositionState
 
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-ZERO_COST = CostModel(
-    multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-    slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
-)
+ZERO_COST = CostModel.zero()
 
 
 def _run(actions_list: list[Action], cost_model: CostModel = ZERO_COST,
@@ -258,9 +255,9 @@ class TestEngineIntegration:
 
         class BuyBar5CloseBar20(BaseStrategy):
             def on_bar(self, ctx):
-                if ctx.bar_index == 5 and ctx.symbol not in ctx.positions:
+                if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
                     return [Action(type="buy", symbol=ctx.symbol, reason="test entry")]
-                if ctx.bar_index == 20 and ctx.symbol in ctx.positions:
+                if ctx.period_index == 20 and ctx.symbol in ctx.positions:
                     return [Action(type="close", symbol=ctx.symbol, reason="test exit")]
                 return []
 
