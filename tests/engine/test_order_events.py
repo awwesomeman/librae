@@ -63,14 +63,14 @@ class TestOpenEvent:
         assert events[0].pnl is None
         assert events[0].net_return is None
         assert events[0].entry_ts is None
-        assert events[0].holding_bars is None
+        assert events[0].holding_periods is None
 
 
 class TestAddEvent:
     def test_scale_in_produces_add(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=90.0, quantity=5.0,
-            entry_ts=TS, bars_held=3, entry_commission=0, entry_slippage=0,
+            entry_ts=TS, periods_held=3, entry_commission=0, entry_slippage=0,
             total_entry_cost=450.0,
         )}
         events, _, _ = _run(
@@ -91,7 +91,7 @@ class TestReduceCloseEvents:
     def test_partial_close_produces_reduce(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, bars_held=5, entry_commission=0, entry_slippage=0,
+            entry_ts=TS, periods_held=5, entry_commission=0, entry_slippage=0,
             total_entry_cost=800.0,
         )}
         events, trades, _ = _run(
@@ -108,14 +108,14 @@ class TestReduceCloseEvents:
         assert e.pnl is not None
         assert e.net_return is not None
         assert e.entry_ts == TS
-        assert e.holding_bars == 5
+        assert e.holding_periods == 5
         # PnL: (100 - 80) * 4 = 80
         assert np.isclose(e.pnl, 80.0)
 
     def test_full_close_produces_close(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, bars_held=5, entry_commission=0, entry_slippage=0,
+            entry_ts=TS, periods_held=5, entry_commission=0, entry_slippage=0,
             total_entry_cost=800.0,
         )}
         events, _, pos = _run(
@@ -133,7 +133,7 @@ class TestReduceCloseEvents:
         """action.quantity > pos.quantity should be clamped, not inflate the event."""
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, bars_held=5, entry_commission=0, entry_slippage=0,
+            entry_ts=TS, periods_held=5, entry_commission=0, entry_slippage=0,
             total_entry_cost=800.0,
         )}
         events, trades, pos = _run(
@@ -151,7 +151,7 @@ class TestReduceCloseEvents:
     def test_close_reason_carried(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, bars_held=5, entry_commission=0, entry_slippage=0,
+            entry_ts=TS, periods_held=5, entry_commission=0, entry_slippage=0,
             total_entry_cost=800.0,
         )}
         events, _, _ = _run(
@@ -168,9 +168,9 @@ class TestComplexLifecycle:
         positions: dict[str, PositionState] = {}
         all_events: list[OrderEvent] = []
 
-        def run_at(actions, price, positions, bars_held_increment=0):
+        def run_at(actions, price, positions, periods_held_increment=0):
             for p in positions.values():
-                p.bars_held += bars_held_increment
+                p.periods_held += periods_held_increment
             result = process_actions(
                 actions, positions, 1_000_000.0, TS,
                 get_price=lambda sym: price,

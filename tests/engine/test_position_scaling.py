@@ -51,7 +51,7 @@ def _make_pos(
     side: str = "long",
     entry_price: float = 100.0,
     quantity: float = 10.0,
-    bars_held: int = 5,
+    periods_held: int = 5,
     cm: CostModel | None = None,
 ) -> PositionState:
     cm = cm or _zero_cost()
@@ -59,7 +59,7 @@ def _make_pos(
         symbol=symbol, side=side,
         entry_price=entry_price, quantity=quantity,
         entry_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        bars_held=bars_held,
+        periods_held=periods_held,
         entry_commission=cm.calc_commission(entry_price, quantity),
         entry_slippage=cm.calc_slippage(quantity),
         total_entry_cost=entry_price * quantity * cm.multiplier,

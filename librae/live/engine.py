@@ -2,6 +2,10 @@
 
 Detects completed bars, runs strategy, and routes actions to LiveExecutor.
 Supports multiple symbols. Caches OHLCV to avoid redundant fetches.
+
+Wiring is internalized: pass cfg=RunConfig to __init__,
+the engine builds adapter, cost_model, callbacks, telegram internally.
+Use on_bar=None etc. to disable specific callbacks (e.g. in tests).
 """
 from __future__ import annotations
 
@@ -10,8 +14,9 @@ import signal
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import pandas as pd
 
@@ -20,9 +25,14 @@ from librae.core.strategy import Action, BaseStrategy, Context, Position, Positi
 
 from .executor import LiveExecutor
 
+if TYPE_CHECKING:
+    from librae.core.run_config import RunConfig
+
 logger = logging.getLogger(__name__)
 
 OHLCVFetcher = Callable[..., pd.DataFrame]
+
+_UNSET = object()  # sentinel: distinguish "not passed" from "explicitly passed None"
 
 
 class LiveTrader:
@@ -30,92 +40,249 @@ class LiveTrader:
 
     Args:
         strategy: Strategy instance (same as backtest).
-        symbols: List of symbols to track.
-        fetcher: Callable(symbol, timeframe, limit, drop_incomplete=True) -> DataFrame.
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
-        executor: LiveExecutor for handling actions.
-        run_id: Unique run identifier for DB writes.
-        timeframe: Candle interval (e.g. "1h").
-        warmup_periods: Number of historical bars for indicator warm-up.
-        initial_balance: Starting cash for position sizing.
-        poll_seconds: Seconds between poll cycles.
-        on_bar: Optional callback(run_id, ts, equity, drawdown, ret_1d)
-            called every completed bar for equity persistence.
-        on_order_event: Optional callback(OrderEvent) called on every
-            position lifecycle event (open/add/reduce/close).
-        on_ohlcv: Optional callback(symbol, timeframe, bar_dict, ts)
-            called every completed bar for OHLCV persistence.
-        on_heartbeat: Optional callback(run_id) called every poll cycle
-            to update liveness status.
-        on_signal_outcome: Optional callback(symbol, ts, signal_value, price)
-            called when signal_column has a non-NaN value.
-        signal_column: Feature column name to capture as signal value.
-
-    Lifecycle notifications (startup/shutdown/error) are sent via the
-    executor's TelegramAdapter if configured.
+        cfg: RunConfig — the sole configuration source.
+        adapter: OHLCVFetcher override. None -> build from cfg.market.
+        cost_model: CostModel override. None -> build from cfg.market.
+        on_bar: _UNSET -> build DB callback from cfg; None -> no callback; callable -> use it.
+        on_order_event: Same pattern as on_bar.
+        on_ohlcv: Same pattern as on_bar.
+        on_heartbeat: Same pattern as on_bar.
+        on_signal_outcome: Same pattern as on_bar.
+        warmup_fetcher: _UNSET -> DB-first warmup; None -> API-only; callable -> use it.
     """
 
     def __init__(
         self,
         strategy: BaseStrategy,
-        symbols: list[str],
-        fetcher: OHLCVFetcher,
         feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
-        executor: LiveExecutor,
         *,
-        run_id: str = "",
-        timeframe: str = "1h",
-        warmup_periods: int = 720,
-        initial_balance: float = 100_000.0,
-        poll_seconds: float = 60.0,
-        on_bar: Callable[..., None] | None = None,
-        on_order_event: Callable[..., None] | None = None,
-        on_ohlcv: Callable[..., None] | None = None,
-        on_heartbeat: Callable[..., None] | None = None,
-        on_signal_outcome: Callable[..., None] | None = None,
-        signal_column: str | None = None,
-        warmup_fetcher: Callable[..., pd.DataFrame] | None = None,
+        cfg: RunConfig,
+        adapter: OHLCVFetcher | None = None,
+        cost_model: CostModel | None = None,
+        on_bar: Callable[..., None] | None | object = _UNSET,
+        on_order_event: Callable[..., None] | None | object = _UNSET,
+        on_ohlcv: Callable[..., None] | None | object = _UNSET,
+        on_heartbeat: Callable[..., None] | None | object = _UNSET,
+        on_signal_outcome: Callable[..., None] | None | object = _UNSET,
+        warmup_fetcher: Callable[..., pd.DataFrame] | None | object = _UNSET,
     ) -> None:
+        from librae.config.market_config import get_market
+        from librae.config.notification import TelegramConfig
+        from librae.core.cost_model import CostModel
+        from librae.core.utils import generate_run_id, to_ccxt
+        from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
+
         self._strategy = strategy
-        self._symbols = symbols
-        self._fetcher = fetcher
         self._feature_fn = feature_fn
-        self._executor = executor
-        self._run_id = run_id
-        self._timeframe = timeframe
-        self._warmup_periods = warmup_periods
-        self._poll_seconds = poll_seconds
-        self._warmup_fetcher = warmup_fetcher
-        self._on_bar = on_bar
-        self._on_order_event = on_order_event
-        self._on_ohlcv = on_ohlcv
-        self._on_heartbeat = on_heartbeat
-        self._on_signal_outcome = on_signal_outcome
-        self._signal_column = signal_column
+        self._cfg = cfg
+        self._symbols = cfg.symbols
+        self._timeframe = to_ccxt(cfg.timeframe)
+        self._poll_seconds = cfg.poll_seconds
+
+        # --- Build adapter ---
+        if adapter is not None:
+            self._fetcher = adapter
+        else:
+            if cfg.mode == "live":
+                raise NotImplementedError(
+                    "Live mode requires an explicit adapter (e.g. ShioajiAdapter)"
+                )
+            from brokers.crypto_adapter import CryptoAdapter
+            _adapter = CryptoAdapter()
+            self._fetcher = lambda symbol, tf, limit, *, drop_incomplete=False: (
+                _adapter.fetch_ohlcv(symbol, tf, limit, drop_incomplete=drop_incomplete)
+            )
+
+        # --- Build cost_model ---
+        if cost_model is not None:
+            resolved_cm = cost_model
+        elif cfg.cost_overrides:
+            mc = get_market(cfg.market)
+            base = asdict(CostModel.from_market(mc))
+            base.update(cfg.cost_overrides)
+            resolved_cm = CostModel(**base)
+        else:
+            resolved_cm = CostModel.from_market(get_market(cfg.market))
+
+        # --- Build telegram ---
+        tg_config = TelegramConfig.from_dict(cfg.telegram_config or {})
+        tg_creds = TelegramCredentials.from_env("TELEGRAM")
+        telegram = TelegramAdapter(config=tg_config, credentials=tg_creds)
+        # Disable telegram if dry_run
+        if cfg.dry_run:
+            telegram = None
+
+        # --- Build run_id ---
+        strategy_name = cfg.strategy_name
+        self._run_id = generate_run_id(
+            f"{strategy_name}_{cfg.market}", cfg.symbol, cfg.timeframe,
+        )
+
+        # --- Build executor ---
+        self._executor = LiveExecutor(
+            resolved_cm, simulation=(cfg.mode == "sim"),
+            telegram=telegram, strategy_name=strategy_name,
+        )
+
+        # --- Resolve callbacks (sentinel pattern) ---
+        self._warmup_periods = (cfg.params or {}).get("warmup_periods", 720)
+
+        callbacks = {
+            "on_bar": (on_bar, self._build_on_bar),
+            "on_order_event": (on_order_event, self._build_on_order_event),
+            "on_ohlcv": (on_ohlcv, self._build_on_ohlcv),
+            "on_heartbeat": (on_heartbeat, self._build_on_heartbeat),
+            "on_signal_outcome": (on_signal_outcome, self._build_on_signal_outcome),
+            "warmup_fetcher": (warmup_fetcher, self._build_warmup_fetcher),
+        }
+        for attr, (value, builder) in callbacks.items():
+            if value is not _UNSET:
+                setattr(self, f"_{attr}", value)
+            elif cfg.no_db:
+                setattr(self, f"_{attr}", None)
+            else:
+                setattr(self, f"_{attr}", builder())
+
+        if not cfg.no_db:
+            self._register_run()
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
-        self._cash: float = initial_balance
-        self._equity_peak: float = initial_balance
-        self._prev_equity: float = initial_balance
+        self._cash: float = cfg.initial_balance
+        self._equity_peak: float = cfg.initial_balance
+        self._prev_equity: float = cfg.initial_balance
         self._trade_count: int = 0
         self._bar_indices: dict[str, int] = {}
-        self._symbols_str: str = ",".join(symbols)
         self._status_bar_count: int = 0
         self._running: bool = False
 
-        # Cache status config to avoid property-chain lookups on every bar
-        tg = executor.telegram
-        self._status_enabled: bool = bool(tg and tg.notifications.status.enabled)
-        self._status_interval: int = tg.notifications.status.interval_bars if tg else 0
+        # Cache status config
+        tg_obj = self._executor.telegram
+        self._status_enabled: bool = bool(tg_obj and tg_obj.notifications.status.enabled)
+        self._status_interval: int = tg_obj.notifications.status.interval_periods if tg_obj else 0
 
-        # WHY: Telegram API calls block (10s timeout + retries).  A bounded
-        # pool avoids spawning a new OS thread per notification while keeping
-        # the main poll loop unblocked.
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tg")
+
+    # --- Callback builders ---
+
+    def _db_write(self, fn: Callable[..., object], *args: object, **kwargs: object) -> None:
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            logger.warning("DB %s failed: %s", fn.__name__, e)
+
+    def _register_run(self) -> None:
+        from db.timescale_writer import write_run_metadata
+        try:
+            write_run_metadata(
+                run_id=self._run_id,
+                strategy=self._cfg.strategy_name,
+                symbol=self._cfg.symbol,
+                timeframe=self._cfg.timeframe,
+                mode=self._cfg.mode,
+                start_ts=datetime.now(tz=timezone.utc),
+                data_source=self._cfg.data_source,
+                poll_seconds=self._cfg.poll_seconds,
+                params_json=self._cfg.params,
+                perf_params_json=self._cfg.perf_params,
+                config_hash=self._cfg.config_hash,
+            )
+        except Exception as e:
+            logger.warning("DB write_run_metadata failed: %s", e)
+
+    def _build_on_bar(self) -> Callable:
+        from db.timescale_writer import write_equity_point
+        run_id = self._run_id
+        strategy = self._cfg.strategy_name
+
+        def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
+            self._db_write(
+                write_equity_point, ts=ts, run_id=run_id_, equity=equity,
+                drawdown=drawdown, ret_1d=ret_1d, strategy=strategy,
+            )
+        return on_bar
+
+    def _build_on_order_event(self) -> Callable:
+        from db.timescale_writer import refresh_performance, write_trade_event
+        from librae.core.utils import make_event_id
+        run_id = self._run_id
+        strategy = self._cfg.strategy_name
+        timeframe = self._cfg.timeframe
+        cfg = self._cfg
+        _event_seq = 0
+
+        def on_order_event(event: "OrderEvent") -> None:
+            nonlocal _event_seq
+            _event_seq += 1
+            fields = asdict(event)
+            fields["event_id"] = make_event_id(run_id, _event_seq)
+            fields["run_id"] = run_id
+            fields["strategy"] = strategy
+            fields["mode"] = cfg.mode
+            fields["timeframe"] = timeframe
+            self._db_write(write_trade_event, **fields)
+            if event.event_type in ("close", "reduce"):
+                self._db_write(refresh_performance, run_id, cfg=cfg)
+        return on_order_event
+
+    def _build_on_ohlcv(self) -> Callable:
+        from db.timescale_writer import write_ohlcv
+
+        def on_ohlcv(symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
+            row = pd.DataFrame([{
+                "ts": ts,
+                "open": bar.get("open", 0),
+                "high": bar.get("high", 0),
+                "low": bar.get("low", 0),
+                "close": bar.get("close", 0),
+                "volume": bar.get("volume", 0),
+            }]).set_index("ts")
+            self._db_write(write_ohlcv, row, symbol, timeframe_, data_source=self._cfg.data_source)
+        return on_ohlcv
+
+    def _build_on_heartbeat(self) -> Callable:
+        from db.timescale_writer import update_heartbeat
+
+        def on_heartbeat(run_id_: str) -> None:
+            self._db_write(update_heartbeat, run_id_)
+        return on_heartbeat
+
+    def _build_on_signal_outcome(self) -> Callable:
+        from db.timescale_writer import write_signal_event
+        run_id = self._run_id
+        strategy = self._cfg.strategy_name
+        timeframe = self._cfg.timeframe
+
+        def on_signal_event_cb(symbol: str, ts: datetime, signal_value: float, price: float) -> None:
+            self._db_write(
+                write_signal_event,
+                ts=ts, run_id=run_id, strategy=strategy, symbol=symbol,
+                mode=self._cfg.mode, timeframe=timeframe,
+                signal_value=signal_value, price=price,
+            )
+        return on_signal_event_cb
+
+    def _build_warmup_fetcher(self) -> Callable:
+        def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
+            """DB-first warmup: reads historical bars from DB, fills gaps from API."""
+            from data.ohlcv import get_ohlcv
+            from librae.core.utils import interval_to_timedelta
+
+            warmup_start = datetime.now(tz=timezone.utc) - interval_to_timedelta(tf_ccxt) * limit
+            df = get_ohlcv(symbol, tf_ccxt, data_source=self._cfg.data_source,
+                           start=warmup_start.isoformat())
+            if df.empty:
+                return self._fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
+            if "timestamp" in df.columns and "ts" not in df.columns:
+                df = df.rename(columns={"timestamp": "ts"})
+            if len(df) > limit:
+                df = df.iloc[-limit:]
+            return df.reset_index(drop=True)
+        return warmup_fetcher
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
     # unreachable), not a transient blip — worth alerting the operator.
@@ -135,7 +302,7 @@ class LiveTrader:
         self._setup_signal_handlers()
         iteration = 0
         strategy_name = self._executor.strategy_name
-        symbols_str = self._symbols_str
+        symbols_str = ",".join(self._symbols)
 
         logger.info(
             "LiveTrader started: symbols=%s, timeframe=%s, poll=%ss",
@@ -145,7 +312,7 @@ class LiveTrader:
             "send_startup",
             strategy=strategy_name,
             symbol=symbols_str,
-            mode="sim" if self._executor.simulation else "live",
+            mode=self._cfg.mode,
             run_id=self._run_id,
         )
 
@@ -185,8 +352,6 @@ class LiveTrader:
                 symbol=symbols_str,
                 reason=shutdown_reason,
             )
-            # WHY: wait=True ensures the shutdown notification is actually sent
-            # before the process exits; without it the pool's threads get killed.
             self._notify_pool.shutdown(wait=True)
             logger.info("LiveTrader stopped (reason: %s)", shutdown_reason)
 
@@ -221,9 +386,9 @@ class LiveTrader:
             self._last_bar_ts[symbol] = latest_ts
             logger.info("New bar detected: %s @ %s", symbol, latest_ts)
 
-            # Increment bars_held on PositionState directly
+            # Increment periods_held on PositionState directly
             if symbol in self._positions:
-                self._positions[symbol].bars_held += 1
+                self._positions[symbol].periods_held += 1
 
             self._process_bar(symbol, df, latest_ts)
 
@@ -232,8 +397,6 @@ class LiveTrader:
         try:
             if symbol not in self._ohlcv_cache:
                 if self._warmup_fetcher:
-                    # WHY: DB-first warmup avoids re-fetching 720 bars from
-                    # exchange API on every sim restart.
                     df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
                 else:
                     df = self._fetcher(
@@ -242,7 +405,6 @@ class LiveTrader:
                 self._ohlcv_cache[symbol] = df
                 return df
 
-            # Incremental: fetch only last 2 bars
             new_df = self._fetcher(symbol, self._timeframe, 2, drop_incomplete=True)
             if new_df.empty:
                 return self._ohlcv_cache[symbol]
@@ -253,7 +415,6 @@ class LiveTrader:
 
             if not new_bars.empty:
                 cached = pd.concat([cached, new_bars], ignore_index=True)
-                # Trim to keep only warmup_periods
                 if len(cached) > self._warmup_periods:
                     cached = cached.iloc[-self._warmup_periods:]
                 self._ohlcv_cache[symbol] = cached
@@ -278,9 +439,8 @@ class LiveTrader:
         price = float(bar.get("close", 0.0))
         self._last_prices[symbol] = price
 
-        # Capture signal from feature layer (before strategy decision)
-        if self._signal_column and self._on_signal_outcome:
-            sig = bar.get(self._signal_column)
+        if self._on_signal_outcome:
+            sig = bar.get("entry_signal")
             if sig is not None and not pd.isna(sig):
                 self._on_signal_outcome(symbol, ts, float(sig), price)
 
@@ -337,7 +497,7 @@ class LiveTrader:
                 entry_price=ps.entry_price,
                 quantity=ps.quantity,
                 entry_ts=ps.entry_ts,
-                bars_held=ps.bars_held,
+                periods_held=ps.periods_held,
                 unrealized_pnl=unrealized,
             )
         return snapshot
@@ -348,7 +508,6 @@ class LiveTrader:
         mtm = 0.0
         for sym, pos in self._positions.items():
             price = self._last_prices.get(sym, pos.entry_price)
-            # WHY: same formula as backtest — PnL + entry notional (fixes direction bug)
             mtm += cost_model.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
             mtm += pos.entry_price * pos.quantity * cost_model.multiplier
         return self._cash + mtm
@@ -376,10 +535,9 @@ class LiveTrader:
                 self._notify(
                     "send_status",
                     strategy=self._executor.strategy_name,
-                    symbol=self._symbols_str,
+                    symbol=",".join(self._symbols),
                     equity=equity,
                     drawdown=drawdown,
                     daily_pnl=ret_1d * equity,
                     position=pos_str,
                 )
-

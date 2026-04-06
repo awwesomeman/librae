@@ -66,7 +66,7 @@ def ensure_trade_events_table(cur):
             pnl             DOUBLE PRECISION,
             net_return      DOUBLE PRECISION,
             entry_ts        TIMESTAMPTZ,
-            holding_bars    INTEGER,
+            holding_periods    INTEGER,
             reason          TEXT,
             CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
             CONSTRAINT chk_event_type CHECK (
@@ -147,7 +147,7 @@ def build_scenarios(ohlcv: list[dict]):
             "tax": 0.0,
             "pnl": realized, "net_return": net_ret,
             "entry_ts": _ts(entry_bar) if entry_bar is not None else None,
-            "holding_bars": hold, "reason": reason,
+            "holding_periods": hold, "reason": reason,
         })
         eidx += 1
 
@@ -162,7 +162,7 @@ def build_scenarios(ohlcv: list[dict]):
             "gross_pnl": gross_pnl, "net_pnl": net_pnl,
             "gross_return": gross_ret, "net_return": net_ret,
             "commission": comm, "slippage": slip, "tax": tax,
-            "holding_bars": hold,
+            "holding_periods": hold,
         })
         tidx += 1
 
@@ -376,13 +376,13 @@ def seed(cur):
         "  ts, symbol, side, event_type,"
         "  quantity, price, entry_price, position_quantity, notional,"
         "  commission, slippage, tax, pnl, net_return,"
-        "  entry_ts, holding_bars, reason)"
+        "  entry_ts, holding_periods, reason)"
         " VALUES %s ON CONFLICT (event_id, ts) DO NOTHING",
         [(e["event_id"], RUN_ID, "demo_full", "backtest", TIMEFRAME,
           e["ts"], e["symbol"], e["side"], e["event_type"],
           e["quantity"], e["price"], e["entry_price"], e["position_quantity"],
           e["notional"], e["commission"], e["slippage"], e["tax"],
-          e["pnl"], e["net_return"], e["entry_ts"], e["holding_bars"],
+          e["pnl"], e["net_return"], e["entry_ts"], e["holding_periods"],
           e["reason"]) for e in events],
     )
 

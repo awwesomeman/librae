@@ -43,7 +43,7 @@ def _make_trade_pnl(
 def _call_compute_all(
     equity: list[float],
     trade_pnls: list | None = None,
-    exposed_bars: int | None = None,
+    exposed_periods: int | None = None,
     annualize: bool = False,
 ) -> StrategyMetrics:
     """Helper to call compute_all with timestamps derived from equity length."""
@@ -52,9 +52,9 @@ def _call_compute_all(
         equity_values=equity,
         timestamps=timestamps,
         trade_pnls=trade_pnls or [],
-        total_bars=len(equity),
+        total_periods=len(equity),
         annualize=annualize,
-        exposed_bars=exposed_bars,
+        exposed_periods=exposed_periods,
     )
 
 
@@ -95,7 +95,7 @@ class TestComputeAllMetrics:
 
     def test_exposure_ratio(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
-        m = _call_compute_all([10_000.0] * 20, [pnl], exposed_bars=5)
+        m = _call_compute_all([10_000.0] * 20, [pnl], exposed_periods=5)
         assert np.isclose(m.exposure_ratio, 5 / 20)
 
     def test_cost_totals(self) -> None:

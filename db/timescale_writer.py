@@ -18,6 +18,7 @@ import psycopg2
 import psycopg2.extras
 
 if TYPE_CHECKING:
+    from librae.core.run_config import RunConfig
     from psycopg2.extensions import cursor as PgCursor
 
 import pandas as pd
@@ -82,6 +83,8 @@ def write_run_metadata(
     data_source: str | None = None,
     poll_seconds: int | None = None,
     params_json: dict | None = None,
+    perf_params_json: dict | None = None,
+    config_hash: str | None = None,
     cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> None:
@@ -93,19 +96,21 @@ def write_run_metadata(
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, data_source,
                 start_ts, end_ts, run_ts, mode, poll_seconds,
-                params)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                params, perf_params, config_hash)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_ts=EXCLUDED.run_ts,
                  mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
-                 params=EXCLUDED.params"""
+                 params=EXCLUDED.params, perf_params=EXCLUDED.perf_params,
+                 config_hash=EXCLUDED.config_hash"""
     params_val = json.dumps(params_json) if params_json is not None else None
+    perf_val = json.dumps(perf_params_json) if perf_params_json is not None else None
     values = (
         run_id, strategy, symbol, timeframe, data_source,
         _to_dt(start_ts), _to_dt(end_ts),
         _to_dt(run_ts) or datetime.now(tz=timezone.utc),
         mode, poll_seconds,
-        params_val,
+        params_val, perf_val, config_hash,
     )
     if cur is not None:
         cur.execute(sql, values)
@@ -114,6 +119,21 @@ def write_run_metadata(
             c = conn.cursor()
             c.execute(sql, values)
             c.close()
+
+
+def _update_perf_params(
+    run_id: str,
+    perf_params: dict[str, Any],
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Update perf_params for an existing run (lightweight recompute path)."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE backtest_runs SET perf_params = %s WHERE run_id = %s",
+            (json.dumps(perf_params), run_id),
+        )
+        cur.close()
 
 
 def update_heartbeat(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
@@ -132,15 +152,24 @@ def write_backtest_output(
     *,
     signal_series: pd.Series | None = None,
     params: dict | None = None,
+    perf_params: dict | None = None,
+    config_hash: str | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
+
+    # TODO: add ON CONFLICT (config_hash) DO NOTHING as defensive safety net
+    # for multi-worker race conditions. Currently relies on UNIQUE INDEX
+    # raising a postgres error, which works but is less clean.
+    # For --force path, use ON CONFLICT (config_hash) DO UPDATE.
 
     Args:
         output: BacktestOutput to write.
         signal_series: Optional Series (index=timestamp, values=signal_value)
             to write to signal_events. Only non-NaN values are written.
         params: Optional strategy parameters dict to store as JSONB.
+        perf_params: Optional perf parameters dict to store as JSONB.
+        config_hash: Optional deterministic hash for dedup.
         dsn: TimescaleDB DSN.
 
     Returns:
@@ -161,6 +190,8 @@ def write_backtest_output(
             start_ts=meta.start_ts, end_ts=meta.end_ts, run_ts=meta.run_ts,
             data_source=meta.data_source,
             params_json=params,
+            perf_params_json=perf_params,
+            config_hash=config_hash,
             cur=cur,
         )
         counts["backtest_runs"] = 1
@@ -207,7 +238,7 @@ def write_backtest_output(
                     ev.commission, ev.slippage, ev.tax,
                     ev.pnl, ev.net_return,
                     _to_dt(ev.entry_ts) if ev.entry_ts else None,
-                    ev.holding_bars, ev.reason,
+                    ev.holding_periods, ev.reason,
                 )
                 for ev in output.order_events
             ]
@@ -221,7 +252,7 @@ def write_backtest_output(
                     position_quantity, notional,
                     commission, slippage, tax,
                     pnl, net_return,
-                    entry_ts, holding_bars, reason)
+                    entry_ts, holding_periods, reason)
                    VALUES %s
                    ON CONFLICT (event_id, ts) DO NOTHING""",
                 event_rows,
@@ -283,7 +314,7 @@ def write_ohlcv(
 
     timeframe = to_canonical(timeframe)
 
-    # Normalise index → ts column (reset_index returns a new DataFrame)
+    # Normalise index -> ts column (reset_index returns a new DataFrame)
     if "ts" not in df.columns and "timestamp" not in df.columns:
         df = df.reset_index()
     ts_col = "ts" if "ts" in df.columns else "timestamp"
@@ -411,7 +442,7 @@ def write_trade_event(
     pnl: float | None = None,
     net_return: float | None = None,
     entry_ts: datetime | None = None,
-    holding_bars: int | None = None,
+    holding_periods: int | None = None,
     reason: str = "",
     dsn: str = TIMESCALE_DSN,
 ) -> None:
@@ -427,7 +458,7 @@ def write_trade_event(
                 position_quantity, notional,
                 commission, slippage, tax,
                 pnl, net_return,
-                entry_ts, holding_bars, reason)
+                entry_ts, holding_periods, reason)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
@@ -439,7 +470,7 @@ def write_trade_event(
                 commission, slippage, tax,
                 pnl, net_return,
                 _to_dt(entry_ts) if entry_ts else None,
-                holding_bars, reason,
+                holding_periods, reason,
             ),
         )
         cur.close()
@@ -496,10 +527,15 @@ def write_performance(
             c.close()
 
 
-def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
+def refresh_performance(
+    run_id: str,
+    cfg: RunConfig | None = None,
+    dsn: str = TIMESCALE_DSN,
+) -> None:
     """Recompute KPI metrics from DB equity_curve + trade_events and upsert.
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
+    When cfg is provided, uses cfg.perf_params for annualization settings.
     """
     from types import SimpleNamespace as _NS
 
@@ -534,12 +570,17 @@ def refresh_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
     ]
     trade_quantities = [float(r.get("quantity", 1.0)) for r in trade_rows]
 
+    perf_kwargs: dict[str, Any] = {}
+    if cfg is not None:
+        perf_kwargs = cfg.perf_params
+
     metrics = compute_all(
         equity_values=equity_values,
         timestamps=timestamps,
         trade_pnls=trade_pnls,
-        total_bars=len(equity_values),
+        total_periods=len(equity_values),
         trade_quantities=trade_quantities,
+        **perf_kwargs,
     )
     write_performance(run_id, metrics, dsn=dsn)
 
@@ -553,10 +594,12 @@ def save_signal_results(
     run_id: str | None = None,
     mode: str = "backtest",
     signal_column: str = "entry_signal",
+    cfg: RunConfig | None = None,
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
     Use this for signal quality analysis without running a full backtest.
+    When cfg is provided, stores config_hash and perf_params.
     """
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     tf = to_canonical(timeframe)
@@ -574,6 +617,9 @@ def save_signal_results(
                     run_id, strategy, symbol, tf, mode,
                     start_ts=_to_dt(start_ts), end_ts=_to_dt(end_ts),
                     data_source=data_source,
+                    config_hash=cfg.config_hash if cfg else None,
+                    perf_params_json=cfg.perf_params if cfg else None,
+                    params_json=cfg.params if cfg else None,
                     cur=cur,
                 )
 
@@ -612,10 +658,7 @@ def save_signal_results(
 def save_strategy_results(
     output: BacktestOutput,
     df: pd.DataFrame,
-    symbol: str,
-    timeframe: str,
-    data_source: str,
-    params: dict | None = None,
+    cfg: RunConfig,
     signal_column: str = "entry_signal",
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
@@ -623,8 +666,18 @@ def save_strategy_results(
     Writes: backtest_runs, equity_curve, trade_events, strategy_performance,
     signal_events, ohlcv.
     """
+    symbol = cfg.symbol
+    timeframe = cfg.timeframe
+    data_source = cfg.data_source
+
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
-    counts = write_backtest_output(output, signal_series=signal_series, params=params)
+    counts = write_backtest_output(
+        output,
+        signal_series=signal_series,
+        params=cfg.params,
+        perf_params=cfg.perf_params,
+        config_hash=cfg.config_hash,
+    )
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"

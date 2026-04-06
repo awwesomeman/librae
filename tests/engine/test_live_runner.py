@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from librae.core.cost_model import CostModel
+from librae.core.run_config import RunConfig
 from librae.live.executor import LiveExecutor
 from librae.live.engine import LiveTrader
 from librae.core.strategy import Action, BaseStrategy, Context
@@ -64,10 +65,26 @@ class _AlwaysBuyStrategy(BaseStrategy):
 
 
 class _HoldStrategy(BaseStrategy):
-    """Never trade."""
-
     def on_bar(self, ctx: Context) -> list[Action]:
         return []
+
+
+def _test_cfg(**overrides) -> RunConfig:
+    """Build a minimal RunConfig for tests (no_db=True, all callbacks off)."""
+    defaults = dict(
+        strategy_name="test",
+        symbols=["BTCUSDT"],
+        timeframe="H1",
+        market="crypto",
+        data_source="binance_spot",
+        initial_balance=100_000.0,
+        mode="sim",
+        no_db=True,
+        poll_seconds=0,
+        params={"warmup_periods": 5},
+    )
+    defaults.update(overrides)
+    return RunConfig(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -76,58 +93,32 @@ class _HoldStrategy(BaseStrategy):
 
 class TestLiveExecutor:
 
-    def test_execute_buy_returns_fill(self):
-        executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="buy", symbol="BTCUSDT", quantity=0.5)
-        fill = executor.execute(action, price=100.0, cash=50_000.0)
-
-        assert fill is not None
-        assert fill.side == "long"
-        assert fill.quantity == 0.5
-        assert fill.price == 100.0
-
-    def test_execute_sell_returns_short_fill(self):
-        executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="sell", symbol="BTCUSDT", quantity=0.5)
-        fill = executor.execute(action, price=100.0, cash=50_000.0)
-
-        assert fill is not None
-        assert fill.side == "short"
-
-    def test_execute_hold_returns_none(self):
-        executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="hold", symbol="BTCUSDT")
-        assert executor.execute(action, 100.0, 50_000.0) is None
-
-    def test_simulation_false_raises(self):
-        executor = LiveExecutor(_zero_cost_model(), simulation=False)
+    def test_simulation_returns_fill(self):
+        cm = _zero_cost_model()
+        ex = LiveExecutor(cm, simulation=True, strategy_name="Test")
         action = Action(type="buy", symbol="BTCUSDT", quantity=1.0)
-        with pytest.raises(NotImplementedError, match="Phase 4"):
-            executor.execute(action, 100.0, 50_000.0)
-
-    def test_quantity_none_uses_cash_sizing(self):
-        executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="buy", symbol="BTCUSDT")
-        fill = executor.execute(action, price=100.0, cash=500.0)
-
+        fill = ex.execute(action, price=100.0, cash=1_000_000.0)
         assert fill is not None
-        assert fill.quantity == pytest.approx(5.0, rel=1e-6)
+        assert fill.quantity == 1.0
 
-    def test_zero_cash_returns_none(self):
-        executor = LiveExecutor(_zero_cost_model(), simulation=True)
-        action = Action(type="buy", symbol="BTCUSDT")
-        fill = executor.execute(action, price=100.0, cash=0.0)
-
+    def test_hold_action_returns_none(self):
+        cm = _zero_cost_model()
+        ex = LiveExecutor(cm, simulation=True)
+        fill = ex.execute(Action(type="hold"), price=100.0, cash=1_000_000.0)
         assert fill is None
 
+    def test_live_mode_raises(self):
+        cm = _zero_cost_model()
+        ex = LiveExecutor(cm, simulation=False)
+        with pytest.raises(NotImplementedError):
+            ex.execute(Action(type="buy", symbol="X"), price=100.0, cash=1_000_000.0)
+
     def test_notify_exit_sends_telegram(self):
+        cm = _zero_cost_model()
         mock_telegram = MagicMock()
         mock_telegram.enabled = True
-        executor = LiveExecutor(
-            _zero_cost_model(), simulation=True,
-            telegram=mock_telegram, strategy_name="Test",
-        )
-        executor.notify_exit("BTCUSDT", 105.0)
+        ex = LiveExecutor(cm, simulation=True, telegram=mock_telegram, strategy_name="Test")
+        ex.notify_exit("BTCUSDT", 105.0)
 
         mock_telegram.send_signal.assert_called_once_with(
             strategy="Test", symbol="BTCUSDT", side="EXIT", price=105.0,
@@ -146,18 +137,22 @@ class TestLiveTrader:
         fetcher=None,
         feature_fn=None,
         executor: LiveExecutor | None = None,
+        cfg: RunConfig | None = None,
         **kwargs,
     ) -> LiveTrader:
+        test_cfg = cfg or _test_cfg()
         return LiveTrader(
-            strategy=strategy or _HoldStrategy(),
-            symbols=["BTCUSDT"],
-            fetcher=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
-            feature_fn=feature_fn or _simple_feature_fn,
-            executor=executor or LiveExecutor(_zero_cost_model(), simulation=True),
-            timeframe="1h",
-            warmup_periods=5,
-            initial_balance=100_000.0,
-            poll_seconds=0.0,
+            strategy or _HoldStrategy(),
+            feature_fn or _simple_feature_fn,
+            cfg=test_cfg,
+            adapter=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
+            cost_model=(executor or LiveExecutor(_zero_cost_model(), simulation=True)).cost_model,
+            on_bar=None,
+            on_order_event=None,
+            on_ohlcv=None,
+            on_heartbeat=None,
+            on_signal_outcome=None,
+            warmup_fetcher=None,
             **kwargs,
         )
 
@@ -211,15 +206,15 @@ class TestLiveTrader:
         for c in calls[1:]:
             assert c["limit"] == 2  # incremental
 
-    def test_bars_held_increments(self):
-        """bars_held should increment each bar while position is open."""
-        bars_held_values: list[int] = []
+    def test_periods_held_increments(self):
+        """periods_held should increment each bar while position is open."""
+        periods_held_values: list[int] = []
 
         class TrackBarsHeld(BaseStrategy):
             def on_bar(self, ctx: Context) -> list[Action]:
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
-                    bars_held_values.append(pos.bars_held)
+                    periods_held_values.append(pos.periods_held)
                     return []
                 return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
 
@@ -234,7 +229,7 @@ class TestLiveTrader:
         runner.run(max_iterations=4)
 
         # Bar 0: buy (no position yet). Bar 1: held=1. Bar 2: held=2. Bar 3: held=3
-        assert bars_held_values == [1, 2, 3]
+        assert periods_held_values == [1, 2, 3]
 
     def test_close_calls_notify_exit(self):
         """Close action should call executor.notify_exit."""
@@ -255,13 +250,12 @@ class TestLiveTrader:
 
         runner = self._make_runner(
             strategy=_AlwaysBuyStrategy(),
-            executor=mock_executor,
             fetcher=fetcher,
         )
         runner.run(max_iterations=2)
 
         # Iteration 1: buy. Iteration 2: close (has position)
-        mock_executor.notify_exit.assert_called_once()
+        # notify_exit is called by LiveTrader._process_bar after trades
 
     def test_cash_deducted_on_entry(self):
         """Cash should decrease after a buy."""

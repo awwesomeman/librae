@@ -94,7 +94,7 @@ class TestCalcTradePnl:
         pos = PositionState(
             symbol="TEST", side="long",
             entry_price=100.0, quantity=10.0,
-            entry_ts=None, bars_held=5,
+            entry_ts=None, periods_held=5,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=cm.calc_slippage(10.0),
             total_entry_cost=100.0 * 10.0,

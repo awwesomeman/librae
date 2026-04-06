@@ -1,12 +1,12 @@
 """Backtest engine — bar-by-bar execution with Strategy + Executor pattern.
 
 Usage:
-    from librae.config import get_market
+    from librae.core.run_config import RunConfig
 
-    bt = Backtest(data=df, strategy=my_strategy, market_config=get_market("crypto"), data_source="binance_spot")
+    bt = Backtest(data=df, strategy=my_strategy, cfg=cfg)
     bt.add_benchmark(df.xs("BTCUSDT", level="symbol")["close"])
     bt.run()
-    output = bt.build_output(annualize=True)
+    output = bt.build_output()
 
 The engine owns all position state. Strategies only observe via Context.
 Execution uses make_fill() from core.executor.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Sequence
 
@@ -27,8 +27,9 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from librae.backtest.schema import BacktestOutput, EquityCurvePoint, StrategyMetrics
+    from librae.core.run_config import RunConfig
 
-from librae.config.market_config import MarketConfig
+from librae.config.market_config import MarketConfig, get_market
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
@@ -58,7 +59,7 @@ class BacktestResult:
     equity_curve: Sequence[EquitySnapshot]
     initial_balance: float
     final_equity: float
-    exposed_bars: int = 0
+    exposed_periods: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -73,27 +74,29 @@ class Backtest:
         data: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
               For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
         strategy: BaseStrategy subclass.
-        market_config: MarketConfig for cost model (mutually exclusive with cost_model).
-        initial_balance: Starting cash.
-        strategy_name: Override strategy name (default: snake_case of class name).
+        cfg: RunConfig (preferred). Derives market_config, initial_balance, etc.
+        market_config: MarketConfig for cost model (legacy, use cfg instead).
+        initial_balance: Starting cash (legacy, use cfg instead).
+        strategy_name: Override strategy name (default: from cfg or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
+        data_source: Data source identifier (legacy, use cfg instead).
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
         strategy: BaseStrategy,
+        cfg: RunConfig | None = None,
         market_config: MarketConfig | None = None,
         initial_balance: float = 100_000.0,
         *,
         strategy_name: str | None = None,
         cost_model: CostModel | None = None,
-        data_source: str,
+        data_source: str = "",
     ) -> None:
         self._data = data
         self._strategy = strategy
-        self._initial_balance = initial_balance
-        self._data_source = data_source
+        self._cfg = cfg
         self._benchmark_prices: pd.Series | None = None
         self._run_id: str | None = None
         self._timeframe: str | None = None
@@ -110,18 +113,38 @@ class Backtest:
         self._time_groups = data.groupby(level="datetime")
         self._timeline = sorted(self._time_groups.groups.keys())
 
-        if cost_model is not None:
-            resolved_cm = cost_model
-        elif market_config is not None:
-            resolved_cm = CostModel.from_market(market_config)
+        # Resolve from cfg or explicit args
+        if cfg is not None:
+            self._initial_balance = cfg.initial_balance
+            self._data_source = cfg.data_source
+            resolved_name = cfg.strategy_name
+            if cost_model is not None:
+                resolved_cm = cost_model
+            elif cfg.cost_overrides:
+                mc = get_market(cfg.market)
+                base = asdict(CostModel.from_market(mc))
+                base.update(cfg.cost_overrides)
+                resolved_cm = CostModel(**base)
+            else:
+                resolved_cm = CostModel.from_market(get_market(cfg.market))
         else:
-            resolved_cm = CostModel.zero()
+            self._initial_balance = initial_balance
+            self._data_source = data_source
+            resolved_name = None
+            if cost_model is not None:
+                resolved_cm = cost_model
+            elif market_config is not None:
+                resolved_cm = CostModel.from_market(market_config)
+            else:
+                resolved_cm = CostModel.zero()
+
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
+        elif resolved_name:
+            self._strategy_name = resolved_name
         else:
-            # Fallback: auto-derive from class name → snake_case
             cls_name = type(strategy).__name__
             self._strategy_name = re.sub(r"(?<!^)(?=[A-Z])", "_", cls_name).lower()
 
@@ -174,7 +197,7 @@ class Backtest:
         trades: list[TradeResult] = []
         all_events: list[OrderEvent] = []
         equity_curve: list[EquitySnapshot] = []
-        exposed_bars = 0
+        exposed_periods = 0
         primary_symbol = self._symbols[0]
 
         for step, ts in enumerate(self._timeline):
@@ -184,7 +207,7 @@ class Backtest:
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
 
             if positions:
-                exposed_bars += 1
+                exposed_periods += 1
 
             ctx = Context(
                 ts=ts,
@@ -209,7 +232,7 @@ class Backtest:
             all_events.extend(result_actions.events)
             cash += result_actions.cash_delta
 
-            self._increment_bars_held(positions)
+            self._increment_periods_held(positions)
 
         # Force-close all open positions at last bar
         if self._timeline:
@@ -229,7 +252,7 @@ class Backtest:
                     notional=price * pos.quantity * cost_model.multiplier,
                     commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
                     pnl=pnl.net_pnl, net_return=pnl.net_return,
-                    entry_ts=pos.entry_ts, holding_bars=pos.bars_held,
+                    entry_ts=pos.entry_ts, holding_periods=pos.periods_held,
                     reason="force_close",
                 ))
                 cash += proceeds
@@ -241,14 +264,14 @@ class Backtest:
             equity_curve=equity_curve,
             initial_balance=self._initial_balance,
             final_equity=cash,
-            exposed_bars=exposed_bars,
+            exposed_periods=exposed_periods,
         )
         return self._result
 
     def build_output(
         self,
         *,
-        annualize: bool = False,
+        annualize: bool | None = None,
     ) -> "BacktestOutput":
         """Compute metrics + build canonical output in one call.
 
@@ -258,6 +281,9 @@ class Backtest:
         - symbol: from self._symbols[0]
         - strategy_name: from type(strategy).__name__
         - timeframe: inferred from data index
+
+        When cfg is provided, perf_params come from cfg.
+        annualize kwarg overrides cfg.annualize if explicitly passed.
 
         Raises RuntimeError if called before run().
         """
@@ -281,7 +307,7 @@ class Backtest:
         # Benchmark — computed here, not in run() (analysis config, not trade facts)
         benchmark_curve = self._compute_benchmark()
 
-        # Build TradePnL list + holding_bars from TradeResult
+        # Build TradePnL list + holding_periods from TradeResult
         trade_pnl_list = [
             TradePnL(
                 gross_pnl=t.gross_pnl, net_pnl=t.net_pnl,
@@ -293,15 +319,24 @@ class Backtest:
         ]
         trade_quantities = [t.quantity for t in result.trades]
 
+        # Resolve perf params from cfg or explicit args
+        perf_kwargs: dict = {}
+        if self._cfg is not None:
+            perf_kwargs = self._cfg.perf_params.copy()
+        if annualize is not None:
+            perf_kwargs["annualize"] = annualize
+        elif "annualize" not in perf_kwargs:
+            perf_kwargs["annualize"] = False
+
         self._metrics = compute_all(
             equity_values=[s.equity for s in result.equity_curve],
             timestamps=[s.ts for s in result.equity_curve],
             trade_pnls=trade_pnl_list,
-            total_bars=len(result.equity_curve),
-            annualize=annualize,
+            total_periods=len(result.equity_curve),
             benchmark_values=benchmark_curve,
-            exposed_bars=result.exposed_bars,
+            exposed_periods=result.exposed_periods,
             trade_quantities=trade_quantities,
+            **perf_kwargs,
         )
 
         run_metadata = RunMetadata(
@@ -336,7 +371,7 @@ class Backtest:
 
     @staticmethod
     def _build_trade_records(result: BacktestResult, run_id: str) -> list[TradeRecord]:
-        """Map TradeResult → TradeRecord."""
+        """Map TradeResult -> TradeRecord."""
         from librae.backtest.schema import TradeRecord
         return [
             TradeRecord(
@@ -348,14 +383,14 @@ class Backtest:
                 gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
                 gross_return=float(t.gross_return), net_return=float(t.net_return),
                 commission=float(t.commission), slippage=float(t.slippage),
-                tax=float(t.tax), holding_bars=int(t.holding_bars),
+                tax=float(t.tax), holding_periods=int(t.holding_periods),
             )
             for i, t in enumerate(result.trades)
         ]
 
     @staticmethod
     def _build_event_records(result: BacktestResult, run_id: str) -> list["OrderEventRecord"]:
-        """Map OrderEvent → OrderEventRecord."""
+        """Map OrderEvent -> OrderEventRecord."""
         from librae.backtest.schema import OrderEventRecord
         return [
             OrderEventRecord(
@@ -369,7 +404,7 @@ class Backtest:
                 tax=float(e.tax),
                 pnl=float(e.pnl) if e.pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
-                entry_ts=e.entry_ts, holding_bars=e.holding_bars,
+                entry_ts=e.entry_ts, holding_periods=e.holding_periods,
                 reason=e.reason,
             )
             for i, e in enumerate(result.order_events)
@@ -430,9 +465,9 @@ class Backtest:
         return result
 
     @staticmethod
-    def _increment_bars_held(positions: dict[str, PositionState]) -> None:
+    def _increment_periods_held(positions: dict[str, PositionState]) -> None:
         for ps in positions.values():
-            ps.bars_held += 1
+            ps.periods_held += 1
 
     def _eval_equity(
         self,
@@ -458,8 +493,7 @@ class Backtest:
                 entry_price=ps.entry_price,
                 quantity=ps.quantity,
                 entry_ts=ps.entry_ts,
-                bars_held=ps.bars_held,
+                periods_held=ps.periods_held,
                 unrealized_pnl=unrealized,
             )
         return mtm, snapshot
-

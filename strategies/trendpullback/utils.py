@@ -24,7 +24,7 @@ DEFAULT_PARAMS: dict = {
     "atr_period": 14,
     "vol_sma_period": 20,
     "pullback_factor": 0.3,
-    "max_hold_bars": 24,
+    "max_hold_periods": 24,
     "vol_threshold": 0.9,
 }
 
@@ -82,7 +82,7 @@ def compute_entry_conditions(df: pd.DataFrame, params: dict | None = None) -> pd
     4. Volume filter: volume >= vol_threshold * vol_sma20
     5. ATR > 0 (valid volatility)
 
-    No position tracking. No bars_held. Just market conditions.
+    No position tracking. No periods_held. Just market conditions.
     """
     p = {**DEFAULT_PARAMS, **(params or {})}
 
@@ -102,7 +102,7 @@ def compute_exit_conditions(df: pd.DataFrame, params: dict | None = None) -> pd.
     """Return boolean Series: True where exit condition is met.
 
     Condition: close < ema20 (trend broken).
-    max_hold_bars is NOT checked here — that's the Strategy's job.
+    max_hold_periods is NOT checked here — that's the Strategy's job.
     """
     return (df["close"] < df["ema20"]).fillna(False)
 

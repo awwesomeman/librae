@@ -1,4 +1,4 @@
-"""Tests for DB-first warmup fetcher in wiring.py."""
+"""Tests for DB-first warmup fetcher in LiveTrader."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,17 +7,24 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from librae.core.run_config import RunConfig
 
-def _make_ohlcv_df(n: int) -> pd.DataFrame:
-    ts = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
-    return pd.DataFrame({
-        "timestamp": ts,
-        "open": range(n),
-        "high": [x + 1 for x in range(n)],
-        "low": [max(0, x - 1) for x in range(n)],
-        "close": [x + 0.5 for x in range(n)],
-        "volume": [100.0] * n,
-    })
+
+def _test_cfg(**overrides) -> RunConfig:
+    defaults = dict(
+        strategy_name="test",
+        symbols=["BTCUSDT"],
+        timeframe="H1",
+        market="crypto",
+        data_source="binance_spot",
+        initial_balance=100_000.0,
+        mode="sim",
+        no_db=True,
+        poll_seconds=0,
+        params={"warmup_periods": 50},
+    )
+    defaults.update(overrides)
+    return RunConfig(**defaults)
 
 
 class TestWarmupFetcher:
@@ -35,16 +42,16 @@ class TestWarmupFetcher:
         mock_warmup = MagicMock(return_value=warmup_df)
         mock_fetcher = MagicMock()
         mock_strategy = MagicMock()
-        mock_executor = MagicMock()
 
+        cfg = _test_cfg()
         trader = LiveTrader(
-            strategy=mock_strategy,
-            symbols=["BTCUSDT"],
-            fetcher=mock_fetcher,
-            feature_fn=lambda x: x,
-            executor=mock_executor,
+            mock_strategy,
+            lambda x: x,
+            cfg=cfg,
+            adapter=mock_fetcher,
             warmup_fetcher=mock_warmup,
-            warmup_periods=50,
+            on_bar=None, on_order_event=None, on_ohlcv=None,
+            on_heartbeat=None, on_signal_outcome=None,
         )
 
         result = trader._fetch_with_cache("BTCUSDT")
@@ -59,7 +66,6 @@ class TestWarmupFetcher:
         from librae.live.engine import LiveTrader
 
         mock_strategy = MagicMock()
-        mock_executor = MagicMock()
         warmup_df = pd.DataFrame({
             "ts": pd.date_range("2024-01-01", periods=10, freq="1h", tz="UTC"),
             "open": range(10), "high": range(10), "low": range(10),
@@ -67,14 +73,15 @@ class TestWarmupFetcher:
         })
         mock_fetcher = MagicMock(return_value=warmup_df)
 
+        cfg = _test_cfg(params={"warmup_periods": 10})
         trader = LiveTrader(
-            strategy=mock_strategy,
-            symbols=["BTCUSDT"],
-            fetcher=mock_fetcher,
-            feature_fn=lambda x: x,
-            executor=mock_executor,
+            mock_strategy,
+            lambda x: x,
+            cfg=cfg,
+            adapter=mock_fetcher,
             warmup_fetcher=None,
-            warmup_periods=10,
+            on_bar=None, on_order_event=None, on_ohlcv=None,
+            on_heartbeat=None, on_signal_outcome=None,
         )
 
         result = trader._fetch_with_cache("BTCUSDT")

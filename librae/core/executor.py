@@ -46,7 +46,7 @@ class TradeResult:
     net_pnl: float
     gross_return: float
     net_return: float
-    holding_bars: int
+    holding_periods: int
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ class OrderEvent:
     pnl: float | None = None
     net_return: float | None = None
     entry_ts: datetime | None = None
-    holding_bars: int | None = None
+    holding_periods: int | None = None
     reason: str = ""
 
 
@@ -290,7 +290,7 @@ def build_trade_result(
         net_pnl=pnl.net_pnl,
         gross_return=pnl.gross_return,
         net_return=pnl.net_return,
-        holding_bars=pos.bars_held,
+        holding_periods=pos.periods_held,
     )
 
 
@@ -357,7 +357,7 @@ def process_actions(
                         entry_price=price,
                         quantity=fill.quantity,
                         entry_ts=ts,
-                        bars_held=0,
+                        periods_held=0,
                         entry_commission=fill.commission,
                         entry_slippage=fill.slippage,
                         total_entry_cost=price * fill.quantity * cost_model.multiplier,
@@ -421,7 +421,7 @@ def process_actions(
                 notional=price * actual_close_qty * cost_model.multiplier,
                 commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
                 pnl=pnl.net_pnl, net_return=pnl.net_return,
-                entry_ts=pos.entry_ts, holding_bars=pos.bars_held,
+                entry_ts=pos.entry_ts, holding_periods=pos.periods_held,
                 reason=reason,
             ))
 

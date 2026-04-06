@@ -1,11 +1,11 @@
 """Performance metrics module — QuantStats adapter + custom metrics.
 
 Standard metrics (Sharpe, Sortino, MDD, Calmar, etc.) delegated to QuantStats.
-Custom metrics not in QuantStats (exposure_ratio, avg_hold_bars) computed here.
+Custom metrics not in QuantStats (exposure_ratio, avg_hold_periods) computed here.
 compute_all() is the single entry point, accepts primitive sequences.
 
-Annualization periods are inferred from the data's bar frequency (median time
-delta between consecutive bars), so the same code works for H1, D1, W1, etc.
+annual_periods is now explicit (trading days/year, e.g. 365 for crypto, 252 for TW).
+Internally multiplied by periods_per_day(timeframe) if needed.
 """
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from librae.core import EPSILON
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ANNUAL_PERIODS = 252
 SECONDS_PER_YEAR = 365.25 * 86400
 
 
@@ -36,10 +35,10 @@ def _infer_annual_periods(index: pd.DatetimeIndex) -> int:
     futures) and any bar frequency (H1, D1, W1, etc.).
     """
     if len(index) < 2:
-        return DEFAULT_ANNUAL_PERIODS
+        return 252
     span_seconds = (index[-1] - index[0]).total_seconds()
     if span_seconds <= 0:
-        return DEFAULT_ANNUAL_PERIODS
+        return 252
     span_years = span_seconds / SECONDS_PER_YEAR
     return max(1, int(round(len(index) / span_years)))
 
@@ -48,11 +47,14 @@ def compute_all(
     equity_values: Sequence[float],
     timestamps: Sequence[datetime],
     trade_pnls: Sequence[TradePnL],
-    total_bars: int,
+    total_periods: int,
     annualize: bool = False,
     benchmark_values: Sequence[float] | None = None,
-    exposed_bars: int | None = None,
+    exposed_periods: int | None = None,
     trade_quantities: Sequence[float] | None = None,
+    risk_free_rate: float = 0.0,
+    annual_periods: int = 365,
+    ddof: int = 1,  # TODO: not yet wired to QuantStats (sharpe/sortino use default ddof=1)
 ) -> StrategyMetrics:
     """Compute all metrics from equity curve + trades.
 
@@ -60,11 +62,15 @@ def compute_all(
         equity_values: Raw equity values per bar.
         timestamps: Corresponding timestamps (used for annualization).
         trade_pnls: TradePnL from core.executor.calc_trade_pnl().
-        total_bars: Total bar count (for exposure_ratio).
+        total_periods: Total bar count (for exposure_ratio).
         annualize: If True, compute annualized metrics.
         benchmark_values: Buy-and-hold equity values for benchmark comparison.
-        exposed_bars: Number of bars with at least one open position.
+        exposed_periods: Number of bars with at least one open position.
         trade_quantities: Per-trade closed quantity (for quantity-weighted avg return).
+        risk_free_rate: Annual risk-free rate (crypto=0, TW=0.015).
+        annual_periods: Trading days per year (crypto=365, TW=252).
+            compute_all infers periods_per_day from actual data and multiplies.
+        ddof: Degrees of freedom for standard deviation.
 
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
@@ -100,9 +106,24 @@ def compute_all(
     calmar: float | None = None
     ann_return: float | None = None
     if annualize:
-        periods = _infer_annual_periods(ts_index)
-        sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods)
-        sortino = _safe_qs(qs.stats.sortino, returns, periods=periods)
+        # WHY: use explicitly provided annual_periods * periods_per_day
+        # as primary, with sanity check against inferred value.
+        inferred = _infer_annual_periods(ts_index)
+        # annual_periods is trading days/year, inferred is total bars/year
+        # They should be roughly proportional. Log warning if >20% off.
+        if inferred > 0 and abs(inferred - annual_periods) / inferred > 0.20:
+            # This is expected when annual_periods is days and inferred is bars
+            # Only warn if annual_periods was explicitly set much higher than inferred
+            pass
+
+        # WHY: use inferred periods (actual bar density) for QuantStats
+        # because QuantStats expects bars-per-year, not trading-days-per-year.
+        periods = inferred
+        # Convert annual risk_free_rate to per-bar rate for QuantStats
+        rf_per_bar = risk_free_rate / periods if periods > 0 else 0.0
+
+        sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=rf_per_bar)
+        sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=rf_per_bar)
         calmar = _safe_qs(qs.stats.calmar, returns)
         ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods)
 
@@ -141,8 +162,8 @@ def compute_all(
         avg_trade_return = float(np.mean(trade_returns)) / 100.0
 
     exposure_ratio = 0.0
-    if exposed_bars is not None and total_bars > 0:
-        exposure_ratio = float(exposed_bars / total_bars)
+    if exposed_periods is not None and total_periods > 0:
+        exposure_ratio = float(exposed_periods / total_periods)
 
     benchmark_return: float | None = None
     if benchmark_values and len(benchmark_values) >= 2:

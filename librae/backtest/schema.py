@@ -108,7 +108,7 @@ class TradeRecord:
     commission: float | None = None
     slippage: float | None = None
     tax: float | None = None
-    holding_bars: int | None = None
+    holding_periods: int | None = None
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,7 @@ class OrderEventRecord:
     pnl: float | None = None
     net_return: float | None = None
     entry_ts: datetime | None = None
-    holding_bars: int | None = None
+    holding_periods: int | None = None
     reason: str = ""
 
 

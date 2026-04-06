@@ -252,16 +252,16 @@ class TestEngineExecutionTiming:
         expected_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
         assert abs(trade.gross_pnl - expected_pnl) < 1e-6
 
-    def test_holding_bars_count(self):
-        """holding_bars must equal number of bars from entry to exit."""
+    def test_holding_periods_count(self):
+        """holding_periods must equal number of bars from entry to exit."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
                       cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         trade = result.trades[0]
-        assert trade.holding_bars == 5, (
-            f"Expected 5 holding bars, got {trade.holding_bars}"
+        assert trade.holding_periods == 5, (
+            f"Expected 5 holding bars, got {trade.holding_periods}"
         )
 
     def test_equity_curve_no_future_pnl(self):

@@ -16,7 +16,7 @@ class StatusConfig:
     """Periodic status summary settings."""
 
     enabled: bool = False
-    interval_bars: int = 12
+    interval_periods: int = 12
 
 
 @dataclass
@@ -40,7 +40,7 @@ class NotificationConfig:
             error=bool(d.get("error", cls.error)),
             status=StatusConfig(
                 enabled=bool(status_raw.get("enabled", StatusConfig.enabled)),
-                interval_bars=int(status_raw.get("interval_bars", StatusConfig.interval_bars)),
+                interval_periods=int(status_raw.get("interval_periods", StatusConfig.interval_periods)),
             ),
         )
 

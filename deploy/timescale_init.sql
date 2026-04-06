@@ -18,8 +18,12 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     poll_seconds    INTEGER,
     last_heartbeat  TIMESTAMPTZ,
     params          JSONB,
+    perf_params     JSONB,
+    config_hash     VARCHAR(32),
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
+    ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
 
 -- ============================================================
 -- equity_curve — 每 bar 淨值 (hypertable, FK CASCADE)
@@ -62,7 +66,7 @@ CREATE TABLE IF NOT EXISTS trade_events (
     pnl             DOUBLE PRECISION,
     net_return      DOUBLE PRECISION,
     entry_ts        TIMESTAMPTZ,
-    holding_bars    INTEGER,
+    holding_periods INTEGER,
     reason          TEXT,
     CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
     CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close')),

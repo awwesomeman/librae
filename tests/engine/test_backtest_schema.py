@@ -70,7 +70,7 @@ def _make_trades() -> list[TradeRecord]:
             net_pnl=180.0,
             commission=20.0,
             slippage=0.0,
-            holding_bars=6,
+            holding_periods=6,
         )
     ]
 
@@ -152,7 +152,7 @@ def test_trade_record_cost_fields_optional() -> None:
     )
     assert tr.commission is None
     assert tr.slippage is None
-    assert tr.holding_bars is None
+    assert tr.holding_periods is None
 
 
 def test_strategy_metrics_cost_fields_optional() -> None:

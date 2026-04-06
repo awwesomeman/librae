@@ -8,7 +8,7 @@ class TestStatusConfig:
     def test_defaults(self):
         cfg = StatusConfig()
         assert cfg.enabled is False
-        assert cfg.interval_bars == 12
+        assert cfg.interval_periods == 12
 
 
 class TestNotificationConfig:
@@ -22,7 +22,7 @@ class TestNotificationConfig:
     def test_from_dict_empty(self):
         cfg = NotificationConfig.from_dict({})
         assert cfg.signal is True
-        assert cfg.status.interval_bars == 12
+        assert cfg.status.interval_periods == 12
 
     def test_from_dict_partial_override(self):
         cfg = NotificationConfig.from_dict({"signal": False})
@@ -31,10 +31,10 @@ class TestNotificationConfig:
 
     def test_from_dict_nested_status(self):
         cfg = NotificationConfig.from_dict({
-            "status": {"enabled": True, "interval_bars": 6},
+            "status": {"enabled": True, "interval_periods": 6},
         })
         assert cfg.status.enabled is True
-        assert cfg.status.interval_bars == 6
+        assert cfg.status.interval_periods == 6
         assert cfg.signal is True  # unchanged
 
 
@@ -63,7 +63,7 @@ class TestTelegramConfig:
         assert cfg.notifications.signal is False
         assert cfg.notifications.startup is True  # default
         assert cfg.notifications.status.enabled is True
-        assert cfg.notifications.status.interval_bars == 12  # default
+        assert cfg.notifications.status.interval_periods == 12  # default
 
     def test_from_dict_none_chat_id_becomes_empty(self):
         cfg = TelegramConfig.from_dict({"chat_id": None})

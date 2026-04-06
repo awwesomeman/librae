@@ -19,6 +19,7 @@ from .core.executor import (
     make_fill, process_actions, scale_into_position, reduce_position,
 )
 from .core.metrics import compute_all
+from .core.run_config import RunConfig
 from .core.utils import generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market
 
@@ -46,6 +47,7 @@ __all__ = [
     "EquitySnapshot",
     "TradeResult",
     "compute_all",
+    "RunConfig",
     "generate_run_id",
     "make_trade_id",
     "infer_timeframe",

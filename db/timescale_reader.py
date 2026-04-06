@@ -1,9 +1,39 @@
 """TimescaleDB reader — query helpers for dashboards and analysis."""
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pandas as pd
 
 from db import TIMESCALE_DSN, get_conn
+
+
+def find_run_by_config_hash(
+    config_hash: str,
+    dsn: str = TIMESCALE_DSN,
+) -> dict[str, Any] | None:
+    """Find the most recent run with the given config_hash.
+
+    Returns dict with run_id, params, perf_params, or None if not found.
+    Existing old runs (config_hash=NULL) are not affected.
+    """
+    sql = """SELECT run_id, params, perf_params
+             FROM backtest_runs
+             WHERE config_hash = %s
+             ORDER BY run_ts DESC LIMIT 1"""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (config_hash,))
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None
+    return {
+        "run_id": row[0],
+        "params": json.loads(row[1]) if row[1] else None,
+        "perf_params": json.loads(row[2]) if row[2] else None,
+    }
 
 
 def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> str | None:
@@ -66,7 +96,7 @@ def load_trade_events(
         SELECT event_id, ts AS _time, symbol, side, event_type,
                quantity, price, entry_price, position_quantity, notional,
                commission, slippage, tax,
-               pnl, net_return, entry_ts, holding_bars, reason
+               pnl, net_return, entry_ts, holding_periods, reason
         FROM trade_events
         WHERE run_id = %s
     """

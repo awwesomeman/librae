@@ -394,7 +394,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " ROUND(pnl::numeric,2) AS \"Net P&L\","
                 " ROUND(net_return::numeric,2) AS \"Net Return %\","
                 " entry_ts AS \"Entry Time\","
-                " holding_bars AS \"Periods\","
+                " holding_periods AS \"Periods\","
                 " reason AS \"Reason\""
                 " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND $__timeFilter(ts)"

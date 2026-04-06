@@ -7,7 +7,24 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from librae.core.run_config import RunConfig
 from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_event
+
+
+def _test_cfg(**overrides) -> RunConfig:
+    defaults = dict(
+        strategy_name="test",
+        symbols=["BTCUSDT"],
+        timeframe="H1",
+        market="crypto",
+        data_source="binance_spot",
+        initial_balance=100_000.0,
+        mode="backtest",
+        no_db=True,
+        params={"a": 1},
+    )
+    defaults.update(overrides)
+    return RunConfig(**defaults)
 
 
 class TestWriteSignalEvent:
@@ -78,7 +95,7 @@ class TestPersistBacktest:
         df, symbol = self._make_featured_df()
         mock_output = MagicMock()
 
-        counts = save_strategy_results(mock_output, df, symbol, "H1", "binance_spot", params={"a": 1})
+        counts = save_strategy_results(mock_output, df, _test_cfg())
 
         mock_write_bt.assert_called_once()
         call_kwargs = mock_write_bt.call_args
@@ -107,7 +124,7 @@ class TestPersistBacktest:
             "entry_signal": signals,
         }, index=mi)
 
-        save_strategy_results(MagicMock(), df, symbol, "H1", "binance_spot")
+        save_strategy_results(MagicMock(), df, _test_cfg())
 
         signal_series = mock_write_bt.call_args.kwargs["signal_series"]
         # Should keep: 1.0, -1.0, 1.0, -0.5, 1.0 (5 values, excluding NaN and 0)

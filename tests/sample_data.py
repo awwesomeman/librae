@@ -92,7 +92,7 @@ def run_simple_sma_crossover(
                 "exit_price": exit_price,
                 "pnl_points": pnl_points,
                 "pnl_return": pnl_points / entry_price,
-                "bars_held": i - entry_idx,
+                "periods_held": i - entry_idx,
             })
             position = 0
 

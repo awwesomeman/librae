@@ -63,13 +63,13 @@ class BuyBar2CloseBar4(BaseStrategy):
 
 class SignalDrivenStrategy(BaseStrategy):
     """Trades based on entry_signal / exit_signal columns in df."""
-    def __init__(self, max_hold_bars: int = 24):
-        self.max_hold_bars = max_hold_bars
+    def __init__(self, max_hold_periods: int = 24):
+        self.max_hold_periods = max_hold_periods
 
     def on_bar(self, ctx: Context) -> list[Action]:
         pos = ctx.positions.get(ctx.symbol)
         if pos:
-            if ctx.bar["exit_signal"] or pos.bars_held >= self.max_hold_bars:
+            if ctx.bar["exit_signal"] or pos.periods_held >= self.max_hold_periods:
                 return [Action(type="close", symbol=ctx.symbol)]
         elif ctx.bar["entry_signal"]:
             return [Action(type="buy", symbol=ctx.symbol)]
@@ -140,20 +140,20 @@ class TestSignalDrivenStrategy:
         result = bt.run()
 
         assert len(result.trades) == 1
-        assert result.trades[0].holding_bars == 3  # bar 4,5,6
+        assert result.trades[0].holding_periods == 3  # bar 4,5,6
 
-    def test_max_hold_bars(self) -> None:
+    def test_max_hold_periods(self) -> None:
         prices = [100.0] * 20
         df = _make_multiindex_df(prices)
         df.iloc[2, df.columns.get_loc("entry_signal")] = True
-        # No exit signal — should force close at max_hold_bars
+        # No exit signal — should force close at max_hold_periods
 
-        bt = Backtest(df, SignalDrivenStrategy(max_hold_bars=5),
+        bt = Backtest(df, SignalDrivenStrategy(max_hold_periods=5),
                       initial_balance=10_000, cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         assert len(result.trades) >= 1
-        assert result.trades[0].holding_bars <= 5
+        assert result.trades[0].holding_periods <= 5
 
 
 class TestMultiAsset:
@@ -249,15 +249,15 @@ class TestContext:
         # Bar 4: still see position (close happens after on_bar)
         assert len(seen_positions[4]) == 1
 
-    def test_ctx_bars_held_increments(self) -> None:
-        """bars_held in Position should increment each bar."""
+    def test_ctx_periods_held_increments(self) -> None:
+        """periods_held in Position should increment each bar."""
         held_values: list[int] = []
 
         class Tracker(BaseStrategy):
             def on_bar(self, ctx):
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
-                    held_values.append(pos.bars_held)
+                    held_values.append(pos.periods_held)
                 if ctx.bar_index == 1:
                     return [Action(type="buy", symbol=ctx.symbol)]
                 if ctx.bar_index == 5:
@@ -269,5 +269,5 @@ class TestContext:
                       cost_model=_zero_cost(), data_source="test")
         bt.run()
 
-        # bars_held should increment: 1, 2, 3, 4 (bars 2,3,4,5)
+        # periods_held should increment: 1, 2, 3, 4 (bars 2,3,4,5)
         assert held_values == [1, 2, 3, 4]
