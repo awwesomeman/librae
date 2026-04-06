@@ -53,12 +53,20 @@ class Context:
 
 @dataclass(frozen=True)
 class Action:
-    """What the strategy wants the engine to do."""
+    """What the strategy wants the engine to do.
+
+    Attributes:
+        fill_price: How to resolve the execution price on the *next* bar.
+            str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
+            float — limit price; fills only if next bar's low <= price <= high.
+            None  — use engine default (RunConfig.params["fill_price"], typically "open").
+    """
 
     type: Literal["buy", "sell", "close", "hold"]
     symbol: str = ""
     quantity: float | None = None
     reason: str = ""
+    fill_price: str | float | None = None
 
 
 @dataclass(frozen=True)
