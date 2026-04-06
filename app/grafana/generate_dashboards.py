@@ -655,7 +655,7 @@ def _make_custom_variable(
     label: str | None = None,
 ) -> dict:
     """Build a Grafana custom-type template variable."""
-    csv = ",".join(value for _, value in options)
+    csv = ",".join(f"{text} : {value}" for text, value in options)
     grafana_options = [
         {"text": text, "value": value, "selected": i == 0}
         for i, (text, value) in enumerate(options)
@@ -747,7 +747,10 @@ def render_unified_dashboard() -> dict:
 # All filtering uses run_id — symbol/timeframe/source derived from backtest_runs.
 # _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
 # so symbol/timeframe/data_source are resolved once instead of once per column.
-_SIG_WHERE = "s.run_id = '${run_id}'"
+_SIG_WHERE = (
+    "s.run_id = '${run_id}'"
+    " AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END"
+)
 _META_INNER = (
     " SELECT symbol, timeframe, data_source"
     " FROM backtest_runs WHERE run_id='${run_id}'"
@@ -1034,11 +1037,15 @@ def render_signal_monitor() -> dict:
         ),
         _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),
         _make_textbox_variable("k", "50", label="Rolling Window (signals)"),
-        _make_textbox_variable("fill_price_field", "open", label="Fill Price Field"),
+        _make_custom_variable(
+            "fill_price_field",
+            [("Close", "close"), ("Open", "open"), ("High", "high"), ("Low", "low")],
+            label="Fill Price Field",
+        ),
         _make_custom_variable(
             "expected_direction",
-            [("1", "1"), ("-1", "-1")],
-            label="Signal Direction",
+            [("Long", "1"), ("Short", "-1")],
+            label="Signal Type",
         ),
     ]
 

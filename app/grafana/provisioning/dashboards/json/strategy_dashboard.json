@@ -15,7 +15,7 @@
       {
         "name": "mode",
         "type": "custom",
-        "query": "backtest,sim,live",
+        "query": "Backtest : backtest,Sim : sim,Live : live",
         "current": {
           "text": "Backtest",
           "value": "backtest"
@@ -879,7 +879,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(position_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_ts AS \"Entry Time\", holding_bars AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(position_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_ts AS \"Entry Time\", holding_periods AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {

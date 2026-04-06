@@ -129,11 +129,13 @@ CREATE TABLE IF NOT EXISTS signal_events (
     timeframe       TEXT NOT NULL,
     signal_value    DOUBLE PRECISION NOT NULL,
     price           DOUBLE PRECISION,
-    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim'))
+    signal_type     TEXT NOT NULL DEFAULT 'entry',
+    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim')),
+    CONSTRAINT chk_signal_type CHECK (signal_type IN ('entry', 'exit'))
 );
 SELECT create_hypertable('signal_events', 'ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_events_unique
-    ON signal_events (ts, strategy, symbol, mode, timeframe);
+    ON signal_events (ts, strategy, symbol, mode, timeframe, signal_type);
 CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
     ON signal_events (strategy, symbol, mode, ts DESC);

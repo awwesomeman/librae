@@ -50,6 +50,22 @@ def _to_dt(ts: Any) -> datetime | None:
     return ts
 
 
+_SIGNAL_INSERT_SQL = """INSERT INTO signal_events
+           (ts, run_id, strategy, symbol, mode, timeframe,
+            signal_value, price, signal_type)
+           VALUES %s
+           ON CONFLICT (ts, strategy, symbol, mode, timeframe, signal_type)
+           DO NOTHING"""
+
+
+def _extract_exit_signals(df: pd.DataFrame, symbol: str) -> pd.Series:
+    """Extract exit_signal series if column exists, else empty Series."""
+    if "exit_signal" not in df.columns:
+        return pd.Series(dtype=float)
+    _, series = _extract_signals(df, symbol, "exit_signal")
+    return series
+
+
 def _extract_signals(
     df: pd.DataFrame,
     symbol: str,
@@ -151,6 +167,7 @@ def write_backtest_output(
     output: BacktestOutput,
     *,
     signal_series: pd.Series | None = None,
+    exit_signal_series: pd.Series | None = None,
     params: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
@@ -166,7 +183,8 @@ def write_backtest_output(
     Args:
         output: BacktestOutput to write.
         signal_series: Optional Series (index=timestamp, values=signal_value)
-            to write to signal_events. Only non-NaN values are written.
+            to write to signal_events as entry signals.
+        exit_signal_series: Optional Series for exit signals.
         params: Optional strategy parameters dict to store as JSONB.
         perf_params: Optional perf parameters dict to store as JSONB.
         config_hash: Optional deterministic hash for dedup.
@@ -261,7 +279,12 @@ def write_backtest_output(
             counts["trade_events"] = len(event_rows)
 
         # signal_events (from feature-layer signal_series)
-        if signal_series is not None and not signal_series.empty:
+        sig_count = 0
+        has_signals = (
+            (signal_series is not None and not signal_series.empty)
+            or (exit_signal_series is not None and not exit_signal_series.empty)
+        )
+        if has_signals:
             cur.execute(
                 """DELETE FROM signal_events
                    WHERE strategy = %s AND symbol = %s AND mode = 'backtest'
@@ -270,23 +293,24 @@ def write_backtest_output(
                 (meta.strategy, meta.symbol, tf,
                  _to_dt(meta.start_ts), _to_dt(meta.end_ts)),
             )
-            so_rows = [
+        if signal_series is not None and not signal_series.empty:
+            entry_rows = [
                 (_to_dt(ts), meta.run_id, meta.strategy, meta.symbol, "backtest",
-                 tf, float(val), None)
+                 tf, float(val), None, "entry")
                 for ts, val in signal_series.items()
             ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO signal_events
-                   (ts, run_id, strategy, symbol, mode, timeframe,
-                    signal_value, price)
-                   VALUES %s
-                   ON CONFLICT (ts, strategy, symbol, mode, timeframe)
-                   DO NOTHING""",
-                so_rows,
-                page_size=1000,
-            )
-            counts["signal_events"] = len(so_rows)
+            psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, entry_rows, page_size=1000)
+            sig_count += len(entry_rows)
+        if exit_signal_series is not None and not exit_signal_series.empty:
+            exit_rows = [
+                (_to_dt(ts), meta.run_id, meta.strategy, meta.symbol, "backtest",
+                 tf, float(val), None, "exit")
+                for ts, val in exit_signal_series.items()
+            ]
+            psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
+            sig_count += len(exit_rows)
+        if sig_count:
+            counts["signal_events"] = sig_count
 
         write_performance(meta.run_id, m, cur=cur)
         counts["strategy_performance"] = 1
@@ -366,6 +390,7 @@ def write_signal_event(
     timeframe: str,
     signal_value: float,
     price: float | None = None,
+    signal_type: str = "entry",
     *,
     cur: PgCursor | None = None,
     dsn: str = TIMESCALE_DSN,
@@ -376,12 +401,12 @@ def write_signal_event(
     transaction).  Otherwise opens its own connection and commits.
     """
     sql = """INSERT INTO signal_events
-               (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (ts, strategy, symbol, mode, timeframe)
+               (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price, signal_type)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (ts, strategy, symbol, mode, timeframe, signal_type)
                DO NOTHING"""
     values = (_to_dt(ts), run_id, strategy, symbol, mode, timeframe,
-              signal_value, price)
+              signal_value, price, signal_type)
     if cur is not None:
         cur.execute(sql, values)
     else:
@@ -602,12 +627,22 @@ def save_signal_results(
     When cfg is provided, stores config_hash and perf_params.
     """
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
+    exit_signal_series = _extract_exit_signals(df, symbol)
     tf = to_canonical(timeframe)
     counts: dict[str, int] = {}
 
-    if not signal_series.empty:
-        start_ts = signal_series.index.min()
-        end_ts = signal_series.index.max()
+    has_entry = not signal_series.empty
+    has_exit = not exit_signal_series.empty
+    if has_entry or has_exit:
+        start_ts = min(
+            signal_series.index.min() if has_entry else exit_signal_series.index.min(),
+            exit_signal_series.index.min() if has_exit else signal_series.index.min(),
+        )
+        end_ts = max(
+            signal_series.index.max() if has_entry else exit_signal_series.index.max(),
+            exit_signal_series.index.max() if has_exit else signal_series.index.max(),
+        )
+        sig_count = 0
 
         with get_conn() as conn:
             cur = conn.cursor()
@@ -631,22 +666,21 @@ def save_signal_results(
                 (strategy, symbol, mode, tf,
                  _to_dt(start_ts), _to_dt(end_ts)),
             )
-            so_rows = [
-                (_to_dt(ts), run_id, strategy, symbol, mode, tf, float(val), None)
-                for ts, val in signal_series.items()
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO signal_events
-                   (ts, run_id, strategy, symbol, mode, timeframe,
-                    signal_value, price)
-                   VALUES %s
-                   ON CONFLICT (ts, strategy, symbol, mode, timeframe)
-                   DO NOTHING""",
-                so_rows,
-                page_size=1000,
-            )
-            counts["signal_events"] = len(so_rows)
+            if has_entry:
+                entry_rows = [
+                    (_to_dt(ts), run_id, strategy, symbol, mode, tf, float(val), None, "entry")
+                    for ts, val in signal_series.items()
+                ]
+                psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, entry_rows, page_size=1000)
+                sig_count += len(entry_rows)
+            if has_exit:
+                exit_rows = [
+                    (_to_dt(ts), run_id, strategy, symbol, mode, tf, float(val), None, "exit")
+                    for ts, val in exit_signal_series.items()
+                ]
+                psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
+                sig_count += len(exit_rows)
+            counts["signal_events"] = sig_count
             cur.close()
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
@@ -671,9 +705,11 @@ def save_strategy_results(
     data_source = cfg.data_source
 
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
+    exit_signal_series = _extract_exit_signals(df, symbol)
     counts = write_backtest_output(
         output,
         signal_series=signal_series,
+        exit_signal_series=exit_signal_series if not exit_signal_series.empty else None,
         params=cfg.params,
         perf_params=cfg.perf_params,
         config_hash=cfg.config_hash,
