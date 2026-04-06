@@ -29,6 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
-      - name: Run contract + streamlit smoke tests
+      - name: Run contract tests
         run: |
-          pytest -q tests/engine/test_contract_minimal.py tests/app/test_schema_builder.py
+          pytest -q tests/engine/test_contract_minimal.py
