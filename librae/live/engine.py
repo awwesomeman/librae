@@ -250,12 +250,16 @@ class LiveTrader:
         strategy = self._cfg.strategy_name
         timeframe = self._cfg.timeframe
 
-        def on_signal_event_cb(symbol: str, ts: datetime, signal_value: float, price: float) -> None:
+        def on_signal_event_cb(
+            symbol: str, ts: datetime, signal_value: float, price: float,
+            signal_type: str = "entry",
+        ) -> None:
             self._db_write(
                 write_signal_event,
                 ts=ts, run_id=run_id, strategy=strategy, symbol=symbol,
                 mode=self._cfg.mode, timeframe=timeframe,
                 signal_value=signal_value, price=price,
+                signal_type=signal_type,
             )
         return on_signal_event_cb
 
@@ -463,8 +467,11 @@ class LiveTrader:
 
         if self._on_signal_outcome:
             sig = bar.get("entry_signal")
-            if sig is not None and not pd.isna(sig):
+            if sig is not None and not pd.isna(sig) and float(sig) != 0:
                 self._on_signal_outcome(symbol, ts, float(sig), price)
+            exit_sig = bar.get("exit_signal")
+            if exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0:
+                self._on_signal_outcome(symbol, ts, float(exit_sig), price, signal_type="exit")
 
         # ── Step 2: strategy decision (produces next bar's pending actions) ──
         period_index = self._period_indices.get(symbol, 0)

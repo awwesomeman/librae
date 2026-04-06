@@ -194,16 +194,25 @@ class SignalPoller:
         price = float(bar.get("close", 0.0))
 
         sig = bar.get("entry_signal")
-        if sig is not None and not pd.isna(sig):
+        if sig is not None and not pd.isna(sig) and float(sig) != 0:
             logger.info("Signal detected: %s @ %s = %.4f (price=%.2f)",
                         symbol, ts, float(sig), price)
             if not self._cfg.no_db:
                 self._write_signal(symbol, ts, float(sig), price)
+        exit_sig = bar.get("exit_signal")
+        if exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0:
+            logger.info("Exit signal: %s @ %s = %.4f (price=%.2f)",
+                        symbol, ts, float(exit_sig), price)
+            if not self._cfg.no_db:
+                self._write_signal(symbol, ts, float(exit_sig), price, signal_type="exit")
 
         if not self._cfg.no_db:
             self._write_ohlcv(symbol, bar, ts)
 
-    def _write_signal(self, symbol: str, ts: datetime, signal_value: float, price: float) -> None:
+    def _write_signal(
+        self, symbol: str, ts: datetime, signal_value: float, price: float,
+        signal_type: str = "entry",
+    ) -> None:
         from db.timescale_writer import write_signal_event
         self._db_write(
             write_signal_event,
@@ -211,6 +220,7 @@ class SignalPoller:
             strategy=self._cfg.strategy_name, symbol=symbol,
             mode=self._cfg.mode, timeframe=self._cfg.timeframe,
             signal_value=signal_value, price=price,
+            signal_type=signal_type,
         )
 
     def _write_ohlcv(self, symbol: str, bar: dict, ts: datetime) -> None:
