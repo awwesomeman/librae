@@ -1,9 +1,9 @@
 # Librae Framework Refactoring
 
-> 狀態：planning
+> 狀態：done
 > 範圍：librae, backtest, schema
 > 建立日期：2026-03-27
-> 最後更新：2026-03-27
+> 最後更新：2026-04-09
 > 依據：[2026-03-27 回測引擎重構](../decisions/2026-03-27-backtest-engine-refactor.md)
 
 ## Context
@@ -755,3 +755,24 @@ Entry point 設計：`Backtest` 和 `LiveTrader` 在概念上對等（都是主�
 7. Verify benchmark: `add_benchmark` → output 有 benchmark_return; 沒呼叫 → None
 8. Verify `core.executor.calc_trade_pnl` 結果與現有 backtest `_close_position` 一致
 9. Verify live `LiveTrader` 平倉計算含 tax（修復現有 bug）
+
+---
+
+## 實作偏差記錄
+
+| # | 計畫 | 實作 | 原因 |
+|---|------|------|------|
+| D1 | `live/wiring.py` + `build_live_trader()` factory | 不存在，wiring 內化到 `LiveTrader.__init__()` | LiveTrader 接收 `RunConfig`，自行組裝 adapter/cost_model/callbacks，不需獨立 factory |
+| D2 | `backtest/persistence.py`（save_output / load_output，合併 archive.py） | 不存在，本地 JSON/CSV/Parquet 序列化移除 | DB 成為唯一持久化目標，不再需要本地檔案序列化 |
+| D3 | RunMetadata 刪除 `mode`、`data_source` | 仍保留（mode 預設 "backtest"，data_source 保留） | DB 查詢和 Grafana dashboard 仍需這兩個欄位做篩選 |
+| D4 | Backtest 建構子 `(data, strategy, market_config, initial_balance)` | `(data, strategy, cfg: RunConfig)`，market_config/initial_balance 為 legacy kwargs | RunConfig 統一管理所有設定，避免散落參數 |
+| D5 | `live/` 只有 engine.py + executor.py + wiring.py | 多了 `signal_poller.py`，無 wiring.py | 信號輪詢邏輯從 engine 拆出，職責更清晰 |
+| D6 | `compute_all` 參數名 `total_bars` | `total_periods` | 統一 periods 術語（與 holding_periods、exposed_periods 一致） |
+| D7 | 根目錄 README.md 更新為新 API | 根 README 維持 `run_dispatch()` 入口；`librae/README.md` 已更新新 API | 策略仍透過 run_dispatch 啟動，根 README 描述的是使用者實際操作流程 |
+
+### Verification 偏差
+
+| # | 計畫 | 實作 | 原因 |
+|---|------|------|------|
+| V4 | `save_output()` 輸出 JSON/CSV | 不適用 | D2 — 本地序列化已移除 |
+| V5 | `load_output()` roundtrip | 不適用 | D2 — 本地序列化已移除 |

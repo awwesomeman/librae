@@ -5,6 +5,7 @@
 # Runtime / local logs
 *.log
 *.pyc
+.claude/
 .openclaw/
 .venv/
 MEMORY.md

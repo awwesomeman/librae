@@ -1,11 +1,12 @@
 # Engine Performance 微優化
 
-> 狀態：implemented
+> 狀態：done
 > 範圍：engine, strategy, data
 > 建立日期：2026-04-04
+> 最後更新：2026-04-08
 > 依據：
 > - [2026-04-01 回測引擎優化](../decisions/2026-04-01-backtest-engine-optimization.md) — #3 slots, #7 cache trim
-> - [enhance_librae_engine](enhance_librae_engine.md) — 整合索引
+> - [enhance_librae](enhance_librae.md) — 整合索引
 
 ## 背景
 
@@ -66,3 +67,18 @@ if end_dt:
 1. Cache trim（優先 — 修正 look-ahead bias）
 2. Context `__slots__`
 3. 跑全部 tests
+
+---
+
+## 實作偏差記錄
+
+| # | 計畫 | 實作 | 原因 |
+|---|------|------|------|
+| D1 | `fetch_ohlcv()` 內直接加 filter | 抽出 `_trim_range()` helper，在 cache hit 和 API fetch 兩個路徑都呼叫 | 避免重複程式碼，兩個返回點都需要 trim |
+
+### 未實作項目
+
+| 項目 | 計畫位置 | 原因 |
+|------|----------|------|
+| 測試 #1：Context `__slots__` 斷言 | §測試 | 測的是 Python decorator 參數，拿掉只影響效能不影響行為，投入產出不划算 |
+| 測試 #2-3：`fetch_ohlcv` start/end 邊界 | §測試 | `_trim_range()` 邏輯僅兩行 DataFrame filter，且需 mock 外部 API + parquet cache；look-ahead 防護已被 backtest regression tests 間接覆蓋 |

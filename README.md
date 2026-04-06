@@ -232,8 +232,9 @@ quant-strategy-lab/
 ├── librae/                 # 回測引擎框架 → 詳見 librae/README.md
 │   ├── core/               #   RunConfig、策略協議、執行器、成本模型、指標
 │   ├── backtest/           #   回測引擎（next-bar execution）
-│   ├── live/               #   即時引擎（LiveTrader + SignalPoller）
+│   ├── live/               #   即時引擎（LiveTrader + LiveExecutor + SignalPoller）
 │   ├── config/             #   市場設定、通知設定
+│   ├── notifications/      #   Telegram 推播
 │   └── cli.py              #   run_dispatch + build_config 入口
 ├── data/
 │   ├── ohlcv.py            # 統一 OHLCV 入口：get_ohlcv()（DB-first + API fallback）

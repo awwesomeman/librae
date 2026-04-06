@@ -1,9 +1,9 @@
 # Config Management 重構計畫
 
-> 狀態：planning
+> 狀態：done
 > 範圍：config, telegram, notification
 > 建立日期：2026-03-31
-> 最後更新：2026-03-31
+> 最後更新：2026-04-08
 > 依據：[2026-03-30 TSDB bind 可配置](../decisions/2026-03-30-tsdb-bind-configurable.md)
 > 備註：2026-03-31 批判檢視 5 點已整合（見 §8）
 
@@ -337,3 +337,18 @@ telegram:
 | F3 | Status update 週期用固定時間還是 bar 數？ | 用 `interval_bars`（自動適應不同 timeframe：M5×12=1h, H1×24=1d） |
 | F4 | `TelegramCredentials.from_env("TELEGRAM")` 的 field mapping | `bot_token` → `TELEGRAM_BOT_TOKEN`, `chat_id` → `TELEGRAM_CHAT_ID`（符合 CredentialConfig 慣例） |
 | F5 | engine.py 不該直接讀 config | wiring.py 負責建構 TelegramAdapter（依賴注入），engine.py 只用注入好的 adapter |
+
+---
+
+## 9) 實作偏差記錄
+
+以下項目在實作時與原計畫不同：
+
+| # | 計畫 | 實作 | 原因 |
+|---|------|------|------|
+| D1 | §3.1 `defaults.yaml` 作為預設值參考檔 | 已刪除，不建立此檔 | 預設值來源改為 argparse defaults + dataclass defaults，避免雙重 source of truth |
+| D2 | §3.4 `STRUCTURED_KEYS` 常數 + `_deep_merge()` + `load_defaults()` | `isinstance(v, dict)` 動態偵測 structured keys，無 deep_merge | 沒有 defaults.yaml 就只剩一層 YAML，不需要 deep merge；動態偵測比維護白名單更彈性 |
+| D3 | §3.4 三層合併（defaults.yaml → strategy config → CLI） | 兩層合併（strategy config.yaml → CLI） | defaults.yaml 刪除後自然簡化為兩層 |
+| D4 | §3.5 獨立 `wiring.py` 負責建構 TelegramAdapter | 整合在 `engine.py` (`LiveTrader.__init__`) | 專案未使用獨立 wiring module，LiveTrader 直接從 RunConfig.telegram_config 建構 |
+| D5 | §3.6 欄位名 `interval_bars` / `_status_bar_count` | `interval_periods` / `_status_period_count` | 統一用 `periods` 術語，與 strategy config 中 `max_hold_periods`、`warmup_periods` 一致 |
+| D6 | §8 F5 engine.py 不讀 config，由 wiring.py 注入 | engine.py 自行從 RunConfig 建構 TelegramAdapter | 同 D4，沒有獨立 wiring module |

@@ -1,4 +1,10 @@
-# Plan: Refactor Librae API (Unified Execution Framework)
+# Refactor Librae API (Unified Execution Framework)
+
+> 狀態：implemented
+> 範圍：engine, cli, live, backtest, db
+> 建立日期：2026-04-05
+> 最後更新：2026-04-06
+> 依據：[refactor_librae](refactor_librae.md)
 
 ## 重構目標
 

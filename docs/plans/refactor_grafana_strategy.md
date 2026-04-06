@@ -1,5 +1,11 @@
 # Order Detail 面板重新規劃（v3 — implemented）
 
+> 狀態：implemented
+> 範圍：grafana, schema, db
+> 建立日期：2026-04-04
+> 最後更新：2026-04-05
+> 依據：[enhance_librae_position_lifecycle](enhance_librae_position_lifecycle.md)
+
 ## Context
 
 引擎已支援加碼（scaling）與部分平倉（partial close），但目前的資料模型和 Grafana 面板只記錄「平倉事件」（trade_blotter，一筆 close = 一行）。看不到：

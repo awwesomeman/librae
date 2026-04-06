@@ -1,11 +1,12 @@
 # Position Lifecycle：Short + Scaling + Partial Close
 
-> 狀態：implemented (Phase 2: order events added 2026-04-05)
+> 狀態：done
 > 範圍：engine, executor, schema, db, grafana
 > 建立日期：2026-04-04
+> 最後更新：2026-04-08
 > 依據：
 > - [2026-04-01 回測引擎優化](../decisions/2026-04-01-backtest-engine-optimization.md) — Short proceeds bug, ctx.cash bug, exit tax bug
-> - [enhance_librae_engine](enhance_librae_engine.md) — 整合索引
+> - [enhance_librae](enhance_librae.md) — 整合索引
 
 ## 背景
 
@@ -88,8 +89,8 @@ collateral 模式下 `estimate_entry_outlay` 對 short 扣全額是設計決策�
 | `OrderEventRecord` dataclass（schema.py） | done |
 | `BacktestResult` / `BacktestOutput` 攜帶 events | done |
 | `order_events` hypertable（timescale_init.sql） | done |
-| `write_order_events()` 批次寫入（timescale_writer.py） | done |
-| `load_order_events()` 讀取（timescale_reader.py） | done |
+| `write_trade_event()` 寫入（timescale_writer.py） | done（見 §偏差 D1） |
+| `load_trade_events()` 讀取（timescale_reader.py） | done（見 §偏差 D1） |
 | Grafana Order Events 面板取代舊 Trade Detail | done |
 | KPI catalogue + configurable DEFAULT_KPIS | done |
 | `test_order_events.py`（11 tests） | done |
@@ -221,3 +222,22 @@ Action loop 替換為呼叫 `process_actions()`。
 7. Backtest 整合測試 #6-24
 8. Live engine 改用 `process_actions`
 9. 全部 tests regression
+
+---
+
+## 實作偏差記錄
+
+| # | 計畫 | 實作 | 原因 |
+|---|------|------|------|
+| D1 | SQL 表 `order_events`、函式 `write_order_events()` / `load_order_events()` | 表名 `trade_events`、函式 `write_trade_event()` / `load_trade_events()` | DB schema refactor 統一命名為 trade_events，更準確描述內容（部位生命週期事件而非委託單） |
+| D2 | `write_order_events()` 批次寫入 | `write_trade_event()` 單筆寫入 | Live engine 每次 close 即時寫入一筆，不需批次；backtest 仍批次迴圈呼叫 |
+| D3 | `load_trade_events()` | 新增 `event_types` 篩選參數 | `refresh_performance()` 只需 close 事件重算 metrics，篩選避免拉多餘資料 |
+| D4 | Phase 2 計畫 `test_order_events.py`（11 tests） | 實際 12 tests | 多一個 `test_engine_produces_events` 整合測試 |
+| D5 | Phase 2「KPI catalogue + configurable DEFAULT_KPIS」 | 實作在 `app/grafana/generate_dashboards.py` 的 `_KPI_CATALOGUE` + `DEFAULT_KPIS` | 屬 Grafana dashboard 層，非 engine 層；計畫描述未指定位置 |
+
+### 未實作項目
+
+| 項目 | 計畫位置 | 原因 |
+|------|----------|------|
+| Live engine 消費 order_events | Phase 2 表格 | deferred — live 目前只寫入 trade_events，不讀取消費 |
+| VPS DB migration（order_events 表） | Phase 2 表格 | deferred — seed script 已建表，正式 migration 待排 |

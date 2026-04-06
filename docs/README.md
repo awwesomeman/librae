@@ -73,6 +73,25 @@
 > 依據：相關的 decision 連結
 ```
 
+### 現有計畫索引
+
+截至 2026-04-06 整理。
+
+| 檔案 | 狀態 | 範圍 | 摘要 |
+|------|------|------|------|
+| [implementation_plan](plans/implementation_plan.md) | in-progress | 全系統 | 端到端回測 + 訊號訂閱 + 即時交易平台總計畫 |
+| [enhance_librae](plans/enhance_librae.md) | in-progress | engine, executor, schema | 引擎層整合優化索引（Position Lifecycle + Performance） |
+| [enhance_librae_position_lifecycle](plans/enhance_librae_position_lifecycle.md) | implemented | engine, executor, schema, db, grafana | Short + Scaling + Partial Close 持倉生命週期 |
+| [enhance_librae_performance](plans/enhance_librae_performance.md) | implemented | engine, strategy, data | Context __slots__、cache trim、look-ahead fix 微優化 |
+| [enhance_librae_multi_symbol_support](plans/enhance_librae_multi_symbol_support.md) | planning | engine, live | Multi-Symbol LiveTrader 對齊 Backtest 行為 |
+| [fix_librae_look_ahead](plans/fix_librae_look_ahead.md) | implemented | engine, executor, grafana | 消除前視偏誤 + 彈性成交價（next-bar execution） |
+| [enhance_db_schema](plans/enhance_db_schema.md) | active | schema, db, engine, grafana, data | DB Schema 7→6 表精簡 + 統一寫入流程 |
+| [refactor_librae](plans/refactor_librae.md) | planning | librae, backtest, schema | Librae 框架重構（core/backtest/live 分層） |
+| [refactor_librae_api](plans/refactor_librae_api.md) | implemented | engine, cli, live, backtest, db | 統一 RunConfig API + 移除舊介面 |
+| [refactor_librae_strategy_protocol_executor](plans/refactor_librae_strategy_protocol_executor.md) | completed | engine, strategy, executor | Strategy Protocol + Executor 分離 |
+| [refactor_config_management](plans/refactor_config_management.md) | planning | config, telegram, notification | 統一 YAML + env var + CLI 設定管理 |
+| [refactor_grafana_strategy](plans/refactor_grafana_strategy.md) | implemented | grafana, schema, db | Order Events 面板（部位生命週期可視化） |
+
 ## guides/
 
 操作指南與部署文件。記錄可重複執行的步驟，供團隊成員或未來的自己參考。

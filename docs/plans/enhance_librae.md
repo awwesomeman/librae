@@ -1,14 +1,17 @@
 # Librae Engine 整合優化（索引）
 
+> 狀態：done
+> 範圍：engine, executor, schema
 > 建立日期：2026-04-04
+> 最後更新：2026-04-08
 > 依據：[2026-04-01 回測引擎優化](../decisions/2026-04-01-backtest-engine-optimization.md)
 
 整合 decision doc 中散落的引擎層待辦項目，按相關性分為獨立計畫：
 
 | 計畫 | 範圍 | 依賴 | 狀態 |
 |------|------|------|------|
-| [Position Lifecycle](enhance_position_lifecycle.md) | short fix, scaling, partial close | 無 | implemented |
-| [Engine Performance](enhance_engine_performance.md) | Context slots, cache trim (look-ahead fix) | 無 | implemented |
+| [Position Lifecycle](enhance_librae_position_lifecycle.md) | short fix, scaling, partial close | 無 | done |
+| [Engine Performance](enhance_librae_performance.md) | Context slots, cache trim (look-ahead fix) | 無 | done |
 
 ### 未來階段（不在此次）
 

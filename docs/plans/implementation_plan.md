@@ -3,18 +3,14 @@
 > 狀態：in-progress
 > 範圍：全系統（engine, strategy, sim, grafana）
 > 建立日期：2026-03-06
-> 最後更新：2026-03-31
+> 最後更新：2026-04-06
 > 依據：[2026-03-06 核心決策](../decisions/2026-03-06-core-tooling-and-schema.md)
-> 進度：Phase 3 sim mode 運行中；trendpullback_m5 已完成回測並正在監控
 
 ---
 
-## 1) Goal Alignment
+## 目標
 
-### End goal
 Signal subscription and live auto trading platform for futures, crypto, pair trading, stock selection.
-
-### 兩大目標
 
 | # | 目標 | 說明 | 對應 Phase |
 |---|------|------|-----------|
@@ -23,104 +19,11 @@ Signal subscription and live auto trading platform for futures, crypto, pair tra
 
 Goal 1 是 Goal 2 的前提 — LiveExecutor `simulation=True` 即為信號推播，`simulation=False` 即為自動交易。同一套程式碼，不同模式。
 
-### Current phase goal
-Phase 2：端到端回測 pipeline 跑通（共同基礎，兩個目標都需要）。
+> 架構、目錄結構、Tech Stack 見 [根目錄 README](../../README.md) 和 [librae/README](../../librae/README.md)。
 
 ---
 
-## 2) Architecture
-
-### 三層解耦
-
-```
-ETL (pipeline/)       → df (MultiIndex + 信號欄位)
-Strategy (strategies/) → on_bar(ctx) → Action[]
-Engine (librae/)       → Executor.execute(action) → Fill → BacktestResult
-```
-
-### 回測 vs 實盤（共用 Strategy）
-
-```
-                回測                              實盤
-                ────                              ────
-Data:      fetcher → DataFrame              broker.stream_bars()
-Strategy:  strategy.on_bar(ctx) → Action[]  strategy.on_bar(ctx) → Action[]  ← 同一份
-Executor:  core.make_fill(CostModel)        LiveExecutor(simulation=True/False)
-Close:     core.close_position(PositionState, price, CostModel) → (TradePnL, proceeds)  ← 共用
-```
-
-### 專案結構
-
-```
-quant-strategy-lab/
-├── librae/                  ← 回測引擎框架（純引擎，可獨立抽出）
-│   ├── core/               # backtest + live 共用 domain model（純計算，無 I/O）
-│   │   ├── strategy.py     # BaseStrategy, Action, Context, Position, PositionState, Fill
-│   │   ├── executor.py     # make_fill, calc_trade_pnl, close_position, TradeResult, TradePnL
-│   │   ├── cost_model.py   # CostModel（multiplier 統一現貨/期貨, commission+tax 分離）
-│   │   ├── metrics.py      # compute_all（QuantStats adapter）
-│   │   └── utils.py        # generate_run_id, infer_timeframe, to_ccxt, to_canonical
-│   ├── backtest/           # 回測 runtime
-│   │   ├── engine.py       # Backtest + build_output
-│   │   ├── schema.py       # BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
-│   │   └── persistence.py  # save_output / load_output（JSON + CSV + Parquet）
-│   ├── live/               # live/sim runtime
-│   │   ├── engine.py       # LiveTrader（polling loop）
-│   │   ├── executor.py     # LiveExecutor（sim 通知 / live 下單）
-│   │   └── wiring.py       # build_live_trader（convenience factory）
-│   ├── config/             # markets.yaml（市場 / 標的設定）
-│   ├── notifications/      # Telegram 推播
-│   └── cli.py              # 共用 CLI parser + config YAML 載入
-│
-├── data/                    ← 專案層：資料取得（librae 不依賴）
-│   └── binance.py          # Binance OHLCV fetcher + cache + resample
-│
-├── strategies/              ← 策略實作（BaseStrategy 子類 + 純信號函數）
-│   ├── trendpullback/       # H1 策略：D1 趨勢 + H1 回調
-│   └── trendpullback_m5/   # M5 策略：M30 趨勢 + M5 回調
-│
-├── pipeline/                ← 資料取得 + ETL
-├── brokers/                 ← 券商 adapter（三層分離：MarketData / Order / Account）
-├── db/                      ← TimescaleDB 讀寫
-├── app/                     ← UI（Streamlit + Grafana）
-├── deploy/                  ← docker-compose, SQL
-├── tests/                   ← 按模組分目錄（engine/, strategies/, pipeline/, ...）
-└── docs/                    ← 文件 + docs/decisions/（ADR）
-```
-
-### Tech Stack
-
-| Area | Tool | 說明 |
-|------|------|------|
-| 回測引擎 | `librae/backtest/` | Backtest class + build_output()，Strategy Protocol, core/ 共用 domain model |
-| Live/Sim | `librae/live/` | LiveTrader + build_live_trader()：DB callbacks + Telegram + heartbeat |
-| 共用計算 | `librae/core/` | calc_trade_pnl, close_position, compute_all, direction, PositionState |
-| CLI 共用 | `librae/cli.py` | base_parser + config YAML 載入 + setup_logging |
-| 成本模型 | `librae/core/cost_model.py` | multiplier 統一現貨/期貨, CostModel.from_market() |
-| 績效指標 | QuantStats + 客製指標 | `librae/core/metrics.py` compute_all（primitive types） |
-| 信號條件 | `strategies/trendpullback/utils.py` | compute_entry/exit_conditions（純布林 Series） |
-| 資料格式 | MultiIndex DataFrame (symbol, datetime) | 單資產是特例，多資產統一 |
-| 研究/參數掃描 | vectorbt（開源版） | Phase 5 |
-| Market Config | `librae/config/markets.yaml` | 兩層：MarketConfig + InstrumentConfig |
-| 執行層 | CCXT / Shioaji | brokers/ 三層 adapter + CryptoAdapter |
-| Time-series DB | TimescaleDB | 唯一資料源 |
-| Dashboards | Streamlit + Grafana（單一 Strategy Dashboard，mode 篩選） | 統一在 app/ |
-| Deployment | docker-compose + Tailscale | VPS 或 GCE |
-| Testing | pytest 232 tests | 按模組分目錄（含 look-ahead bias + LiveTrader） |
-
-### 設計原則
-
-- **三層解耦**：ETL / Strategy / Engine 各做各的事
-- **Strategy 不追蹤持倉**：看 `ctx.positions`（engine 擁有），用 `Action` 表達意圖
-- **Engine 擁有所有狀態**：positions, bars_held, cash
-- **Executor 可替換**：回測用 core.make_fill()，實盤用 LiveExecutor
-- **同一份 Strategy 跑回測和實盤**：零修改
-- **CostModel 內部實作**：使用者不需知道，Backtest 自動從 markets.yaml 建
-- **Python coding-standards skill**：所有程式碼遵循 `~/.claude/skills/python/coding-standards/` 規範（命名慣例、型別標註、錯誤處理、不過度設計）
-
----
-
-## 3) Phase 進度
+## Phase 進度
 
 ```
 Phase 0–1 ✅           Phase 2 ✅            Phase 3 ⏳            Phase 4              Phase 5
@@ -239,32 +142,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 
 ---
 
-## 4) Key Decisions
-
-見 `docs/decisions/` 目錄：
-- `2026-03-31-database-schema-review.md` — Database schema review
-- `2026-03-30-tsdb-bind-configurable.md` — TimescaleDB port binding 環境變數化
-- `2026-03-28-strategy-folder-convention.md` — 策略目錄慣例
-- `2026-03-27-backtest-engine-refactor.md` — 統一回測引擎 + CostModel + QuantStats
-- `2026-03-26-platform-architecture.md`
-- `2026-03-26-market-adapter-architecture.md`
-- `2026-03-26-performance-metrics-standard.md`
-- `2026-03-26-backtest-performance-optimization.md`
-- `2026-03-26-dashboard-data-scope.md`
-- `2026-03-25-dashboard-architecture.md`
-- `2026-03-06-core-tooling-and-schema.md`
-
----
-
-## 5) Config 重構 ✅
-
-已完成。`librae/config/markets.yaml` 現在只保留市場屬性 + 成本參數：
-- `warmup_bars`, `max_hold_bars` → 已移至策略層
-- `data_source`, `exchange` → 已移至 broker layer
-
----
-
-## 6) 待辦：Dashboard 指標擴充
+## 待辦：Dashboard 指標擴充
 
 目前 Performance Overview 只有 6 個 KPI（Total Return, Max DD, Sharpe, Win Rate, Profit Factor, Trades）。
 需要設計如何加入更多指標（例如 Active Period Return、年化報酬、Sortino、Calmar）同時保持版面整潔。
@@ -286,7 +164,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 
 ---
 
-## 7) Future Considerations（已評估、刻意延後）
+## Future Considerations（已評估、刻意延後）
 
 > 以下項目在 librae 重構時經過批判檢視，確認現階段不實作但未來機率不低。記錄延後原因與觸發條件，避免重複討論。
 > 參考框架：NautilusTrader, Zipline, Lumibot, vn.py, Backtrader, QSTrader, Freqtrade
@@ -339,7 +217,7 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 
 ---
 
-## 8) Refactor 門檻
+## Refactor 門檻
 
 觸發任 2~3 條才考慮大幅重構：
 1. 策略 >10 且重複邏輯 >40%

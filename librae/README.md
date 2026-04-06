@@ -11,10 +11,11 @@
 ```
 core/                       共用 domain model（純計算，無 I/O）
 ├── strategy.py             BaseStrategy, Action, Context, Position, PositionState, Fill
-├── executor.py             make_fill, calc_trade_pnl, close_position, TradeResult, TradePnL
+├── executor.py             make_fill, process_actions, calc_trade_pnl, close_position, scale_into_position, reduce_position
 ├── cost_model.py           CostModel（手續費 / 滑價 / 稅 / 合約乘數）
 ├── metrics.py              compute_all（QuantStats adapter）
-└── utils.py                generate_run_id, infer_timeframe, to_ccxt, to_canonical
+├── run_config.py           RunConfig — 統一執行參數（frozen dataclass）
+└── utils.py                generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
 
 backtest/                   回測 runtime
 ├── engine.py               Backtest — bar-by-bar 執行 + build_output()
@@ -23,7 +24,7 @@ backtest/                   回測 runtime
 live/                       即時 / 模擬 runtime
 ├── engine.py               LiveTrader — polling loop + 信號偵測
 ├── executor.py             LiveExecutor（sim 通知 / live 下單）
-└── wiring.py               build_live_trader() — DB + Telegram + heartbeat 組裝
+└── signal_poller.py        SignalPoller — 訊號專用輪詢
 
 config/                     設定管理
 ├── markets.yaml            市場參數（成本模型、tick_size、乘數）
@@ -64,9 +65,7 @@ live/     ──→ core/
 ### 回測 (backtest)
 
 ```python
-from librae import Backtest, BaseStrategy, Action, Context
-from librae.backtest.persistence import save_output
-from librae.config import get_market
+from librae import Backtest, BaseStrategy, Action, Context, RunConfig
 
 # 1. 定義策略
 class MyStrategy(BaseStrategy):
@@ -79,15 +78,14 @@ class MyStrategy(BaseStrategy):
             return [Action(type="buy", symbol=ctx.symbol)]
         return []
 
-# 2. 跑引擎
+# 2. 跑引擎（通常由 cli.build_config() 建立 RunConfig）
 df = fetch_and_prepare(symbol, months)          # 你的 ETL
-bt = Backtest(data=df, strategy=MyStrategy(), market_config=get_market("crypto"))
+bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
 bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
 bt.run()
 
 # 3. 取得結果
-output = bt.build_output(annualize=True)        # BacktestOutput
-save_output(output, Path("data/backtests"))     # JSON + CSV
+output = bt.build_output()                      # BacktestOutput
 ```
 
 **資料格式**：MultiIndex DataFrame `(symbol, datetime)` + OHLCV + 自訂特徵欄位。
@@ -95,15 +93,12 @@ save_output(output, Path("data/backtests"))     # JSON + CSV
 ### 模擬監控 (sim)
 
 ```python
-from librae.live.wiring import build_live_trader
+from librae.live.engine import LiveTrader
 
-trader = build_live_trader(
+trader = LiveTrader(
     strategy=MyStrategy(),
-    strategy_name="my_strategy",
     feature_fn=prepare_signals,     # 同一個 ETL pipeline
-    symbols=["BTCUSDT"],
-    timeframe="H1",                 # canonical label，內部用 to_ccxt() 轉換
-    poll_interval=60,
+    cfg=cfg,                        # RunConfig（由 cli.build_config() 建立）
 )
 trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 ```
@@ -125,17 +120,17 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | 類型 | 說明 |
 |------|------|
 | `BaseStrategy` | 抽象基類，實作 `on_bar(ctx) -> list[Action]` |
-| `Context` | 不可變快照：bar data + positions + cash + bar_index |
+| `Context` | 不可變快照：ts, symbol, symbols, bar, bars, positions, cash, period_index |
 | `Action` | 策略意圖：`type` = buy / sell / close / hold |
 | `Position` | 凍結持倉（給策略看）：symbol, side, entry_price, quantity, unrealized_pnl |
-| `PositionState` | 可變持倉（引擎內部）：追蹤 bars_held, entry_commission, entry_slippage |
+| `PositionState` | 可變持倉（引擎內部）：追蹤 periods_held, entry_commission, entry_slippage, total_entry_cost |
 
 ### Execution 層
 
 | 類型 | 說明 |
 |------|------|
 | `Fill` | 成交回報：price, quantity, commission, slippage, tax |
-| `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + holding_bars |
+| `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + holding_periods |
 | `TradePnL` | PnL 拆解：gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax |
 
@@ -154,7 +149,10 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | 函數 | 說明 |
 |------|------|
 | `make_fill(action, price, cash, cost_model)` | 模擬成交（backtest 直接用） |
-| `close_position(pos, exit_price, cost_model)` | 平倉 PnL + proceeds（backtest + live 共用） |
+| `process_actions(actions, ...)` | 共用 action 迴圈（backtest + live 共用） |
+| `close_position(pos, exit_price, cost_model)` | 平倉 PnL + proceeds |
+| `scale_into_position(pos, fill, cost_model)` | 同方向加碼（weighted avg entry） |
+| `reduce_position(pos, quantity, exit_price, cost_model)` | 部分平倉 |
 | `calc_trade_pnl(...)` | 單筆交易 PnL 拆解 |
 | `compute_all(equity_values, timestamps, trade_pnls, ...)` | 績效計算（QuantStats adapter） |
 | `direction(side)` | `"long"` → +1.0, `"short"` → -1.0 |
@@ -165,7 +163,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 
 - **Primitive signature**: `compute_all()` 接受 `Sequence[float]` / `Sequence[datetime]`，不依賴 `BacktestResult`，讓 live 引擎也能直接呼叫。
 - **Lazy import**: `quantstats` 在 `compute_all()` 內延遲載入，`import librae` 保持 <1s。
-- **PositionState in core**: backtest 和 live 共用同一個可變持倉型別，消除重複的 PnL / bars_held 邏輯。
+- **PositionState in core**: backtest 和 live 共用同一個可變持倉型別，追蹤 `total_entry_cost` 避免 scaling 時浮點數漂移。
 - **Pre-computed bars**: `_precompute_bars()` 一次性將 DataFrame 轉為 dict-of-dicts，避免 hot loop 中每 bar 呼叫 `to_dict()`。
 - **Frozen dataclasses**: `BacktestOutput`, `StrategyMetrics`, `TradeRecord`, `CostModel` 等皆為 frozen，確保不可變。
 
