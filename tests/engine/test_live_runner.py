@@ -228,8 +228,9 @@ class TestLiveTrader:
         runner = self._make_runner(strategy=TrackBarsHeld(), fetcher=fetcher)
         runner.run(max_iterations=4)
 
-        # Bar 0: buy (no position yet). Bar 1: held=1. Bar 2: held=2. Bar 3: held=3
-        assert periods_held_values == [1, 2, 3]
+        # WHY: next-bar execution — buy queued at bar 0, fills at bar 1.
+        # Bar 1: held=0 (just entered). Bar 2: held=1. Bar 3: held=2.
+        assert periods_held_values == [0, 1, 2]
 
     def test_close_calls_notify_exit(self):
         """Close action should call executor.notify_exit."""

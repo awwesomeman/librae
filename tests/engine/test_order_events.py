@@ -30,7 +30,7 @@ def _run(actions_list: list[Action], cost_model: CostModel = ZERO_COST,
         positions = {}
     result = process_actions(
         actions_list, positions, cash, TS,
-        get_price=lambda sym: 100.0,
+        get_price=lambda sym, action: 100.0,
         get_cost_model=lambda sym: cost_model,
         primary_symbol="TEST",
     )
@@ -173,7 +173,7 @@ class TestComplexLifecycle:
                 p.periods_held += periods_held_increment
             result = process_actions(
                 actions, positions, 1_000_000.0, TS,
-                get_price=lambda sym: price,
+                get_price=lambda sym, action: price,
                 get_cost_model=lambda sym: ZERO_COST,
                 primary_symbol="TEST",
             )
@@ -220,7 +220,7 @@ class TestShortLifecycle:
         def run_at(actions, price, positions):
             result = process_actions(
                 actions, positions, 1_000_000.0, TS,
-                get_price=lambda sym: price,
+                get_price=lambda sym, action: price,
                 get_cost_model=lambda sym: ZERO_COST,
                 primary_symbol="TEST",
             )
