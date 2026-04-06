@@ -34,7 +34,7 @@ from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     OrderEvent, TradePnL, TradeResult, build_trade_result,
-    close_position, direction, process_actions,
+    close_position, direction, process_actions, resolve_fill_price,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id, make_trade_id
@@ -139,6 +139,7 @@ class Backtest:
                 resolved_cm = CostModel.zero()
 
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
+        self._fill_price: str = (cfg.params or {}).get("fill_price", "open") if cfg else "open"
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
@@ -199,16 +200,33 @@ class Backtest:
         equity_curve: list[EquitySnapshot] = []
         exposed_periods = 0
         primary_symbol = self._symbols[0]
+        pending_actions: list[Action] = []
 
         for step, ts in enumerate(self._timeline):
             bars = all_bars[ts]
 
+            # ── Step 1: execute previous bar's pending actions at current bar's price ──
+            if pending_actions:
+                result_actions = process_actions(
+                    pending_actions, positions, cash, ts,
+                    get_price=lambda sym, action: resolve_fill_price(
+                        bars.get(sym, {}), action, default_fill=self._fill_price),
+                    get_cost_model=self._get_cost_model,
+                    primary_symbol=primary_symbol,
+                )
+                trades.extend(result_actions.trades)
+                all_events.extend(result_actions.events)
+                cash += result_actions.cash_delta
+                pending_actions = []
+
+            # ── Step 2: equity snapshot (reflects just-executed trades) ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
 
             if positions:
                 exposed_periods += 1
 
+            # ── Step 3: strategy decision (produces next bar's pending actions) ──
             ctx = Context(
                 ts=ts,
                 symbol=primary_symbol,
@@ -219,21 +237,11 @@ class Backtest:
                 cash=cash,
                 bar_index=step,
             )
-
-            actions = self._strategy.on_bar(ctx)
-
-            result_actions = process_actions(
-                actions, positions, cash, ts,
-                get_price=lambda sym: bars.get(sym, {}).get("close"),
-                get_cost_model=self._get_cost_model,
-                primary_symbol=primary_symbol,
-            )
-            trades.extend(result_actions.trades)
-            all_events.extend(result_actions.events)
-            cash += result_actions.cash_delta
+            pending_actions = self._strategy.on_bar(ctx)
 
             self._increment_periods_held(positions)
 
+        # WHY: pending_actions from last on_bar() are discarded — no T+1 bar to fill them.
         # Force-close all open positions at last bar
         if self._timeline:
             last_ts = self._timeline[-1]

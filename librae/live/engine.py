@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Callable
 
 import pandas as pd
 
-from librae.core.executor import TradeResult, direction, process_actions
+from librae.core.executor import TradeResult, direction, process_actions, resolve_fill_price
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
@@ -153,6 +153,8 @@ class LiveTrader:
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
         self._cash: float = cfg.initial_balance
+        self._fill_price: str = (cfg.params or {}).get("fill_price", "open")
+        self._pending_actions: dict[str, list[Action]] = {}
         self._equity_peak: float = cfg.initial_balance
         self._prev_equity: float = cfg.initial_balance
         self._trade_count: int = 0
@@ -425,7 +427,12 @@ class LiveTrader:
             return self._ohlcv_cache.get(symbol)
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
-        """Run feature pipeline + strategy on a completed bar."""
+        """Run feature pipeline + strategy on a completed bar.
+
+        Uses pending-then-execute pattern to eliminate look-ahead bias:
+        previous bar's actions are filled at *this* bar's price, then the
+        strategy sees this bar and produces the *next* bar's pending actions.
+        """
         h1 = raw_df.set_index("ts")
         h1.index.name = "ts"
         try:
@@ -439,11 +446,36 @@ class LiveTrader:
         price = float(bar.get("close", 0.0))
         self._last_prices[symbol] = price
 
+        # ── Step 1: execute previous bar's pending actions at current bar's price ──
+        prev_actions = self._pending_actions.pop(symbol, [])
+        if prev_actions:
+            result = process_actions(
+                prev_actions, self._positions, self._cash, ts,
+                get_price=lambda s, action, _bar=bar, _sym=symbol: resolve_fill_price(
+                    _bar if s == _sym else {}, action, default_fill=self._fill_price),
+                get_cost_model=lambda s: self._executor.cost_model,
+                primary_symbol=symbol,
+            )
+            self._cash += result.cash_delta
+
+            for event in result.events:
+                logger.info("Order event: %s %s %s %.4f @ %.2f",
+                            event.event_type, event.side, event.symbol,
+                            event.quantity, event.price)
+                if self._on_order_event:
+                    self._on_order_event(event)
+
+            for trade in result.trades:
+                self._trade_count += 1
+                self._executor.notify_exit(trade.symbol, trade.exit_price)
+                logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
+
         if self._on_signal_outcome:
             sig = bar.get("entry_signal")
             if sig is not None and not pd.isna(sig):
                 self._on_signal_outcome(symbol, ts, float(sig), price)
 
+        # ── Step 2: strategy decision (produces next bar's pending actions) ──
         bar_index = self._bar_indices.get(symbol, 0)
         ctx = Context(
             ts=ts,
@@ -458,28 +490,9 @@ class LiveTrader:
 
         actions = self._strategy.on_bar(ctx)
         self._bar_indices[symbol] = bar_index + 1
+        self._pending_actions[symbol] = actions
 
-        result = process_actions(
-            actions, self._positions, self._cash, ts,
-            get_price=lambda s: self._last_prices.get(s),
-            get_cost_model=lambda s: self._executor.cost_model,
-            primary_symbol=symbol,
-        )
-        self._cash += result.cash_delta
-
-        for event in result.events:
-            logger.info("Order event: %s %s %s %.4f @ %.2f",
-                        event.event_type, event.side, event.symbol,
-                        event.quantity, event.price)
-            if self._on_order_event:
-                self._on_order_event(event)
-
-        for trade in result.trades:
-            self._trade_count += 1
-            self._executor.notify_exit(trade.symbol, trade.exit_price)
-            logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
-
-        # Record equity and OHLCV after processing all actions
+        # Record equity and OHLCV after processing
         self._record_equity(ts)
         if self._on_ohlcv:
             self._on_ohlcv(symbol, self._timeframe, bar, ts)
