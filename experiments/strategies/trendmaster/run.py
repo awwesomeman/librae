@@ -30,7 +30,7 @@ def _build_strategy(params: dict) -> TrendMasterStrategy:
         sl_percent=params.get("sl_percent", 3.0),
         tp_percent=params.get("tp_percent", 15.0),
         sl_trail=params.get("sl_trail", True),
-        max_hold_bars=params.get("max_hold_bars", 144),
+        max_hold_periods=params.get("max_hold_periods", 144),
         tp_reached_limit=params.get("tp_reached_limit", 3),
         sl_reached_limit=params.get("sl_reached_limit", 3),
     )

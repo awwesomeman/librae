@@ -13,11 +13,12 @@ All parameters are scalars for vectorbt compatibility in future param sweeps.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from librae.config.market_config import MarketConfig
+    from librae.core.run_config import RunConfig
 
 from librae.core import EPSILON
 
@@ -51,6 +52,23 @@ class CostModel:
             multiplier=1.0, commission_rate=0.0, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
         )
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: RunConfig,
+        override: CostModel | None = None,
+    ) -> CostModel:
+        """Resolve cost model with standard priority: explicit > overrides > from market."""
+        if override is not None:
+            return override
+        from librae.config.market_config import get_market
+        mc = get_market(cfg.market)
+        if cfg.cost_overrides:
+            base = asdict(cls.from_market(mc))
+            base.update(cfg.cost_overrides)
+            return cls(**base)
+        return cls.from_market(mc)
 
     @classmethod
     def from_market(cls, market: MarketConfig) -> CostModel:

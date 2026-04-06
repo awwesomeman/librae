@@ -141,9 +141,9 @@ class TestComputeAllWithEngine:
 
         class BuyBar10CloseBar30(BaseStrategy):
             def on_bar(self, ctx):
-                if ctx.bar_index == 10 and ctx.symbol not in ctx.positions:
+                if ctx.period_index == 10 and ctx.symbol not in ctx.positions:
                     return [Action(type="buy", symbol=ctx.symbol)]
-                if ctx.bar_index == 30 and ctx.symbol in ctx.positions:
+                if ctx.period_index == 30 and ctx.symbol in ctx.positions:
                     return [Action(type="close", symbol=ctx.symbol)]
                 return []
 

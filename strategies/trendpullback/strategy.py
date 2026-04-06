@@ -16,7 +16,7 @@ class TrendPullbackStrategy(BaseStrategy):
     - exit_signal (bool): exit conditions met (close < ema20)
 
     Args:
-        max_hold_periods: Force close after N bars in position.
+        max_hold_periods: Force close after N periods in position.
     """
 
     def __init__(self, max_hold_periods: int = 24) -> None:

@@ -72,7 +72,7 @@ strategy:
     sl_percent: 3.0             # trailing stop distance
     tp_percent: 15.0            # profit cap
     sl_trail: true              # trailing stop enabled
-    max_hold_bars: 144          # 6 天 (H1)
+    max_hold_periods: 144          # 6 天 (H1)
 
     # --- Daily Limits ---
     tp_reached_limit: 3

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Callable
 
 import pandas as pd
 
-from librae.core.executor import TradeResult, direction, process_actions, resolve_fill_price
+from librae.core.executor import TradeResult, eval_equity, process_actions, resolve_fill_price
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
@@ -67,7 +67,6 @@ class LiveTrader:
         on_signal_outcome: Callable[..., None] | None | object = _UNSET,
         warmup_fetcher: Callable[..., pd.DataFrame] | None | object = _UNSET,
     ) -> None:
-        from librae.config.market_config import get_market
         from librae.config.notification import TelegramConfig
         from librae.core.cost_model import CostModel
         from librae.core.utils import generate_run_id, to_ccxt
@@ -95,15 +94,7 @@ class LiveTrader:
             )
 
         # --- Build cost_model ---
-        if cost_model is not None:
-            resolved_cm = cost_model
-        elif cfg.cost_overrides:
-            mc = get_market(cfg.market)
-            base = asdict(CostModel.from_market(mc))
-            base.update(cfg.cost_overrides)
-            resolved_cm = CostModel(**base)
-        else:
-            resolved_cm = CostModel.from_market(get_market(cfg.market))
+        resolved_cm = CostModel.from_config(cfg, override=cost_model)
 
         # --- Build telegram ---
         tg_config = TelegramConfig.from_dict(cfg.telegram_config or {})
@@ -158,8 +149,8 @@ class LiveTrader:
         self._equity_peak: float = cfg.initial_balance
         self._prev_equity: float = cfg.initial_balance
         self._trade_count: int = 0
-        self._bar_indices: dict[str, int] = {}
-        self._status_bar_count: int = 0
+        self._period_indices: dict[str, int] = {}
+        self._status_period_count: int = 0
         self._running: bool = False
 
         # Cache status config
@@ -476,7 +467,7 @@ class LiveTrader:
                 self._on_signal_outcome(symbol, ts, float(sig), price)
 
         # ── Step 2: strategy decision (produces next bar's pending actions) ──
-        bar_index = self._bar_indices.get(symbol, 0)
+        period_index = self._period_indices.get(symbol, 0)
         ctx = Context(
             ts=ts,
             symbol=symbol,
@@ -485,11 +476,11 @@ class LiveTrader:
             bars={symbol: bar},
             positions=self._build_position_snapshot(),
             cash=self._cash,
-            bar_index=bar_index,
+            period_index=period_index,
         )
 
         actions = self._strategy.on_bar(ctx)
-        self._bar_indices[symbol] = bar_index + 1
+        self._period_indices[symbol] = period_index + 1
         self._pending_actions[symbol] = actions
 
         # Record equity and OHLCV after processing
@@ -499,31 +490,27 @@ class LiveTrader:
 
     def _build_position_snapshot(self) -> dict[str, Position]:
         """Convert mutable PositionState to frozen Position for Context."""
-        cost_model = self._executor.cost_model
-        snapshot: dict[str, Position] = {}
-        for sym, ps in self._positions.items():
-            price = self._last_prices.get(sym, ps.entry_price)
-            unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
-            snapshot[sym] = Position(
-                symbol=ps.symbol,
-                side=ps.side,
-                entry_price=ps.entry_price,
-                quantity=ps.quantity,
-                entry_ts=ps.entry_ts,
-                periods_held=ps.periods_held,
-                unrealized_pnl=unrealized,
-            )
+        _, snapshot = self._eval_equity_snapshot()
         return snapshot
 
     def _eval_equity(self) -> float:
         """Total equity = cash + market value of all positions."""
-        cost_model = self._executor.cost_model
-        mtm = 0.0
-        for sym, pos in self._positions.items():
-            price = self._last_prices.get(sym, pos.entry_price)
-            mtm += cost_model.calc_pnl(pos.entry_price, price, pos.quantity) * direction(pos.side)
-            mtm += pos.entry_price * pos.quantity * cost_model.multiplier
-        return self._cash + mtm
+        mtm, _ = self._eval_equity_snapshot()
+        return mtm
+
+    def _get_last_price(self, sym: str, ps: PositionState) -> float:
+        return self._last_prices.get(sym, ps.entry_price)
+
+    def _get_cost_model(self, _sym: str) -> "CostModel":
+        return self._executor.cost_model
+
+    def _eval_equity_snapshot(self) -> tuple[float, dict[str, Position]]:
+        """Shared MTM + snapshot computation."""
+        return eval_equity(
+            self._cash, self._positions,
+            get_price=self._get_last_price,
+            get_cost_model=self._get_cost_model,
+        )
 
     def _record_equity(self, ts: datetime) -> None:
         """Calculate equity + drawdown, call on_bar callback, and send periodic status."""
@@ -538,9 +525,9 @@ class LiveTrader:
 
         # Periodic status notification (flags cached at init)
         if self._status_enabled:
-            self._status_bar_count += 1
-            if self._status_bar_count >= self._status_interval:
-                self._status_bar_count = 0
+            self._status_period_count += 1
+            if self._status_period_count >= self._status_interval:
+                self._status_period_count = 0
                 pos_str = "flat"
                 if self._positions:
                     parts = [f"{ps.side} {sym}" for sym, ps in self._positions.items()]

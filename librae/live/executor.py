@@ -8,8 +8,7 @@ from __future__ import annotations
 import logging
 
 from librae.core.cost_model import CostModel
-from librae.core.executor import make_fill
-from librae.core.strategy import Action, Fill
+from librae.core.strategy import Action
 from librae.notifications.telegram import TelegramAdapter
 
 logger = logging.getLogger(__name__)
@@ -53,22 +52,6 @@ class LiveExecutor:
     @property
     def strategy_name(self) -> str:
         return self._strategy_name
-
-    def execute(self, action: Action, price: float, cash: float) -> Fill | None:
-        """Execute an action. In simulation mode, creates a simulated fill."""
-        if action.type == "hold":
-            return None
-
-        if not self._simulation:
-            raise NotImplementedError(
-                "Live order execution not yet implemented (Phase 4). "
-                "Use simulation=True for sim mode."
-            )
-
-        fill = make_fill(action, price, cash, self._cost_model)
-        if fill:
-            self._notify_signal(action, price)
-        return fill
 
     def notify_exit(self, symbol: str, price: float) -> None:
         """Send exit notification (called by LiveTrader on close action)."""

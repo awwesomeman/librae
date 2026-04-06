@@ -23,7 +23,7 @@ from typing import Callable, Literal
 
 from librae.core import EPSILON
 from .cost_model import CostModel
-from .strategy import Action, Fill, PositionState
+from .strategy import Action, Fill, Position, PositionState
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,49 @@ class ActionResults:
 def direction(side: Literal["long", "short"]) -> float:
     """Convert side to direction multiplier. +1 for long, -1 for short."""
     return -1.0 if side == "short" else 1.0
+
+
+# ---------------------------------------------------------------------------
+# Position snapshot + MTM
+# ---------------------------------------------------------------------------
+
+
+def eval_equity(
+    cash: float,
+    positions: dict[str, PositionState],
+    *,
+    get_price: Callable[[str, PositionState], float],
+    get_cost_model: Callable[[str], CostModel],
+) -> tuple[float, dict[str, Position]]:
+    """Compute portfolio MTM value and position snapshot in a single pass.
+
+    Shared by backtest and live engines.
+
+    Args:
+        cash: Current cash balance.
+        positions: Mutable position states keyed by symbol.
+        get_price: (symbol, pos) -> current price for the position.
+        get_cost_model: (symbol) -> CostModel for the symbol.
+
+    Returns (mark_to_market, {symbol: Position}).
+    """
+    mtm = cash
+    snapshot: dict[str, Position] = {}
+    for sym, ps in positions.items():
+        price = get_price(sym, ps)
+        cost_model = get_cost_model(sym)
+        unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
+        mtm += unrealized + ps.entry_price * ps.quantity * cost_model.multiplier
+        snapshot[sym] = Position(
+            symbol=sym,
+            side=ps.side,
+            entry_price=ps.entry_price,
+            quantity=ps.quantity,
+            entry_ts=ps.entry_ts,
+            periods_held=ps.periods_held,
+            unrealized_pnl=unrealized,
+        )
+    return mtm, snapshot
 
 
 # ---------------------------------------------------------------------------

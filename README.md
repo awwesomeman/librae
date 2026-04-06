@@ -43,38 +43,53 @@ python -m app.grafana.generate_dashboards
 
 ## 兩種研究模式
 
+所有 runner 統一使用 `RunConfig` + `run_dispatch()` 模式：
+
+```python
+# run.py 標準結構
+def run_backtest(cfg: RunConfig) -> None: ...
+def run_realtime(cfg: RunConfig) -> None: ...
+
+def main() -> None:
+    from librae.cli import run_dispatch
+    run_dispatch(STRATEGY_NAME, __file__, run_backtest, run_realtime)
+```
+
+config.yaml 定義參數，CLI 可覆蓋 (`--mode sim`, `--dry-run`, `--no-db` 等)。
+
 ### 訊號研究（不需要回測引擎）
 
 評估一個指標的預測力，只需要 OHLCV + feature pipeline。
 
 ```
 experiments/signals/kdj_oversold/
-├── signal.py      # 純指標計算 + prepare_signals()
-├── strategy.py    # HoldStrategy（sim 用，3 行）
-└── run.py         # backtest / sim 入口
+├── config.yaml    # 參數配置
+├── utils.py       # 純指標計算 + prepare_signals()
+└── run.py         # run_backtest / run_realtime 入口
 ```
 
 ```bash
 # 回測：跑歷史訊號 → 寫 DB → Grafana Signal 看結果
-python -m experiments.signals.kdj_oversold.run
+python -m experiments.signals.kdj_oversold.run --mode backtest
 
 # 即時監控：每根 bar 寫入 signal_events
-python -m experiments.signals.kdj_oversold.run --sim
+python -m experiments.signals.kdj_oversold.run --mode sim
 ```
 
 **Grafana**：Signal → `$mode=backtest` 或 `sim` → `$run_id`
 
-**寫新訊號**：複製 `kdj_oversold/` 資料夾，改 `signal.py` 的指標計算和 `run.py` 的 config。
+**寫新訊號**：複製 `kdj_oversold/` 資料夾，改 `utils.py` 的指標計算和 `config.yaml` 的參數。
 
 ### 策略回測（需要回測引擎）
 
 完整的進出場邏輯 + 部位管理 + 成本模擬。支援 long/short、同方向加碼（scaling）、部分平倉。
+引擎使用 next-bar execution：bar[i] 產生決策，bar[i+1] 的價格成交，消除 look-ahead bias。
 
 ```
 strategies/trendpullback/
 ├── strategy.py    # BaseStrategy 子類 — on_bar() 決策邏輯
 ├── utils.py       # 特徵工程 + 進出場條件
-├── run.py         # backtest / sim 入口
+├── run.py         # run_backtest / run_realtime 入口
 └── config.yaml    # 參數配置
 ```
 
@@ -99,7 +114,7 @@ get_ohlcv()                    save_signal_results()       save_strategy_results
   ├→ DB 缺口 → API 補齊 → DB    └→ ohlcv                    ├→ equity_curve
   └→ DB 不可用 → API fallback                                ├→ trade_events
                                                              ├→ strategy_performance
-Sim callbacks (wiring.py)                                    ├→ signal_events
+LiveTrader callbacks                                         ├→ signal_events
   ├→ on_order_event   → trade_events                         └→ ohlcv
   ├→ on_signal_outcome → signal_events
   ├→ on_bar            → equity_curve
@@ -114,8 +129,8 @@ Sim callbacks (wiring.py)                                    ├→ signal_event
 |---|---|---|
 | `ohlcv` | 共享市場資料（cache） | `get_ohlcv()` 自動寫入 |
 | `signal_events` | 訊號發射記錄 | backtest: `save_signal_results()` / sim: `on_signal_event` |
-| `backtest_runs` | Run metadata + params | `save_strategy_results()` |
-| `equity_curve` | 每 bar 淨值 | 同上 |
+| `backtest_runs` | Run metadata + params + config_hash | `save_strategy_results()` |
+| `equity_curve` | 每 period 淨值 | 同上 |
 | `trade_events` | 部位生命週期事件（open/add/reduce/close） | 同上 |
 | `strategy_performance` | 聚合 KPI | 同上 |
 
@@ -202,7 +217,7 @@ docker exec -i quant_timescaledb psql -U quant -d quant < timescale_init.sql
 ./deploy/sim_start.sh trendpullback
 
 # 啟動訊號 sim
-python -m experiments.signals.kdj_oversold.run --sim
+python -m experiments.signals.kdj_oversold.run --mode sim
 
 # 停止
 ./deploy/sim_stop.sh trendpullback
@@ -215,7 +230,11 @@ python -m experiments.signals.kdj_oversold.run --sim
 ```
 quant-strategy-lab/
 ├── librae/                 # 回測引擎框架 → 詳見 librae/README.md
-│   └── core/               #   策略協議、執行器、成本模型、指標
+│   ├── core/               #   RunConfig、策略協議、執行器、成本模型、指標
+│   ├── backtest/           #   回測引擎（next-bar execution）
+│   ├── live/               #   即時引擎（LiveTrader + SignalPoller）
+│   ├── config/             #   市場設定、通知設定
+│   └── cli.py              #   run_dispatch + build_config 入口
 ├── data/
 │   ├── ohlcv.py            # 統一 OHLCV 入口：get_ohlcv()（DB-first + API fallback）
 │   ├── binance.py          # Binance 公開 API fetcher（不需認證）
@@ -226,10 +245,13 @@ quant-strategy-lab/
 ├── db/
 │   ├── timescale_writer.py # write_* (單表) + save_* (多表 orchestrator)
 │   └── timescale_reader.py # load_* 查詢函式
-├── strategies/
+├── strategies/             # 正式策略
 │   ├── utils.py            # 共用特徵工具：merge_htf_column
 │   ├── trendpullback/      # H1 趨勢回踩策略
 │   └── trendpullback_m5/   # M5 變體
+├── experiments/            # 實驗性策略與訊號研究
+│   ├── signals/            #   訊號研究（kdj_oversold 等）
+│   └── strategies/         #   實驗策略（trendmaster 等）
 ├── app/grafana/            # Grafana 儀表板 generator
 ├── deploy/                 # Docker Compose + SQL + sim 腳本
 ├── scripts/                # 開發 / 運維工具腳本
@@ -296,8 +318,8 @@ data/cache/{SYMBOL}_{INTERVAL}_{SOURCE}.parquet    # 例：data/cache/BTCUSDT_1h
 | 指令 | 說明 |
 |------|------|
 | `pytest tests/ -q` | 跑測試 |
-| `python -m experiments.signals.kdj_oversold.run` | 訊號回測 |
-| `python -m experiments.signals.kdj_oversold.run --sim` | 訊號即時監控 |
+| `python -m experiments.signals.kdj_oversold.run --mode backtest` | 訊號回測 |
+| `python -m experiments.signals.kdj_oversold.run --mode sim` | 訊號即時監控 |
 | `python -m strategies.trendpullback.run --mode backtest` | 策略回測 |
 | `python -m strategies.trendpullback.run --mode sim` | 策略即時監控 |
 | `python -m app.grafana.generate_dashboards` | 重新產生 Grafana JSON |
@@ -309,9 +331,10 @@ data/cache/{SYMBOL}_{INTERVAL}_{SOURCE}.parquet    # 例：data/cache/BTCUSDT_1h
 | 檔案 | 設定什麼 | 是否進 git |
 |------|---------|-----------|
 | `.env.example` → `.env`（專案根目錄） | secrets + DB 連線 + Grafana + Telegram | `.env.example` 進，`.env` 不進 |
-| `librae/config/markets.yaml` | 市場成本參數 | ✅ |
-| `strategies/*/config.yaml` | 策略參數 + 通知 | ✅ |
-| `deploy/timescale_init.sql` | DB schema | ✅ |
+| `librae/config/markets.yaml` | 市場成本參數 | yes |
+| `strategies/*/config.yaml` | 策略參數 + 通知 | yes |
+| `experiments/*/config.yaml` | 實驗參數 | yes |
+| `deploy/timescale_init.sql` | DB schema | yes |
 
 ---
 

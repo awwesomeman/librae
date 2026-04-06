@@ -443,38 +443,42 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed", "_x": 0, "_dy": 10,
         "title": "Entry / Exit Signals",
-        "description": "Entry = open/add (green/blue), Exit = reduce/close (orange/red). From trade_events table.",
+        "description": "Signal decision time (1 period before fill). Entry = open/add, Exit = reduce/close.",
         "type": "timeseries",
         "h": 5,
         "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, price AS \"Open\""
-                " FROM trade_events"
-                " WHERE run_id = '${run_id}' AND event_type = 'open'"
-                " AND $__timeFilter(ts)",
+                "SELECT te.ts - CASE UPPER(br.timeframe)"
+                " WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour'"
+                " WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes'"
+                " WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes'"
+                " WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours'"
+                " WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day'"
+                " ELSE interval '1 hour' END AS time,"
+                " te.price AS \"Entry\""
+                " FROM trade_events te"
+                " JOIN backtest_runs br ON br.run_id = te.run_id"
+                " WHERE te.run_id = '${run_id}'"
+                " AND te.event_type IN ('open', 'add')"
+                " AND $__timeFilter(te.ts)",
                 "A",
             ),
             _target(
-                "SELECT ts AS time, price AS \"Add\""
-                " FROM trade_events"
-                " WHERE run_id = '${run_id}' AND event_type = 'add'"
-                " AND $__timeFilter(ts)",
+                "SELECT te.ts - CASE UPPER(br.timeframe)"
+                " WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour'"
+                " WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes'"
+                " WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes'"
+                " WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours'"
+                " WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day'"
+                " ELSE interval '1 hour' END AS time,"
+                " te.price AS \"Exit\""
+                " FROM trade_events te"
+                " JOIN backtest_runs br ON br.run_id = te.run_id"
+                " WHERE te.run_id = '${run_id}'"
+                " AND te.event_type IN ('reduce', 'close')"
+                " AND $__timeFilter(te.ts)",
                 "B",
-            ),
-            _target(
-                "SELECT ts AS time, price AS \"Reduce\""
-                " FROM trade_events"
-                " WHERE run_id = '${run_id}' AND event_type = 'reduce'"
-                " AND $__timeFilter(ts)",
-                "C",
-            ),
-            _target(
-                "SELECT ts AS time, price AS \"Close\""
-                " FROM trade_events"
-                " WHERE run_id = '${run_id}' AND event_type = 'close'"
-                " AND $__timeFilter(ts)",
-                "D",
             ),
         ],
         "fieldConfig": {
@@ -482,10 +486,8 @@ BASE_PANELS_DEF: list[dict] = [
                 "custom": {"lineWidth": 0, "showPoints": "always", "pointSize": 12}
             },
             "overrides": [
-                _color_override("Open", "green"),
-                _color_override("Add", "blue"),
-                _color_override("Reduce", "orange"),
-                _color_override("Close", "red"),
+                _color_override("Entry", "green"),
+                _color_override("Exit", "red"),
             ],
         },
         "options": {
