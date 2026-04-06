@@ -792,8 +792,14 @@ _EXC_CTE = (
     f"  ) entry_bar ON true\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT\n"
-    f"      MAX((b.high - entry_bar.entry_close) / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n"
-    f"      MAX((entry_bar.entry_close - b.low) / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
+    f"      MAX(CASE WHEN $expected_direction = 1"
+    f" THEN (b.high - entry_bar.entry_close)"
+    f" ELSE (entry_bar.entry_close - b.low)"
+    f" END / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n"
+    f"      MAX(CASE WHEN $expected_direction = 1"
+    f" THEN (entry_bar.entry_close - b.low)"
+    f" ELSE (b.high - entry_bar.entry_close)"
+    f" END / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
     f"    FROM (\n"
     f"      SELECT high, low FROM ohlcv\n"
     f"      WHERE {_OHLCV_WHERE} AND ts > s.ts\n"
@@ -933,7 +939,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Cumulative Signal Return (T+$n)",
-        "description": "Cumulative expected_direction x forward return. Pure signal edge accumulation.",
+        "description": "Arithmetic sum of per-signal forward returns (not compounded). Shows pure signal edge accumulation.",
         "type": "timeseries",
         "h": 8, "w": 12,
         "targets": [_target(
