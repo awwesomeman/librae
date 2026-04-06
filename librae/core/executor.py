@@ -233,6 +233,46 @@ def close_position(
 
 
 # ---------------------------------------------------------------------------
+# Fill price resolution (shared by backtest + live engines)
+# ---------------------------------------------------------------------------
+
+
+def resolve_fill_price(
+    bar: dict[str, float],
+    action: Action,
+    default_fill: str,
+) -> float | None:
+    """Resolve actual fill price from action.fill_price or engine default.
+
+    Args:
+        bar: Next bar's OHLCV dict (the bar where the fill happens).
+        action: The action whose fill_price spec to use.
+        default_fill: Engine-level default field name (e.g. "open").
+
+    Returns:
+        Resolved price, or None if the order should be rejected
+        (limit not reachable, field missing/zero).
+    """
+    fill_spec = action.fill_price if action.fill_price is not None else default_fill
+
+    if isinstance(fill_spec, (int, float)):
+        limit = float(fill_spec)
+        if limit <= 0:
+            return None
+        low, high = bar.get("low", 0), bar.get("high", 0)
+        if low <= limit <= high:
+            return limit
+        return None
+
+    if isinstance(fill_spec, str):
+        val = bar.get(fill_spec)
+        if val is not None and float(val) > 0:
+            return float(val)
+        logger.warning("fill_price='%s' not found or zero in bar, order rejected", fill_spec)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Fill creation + sizing
 # ---------------------------------------------------------------------------
 
@@ -318,7 +358,7 @@ def process_actions(
     cash: float,
     ts: datetime,
     *,
-    get_price: Callable[[str], float | None],
+    get_price: Callable[[str, Action], float | None],
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
 ) -> ActionResults:
@@ -336,7 +376,7 @@ def process_actions(
             continue
 
         sym = action.symbol or primary_symbol
-        price_raw = get_price(sym)
+        price_raw = get_price(sym, action)
         if price_raw is None or price_raw <= 0:
             continue
         price = float(price_raw)

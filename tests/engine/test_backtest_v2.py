@@ -91,7 +91,9 @@ class TestBacktestBasics:
         assert len(result.equity_curve) == 10
 
     def test_single_round_trip(self) -> None:
-        prices = [100.0, 100.0, 100.0, 110.0, 110.0, 110.0]
+        # WHY: next-bar execution — buy queued at bar 2, fills at bar 3 open.
+        # Price must still be 100 at bar 3 for entry, 110 at bar 5 for exit.
+        prices = [100.0, 100.0, 100.0, 100.0, 110.0, 110.0]
         df = _make_multiindex_df(prices)
         bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
                       cost_model=_zero_cost(), data_source="test")
@@ -153,7 +155,8 @@ class TestSignalDrivenStrategy:
         result = bt.run()
 
         assert len(result.trades) >= 1
-        assert result.trades[0].holding_periods <= 5
+        # WHY: next-bar execution adds 1 bar delay between close decision and fill
+        assert result.trades[0].holding_periods <= 6
 
 
 class TestMultiAsset:
@@ -240,13 +243,13 @@ class TestContext:
                       cost_model=_zero_cost(), data_source="test")
         bt.run()
 
-        # Bar 0-1: no position
+        # Bar 0-1: no position (buy queued at bar 1, not yet filled)
         assert len(seen_positions[0]) == 0
         assert len(seen_positions[1]) == 0
-        # Bar 2-3: should see position (bought at bar 1)
+        # Bar 2-3: should see position (queued at bar 1, filled at bar 2)
         assert len(seen_positions[2]) == 1
         assert len(seen_positions[3]) == 1
-        # Bar 4: still see position (close happens after on_bar)
+        # Bar 4: still see position (close queued, fills at bar 5)
         assert len(seen_positions[4]) == 1
 
     def test_ctx_periods_held_increments(self) -> None:
@@ -269,5 +272,6 @@ class TestContext:
                       cost_model=_zero_cost(), data_source="test")
         bt.run()
 
-        # periods_held should increment: 1, 2, 3, 4 (bars 2,3,4,5)
-        assert held_values == [1, 2, 3, 4]
+        # WHY: next-bar execution — buy queued at bar 1, fills at bar 2.
+        # Bar 2 sees periods_held=0 (just entered), then increments each bar.
+        assert held_values == [0, 1, 2, 3]

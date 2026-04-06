@@ -99,7 +99,7 @@ def _run_actions(
     cm = cm or _zero_cost()
     return process_actions(
         actions, positions, cash, TS,
-        get_price=lambda s: prices.get(s),
+        get_price=lambda s, action: prices.get(s),
         get_cost_model=lambda s: cm,
         primary_symbol="TEST",
     )

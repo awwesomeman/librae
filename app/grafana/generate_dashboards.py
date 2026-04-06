@@ -758,20 +758,20 @@ _OHLCV_WHERE = (
     " AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)"
 )
 _ENTRY_BAR = (
-    f"SELECT close FROM ohlcv, meta"
-    f" WHERE {_OHLCV_WHERE} AND ts <= s.ts"
-    f" ORDER BY ts DESC LIMIT 1"
+    f"SELECT $fill_price_field AS entry_price FROM ohlcv, meta"
+    f" WHERE {_OHLCV_WHERE} AND ts > s.ts"
+    f" ORDER BY ts LIMIT 1"
 )
 _EXIT_BAR = (
     f"SELECT close FROM ohlcv, meta"
     f" WHERE {_OHLCV_WHERE} AND ts > s.ts"
-    f" ORDER BY ts LIMIT 1 OFFSET ($n - 1)"
+    f" ORDER BY ts LIMIT 1 OFFSET $n"
 )
 _FWD_CTE = (
     f"WITH meta AS ({_META_INNER}),\n"
     f"fwd AS (\n"
     f"  SELECT s.ts,\n"
-    f"    (exit_bar.close - entry_bar.close) / NULLIF(entry_bar.close, 0) AS ret\n"
+    f"    (exit_bar.close - entry_bar.entry_price) / NULLIF(entry_bar.entry_price, 0) AS ret\n"
     f"  FROM signal_events s, meta\n"
     f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
     f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
@@ -786,23 +786,23 @@ _EXC_CTE = (
     f"    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
     f"  FROM signal_events s, meta\n"
     f"  JOIN LATERAL (\n"
-    f"    SELECT close AS entry_close FROM ohlcv\n"
-    f"    WHERE {_OHLCV_WHERE} AND ts <= s.ts\n"
-    f"    ORDER BY ts DESC LIMIT 1\n"
+    f"    SELECT $fill_price_field AS entry_price, ts AS entry_ts FROM ohlcv\n"
+    f"    WHERE {_OHLCV_WHERE} AND ts > s.ts\n"
+    f"    ORDER BY ts LIMIT 1\n"
     f"  ) entry_bar ON true\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT\n"
     f"      MAX(CASE WHEN $expected_direction = 1"
-    f" THEN (b.high - entry_bar.entry_close)"
-    f" ELSE (entry_bar.entry_close - b.low)"
-    f" END / NULLIF(entry_bar.entry_close, 0)) AS mfe,\n"
+    f" THEN (b.high - entry_bar.entry_price)"
+    f" ELSE (entry_bar.entry_price - b.low)"
+    f" END / NULLIF(entry_bar.entry_price, 0)) AS mfe,\n"
     f"      MAX(CASE WHEN $expected_direction = 1"
-    f" THEN (entry_bar.entry_close - b.low)"
-    f" ELSE (b.high - entry_bar.entry_close)"
-    f" END / NULLIF(entry_bar.entry_close, 0)) AS mae\n"
+    f" THEN (entry_bar.entry_price - b.low)"
+    f" ELSE (b.high - entry_bar.entry_price)"
+    f" END / NULLIF(entry_bar.entry_price, 0)) AS mae\n"
     f"    FROM (\n"
     f"      SELECT high, low FROM ohlcv\n"
-    f"      WHERE {_OHLCV_WHERE} AND ts > s.ts\n"
+    f"      WHERE {_OHLCV_WHERE} AND ts > entry_bar.entry_ts\n"
     f"      ORDER BY ts LIMIT $n\n"
     f"    ) b\n"
     f"  ) exc ON true\n"
@@ -835,8 +835,8 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             "  SELECT ts, signal_value,\n"
             f"    (SELECT close FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
             " ORDER BY ts DESC LIMIT 1) AS current_close,\n"
-            f"    (SELECT close FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
-            " AND ts <= s.ts ORDER BY ts DESC LIMIT 1) AS signal_price\n"
+            f"    (SELECT $fill_price_field FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
+            " AND ts > s.ts ORDER BY ts LIMIT 1) AS signal_price\n"
             f"  FROM signal_events s\n  WHERE {_SIG_WHERE}\n"
             "  ORDER BY ts DESC LIMIT 1\n)\n"
             "SELECT $expected_direction * (current_close - signal_price)"
@@ -852,14 +852,14 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             {"color": "green", "value": 0.01},
         ],
         w=4, decimals=3, no_value="N/A",
-        description="Latest signal's unrealized return: expected_direction x (current_price - signal_price) / signal_price.",
+        description="Latest signal's unrealized return: expected_direction x (current_close - entry_price) / entry_price. Entry = T+1 $fill_price_field (next-bar execution).",
     ),
     _stat_panel(
         "Mean Fwd Return (T+$n)",
         _FWD_CTE + "SELECT $expected_direction * AVG(ret) AS \"Mean Ret\" FROM fwd",
         "percentunit", _TH_RED_YELLOW_GREEN,
         w=4, decimals=3,
-        description="expected_direction x AVG(forward return over n bars).",
+        description="expected_direction x AVG(forward return over n bars). Entry @ T+1 $fill_price_field, exit @ T+1+n close.",
     ),
     _stat_panel(
         "Edge Ratio (T+$n)",
@@ -939,7 +939,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Cumulative Signal Return (T+$n)",
-        "description": "Arithmetic sum of per-signal forward returns (not compounded). Shows pure signal edge accumulation.",
+        "description": "Arithmetic sum of per-signal forward returns (not compounded). Entry @ T+1 $fill_price_field, exit @ T+1+n close.",
         "type": "timeseries",
         "h": 8, "w": 12,
         "targets": [_target(
@@ -955,15 +955,15 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Rolling $k Mean Return (T+$n)",
-        "description": "Rolling k-signal average of adjusted forward return. Declining = edge weakening.",
+        "description": "Rolling k-signal average of adjusted forward return. Entry @ T+1 $fill_price_field. Declining = edge weakening.",
         "type": "timeseries",
         "h": 8, "w": 12,
         "targets": [_target(
             f"WITH meta AS ({_META_INNER}),\n"
             "fwd AS (\n"
             "  SELECT s.ts,\n"
-            "    $expected_direction * (exit_bar.close - entry_bar.close)"
-            " / NULLIF(entry_bar.close, 0) AS adj_return,\n"
+            "    $expected_direction * (exit_bar.close - entry_bar.entry_price)"
+            " / NULLIF(entry_bar.entry_price, 0) AS adj_return,\n"
             "    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
             "  FROM signal_events s, meta\n"
             f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
@@ -986,7 +986,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Rolling $k Edge Ratio (T+$n)",
-        "description": "Rolling k-signal AVG(MFE)/AVG(MAE). >2 = healthy, <1 = adverse exceeds favorable.",
+        "description": "Rolling k-signal AVG(MFE)/AVG(MAE) from T+2 onward (entry bar excluded). >2 = healthy, <1 = adverse exceeds favorable.",
         "type": "timeseries",
         "h": 8, "w": 12,
         "targets": [_target(
@@ -1034,6 +1034,7 @@ def render_signal_monitor() -> dict:
         ),
         _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),
         _make_textbox_variable("k", "50", label="Rolling Window (signals)"),
+        _make_textbox_variable("fill_price_field", "open", label="Fill Price Field"),
         _make_custom_variable(
             "expected_direction",
             [("1", "1"), ("-1", "-1")],

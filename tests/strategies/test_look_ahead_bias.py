@@ -3,7 +3,7 @@
 Verifies that:
 1. Signal[i] depends only on bars[0..i] (no future data)
 2. D1→H1 merge uses only completed daily bars (backward join)
-3. Engine executes at bar[i] close, not bar[i+1] open
+3. Engine uses next-bar execution: decision at bar[i], fill at bar[i+1] open
 
 Skills: python, quant
 """
@@ -179,7 +179,7 @@ class TestDailyMergeNoLeak:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Engine execution timing
+# Test 3: Engine next-bar execution timing
 # ---------------------------------------------------------------------------
 
 class _BuyBar5Strategy(BaseStrategy):
@@ -195,10 +195,13 @@ class _BuyBar5Strategy(BaseStrategy):
 
 
 class TestEngineExecutionTiming:
-    """Engine must execute at the correct bar's close price."""
+    """Engine uses next-bar execution: decision at bar T, fill at bar T+1 open."""
 
     def _make_simple_df(self, n: int = 20) -> pd.DataFrame:
-        """Create a simple DataFrame with known prices."""
+        """Create a simple DataFrame with known prices.
+
+        Bar i: open=i+99.5, high=i+101, low=i+99, close=i+100, volume=1000
+        """
         idx = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
         prices = np.arange(100.0, 100.0 + n, 1.0)
         df = pd.DataFrame({
@@ -215,8 +218,8 @@ class TestEngineExecutionTiming:
         )
         return df.set_index(mi)
 
-    def test_entry_at_close_of_signal_bar(self):
-        """Trade entry price must equal close[i] where signal fired."""
+    def test_entry_at_next_bar_open(self):
+        """Decision at bar 5 → fill at bar 6 open (105.5)."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
                       cost_model=_zero_cost(), data_source="test")
@@ -224,12 +227,13 @@ class TestEngineExecutionTiming:
 
         assert len(result.trades) == 1
         trade = result.trades[0]
-        assert trade.entry_price == 105.0, (
-            f"Entry should be at bar 5 close (105.0), got {trade.entry_price}"
+        # bar 6 open = 106.0 - 0.5 = 105.5
+        assert trade.entry_price == 105.5, (
+            f"Entry should be at bar 6 open (105.5), got {trade.entry_price}"
         )
 
-    def test_exit_at_close_of_signal_bar(self):
-        """Trade exit price must equal close[j] where exit signal fired."""
+    def test_exit_at_next_bar_open(self):
+        """Decision at bar 10 → fill at bar 11 open (110.5)."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
                       cost_model=_zero_cost(), data_source="test")
@@ -237,8 +241,9 @@ class TestEngineExecutionTiming:
 
         assert len(result.trades) == 1
         trade = result.trades[0]
-        assert trade.exit_price == 110.0, (
-            f"Exit should be at bar 10 close (110.0), got {trade.exit_price}"
+        # bar 11 open = 111.0 - 0.5 = 110.5
+        assert trade.exit_price == 110.5, (
+            f"Exit should be at bar 11 open (110.5), got {trade.exit_price}"
         )
 
     def test_pnl_consistent_with_entry_exit_prices(self):
@@ -253,7 +258,7 @@ class TestEngineExecutionTiming:
         assert abs(trade.gross_pnl - expected_pnl) < 1e-6
 
     def test_holding_periods_count(self):
-        """holding_periods must equal number of bars from entry to exit."""
+        """holding_periods = bars position was held (bar 6 through bar 10 = 5)."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
                       cost_model=_zero_cost(), data_source="test")
@@ -265,14 +270,15 @@ class TestEngineExecutionTiming:
         )
 
     def test_equity_curve_no_future_pnl(self):
-        """Equity should not jump before the trade entry."""
+        """Equity must be flat until bar 6 (buy queued at bar 5, filled at bar 6)."""
         df = self._make_simple_df()
         bt = Backtest(df, _BuyBar5Strategy(), initial_balance=100_000,
                       cost_model=_zero_cost(), data_source="test")
         result = bt.run()
 
         eq = result.equity_curve
-        for i in range(5):
+        # Bars 0-5: no position yet (buy pending, not filled until bar 6)
+        for i in range(6):
             assert eq[i].equity == 100_000.0, (
                 f"Equity at bar {i} should be 100000, got {eq[i].equity}"
             )
