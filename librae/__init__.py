@@ -8,7 +8,6 @@ from .backtest.schema import (
     EquityCurvePoint,
     RunMetadata,
     StrategyMetrics,
-    TradeRecord,
     RUN_ID_PATTERN,
 )
 from .backtest.engine import Backtest, BacktestResult, EquitySnapshot
@@ -20,7 +19,7 @@ from .core.executor import (
 )
 from .core.metrics import compute_all
 from .core.run_config import RunConfig
-from .core.utils import generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
+from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market
 
 __all__ = [
@@ -28,7 +27,6 @@ __all__ = [
     "EquityCurvePoint",
     "RunMetadata",
     "StrategyMetrics",
-    "TradeRecord",
     "RUN_ID_PATTERN",
     "CostModel",
     "MarketConfig",
@@ -49,7 +47,6 @@ __all__ = [
     "compute_all",
     "RunConfig",
     "generate_run_id",
-    "make_trade_id",
     "infer_timeframe",
     "to_ccxt",
     "to_canonical",

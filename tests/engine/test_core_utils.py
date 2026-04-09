@@ -7,7 +7,6 @@ import pytest
 from librae.core.utils import (
     generate_run_id,
     infer_timeframe,
-    make_trade_id,
     to_canonical,
     to_ccxt,
 )
@@ -79,17 +78,6 @@ class TestTimeframeConversion:
     def test_to_canonical_unknown_raises(self) -> None:
         with pytest.raises(ValueError, match="Cannot parse timeframe"):
             to_canonical("xyz")
-
-
-# ---------------------------------------------------------------------------
-# make_trade_id
-# ---------------------------------------------------------------------------
-
-
-class TestMakeTradeId:
-    def test_format(self) -> None:
-        assert make_trade_id("run-123", 0) == "run-123-t0000"
-        assert make_trade_id("run-123", 42) == "run-123-t0042"
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,6 @@
 
 Provides:
 - generate_run_id(): Deterministic-prefix run ID generation
-- make_trade_id(): Canonical trade ID format
 - infer_timeframe(): Infer canonical timeframe label from data index
 - to_ccxt() / to_canonical(): Timeframe format conversion
 - interval_to_timedelta(): Timeframe string → pd.Timedelta
@@ -31,11 +30,6 @@ def generate_run_id(strategy: str, symbol: str, timeframe: str | None = None) ->
     short = uuid.uuid4().hex[:6]
     tf = f"-{_sanitize_slug(timeframe)}" if timeframe is not None else ""
     return f"{_sanitize_slug(strategy)}-{_sanitize_slug(symbol)}{tf}-{ts}-{short}"
-
-
-def make_trade_id(run_id: str, index: int) -> str:
-    """Canonical trade ID: {run_id}-t{index:04d}."""
-    return f"{run_id}-t{index:04d}"
 
 
 def make_event_id(run_id: str, index: int) -> str:

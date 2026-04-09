@@ -83,12 +83,13 @@ class TestBuildOutputValid:
         output = bt.build_output()
         assert output.run_metadata.strategy == "my_custom_name"
 
-    def test_has_trades(self) -> None:
+    def test_has_close_events(self) -> None:
         df = _make_df()
         bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
-        assert len(output.trades) >= 1
+        close_events = [e for e in output.order_events if e.event_type == "close"]
+        assert len(close_events) >= 1
 
     def test_has_equity_curve(self) -> None:
         df = _make_df()

@@ -11,7 +11,6 @@ from librae.backtest.schema import (
     EquityCurvePoint,
     RunMetadata,
     StrategyMetrics,
-    TradeRecord,
 )
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
@@ -55,26 +54,6 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
     ]
 
 
-def _make_trades() -> list[TradeRecord]:
-    return [
-        TradeRecord(
-            trade_id="t001",
-            entry_ts=datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc),
-            exit_ts=datetime(2026, 3, 1, 15, 0, 0, tzinfo=timezone.utc),
-            symbol="MXFR1",
-            side="long",
-            entry_price=21000.0,
-            exit_price=21200.0,
-            quantity=1.0,
-            gross_pnl=200.0,
-            net_pnl=180.0,
-            commission=20.0,
-            slippage=0.0,
-            holding_periods=6,
-        )
-    ]
-
-
 def _make_metrics() -> StrategyMetrics:
     return StrategyMetrics(
         total_return=0.05,
@@ -104,7 +83,6 @@ def test_backtest_output_validate_passes() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
         equity_curve=_make_equity_curve(),
-        trades=_make_trades(),
         order_events=(),
         metrics=_make_metrics(),
     )
@@ -116,7 +94,6 @@ def test_backtest_output_validate_empty_run_id_raises() -> None:
     output = BacktestOutput(
         run_metadata=meta,
         equity_curve=[],
-        trades=[],
         order_events=(),
         metrics=_make_metrics(),
     )
@@ -129,30 +106,11 @@ def test_backtest_output_validate_empty_strategy_raises() -> None:
     output = BacktestOutput(
         run_metadata=meta,
         equity_curve=[],
-        trades=[],
         order_events=(),
         metrics=_make_metrics(),
     )
     with pytest.raises(ValueError, match="strategy"):
         output.validate()
-
-
-def test_trade_record_cost_fields_optional() -> None:
-    tr = TradeRecord(
-        trade_id="t002",
-        entry_ts=NOW,
-        exit_ts=NOW,
-        symbol="BTCUSDT",
-        side="short",
-        entry_price=50000.0,
-        exit_price=49000.0,
-        quantity=0.1,
-        gross_pnl=-100.0,
-        net_pnl=-100.0,
-    )
-    assert tr.commission is None
-    assert tr.slippage is None
-    assert tr.holding_periods is None
 
 
 def test_strategy_metrics_cost_fields_optional() -> None:

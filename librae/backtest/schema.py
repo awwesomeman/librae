@@ -32,9 +32,6 @@ RUN_ID_PATTERN = re.compile(
     r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$"
 )
 
-REQUIRED_SIGNAL_KEYS: tuple[str, ...] = (
-    "timestamp", "strategy", "symbol", "side", "timeframe",
-)
 REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
     "full_sample_period", "train_period", "oos_period", "asset", "freq",
 )
@@ -48,7 +45,7 @@ REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
     "risk_limits", "assumptions", "logic", "params",
 )
 REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
-    "run_metadata", "equity_curve", "trades", "metrics",
+    "run_metadata", "equity_curve", "order_events", "metrics",
 )
 
 # ---------------------------------------------------------------------------
@@ -83,32 +80,6 @@ class EquityCurvePoint:
     benchmark_equity: float | None = None
     benchmark_ret_1d: float | None = None
     strategy: str | None = None
-
-
-@dataclass(frozen=True)
-class TradeRecord:
-    """Single completed trade."""
-
-    trade_id: str
-    entry_ts: datetime
-    exit_ts: datetime
-    symbol: str
-    side: Literal["long", "short"]
-    entry_price: float
-    exit_price: float
-    quantity: float
-    gross_pnl: float
-    net_pnl: float
-    gross_return: float | None = None
-    net_return: float | None = None
-    # Units for multi-market support
-    price_unit: str = "USDT"
-    quantity_unit: str = "asset"
-    pnl_unit: str = "USDT"
-    commission: float | None = None
-    slippage: float | None = None
-    tax: float | None = None
-    holding_periods: int | None = None
 
 
 @dataclass(frozen=True)
@@ -184,7 +155,6 @@ class BacktestOutput:
 
     run_metadata: RunMetadata
     equity_curve: Sequence[EquityCurvePoint]
-    trades: Sequence[TradeRecord]
     order_events: Sequence[OrderEventRecord]
     metrics: StrategyMetrics
 
@@ -219,8 +189,6 @@ class BacktestOutput:
             raise ValueError("run_metadata.timeframe is required")
         if self.equity_curve is None:
             raise ValueError("equity_curve is required (may be empty list)")
-        if self.trades is None:
-            raise ValueError("trades is required (may be empty list)")
 
 
 def ensure_snake_case_keys(keys: list[str] | tuple[str, ...], record_name: str) -> None:
@@ -241,11 +209,6 @@ def validate_record_contract(record: dict[str, Any], required_keys: tuple[str, .
     """Validate snake_case keys + required keys in a record."""
     ensure_snake_case_keys(list(record.keys()), record_name)
     require_keys(record, required_keys, record_name)
-
-
-def validate_signal_record(record: dict[str, Any]) -> None:
-    """Validate a strategy signal record."""
-    validate_record_contract(record, REQUIRED_SIGNAL_KEYS, "strategy_signals record")
 
 
 def validate_dataframe_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
