@@ -37,7 +37,7 @@ from librae.core.executor import (
     close_position, direction, eval_equity, process_actions, resolve_fill_price,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
-from librae.core.utils import generate_run_id, infer_timeframe, make_event_id, make_trade_id
+from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,7 @@ class Backtest:
             )
             pending_actions = self._strategy.on_bar(ctx)
 
-            self._increment_periods_held(positions)
+            self._increment_holding_periods(positions)
 
         # WHY: pending_actions from last on_bar() are discarded — no T+1 bar to fill them.
         # Force-close all open positions at last bar
@@ -252,7 +252,7 @@ class Backtest:
                     notional=price * pos.quantity * cost_model.multiplier,
                     commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
                     pnl=pnl.net_pnl, net_return=pnl.net_return,
-                    entry_ts=pos.entry_ts, holding_periods=pos.periods_held,
+                    entry_ts=pos.entry_ts, holding_periods=pos.holding_periods,
                     reason="force_close",
                 ))
                 cash += proceeds
@@ -288,7 +288,7 @@ class Backtest:
         Raises RuntimeError if called before run().
         """
         from librae.backtest.schema import (
-            BacktestOutput, EquityCurvePoint, OrderEventRecord, RunMetadata, TradeRecord,
+            BacktestOutput, EquityCurvePoint, OrderEventRecord, RunMetadata,
         )
         from librae.core.metrics import compute_all
 
@@ -350,14 +350,12 @@ class Backtest:
             run_ts=datetime.now(tz=timezone.utc),
         )
 
-        trade_records = self._build_trade_records(result, run_id)
         event_records = self._build_event_records(result, run_id)
         equity_points = self._enrich_equity_curve(result, benchmark_curve)
 
         return BacktestOutput(
             run_metadata=run_metadata,
             equity_curve=tuple(equity_points),
-            trades=tuple(trade_records),
             order_events=tuple(event_records),
             metrics=self._metrics,
         )
@@ -368,25 +366,6 @@ class Backtest:
         if self._metrics is None:
             raise RuntimeError("Call build_output() before accessing metrics")
         return self._metrics
-
-    @staticmethod
-    def _build_trade_records(result: BacktestResult, run_id: str) -> list[TradeRecord]:
-        """Map TradeResult -> TradeRecord."""
-        from librae.backtest.schema import TradeRecord
-        return [
-            TradeRecord(
-                trade_id=make_trade_id(run_id, i),
-                entry_ts=t.entry_ts, exit_ts=t.exit_ts,
-                symbol=t.symbol, side=t.side,
-                entry_price=float(t.entry_price), exit_price=float(t.exit_price),
-                quantity=float(t.quantity),
-                gross_pnl=float(t.gross_pnl), net_pnl=float(t.net_pnl),
-                gross_return=float(t.gross_return), net_return=float(t.net_return),
-                commission=float(t.commission), slippage=float(t.slippage),
-                tax=float(t.tax), holding_periods=int(t.holding_periods),
-            )
-            for i, t in enumerate(result.trades)
-        ]
 
     @staticmethod
     def _build_event_records(result: BacktestResult, run_id: str) -> list["OrderEventRecord"]:
@@ -465,9 +444,9 @@ class Backtest:
         return result
 
     @staticmethod
-    def _increment_periods_held(positions: dict[str, PositionState]) -> None:
+    def _increment_holding_periods(positions: dict[str, PositionState]) -> None:
         for ps in positions.values():
-            ps.periods_held += 1
+            ps.holding_periods += 1
 
     def _eval_equity(
         self,

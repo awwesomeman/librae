@@ -35,7 +35,7 @@ class CostModel:
         min_commission: Minimum commission per trade (e.g. 100 TWD for TW futures).
         slippage_ticks: Number of ticks slippage per side.
         tick_size: Minimum price increment.
-        transaction_tax: Tax rate applied on sell side only (e.g. 0.00002 for TW futures).
+        tax_rate: Per-side tax rate (e.g. 0.00002 for TW futures). Applied symmetrically on both buy and sell.
     """
 
     multiplier: float
@@ -43,14 +43,14 @@ class CostModel:
     min_commission: float
     slippage_ticks: float
     tick_size: float
-    transaction_tax: float
+    tax_rate: float
 
     @classmethod
     def zero(cls) -> CostModel:
         """Zero-cost model for research or testing."""
         return cls(
             multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
+            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
         )
 
     @classmethod
@@ -79,7 +79,7 @@ class CostModel:
             min_commission=market.min_commission,
             slippage_ticks=float(market.slippage_ticks),
             tick_size=market.tick_size if market.tick_size > 0 else 0.01,
-            transaction_tax=market.transaction_tax,
+            tax_rate=market.tax_rate,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
@@ -99,21 +99,21 @@ class CostModel:
         """Single-side slippage cost in quote currency."""
         return self.slippage_ticks * self.tick_size * abs(quantity) * self.multiplier
 
-    def calc_tax(self, price: float, quantity: float, *, is_sell: bool) -> float:
-        """Transaction tax (applied on sell side only, e.g. TW stock/futures)."""
-        if not is_sell or self.transaction_tax <= 0:
+    def calc_tax(self, price: float, quantity: float) -> float:
+        """Per-side transaction tax. Applied symmetrically on both buy and sell."""
+        if self.tax_rate <= 0:
             return 0.0
         notional = price * quantity * self.multiplier
-        return abs(notional) * self.transaction_tax
+        return abs(notional) * self.tax_rate
 
-    def total_cost(self, price: float, quantity: float, *, is_sell: bool) -> float:
+    def total_cost(self, price: float, quantity: float) -> float:
         """Total single-side cost: commission + slippage + tax."""
         return (
             self.calc_commission(price, quantity)
             + self.calc_slippage(quantity)
-            + self.calc_tax(price, quantity, is_sell=is_sell)
+            + self.calc_tax(price, quantity)
         )
 
     def estimate_entry_outlay(self, price: float, quantity: float) -> float:
         """Estimate total cash outlay for entering a position (for sizing)."""
-        return price * quantity * self.multiplier + self.total_cost(price, quantity, is_sell=False)
+        return price * quantity * self.multiplier + self.total_cost(price, quantity)

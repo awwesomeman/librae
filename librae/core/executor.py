@@ -140,7 +140,7 @@ def eval_equity(
             entry_price=ps.entry_price,
             quantity=ps.quantity,
             entry_ts=ps.entry_ts,
-            periods_held=ps.periods_held,
+            holding_periods=ps.holding_periods,
             unrealized_pnl=unrealized,
         )
     return mtm, snapshot
@@ -159,6 +159,7 @@ def calc_trade_pnl(
     cost_model: CostModel,
     entry_commission: float,
     entry_slippage: float,
+    entry_tax: float = 0.0,
 ) -> TradePnL:
     """Single trade PnL breakdown. Used by backtest + live."""
     dir_mult = direction(side)
@@ -166,12 +167,12 @@ def calc_trade_pnl(
 
     exit_commission = cost_model.calc_commission(exit_price, quantity)
     exit_slippage = cost_model.calc_slippage(quantity)
-    # WHY: closing a long = sell (taxed), closing a short = buy (not taxed)
-    exit_tax = cost_model.calc_tax(exit_price, quantity, is_sell=(side == "long"))
+    exit_tax = cost_model.calc_tax(exit_price, quantity)
 
     total_commission = entry_commission + exit_commission
     total_slippage = entry_slippage + exit_slippage
-    net_pnl = gross_pnl - total_commission - total_slippage - exit_tax
+    total_tax = entry_tax + exit_tax
+    net_pnl = gross_pnl - total_commission - total_slippage - total_tax
 
     entry_notional = entry_price * quantity * cost_model.multiplier
     gross_return = (gross_pnl / entry_notional * 100) if entry_notional > EPSILON else 0.0
@@ -182,7 +183,7 @@ def calc_trade_pnl(
         net_pnl=net_pnl,
         commission=total_commission,
         slippage=total_slippage,
-        tax=exit_tax,
+        tax=total_tax,
         exit_commission=exit_commission,
         exit_slippage=exit_slippage,
         exit_tax=exit_tax,
@@ -212,6 +213,7 @@ def scale_into_position(
     pos.entry_price = pos.total_entry_cost / (pos.quantity * cost_model.multiplier)
     pos.entry_commission += fill.commission
     pos.entry_slippage += fill.slippage
+    pos.entry_tax += fill.tax
 
 
 def reduce_position(pos: PositionState, closed_qty: float) -> None:
@@ -228,6 +230,7 @@ def reduce_position(pos: PositionState, closed_qty: float) -> None:
     pos.total_entry_cost *= fraction
     pos.entry_commission *= fraction
     pos.entry_slippage *= fraction
+    pos.entry_tax *= fraction
 
 
 def close_position(
@@ -251,6 +254,7 @@ def close_position(
     fraction = close_qty / pos.quantity
     pro_entry_commission = pos.entry_commission * fraction
     pro_entry_slippage = pos.entry_slippage * fraction
+    pro_entry_tax = pos.entry_tax * fraction
 
     pnl = calc_trade_pnl(
         entry_price=pos.entry_price,
@@ -260,6 +264,7 @@ def close_position(
         cost_model=cost_model,
         entry_commission=pro_entry_commission,
         entry_slippage=pro_entry_slippage,
+        entry_tax=pro_entry_tax,
     )
 
     # WHY: proceeds = collateral returned + PnL - exit costs.
@@ -346,7 +351,7 @@ def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) 
         quantity=qty,
         commission=cost_model.calc_commission(price, qty),
         slippage=cost_model.calc_slippage(qty),
-        tax=cost_model.calc_tax(price, qty, is_sell=(action.type == "sell")),
+        tax=cost_model.calc_tax(price, qty),
     )
 
 
@@ -373,7 +378,7 @@ def build_trade_result(
         net_pnl=pnl.net_pnl,
         gross_return=pnl.gross_return,
         net_return=pnl.net_return,
-        holding_periods=pos.periods_held,
+        holding_periods=pos.holding_periods,
     )
 
 
@@ -440,9 +445,10 @@ def process_actions(
                         entry_price=price,
                         quantity=fill.quantity,
                         entry_ts=ts,
-                        periods_held=0,
+                        holding_periods=0,
                         entry_commission=fill.commission,
                         entry_slippage=fill.slippage,
+                        entry_tax=fill.tax,
                         total_entry_cost=price * fill.quantity * cost_model.multiplier,
                     )
                     events.append(OrderEvent(
@@ -490,7 +496,7 @@ def process_actions(
 
             actual_close_qty = min(close_qty, pos.quantity) if close_qty else pos.quantity
             pnl, proceeds, fully_closed = close_position(
-                pos, price, cost_model, quantity=close_qty,
+                pos, price, cost_model, quantity=actual_close_qty,
             )
             trades.append(build_trade_result(pos, ts, price, actual_close_qty, pnl))
             cash_delta += proceeds
@@ -504,7 +510,7 @@ def process_actions(
                 notional=price * actual_close_qty * cost_model.multiplier,
                 commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
                 pnl=pnl.net_pnl, net_return=pnl.net_return,
-                entry_ts=pos.entry_ts, holding_periods=pos.periods_held,
+                entry_ts=pos.entry_ts, holding_periods=pos.holding_periods,
                 reason=reason,
             ))
 

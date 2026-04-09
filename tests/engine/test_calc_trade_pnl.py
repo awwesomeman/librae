@@ -15,7 +15,7 @@ def _crypto_cost_model() -> CostModel:
         min_commission=0.0,
         slippage_ticks=0.0,
         tick_size=0.01,
-        transaction_tax=0.0,
+        tax_rate=0.0,
     )
 
 
@@ -74,7 +74,7 @@ class TestCalcTradePnl:
         cm = CostModel(
             multiplier=1.0, commission_rate=0.001, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01,
-            transaction_tax=0.003,  # 0.3% sell tax
+            tax_rate=0.003,  # 0.3% sell tax
         )
         pnl = calc_trade_pnl(
             entry_price=100.0, exit_price=110.0, quantity=10.0,
@@ -94,9 +94,10 @@ class TestCalcTradePnl:
         pos = PositionState(
             symbol="TEST", side="long",
             entry_price=100.0, quantity=10.0,
-            entry_ts=None, periods_held=5,
+            entry_ts=None, holding_periods=5,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=cm.calc_slippage(10.0),
+            entry_tax=cm.calc_tax(100.0, 10.0),
             total_entry_cost=100.0 * 10.0,
         )
         pnl_close, _, _ = close_position(pos, 110.0, cm)
@@ -122,7 +123,7 @@ class TestCalcTradePnl:
             multiplier=200.0,  # futures
             commission_rate=0.0, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01,
-            transaction_tax=0.0,
+            tax_rate=0.0,
         )
         pnl = calc_trade_pnl(
             entry_price=100.0, exit_price=101.0, quantity=1.0,

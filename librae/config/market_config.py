@@ -29,7 +29,7 @@ class MarketConfig:
     is_24h: bool
     commission_rate: float
     min_commission: float
-    transaction_tax: float
+    tax_rate: float
     slippage_ticks: int
     tick_size: float
     multiplier: float
@@ -66,7 +66,7 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfi
             is_24h=bool(mdata.get("is_24h", False)),
             commission_rate=float(mdata.get("commission_rate", 0.0)),
             min_commission=float(mdata.get("min_commission", 0.0)),
-            transaction_tax=float(mdata.get("transaction_tax", 0.0)),
+            tax_rate=float(mdata.get("tax_rate", 0.0)),
             slippage_ticks=int(mdata.get("slippage_ticks", 0)),
             tick_size=float(mdata.get("tick_size", 0.01)),
             multiplier=float(mdata.get("multiplier", 1.0)),

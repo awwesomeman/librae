@@ -383,9 +383,9 @@ class LiveTrader:
             self._last_bar_ts[symbol] = latest_ts
             logger.info("New bar detected: %s @ %s", symbol, latest_ts)
 
-            # Increment periods_held on PositionState directly
+            # Increment holding_periods on PositionState directly
             if symbol in self._positions:
-                self._positions[symbol].periods_held += 1
+                self._positions[symbol].holding_periods += 1
 
             self._process_bar(symbol, df, latest_ts)
 

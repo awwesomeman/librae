@@ -15,11 +15,11 @@ core/                       共用 domain model（純計算，無 I/O）
 ├── cost_model.py           CostModel（手續費 / 滑價 / 稅 / 合約乘數）
 ├── metrics.py              compute_all（QuantStats adapter）
 ├── run_config.py           RunConfig — 統一執行參數（frozen dataclass）
-└── utils.py                generate_run_id, make_trade_id, infer_timeframe, to_ccxt, to_canonical
+└── utils.py                generate_run_id, infer_timeframe, to_ccxt, to_canonical
 
 backtest/                   回測 runtime
 ├── engine.py               Backtest — bar-by-bar 執行 + build_output()
-└── schema.py               BacktestOutput, RunMetadata, StrategyMetrics, TradeRecord
+└── schema.py               BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord
 
 live/                       即時 / 模擬 runtime
 ├── engine.py               LiveTrader — polling loop + 信號偵測
@@ -123,7 +123,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `Context` | 不可變快照：ts, symbol, symbols, bar, bars, positions, cash, period_index |
 | `Action` | 策略意圖：`type` = buy / sell / close / hold |
 | `Position` | 凍結持倉（給策略看）：symbol, side, entry_price, quantity, unrealized_pnl |
-| `PositionState` | 可變持倉（引擎內部）：追蹤 periods_held, entry_commission, entry_slippage, total_entry_cost |
+| `PositionState` | 可變持倉（引擎內部）：追蹤 holding_periods, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
 ### Execution 層
 
@@ -141,7 +141,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `BacktestOutput` | 頂層容器（frozen）：run_metadata + equity_curve + trades + metrics |
 | `RunMetadata` | run_id, strategy, symbol, timeframe, start/end/run timestamps |
 | `StrategyMetrics` | 績效指標：total_return, sharpe, sortino, calmar, max_drawdown, win_rate... |
-| `TradeRecord` | 交易紀錄（含 unit fields 支援多市場）|
+| `OrderEventRecord` | 部位生命週期事件（open/add/reduce/close）|
 | `EquityCurvePoint` | 單點：ts, equity, ret_1d, drawdown, benchmark_equity |
 
 ### 共用函數
@@ -165,7 +165,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 - **Lazy import**: `quantstats` 在 `compute_all()` 內延遲載入，`import librae` 保持 <1s。
 - **PositionState in core**: backtest 和 live 共用同一個可變持倉型別，追蹤 `total_entry_cost` 避免 scaling 時浮點數漂移。
 - **Pre-computed bars**: `_precompute_bars()` 一次性將 DataFrame 轉為 dict-of-dicts，避免 hot loop 中每 bar 呼叫 `to_dict()`。
-- **Frozen dataclasses**: `BacktestOutput`, `StrategyMetrics`, `TradeRecord`, `CostModel` 等皆為 frozen，確保不可變。
+- **Frozen dataclasses**: `BacktestOutput`, `StrategyMetrics`, `OrderEventRecord`, `CostModel` 等皆為 frozen，確保不可變。
 
 ---
 

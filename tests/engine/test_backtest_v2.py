@@ -69,7 +69,7 @@ class SignalDrivenStrategy(BaseStrategy):
     def on_bar(self, ctx: Context) -> list[Action]:
         pos = ctx.positions.get(ctx.symbol)
         if pos:
-            if ctx.bar["exit_signal"] or pos.periods_held >= self.max_hold_periods:
+            if ctx.bar["exit_signal"] or pos.holding_periods >= self.max_hold_periods:
                 return [Action(type="close", symbol=ctx.symbol)]
         elif ctx.bar["entry_signal"]:
             return [Action(type="buy", symbol=ctx.symbol)]
@@ -211,7 +211,7 @@ class TestWithCosts:
 
         cost = CostModel(
             multiplier=1.0, commission_rate=0.01, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
+            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
         )
 
         bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
@@ -252,15 +252,15 @@ class TestContext:
         # Bar 4: still see position (close queued, fills at bar 5)
         assert len(seen_positions[4]) == 1
 
-    def test_ctx_periods_held_increments(self) -> None:
-        """periods_held in Position should increment each bar."""
+    def test_ctx_holding_periods_increments(self) -> None:
+        """holding_periods in Position should increment each bar."""
         held_values: list[int] = []
 
         class Tracker(BaseStrategy):
             def on_bar(self, ctx):
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
-                    held_values.append(pos.periods_held)
+                    held_values.append(pos.holding_periods)
                 if ctx.period_index == 1:
                     return [Action(type="buy", symbol=ctx.symbol)]
                 if ctx.period_index == 5:
@@ -273,5 +273,5 @@ class TestContext:
         bt.run()
 
         # WHY: next-bar execution — buy queued at bar 1, fills at bar 2.
-        # Bar 2 sees periods_held=0 (just entered), then increments each bar.
+        # Bar 2 sees holding_periods=0 (just entered), then increments each bar.
         assert held_values == [0, 1, 2, 3]

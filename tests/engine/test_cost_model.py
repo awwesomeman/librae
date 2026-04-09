@@ -20,7 +20,7 @@ def crypto_cost() -> CostModel:
         min_commission=0.0,
         slippage_ticks=2.0,
         tick_size=0.01,
-        transaction_tax=0.0,
+        tax_rate=0.0,
     )
 
 
@@ -33,7 +33,7 @@ def tw_futures_cost() -> CostModel:
         min_commission=100.0,
         slippage_ticks=1.0,
         tick_size=1.0,
-        transaction_tax=0.00002,
+        tax_rate=0.00002,
     )
 
 
@@ -46,7 +46,7 @@ class TestFromMarket:
         cm = CostModel.from_market(market)
         assert np.isclose(cm.multiplier, 1.0)
         assert np.isclose(cm.commission_rate, 0.001)
-        assert np.isclose(cm.transaction_tax, 0.0)
+        assert np.isclose(cm.tax_rate, 0.0)
 
     def test_futures_multiplier(self) -> None:
         market = get_market("tw_futures")
@@ -110,29 +110,25 @@ class TestSlippage:
 
 class TestTax:
     def test_crypto_no_tax(self, crypto_cost: CostModel) -> None:
-        tax = crypto_cost.calc_tax(50_000.0, 1.0, is_sell=True)
+        tax = crypto_cost.calc_tax(50_000.0, 1.0)
         assert np.isclose(tax, 0.0)
 
-    def test_futures_tax_on_sell(self, tw_futures_cost: CostModel) -> None:
-        # 20000 * 1 * 50 * 0.00002 = 20.0
-        tax = tw_futures_cost.calc_tax(20_000.0, 1.0, is_sell=True)
+    def test_futures_tax_symmetric(self, tw_futures_cost: CostModel) -> None:
+        # 20000 * 1 * 50 * 0.00002 = 20.0 — same for buy and sell
+        tax = tw_futures_cost.calc_tax(20_000.0, 1.0)
         assert np.isclose(tax, 20.0)
-
-    def test_futures_no_tax_on_buy(self, tw_futures_cost: CostModel) -> None:
-        tax = tw_futures_cost.calc_tax(20_000.0, 1.0, is_sell=False)
-        assert np.isclose(tax, 0.0)
 
 
 # ── Total cost ────────────────────────────────────────────────────────────
 
 
 class TestTotalCost:
-    def test_crypto_buy_cost(self, crypto_cost: CostModel) -> None:
+    def test_crypto_cost(self, crypto_cost: CostModel) -> None:
         # commission=25 + slippage=0.01 + tax=0
-        cost = crypto_cost.total_cost(50_000.0, 0.5, is_sell=False)
+        cost = crypto_cost.total_cost(50_000.0, 0.5)
         assert np.isclose(cost, 25.01)
 
-    def test_futures_sell_cost(self, tw_futures_cost: CostModel) -> None:
+    def test_futures_cost(self, tw_futures_cost: CostModel) -> None:
         # commission=100 + slippage=50 + tax=20
-        cost = tw_futures_cost.total_cost(20_000.0, 1.0, is_sell=True)
+        cost = tw_futures_cost.total_cost(20_000.0, 1.0)
         assert np.isclose(cost, 170.0)

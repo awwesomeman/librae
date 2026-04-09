@@ -82,7 +82,7 @@ def compute_entry_conditions(df: pd.DataFrame, params: dict | None = None) -> pd
     4. Volume filter: volume >= vol_threshold * vol_sma20
     5. ATR > 0 (valid volatility)
 
-    No position tracking. No periods_held. Just market conditions.
+    No position tracking. No holding_periods. Just market conditions.
     """
     p = {**DEFAULT_PARAMS, **(params or {})}
 

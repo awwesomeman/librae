@@ -26,7 +26,7 @@ class TrendPullbackStrategy(BaseStrategy):
         pos = ctx.positions.get(ctx.symbol)
 
         if pos:
-            if ctx.bar.get("exit_signal") or pos.periods_held >= self.max_hold_periods:
+            if ctx.bar.get("exit_signal") or pos.holding_periods >= self.max_hold_periods:
                 return [Action(type="close", symbol=ctx.symbol)]
             return []
 

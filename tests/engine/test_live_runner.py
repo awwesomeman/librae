@@ -170,15 +170,15 @@ class TestLiveTrader:
         for c in calls[1:]:
             assert c["limit"] == 2  # incremental
 
-    def test_periods_held_increments(self):
-        """periods_held should increment each bar while position is open."""
-        periods_held_values: list[int] = []
+    def test_holding_periods_increments(self):
+        """holding_periods should increment each bar while position is open."""
+        holding_periods_values: list[int] = []
 
         class TrackBarsHeld(BaseStrategy):
             def on_bar(self, ctx: Context) -> list[Action]:
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
-                    periods_held_values.append(pos.periods_held)
+                    holding_periods_values.append(pos.holding_periods)
                     return []
                 return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
 
@@ -194,7 +194,7 @@ class TestLiveTrader:
 
         # WHY: next-bar execution — buy queued at bar 0, fills at bar 1.
         # Bar 1: held=0 (just entered). Bar 2: held=1. Bar 3: held=2.
-        assert periods_held_values == [0, 1, 2]
+        assert holding_periods_values == [0, 1, 2]
 
     def test_close_calls_notify_exit(self):
         """Close action should call executor.notify_exit."""

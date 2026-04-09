@@ -22,7 +22,7 @@ class Position:
     entry_price: float
     quantity: float
     entry_ts: datetime
-    periods_held: int
+    holding_periods: int
     unrealized_pnl: float
 
 
@@ -98,9 +98,10 @@ class PositionState:
     entry_price: float
     quantity: float
     entry_ts: datetime
-    periods_held: int
+    holding_periods: int
     entry_commission: float
     entry_slippage: float
+    entry_tax: float
     total_entry_cost: float
 
 

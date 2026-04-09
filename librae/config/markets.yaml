@@ -1,6 +1,14 @@
 # Market-level configuration for backtesting.
 # Each key is a market identifier used in Backtest(market="crypto").
 # Per-instrument details (symbol, min_qty, exchange) belong to the broker layer.
+#
+# Cost fields:
+#   commission_rate  — per-side rate (0.001 = 0.1%)
+#   min_commission   — per-side floor in quote currency (0.0 if none)
+#   tax_rate         — per-side tax rate (0.00002 = 0.002%)
+#   slippage_ticks   — per-side slippage in ticks
+#   tick_size        — minimum price increment in quote currency
+#   multiplier       — contract multiplier (spot=1.0)
 
 crypto:
   asset_class: crypto
@@ -9,7 +17,7 @@ crypto:
   is_24h: true
   commission_rate: 0.001
   min_commission: 0.0
-  transaction_tax: 0.0
+  tax_rate: 0.0
   slippage_ticks: 2
   tick_size: 0.01
   multiplier: 1.0
@@ -21,7 +29,7 @@ tw_futures:
   is_24h: false
   commission_rate: 0.0
   min_commission: 100.0
-  transaction_tax: 0.00002
+  tax_rate: 0.00002
   slippage_ticks: 1
   tick_size: 1.0
   multiplier: 50.0
@@ -33,7 +41,7 @@ us_equity:
   is_24h: false
   commission_rate: 0.0
   min_commission: 0.0
-  transaction_tax: 0.0
+  tax_rate: 0.0
   slippage_ticks: 2
   tick_size: 0.01
   multiplier: 1.0

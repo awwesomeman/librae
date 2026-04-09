@@ -150,7 +150,7 @@ class TestComputeAllWithEngine:
         cost = CostModel(
             multiplier=1.0, commission_rate=0.001,
             min_commission=0.0, slippage_ticks=0.0,
-            tick_size=0.01, transaction_tax=0.0,
+            tick_size=0.01, tax_rate=0.0,
         )
         bt = Backtest(df, BuyBar10CloseBar30(), initial_balance=10_000,
                       cost_model=cost, data_source="test")

@@ -34,7 +34,7 @@ def _zero_cost() -> CostModel:
 def _crypto_cost() -> CostModel:
     return CostModel(
         multiplier=1.0, commission_rate=0.001, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, transaction_tax=0.0,
+        slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
     )
 
 
@@ -42,7 +42,7 @@ def _tw_futures_cost() -> CostModel:
     """Taiwan futures: tax on sell side only."""
     return CostModel(
         multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=1.0, transaction_tax=0.00002,
+        slippage_ticks=0.0, tick_size=1.0, tax_rate=0.00002,
     )
 
 
@@ -51,7 +51,7 @@ def _make_pos(
     side: str = "long",
     entry_price: float = 100.0,
     quantity: float = 10.0,
-    periods_held: int = 5,
+    holding_periods: int = 5,
     cm: CostModel | None = None,
 ) -> PositionState:
     cm = cm or _zero_cost()
@@ -59,9 +59,10 @@ def _make_pos(
         symbol=symbol, side=side,
         entry_price=entry_price, quantity=quantity,
         entry_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        periods_held=periods_held,
+        holding_periods=holding_periods,
         entry_commission=cm.calc_commission(entry_price, quantity),
         entry_slippage=cm.calc_slippage(quantity),
+        entry_tax=cm.calc_tax(entry_price, quantity),
         total_entry_cost=entry_price * quantity * cm.multiplier,
     )
 
@@ -78,7 +79,7 @@ def _make_fill(
         symbol=symbol, side=side, price=price, quantity=quantity,
         commission=cm.calc_commission(price, quantity),
         slippage=cm.calc_slippage(quantity),
-        tax=cm.calc_tax(price, quantity, is_sell=(side == "short")),
+        tax=cm.calc_tax(price, quantity),
     )
 
 
@@ -224,13 +225,14 @@ class TestShortPositions:
 
         assert cash_after_entry + proceeds == pytest.approx(initial_cash)
 
-    def test_short_close_no_tax(self):
-        """#9: buy-to-cover should NOT incur transaction tax."""
+    def test_short_close_tax_symmetric(self):
+        """#9: tax is symmetric — buy-to-cover also incurs tax."""
         cm = _tw_futures_cost()
         pos = _make_pos(side="short", entry_price=20000.0, quantity=1.0, cm=cm)
         pnl, _, _ = close_position(pos, 19900.0, cm)
 
-        assert pnl.exit_tax == 0.0  # buy-to-cover is not a sell
+        # 19900 * 1 * 1.0 * 0.00002 = 0.398
+        assert pnl.exit_tax == pytest.approx(19900.0 * 0.00002)
 
 
 # ===========================================================================

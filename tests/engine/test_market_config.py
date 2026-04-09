@@ -35,7 +35,7 @@ class TestLoadMarketConfigs:
         assert tw.timezone == "Asia/Taipei"
         assert tw.min_commission == 100.0
         assert tw.multiplier == 50.0
-        assert tw.transaction_tax == 0.00002
+        assert tw.tax_rate == 0.00002
 
     def test_us_equity_fields(self, markets):
         us = markets["us_equity"]
