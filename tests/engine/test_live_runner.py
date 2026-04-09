@@ -58,7 +58,7 @@ class _AlwaysBuyStrategy(BaseStrategy):
         pos = ctx.positions.get(ctx.symbol)
         if pos:
             return [Action(type="close", symbol=ctx.symbol)]
-        return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
+        return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
 
 
 class _HoldStrategy(BaseStrategy):
@@ -180,7 +180,7 @@ class TestLiveTrader:
                 if pos:
                     holding_periods_values.append(pos.holding_periods)
                     return []
-                return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
+                return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
 
         call_num = 0
 
@@ -222,7 +222,7 @@ class TestLiveTrader:
             def on_bar(self, ctx: Context) -> list[Action]:
                 cash_values.append(ctx.cash)
                 if not ctx.positions.get(ctx.symbol):
-                    return [Action(type="buy", symbol=ctx.symbol, quantity=1.0)]
+                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
         call_num = 0

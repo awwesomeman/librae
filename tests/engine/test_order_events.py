@@ -36,7 +36,7 @@ def _run(actions_list: list[Action], cost_model: CostModel = ZERO_COST,
 
 class TestOpenEvent:
     def test_buy_produces_open_event(self):
-        events, _, _ = _run([Action(type="buy", symbol="TEST")])
+        events, _, _ = _run([Action(type="long", symbol="TEST")])
         assert len(events) == 1
         e = events[0]
         assert e.event_type == "open"
@@ -46,17 +46,17 @@ class TestOpenEvent:
         assert e.entry_price == 100.0
 
     def test_sell_produces_short_open(self):
-        events, _, _ = _run([Action(type="sell", symbol="TEST")])
+        events, _, _ = _run([Action(type="short", symbol="TEST")])
         assert len(events) == 1
         assert events[0].event_type == "open"
         assert events[0].side == "short"
 
     def test_open_carries_reason(self):
-        events, _, _ = _run([Action(type="buy", symbol="TEST", reason="RSI oversold")])
+        events, _, _ = _run([Action(type="long", symbol="TEST", reason="RSI oversold")])
         assert events[0].reason == "RSI oversold"
 
     def test_open_has_no_pnl(self):
-        events, _, _ = _run([Action(type="buy", symbol="TEST")])
+        events, _, _ = _run([Action(type="long", symbol="TEST")])
         assert events[0].pnl is None
         assert events[0].net_return is None
         assert events[0].entry_ts is None
@@ -71,7 +71,7 @@ class TestAddEvent:
             total_entry_cost=450.0,
         )}
         events, _, _ = _run(
-            [Action(type="buy", symbol="TEST", quantity=5.0)],
+            [Action(type="long", symbol="TEST", quantity=5.0)],
             positions=positions,
         )
         assert len(events) == 1
@@ -177,12 +177,12 @@ class TestComplexLifecycle:
             all_events.extend(result.events)
 
         # 1. buy 10@100
-        run_at([Action(type="buy", symbol="TEST", quantity=10)], 100.0, positions)
+        run_at([Action(type="long", symbol="TEST", quantity=10)], 100.0, positions)
         assert all_events[-1].event_type == "open"
         assert all_events[-1].position_quantity == 10.0
 
         # 2. buy 5@120 (scale in)
-        run_at([Action(type="buy", symbol="TEST", quantity=5)], 120.0, positions, 3)
+        run_at([Action(type="long", symbol="TEST", quantity=5)], 120.0, positions, 3)
         assert all_events[-1].event_type == "add"
         assert all_events[-1].position_quantity == 15.0
         assert np.isclose(all_events[-1].entry_price, (100 * 10 + 120 * 5) / 15)
@@ -194,7 +194,7 @@ class TestComplexLifecycle:
         assert all_events[-1].pnl is not None
 
         # 4. buy 8@110 (scale in again)
-        run_at([Action(type="buy", symbol="TEST", quantity=8)], 110.0, positions, 1)
+        run_at([Action(type="long", symbol="TEST", quantity=8)], 110.0, positions, 1)
         assert all_events[-1].event_type == "add"
         assert all_events[-1].position_quantity == 20.0
 
@@ -223,8 +223,8 @@ class TestShortLifecycle:
             )
             all_events.extend(result.events)
 
-        run_at([Action(type="sell", symbol="TEST", quantity=10)], 100.0, positions)
-        run_at([Action(type="sell", symbol="TEST", quantity=5)], 110.0, positions)
+        run_at([Action(type="short", symbol="TEST", quantity=10)], 100.0, positions)
+        run_at([Action(type="short", symbol="TEST", quantity=5)], 110.0, positions)
         run_at([Action(type="close", symbol="TEST")], 90.0, positions)
 
         assert len(all_events) == 3
@@ -256,7 +256,7 @@ class TestEngineIntegration:
         class BuyBar5CloseBar20(BaseStrategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
-                    return [Action(type="buy", symbol=ctx.symbol, reason="test entry")]
+                    return [Action(type="long", symbol=ctx.symbol, reason="test entry")]
                 if ctx.period_index == 20 and ctx.symbol in ctx.positions:
                     return [Action(type="close", symbol=ctx.symbol, reason="test exit")]
                 return []

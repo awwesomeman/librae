@@ -334,8 +334,8 @@ def _size_position(cost_model: CostModel, price: float, cash: float) -> float:
 
 
 def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) -> Fill | None:
-    """Build a Fill for a buy/sell action. Returns None if rejected."""
-    if action.type not in ("buy", "sell"):
+    """Build a Fill for a long/short action. Returns None if rejected."""
+    if action.type not in ("long", "short"):
         return None
 
     qty = action.quantity
@@ -346,7 +346,7 @@ def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) 
 
     return Fill(
         symbol=action.symbol,
-        side="long" if action.type == "buy" else "short",
+        side=action.type,
         price=price,
         quantity=qty,
         commission=cost_model.calc_commission(price, qty),
@@ -431,8 +431,8 @@ def process_actions(
         cost_model = get_cost_model(sym)
         reason = action.reason
 
-        if action.type in ("buy", "sell"):
-            desired_side: Literal["long", "short"] = "long" if action.type == "buy" else "short"
+        if action.type in ("long", "short"):
+            desired_side: Literal["long", "short"] = action.type
 
             if sym not in positions:
                 # OPEN NEW

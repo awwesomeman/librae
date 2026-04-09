@@ -75,7 +75,7 @@ class MyStrategy(BaseStrategy):
                 return [Action(type="close", symbol=ctx.symbol)]
             return []
         if ctx.bar.get("entry_signal"):
-            return [Action(type="buy", symbol=ctx.symbol)]
+            return [Action(type="long", symbol=ctx.symbol)]
         return []
 
 # 2. 跑引擎（通常由 cli.build_config() 建立 RunConfig）
@@ -121,7 +121,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 |------|------|
 | `BaseStrategy` | 抽象基類，實作 `on_bar(ctx) -> list[Action]` |
 | `Context` | 不可變快照：ts, symbol, symbols, bar, bars, positions, cash, period_index |
-| `Action` | 策略意圖：`type` = buy / sell / close / hold |
+| `Action` | 策略意圖：`type` = long / short / close / hold |
 | `Position` | 凍結持倉（給策略看）：symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | 可變持倉（引擎內部）：追蹤 holding_periods, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 

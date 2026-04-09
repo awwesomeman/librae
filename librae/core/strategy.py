@@ -62,7 +62,7 @@ class Action:
             None  — use engine default (RunConfig.params["fill_price"], typically "open").
     """
 
-    type: Literal["buy", "sell", "close", "hold"]
+    type: Literal["long", "short", "close", "hold"]
     symbol: str = ""
     quantity: float | None = None
     reason: str = ""

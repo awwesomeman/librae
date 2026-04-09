@@ -66,7 +66,7 @@ class LiveExecutor:
 
     def _notify_signal(self, action: Action, price: float) -> None:
         """Send entry notification via Telegram."""
-        side = "BUY" if action.type == "buy" else "SELL"
+        side = "LONG" if action.type == "long" else "SHORT"
         logger.info(
             "SIGNAL %s %s @ %.2f (reason: %s)",
             side, action.symbol, price, action.reason or "n/a",

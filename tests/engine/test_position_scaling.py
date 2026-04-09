@@ -245,13 +245,13 @@ class TestScalingIntegration:
     def test_long_scale_and_close(self):
         """#10: buy@100, add@120, close@130 → correct PnL."""
         positions: dict[str, PositionState] = {}
-        actions = [Action(type="buy", symbol="TEST", quantity=10.0)]
+        actions = [Action(type="long", symbol="TEST", quantity=10.0)]
         result = _run_actions(actions, positions, prices={"TEST": 100.0})
         assert "TEST" in positions
         assert result.cash_delta == pytest.approx(-100.0 * 10.0)
 
         # Scale in
-        actions2 = [Action(type="buy", symbol="TEST", quantity=5.0)]
+        actions2 = [Action(type="long", symbol="TEST", quantity=5.0)]
         result2 = _run_actions(actions2, positions, cash=100_000 + result.cash_delta, prices={"TEST": 120.0})
         assert positions["TEST"].quantity == 15.0
         expected_avg = (100.0 * 10.0 + 120.0 * 5.0) / 15.0
@@ -268,7 +268,7 @@ class TestScalingIntegration:
         """#12: add, partial close, then close rest."""
         cm = _zero_cost()
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="buy", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0}, cm=cm)
+        _run_actions([Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0}, cm=cm)
 
         # Partial close 4
         result = _run_actions(
@@ -313,11 +313,11 @@ class TestScalingIntegration:
         positions: dict[str, PositionState] = {}
 
         # Open short
-        _run_actions([Action(type="sell", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0}, cm=cm)
+        _run_actions([Action(type="short", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0}, cm=cm)
         assert positions["TEST"].side == "short"
 
         # Scale short
-        _run_actions([Action(type="sell", symbol="TEST", quantity=3.0)], positions, prices={"TEST": 110.0}, cm=cm)
+        _run_actions([Action(type="short", symbol="TEST", quantity=3.0)], positions, prices={"TEST": 110.0}, cm=cm)
         assert positions["TEST"].quantity == 8.0
 
         # Partial close (buy-to-cover 4)
@@ -339,19 +339,19 @@ class TestEdgeCases:
     def test_scale_without_quantity_rejected(self):
         """#15: scaling requires explicit quantity."""
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="buy", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0})
+        _run_actions([Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0})
 
         # Try to scale without quantity
-        result = _run_actions([Action(type="buy", symbol="TEST")], positions, prices={"TEST": 120.0})
+        result = _run_actions([Action(type="long", symbol="TEST")], positions, prices={"TEST": 120.0})
         assert positions["TEST"].quantity == 10.0  # unchanged
         assert result.cash_delta == 0.0
 
     def test_buy_while_short_rejected(self):
         """#16: opposite-side action rejected."""
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="sell", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0})
+        _run_actions([Action(type="short", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0})
 
-        result = _run_actions([Action(type="buy", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 90.0})
+        result = _run_actions([Action(type="long", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 90.0})
         assert positions["TEST"].side == "short"  # unchanged
         assert result.cash_delta == 0.0
 
@@ -385,11 +385,11 @@ class TestEdgeCases:
     def test_scale_insufficient_cash_rejected(self):
         """#20: scaling rejected when cash insufficient."""
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="buy", symbol="TEST", quantity=10.0)], positions, cash=1100.0, prices={"TEST": 100.0})
+        _run_actions([Action(type="long", symbol="TEST", quantity=10.0)], positions, cash=1100.0, prices={"TEST": 100.0})
 
         # Only ~100 cash left, try to add 10 more @ 100
         result = _run_actions(
-            [Action(type="buy", symbol="TEST", quantity=10.0)],
+            [Action(type="long", symbol="TEST", quantity=10.0)],
             positions, cash=100.0, prices={"TEST": 100.0},
         )
         assert positions["TEST"].quantity == 10.0  # unchanged
@@ -402,15 +402,15 @@ class TestEdgeCases:
         cm = _zero_cost()
 
         _run_actions([
-            Action(type="buy", symbol="A", quantity=5.0),
-            Action(type="buy", symbol="B", quantity=3.0),
+            Action(type="long", symbol="A", quantity=5.0),
+            Action(type="long", symbol="B", quantity=3.0),
         ], positions, prices=prices, cm=cm)
 
         assert positions["A"].quantity == 5.0
         assert positions["B"].quantity == 3.0
 
         # Scale A
-        _run_actions([Action(type="buy", symbol="A", quantity=2.0)], positions, prices=prices, cm=cm)
+        _run_actions([Action(type="long", symbol="A", quantity=2.0)], positions, prices=prices, cm=cm)
         assert positions["A"].quantity == 7.0
         assert positions["B"].quantity == 3.0  # unchanged
 
@@ -449,7 +449,7 @@ class TestEdgeCases:
 
         # Open
         result1 = _run_actions(
-            [Action(type="buy", symbol="TEST")],  # auto-size
+            [Action(type="long", symbol="TEST")],  # auto-size
             positions, cash=10_000.0, prices={"TEST": 100.0}, cm=cm,
         )
         assert "TEST" in positions

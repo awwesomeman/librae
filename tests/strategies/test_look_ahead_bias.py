@@ -190,7 +190,7 @@ class _BuyBar5Strategy(BaseStrategy):
         if pos and ctx.period_index >= 10:
             return [Action(type="close", symbol=ctx.symbol)]
         if not pos and ctx.period_index == 5:
-            return [Action(type="buy", symbol=ctx.symbol)]
+            return [Action(type="long", symbol=ctx.symbol)]
         return []
 
 

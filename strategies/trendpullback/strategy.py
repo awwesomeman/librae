@@ -31,6 +31,6 @@ class TrendPullbackStrategy(BaseStrategy):
             return []
 
         if ctx.bar.get("entry_signal"):
-            return [Action(type="buy", symbol=ctx.symbol)]
+            return [Action(type="long", symbol=ctx.symbol)]
 
         return []
