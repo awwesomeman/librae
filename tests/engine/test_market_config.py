@@ -28,6 +28,8 @@ class TestLoadMarketConfigs:
         assert crypto.is_24h is True
         assert crypto.commission_rate == 0.001
         assert crypto.multiplier == 1.0
+        assert crypto.long_margin_rate == 1.0
+        assert crypto.short_margin_rate == 1.0
 
     def test_tw_futures_fields(self, markets):
         tw = markets["tw_futures"]
@@ -36,12 +38,16 @@ class TestLoadMarketConfigs:
         assert tw.min_commission == 100.0
         assert tw.multiplier == 50.0
         assert tw.tax_rate == 0.00002
+        assert tw.long_margin_rate == 0.067
+        assert tw.short_margin_rate == 0.067
 
     def test_us_equity_fields(self, markets):
         us = markets["us_equity"]
         assert us.asset_class == "equity"
         assert us.timezone == "America/New_York"
         assert us.multiplier == 1.0
+        assert us.long_margin_rate == 1.0
+        assert us.short_margin_rate == 0.5
 
     def test_market_config_is_frozen(self, markets):
         with pytest.raises(AttributeError):

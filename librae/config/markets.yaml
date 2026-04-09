@@ -21,6 +21,8 @@ crypto:
   slippage_ticks: 2
   tick_size: 0.01
   multiplier: 1.0
+  long_margin_rate: 1.0
+  short_margin_rate: 1.0
 
 tw_futures:
   asset_class: futures
@@ -33,6 +35,8 @@ tw_futures:
   slippage_ticks: 1
   tick_size: 1.0
   multiplier: 50.0
+  long_margin_rate: 0.067
+  short_margin_rate: 0.067
 
 us_equity:
   asset_class: equity
@@ -45,3 +49,5 @@ us_equity:
   slippage_ticks: 2
   tick_size: 0.01
   multiplier: 1.0
+  long_margin_rate: 1.0
+  short_margin_rate: 0.5

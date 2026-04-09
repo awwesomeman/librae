@@ -217,7 +217,7 @@ class TestShortPositions:
         """#8: short round-trip at same price → cash unchanged."""
         cm = _zero_cost()
         initial_cash = 100_000.0
-        outlay = cm.estimate_entry_outlay(100.0, 1.0)
+        outlay = cm.estimate_entry_outlay(100.0, 1.0, side="short")
         cash_after_entry = initial_cash - outlay
 
         pos = _make_pos(side="short", entry_price=100.0, quantity=1.0, cm=cm)
@@ -466,3 +466,136 @@ class TestEdgeCases:
         )
         assert "TEST" not in positions
         assert result3.trades[0].gross_pnl == pytest.approx(1000.0)  # (110-100)*100
+
+
+# ===========================================================================
+# Margin rate tests
+# ===========================================================================
+
+
+def _us_equity_cost() -> CostModel:
+    """US equity: short_margin_rate=0.5 (Reg T)."""
+    return CostModel(
+        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+        slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+        long_margin_rate=1.0, short_margin_rate=0.5,
+    )
+
+
+def _futures_cost() -> CostModel:
+    """Futures: margin_rate=0.1 both sides, multiplier=50."""
+    return CostModel(
+        multiplier=50.0, commission_rate=0.0, min_commission=0.0,
+        slippage_ticks=0.0, tick_size=1.0, tax_rate=0.0,
+        long_margin_rate=0.1, short_margin_rate=0.1,
+    )
+
+
+class TestMarginRate:
+    """Margin rate affects cash outlay, proceeds, and equity — not PnL."""
+
+    def test_us_short_outlay_is_half_notional(self):
+        """Reg T: short locks 50% of notional from trader's cash."""
+        cm = _us_equity_cost()
+        outlay = cm.estimate_entry_outlay(200.0, 100.0, side="short")
+        # notional=20000, margin=20000*0.5=10000, costs=0
+        assert outlay == pytest.approx(10_000.0)
+
+    def test_us_long_outlay_is_full_notional(self):
+        cm = _us_equity_cost()
+        outlay = cm.estimate_entry_outlay(200.0, 100.0, side="long")
+        assert outlay == pytest.approx(20_000.0)
+
+    def test_futures_outlay_is_margin_only(self):
+        cm = _futures_cost()
+        # price=20000, qty=1, multiplier=50 → notional=1,000,000
+        outlay = cm.estimate_entry_outlay(20_000.0, 1.0, side="long")
+        assert outlay == pytest.approx(100_000.0)  # 10% of 1M
+
+    def test_us_short_proceeds_correct(self):
+        """Short $20k at 200, close at 180 → profit $2k, proceeds = $12k."""
+        cm = _us_equity_cost()
+        pos = _make_pos(side="short", entry_price=200.0, quantity=100.0, cm=cm)
+        pnl, proceeds, _ = close_position(pos, 180.0, cm)
+
+        assert pnl.gross_pnl == pytest.approx(2_000.0)
+        # margin_locked = 20000 * 0.5 = 10000
+        assert proceeds == pytest.approx(12_000.0)  # 10000 + 2000
+
+    def test_us_short_losing_proceeds(self):
+        """Short $20k at 200, close at 220 → loss $2k, proceeds = $8k."""
+        cm = _us_equity_cost()
+        pos = _make_pos(side="short", entry_price=200.0, quantity=100.0, cm=cm)
+        pnl, proceeds, _ = close_position(pos, 220.0, cm)
+
+        assert pnl.gross_pnl == pytest.approx(-2_000.0)
+        assert proceeds == pytest.approx(8_000.0)  # 10000 - 2000
+
+    def test_us_short_round_trip_cash_balanced(self):
+        """Open short, close at same price → cash unchanged."""
+        cm = _us_equity_cost()
+        initial_cash = 100_000.0
+        outlay = cm.estimate_entry_outlay(200.0, 100.0, side="short")
+        cash_after = initial_cash - outlay  # 90000
+
+        pos = _make_pos(side="short", entry_price=200.0, quantity=100.0, cm=cm)
+        _, proceeds, _ = close_position(pos, 200.0, cm)
+
+        assert cash_after + proceeds == pytest.approx(initial_cash)
+
+    def test_futures_round_trip_cash_balanced(self):
+        """Futures: open + close at same price → cash unchanged."""
+        cm = _futures_cost()
+        initial_cash = 500_000.0
+        outlay = cm.estimate_entry_outlay(20_000.0, 1.0, side="long")
+        cash_after = initial_cash - outlay
+
+        pos = _make_pos(
+            side="long", entry_price=20_000.0, quantity=1.0, cm=cm,
+        )
+        _, proceeds, _ = close_position(pos, 20_000.0, cm)
+
+        assert cash_after + proceeds == pytest.approx(initial_cash)
+
+    def test_futures_short_profitable(self):
+        """Futures short: price drops → profit."""
+        cm = _futures_cost()
+        pos = _make_pos(side="short", entry_price=20_000.0, quantity=1.0, cm=cm)
+        pnl, proceeds, _ = close_position(pos, 19_800.0, cm)
+
+        # gross_pnl = (20000-19800)*1*50 = 10000
+        assert pnl.gross_pnl == pytest.approx(10_000.0)
+        # margin_locked = 20000*1*50*0.1 = 100000
+        assert proceeds == pytest.approx(110_000.0)  # 100000 + 10000
+
+    def test_equity_with_margin(self):
+        """eval_equity reflects margin_locked, not full notional."""
+        from librae.core.executor import eval_equity
+
+        cm = _us_equity_cost()
+        pos = _make_pos(side="short", entry_price=200.0, quantity=100.0, cm=cm)
+        initial_cash = 100_000.0
+        outlay = cm.estimate_entry_outlay(200.0, 100.0, side="short")  # 10000
+        cash = initial_cash - outlay  # 90000
+
+        # Price drops to 180 → unrealized profit = 2000
+        mtm, _ = eval_equity(
+            cash, {"TEST": pos},
+            get_price=lambda s, p: 180.0,
+            get_cost_model=lambda s: cm,
+        )
+        # 90000 + 10000 (margin_locked) + 2000 (unrealized) = 102000
+        assert mtm == pytest.approx(102_000.0)
+
+    def test_sizing_respects_margin(self):
+        """Position sizing uses margin_rate, allowing larger futures positions."""
+        cm = _futures_cost()
+        positions: dict[str, PositionState] = {}
+        result = _run_actions(
+            [Action(type="long", symbol="TEST")],
+            positions, cash=100_000.0,
+            prices={"TEST": 20_000.0}, cm=cm,
+        )
+        # outlay_per_unit = 20000 * 50 * 0.1 = 100000
+        # qty = 100000 / 100000 = 1.0
+        assert positions["TEST"].quantity == pytest.approx(1.0)

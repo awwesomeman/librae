@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from librae.config.market_config import MarketConfig
@@ -36,6 +36,10 @@ class CostModel:
         slippage_ticks: Number of ticks slippage per side.
         tick_size: Minimum price increment.
         tax_rate: Per-side tax rate (e.g. 0.00002 for TW futures). Applied symmetrically on both buy and sell.
+        long_margin_rate: Fraction of notional deducted from cash when opening a long.
+            Spot=1.0 (pay full notional), futures=initial_margin/notional (e.g. 0.067).
+        short_margin_rate: Fraction of notional deducted from cash when opening a short.
+            US equity=0.5 (Reg T 50%), TW equity=0.9 (融券保證金 90%), futures same as long.
     """
 
     multiplier: float
@@ -44,6 +48,8 @@ class CostModel:
     slippage_ticks: float
     tick_size: float
     tax_rate: float
+    long_margin_rate: float = 1.0
+    short_margin_rate: float = 1.0
 
     @classmethod
     def zero(cls) -> CostModel:
@@ -51,6 +57,7 @@ class CostModel:
         return cls(
             multiplier=1.0, commission_rate=0.0, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+            long_margin_rate=1.0, short_margin_rate=1.0,
         )
 
     @classmethod
@@ -80,6 +87,8 @@ class CostModel:
             slippage_ticks=float(market.slippage_ticks),
             tick_size=market.tick_size if market.tick_size > 0 else 0.01,
             tax_rate=market.tax_rate,
+            long_margin_rate=market.long_margin_rate,
+            short_margin_rate=market.short_margin_rate,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
@@ -114,6 +123,11 @@ class CostModel:
             + self.calc_tax(price, quantity)
         )
 
-    def estimate_entry_outlay(self, price: float, quantity: float) -> float:
+    def margin_rate(self, side: Literal["long", "short"]) -> float:
+        """Return margin rate for the given side."""
+        return self.short_margin_rate if side == "short" else self.long_margin_rate
+
+    def estimate_entry_outlay(self, price: float, quantity: float, side: Literal["long", "short"]) -> float:
         """Estimate total cash outlay for entering a position (for sizing)."""
-        return price * quantity * self.multiplier + self.total_cost(price, quantity)
+        notional = price * quantity * self.multiplier
+        return notional * self.margin_rate(side) + self.total_cost(price, quantity)

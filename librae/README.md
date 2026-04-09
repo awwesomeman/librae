@@ -12,7 +12,7 @@
 core/                       共用 domain model（純計算，無 I/O）
 ├── strategy.py             BaseStrategy, Action, Context, Position, PositionState, Fill
 ├── executor.py             make_fill, process_actions, calc_trade_pnl, close_position, scale_into_position, reduce_position
-├── cost_model.py           CostModel（手續費 / 滑價 / 稅 / 合約乘數）
+├── cost_model.py           CostModel（手續費 / 滑價 / 稅 / 合約乘數 / 保證金）
 ├── metrics.py              compute_all（QuantStats adapter）
 ├── run_config.py           RunConfig — 統一執行參數（frozen dataclass）
 └── utils.py                generate_run_id, infer_timeframe, to_ccxt, to_canonical
@@ -27,7 +27,7 @@ live/                       即時 / 模擬 runtime
 └── signal_poller.py        SignalPoller — 訊號專用輪詢
 
 config/                     設定管理
-├── markets.yaml            市場參數（成本模型、tick_size、乘數）
+├── markets.yaml            市場參數（成本模型、tick_size、乘數、保證金率）
 ├── market_config.py        MarketConfig dataclass + load helpers
 └── notification.py         TelegramConfig + NotificationConfig dataclass
 
@@ -132,7 +132,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `Fill` | 成交回報：price, quantity, commission, slippage, tax |
 | `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + holding_periods |
 | `TradePnL` | PnL 拆解：gross_pnl, net_pnl, commission, slippage, tax |
-| `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax |
+| `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate |
 
 ### Output 層
 
@@ -166,6 +166,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 - **PositionState in core**: backtest 和 live 共用同一個可變持倉型別，追蹤 `total_entry_cost` 避免 scaling 時浮點數漂移。
 - **Pre-computed bars**: `_precompute_bars()` 一次性將 DataFrame 轉為 dict-of-dicts，避免 hot loop 中每 bar 呼叫 `to_dict()`。
 - **Frozen dataclasses**: `BacktestOutput`, `StrategyMetrics`, `OrderEventRecord`, `CostModel` 等皆為 frozen，確保不可變。
+- **Margin rate 統一公式**: `margin_rate` = 從可用現金流出的比例 / notional。開倉 `cash -= notional * margin_rate + costs`，平倉 `proceeds = notional * margin_rate + gross_pnl - exit_costs`，equity `mtm += unrealized + notional * margin_rate`。一個公式覆蓋現貨（1.0）、美股做空（0.5, Reg T）、台股融券（0.9）、期貨（0.067）。使用者可透過 `cost_overrides` 覆蓋預設值。
 
 ---
 

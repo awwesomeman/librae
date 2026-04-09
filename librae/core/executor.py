@@ -133,7 +133,8 @@ def eval_equity(
         price = get_price(sym, ps)
         cost_model = get_cost_model(sym)
         unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
-        mtm += unrealized + ps.entry_price * ps.quantity * cost_model.multiplier
+        entry_notional = ps.entry_price * ps.quantity * cost_model.multiplier
+        mtm += unrealized + entry_notional * cost_model.margin_rate(ps.side)
         snapshot[sym] = Position(
             symbol=sym,
             side=ps.side,
@@ -267,15 +268,13 @@ def close_position(
         entry_tax=pro_entry_tax,
     )
 
-    # WHY: proceeds = collateral returned + PnL - exit costs.
-    # For longs: entry deducted (entry_notional + entry_costs), exit returns (exit_notional - exit_costs).
-    # For shorts: entry deducted (entry_notional + entry_costs) as collateral,
-    #   exit returns (entry_notional + gross_pnl - exit_costs).
+    # WHY: proceeds = margin_locked + PnL - exit costs.
+    # margin_locked = entry_notional * margin_rate (what was deducted on open).
+    # Works for all cases: spot long (rate=1.0), spot short, futures.
     entry_notional = pos.entry_price * close_qty * cost_model.multiplier
-    if pos.side == "long":
-        proceeds = exit_price * close_qty * cost_model.multiplier - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
-    else:
-        proceeds = entry_notional + pnl.gross_pnl - pnl.exit_commission - pnl.exit_slippage - pnl.exit_tax
+    margin_locked = entry_notional * cost_model.margin_rate(pos.side)
+    exit_costs = pnl.exit_commission + pnl.exit_slippage + pnl.exit_tax
+    proceeds = margin_locked + pnl.gross_pnl - exit_costs
 
     return pnl, proceeds, fully_closed
 
@@ -325,9 +324,9 @@ def resolve_fill_price(
 # ---------------------------------------------------------------------------
 
 
-def _size_position(cost_model: CostModel, price: float, cash: float) -> float:
+def _size_position(cost_model: CostModel, price: float, cash: float, side: Literal["long", "short"]) -> float:
     """Compute position size using all available cash."""
-    outlay_per_unit = cost_model.estimate_entry_outlay(price, 1.0)
+    outlay_per_unit = cost_model.estimate_entry_outlay(price, 1.0, side)
     if outlay_per_unit < EPSILON:
         return 0.0
     return cash / outlay_per_unit
@@ -340,7 +339,7 @@ def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) 
 
     qty = action.quantity
     if qty is None:
-        qty = _size_position(cost_model, price, cash)
+        qty = _size_position(cost_model, price, cash, action.type)
     if qty <= 0:
         return None
 
@@ -394,7 +393,7 @@ def _try_fill(
     fill = make_fill(action, price, available_cash, cost_model)
     if not fill or fill.quantity <= 0:
         return None, 0.0
-    outlay = cost_model.estimate_entry_outlay(price, fill.quantity)
+    outlay = cost_model.estimate_entry_outlay(price, fill.quantity, action.type)
     if available_cash - outlay < -EPSILON:
         return None, 0.0
     return fill, outlay

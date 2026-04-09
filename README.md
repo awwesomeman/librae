@@ -332,7 +332,7 @@ data/cache/{SYMBOL}_{INTERVAL}_{SOURCE}.parquet    # 例：data/cache/BTCUSDT_1h
 | 檔案 | 設定什麼 | 是否進 git |
 |------|---------|-----------|
 | `.env.example` → `.env`（專案根目錄） | secrets + DB 連線 + Grafana + Telegram | `.env.example` 進，`.env` 不進 |
-| `librae/config/markets.yaml` | 市場成本參數 | yes |
+| `librae/config/markets.yaml` | 市場成本 + 保證金參數 | yes |
 | `strategies/*/config.yaml` | 策略參數 + 通知 | yes |
 | `experiments/*/config.yaml` | 實驗參數 | yes |
 | `deploy/timescale_init.sql` | DB schema | yes |

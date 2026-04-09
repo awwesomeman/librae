@@ -54,6 +54,18 @@ class TestFromMarket:
         assert np.isclose(cm.multiplier, 50.0)
         assert np.isclose(cm.min_commission, 100.0)
 
+    def test_futures_margin_rate(self) -> None:
+        market = get_market("tw_futures")
+        cm = CostModel.from_market(market)
+        assert np.isclose(cm.long_margin_rate, 0.067)
+        assert np.isclose(cm.short_margin_rate, 0.067)
+
+    def test_us_equity_margin_rate(self) -> None:
+        market = get_market("us_equity")
+        cm = CostModel.from_market(market)
+        assert np.isclose(cm.long_margin_rate, 1.0)
+        assert np.isclose(cm.short_margin_rate, 0.5)
+
 
 # ── PnL calculation ──────────────────────────────────────────────────────
 

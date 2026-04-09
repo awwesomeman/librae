@@ -33,6 +33,8 @@ class MarketConfig:
     slippage_ticks: int
     tick_size: float
     multiplier: float
+    long_margin_rate: float
+    short_margin_rate: float
 
 
 def _default_markets_path() -> Path:
@@ -70,6 +72,8 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfi
             slippage_ticks=int(mdata.get("slippage_ticks", 0)),
             tick_size=float(mdata.get("tick_size", 0.01)),
             multiplier=float(mdata.get("multiplier", 1.0)),
+            long_margin_rate=float(mdata.get("long_margin_rate", 1.0)),
+            short_margin_rate=float(mdata.get("short_margin_rate", 1.0)),
         )
 
     return markets
