@@ -92,6 +92,25 @@
 | [refactor_config_management](plans/refactor_config_management.md) | planning | config, telegram, notification | 統一 YAML + env var + CLI 設定管理 |
 | [refactor_grafana_strategy](plans/refactor_grafana_strategy.md) | implemented | grafana, schema, db | Order Events 面板（部位生命週期可視化） |
 
+## strategies/
+
+策略想法與參考資料。記錄策略構思、靈感來源、初步邏輯設計，作為從「想法」到「實作」的中間站。
+
+- 每個策略想法一份檔案，命名簡潔（e.g. `mean_reversion_funding_rate.md`）
+- 不需要完整實作規劃，重點是捕捉核心邏輯與參考依據
+- 當策略進入實作階段，在檔案中標注連結到 `strategies/<name>/` 程式碼
+
+## studies/
+
+研究過程中的文獻整理與專題筆記。
+
+- `literature_review.md` — 統一收錄所有參考文獻與網站，按主題分類排序
+- 其餘 `*.md` — 個別專題的深入研究筆記（e.g. `kronos_overview.md`）
+
+**寫入準則：**
+- 研究過程中遇到的論文、文章、網站、開源專案，一律收錄到 `literature_review.md`
+- 單一主題需要較長篇幅整理時，另建獨立檔案並在 `literature_review.md` 中交叉引用
+
 ## guides/
 
 操作指南與部署文件。記錄可重複執行的步驟，供團隊成員或未來的自己參考。
@@ -99,3 +118,10 @@
 ## learnings/
 
 開發過程中遭遇的問題與解法。記錄錯誤訊息、根因分析、與修復方式，避免重複踩坑。
+
+---
+
+## 工作流程提醒
+
+1. **寫任何文件到 `docs/` 之前，先讀本文件**（`docs/README.md`），確認歸類與格式。
+2. **研究文獻統一收錄**到 `studies/literature_review.md`，不散落在各處。
