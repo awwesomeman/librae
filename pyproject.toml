@@ -2,7 +2,24 @@
 name = "quant-strategy-lab"
 version = "0.1.0"
 description = "Quant strategy research platform — Librae backtest engine, multi-asset support"
+readme = "README.md"
+authors = [
+  { name = "Jason Pan", email = "atk50715@gmail.com" }
+]
+license = { text = "MIT" }
 requires-python = ">=3.10"
+keywords = ["quant", "trading", "backtest", "finance", "strategy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
   "pandas>=2.0",
   "numpy>=1.24",
@@ -11,7 +28,13 @@ dependencies = [
   "httpx>=0.24",
   "pyyaml>=6.0",
   "psycopg2-binary>=2.9",
+  "pyarrow>=14.0",
+  "factrix>=0.5",
 ]
+
+[project.urls]
+Repository = "https://github.com/awwesomeman/quant-strategy-lab"
+Issues = "https://github.com/awwesomeman/quant-strategy-lab/issues"
 
 [project.optional-dependencies]
 tw-live = [
