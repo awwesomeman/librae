@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from librae.core.cost_model import CostModel
-from librae.backtest.engine import Backtest, BacktestResult
+from librae.backtest.engine import Backtest
 from librae.core.strategy import Action, BaseStrategy, Context
 
 
@@ -69,7 +69,7 @@ class SignalDrivenStrategy(BaseStrategy):
     def on_bar(self, ctx: Context) -> list[Action]:
         pos = ctx.positions.get(ctx.symbol)
         if pos:
-            if ctx.bar["exit_signal"] or pos.holding_periods >= self.max_hold_periods:
+            if ctx.bar["exit_signal"] or pos.periods_held >= self.max_hold_periods:
                 return [Action(type="close", symbol=ctx.symbol)]
         elif ctx.bar["entry_signal"]:
             return [Action(type="long", symbol=ctx.symbol)]
@@ -142,7 +142,7 @@ class TestSignalDrivenStrategy:
         result = bt.run()
 
         assert len(result.trades) == 1
-        assert result.trades[0].holding_periods == 3  # bar 4,5,6
+        assert result.trades[0].periods_held == 3  # bar 4,5,6
 
     def test_max_hold_periods(self) -> None:
         prices = [100.0] * 20
@@ -156,7 +156,7 @@ class TestSignalDrivenStrategy:
 
         assert len(result.trades) >= 1
         # WHY: next-bar execution adds 1 bar delay between close decision and fill
-        assert result.trades[0].holding_periods <= 6
+        assert result.trades[0].periods_held <= 6
 
 
 class TestMultiAsset:
@@ -252,15 +252,15 @@ class TestContext:
         # Bar 4: still see position (close queued, fills at bar 5)
         assert len(seen_positions[4]) == 1
 
-    def test_ctx_holding_periods_increments(self) -> None:
-        """holding_periods in Position should increment each bar."""
+    def test_ctx_periods_held_increments(self) -> None:
+        """periods_held in Position should increment each bar."""
         held_values: list[int] = []
 
         class Tracker(BaseStrategy):
             def on_bar(self, ctx):
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
-                    held_values.append(pos.holding_periods)
+                    held_values.append(pos.periods_held)
                 if ctx.period_index == 1:
                     return [Action(type="long", symbol=ctx.symbol)]
                 if ctx.period_index == 5:
@@ -273,5 +273,5 @@ class TestContext:
         bt.run()
 
         # WHY: next-bar execution — buy queued at bar 1, fills at bar 2.
-        # Bar 2 sees holding_periods=0 (just entered), then increments each bar.
+        # Bar 2 sees periods_held=0 (just entered), then increments each bar.
         assert held_values == [0, 1, 2, 3]

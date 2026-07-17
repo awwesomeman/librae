@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Callable
 
 import pandas as pd
 
-from librae.core.executor import TradeResult, eval_equity, process_actions, resolve_fill_price
+from librae.core.executor import eval_equity, process_actions, resolve_fill_price
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
@@ -43,6 +43,9 @@ class LiveTrader:
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         cfg: RunConfig — the sole configuration source.
         adapter: OHLCVFetcher override. None -> build from cfg.market.
+        order_adapter: Required when cfg.mode == "live". Places real orders
+            (e.g. ShioajiAdapter, CryptoAdapter with trading credentials).
+            Ignored in sim mode (sim never places real orders).
         cost_model: CostModel override. None -> build from cfg.market.
         on_bar: _UNSET -> build DB callback from cfg; None -> no callback; callable -> use it.
         on_order_event: Same pattern as on_bar.
@@ -59,6 +62,7 @@ class LiveTrader:
         *,
         cfg: RunConfig,
         adapter: OHLCVFetcher | None = None,
+        order_adapter: object | None = None,
         cost_model: CostModel | None = None,
         on_bar: Callable[..., None] | None | object = _UNSET,
         on_order_event: Callable[..., None] | None | object = _UNSET,
@@ -82,6 +86,16 @@ class LiveTrader:
         # --- Build adapter ---
         if adapter is not None:
             self._fetcher = adapter
+        elif cfg.market == "tw_futures":
+            from brokers.shioaji_adapter import ShioajiAdapter
+            _shioaji = ShioajiAdapter(simulation=(cfg.mode != "live"))
+            self._fetcher = lambda symbol, tf, limit, *, drop_incomplete=False: (
+                _shioaji.fetch_ohlcv(symbol, tf, limit=limit)
+            )
+            # Shioaji also places orders — reuse the same authenticated
+            # session for live mode unless the caller passed one explicitly.
+            if order_adapter is None and cfg.mode == "live":
+                order_adapter = _shioaji
         else:
             if cfg.mode == "live":
                 raise NotImplementedError(
@@ -111,9 +125,11 @@ class LiveTrader:
         )
 
         # --- Build executor ---
+        is_live = cfg.mode == "live"
         self._executor = LiveExecutor(
-            resolved_cm, simulation=(cfg.mode == "sim"),
+            resolved_cm, simulation=not is_live,
             telegram=telegram, strategy_name=strategy_name,
+            order_adapter=order_adapter if is_live else None,
         )
 
         # --- Resolve callbacks (sentinel pattern) ---
@@ -177,25 +193,24 @@ class LiveTrader:
                 symbol=self._cfg.symbol,
                 timeframe=self._cfg.timeframe,
                 mode=self._cfg.mode,
-                start_ts=datetime.now(tz=timezone.utc),
+                started_at=datetime.now(tz=timezone.utc),
                 data_source=self._cfg.data_source,
                 poll_seconds=self._cfg.poll_seconds,
-                params_json=self._cfg.params,
-                perf_params_json=self._cfg.perf_params,
+                params=self._cfg.params,
+                perf_params=self._cfg.perf_params,
                 config_hash=self._cfg.config_hash,
             )
         except Exception as e:
             logger.warning("DB write_run_metadata failed: %s", e)
 
     def _build_on_bar(self) -> Callable:
-        from db.timescale_writer import write_equity_point
-        run_id = self._run_id
+        from db.timescale_writer import write_equity_curve_point
         strategy = self._cfg.strategy_name
 
-        def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, ret_1d: float) -> None:
+        def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, period_return: float) -> None:
             self._db_write(
-                write_equity_point, ts=ts, run_id=run_id_, equity=equity,
-                drawdown=drawdown, ret_1d=ret_1d, strategy=strategy,
+                write_equity_curve_point, ts=ts, run_id=run_id_, equity=equity,
+                drawdown=drawdown, period_return=period_return, strategy=strategy,
             )
         return on_bar
 
@@ -383,9 +398,9 @@ class LiveTrader:
             self._last_bar_ts[symbol] = latest_ts
             logger.info("New bar detected: %s @ %s", symbol, latest_ts)
 
-            # Increment holding_periods on PositionState directly
+            # Increment periods_held on PositionState directly
             if symbol in self._positions:
-                self._positions[symbol].holding_periods += 1
+                self._positions[symbol].periods_held += 1
 
             self._process_bar(symbol, df, latest_ts)
 
@@ -456,9 +471,21 @@ class LiveTrader:
             for event in result.events:
                 logger.info("Order event: %s %s %s %.4f @ %.2f",
                             event.event_type, event.side, event.symbol,
-                            event.quantity, event.price)
+                            event.fill_quantity, event.price)
                 if self._on_order_event:
                     self._on_order_event(event)
+
+                if not self._executor.simulation:
+                    order_result = self._executor.submit_order(event)
+                    if order_result is None:
+                        self._notify(
+                            "send_alert",
+                            title=f"[{self._executor.strategy_name}] Order Failed",
+                            message=(
+                                f"{event.event_type} {event.symbol} "
+                                f"qty={event.quantity:.4f} — check broker manually"
+                            ),
+                        )
 
             for trade in result.trades:
                 self._trade_count += 1
@@ -524,11 +551,11 @@ class LiveTrader:
         equity = self._eval_equity()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
-        ret_1d = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
+        period_return = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
         self._prev_equity = equity
 
         if self._on_bar:
-            self._on_bar(self._run_id, ts, equity, drawdown, ret_1d)
+            self._on_bar(self._run_id, ts, equity, drawdown, period_return)
 
         # Periodic status notification (flags cached at init)
         if self._status_enabled:
@@ -545,6 +572,6 @@ class LiveTrader:
                     symbol=",".join(self._symbols),
                     equity=equity,
                     drawdown=drawdown,
-                    daily_pnl=ret_1d * equity,
+                    daily_pnl=period_return * equity,
                     position=pos_str,
                 )

@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from librae.core.cost_model import CostModel
+from librae.core.executor import OrderEvent
 from librae.live.executor import LiveExecutor
 from tests.conftest import make_test_cfg
 from librae.live.engine import LiveTrader
@@ -87,6 +88,66 @@ class TestLiveExecutor:
         mock_telegram.send_signal.assert_called_once_with(
             strategy="Test", symbol="BTCUSDT", side="EXIT", price=105.0,
         )
+
+    def test_live_requires_order_adapter(self):
+        """simulation=False without order_adapter should fail fast at construction."""
+        with pytest.raises(ValueError, match="order_adapter"):
+            LiveExecutor(_zero_cost_model(), simulation=False)
+
+    def test_submit_order_noop_in_simulation(self):
+        mock_adapter = MagicMock()
+        ex = LiveExecutor(_zero_cost_model(), simulation=True)
+        event = OrderEvent(
+            ts=datetime(2025, 1, 1, tzinfo=timezone.utc), symbol="BTCUSDT",
+            side="long", event_type="open", fill_quantity=1.0, price=100.0,
+            entry_price=100.0, remaining_quantity=1.0, notional=100.0,
+            commission=0.0, slippage=0.0, tax=0.0,
+        )
+        assert ex.submit_order(event) is None
+        mock_adapter.place_order.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "side,event_type,expected_order_side",
+        [
+            ("long", "open", "buy"),
+            ("long", "add", "buy"),
+            ("long", "close", "sell"),
+            ("long", "reduce", "sell"),
+            ("short", "open", "sell"),
+            ("short", "add", "sell"),
+            ("short", "close", "buy"),
+            ("short", "reduce", "buy"),
+        ],
+    )
+    def test_submit_order_side_mapping(self, side, event_type, expected_order_side):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.return_value = {"id": "123", "status": "filled"}
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+        event = OrderEvent(
+            ts=datetime(2025, 1, 1, tzinfo=timezone.utc), symbol="BTCUSDT",
+            side=side, event_type=event_type, fill_quantity=2.0, price=100.0,
+            entry_price=100.0, remaining_quantity=2.0, notional=200.0,
+            commission=0.0, slippage=0.0, tax=0.0,
+        )
+        result = ex.submit_order(event)
+
+        assert result == {"id": "123", "status": "filled"}
+        mock_adapter.place_order.assert_called_once_with({
+            "symbol": "BTCUSDT", "side": expected_order_side,
+            "quantity": 2.0, "order_type": "market",
+        })
+
+    def test_submit_order_returns_none_on_broker_error(self):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.side_effect = RuntimeError("connection refused")
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+        event = OrderEvent(
+            ts=datetime(2025, 1, 1, tzinfo=timezone.utc), symbol="BTCUSDT",
+            side="long", event_type="open", fill_quantity=1.0, price=100.0,
+            entry_price=100.0, remaining_quantity=1.0, notional=100.0,
+            commission=0.0, slippage=0.0, tax=0.0,
+        )
+        assert ex.submit_order(event) is None
 
 
 # ---------------------------------------------------------------------------
@@ -170,15 +231,15 @@ class TestLiveTrader:
         for c in calls[1:]:
             assert c["limit"] == 2  # incremental
 
-    def test_holding_periods_increments(self):
-        """holding_periods should increment each bar while position is open."""
-        holding_periods_values: list[int] = []
+    def test_periods_held_increments(self):
+        """periods_held should increment each bar while position is open."""
+        periods_held_values: list[int] = []
 
         class TrackBarsHeld(BaseStrategy):
             def on_bar(self, ctx: Context) -> list[Action]:
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
-                    holding_periods_values.append(pos.holding_periods)
+                    periods_held_values.append(pos.periods_held)
                     return []
                 return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
 
@@ -194,7 +255,7 @@ class TestLiveTrader:
 
         # WHY: next-bar execution — buy queued at bar 0, fills at bar 1.
         # Bar 1: held=0 (just entered). Bar 2: held=1. Bar 3: held=2.
-        assert holding_periods_values == [0, 1, 2]
+        assert periods_held_values == [0, 1, 2]
 
     def test_close_calls_notify_exit(self):
         """Close action should call executor.notify_exit."""
@@ -238,3 +299,33 @@ class TestLiveTrader:
         # First bar: full cash. Second bar: cash reduced by entry outlay
         assert cash_values[0] == 100_000.0
         assert cash_values[1] < 100_000.0
+
+    def test_live_mode_places_real_orders(self):
+        """End-to-end: live mode should call order_adapter.place_order on fills."""
+        mock_order_adapter = MagicMock()
+        mock_order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        cfg = _test_cfg(mode="live")
+        runner = self._make_runner(
+            strategy=_AlwaysBuyStrategy(), fetcher=fetcher, cfg=cfg,
+            order_adapter=mock_order_adapter,
+        )
+        runner.run(max_iterations=2)
+
+        # Iteration 1: buy queued. Iteration 2: buy fills (open) + close queued/fills.
+        assert mock_order_adapter.place_order.call_count >= 1
+        first_call_signal = mock_order_adapter.place_order.call_args_list[0].args[0]
+        assert first_call_signal["side"] == "buy"
+        assert first_call_signal["symbol"] == "BTCUSDT"
+
+    def test_live_mode_without_order_adapter_raises(self):
+        cfg = _test_cfg(mode="live")
+        with pytest.raises(ValueError, match="order_adapter"):
+            self._make_runner(cfg=cfg)

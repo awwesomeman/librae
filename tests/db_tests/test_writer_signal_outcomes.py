@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pytest
 
 from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_event
 from tests.conftest import make_test_cfg
@@ -80,7 +79,7 @@ class TestPersistBacktest:
         return df, symbol
 
     @patch("db.timescale_writer.write_ohlcv", return_value=20)
-    @patch("db.timescale_writer.write_backtest_output", return_value={"backtest_runs": 1})
+    @patch("db.timescale_writer.save_backtest_output", return_value={"backtest_runs": 1})
     def test_extracts_signals_and_calls_writer(self, mock_write_bt, mock_write_ohlcv):
         df, symbol = self._make_featured_df()
         mock_output = MagicMock()
@@ -100,7 +99,7 @@ class TestPersistBacktest:
         assert counts["ohlcv"] == 20
 
     @patch("db.timescale_writer.write_ohlcv", return_value=20)
-    @patch("db.timescale_writer.write_backtest_output", return_value={})
+    @patch("db.timescale_writer.save_backtest_output", return_value={})
     def test_excludes_nan_and_zero_signals(self, mock_write_bt, mock_write_ohlcv):
         """NaN and 0 values are excluded from signal_series."""
         symbol = "BTCUSDT"

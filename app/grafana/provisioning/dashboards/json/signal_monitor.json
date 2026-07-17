@@ -38,14 +38,33 @@
         "label": "Mode"
       },
       {
+        "name": "strategy",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        "query": "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 0,
+        "multi": false,
+        "label": "Strategy"
+      },
+      {
         "name": "run_id",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL) ORDER BY run_ts DESC LIMIT 20",
-        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL) ORDER BY run_ts DESC LIMIT 20",
+        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy='${strategy}' AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL) ORDER BY run_at DESC LIMIT 20",
+        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy='${strategy}' AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL) ORDER BY run_at DESC LIMIT 20",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -288,7 +307,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nexc AS (\n  SELECT s.ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n  FROM signal_events s, meta\n  JOIN LATERAL (\n    SELECT $fill_price_field AS entry_price, ts AS entry_ts FROM ohlcv\n    WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > s.ts\n    ORDER BY ts LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX(CASE WHEN $expected_direction = 1 THEN (b.high - entry_bar.entry_price) ELSE (entry_bar.entry_price - b.low) END / NULLIF(entry_bar.entry_price, 0)) AS mfe,\n      MAX(CASE WHEN $expected_direction = 1 THEN (entry_bar.entry_price - b.low) ELSE (b.high - entry_bar.entry_price) END / NULLIF(entry_bar.entry_price, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > entry_bar.entry_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.run_id = '${run_id}' AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END\n    AND $__timeFilter(s.ts)\n)\nSELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nexc AS (\n  SELECT s.ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n  FROM signal_events s, meta\n  JOIN LATERAL (\n    SELECT $fill_price_field AS entry_price, ts AS entry_at FROM ohlcv\n    WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > s.ts\n    ORDER BY ts LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX(CASE WHEN $expected_direction = 1 THEN (b.high - entry_bar.entry_price) ELSE (entry_bar.entry_price - b.low) END / NULLIF(entry_bar.entry_price, 0)) AS mfe,\n      MAX(CASE WHEN $expected_direction = 1 THEN (entry_bar.entry_price - b.low) ELSE (b.high - entry_bar.entry_price) END / NULLIF(entry_bar.entry_price, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > entry_bar.entry_at\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.run_id = '${run_id}' AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END\n    AND $__timeFilter(s.ts)\n)\nSELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -753,7 +772,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nexc AS (\n  SELECT s.ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n  FROM signal_events s, meta\n  JOIN LATERAL (\n    SELECT $fill_price_field AS entry_price, ts AS entry_ts FROM ohlcv\n    WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > s.ts\n    ORDER BY ts LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX(CASE WHEN $expected_direction = 1 THEN (b.high - entry_bar.entry_price) ELSE (entry_bar.entry_price - b.low) END / NULLIF(entry_bar.entry_price, 0)) AS mfe,\n      MAX(CASE WHEN $expected_direction = 1 THEN (entry_bar.entry_price - b.low) ELSE (b.high - entry_bar.entry_price) END / NULLIF(entry_bar.entry_price, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > entry_bar.entry_ts\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.run_id = '${run_id}' AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END\n    AND $__timeFilter(s.ts)\n)\nSELECT ts AS time,\n  AVG(mfe) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n  / NULLIF(AVG(mae) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n  AS \"Edge Ratio\"\nFROM exc WHERE rn >= $k ORDER BY ts",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nexc AS (\n  SELECT s.ts, exc.mfe, exc.mae,\n    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n  FROM signal_events s, meta\n  JOIN LATERAL (\n    SELECT $fill_price_field AS entry_price, ts AS entry_at FROM ohlcv\n    WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > s.ts\n    ORDER BY ts LIMIT 1\n  ) entry_bar ON true\n  JOIN LATERAL (\n    SELECT\n      MAX(CASE WHEN $expected_direction = 1 THEN (b.high - entry_bar.entry_price) ELSE (entry_bar.entry_price - b.low) END / NULLIF(entry_bar.entry_price, 0)) AS mfe,\n      MAX(CASE WHEN $expected_direction = 1 THEN (entry_bar.entry_price - b.low) ELSE (b.high - entry_bar.entry_price) END / NULLIF(entry_bar.entry_price, 0)) AS mae\n    FROM (\n      SELECT high, low FROM ohlcv\n      WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source) AND ts > entry_bar.entry_at\n      ORDER BY ts LIMIT $n\n    ) b\n  ) exc ON true\n  WHERE s.run_id = '${run_id}' AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END\n    AND $__timeFilter(s.ts)\n)\nSELECT ts AS time,\n  AVG(mfe) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n  / NULLIF(AVG(mae) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n  AS \"Edge Ratio\"\nFROM exc WHERE rn >= $k ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {

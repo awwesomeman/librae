@@ -27,14 +27,21 @@ from .strategy import Action, Fill, Position, PositionState
 
 logger = logging.getLogger(__name__)
 
+# Canonical event_type="close"/"reduce" reasons — engine-generated (not
+# strategy-chosen) exits use these exact strings so DB records stay queryable
+# without free-text drift. Strategy-chosen closes may use any reason string.
+REASON_STOP_LOSS = "stop_loss"
+REASON_TAKE_PROFIT = "take_profit"
+REASON_FORCE_CLOSE = "force_close"
+
 
 @dataclass(frozen=True)
 class TradeResult:
     """Single completed trade — shared by backtest + live engines."""
 
     symbol: str
-    entry_ts: datetime
-    exit_ts: datetime
+    entry_at: datetime
+    exit_at: datetime
     side: Literal["long", "short"]
     entry_price: float
     exit_price: float
@@ -46,7 +53,7 @@ class TradeResult:
     net_pnl: float
     gross_return: float
     net_return: float
-    holding_periods: int
+    periods_held: int
 
 
 @dataclass(frozen=True)
@@ -74,18 +81,18 @@ class OrderEvent:
     symbol: str
     side: Literal["long", "short"]
     event_type: Literal["open", "add", "reduce", "close"]
-    quantity: float
+    fill_quantity: float
     price: float
     entry_price: float
-    position_quantity: float
+    remaining_quantity: float
     notional: float
     commission: float
     slippage: float
     tax: float
     pnl: float | None = None
     net_return: float | None = None
-    entry_ts: datetime | None = None
-    holding_periods: int | None = None
+    entry_at: datetime | None = None
+    periods_held: int | None = None
     reason: str = ""
 
 
@@ -140,9 +147,11 @@ def eval_equity(
             side=ps.side,
             entry_price=ps.entry_price,
             quantity=ps.quantity,
-            entry_ts=ps.entry_ts,
-            holding_periods=ps.holding_periods,
+            entry_at=ps.entry_at,
+            periods_held=ps.periods_held,
             unrealized_pnl=unrealized,
+            stop_price=ps.stop_price,
+            take_profit_price=ps.take_profit_price,
         )
     return mtm, snapshot
 
@@ -279,6 +288,114 @@ def close_position(
     return pnl, proceeds, fully_closed
 
 
+def build_close_event(
+    pos: PositionState,
+    ts: datetime,
+    exit_price: float,
+    cost_model: CostModel,
+    reason: str,
+    *,
+    quantity: float | None = None,
+) -> tuple[TradeResult, OrderEvent, float, bool]:
+    """Close a position (full/partial) and build its TradeResult + OrderEvent together.
+
+    Single place that turns a "close at this price" decision into the trade
+    record + lifecycle event, whoever the caller is (strategy-driven close,
+    stop-loss/take-profit trigger, end-of-run force-close). Keeps the three
+    call sites from hand-rolling slightly different OrderEvent constructions.
+
+    Returns (trade, event, cash_proceeds, fully_closed).
+    """
+    close_qty = min(quantity, pos.quantity) if quantity is not None else pos.quantity
+    pnl, proceeds, fully_closed = close_position(pos, exit_price, cost_model, quantity=close_qty)
+    trade = build_trade_result(pos, ts, exit_price, close_qty, pnl)
+    remaining_qty = 0.0 if fully_closed else max(0.0, pos.quantity - close_qty)
+    event = OrderEvent(
+        ts=ts, symbol=pos.symbol, side=pos.side,
+        event_type="close" if fully_closed else "reduce",
+        fill_quantity=close_qty, price=exit_price,
+        entry_price=pos.entry_price, remaining_quantity=remaining_qty,
+        notional=exit_price * close_qty * cost_model.multiplier,
+        commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
+        pnl=pnl.net_pnl, net_return=pnl.net_return,
+        entry_at=pos.entry_at, periods_held=pos.periods_held,
+        reason=reason,
+    )
+    return trade, event, proceeds, fully_closed
+
+
+# ---------------------------------------------------------------------------
+# Stop-loss / take-profit
+# ---------------------------------------------------------------------------
+
+
+def resolve_stop_exit(pos: PositionState, bar: dict[str, float]) -> tuple[float, str] | None:
+    """Check whether this bar's range triggers pos's stop-loss or take-profit.
+
+    stop_price is modeled as a stop-market order: once the bar's range
+    reaches it, it fills at the *worse* of (stop_price, bar open) to capture
+    gap-through risk. take_profit_price is modeled as a limit order: it
+    fills exactly at that price once touched. Stop-loss is checked first —
+    if both would trigger on the same bar, the conservative outcome wins.
+
+    Returns (fill_price, reason) or None if neither is triggered.
+    """
+    high, low, open_ = bar.get("high"), bar.get("low"), bar.get("open")
+    if high is None or low is None or open_ is None:
+        return None
+    is_long = pos.side == "long"
+
+    if pos.stop_price is not None:
+        triggered = low <= pos.stop_price if is_long else high >= pos.stop_price
+        if triggered:
+            fill = min(pos.stop_price, open_) if is_long else max(pos.stop_price, open_)
+            return fill, REASON_STOP_LOSS
+
+    if pos.take_profit_price is not None:
+        triggered = high >= pos.take_profit_price if is_long else low <= pos.take_profit_price
+        if triggered:
+            return pos.take_profit_price, REASON_TAKE_PROFIT
+
+    return None
+
+
+def check_stop_targets(
+    positions: dict[str, PositionState],
+    bars: dict[str, dict[str, float]],
+    ts: datetime,
+    *,
+    get_cost_model: Callable[[str], CostModel],
+) -> ActionResults:
+    """Force-close any position whose stop-loss/take-profit is hit this bar.
+
+    Shared by backtest and live engines — called once per bar, before the
+    strategy sees this bar's Context, so a triggered stop is filled and
+    reflected in the same bar's equity (real stop orders don't wait a bar).
+    Mutates *positions* in place.
+    """
+    trades: list[TradeResult] = []
+    events: list[OrderEvent] = []
+    cash_delta = 0.0
+
+    for sym in list(positions.keys()):
+        bar = bars.get(sym)
+        if bar is None:
+            continue
+        pos = positions[sym]
+        hit = resolve_stop_exit(pos, bar)
+        if hit is None:
+            continue
+        price, reason = hit
+        cost_model = get_cost_model(sym)
+        trade, event, proceeds, _ = build_close_event(pos, ts, price, cost_model, reason)
+        trades.append(trade)
+        events.append(event)
+        cash_delta += proceeds
+        del positions[sym]
+
+    return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
+
+
 # ---------------------------------------------------------------------------
 # Fill price resolution (shared by backtest + live engines)
 # ---------------------------------------------------------------------------
@@ -356,7 +473,7 @@ def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) 
 
 def build_trade_result(
     pos: PositionState,
-    exit_ts: datetime,
+    exit_at: datetime,
     exit_price: float,
     close_qty: float,
     pnl: TradePnL,
@@ -364,8 +481,8 @@ def build_trade_result(
     """Build a TradeResult from a (partial or full) close."""
     return TradeResult(
         symbol=pos.symbol,
-        entry_ts=pos.entry_ts,
-        exit_ts=exit_ts,
+        entry_at=pos.entry_at,
+        exit_at=exit_at,
         side=pos.side,
         entry_price=pos.entry_price,
         exit_price=exit_price,
@@ -377,7 +494,7 @@ def build_trade_result(
         net_pnl=pnl.net_pnl,
         gross_return=pnl.gross_return,
         net_return=pnl.net_return,
-        holding_periods=pos.holding_periods,
+        periods_held=pos.periods_held,
     )
 
 
@@ -443,17 +560,19 @@ def process_actions(
                         side=fill.side,
                         entry_price=price,
                         quantity=fill.quantity,
-                        entry_ts=ts,
-                        holding_periods=0,
+                        entry_at=ts,
+                        periods_held=0,
                         entry_commission=fill.commission,
                         entry_slippage=fill.slippage,
                         entry_tax=fill.tax,
                         total_entry_cost=price * fill.quantity * cost_model.multiplier,
+                        stop_price=action.stop_price,
+                        take_profit_price=action.take_profit_price,
                     )
                     events.append(OrderEvent(
                         ts=ts, symbol=sym, side=fill.side, event_type="open",
-                        quantity=fill.quantity, price=price,
-                        entry_price=price, position_quantity=fill.quantity,
+                        fill_quantity=fill.quantity, price=price,
+                        entry_price=price, remaining_quantity=fill.quantity,
                         notional=price * fill.quantity * cost_model.multiplier,
                         commission=fill.commission, slippage=fill.slippage,
                         tax=fill.tax, reason=reason,
@@ -469,10 +588,16 @@ def process_actions(
                     cash_delta -= outlay
                     scale_into_position(positions[sym], fill, cost_model)
                     pos = positions[sym]
+                    # WHY: re-issuing an add with a new stop/target lets a
+                    # strategy trail its stop without a separate action type.
+                    if action.stop_price is not None:
+                        pos.stop_price = action.stop_price
+                    if action.take_profit_price is not None:
+                        pos.take_profit_price = action.take_profit_price
                     events.append(OrderEvent(
                         ts=ts, symbol=sym, side=pos.side, event_type="add",
-                        quantity=fill.quantity, price=price,
-                        entry_price=pos.entry_price, position_quantity=pos.quantity,
+                        fill_quantity=fill.quantity, price=price,
+                        entry_price=pos.entry_price, remaining_quantity=pos.quantity,
                         notional=price * fill.quantity * cost_model.multiplier,
                         commission=fill.commission, slippage=fill.slippage,
                         tax=fill.tax, reason=reason,
@@ -493,29 +618,16 @@ def process_actions(
             if close_qty is not None and close_qty <= 0:
                 continue
 
-            actual_close_qty = min(close_qty, pos.quantity) if close_qty else pos.quantity
-            pnl, proceeds, fully_closed = close_position(
-                pos, price, cost_model, quantity=actual_close_qty,
+            trade, event, proceeds, fully_closed = build_close_event(
+                pos, ts, price, cost_model, reason, quantity=close_qty,
             )
-            trades.append(build_trade_result(pos, ts, price, actual_close_qty, pnl))
+            trades.append(trade)
+            events.append(event)
             cash_delta += proceeds
-
-            remaining_qty = 0.0 if fully_closed else max(0.0, pos.quantity - actual_close_qty)
-            events.append(OrderEvent(
-                ts=ts, symbol=sym, side=pos.side,
-                event_type="close" if fully_closed else "reduce",
-                quantity=actual_close_qty, price=price,
-                entry_price=pos.entry_price, position_quantity=remaining_qty,
-                notional=price * actual_close_qty * cost_model.multiplier,
-                commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
-                pnl=pnl.net_pnl, net_return=pnl.net_return,
-                entry_ts=pos.entry_ts, holding_periods=pos.holding_periods,
-                reason=reason,
-            ))
 
             if fully_closed:
                 del positions[sym]
             else:
-                reduce_position(pos, actual_close_qty)
+                reduce_position(pos, trade.quantity)
 
     return ActionResults(trades=trades, events=events, cash_delta=cash_delta)

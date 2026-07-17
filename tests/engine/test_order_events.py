@@ -1,7 +1,7 @@
 """Tests for OrderEvent generation in process_actions and engine.
 
 Verifies open/add/reduce/close events have correct
-entry_price, position_quantity, pnl, net_return, and reason.
+entry_price, remaining_quantity, pnl, net_return, and reason.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class TestOpenEvent:
         assert e.event_type == "open"
         assert e.side == "long"
         assert e.symbol == "TEST"
-        assert e.position_quantity > 0
+        assert e.remaining_quantity > 0
         assert e.entry_price == 100.0
 
     def test_sell_produces_short_open(self):
@@ -59,15 +59,15 @@ class TestOpenEvent:
         events, _, _ = _run([Action(type="long", symbol="TEST")])
         assert events[0].pnl is None
         assert events[0].net_return is None
-        assert events[0].entry_ts is None
-        assert events[0].holding_periods is None
+        assert events[0].entry_at is None
+        assert events[0].periods_held is None
 
 
 class TestAddEvent:
     def test_scale_in_produces_add(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=90.0, quantity=5.0,
-            entry_ts=TS, holding_periods=3, entry_commission=0, entry_slippage=0, entry_tax=0,
+            entry_at=TS, periods_held=3, entry_commission=0, entry_slippage=0, entry_tax=0,
             total_entry_cost=450.0,
         )}
         events, _, _ = _run(
@@ -77,8 +77,8 @@ class TestAddEvent:
         assert len(events) == 1
         e = events[0]
         assert e.event_type == "add"
-        assert e.quantity == 5.0
-        assert e.position_quantity == 10.0
+        assert e.fill_quantity == 5.0
+        assert e.remaining_quantity == 10.0
         # entry_price = (450 + 500) / 10 = 95.0
         assert np.isclose(e.entry_price, 95.0)
         assert e.pnl is None
@@ -88,7 +88,7 @@ class TestReduceCloseEvents:
     def test_partial_close_produces_reduce(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, holding_periods=5, entry_commission=0, entry_slippage=0, entry_tax=0,
+            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
             total_entry_cost=800.0,
         )}
         events, trades, _ = _run(
@@ -99,20 +99,20 @@ class TestReduceCloseEvents:
         assert len(trades) == 1
         e = events[0]
         assert e.event_type == "reduce"
-        assert e.quantity == 4.0
-        assert e.position_quantity == 6.0
+        assert e.fill_quantity == 4.0
+        assert e.remaining_quantity == 6.0
         assert e.entry_price == 80.0
         assert e.pnl is not None
         assert e.net_return is not None
-        assert e.entry_ts == TS
-        assert e.holding_periods == 5
+        assert e.entry_at == TS
+        assert e.periods_held == 5
         # PnL: (100 - 80) * 4 = 80
         assert np.isclose(e.pnl, 80.0)
 
     def test_full_close_produces_close(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, holding_periods=5, entry_commission=0, entry_slippage=0, entry_tax=0,
+            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
             total_entry_cost=800.0,
         )}
         events, _, pos = _run(
@@ -122,15 +122,15 @@ class TestReduceCloseEvents:
         assert len(events) == 1
         e = events[0]
         assert e.event_type == "close"
-        assert e.quantity == 10.0
-        assert e.position_quantity == 0.0
+        assert e.fill_quantity == 10.0
+        assert e.remaining_quantity == 0.0
         assert "TEST" not in pos
 
     def test_close_qty_exceeds_position_clamped(self):
         """action.quantity > pos.quantity should be clamped, not inflate the event."""
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, holding_periods=5, entry_commission=0, entry_slippage=0, entry_tax=0,
+            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
             total_entry_cost=800.0,
         )}
         events, trades, pos = _run(
@@ -140,15 +140,15 @@ class TestReduceCloseEvents:
         assert len(events) == 1
         e = events[0]
         assert e.event_type == "close"
-        assert e.quantity == 10.0  # clamped, not 999
-        assert e.position_quantity == 0.0
+        assert e.fill_quantity == 10.0  # clamped, not 999
+        assert e.remaining_quantity == 0.0
         assert trades[0].quantity == 10.0
         assert "TEST" not in pos
 
     def test_close_reason_carried(self):
         positions = {"TEST": PositionState(
             symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_ts=TS, holding_periods=5, entry_commission=0, entry_slippage=0, entry_tax=0,
+            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
             total_entry_cost=800.0,
         )}
         events, _, _ = _run(
@@ -165,9 +165,9 @@ class TestComplexLifecycle:
         positions: dict[str, PositionState] = {}
         all_events: list[OrderEvent] = []
 
-        def run_at(actions, price, positions, holding_periods_increment=0):
+        def run_at(actions, price, positions, periods_held_increment=0):
             for p in positions.values():
-                p.holding_periods += holding_periods_increment
+                p.periods_held += periods_held_increment
             result = process_actions(
                 actions, positions, 1_000_000.0, TS,
                 get_price=lambda sym, action: price,
@@ -179,29 +179,29 @@ class TestComplexLifecycle:
         # 1. buy 10@100
         run_at([Action(type="long", symbol="TEST", quantity=10)], 100.0, positions)
         assert all_events[-1].event_type == "open"
-        assert all_events[-1].position_quantity == 10.0
+        assert all_events[-1].remaining_quantity == 10.0
 
         # 2. buy 5@120 (scale in)
         run_at([Action(type="long", symbol="TEST", quantity=5)], 120.0, positions, 3)
         assert all_events[-1].event_type == "add"
-        assert all_events[-1].position_quantity == 15.0
+        assert all_events[-1].remaining_quantity == 15.0
         assert np.isclose(all_events[-1].entry_price, (100 * 10 + 120 * 5) / 15)
 
         # 3. sell 3@130 (partial close)
         run_at([Action(type="close", symbol="TEST", quantity=3)], 130.0, positions, 2)
         assert all_events[-1].event_type == "reduce"
-        assert all_events[-1].position_quantity == 12.0
+        assert all_events[-1].remaining_quantity == 12.0
         assert all_events[-1].pnl is not None
 
         # 4. buy 8@110 (scale in again)
         run_at([Action(type="long", symbol="TEST", quantity=8)], 110.0, positions, 1)
         assert all_events[-1].event_type == "add"
-        assert all_events[-1].position_quantity == 20.0
+        assert all_events[-1].remaining_quantity == 20.0
 
         # 5. sell all @140 (full close)
         run_at([Action(type="close", symbol="TEST")], 140.0, positions, 5)
         assert all_events[-1].event_type == "close"
-        assert all_events[-1].position_quantity == 0.0
+        assert all_events[-1].remaining_quantity == 0.0
         assert all_events[-1].pnl is not None
 
         assert len(all_events) == 5
@@ -232,7 +232,7 @@ class TestShortLifecycle:
         assert all_events[0].side == "short"
         assert all_events[1].event_type == "add"
         assert all_events[2].event_type == "close"
-        assert all_events[2].position_quantity == 0.0
+        assert all_events[2].remaining_quantity == 0.0
         # Short profit: (avg_entry - 90) * 15
         assert all_events[2].pnl > 0
 

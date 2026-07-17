@@ -25,9 +25,9 @@ def _make_run_metadata(**kwargs) -> RunMetadata:
         symbol="MXFR1",
         timeframe="H1",
         data_source="binance_spot",
-        start_ts=START,
-        end_ts=END,
-        run_ts=NOW,
+        started_at=START,
+        ended_at=END,
+        run_at=NOW,
     )
     defaults.update(kwargs)
     return RunMetadata(**defaults)
@@ -38,18 +38,18 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
         EquityCurvePoint(
             ts=datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc),
             equity=1_000_000.0,
-            ret_1d=0.0,
+            period_return=0.0,
             drawdown=0.0,
             benchmark_equity=1_000_000.0,
-            benchmark_ret_1d=0.0,
+            benchmark_period_return=0.0,
         ),
         EquityCurvePoint(
             ts=datetime(2026, 3, 2, 10, 0, 0, tzinfo=timezone.utc),
             equity=1_005_000.0,
-            ret_1d=0.005,
+            period_return=0.005,
             drawdown=0.0,
             benchmark_equity=1_001_000.0,
-            benchmark_ret_1d=0.001,
+            benchmark_period_return=0.001,
         ),
     ]
 
@@ -123,10 +123,10 @@ def test_equity_curve_point_benchmark_optional() -> None:
     pt = EquityCurvePoint(
         ts=NOW,
         equity=1_000_000.0,
-        ret_1d=0.01,
+        period_return=0.01,
         drawdown=-0.005,
     )
     assert pt.benchmark_equity is None
-    assert pt.benchmark_ret_1d is None
+    assert pt.benchmark_period_return is None
 
 

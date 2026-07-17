@@ -104,8 +104,8 @@ def _stat_panel(
 # Threshold = 2x strategy timeframe (not poll_seconds) to avoid false Offline on brief delays.
 _STATUS_SQL = (
     "SELECT CASE"
-    " WHEN last_heartbeat IS NULL THEN -1"
-    " WHEN last_heartbeat > now() - "
+    " WHEN last_heartbeat_at IS NULL THEN -1"
+    " WHEN last_heartbeat_at > now() - "
     "CASE UPPER(timeframe)"
     " WHEN 'H1' THEN interval '2 hours'"
     " WHEN '1H' THEN interval '2 hours'"
@@ -128,7 +128,7 @@ _STATUS_SQL = (
 STATUS_PANEL: dict = {
     "_type": "kpi",
     "title": "Status",
-    "description": "Online if last_heartbeat within 2x timeframe. Offline = process may have stopped.",
+    "description": "Online if last_heartbeat_at within 2x timeframe. Offline = process may have stopped.",
     "type": "stat",
     "h": 4,
     "w": 4,
@@ -341,15 +341,15 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT symbol, timeframe, data_source, start_ts, end_ts"
+                " SELECT symbol, timeframe, data_source, started_at, ended_at"
                 " FROM backtest_runs WHERE run_id = '${run_id}')"
                 " SELECT o.ts AS time, o.close"
                 " FROM ohlcv o, meta m"
                 " WHERE o.symbol = m.symbol"
                 " AND o.timeframe = m.timeframe"
                 " AND (m.data_source IS NULL OR o.data_source = m.data_source)"
-                " AND (m.start_ts IS NULL OR o.ts >= m.start_ts)"
-                " AND (m.end_ts IS NULL OR o.ts <= m.end_ts)"
+                " AND (m.started_at IS NULL OR o.ts >= m.started_at)"
+                " AND (m.ended_at IS NULL OR o.ts <= m.ended_at)"
                 " AND $__timeFilter(o.ts)"
                 " ORDER BY o.ts",
                 "A",
@@ -373,7 +373,7 @@ BASE_PANELS_DEF: list[dict] = [
         "description": (
             "Position lifecycle: open/add = entry side, reduce/close = exit side.\n"
             "P&L and return shown on reduce/close rows only (weighted-average entry price).\n"
-            "One full lifecycle = position_quantity goes from 0 → N → 0."
+            "One full lifecycle = remaining_quantity goes from 0 → N → 0."
         ),
         "type": "table",
         "h": 15,
@@ -386,15 +386,15 @@ BASE_PANELS_DEF: list[dict] = [
                 " event_type AS \"Event\","
                 " symbol AS \"Symbol\","
                 " side AS \"Side\","
-                " ROUND(quantity::numeric,4) AS \"Qty\","
+                " ROUND(fill_quantity::numeric,4) AS \"Qty\","
                 " ROUND(price::numeric,2) AS \"Price\","
                 " ROUND(entry_price::numeric,2) AS \"Avg Entry\","
-                " ROUND(position_quantity::numeric,4) AS \"Pos Qty\","
+                " ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\","
                 " ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\","
                 " ROUND(pnl::numeric,2) AS \"Net P&L\","
                 " ROUND(net_return::numeric,2) AS \"Net Return %\","
-                " entry_ts AS \"Entry Time\","
-                " holding_periods AS \"Periods\","
+                " entry_at AS \"Entry Time\","
+                " periods_held AS \"Periods\","
                 " reason AS \"Reason\""
                 " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND $__timeFilter(ts)"
@@ -520,7 +520,7 @@ EXTRA_PANELS: list[dict] = [
             " FROM backtest_runs WHERE run_id='${run_id}'"
             "),\n"
             "pos AS (\n"
-            "  SELECT side, entry_price, position_quantity AS quantity\n"
+            "  SELECT side, entry_price, remaining_quantity\n"
             "  FROM trade_events\n"
             "  WHERE run_id = '${run_id}'\n"
             "  ORDER BY ts DESC LIMIT 1\n"
@@ -531,10 +531,10 @@ EXTRA_PANELS: list[dict] = [
             "    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
-            "SELECT CASE WHEN p.quantity > 0 THEN\n"
+            "SELECT CASE WHEN p.remaining_quantity > 0 THEN\n"
             "  CASE WHEN p.side='long'\n"
-            "    THEN (l.close - p.entry_price) * p.quantity\n"
-            "    ELSE (p.entry_price - l.close) * p.quantity\n"
+            "    THEN (l.close - p.entry_price) * p.remaining_quantity\n"
+            "    ELSE (p.entry_price - l.close) * p.remaining_quantity\n"
             "  END ELSE NULL END AS \"PnL\"\n"
             "FROM pos p, latest l"
         ),
@@ -552,14 +552,14 @@ EXTRA_PANELS: list[dict] = [
         "Current Position",
         (
             "WITH pos AS (\n"
-            "  SELECT side, position_quantity AS quantity, entry_price\n"
+            "  SELECT side, remaining_quantity, entry_price\n"
             "  FROM trade_events\n"
             "  WHERE run_id = '${run_id}'\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
-            "SELECT CASE WHEN quantity > 0 THEN\n"
+            "SELECT CASE WHEN remaining_quantity > 0 THEN\n"
             "  CASE WHEN side='long' THEN '+' ELSE '-' END\n"
-            "  || ROUND(quantity::numeric, 4) || ' @ '\n"
+            "  || ROUND(remaining_quantity::numeric, 4) || ' @ '\n"
             "  || ROUND(entry_price::numeric, 2)\n"
             "ELSE NULL END AS \"Position\"\n"
             "FROM pos"
@@ -711,12 +711,17 @@ def render_unified_dashboard() -> dict:
         [("Backtest", "backtest"), ("Sim", "sim"), ("Live", "live")],
         label="Mode",
     )
+    strategy_var = _make_query_variable(
+        "strategy",
+        "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        label="Strategy",
+    )
     run_id_var = _make_query_variable(
         "run_id",
         "SELECT run_id FROM backtest_runs"
-        " WHERE mode='${mode}'"
+        " WHERE mode='${mode}' AND strategy='${strategy}'"
         " AND run_id IN (SELECT run_id FROM strategy_performance)"
-        " ORDER BY run_ts DESC LIMIT 20",
+        " ORDER BY run_at DESC LIMIT 20",
         label="Run ID",
     )
 
@@ -730,7 +735,7 @@ def render_unified_dashboard() -> dict:
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [mode_var, run_id_var],
+            "list": [mode_var, strategy_var, run_id_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},
@@ -791,7 +796,7 @@ _EXC_CTE = (
     f"    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
     f"  FROM signal_events s, meta\n"
     f"  JOIN LATERAL (\n"
-    f"    SELECT $fill_price_field AS entry_price, ts AS entry_ts FROM ohlcv\n"
+    f"    SELECT $fill_price_field AS entry_price, ts AS entry_at FROM ohlcv\n"
     f"    WHERE {_OHLCV_WHERE} AND ts > s.ts\n"
     f"    ORDER BY ts LIMIT 1\n"
     f"  ) entry_bar ON true\n"
@@ -807,7 +812,7 @@ _EXC_CTE = (
     f" END / NULLIF(entry_bar.entry_price, 0)) AS mae\n"
     f"    FROM (\n"
     f"      SELECT high, low FROM ohlcv\n"
-    f"      WHERE {_OHLCV_WHERE} AND ts > entry_bar.entry_ts\n"
+    f"      WHERE {_OHLCV_WHERE} AND ts > entry_bar.entry_at\n"
     f"      ORDER BY ts LIMIT $n\n"
     f"    ) b\n"
     f"  ) exc ON true\n"
@@ -1030,11 +1035,16 @@ def render_signal_monitor() -> dict:
             label="Mode",
         ),
         _make_query_variable(
+            "strategy",
+            "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+            label="Strategy",
+        ),
+        _make_query_variable(
             "run_id",
             "SELECT run_id FROM backtest_runs"
-            " WHERE mode='${mode}'"
+            " WHERE mode='${mode}' AND strategy='${strategy}'"
             " AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL)"
-            " ORDER BY run_ts DESC LIMIT 20",
+            " ORDER BY run_at DESC LIMIT 20",
             label="Run ID",
         ),
         _make_textbox_variable("n", "24", label="Forward Horizon (bars)"),

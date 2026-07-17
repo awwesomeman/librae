@@ -43,14 +43,33 @@
         "label": "Mode"
       },
       {
+        "name": "strategy",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        "query": "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 0,
+        "multi": false,
+        "label": "Strategy"
+      },
+      {
         "name": "run_id",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND run_id IN (SELECT run_id FROM strategy_performance) ORDER BY run_ts DESC LIMIT 20",
-        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND run_id IN (SELECT run_id FROM strategy_performance) ORDER BY run_ts DESC LIMIT 20",
+        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy='${strategy}' AND run_id IN (SELECT run_id FROM strategy_performance) ORDER BY run_at DESC LIMIT 20",
+        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy='${strategy}' AND run_id IN (SELECT run_id FROM strategy_performance) ORDER BY run_at DESC LIMIT 20",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -83,11 +102,11 @@
     },
     {
       "title": "Status",
-      "description": "Online if last_heartbeat within 2x timeframe. Offline = process may have stopped.",
+      "description": "Online if last_heartbeat_at within 2x timeframe. Offline = process may have stopped.",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT CASE WHEN last_heartbeat IS NULL THEN -1 WHEN last_heartbeat > now() - CASE UPPER(timeframe) WHEN 'H1' THEN interval '2 hours' WHEN '1H' THEN interval '2 hours' WHEN 'M5' THEN interval '10 minutes' WHEN '5M' THEN interval '10 minutes' WHEN 'M15' THEN interval '30 minutes' WHEN '15M' THEN interval '30 minutes' WHEN 'H4' THEN interval '8 hours' WHEN '4H' THEN interval '8 hours' WHEN 'D1' THEN interval '2 days' WHEN '1D' THEN interval '2 days' ELSE interval '2 hours' END THEN 1 ELSE 0 END AS status FROM backtest_runs WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT CASE WHEN last_heartbeat_at IS NULL THEN -1 WHEN last_heartbeat_at > now() - CASE UPPER(timeframe) WHEN 'H1' THEN interval '2 hours' WHEN '1H' THEN interval '2 hours' WHEN 'M5' THEN interval '10 minutes' WHEN '5M' THEN interval '10 minutes' WHEN 'M15' THEN interval '30 minutes' WHEN '15M' THEN interval '30 minutes' WHEN 'H4' THEN interval '8 hours' WHEN '4H' THEN interval '8 hours' WHEN 'D1' THEN interval '2 days' WHEN '1D' THEN interval '2 days' ELSE interval '2 hours' END THEN 1 ELSE 0 END AS status FROM backtest_runs WHERE run_id = '${run_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -212,7 +231,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT side, entry_price, position_quantity AS quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta\n  WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.quantity\n    ELSE (p.entry_price - l.close) * p.quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT side, entry_price, remaining_quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta\n  WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.remaining_quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.remaining_quantity\n    ELSE (p.entry_price - l.close) * p.remaining_quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -279,7 +298,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH pos AS (\n  SELECT side, position_quantity AS quantity, entry_price\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN quantity > 0 THEN\n  CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2)\nELSE NULL END AS \"Position\"\nFROM pos",
+          "rawSql": "WITH pos AS (\n  SELECT side, remaining_quantity, entry_price\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN remaining_quantity > 0 THEN\n  CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(remaining_quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2)\nELSE NULL END AS \"Position\"\nFROM pos",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -818,7 +837,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source, start_ts, end_ts FROM backtest_runs WHERE run_id = '${run_id}') SELECT o.ts AS time, o.close FROM ohlcv o, meta m WHERE o.symbol = m.symbol AND o.timeframe = m.timeframe AND (m.data_source IS NULL OR o.data_source = m.data_source) AND (m.start_ts IS NULL OR o.ts >= m.start_ts) AND (m.end_ts IS NULL OR o.ts <= m.end_ts) AND $__timeFilter(o.ts) ORDER BY o.ts",
+          "rawSql": "WITH meta AS ( SELECT symbol, timeframe, data_source, started_at, ended_at FROM backtest_runs WHERE run_id = '${run_id}') SELECT o.ts AS time, o.close FROM ohlcv o, meta m WHERE o.symbol = m.symbol AND o.timeframe = m.timeframe AND (m.data_source IS NULL OR o.data_source = m.data_source) AND (m.started_at IS NULL OR o.ts >= m.started_at) AND (m.ended_at IS NULL OR o.ts <= m.ended_at) AND $__timeFilter(o.ts) ORDER BY o.ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -875,11 +894,11 @@
     },
     {
       "title": "Trade Events",
-      "description": "Position lifecycle: open/add = entry side, reduce/close = exit side.\nP&L and return shown on reduce/close rows only (weighted-average entry price).\nOne full lifecycle = position_quantity goes from 0 → N → 0.",
+      "description": "Position lifecycle: open/add = entry side, reduce/close = exit side.\nP&L and return shown on reduce/close rows only (weighted-average entry price).\nOne full lifecycle = remaining_quantity goes from 0 → N → 0.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(position_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_ts AS \"Entry Time\", holding_periods AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_at AS \"Entry Time\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {

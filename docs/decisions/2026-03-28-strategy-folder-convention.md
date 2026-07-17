@@ -111,8 +111,8 @@ strategies/                 # production 策略（每個子資料夾遵循標準
     utils.py                # fetch + ETL + signals
     run.py                  # --mode backtest|monitor|live
 
-experiments/                # 策略研究實驗（獨立可執行）
-  trendpullback_btc/
+  experiments/               # 策略研究實驗（獨立可執行，不被其他模組 import）
+    trendpullback_btc/
 
 db/                         # TimescaleDB 讀寫
 app/                        # Streamlit UI

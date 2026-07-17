@@ -7,20 +7,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pandas as pd
 import pytest
 
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     ActionResults,
-    build_trade_result,
-    calc_trade_pnl,
     close_position,
     process_actions,
     reduce_position,
     scale_into_position,
 )
-from librae.core.strategy import Action, BaseStrategy, Context, Fill, PositionState
+from librae.core.strategy import Action, Fill, PositionState
 
 
 # ---------------------------------------------------------------------------
@@ -51,15 +48,15 @@ def _make_pos(
     side: str = "long",
     entry_price: float = 100.0,
     quantity: float = 10.0,
-    holding_periods: int = 5,
+    periods_held: int = 5,
     cm: CostModel | None = None,
 ) -> PositionState:
     cm = cm or _zero_cost()
     return PositionState(
         symbol=symbol, side=side,
         entry_price=entry_price, quantity=quantity,
-        entry_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        holding_periods=holding_periods,
+        entry_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        periods_held=periods_held,
         entry_commission=cm.calc_commission(entry_price, quantity),
         entry_slippage=cm.calc_slippage(quantity),
         entry_tax=cm.calc_tax(entry_price, quantity),
@@ -448,7 +445,7 @@ class TestEdgeCases:
         cm = _zero_cost()
 
         # Open
-        result1 = _run_actions(
+        _run_actions(
             [Action(type="long", symbol="TEST")],  # auto-size
             positions, cash=10_000.0, prices={"TEST": 100.0}, cm=cm,
         )
@@ -591,7 +588,7 @@ class TestMarginRate:
         """Position sizing uses margin_rate, allowing larger futures positions."""
         cm = _futures_cost()
         positions: dict[str, PositionState] = {}
-        result = _run_actions(
+        _run_actions(
             [Action(type="long", symbol="TEST")],
             positions, cash=100_000.0,
             prices={"TEST": 20_000.0}, cm=cm,

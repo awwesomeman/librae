@@ -362,7 +362,7 @@ config.yaml + CLI flags
 | `total_bars` | `total_periods` | metrics.py, backtest/engine.py, timescale_writer.py |
 | `exposed_bars` | `exposed_periods` | backtest/engine.py, backtest/schema.py, metrics.py |
 | `holding_bars` | `holding_periods` | executor.py, backtest/engine.py, backtest/schema.py, timescale_writer.py, timescale_reader.py |
-| `bars_held` | `periods_held` | strategy.py (PositionState, Context), executor.py, live/engine.py, backtest/engine.py |
+| `periods_held` | `periods_held` | strategy.py (PositionState, Context), executor.py, live/engine.py, backtest/engine.py |
 | `interval_bars` | `interval_periods` | config/notification.py |
 
 > DB column `holding_bars` 在 `trade_events` 表中 → 改為 `holding_periods`（drop + recreate，不做 migration）。

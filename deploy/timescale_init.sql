@@ -11,12 +11,12 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT,
-    start_ts        TIMESTAMPTZ,
-    end_ts          TIMESTAMPTZ,
-    run_ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at      TIMESTAMPTZ,
+    ended_at        TIMESTAMPTZ,
+    run_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     mode            TEXT DEFAULT 'backtest',
     poll_seconds    INTEGER,
-    last_heartbeat  TIMESTAMPTZ,
+    last_heartbeat_at TIMESTAMPTZ,
     params          JSONB,
     perf_params     JSONB,
     config_hash     VARCHAR(32),
@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     equity              DOUBLE PRECISION,
     benchmark_equity    DOUBLE PRECISION,
     drawdown            DOUBLE PRECISION,
-    ret_1d              DOUBLE PRECISION,
-    benchmark_ret_1d    DOUBLE PRECISION,
+    period_return       DOUBLE PRECISION,
+    benchmark_period_return DOUBLE PRECISION,
     strategy            TEXT
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
@@ -55,18 +55,18 @@ CREATE TABLE IF NOT EXISTS trade_events (
     symbol          TEXT,
     side            TEXT,
     event_type      TEXT,
-    quantity        DOUBLE PRECISION,
+    fill_quantity   DOUBLE PRECISION,
     price           DOUBLE PRECISION,
     entry_price     DOUBLE PRECISION,
-    position_quantity DOUBLE PRECISION,
+    remaining_quantity DOUBLE PRECISION,
     notional        DOUBLE PRECISION,
     commission      DOUBLE PRECISION NOT NULL DEFAULT 0,
     slippage        DOUBLE PRECISION NOT NULL DEFAULT 0,
     tax             DOUBLE PRECISION NOT NULL DEFAULT 0,
     pnl             DOUBLE PRECISION,
     net_return      DOUBLE PRECISION,
-    entry_ts        TIMESTAMPTZ,
-    holding_periods INTEGER,
+    entry_at        TIMESTAMPTZ,
+    periods_held       INTEGER,
     reason          TEXT,
     CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
     CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close')),
@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS signal_events (
     signal_value    DOUBLE PRECISION NOT NULL,
     price           DOUBLE PRECISION,
     signal_type     TEXT NOT NULL DEFAULT 'entry',
-    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim')),
+    CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim', 'live')),
     CONSTRAINT chk_signal_type CHECK (signal_type IN ('entry', 'exit'))
 );
 SELECT create_hypertable('signal_events', 'ts', if_not_exists => TRUE);
@@ -139,3 +139,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_events_unique
 CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
     ON signal_events (strategy, symbol, mode, ts DESC);
+
+-- ============================================================
+-- ohlcv_coverage_ranges — get_ohlcv() cache 覆蓋區間追蹤 (非 hypertable)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ohlcv_coverage_ranges (
+    id              SERIAL PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    timeframe       TEXT NOT NULL,
+    data_source     TEXT NOT NULL,
+    range_started_at     TIMESTAMPTZ NOT NULL,
+    range_ended_at       TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
+    ON ohlcv_coverage_ranges(symbol, timeframe, data_source, range_started_at);

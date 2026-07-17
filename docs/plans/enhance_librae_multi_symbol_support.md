@@ -177,7 +177,7 @@ Engine 偵測 strategy 是否提供 `feature_fn_cross`，有則用之，否則 f
 1. `test_multi_symbol_cross_sectional_bars` — 兩個 symbol，驗證 `on_bar()` 每 cycle 只呼叫一次，`ctx.bars` 包含兩者
 2. `test_multi_symbol_run_id_format` — 驗證 multi-symbol run_id 格式
 3. `test_single_symbol_backward_compat` — 確認現有單標的行為不變
-4. `test_bars_held_increments_once_per_cycle` — 多標的時 `bars_held` 每 cycle 只 +1（所有持倉 symbol 統一遞增）
+4. `test_periods_held_increments_once_per_cycle` — 多標的時 `periods_held` 每 cycle 只 +1（所有持倉 symbol 統一遞增）
 5. `test_stale_data_watermark_any` — watermark=ANY 時，驗證 ctx.bars 含 stale bar
 6. `test_cross_symbol_action_execution` — 策略產出 Action(symbol="ETH") 在 BTC watermark 觸發時，下一 cycle 正確執行
 7. `test_feature_fn_cross_sectional` — 驗證 feature_fn_cross 被正確呼叫

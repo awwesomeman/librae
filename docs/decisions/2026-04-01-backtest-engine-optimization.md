@@ -2,7 +2,7 @@
 
 > 狀態：accepted（部分已實作）
 > 更新：2026-04-04 大部分項目已落地
-> 注記：已完成項目：short bugs（proceeds + exit tax + ctx.cash）、cache trim (#7)、Context slots (#3)、position scaling + partial close。待實作：SL/TP 內建 (#4)、precompute bars numpy (#2)、ctx.bars_back (#5)、dry-run 增強 (#6)。詳見 [enhance_librae_engine](../plans/enhance_librae_engine.md)
+> 注記：已完成項目：short bugs（proceeds + exit tax + ctx.cash）、cache trim (#7)、Context slots (#3)、position scaling + partial close。待實作：SL/TP 內建 (#4)、precompute bars numpy (#2)、ctx.bars_back (#5)、dry-run 增強 (#6)。詳見 [enhance_librae](../plans/enhance_librae.md)
 
 ## 核心定位
 

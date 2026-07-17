@@ -47,8 +47,9 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--config", type=str, default=None,
                    help="path to strategy config YAML (overrides built-in config)")
     p.add_argument("--mode", default="backtest", choices=["backtest", "sim", "live"])
-    p.add_argument("--poll-seconds", type=int, default=60,
-                   help="seconds between poll cycles (sim mode)")
+    p.add_argument("--poll-seconds", type=int, default=None,
+                   help="seconds between poll cycles (required for sim/live mode — "
+                        "no implicit default, must match the strategy's timeframe)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     p.add_argument("--no-annualize", action="store_true",
@@ -131,6 +132,42 @@ def floor_to_timeframe(dt: datetime, timeframe: str) -> datetime:
     return datetime.fromtimestamp(floored_epoch, tz=timezone.utc)
 
 
+def _resolve_market_and_data_source(
+    symbols: list[str],
+    market: str | None,
+    data_source: str | None,
+) -> tuple[str, str]:
+    """Resolve market/data_source: symbols.yaml is the default source, config.yaml
+    values (if given) are an explicit override — but must agree with the
+    registry for any symbol that's actually registered there, so the two
+    can't silently drift apart.
+
+    Symbols not in symbols.yaml (e.g. one-off experiment tickers) fall back
+    to config.yaml's values, or crypto/binance_spot if neither is set.
+    """
+    from librae.config.symbols import load_symbol_registry
+
+    registry = load_symbol_registry()
+    for sym in symbols:
+        entry = registry.get(sym)
+        if entry is None:
+            continue
+        if market is not None and market != entry.market:
+            raise ValueError(
+                f"config.yaml market={market!r} for {sym!r} disagrees with "
+                f"symbols.yaml ({entry.market!r}) — fix one of them."
+            )
+        if data_source is not None and data_source != entry.data_source:
+            raise ValueError(
+                f"config.yaml data_source={data_source!r} for {sym!r} disagrees "
+                f"with symbols.yaml ({entry.data_source!r}) — fix one of them."
+            )
+        market = market or entry.market
+        data_source = data_source or entry.data_source
+
+    return market or "crypto", data_source or "binance_spot"
+
+
 # ---------------------------------------------------------------------------
 # build_config() — sole factory for RunConfig
 # ---------------------------------------------------------------------------
@@ -159,8 +196,9 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         symbols = [s.strip() for s in str(symbols_raw).split(",")]
 
     timeframe = scfg.get("timeframe", "H1")
-    market = scfg.get("market", "crypto")
-    data_source = scfg.get("data_source", "binance_spot")
+    market, data_source = _resolve_market_and_data_source(
+        symbols, scfg.get("market"), scfg.get("data_source"),
+    )
     initial_balance = float(scfg.get("initial_balance", 100_000))
 
     # 1. Parse start/end (pop from params so they don't enter config_hash via params)
@@ -185,6 +223,18 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     # 3. dry_run -> no_db
     dry_run = args.dry_run
     no_db = args.no_db or dry_run
+
+    # poll_seconds has no implicit default in sim/live — must be set explicitly
+    # so it's a deliberate choice matched to the strategy's timeframe, not a
+    # silently-inherited 60s that may poll too slowly (missed bars) or too
+    # fast (wasted API calls) for whatever timeframe this strategy uses.
+    if args.mode in ("sim", "live") and args.poll_seconds is None:
+        raise ValueError(
+            "--poll-seconds is required for sim/live mode. "
+            f"Set it explicitly to match timeframe={timeframe!r} "
+            "(e.g. <= one bar's worth of seconds)."
+        )
+    poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
 
     # 4. Perf params (with data_source defaults)
     default_annual = _DATA_SOURCE_ANNUAL_PERIODS.get(data_source, 365)
@@ -211,7 +261,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
         annual_periods=int(perf.get("annual_periods", default_annual)),
         ddof=int(perf.get("ddof", 1)),
-        poll_seconds=args.poll_seconds,
+        poll_seconds=poll_seconds,
         no_db=no_db,
         dry_run=dry_run,
         force=args.force,
@@ -245,11 +295,11 @@ def check_existing_run(cfg: RunConfig) -> str | None:
     Shared by strategy backtest + signal backtest.
     """
     try:
-        from db.timescale_reader import find_run_by_config_hash
+        from db.timescale_reader import get_run_by_config_hash
     except ImportError:
         return None
 
-    existing = find_run_by_config_hash(cfg.config_hash)
+    existing = get_run_by_config_hash(cfg.config_hash)
     if not existing:
         return None
 

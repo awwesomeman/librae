@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Heartbeat monitor — alerts via Telegram when sim/live services go stale.
 
-Queries backtest_runs for active sim/live runs whose last_heartbeat exceeds
+Queries backtest_runs for active sim/live runs whose last_heartbeat_at exceeds
 the expected interval (default: 3× poll_seconds). Designed to run as a cron
 job or standalone watchdog, independent of the monitored services.
 
@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import logging
 import time
-from datetime import datetime, timezone
 
 from db import get_conn
 from librae.config.notification import TelegramConfig
@@ -39,11 +38,11 @@ def find_stale_runs() -> list[dict[str, str]]:
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT run_id, strategy, symbol, mode, poll_seconds, last_heartbeat
+            SELECT run_id, strategy, symbol, mode, poll_seconds, last_heartbeat_at
             FROM backtest_runs
             WHERE mode IN ('sim', 'live')
-              AND last_heartbeat IS NOT NULL
-              AND last_heartbeat < NOW() - (poll_seconds * %s || ' seconds')::interval
+              AND last_heartbeat_at IS NOT NULL
+              AND last_heartbeat_at < NOW() - (poll_seconds * %s || ' seconds')::interval
         """, (STALE_MULTIPLIER,))
         rows = cur.fetchall()
         cur.close()
@@ -55,7 +54,7 @@ def find_stale_runs() -> list[dict[str, str]]:
             "symbol": r[2],
             "mode": r[3],
             "poll_seconds": r[4],
-            "last_heartbeat": r[5].isoformat() if r[5] else "unknown",
+            "last_heartbeat_at": r[5].isoformat() if r[5] else "unknown",
         }
         for r in rows
     ]
@@ -71,11 +70,11 @@ def check_and_alert(adapter: TelegramAdapter) -> int:
     for run in stale:
         logger.warning(
             "Stale heartbeat: %s/%s (last: %s)",
-            run["strategy"], run["symbol"], run["last_heartbeat"],
+            run["strategy"], run["symbol"], run["last_heartbeat_at"],
         )
         adapter.send_alert(
             title=f"{EMOJI_WARNING} [{run['strategy']}] Heartbeat Timeout",
-            message=f"Symbol: {run['symbol']}\nLast seen: {run['last_heartbeat']}\nService may be down. Check logs.",
+            message=f"Symbol: {run['symbol']}\nLast seen: {run['last_heartbeat_at']}\nService may be down. Check logs.",
         )
     return len(stale)
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Literal, Sequence
 
 import pandas as pd
@@ -62,9 +62,9 @@ class RunMetadata:
     symbol: str
     timeframe: str
     data_source: str
-    start_ts: datetime
-    end_ts: datetime
-    run_ts: datetime
+    started_at: datetime
+    ended_at: datetime
+    run_at: datetime
     params: dict | None = None
     mode: str = "backtest"
 
@@ -75,10 +75,10 @@ class EquityCurvePoint:
 
     ts: datetime
     equity: float
-    ret_1d: float
+    period_return: float
     drawdown: float
     benchmark_equity: float | None = None
-    benchmark_ret_1d: float | None = None
+    benchmark_period_return: float | None = None
     strategy: str | None = None
 
 
@@ -91,18 +91,18 @@ class OrderEventRecord:
     symbol: str
     side: Literal["long", "short"]
     event_type: Literal["open", "add", "reduce", "close"]
-    quantity: float
+    fill_quantity: float
     price: float
     entry_price: float
-    position_quantity: float
+    remaining_quantity: float
     notional: float
     commission: float = 0.0
     slippage: float = 0.0
     tax: float = 0.0
     pnl: float | None = None
     net_return: float | None = None
-    entry_ts: datetime | None = None
-    holding_periods: int | None = None
+    entry_at: datetime | None = None
+    periods_held: int | None = None
     reason: str = ""
 
 

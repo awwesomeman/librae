@@ -21,9 +21,11 @@ class Position:
     side: Literal["long", "short"]
     entry_price: float
     quantity: float
-    entry_ts: datetime
-    holding_periods: int
+    entry_at: datetime
+    periods_held: int
     unrealized_pnl: float
+    stop_price: float | None = None
+    take_profit_price: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,13 @@ class Action:
             str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
             float — limit price; fills only if next bar's low <= price <= high.
             None  — use engine default (RunConfig.params["fill_price"], typically "open").
+        stop_price: Absolute price that force-closes the position (stop-market
+            order — fills at the worse of stop_price/bar-open on gap-through).
+            Only applied on open/scale of a "long"/"short" action; the engine
+            checks it every bar after this one until the position closes.
+        take_profit_price: Absolute price that force-closes the position
+            (limit order — fills exactly at this price when the bar's range
+            touches it). Same lifecycle as stop_price.
     """
 
     type: Literal["long", "short", "close", "hold"]
@@ -67,6 +76,8 @@ class Action:
     quantity: float | None = None
     reason: str = ""
     fill_price: str | float | None = None
+    stop_price: float | None = None
+    take_profit_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -97,12 +108,14 @@ class PositionState:
     side: Literal["long", "short"]
     entry_price: float
     quantity: float
-    entry_ts: datetime
-    holding_periods: int
+    entry_at: datetime
+    periods_held: int
     entry_commission: float
     entry_slippage: float
     entry_tax: float
     total_entry_cost: float
+    stop_price: float | None = None
+    take_profit_price: float | None = None
 
 
 class BaseStrategy(ABC):

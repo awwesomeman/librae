@@ -1,16 +1,21 @@
 """Unified OHLCV data access — DB-first with API fallback.
 
 Single entry point for all OHLCV data needs (backtest, sim, pipeline).
-Checks DB for existing data, fetches gaps from exchange API, and upserts
-results back to DB.
+Tracks which time ranges are already cached per (symbol, timeframe,
+data_source) in ohlcv_coverage_ranges — possibly several disjoint ranges — so a
+request only pays for whatever slice isn't already covered, instead of
+re-fetching the whole span between old and new data for a disjoint request.
 
     df = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start="2025-10-01", end="2026-04-01")
     df = get_ohlcv("TXFR1", "5m", data_source="shioaji", start="2025-01-01", warmup_periods=200)
 
 Adding a new data source
 ------------------------
-Register a fetcher function with ``register_ohlcv_fetcher`` before calling
-``get_ohlcv``.  The fetcher signature is::
+Any ccxt exchange can be registered in one line via ``_ccxt_fetcher``::
+
+    register_ohlcv_fetcher("okx_spot", _ccxt_fetcher("okx"))
+
+For non-ccxt sources, register a fetcher function directly. The signature is::
 
     def my_fetcher(
         symbol: str,
@@ -30,7 +35,6 @@ from typing import Callable
 
 import pandas as pd
 
-from data.binance import fetch_ohlcv as _binance_fetch_ohlcv
 from data.utils import parse_dt
 from librae.core.utils import interval_to_timedelta, to_canonical, to_ccxt
 
@@ -60,13 +64,46 @@ def register_ohlcv_fetcher(data_source: str, fn: Callable) -> None:
     _OHLCV_FETCHERS[data_source] = fn
 
 
-def _binance_fetcher(
-    symbol: str, interval: str, start: datetime, end: datetime,
-) -> pd.DataFrame:
-    return _binance_fetch_ohlcv(symbol=symbol, interval=interval, start=start, end=end, use_cache=False)
+def _ccxt_fetcher(exchange_id: str) -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
+    """Build a get_ohlcv-compatible fetcher backed by CryptoAdapter (ccxt).
+
+    Paginates via ``since`` until [start, end] is covered — a single ccxt
+    call is capped at ~1000 bars, so large windows need multiple pages.
+    Works read-only (no API key needed) for any ccxt exchange id.
+    """
+    def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        from brokers.crypto_adapter import CryptoAdapter
+
+        adapter = CryptoAdapter(exchange_id=exchange_id)
+        limit = 1000
+        since_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+
+        pages: list[pd.DataFrame] = []
+        while since_ms <= end_ms:
+            page = adapter.fetch_ohlcv(symbol, interval, limit, since=since_ms)
+            if page.empty:
+                break
+            pages.append(page)
+            last_ts_ms = int(page["ts"].iloc[-1].timestamp() * 1000)
+            next_since_ms = last_ts_ms + 1
+            if next_since_ms <= since_ms:
+                break  # no progress — avoid looping forever
+            since_ms = next_since_ms
+            if len(page) < limit:
+                break  # short page — caught up to the exchange's latest data
+
+        if not pages:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+
+        df = pd.concat(pages, ignore_index=True).rename(columns={"ts": "timestamp"})
+        df = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+        return df.reset_index(drop=True)
+
+    return _fetch
 
 
-register_ohlcv_fetcher("binance_spot", _binance_fetcher)
+register_ohlcv_fetcher("binance_spot", _ccxt_fetcher("binance"))
 
 
 # ---------------------------------------------------------------------------
@@ -117,26 +154,30 @@ def get_ohlcv(
     if warmup_periods > 0:
         start_dt = start_dt - interval_to_timedelta(tf_ccxt) * warmup_periods
 
-    # 1. Try DB first
-    db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
+    # 1. Find gaps against tracked coverage (may be several disjoint ranges)
+    coverage = _query_coverage(symbol, tf_ccxt, data_source)
+    if coverage is None:
+        # DB unavailable — skip caching, fetch the full range directly.
+        logger.warning("Coverage lookup failed, fetching full range from API (no cache)")
+        return _fetch_from_api(symbol, tf_ccxt, start_dt, end_dt, data_source)
 
-    if db_df is not None and not db_df.empty:
-        gaps = _find_gaps(db_df, start_dt, end_dt, tf_ccxt)
-        if not gaps:
-            logger.debug("DB hit: %s %s (%d bars)", symbol, tf_ccxt, len(db_df))
-            return db_df
-        logger.info("DB partial: %s %s, %d gaps to fill", symbol, tf_ccxt, len(gaps))
-    else:
-        gaps = [(start_dt, end_dt)]
-        logger.info("DB miss: %s %s, fetching full range from API", symbol, tf_ccxt)
+    gaps = _compute_gaps(coverage, start_dt, end_dt)
+    if not gaps:
+        logger.debug("DB hit: %s %s (fully covered)", symbol, tf_ccxt)
+        db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
+        return db_df if db_df is not None else pd.DataFrame(columns=OHLCV_COLUMNS)
+    logger.info("DB partial: %s %s, %d gaps to fill", symbol, tf_ccxt, len(gaps))
 
-    # 2. Fill gaps from API → upsert to DB
+    # 2. Fill gaps from API → upsert bars + mark covered (even if a gap
+    # legitimately returns no bars, e.g. an exchange holiday — otherwise
+    # every future call would re-fetch that same empty window forever).
     fetched_parts: list[pd.DataFrame] = []
     for gap_start, gap_end in gaps:
         api_df = _fetch_from_api(symbol, tf_ccxt, gap_start, gap_end, data_source)
         if not api_df.empty:
             fetched_parts.append(api_df)
             _upsert_db(api_df, symbol, tf_ccxt, data_source)
+        _merge_coverage(symbol, tf_ccxt, data_source, gap_start, gap_end)
 
     # 3. Re-read from DB (merges existing + newly upserted data)
     db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
@@ -146,7 +187,7 @@ def get_ohlcv(
     # 4. Fallback: DB unavailable, return already-fetched API data
     if fetched_parts:
         return pd.concat(fetched_parts, ignore_index=True)
-    return _fetch_from_api(symbol, tf_ccxt, start_dt, end_dt, data_source)
+    return pd.DataFrame(columns=OHLCV_COLUMNS)
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +205,7 @@ def _query_db(
         df = load_ohlcv(
             symbol=symbol, timeframe=to_canonical(tf_ccxt),
             data_source=data_source,
-            start_ts=start_dt.isoformat(), end_ts=end_dt.isoformat(),
+            started_at=start_dt.isoformat(), ended_at=end_dt.isoformat(),
         )
         if df.empty:
             return df
@@ -203,34 +244,50 @@ def _upsert_db(
         logger.warning("DB upsert failed: %s", e)
 
 
-def _find_gaps(
-    db_df: pd.DataFrame,
+def _query_coverage(
+    symbol: str, tf_ccxt: str, data_source: str,
+) -> list[tuple[datetime, datetime]] | None:
+    """Query cached coverage ranges for this key. Returns None if DB is unavailable."""
+    try:
+        from db.timescale_reader import get_ohlcv_coverage_ranges
+        return get_ohlcv_coverage_ranges(symbol, to_canonical(tf_ccxt), data_source)
+    except Exception as e:
+        logger.warning("Coverage query failed: %s", e)
+        return None
+
+
+def _merge_coverage(
+    symbol: str, tf_ccxt: str, data_source: str, start_dt: datetime, end_dt: datetime,
+) -> None:
+    """Mark [start_dt, end_dt] as cached for this key."""
+    try:
+        from db.timescale_writer import merge_ohlcv_coverage_ranges
+        merge_ohlcv_coverage_ranges(symbol, to_canonical(tf_ccxt), data_source, start_dt, end_dt)
+    except Exception as e:
+        logger.warning("Coverage merge failed: %s", e)
+
+
+def _compute_gaps(
+    ranges: list[tuple[datetime, datetime]],
     start_dt: datetime,
     end_dt: datetime,
-    tf_ccxt: str,
 ) -> list[tuple[datetime, datetime]]:
-    """Find missing time ranges in DB data.
+    """Sub-ranges of [start_dt, end_dt] not covered by any of ``ranges`` (sorted).
 
     Returns list of (gap_start, gap_end) tuples. Empty list = no gaps.
     """
-    if db_df.empty:
-        return [(start_dt, end_dt)]
-
-    ts_col = "timestamp" if "timestamp" in db_df.columns else "_time"
-    db_min = pd.Timestamp(db_df[ts_col].min()).to_pydatetime()
-    db_max = pd.Timestamp(db_df[ts_col].max()).to_pydatetime()
-
-    if db_min.tzinfo is None:
-        db_min = db_min.replace(tzinfo=timezone.utc)
-    if db_max.tzinfo is None:
-        db_max = db_max.replace(tzinfo=timezone.utc)
-
-    delta = interval_to_timedelta(tf_ccxt)
-
     gaps: list[tuple[datetime, datetime]] = []
-    if db_min > start_dt + delta:
-        gaps.append((start_dt, db_min))
-    if db_max < end_dt - delta:
-        gaps.append((db_max, end_dt))
-
+    cursor = start_dt
+    for range_started_at, range_ended_at in ranges:
+        if range_ended_at < cursor:
+            continue
+        if range_started_at > end_dt:
+            break
+        if range_started_at > cursor:
+            gaps.append((cursor, min(range_started_at, end_dt)))
+        cursor = max(cursor, range_ended_at)
+        if cursor >= end_dt:
+            break
+    if cursor < end_dt:
+        gaps.append((cursor, end_dt))
     return gaps

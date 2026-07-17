@@ -21,7 +21,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import pandas as pd
 
@@ -30,13 +30,13 @@ if TYPE_CHECKING:
     from librae.core.run_config import RunConfig
 
 from librae.config.market_config import MarketConfig
-from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
-    OrderEvent, TradePnL, TradeResult, build_trade_result,
-    close_position, direction, eval_equity, process_actions, resolve_fill_price,
+    REASON_FORCE_CLOSE, OrderEvent, TradePnL, TradeResult,
+    build_close_event, check_stop_targets, eval_equity, process_actions,
+    resolve_fill_price,
 )
-from librae.core.strategy import Action, BaseStrategy, Context, Fill, Position, PositionState
+from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
 logger = logging.getLogger(__name__)
@@ -211,6 +211,17 @@ class Backtest:
                 cash += result_actions.cash_delta
                 pending_actions = []
 
+            # ── Step 1.5: stop-loss / take-profit — checked every bar so a
+            # triggered stop fills and is reflected in this bar's equity,
+            # same as a resting broker-side stop order would ──
+            if positions:
+                result_stops = check_stop_targets(
+                    positions, bars, ts, get_cost_model=self._get_cost_model,
+                )
+                trades.extend(result_stops.trades)
+                all_events.extend(result_stops.events)
+                cash += result_stops.cash_delta
+
             # ── Step 2: equity snapshot (reflects just-executed trades) ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
@@ -231,7 +242,7 @@ class Backtest:
             )
             pending_actions = self._strategy.on_bar(ctx)
 
-            self._increment_holding_periods(positions)
+            self._increment_periods_held(positions)
 
         # WHY: pending_actions from last on_bar() are discarded — no T+1 bar to fill them.
         # Force-close all open positions at last bar
@@ -243,18 +254,11 @@ class Backtest:
                 last_bar = last_bars.get(sym)
                 price = last_bar["close"] if last_bar is not None else pos.entry_price
                 cost_model = self._get_cost_model(sym)
-                pnl, proceeds, _ = close_position(pos, price, cost_model)
-                trades.append(build_trade_result(pos, last_ts, price, pos.quantity, pnl))
-                all_events.append(OrderEvent(
-                    ts=last_ts, symbol=sym, side=pos.side, event_type="close",
-                    quantity=pos.quantity, price=price,
-                    entry_price=pos.entry_price, position_quantity=0.0,
-                    notional=price * pos.quantity * cost_model.multiplier,
-                    commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
-                    pnl=pnl.net_pnl, net_return=pnl.net_return,
-                    entry_ts=pos.entry_ts, holding_periods=pos.holding_periods,
-                    reason="force_close",
-                ))
+                trade, event, proceeds, _ = build_close_event(
+                    pos, last_ts, price, cost_model, REASON_FORCE_CLOSE,
+                )
+                trades.append(trade)
+                all_events.append(event)
                 cash += proceeds
                 del positions[sym]
 
@@ -277,7 +281,7 @@ class Backtest:
 
         All metadata is auto-derived from the engine state:
         - run_id: generated in run()
-        - start_ts/end_ts: from self._timeline
+        - started_at/ended_at: from self._timeline
         - symbol: from self._symbols[0]
         - strategy_name: from type(strategy).__name__
         - timeframe: inferred from data index
@@ -288,7 +292,7 @@ class Backtest:
         Raises RuntimeError if called before run().
         """
         from librae.backtest.schema import (
-            BacktestOutput, EquityCurvePoint, OrderEventRecord, RunMetadata,
+            BacktestOutput, RunMetadata,
         )
         from librae.core.metrics import compute_all
 
@@ -299,15 +303,15 @@ class Backtest:
         run_id = self._run_id
 
         timeline = self._timeline
-        start_ts = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
-        end_ts = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
+        started_at = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
+        ended_at = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
         symbol = self._symbols[0]
         timeframe = self._timeframe
 
         # Benchmark — computed here, not in run() (analysis config, not trade facts)
         benchmark_curve = self._compute_benchmark()
 
-        # Build TradePnL list + holding_periods from TradeResult
+        # Build TradePnL list + periods_held from TradeResult
         trade_pnl_list = [
             TradePnL(
                 gross_pnl=t.gross_pnl, net_pnl=t.net_pnl,
@@ -345,9 +349,9 @@ class Backtest:
             symbol=symbol,
             timeframe=timeframe,
             data_source=self._data_source,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            run_ts=datetime.now(tz=timezone.utc),
+            started_at=started_at,
+            ended_at=ended_at,
+            run_at=datetime.now(tz=timezone.utc),
         )
 
         event_records = self._build_event_records(result, run_id)
@@ -375,15 +379,15 @@ class Backtest:
             OrderEventRecord(
                 event_id=make_event_id(run_id, i),
                 ts=e.ts, symbol=e.symbol, side=e.side, event_type=e.event_type,
-                quantity=float(e.quantity), price=float(e.price),
+                fill_quantity=float(e.fill_quantity), price=float(e.price),
                 entry_price=float(e.entry_price),
-                position_quantity=float(e.position_quantity),
+                remaining_quantity=float(e.remaining_quantity),
                 notional=float(e.notional),
                 commission=float(e.commission), slippage=float(e.slippage),
                 tax=float(e.tax),
                 pnl=float(e.pnl) if e.pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
-                entry_ts=e.entry_ts, holding_periods=e.holding_periods,
+                entry_at=e.entry_at, periods_held=e.periods_held,
                 reason=e.reason,
             )
             for i, e in enumerate(result.order_events)
@@ -394,7 +398,7 @@ class Backtest:
         result: BacktestResult,
         benchmark_curve: list[float] | None,
     ) -> list[EquityCurvePoint]:
-        """Build EquityCurvePoints with drawdown, ret_1d, and benchmark alignment."""
+        """Build EquityCurvePoints with drawdown, period_return, and benchmark alignment."""
         from librae.backtest.schema import EquityCurvePoint
 
         has_bm = benchmark_curve is not None and len(benchmark_curve) > 0
@@ -406,7 +410,7 @@ class Backtest:
             eq = snap.equity
             peak = max(peak, eq)
             drawdown = (eq - peak) / peak if peak > 0 else 0.0
-            ret_1d = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
+            period_return = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
             prev_eq = eq
 
             bm_eq, bm_ret = None, None
@@ -417,8 +421,8 @@ class Backtest:
 
             equity_points.append(EquityCurvePoint(
                 ts=snap.ts, equity=float(eq),
-                ret_1d=float(ret_1d), drawdown=float(drawdown),
-                benchmark_equity=bm_eq, benchmark_ret_1d=bm_ret,
+                period_return=float(period_return), drawdown=float(drawdown),
+                benchmark_equity=bm_eq, benchmark_period_return=bm_ret,
             ))
         return equity_points
 
@@ -444,9 +448,9 @@ class Backtest:
         return result
 
     @staticmethod
-    def _increment_holding_periods(positions: dict[str, PositionState]) -> None:
+    def _increment_periods_held(positions: dict[str, PositionState]) -> None:
         for ps in positions.values():
-            ps.holding_periods += 1
+            ps.periods_held += 1
 
     def _eval_equity(
         self,

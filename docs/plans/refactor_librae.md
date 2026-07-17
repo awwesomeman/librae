@@ -603,7 +603,7 @@ Persistence（獨立函式，不在 BacktestOutput 上）：
 | `close_position()` 從 backtest 私有提升到 `core/executor.py` 共用 | 消除 backtest `_close_position` 和 live `_record_trade` 的 PnL 計算重複 |
 | `TradeResult` 從 `backtest/engine.py` 搬到 `core/executor.py` | live 也需要 typed TradeResult（取代 raw dict callback），避免 live→backtest 的跨層依賴 |
 | Live `on_trade` callback 從 `dict` 改為 `TradeResult` | 型別安全，caller 不用猜 key name |
-| Live `_bars_held` dict 消除 | `PositionState` 是 mutable，直接 `.bars_held += 1`，消除 double bookkeeping |
+| Live `_bars_held` dict 消除 | `PositionState` 是 mutable，直接 `.periods_held += 1`，消除 double bookkeeping |
 | `direction()` 提升為 `core/executor.py` public function | 消除 4 處 inline `-1.0 if side == "short" else 1.0` |
 | `make_trade_id()` 抽到 `core/utils.py` | 消除 3 處 inline `f"{run_id}-t{i:04d}"` |
 
