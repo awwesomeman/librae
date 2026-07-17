@@ -23,8 +23,7 @@ backtest/                   回測 runtime
 
 live/                       即時 / 模擬 runtime
 ├── engine.py               LiveTrader — polling loop + 信號偵測
-├── executor.py             LiveExecutor（sim 通知 / live 下單）
-└── signal_poller.py        SignalPoller — 訊號專用輪詢
+└── executor.py             LiveExecutor（sim 通知 / live 下單）
 
 config/                     設定管理
 ├── markets.yaml            市場參數（成本模型、tick_size、乘數、保證金率）
@@ -123,14 +122,14 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `Context` | 不可變快照：ts, symbol, symbols, bar, bars, positions, cash, period_index |
 | `Action` | 策略意圖：`type` = long / short / close / hold |
 | `Position` | 凍結持倉（給策略看）：symbol, side, entry_price, quantity, unrealized_pnl |
-| `PositionState` | 可變持倉（引擎內部）：追蹤 holding_periods, entry_commission, entry_slippage, entry_tax, total_entry_cost |
+| `PositionState` | 可變持倉（引擎內部）：追蹤 periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
 ### Execution 層
 
 | 類型 | 說明 |
 |------|------|
 | `Fill` | 成交回報：price, quantity, commission, slippage, tax |
-| `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + holding_periods |
+| `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + periods_held |
 | `TradePnL` | PnL 拆解：gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate |
 
@@ -142,7 +141,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `RunMetadata` | run_id, strategy, symbol, timeframe, start/end/run timestamps |
 | `StrategyMetrics` | 績效指標：total_return, sharpe, sortino, calmar, max_drawdown, win_rate... |
 | `OrderEventRecord` | 部位生命週期事件（open/add/reduce/close）|
-| `EquityCurvePoint` | 單點：ts, equity, ret_1d, drawdown, benchmark_equity |
+| `EquityCurvePoint` | 單點：ts, equity, period_return, drawdown, benchmark_equity |
 
 ### 共用函數
 

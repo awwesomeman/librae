@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from librae.config.market_config import MarketConfig
     from librae.core.run_config import RunConfig
 
-from librae.core import EPSILON
 
 logger = logging.getLogger(__name__)
 

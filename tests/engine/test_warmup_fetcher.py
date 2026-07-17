@@ -1,11 +1,9 @@
 """Tests for DB-first warmup fetcher in LiveTrader."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
-import pytest
 
 from tests.conftest import make_test_cfg
 

@@ -1,0 +1,15 @@
+# Per-symbol registry — which market + default data source a symbol resolves to.
+# Market-level cost/contract params live in markets.yaml (MarketConfig);
+# this is the thin layer above it mapping individual symbols to their market.
+#
+# continuous_alias: true marks a rolling continuous-futures alias (e.g. R1/R2
+# splices) that needs back-adjustment/rollover handling, not a concrete contract.
+
+BTCUSDT:
+  market: crypto
+  data_source: binance_spot
+
+TXFR1:
+  market: tw_futures
+  data_source: shioaji
+  continuous_alias: true

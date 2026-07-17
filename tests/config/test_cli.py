@@ -34,7 +34,7 @@ class TestParseWithConfig:
         p = base_parser("test")
         ns = parse_with_config(p, config_path=None)
         assert ns.mode == "backtest"
-        assert ns.poll_seconds == 60
+        assert ns.poll_seconds is None  # no implicit default — must be set for sim/live
 
     def test_yaml_scalars_become_argparse_defaults(self, config_yaml):
         cfg = config_yaml("""\

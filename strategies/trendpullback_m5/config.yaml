@@ -4,11 +4,9 @@
 
 strategy:
   name: trendpullback_m5
-  symbol: BTCUSDT
-  market: crypto
+  symbol: BTCUSDT   # market/data_source resolved from librae/config/symbols.yaml
   initial_balance: 100000
   timeframe: M5
-  data_source: binance_spot
   params:
     periods: 8640
     max_hold_periods: 24

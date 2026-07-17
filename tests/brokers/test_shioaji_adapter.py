@@ -6,8 +6,7 @@ Marked tw_live so they are skipped when shioaji is not installed.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -30,12 +29,21 @@ def _make_adapter(*, ca_activated: bool = False):
 
 
 def _make_kbars_response():
-    """Simulate Shioaji kbars() return value (dict of lists)."""
+    """Simulate Shioaji kbars() return value (dict of lists).
+
+    ``ts`` is raw nanoseconds, encoding Taipei wall-clock time as if it were
+    a UTC epoch (Shioaji's actual behavior — see taipei_time.py) — these
+    values correspond to Taipei local 09:00/09:05/09:10 on 2026-04-01, i.e.
+    true UTC 01:00/01:05/01:10.
+    """
+    taipei_wall_clock = pd.to_datetime(
+        ["2026-04-01 09:00", "2026-04-01 09:05", "2026-04-01 09:10"],
+        utc=True,
+    )
     return {
-        "ts": pd.to_datetime(
-            ["2026-04-01 09:00", "2026-04-01 09:05", "2026-04-01 09:10"],
-            utc=True,
-        ).tolist(),
+        # as_unit("ns") forces true nanosecond ints regardless of pandas's
+        # default DatetimeIndex resolution — Shioaji's raw ts is always ns.
+        "ts": taipei_wall_clock.as_unit("ns").astype("int64").tolist(),
         "open": [20100.0, 20120.0, 20150.0],
         "high": [20130.0, 20160.0, 20180.0],
         "low": [20080.0, 20100.0, 20140.0],
@@ -54,18 +62,31 @@ class TestFetchOhlcv:
         adapter._api.kbars.return_value = _make_kbars_response()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
 
-        df = adapter.fetch_ohlcv("TXFR1", "1min")
+        df = adapter.fetch_ohlcv("TXFR1", "1m")
 
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
         assert len(df) == 3
         assert pd.api.types.is_datetime64_any_dtype(df["ts"])
+
+    def test_corrects_taipei_epoch_offset(self):
+        """Shioaji's raw ts is Taipei wall-clock as fake-UTC; must be shifted -8h."""
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+
+        df = adapter.fetch_ohlcv("TXFR1", "1m")
+
+        expected = pd.to_datetime(
+            ["2026-04-01 01:00", "2026-04-01 01:05", "2026-04-01 01:10"], utc=True,
+        )
+        assert list(df["ts"]) == list(expected)
 
     def test_empty_response(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = {}
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
 
-        df = adapter.fetch_ohlcv("TXFR1", "1min")
+        df = adapter.fetch_ohlcv("TXFR1", "1m")
 
         assert df.empty
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
@@ -75,7 +96,7 @@ class TestFetchOhlcv:
         adapter._api.kbars.return_value = _make_kbars_response()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
 
-        df = adapter.fetch_ohlcv("TXFR1", "1min", limit=2)
+        df = adapter.fetch_ohlcv("TXFR1", "1m", limit=2)
 
         assert len(df) == 2
 

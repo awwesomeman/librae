@@ -15,7 +15,7 @@ from pathlib import Path
 
 from librae import Backtest
 from librae.config.market_config import get_market
-from db.timescale_writer import write_backtest_output, write_ohlcv
+from db.timescale_writer import save_backtest_output, write_ohlcv
 
 from .strategy import TrendMasterStrategy
 from .utils import fetch_and_prepare, prepare_signals
@@ -78,7 +78,7 @@ def run_backtest(args: argparse.Namespace) -> None:
 
     if not args.no_db:
         try:
-            counts = write_backtest_output(output)
+            counts = save_backtest_output(output)
             ohlcv_df = df.droplevel("symbol")[["open", "high", "low", "close", "volume"]]
             ohlcv_df.index.name = "ts"
             counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, data_source="binance_spot")
@@ -88,32 +88,11 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 
 def run_sim(args: argparse.Namespace) -> None:
-    """Run sim mode — delegates infrastructure to sim_wiring."""
-    from librae.live.wiring import build_live_trader
-
-    scfg = args.strategy
-    params = scfg["params"]
-    symbols = [s.strip() for s in scfg["symbol"].split(",")]
-    timeframe = scfg["timeframe"]
-
-    strategy = _build_strategy(params)
-
-    trader = build_live_trader(
-        strategy=strategy,
-        strategy_name=STRATEGY_NAME,
-        feature_fn=prepare_signals,
-        symbols=symbols,
-        timeframe=timeframe,
-        market=scfg["market"],
-        initial_balance=scfg["initial_balance"],
-        poll_seconds=args.poll_seconds,
-        warmup_periods=params["warmup_periods"],
-        no_db=args.no_db,
-        telegram_config=getattr(args, "telegram", None),
+    raise NotImplementedError(
+        "Sim mode not wired up — this experiment predates LiveTrader's "
+        "cfg=RunConfig wiring (see strategies/trendpullback/run.py for the "
+        "current pattern)."
     )
-    logger.info("Sim started: strategy=%s, symbols=%s, timeframe=%s, poll=%ds",
-                STRATEGY_NAME, symbols, timeframe, args.poll_seconds)
-    trader.run()
 
 
 def run_live(args: argparse.Namespace) -> None:

@@ -7,7 +7,6 @@ import pytest
 
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import BacktestOutput, StrategyMetrics
-from librae.core.cost_model import CostModel
 from librae.core.strategy import Action, BaseStrategy
 
 

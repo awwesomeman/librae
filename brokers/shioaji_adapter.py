@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pandas as pd
 
 from .base import AdapterInfo, CredentialConfig
+from .taipei_time import resample_taifex_ohlcv, shioaji_ts_ns_to_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ class ShioajiAdapter:
     def fetch_ohlcv(
         self,
         symbol: str,
-        timeframe: str = "1min",
+        timeframe: str = "1m",
         *,
         start: datetime | str | None = None,
         end: datetime | str | None = None,
@@ -121,20 +122,26 @@ class ShioajiAdapter:
     ) -> pd.DataFrame:
         """Fetch OHLCV via Shioaji kbars API.
 
-        Shioaji kbars always returns 1-min bars. When *timeframe* is
-        coarser (e.g. ``"5min"``, ``"1D"``), the result is resampled
-        using ``data.utils.resample_ohlcv``.
+        Shioaji kbars always returns 1-min bars. When *timeframe* is coarser,
+        the result is resampled on TAIFEX session/trading-day boundaries
+        (``taipei_time.resample_taifex_ohlcv``) — not a plain UTC-epoch grid,
+        which would mislabel bars around session opens/closes.
+
+        Shioaji's raw kbar ``ts`` encodes Taipei wall-clock time as if it
+        were a UTC epoch; this is corrected to a true UTC epoch before
+        returning (``taipei_time.shioaji_ts_ns_to_epoch``).
 
         Args:
             symbol: Contract code (e.g. ``"TXFR1"``, ``"2330"``).
-            timeframe: Target candle interval as pandas resample rule
-                (``"1min"``, ``"5min"``, ``"30min"``, ``"60min"``, ``"1D"``).
+            timeframe: Target candle interval, ccxt or canonical format
+                (e.g. ``"1m"``, ``"5m"``, ``"30m"``, ``"1h"``, ``"1d"``) —
+                same convention as CryptoAdapter.
             start/end: Date range as datetime or ``"YYYY-MM-DD"`` string.
                 If omitted, fetches the most recent *limit* bars.
             limit: Max bars (used only when start/end are omitted).
 
         Returns columns: ``[ts, open, high, low, close, volume]``
-        where ``ts`` is a UTC-aware datetime.
+        where ``ts`` is a true UTC-aware datetime.
         """
         contract = self._resolve_contract(symbol)
 
@@ -155,14 +162,13 @@ class ShioajiAdapter:
 
         # Normalise column names (Shioaji may return capitalised names)
         df.columns = df.columns.str.lower()
-        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        df["ts"] = pd.to_datetime(df["ts"].map(shioaji_ts_ns_to_epoch), unit="s", utc=True)
 
         # Resample if requested timeframe is coarser than 1-min
-        if timeframe not in ("1min", "1T"):
-            from data.utils import resample_ohlcv
-            df = df.set_index("ts")
-            df = resample_ohlcv(df, rule=timeframe)
-            df = df.reset_index().rename(columns={df.index.name or "index": "ts"})
+        if timeframe != "1m":
+            from librae.core.utils import interval_to_timedelta
+            target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
+            df = resample_taifex_ohlcv(df.set_index("ts"), target_seconds).reset_index()
 
         if not start and not end and len(df) > limit:
             df = df.tail(limit).reset_index(drop=True)

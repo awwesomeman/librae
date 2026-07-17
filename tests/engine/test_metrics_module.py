@@ -10,11 +10,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from librae.core.cost_model import CostModel
-from librae.backtest.engine import Backtest, BacktestResult, EquitySnapshot
-from librae.core.executor import TradeResult
+from librae.backtest.engine import Backtest
 from librae.core.strategy import Action, BaseStrategy
 from librae.core.metrics import compute_all
 from librae.backtest.schema import StrategyMetrics

@@ -27,7 +27,7 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: quant_timescaledb
     ports:
-      - "${TSDB_BIND:-127.0.0.1}:5432:5432"
+      - "${TSDB_BIND:-127.0.0.1}:${TSDB_PORT:-5432}:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
       - ./timescale_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
@@ -44,22 +44,6 @@ services:
     networks:
       - quant_network
 
-  tailscale:
-    image: tailscale/tailscale:latest
-    container_name: tailscale
-    hostname: quant-server
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY}
-      - TS_STATE_DIR=/var/lib/tailscale
-    volumes:
-      - tailscale_data:/var/lib/tailscale
-      - /dev/net/tun:/dev/net/tun
-    restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    network_mode: host
-
 networks:
   quant_network:
     name: quant_network
@@ -68,4 +52,3 @@ networks:
 volumes:
   grafana_data:
   timescaledb_data:
-  tailscale_data:

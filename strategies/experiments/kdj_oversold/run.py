@@ -2,8 +2,12 @@
 """KDJ Oversold — backtest + sim runner.
 
 Usage:
-    python -m experiments.utils.kdj_oversold.run          # backtest
-    python -m experiments.utils.kdj_oversold.run --sim    # sim (real-time monitoring)
+    python -m experiments.kdj_oversold.run          # backtest
+    python -m experiments.kdj_oversold.run --sim    # sim (real-time monitoring)
+
+Note: currently broken — imports `from .utils import ...` but this folder has
+no utils.py (missing since before this file was last touched). Needs
+DEFAULT_PARAMS/SIGNAL_NAME/prepare_signals written before run_backtest() works.
 """
 from __future__ import annotations
 
@@ -50,27 +54,11 @@ def run_backtest() -> None:
 
 
 def run_sim() -> None:
-    """Monitor signal in real-time via LiveTrader poll loop."""
-    from librae.live.wiring import build_live_trader
-    from .strategy import HoldStrategy
-
-    trader = build_live_trader(
-        strategy=HoldStrategy(),
-        strategy_name=SIGNAL_NAME,
-        feature_fn=prepare_signals,
-        symbols=[SYMBOL],
-        timeframe=TIMEFRAME,
-        market="crypto",
-        initial_balance=0,
-        poll_seconds=POLL_SECONDS,
-        warmup_periods=WARMUP_PERIODS,
-        no_db=False,
-        signal_column="entry_signal",
-        params=DEFAULT_PARAMS,
+    raise NotImplementedError(
+        "Sim mode not wired up — this experiment predates LiveTrader's "
+        "cfg=RunConfig wiring (see strategies/trendpullback/run.py for the "
+        "current pattern)."
     )
-    logger.info("Sim started: signal=%s, symbol=%s, timeframe=%s, poll=%ds",
-                SIGNAL_NAME, SYMBOL, TIMEFRAME, POLL_SECONDS)
-    trader.run()
 
 
 if __name__ == "__main__":

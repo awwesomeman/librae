@@ -1,7 +1,6 @@
 """Shared test fixtures and helpers."""
 from __future__ import annotations
 
-from librae.core.cost_model import CostModel
 from librae.core.run_config import RunConfig
 
 

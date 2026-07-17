@@ -106,7 +106,6 @@ def run_simple_sma_crossover(
     returns = [t["pnl_return"] for t in trades]
     pnl_pts = [t["pnl_points"] for t in trades]
     wins = [r for r in returns if r > 0]
-    losses = [r for r in returns if r <= 0]
 
     equity_curve = [1.0]
     for r in returns:

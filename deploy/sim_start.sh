@@ -5,11 +5,19 @@
 # Example:
 #   ./deploy/sim_start.sh trendpullback
 #   ./deploy/sim_start.sh trendpullback_m5 30
+#
+# Local dev (no SIM_IMAGE set in .env): builds the image from this checkout,
+# needs the full repo — same as always.
+# On a no-repo VM: set SIM_IMAGE in .env (e.g. ghcr.io/<user>/quant-sim) and
+# this pulls that image instead of building — run build_push_sim.sh locally
+# first whenever the code changes. Either way this script itself still needs
+# to exist on whichever machine runs it (already true via cloud_deploy.sh,
+# which syncs deploy/).
 set -euo pipefail
 
 STRATEGY="${1:?Usage: sim_start.sh <strategy> [poll_seconds]}"
 POLL_SECONDS="${2:-60}"
-IMAGE="quant-sim"
+IMAGE="${SIM_IMAGE:-quant-sim}"
 NETWORK="quant_network"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,9 +33,13 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     set +a
 fi
 
-# Always rebuild to pick up code changes
-echo "Building sim image..."
-docker build -q -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile.sim" "${SCRIPT_DIR}/.." >/dev/null
+if [[ -n "${SIM_IMAGE:-}" ]]; then
+    echo "Pulling ${IMAGE}:latest..."
+    docker pull -q "${IMAGE}:latest" >/dev/null
+else
+    echo "Building sim image locally..."
+    docker build -q -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile.sim" "${SCRIPT_DIR}/.." >/dev/null
+fi
 
 # Stop existing container with same name
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -35,7 +47,7 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     docker rm -f "${CONTAINER}" >/dev/null
 fi
 
-echo "Starting ${CONTAINER}: strategy=${STRATEGY}, symbol=${SYMBOL}, poll=${POLL_SECONDS}s"
+echo "Starting ${CONTAINER}: strategy=${STRATEGY}, poll=${POLL_SECONDS}s"
 
 docker run -d \
     --name "${CONTAINER}" \
