@@ -198,22 +198,25 @@ class ShioajiAdapter:
         contract = self._resolve_contract(signal["symbol"])
         is_futures = self._is_futures(signal["symbol"])
 
+        # shioaji >=1.4 moved these enums from shioaji.order.* to top-level
+        # shioaji.* (member names unchanged) — sj.order.Action etc. raises
+        # AttributeError on current versions.
         action = (
-            sj.order.Action.Buy if signal["side"] == "buy"
-            else sj.order.Action.Sell
+            sj.Action.Buy if signal["side"] == "buy"
+            else sj.Action.Sell
         )
         is_limit = signal.get("order_type") == "limit"
         if is_futures:
-            price_type = sj.order.FuturesPriceType.LMT if is_limit else sj.order.FuturesPriceType.MKT
+            price_type = sj.FuturesPriceType.LMT if is_limit else sj.FuturesPriceType.MKT
         else:
-            price_type = sj.order.StockPriceType.LMT if is_limit else sj.order.StockPriceType.MKT
+            price_type = sj.StockPriceType.LMT if is_limit else sj.StockPriceType.MKT
 
         order = self._api.Order(
             price=signal.get("price", 0),
             quantity=int(signal["quantity"]),
             action=action,
             price_type=price_type,
-            order_type=sj.order.OrderType.ROD,
+            order_type=sj.OrderType.ROD,
         )
         trade = self._api.place_order(contract, order)
         return {

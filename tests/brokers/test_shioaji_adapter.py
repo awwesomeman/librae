@@ -115,6 +115,64 @@ class TestReadOnlyGuard:
             adapter.get_position("TXFR1")
 
 
+class TestPlaceOrder:
+    """Exercises place_order()'s body against a mocked shioaji module — the
+    previous test suite only covered the read-only guard (above), never the
+    actual sj.Action/FuturesPriceType/OrderType construction, which is
+    exactly how a real bug shipped: shioaji >=1.4 moved these enums from
+    shioaji.order.* to top-level shioaji.*, and nothing caught it until a
+    real order attempt against the live API."""
+
+    def _mock_shioaji_module(self):
+        mock_sj = MagicMock()
+        mock_sj.Action.Buy = "BUY"
+        mock_sj.Action.Sell = "SELL"
+        mock_sj.FuturesPriceType.LMT = "FUT_LMT"
+        mock_sj.FuturesPriceType.MKT = "FUT_MKT"
+        mock_sj.StockPriceType.LMT = "STK_LMT"
+        mock_sj.StockPriceType.MKT = "STK_MKT"
+        mock_sj.OrderType.ROD = "ROD"
+        return mock_sj
+
+    def test_futures_limit_order_uses_futures_price_type(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._is_futures = MagicMock(return_value=True)
+        mock_trade = MagicMock()
+        mock_trade.status.id = "order123"
+        mock_trade.status.status = "PendingSubmit"
+        adapter._api.place_order.return_value = mock_trade
+        adapter._api.Order = MagicMock(return_value="mock_order")
+
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()):
+            result = adapter.place_order({
+                "symbol": "TXFR1", "side": "buy", "quantity": 1,
+                "order_type": "limit", "price": 17000,
+            })
+
+        adapter._api.Order.assert_called_once_with(
+            price=17000, quantity=1, action="BUY", price_type="FUT_LMT", order_type="ROD",
+        )
+        assert result == {"id": "order123", "status": "PendingSubmit"}
+
+    def test_stock_market_order_uses_stock_price_type(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._is_futures = MagicMock(return_value=False)
+        mock_trade = MagicMock()
+        mock_trade.status.id = "order456"
+        mock_trade.status.status = "Filled"
+        adapter._api.place_order.return_value = mock_trade
+        adapter._api.Order = MagicMock(return_value="mock_order")
+
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()):
+            adapter.place_order({"symbol": "2330", "side": "sell", "quantity": 1000})
+
+        adapter._api.Order.assert_called_once_with(
+            price=0, quantity=1000, action="SELL", price_type="STK_MKT", order_type="ROD",
+        )
+
+
 class TestResolveContract:
     def test_futures_found(self):
         adapter = _make_adapter()
