@@ -26,7 +26,9 @@ def crypto_cost() -> CostModel:
 
 @pytest.fixture
 def tw_futures_cost() -> CostModel:
-    """TW_TXFR: futures, multiplier=50, min_commission=100, tax on sell."""
+    """Generic TW futures cost math fixture (multiplier=50 is an arbitrary
+    test value here, not TXF's real multiplier — see TestFromConfig below
+    for the real per-symbol multiplier resolution, which TXFR1 needs)."""
     return CostModel(
         multiplier=50.0,
         commission_rate=0.0,
@@ -144,3 +146,39 @@ class TestTotalCost:
         # commission=100 + slippage=50 + tax=20
         cost = tw_futures_cost.total_cost(20_000.0, 1.0)
         assert np.isclose(cost, 170.0)
+
+
+# ── CostModel.from_config: per-symbol multiplier resolution ──────────────
+# Regression coverage for a real bug: markets.yaml's tw_futures multiplier
+# (50, matching MXF) was silently applied to TXFR1 (real multiplier 200)
+# because from_config() never consulted symbols.yaml at all.
+
+
+class TestFromConfig:
+    def _cfg(self, symbol: str, market: str = "tw_futures", data_source: str = "shioaji", **kwargs):
+        from librae.core.run_config import RunConfig
+        return RunConfig(
+            strategy_name="x", symbols=[symbol], timeframe="5m", market=market,
+            data_source=data_source, initial_balance=100_000.0, mode="backtest", **kwargs,
+        )
+
+    def test_registered_symbol_uses_its_own_multiplier(self) -> None:
+        cm = CostModel.from_config(self._cfg("TXFR1"))
+        assert cm.multiplier == 200.0  # not markets.yaml's tw_futures default (50)
+
+    def test_unregistered_symbol_falls_back_to_market_default(self) -> None:
+        cm = CostModel.from_config(self._cfg("SOME_UNREGISTERED_SYMBOL"))
+        assert cm.multiplier == 50.0
+
+    def test_crypto_spot_unaffected(self) -> None:
+        cm = CostModel.from_config(self._cfg("BTCUSDT", market="crypto", data_source="binance_spot"))
+        assert cm.multiplier == 1.0
+
+    def test_explicit_cost_overrides_win_over_symbol_multiplier(self) -> None:
+        cm = CostModel.from_config(self._cfg("TXFR1", cost_overrides={"multiplier": 999.0}))
+        assert cm.multiplier == 999.0
+
+    def test_explicit_override_object_wins_over_everything(self) -> None:
+        explicit = CostModel.zero()
+        cm = CostModel.from_config(self._cfg("TXFR1"), override=explicit)
+        assert cm is explicit

@@ -13,6 +13,12 @@
 #
 # continuous_alias: true marks a rolling continuous-futures alias (e.g. R1/R2
 # splices) that needs back-adjustment/rollover handling, not a concrete contract.
+#
+# multiplier: per-symbol override of markets.yaml's market-level multiplier —
+# required whenever symbols sharing one `market` have different contract
+# economics (e.g. tw_futures' TXF=200 vs MXF=50 vs TMF=10; markets.yaml can
+# only hold one number). Omit only when every symbol on that market genuinely
+# shares the market-level value (true for crypto spot today).
 
 BTCUSDT:
   market: crypto
@@ -24,3 +30,8 @@ TXFR1:
   data_source: shioaji
   instrument_type: contract_monthly
   continuous_alias: true
+  multiplier: 200.0  # 臺股期貨（大台）— NOT markets.yaml's tw_futures default (50, = MXF's)
+
+# Not registered yet — reference values for when they're actually added:
+#   MXFR1 (小型臺指期貨): multiplier: 50.0   (matches markets.yaml's tw_futures default)
+#   TMFR1 (微型臺指期貨): multiplier: 10.0

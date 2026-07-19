@@ -27,6 +27,7 @@ class TestLoadSymbolRegistry:
         assert btc.data_source == "binance_spot"
         assert btc.instrument_type == "spot"
         assert btc.continuous_alias is False
+        assert btc.multiplier is None  # no override — uses markets.yaml's crypto default
 
     def test_txfr1_fields(self, registry):
         txf = registry["TXFR1"]
@@ -34,6 +35,7 @@ class TestLoadSymbolRegistry:
         assert txf.data_source == "shioaji"
         assert txf.instrument_type == "contract_monthly"
         assert txf.continuous_alias is True
+        assert txf.multiplier == 200.0  # NOT markets.yaml's tw_futures default (50, = MXF's)
 
     def test_symbol_info_is_frozen(self, registry):
         with pytest.raises(AttributeError):

@@ -180,3 +180,18 @@ gcloud compute instances add-metadata <instance> --zone=<zone> \
 - 下單這條路徑風險高、卻是最容易「本機測過就以為沒事」的地方——本機用的 SDK 版本、Docker image 裡實際裝的 SDK 版本可能不一致，光靠本機跑過不代表 VM 上真的能跑。
 - 任何呼叫第三方 SDK enum/常數的程式碼，都要有測試真的呼叫到那一行，不能只測外層的 guard/例外路徑；「有測試」不等於「測到了會出錯的地方」。
 - 順帶一提：這次也看到 shioaji 印出 `Order() is deprecated, use StockOrder() or FuturesOrder()` 的警告——目前還能用，但下次 SDK 大版本升級時這個可能會變成下一個要修的坑，先記一筆。
+
+## 2026-07-19 markets.yaml 一個 market 只有一組 multiplier，TXFR1 套錯成 MXF 的值
+
+**症狀**：討論「用大台報價研究、微台下單」時往回查，發現 `librae/config/markets.yaml` 的 `tw_futures` market 只有 `multiplier: 50.0` 一組值。這個數字是小型臺指期貨（MXF）的 multiplier，不是唯一有註冊的 `TXFR1`（臺股期貨/大台）的——大台實際 multiplier 是 200。所有經過 `CostModel.from_config()` 算出來的 TXFR1 PnL/notional/commission/margin，數字都只有正確值的 1/4（50/200）。
+
+**根因**：`multiplier` 是**合約本身**的經濟參數，不是 market 分類的參數——但 schema 把它放在 `markets.yaml` 的 market 層級，同一個 `market: tw_futures` 底下的 TXF（200）/MXF（50）/TMF（10）三種商品被迫共用一個數字，選錯或漏改都不會有任何報錯或警告。
+
+**修法**：
+- `librae/config/symbols.py` 的 `SymbolInfo` 加 `multiplier: float | None = None` 欄位——每個 symbol 可以宣告自己真正的 multiplier，覆蓋 market 層級的預設值；`None` 表示沿用 `markets.yaml` 的值（適用於整個 market 底下商品經濟參數真的一致的情況，例如 crypto spot 全部都是 1.0）。
+- `librae/config/symbols.yaml` 幫 `TXFR1` 補上 `multiplier: 200.0`。
+- `CostModel.from_config()` 解析順序改成：explicit override > `cfg.cost_overrides` > `symbols.yaml` 的 per-symbol multiplier > market 層級預設值——原本完全沒有查 `symbols.yaml` 這一步。
+
+**預防**：
+- 一個 market 底下如果會放多種契約規格不同的商品（尤其是期貨，multiplier/保證金常常每個月份/規格都不一樣），market 層級的單一數值只能當「預設」，不能當「唯一真相」——真正決定 PnL 對不對的參數要能在 symbol 這一層被明確覆蓋、而且要有測試鎖住這個解析順序（見 `tests/engine/test_cost_model.py::TestFromConfig`），不能只靠人記得要在 config 手動 override。
+- 加新商品（尤其是同一個 market 底下的變體，例如大台/小台/微台）時，第一件事就是去確認 market 層級的預設值是否適用，不要假設「反正都是 XX 市場」。

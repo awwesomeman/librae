@@ -27,13 +27,23 @@ ALLOWED_INSTRUMENT_TYPES = frozenset({
 
 @dataclass(frozen=True)
 class SymbolInfo:
-    """Registry entry for a single symbol."""
+    """Registry entry for a single symbol.
+
+    multiplier: Contract multiplier override, e.g. TXF=200, MXF=50, TMF=10 —
+    all three are "market: tw_futures" but have wildly different economics,
+    so a single per-market multiplier in markets.yaml can't represent all of
+    them correctly at once. None (default) means "use markets.yaml's
+    market-level multiplier" — fine for markets where every registered
+    symbol genuinely shares one multiplier (e.g. crypto spot, always 1.0);
+    set explicitly here the moment that stops being true for a market.
+    """
 
     symbol: str
     market: str
     data_source: str
     instrument_type: str
     continuous_alias: bool = False
+    multiplier: float | None = None
 
     def __post_init__(self) -> None:
         if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
@@ -71,12 +81,14 @@ def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo
     for symbol, data in raw.items():
         if not isinstance(data, dict):
             continue
+        raw_multiplier = data.get("multiplier")
         registry[symbol] = SymbolInfo(
             symbol=symbol,
             market=str(data.get("market", "")),
             data_source=str(data.get("data_source", "")),
             instrument_type=str(data.get("instrument_type", "")),
             continuous_alias=bool(data.get("continuous_alias", False)),
+            multiplier=float(raw_multiplier) if raw_multiplier is not None else None,
         )
     return registry
 

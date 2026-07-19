@@ -65,16 +65,32 @@ class CostModel:
         cfg: RunConfig,
         override: CostModel | None = None,
     ) -> CostModel:
-        """Resolve cost model with standard priority: explicit > overrides > from market."""
+        """Resolve cost model with standard priority:
+        explicit override > cfg.cost_overrides > symbols.yaml per-symbol
+        multiplier > market-level default.
+
+        The per-symbol multiplier step matters whenever a market groups
+        instruments with different contract economics under one
+        markets.yaml entry (e.g. tw_futures: TXF=200 vs MXF=50 vs TMF=10) —
+        see librae/config/symbols.py's SymbolInfo.multiplier.
+        """
         if override is not None:
             return override
         from librae.config.market_config import get_market
         mc = get_market(cfg.market)
+        base = asdict(cls.from_market(mc))
+
+        from librae.config.symbols import get_symbol
+        try:
+            sym_multiplier = get_symbol(cfg.symbol).multiplier
+        except KeyError:
+            sym_multiplier = None
+        if sym_multiplier is not None:
+            base["multiplier"] = sym_multiplier
+
         if cfg.cost_overrides:
-            base = asdict(cls.from_market(mc))
             base.update(cfg.cost_overrides)
-            return cls(**base)
-        return cls.from_market(mc)
+        return cls(**base)
 
     @classmethod
     def from_market(cls, market: MarketConfig) -> CostModel:
