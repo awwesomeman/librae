@@ -7,7 +7,7 @@ Skills: python, quant
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -329,3 +329,35 @@ class TestLiveTrader:
         cfg = _test_cfg(mode="live")
         with pytest.raises(ValueError, match="order_adapter"):
             self._make_runner(cfg=cfg)
+
+
+class TestCryptoLiveAutoWiring:
+    """LiveTrader without an explicit adapter= override (the real code path
+    used in production) for crypto (non-tw_futures) live mode.
+
+    _make_runner above always passes adapter=, which bypasses this branch
+    entirely — so it never covered the auto-wiring that replaced the old
+    unconditional NotImplementedError for crypto live mode."""
+
+    def _build(self, monkeypatch, **kwargs):
+        monkeypatch.setenv("BINANCE_API_KEY", "k")
+        monkeypatch.setenv("BINANCE_API_SECRET", "s")
+        with patch("brokers.crypto_adapter.CryptoAdapter") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            trader = LiveTrader(
+                _HoldStrategy(), _simple_feature_fn, cfg=_test_cfg(mode="live"),
+                cost_model=_zero_cost_model(),
+                on_bar=None, on_order_event=None, on_ohlcv=None,
+                on_heartbeat=None, on_signal_outcome=None,
+                **kwargs,
+            )
+        return trader, mock_cls.return_value
+
+    def test_auto_builds_order_adapter_from_env(self, monkeypatch):
+        trader, adapter_instance = self._build(monkeypatch)
+        assert trader._executor._order_adapter is adapter_instance
+
+    def test_explicit_order_adapter_not_overridden(self, monkeypatch):
+        explicit = MagicMock()
+        trader, _ = self._build(monkeypatch, order_adapter=explicit)
+        assert trader._executor._order_adapter is explicit

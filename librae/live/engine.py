@@ -43,9 +43,10 @@ class LiveTrader:
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         cfg: RunConfig — the sole configuration source.
         adapter: OHLCVFetcher override. None -> build from cfg.market.
-        order_adapter: Required when cfg.mode == "live". Places real orders
-            (e.g. ShioajiAdapter, CryptoAdapter with trading credentials).
-            Ignored in sim mode (sim never places real orders).
+        order_adapter: Override for order placement. None -> auto-built from
+            cfg.market + env credentials when cfg.mode == "live" (SHIOAJI_*
+            for tw_futures, CRYPTO_* otherwise — same adapter instance used
+            for fetching, reused for orders). Ignored in sim mode.
         cost_model: CostModel override. None -> build from cfg.market.
         on_bar: _UNSET -> build DB callback from cfg; None -> no callback; callable -> use it.
         on_order_event: Same pattern as on_bar.
@@ -97,12 +98,19 @@ class LiveTrader:
             if order_adapter is None and cfg.mode == "live":
                 order_adapter = _shioaji
         else:
+            from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
             if cfg.mode == "live":
-                raise NotImplementedError(
-                    "Live mode requires an explicit adapter (e.g. ShioajiAdapter)"
-                )
-            from brokers.crypto_adapter import CryptoAdapter
-            _adapter = CryptoAdapter()
+                # BINANCE_API_KEY/BINANCE_API_SECRET required for live — read-only
+                # CryptoAdapter() (no creds) would fail place_order at trade time.
+                # Prefix is Binance-specific by convention (see crypto_adapter.py
+                # module docstring) — a second exchange would need its own prefix.
+                _adapter = CryptoAdapter(credentials=CryptoCredentials.from_env("BINANCE"))
+                # Reuse the same authenticated adapter for order placement — same
+                # pattern as Shioaji above — unless the caller passed one explicitly.
+                if order_adapter is None:
+                    order_adapter = _adapter
+            else:
+                _adapter = CryptoAdapter()
             self._fetcher = lambda symbol, tf, limit, *, drop_incomplete=False: (
                 _adapter.fetch_ohlcv(symbol, tf, limit, drop_incomplete=drop_incomplete)
             )
@@ -281,7 +289,7 @@ class LiveTrader:
     def _build_warmup_fetcher(self) -> Callable:
         def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
             """DB-first warmup: reads historical bars from DB, fills gaps from API."""
-            from data.ohlcv import get_ohlcv
+            from strategies.data.ohlcv import get_ohlcv
             from librae.core.utils import interval_to_timedelta
 
             warmup_start = datetime.now(tz=timezone.utc) - interval_to_timedelta(tf_ccxt) * limit
