@@ -334,12 +334,16 @@ def write_ohlcv(
     symbol: str,
     timeframe: str,
     data_source: str,
+    instrument_type: str = "spot",
     dsn: str = TIMESCALE_DSN,
 ) -> int:
     """Write OHLCV DataFrame to TimescaleDB ohlcv table.
 
     Expects df with DatetimeIndex (or 'ts'/'timestamp' column) and
-    columns: open, high, low, close, volume.
+    columns: open, high, low, close, volume. instrument_type is the
+    contract's expiry structure (see librae/config/symbols.py) — part of
+    the row's identity, not just metadata, so spot/perpetual/etc. sharing a
+    symbol+data_source can't silently overwrite each other.
     Returns number of rows written.
     """
     if df is None or df.empty:
@@ -367,6 +371,7 @@ def write_ohlcv(
         [symbol] * len(df),
         [timeframe] * len(df),
         [data_source] * len(df),
+        [instrument_type] * len(df),
         df["open"].astype(float),
         df["high"].astype(float),
         df["low"].astype(float),
@@ -378,10 +383,10 @@ def write_ohlcv(
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO ohlcv (ts, symbol, timeframe, data_source,
+            """INSERT INTO ohlcv (ts, symbol, timeframe, data_source, instrument_type,
                open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT (ts, symbol, timeframe, data_source) DO NOTHING""",
+               ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type) DO NOTHING""",
             rows,
             page_size=2000,
         )
@@ -441,6 +446,7 @@ def merge_ohlcv_coverage_ranges(
     data_source: str,
     range_started_at: datetime,
     range_ended_at: datetime,
+    instrument_type: str = "spot",
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Record [range_started_at, range_ended_at] as cached for this key.
@@ -452,8 +458,8 @@ def merge_ohlcv_coverage_ranges(
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         _merge_coverage_ranges(
-            cur, "ohlcv_coverage_ranges", ("symbol", "timeframe", "data_source"),
-            (symbol, timeframe, data_source), range_started_at, range_ended_at,
+            cur, "ohlcv_coverage_ranges", ("symbol", "timeframe", "data_source", "instrument_type"),
+            (symbol, timeframe, data_source, instrument_type), range_started_at, range_ended_at,
         )
         cur.close()
 
@@ -463,6 +469,7 @@ def write_external_factor(
     symbol: str,
     factor_name: str,
     source: str,
+    instrument_type: str = "spot",
     dsn: str = TIMESCALE_DSN,
 ) -> int:
     """Write a factor DataFrame to TimescaleDB external_factors table.
@@ -487,6 +494,7 @@ def write_external_factor(
         [symbol] * len(df),
         [factor_name] * len(df),
         [source] * len(df),
+        [instrument_type] * len(df),
         df["value"].astype(float),
     ))
 
@@ -494,9 +502,9 @@ def write_external_factor(
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO external_factors (ts, symbol, factor_name, source, value)
+            """INSERT INTO external_factors (ts, symbol, factor_name, source, instrument_type, value)
                VALUES %s
-               ON CONFLICT (ts, symbol, factor_name, source) DO NOTHING""",
+               ON CONFLICT (ts, symbol, factor_name, source, instrument_type) DO NOTHING""",
             rows,
             page_size=2000,
         )
@@ -511,19 +519,21 @@ def merge_external_factor_coverage_ranges(
     source: str,
     range_started_at: datetime,
     range_ended_at: datetime,
+    instrument_type: str = "spot",
     dsn: str = TIMESCALE_DSN,
 ) -> None:
     """Record [range_started_at, range_ended_at] as cached for this factor key.
 
     Same merge semantics as merge_ohlcv_coverage_ranges(), keyed by
-    (symbol, factor_name, source) instead of (symbol, timeframe, data_source).
+    (symbol, factor_name, source, instrument_type) instead of
+    (symbol, timeframe, data_source, instrument_type).
     """
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         _merge_coverage_ranges(
-            cur, "external_factor_coverage_ranges", ("symbol", "factor_name", "source"),
-            (symbol, factor_name, source), range_started_at, range_ended_at,
+            cur, "external_factor_coverage_ranges", ("symbol", "factor_name", "source", "instrument_type"),
+            (symbol, factor_name, source, instrument_type), range_started_at, range_ended_at,
         )
         cur.close()
 

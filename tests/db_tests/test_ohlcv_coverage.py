@@ -53,8 +53,8 @@ class TestMergeOhlcvCoverage:
         mock_exec_values.assert_called_once()
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 1
-        assert inserted_rows[0][3] == datetime(2024, 1, 1, tzinfo=timezone.utc)
-        assert inserted_rows[0][4] == datetime(2024, 1, 3, tzinfo=timezone.utc)
+        assert inserted_rows[0][4] == datetime(2024, 1, 1, tzinfo=timezone.utc)
+        assert inserted_rows[0][5] == datetime(2024, 1, 3, tzinfo=timezone.utc)
 
     @patch("db.timescale_writer.psycopg2.extras.execute_values")
     @patch("db.timescale_writer.get_conn")

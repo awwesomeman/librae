@@ -91,7 +91,12 @@ def _fetch_oi_range(symbol_raw: str, start_dt: datetime, end_dt: datetime) -> pd
     return combined.rename(columns={"open_interest": "value"})
 
 
-register_factor_fetcher("open_interest", _fetch_oi_range, source=_SOURCE)
+register_factor_fetcher(
+    "open_interest", _fetch_oi_range, source=_SOURCE,
+    # data.binance.vision's futures/um metrics archive is UM-perpetual OI —
+    # same ticker string ("BTCUSDT") as spot, but a different product.
+    instrument_type="contract_perpetual",
+)
 
 
 def fetch_open_interest_history(symbol_raw: str, start: str, end: str) -> pd.DataFrame:

@@ -102,20 +102,28 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
 -- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)
 -- ============================================================
+-- instrument_type: contract expiry structure, orthogonal to continuous
+-- rolling-alias handling (see librae/config/symbols.yaml). Keeps e.g.
+-- Binance spot BTCUSDT and a same-named perpetual from silently colliding
+-- under the same (symbol, data_source) key.
 CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'spot',
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,
     low             DOUBLE PRECISION,
     close           DOUBLE PRECISION,
-    volume          DOUBLE PRECISION
+    volume          DOUBLE PRECISION,
+    CONSTRAINT chk_ohlcv_instrument_type CHECK (
+        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
+    )
 );
 SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, data_source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, data_source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, data_source, instrument_type);
 
 -- ============================================================
 -- signal_events — 訊號品質監控 (hypertable, 獨立)
@@ -148,11 +156,15 @@ CREATE TABLE IF NOT EXISTS ohlcv_coverage_ranges (
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'spot',
     range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL
+    range_ended_at       TIMESTAMPTZ NOT NULL,
+    CONSTRAINT chk_ohlcv_coverage_instrument_type CHECK (
+        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
-    ON ohlcv_coverage_ranges(symbol, timeframe, data_source, range_started_at);
+    ON ohlcv_coverage_ranges(symbol, timeframe, data_source, instrument_type, range_started_at);
 
 -- ============================================================
 -- external_factors — 通用第三方因子資料 (hypertable)
@@ -166,11 +178,15 @@ CREATE TABLE IF NOT EXISTS external_factors (
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
     source          TEXT NOT NULL,
-    value           DOUBLE PRECISION NOT NULL
+    instrument_type TEXT NOT NULL DEFAULT 'spot',
+    value           DOUBLE PRECISION NOT NULL,
+    CONSTRAINT chk_external_factors_instrument_type CHECK (
+        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
+    )
 );
 SELECT create_hypertable('external_factors', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, source, instrument_type);
 
 -- ============================================================
 -- external_factor_coverage_ranges — get_factor() cache 覆蓋區間追蹤
@@ -181,8 +197,12 @@ CREATE TABLE IF NOT EXISTS external_factor_coverage_ranges (
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
     source          TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'spot',
     range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL
+    range_ended_at       TIMESTAMPTZ NOT NULL,
+    CONSTRAINT chk_external_factor_coverage_instrument_type CHECK (
+        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
-    ON external_factor_coverage_ranges(symbol, factor_name, source, range_started_at);
+    ON external_factor_coverage_ranges(symbol, factor_name, source, instrument_type, range_started_at);

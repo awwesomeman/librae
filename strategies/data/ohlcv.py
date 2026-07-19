@@ -191,6 +191,7 @@ def get_ohlcv(
             "Register one with register_ohlcv_fetcher()."
         )
 
+    instrument_type = _resolve_instrument_type(symbol)
     end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
     tf_ccxt = to_ccxt(timeframe)
     start_dt = parse_dt(start)
@@ -200,7 +201,7 @@ def get_ohlcv(
         start_dt = start_dt - interval_to_timedelta(tf_ccxt) * warmup_periods
 
     # 1. Find gaps against tracked coverage (may be several disjoint ranges)
-    coverage = _query_coverage(symbol, tf_ccxt, data_source)
+    coverage = _query_coverage(symbol, tf_ccxt, data_source, instrument_type)
     if coverage is None:
         # DB unavailable — skip caching, fetch the full range directly.
         logger.warning("Coverage lookup failed, fetching full range from API (no cache)")
@@ -209,7 +210,7 @@ def get_ohlcv(
     gaps = _compute_gaps(coverage, start_dt, end_dt)
     if not gaps:
         logger.debug("DB hit: %s %s (fully covered)", symbol, tf_ccxt)
-        db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
+        db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source, instrument_type)
         return db_df if db_df is not None else pd.DataFrame(columns=OHLCV_COLUMNS)
     logger.info("DB partial: %s %s, %d gaps to fill", symbol, tf_ccxt, len(gaps))
 
@@ -221,11 +222,11 @@ def get_ohlcv(
         api_df = _fetch_from_api(symbol, tf_ccxt, gap_start, gap_end, data_source)
         if not api_df.empty:
             fetched_parts.append(api_df)
-            _upsert_db(api_df, symbol, tf_ccxt, data_source)
-        _merge_coverage(symbol, tf_ccxt, data_source, gap_start, gap_end)
+            _upsert_db(api_df, symbol, tf_ccxt, data_source, instrument_type)
+        _merge_coverage(symbol, tf_ccxt, data_source, gap_start, gap_end, instrument_type)
 
     # 3. Re-read from DB (merges existing + newly upserted data)
-    db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source)
+    db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source, instrument_type)
     if db_df is not None and not db_df.empty:
         return db_df
 
@@ -239,9 +240,28 @@ def get_ohlcv(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_instrument_type(symbol: str) -> str:
+    """Look up this symbol's contract expiry structure from symbols.yaml.
+
+    Falls back to 'spot' (with a warning) for one-off/unregistered symbols
+    (e.g. experiment tickers) — matches the existing registry-optional
+    fallback pattern in librae/cli.py's _resolve_market_and_data_source.
+    """
+    from librae.config.symbols import get_symbol
+
+    try:
+        return get_symbol(symbol).instrument_type
+    except KeyError:
+        logger.warning(
+            "%s not in symbols.yaml — defaulting instrument_type='spot'. "
+            "Register it if this isn't actually spot.", symbol,
+        )
+        return "spot"
+
+
 def _query_db(
     symbol: str, tf_ccxt: str, start_dt: datetime, end_dt: datetime,
-    data_source: str,
+    data_source: str, instrument_type: str,
 ) -> pd.DataFrame | None:
     """Query ohlcv table. Returns None if DB is unavailable."""
     try:
@@ -249,7 +269,7 @@ def _query_db(
 
         df = load_ohlcv(
             symbol=symbol, timeframe=to_canonical(tf_ccxt),
-            data_source=data_source,
+            data_source=data_source, instrument_type=instrument_type,
             started_at=start_dt.isoformat(), ended_at=end_dt.isoformat(),
         )
         if df.empty:
@@ -274,7 +294,7 @@ def _fetch_from_api(
 
 
 def _upsert_db(
-    df: pd.DataFrame, symbol: str, tf_ccxt: str, data_source: str,
+    df: pd.DataFrame, symbol: str, tf_ccxt: str, data_source: str, instrument_type: str,
 ) -> None:
     """Write OHLCV to DB via existing writer."""
     try:
@@ -284,18 +304,18 @@ def _upsert_db(
         if "timestamp" in work.columns:
             work = work.set_index("timestamp")
             work.index.name = "ts"
-        write_ohlcv(work, symbol, tf_ccxt, data_source=data_source)
+        write_ohlcv(work, symbol, tf_ccxt, data_source=data_source, instrument_type=instrument_type)
     except Exception as e:
         logger.warning("DB upsert failed: %s", e)
 
 
 def _query_coverage(
-    symbol: str, tf_ccxt: str, data_source: str,
+    symbol: str, tf_ccxt: str, data_source: str, instrument_type: str,
 ) -> list[tuple[datetime, datetime]] | None:
     """Query cached coverage ranges for this key. Returns None if DB is unavailable."""
     try:
         from db.timescale_reader import get_ohlcv_coverage_ranges
-        return get_ohlcv_coverage_ranges(symbol, to_canonical(tf_ccxt), data_source)
+        return get_ohlcv_coverage_ranges(symbol, to_canonical(tf_ccxt), data_source, instrument_type)
     except Exception as e:
         logger.warning("Coverage query failed: %s", e)
         return None
@@ -303,11 +323,14 @@ def _query_coverage(
 
 def _merge_coverage(
     symbol: str, tf_ccxt: str, data_source: str, start_dt: datetime, end_dt: datetime,
+    instrument_type: str,
 ) -> None:
     """Mark [start_dt, end_dt] as cached for this key."""
     try:
         from db.timescale_writer import merge_ohlcv_coverage_ranges
-        merge_ohlcv_coverage_ranges(symbol, to_canonical(tf_ccxt), data_source, start_dt, end_dt)
+        merge_ohlcv_coverage_ranges(
+            symbol, to_canonical(tf_ccxt), data_source, start_dt, end_dt, instrument_type,
+        )
     except Exception as e:
         logger.warning("Coverage merge failed: %s", e)
 

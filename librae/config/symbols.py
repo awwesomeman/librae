@@ -11,6 +11,19 @@ from pathlib import Path
 
 import yaml
 
+# Contract expiry structure — orthogonal to continuous_alias (see symbols.yaml
+# module comment). 'spot' is the bare case (direct ownership, not an
+# exchange-traded derivative); everything else is prefixed contract_* so the
+# derivative family is filterable/greppable as a group. Extend this set (and
+# the matching DB CHECK constraint in deploy/timescale_init.sql) when a new
+# type is actually needed — don't pre-enumerate speculative ones.
+ALLOWED_INSTRUMENT_TYPES = frozenset({
+    "spot",
+    "contract_perpetual",
+    "contract_monthly",
+    "contract_quarterly",
+})
+
 
 @dataclass(frozen=True)
 class SymbolInfo:
@@ -19,7 +32,15 @@ class SymbolInfo:
     symbol: str
     market: str
     data_source: str
+    instrument_type: str
     continuous_alias: bool = False
+
+    def __post_init__(self) -> None:
+        if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
+            raise ValueError(
+                f"symbols.yaml: {self.symbol!r} has instrument_type="
+                f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
+            )
 
 
 def _default_symbols_path() -> Path:
@@ -32,6 +53,11 @@ def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo
 
     Returns:
         Dict mapping symbol to SymbolInfo.
+
+    Raises:
+        ValueError: If an entry's instrument_type is missing or not in
+            ALLOWED_INSTRUMENT_TYPES — caught here, at load time, rather
+            than letting an unvalidated string drift into the DB.
     """
     yaml_path = Path(path) if path else _default_symbols_path()
 
@@ -49,6 +75,7 @@ def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo
             symbol=symbol,
             market=str(data.get("market", "")),
             data_source=str(data.get("data_source", "")),
+            instrument_type=str(data.get("instrument_type", "")),
             continuous_alias=bool(data.get("continuous_alias", False)),
         )
     return registry

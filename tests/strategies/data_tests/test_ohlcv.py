@@ -11,6 +11,7 @@ from strategies.data.ohlcv import (
     OHLCV_COLUMNS,
     _ccxt_fetcher,
     _compute_gaps,
+    _resolve_instrument_type,
     _shioaji_fetcher,
     get_ohlcv,
     register_ohlcv_fetcher,
@@ -77,7 +78,7 @@ class TestGetOhlcv:
 
         mock_api.assert_called_once()
         mock_upsert.assert_called_once()
-        mock_merge.assert_called_once_with("BTCUSDT", "1h", "binance_spot", START, END)
+        mock_merge.assert_called_once_with("BTCUSDT", "1h", "binance_spot", START, END, "spot")
         assert len(result) == 5
 
     @patch("strategies.data.ohlcv._merge_coverage")
@@ -272,6 +273,15 @@ class TestShioajiFetcher:
     def test_registered_under_shioaji(self):
         from strategies.data.ohlcv import _OHLCV_FETCHERS
         assert "shioaji" in _OHLCV_FETCHERS
+
+
+class TestResolveInstrumentType:
+    def test_registered_symbol_returns_registry_value(self):
+        assert _resolve_instrument_type("BTCUSDT") == "spot"
+        assert _resolve_instrument_type("TXFR1") == "contract_monthly"
+
+    def test_unregistered_symbol_falls_back_to_spot(self, caplog):
+        assert _resolve_instrument_type("SOME_EXPERIMENT_TICKER") == "spot"
 
 
 class TestIntervalToTimedelta:

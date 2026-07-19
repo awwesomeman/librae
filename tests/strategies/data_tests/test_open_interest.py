@@ -13,8 +13,9 @@ from strategies.data.open_interest import _fetch_oi_range, fetch_open_interest_h
 
 def test_open_interest_registered_with_archive_source():
     assert "open_interest" in _FACTOR_FETCHERS
-    _fn, source = _FACTOR_FETCHERS["open_interest"]
+    _fn, source, instrument_type = _FACTOR_FETCHERS["open_interest"]
     assert source == "data.binance.vision"
+    assert instrument_type == "contract_perpetual"
 
 
 def test_fetch_open_interest_history_renames_value_column():

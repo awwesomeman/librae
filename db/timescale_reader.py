@@ -170,6 +170,7 @@ def get_ohlcv_coverage_ranges(
     symbol: str,
     timeframe: str,
     data_source: str,
+    instrument_type: str = "spot",
     dsn: str = TIMESCALE_DSN,
 ) -> list[tuple[datetime, datetime]]:
     """Return this key's cached (range_started_at, range_ended_at) pairs, sorted.
@@ -180,12 +181,12 @@ def get_ohlcv_coverage_ranges(
     """
     sql = """
         SELECT range_started_at, range_ended_at FROM ohlcv_coverage_ranges
-        WHERE symbol = %s AND timeframe = %s AND data_source = %s
+        WHERE symbol = %s AND timeframe = %s AND data_source = %s AND instrument_type = %s
         ORDER BY range_started_at
     """
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(sql, (symbol, timeframe, data_source))
+        cur.execute(sql, (symbol, timeframe, data_source, instrument_type))
         rows = cur.fetchall()
         cur.close()
     return [(r[0], r[1]) for r in rows]
@@ -195,18 +196,19 @@ def get_external_factor_coverage_ranges(
     symbol: str,
     factor_name: str,
     source: str,
+    instrument_type: str = "spot",
     dsn: str = TIMESCALE_DSN,
 ) -> list[tuple[datetime, datetime]]:
     """Return this factor key's cached (range_started_at, range_ended_at) pairs,
     sorted. Same shape/semantics as get_ohlcv_coverage_ranges()."""
     sql = """
         SELECT range_started_at, range_ended_at FROM external_factor_coverage_ranges
-        WHERE symbol = %s AND factor_name = %s AND source = %s
+        WHERE symbol = %s AND factor_name = %s AND source = %s AND instrument_type = %s
         ORDER BY range_started_at
     """
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(sql, (symbol, factor_name, source))
+        cur.execute(sql, (symbol, factor_name, source, instrument_type))
         rows = cur.fetchall()
         cur.close()
     return [(r[0], r[1]) for r in rows]
@@ -217,20 +219,21 @@ def load_external_factor(
     factor_name: str,
     source: str,
     *,
+    instrument_type: str = "spot",
     started_at: str | None = None,
     ended_at: str | None = None,
     dsn: str = TIMESCALE_DSN,
 ) -> pd.DataFrame:
-    """Load cached factor values for (symbol, factor_name, source).
+    """Load cached factor values for (symbol, factor_name, source, instrument_type).
 
     Returns DataFrame with columns [timestamp, value], tz-aware UTC, sorted
     ascending — same shape get_factor()'s fetchers must return.
     """
     sql = """
         SELECT ts AS timestamp, value FROM external_factors
-        WHERE symbol = %s AND factor_name = %s AND source = %s
+        WHERE symbol = %s AND factor_name = %s AND source = %s AND instrument_type = %s
     """
-    params: list = [symbol, factor_name, source]
+    params: list = [symbol, factor_name, source, instrument_type]
     if started_at:
         sql += " AND ts >= %s"
         params.append(started_at)
@@ -251,6 +254,7 @@ def load_ohlcv(
     symbol: str | None = None,
     timeframe: str | None = None,
     data_source: str | None = None,
+    instrument_type: str | None = None,
     started_at: str | None = None,
     ended_at: str | None = None,
     dsn: str = TIMESCALE_DSN,
@@ -259,6 +263,12 @@ def load_ohlcv(
 
     When *run_id* is given (without symbol/timeframe), the run's metadata
     is used to derive symbol, timeframe, and date range.
+
+    instrument_type is an optional filter (None = don't filter, e.g. for
+    dashboards that haven't been updated to pass it) — internal callers
+    that write/read the same key (strategies/data/ohlcv.py) should always
+    pass it explicitly to avoid silently mixing rows of different contract
+    types that happen to share a symbol/data_source.
     """
     if symbol and timeframe:
         sql = """
@@ -270,6 +280,9 @@ def load_ohlcv(
         if data_source:
             sql += " AND data_source = %s"
             params.append(data_source)
+        if instrument_type:
+            sql += " AND instrument_type = %s"
+            params.append(instrument_type)
         if started_at:
             sql += " AND ts >= %s"
             params.append(started_at)

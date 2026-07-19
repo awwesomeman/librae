@@ -2,14 +2,25 @@
 # Market-level cost/contract params live in markets.yaml (MarketConfig);
 # this is the thin layer above it mapping individual symbols to their market.
 #
+# instrument_type: what kind of contract this actually is (spot,
+# contract_perpetual, contract_monthly, contract_quarterly, ...) — required,
+# validated against librae/config/symbols.py's ALLOWED_INSTRUMENT_TYPES.
+# Orthogonal to continuous_alias: instrument_type is the contract's expiry
+# structure; continuous_alias is whether this symbol's stored series is a
+# back-adjusted rolling splice across multiple concrete contracts of that
+# type, not a single dated contract's own price series. TXFR1 is both a
+# monthly contract AND a continuous alias — two independent facts.
+#
 # continuous_alias: true marks a rolling continuous-futures alias (e.g. R1/R2
 # splices) that needs back-adjustment/rollover handling, not a concrete contract.
 
 BTCUSDT:
   market: crypto
   data_source: binance_spot
+  instrument_type: spot
 
 TXFR1:
   market: tw_futures
   data_source: shioaji
+  instrument_type: contract_monthly
   continuous_alias: true

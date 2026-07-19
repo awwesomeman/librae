@@ -68,7 +68,10 @@ def _fetch_funding_rate_page(symbol: str, start_dt: datetime, end_dt: datetime) 
     )
 
 
-register_factor_fetcher("funding_rate", _fetch_funding_rate_page, source=_EXCHANGE_ID)
+register_factor_fetcher(
+    "funding_rate", _fetch_funding_rate_page, source=_EXCHANGE_ID,
+    instrument_type="contract_perpetual",  # funding rate only exists for perpetuals
+)
 
 
 def fetch_funding_rate_history(symbol: str, start: str, end: str) -> pd.DataFrame:

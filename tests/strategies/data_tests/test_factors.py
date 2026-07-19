@@ -58,7 +58,7 @@ class TestGetFactor:
 
         mock_fetcher.assert_called_once_with("BTCUSDT", START, END)
         mock_upsert.assert_called_once()
-        mock_merge.assert_called_once_with("BTCUSDT", "test_factor_nocov", "test-source", START, END)
+        mock_merge.assert_called_once_with("BTCUSDT", "test_factor_nocov", "test-source", "spot", START, END)
         assert len(result) == 5
 
     @patch("strategies.data.factors._query_coverage")
@@ -91,4 +91,4 @@ class TestGetFactor:
 
         get_factor("BTCUSDT", "test_factor_source", start=START, end=END)
 
-        mock_merge.assert_called_once_with("BTCUSDT", "test_factor_source", "my-provider", START, END)
+        mock_merge.assert_called_once_with("BTCUSDT", "test_factor_source", "my-provider", "spot", START, END)
