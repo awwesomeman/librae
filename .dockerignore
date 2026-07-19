@@ -18,7 +18,10 @@ docs/
 .idea/
 
 # Local secrets & config
+.env
 .env.local
+.env.secrets
+.secrets/
 deploy/.env
 
 # Data cache
