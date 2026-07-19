@@ -35,7 +35,7 @@ from typing import Callable
 
 import pandas as pd
 
-from data.utils import parse_dt
+from strategies.data.utils import compute_coverage_gaps, parse_dt
 from librae.core.utils import interval_to_timedelta, to_canonical, to_ccxt
 
 logger = logging.getLogger(__name__)
@@ -106,6 +106,51 @@ def _ccxt_fetcher(exchange_id: str) -> Callable[[str, str, datetime, datetime], 
 register_ohlcv_fetcher("binance_spot", _ccxt_fetcher("binance"))
 
 
+def _shioaji_fetcher() -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
+    """Build a get_ohlcv-compatible fetcher backed by ShioajiAdapter.
+
+    Unlike ccxt (stateless REST, no login needed for market data), Shioaji
+    requires an authenticated session for every call — a read-only
+    (no-CA) SHIOAJI_* key is enough (see brokers/shioaji_adapter.py).
+    Login is expensive relative to a REST call, so one adapter instance is
+    lazily created and reused across every gap-fill call in a process
+    rather than rebuilt per call. shioaji itself isn't imported until the
+    first actual fetch, so importing this module doesn't require it to be
+    installed or configured.
+
+    Shioaji's kbars API takes a date range directly (server-side, no
+    client-side pagination needed) and already returns the target
+    timeframe resampled on TAIFEX session boundaries — see
+    ShioajiAdapter.fetch_ohlcv for the resample/timezone handling.
+    """
+    _adapter_holder: dict = {}
+
+    def _get_adapter():
+        if "adapter" not in _adapter_holder:
+            from brokers.shioaji_adapter import ShioajiAdapter
+            # Historical OHLCV is research/backtest, never order placement —
+            # always simulation mode here, regardless of what the caller's
+            # own live/sim mode is. Some SHIOAJI_API_KEY tokens are only
+            # provisioned for simulation login (production login then fails
+            # with "Token doesn't have production permission"), so this is
+            # also the more broadly-compatible default, not just the safer one.
+            _adapter_holder["adapter"] = ShioajiAdapter(simulation=True)
+        return _adapter_holder["adapter"]
+
+    def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        adapter = _get_adapter()
+        df = adapter.fetch_ohlcv(symbol, interval, start=start, end=end)
+        if df.empty:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+        df = df.rename(columns={"ts": "timestamp"})
+        return df[(df["timestamp"] >= start) & (df["timestamp"] <= end)].reset_index(drop=True)
+
+    return _fetch
+
+
+register_ohlcv_fetcher("shioaji", _shioaji_fetcher())
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -126,7 +171,7 @@ def get_ohlcv(
         timeframe:       Candle interval in any supported format
                          (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
         data_source:     Data source key registered via ``register_ohlcv_fetcher``.
-                         Built-in: ``'binance_spot'``.
+                         Built-in: ``'binance_spot'``, ``'shioaji'``.
         start:           Start of the requested time range.
         end:             End of the requested time range. Defaults to now.
         warmup_periods:  Extra bars to fetch before ``start`` for indicator warm-up.
@@ -267,27 +312,6 @@ def _merge_coverage(
         logger.warning("Coverage merge failed: %s", e)
 
 
-def _compute_gaps(
-    ranges: list[tuple[datetime, datetime]],
-    start_dt: datetime,
-    end_dt: datetime,
-) -> list[tuple[datetime, datetime]]:
-    """Sub-ranges of [start_dt, end_dt] not covered by any of ``ranges`` (sorted).
-
-    Returns list of (gap_start, gap_end) tuples. Empty list = no gaps.
-    """
-    gaps: list[tuple[datetime, datetime]] = []
-    cursor = start_dt
-    for range_started_at, range_ended_at in ranges:
-        if range_ended_at < cursor:
-            continue
-        if range_started_at > end_dt:
-            break
-        if range_started_at > cursor:
-            gaps.append((cursor, min(range_started_at, end_dt)))
-        cursor = max(cursor, range_ended_at)
-        if cursor >= end_dt:
-            break
-    if cursor < end_dt:
-        gaps.append((cursor, end_dt))
-    return gaps
+# Re-exported for backwards compatibility — moved to strategies/data/utils.py
+# so factors.py's get_factor() can share the same gap math.
+_compute_gaps = compute_coverage_gaps

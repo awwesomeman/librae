@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from data.ohlcv import get_ohlcv
+from strategies.data.ohlcv import get_ohlcv
 from db.timescale_writer import save_signal_results
 from librae.core.utils import generate_run_id, to_canonical
 

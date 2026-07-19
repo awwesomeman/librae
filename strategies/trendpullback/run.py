@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data.ohlcv import get_ohlcv
+from strategies.data.ohlcv import get_ohlcv
 from librae import Backtest
 from librae.core.run_config import RunConfig
 from librae.live.engine import LiveTrader

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from data.utils import resample_ohlcv
+from strategies.data.utils import resample_ohlcv
 from strategies.trendpullback.utils import (
     compute_daily_gate,
     compute_entry_conditions,
