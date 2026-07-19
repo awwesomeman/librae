@@ -1,4 +1,9 @@
-"""Tests for market config (single-file, market-level)."""
+"""Tests for market config (single-file, market-level).
+
+multiplier/tick_size are deliberately NOT covered here — they're
+per-symbol (see test_symbols.py), not market-level; MarketConfig doesn't
+carry them (see librae/config/market_config.py's module docstring for why).
+"""
 from __future__ import annotations
 
 import pytest
@@ -23,35 +28,25 @@ class TestLoadMarketConfigs:
 
     def test_crypto_fields(self, markets):
         crypto = markets["crypto"]
-        assert crypto.asset_class == "crypto"
-        assert crypto.quote_currency == "USDT"
-        assert crypto.is_24h is True
         assert crypto.commission_rate == 0.001
-        assert crypto.multiplier == 1.0
         assert crypto.long_margin_rate == 1.0
         assert crypto.short_margin_rate == 1.0
 
     def test_tw_futures_fields(self, markets):
         tw = markets["tw_futures"]
-        assert tw.asset_class == "futures"
-        assert tw.timezone == "Asia/Taipei"
         assert tw.min_commission == 100.0
-        assert tw.multiplier == 50.0
         assert tw.tax_rate == 0.00002
         assert tw.long_margin_rate == 0.067
         assert tw.short_margin_rate == 0.067
 
     def test_us_equity_fields(self, markets):
         us = markets["us_equity"]
-        assert us.asset_class == "equity"
-        assert us.timezone == "America/New_York"
-        assert us.multiplier == 1.0
         assert us.long_margin_rate == 1.0
         assert us.short_margin_rate == 0.5
 
     def test_market_config_is_frozen(self, markets):
         with pytest.raises(AttributeError):
-            markets["crypto"].multiplier = 2.0
+            markets["crypto"].commission_rate = 0.5
 
 
 class TestGetMarket:

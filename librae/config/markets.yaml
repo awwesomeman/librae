@@ -1,53 +1,54 @@
-# Market-level configuration for backtesting.
-# Each key is a market identifier used in Backtest(market="crypto").
-# Per-instrument details (symbol, min_qty, exchange) belong to the broker layer.
+# Market-level configuration for backtesting — fields genuinely shared
+# across every instrument traded in a market. Each key is a market
+# identifier used in Backtest(market="crypto").
+#
+# multiplier is NOT here — see librae/config/symbols.py: spot instruments
+# default to 1.0 automatically (a mathematical invariant), contract_*
+# instruments (futures/options) require it explicit per symbol, because it
+# genuinely varies per contract (TXF=200 vs MXF=50 vs TMF=10, all
+# "tw_futures") and directly scales PnL/notional/margin if wrong.
+#
+# tick_size IS still here as an approximate default — it only feeds a
+# backtest slippage-cost estimate (not PnL/margin sizing), so a market-wide
+# value is fine for large homogeneous universes (equities, crypto spot
+# pairs); override per-symbol in symbols.yaml when precision matters (e.g.
+# a specific futures contract's real tick).
+#
+# min_commission/long_margin_rate/short_margin_rate are kept at this
+# market-level for now but are UNVERIFIED for per-instrument variation
+# within tw_futures (unlike multiplier, which was confirmed wrong via real
+# Shioaji contract data) — don't assume they're safe to reuse for MXF/TMF
+# without checking first.
 #
 # Cost fields:
 #   commission_rate  — per-side rate (0.001 = 0.1%)
 #   min_commission   — per-side floor in quote currency (0.0 if none)
 #   tax_rate         — per-side tax rate (0.00002 = 0.002%)
-#   slippage_ticks   — per-side slippage in ticks
-#   tick_size        — minimum price increment in quote currency
-#   multiplier       — contract multiplier (spot=1.0)
+#   slippage_ticks   — per-side slippage in ticks (backtest assumption, not a market fact)
 
 crypto:
-  asset_class: crypto
-  quote_currency: USDT
-  timezone: UTC
-  is_24h: true
   commission_rate: 0.001
   min_commission: 0.0
   tax_rate: 0.0
   slippage_ticks: 2
   tick_size: 0.01
-  multiplier: 1.0
   long_margin_rate: 1.0
   short_margin_rate: 1.0
 
 tw_futures:
-  asset_class: futures
-  quote_currency: TWD
-  timezone: Asia/Taipei
-  is_24h: false
   commission_rate: 0.0
   min_commission: 100.0
   tax_rate: 0.00002
   slippage_ticks: 1
   tick_size: 1.0
-  multiplier: 50.0
   long_margin_rate: 0.067
   short_margin_rate: 0.067
 
 us_equity:
-  asset_class: equity
-  quote_currency: USD
-  timezone: America/New_York
-  is_24h: false
   commission_rate: 0.0
   min_commission: 0.0
   tax_rate: 0.0
   slippage_ticks: 2
   tick_size: 0.01
-  multiplier: 1.0
   long_margin_rate: 1.0
   short_margin_rate: 0.5

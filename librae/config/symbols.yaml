@@ -1,6 +1,24 @@
-# Per-symbol registry — which market + default data source a symbol resolves to.
-# Market-level cost/contract params live in markets.yaml (MarketConfig);
-# this is the thin layer above it mapping individual symbols to their market.
+# Per-symbol registry — market + data source + contract economics for each symbol.
+# Market-level cost params (commission/tax/slippage/margin, plus an
+# approximate default tick_size) live in markets.yaml (MarketConfig) —
+# genuinely shared across every instrument in a market.
+#
+# multiplier: NOT market-level. 'spot' instruments (crypto pairs, individual
+# stocks) don't need to declare it — it auto-defaults to 1.0 (see
+# librae/config/symbols.py). contract_* instruments (futures/options) MUST
+# declare it explicitly — it varies per contract even within one market
+# (TXF=200 vs MXF=50 vs TMF=10, all "market: tw_futures") and directly
+# scales PnL/notional/margin if wrong. This mirrors mainstream backtesting
+# frameworks (e.g. QuantConnect LEAN's symbol-properties-database.csv: a
+# market-wide wildcard row for equities, an explicit row per futures
+# contract) — large homogeneous universes (stock-picking, multi-pair
+# crypto) need zero per-symbol registration for this; only the small set of
+# specific futures contracts you actually trade needs it.
+#
+# tick_size: optional per symbol — omit to use markets.yaml's market-level
+# approximation (fine for most spot instruments; it only feeds a backtest
+# slippage-cost estimate, not PnL/margin sizing). Override here when a
+# specific contract's real tick matters.
 #
 # instrument_type: what kind of contract this actually is (spot,
 # contract_perpetual, contract_monthly, contract_quarterly, ...) — required,
@@ -13,25 +31,29 @@
 #
 # continuous_alias: true marks a rolling continuous-futures alias (e.g. R1/R2
 # splices) that needs back-adjustment/rollover handling, not a concrete contract.
-#
-# multiplier: per-symbol override of markets.yaml's market-level multiplier —
-# required whenever symbols sharing one `market` have different contract
-# economics (e.g. tw_futures' TXF=200 vs MXF=50 vs TMF=10; markets.yaml can
-# only hold one number). Omit only when every symbol on that market genuinely
-# shares the market-level value (true for crypto spot today).
 
 BTCUSDT:
   market: crypto
   data_source: binance_spot
   instrument_type: spot
+  # multiplier/tick_size omitted on purpose — spot auto-defaults to
+  # multiplier=1.0, tick_size falls back to markets.yaml's crypto default (0.01).
 
 TXFR1:
   market: tw_futures
   data_source: shioaji
   instrument_type: contract_monthly
   continuous_alias: true
-  multiplier: 200.0  # 臺股期貨（大台）— NOT markets.yaml's tw_futures default (50, = MXF's)
+  multiplier: 200.0  # 臺股期貨（大台）— required, no safe default for contract_* types
+  tick_size: 1.0      # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
 
 # Not registered yet — reference values for when they're actually added:
-#   MXFR1 (小型臺指期貨): multiplier: 50.0   (matches markets.yaml's tw_futures default)
+#   MXFR1 (小型臺指期貨): multiplier: 50.0
 #   TMFR1 (微型臺指期貨): multiplier: 10.0
+#   個股 (individual TW stocks): market: tw_equity, instrument_type: spot —
+#     multiplier auto-defaults to 1.0 like any spot instrument, no per-stock
+#     registration needed. tick_size does vary by price band in Taiwan
+#     (NT$10 以下 0.01、10-50 0.05、50-100 0.1...) — if that precision is
+#     ever needed, it's a function of price, not a single per-symbol
+#     constant; don't build that machinery until an actual stock strategy
+#     needs it (markets.yaml's approximate default is fine until then).

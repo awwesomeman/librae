@@ -126,7 +126,12 @@ class Backtest:
             if cost_model is not None:
                 resolved_cm = cost_model
             elif market_config is not None:
-                resolved_cm = CostModel.from_market(market_config)
+                raise ValueError(
+                    "market_config alone can't build a CostModel — multiplier comes from "
+                    "symbols.yaml (spot=1.0 auto, contract_* explicit-required), which "
+                    "this legacy path has no symbol for. Pass cost_model= directly (e.g. "
+                    "CostModel.from_market(market_config, multiplier=...)), or use cfg= instead."
+                )
             else:
                 resolved_cm = CostModel.zero()
 

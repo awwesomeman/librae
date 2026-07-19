@@ -2,6 +2,11 @@
 
 Handles commission, slippage, transaction tax, and PnL calculation
 for both spot and futures instruments via a single `multiplier` pattern.
+multiplier always comes from the per-symbol registry (symbols.yaml) —
+auto-1.0 for spot, required-explicit for contract_* instruments. tick_size
+comes from symbols.yaml when overridden there, otherwise from markets.yaml's
+market-level approximation (see librae/config/symbols.py's module
+docstring for why these two have different risk profiles/fallback rules).
 
 Design references:
 - Backtrader `cashadjust()`: multiplier unifies spot/futures PnL
@@ -67,40 +72,56 @@ class CostModel:
     ) -> CostModel:
         """Resolve cost model with standard priority:
         explicit override > cfg.cost_overrides > symbols.yaml per-symbol
-        multiplier > market-level default.
+        multiplier (spot auto-1.0, contract_* required-explicit) and
+        tick_size (optional override) > market-level defaults for
+        everything else (see librae/config/symbols.py's module docstring).
 
-        The per-symbol multiplier step matters whenever a market groups
-        instruments with different contract economics under one
-        markets.yaml entry (e.g. tw_futures: TXF=200 vs MXF=50 vs TMF=10) —
-        see librae/config/symbols.py's SymbolInfo.multiplier.
+        Raises:
+            ValueError: cfg.symbol isn't registered in symbols.yaml (so no
+                multiplier can be resolved at all — not even the spot
+                auto-default, since we don't know the instrument_type) and
+                cfg.cost_overrides doesn't supply multiplier either.
         """
         if override is not None:
             return override
         from librae.config.market_config import get_market
         mc = get_market(cfg.market)
-        base = asdict(cls.from_market(mc))
 
         from librae.config.symbols import get_symbol
         try:
-            sym_multiplier = get_symbol(cfg.symbol).multiplier
+            sym = get_symbol(cfg.symbol)
+            multiplier, tick_size = sym.multiplier, sym.tick_size
         except KeyError:
-            sym_multiplier = None
-        if sym_multiplier is not None:
-            base["multiplier"] = sym_multiplier
+            multiplier, tick_size = None, None
 
+        overrides = cfg.cost_overrides or {}
+        multiplier = overrides.get("multiplier", multiplier)
+        tick_size = overrides.get("tick_size", tick_size)
+        if multiplier is None:
+            raise ValueError(
+                f"No multiplier for symbol={cfg.symbol!r} — register it in symbols.yaml "
+                "(spot instruments default to 1.0 automatically; contract_* instruments "
+                "need it explicit), or pass cfg.cost_overrides={'multiplier': ...}."
+            )
+
+        base = asdict(cls.from_market(mc, multiplier=multiplier, tick_size=tick_size))
         if cfg.cost_overrides:
             base.update(cfg.cost_overrides)
         return cls(**base)
 
     @classmethod
-    def from_market(cls, market: MarketConfig) -> CostModel:
-        """Build CostModel from MarketConfig (markets.yaml)."""
+    def from_market(
+        cls, market: MarketConfig, *, multiplier: float, tick_size: float | None = None,
+    ) -> CostModel:
+        """Build CostModel from MarketConfig (markets.yaml) + a per-symbol
+        multiplier (required — see librae/config/symbols.py). tick_size
+        defaults to the market's approximate value when not overridden."""
         return cls(
-            multiplier=market.multiplier,
+            multiplier=multiplier,
             commission_rate=market.commission_rate,
             min_commission=market.min_commission,
             slippage_ticks=float(market.slippage_ticks),
-            tick_size=market.tick_size if market.tick_size > 0 else 0.01,
+            tick_size=tick_size if tick_size is not None else market.tick_size,
             tax_rate=market.tax_rate,
             long_margin_rate=market.long_margin_rate,
             short_margin_rate=market.short_margin_rate,
