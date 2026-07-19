@@ -167,3 +167,16 @@ gcloud compute instances add-metadata <instance> --zone=<zone> \
 **修法**：歷史資料 fetcher（`strategies/data/ohlcv.py` 的 `_shioaji_fetcher`）固定用 `ShioajiAdapter(simulation=True)` 登入——回測用歷史資料本來就不需要正式權限，也讓只有模擬權限的 key 能用。
 
 **預防**：Shioaji 的「模擬 vs 正式」是登入層級的權限，不是下單層級（下單層級是有沒有 CA），申請/使用 key 時兩層要分開確認；純資料用途沒有理由要求正式登入權限。
+
+## 2026-07-19 shioaji 1.7.0 的下單 enum 從 shioaji.order.* 搬到 shioaji.*
+
+**症狀**：VM 上用正式 full 權限 key + CA 對台指期實際掛一筆限價單，`ShioajiAdapter.place_order()` 內部呼叫 `sj.order.Action.Buy` 時噴 `AttributeError: module 'shioaji.order' has no attribute 'Action'`。本機開發時用的是 shioaji 1.3.3，這段程式碼從沒被跑到過（既有測試只覆蓋 read-only guard 那條 raise 路徑，沒有真的呼叫過 `place_order()` 內部邏輯）。
+
+**根因**：`deploy/Dockerfile` 裝的是 shioaji 1.7.0（`pip install '.[tw-live]'` 沒釘死版本，抓到的是當下最新版）。1.4 之後這些下單用的 enum（`Action`、`FuturesPriceType`、`StockPriceType`、`OrderType`）從 `shioaji.order.*` 搬到頂層 `shioaji.*`，member 名稱沒變（`Buy`/`Sell`/`LMT`/`MKT`/`ROD` 都還在），只是路徑變了。
+
+**修法**：`brokers/shioaji_adapter.py` 的 `place_order()` 全部改成 `sj.Action`/`sj.FuturesPriceType`/`sj.StockPriceType`/`sj.OrderType`（拿掉 `.order.` 這一段）。同時補了 `TestPlaceOrder`（mock `shioaji` 模組），實際測試 `place_order()` 組出來的 `Order()` 呼叫參數，不再只測 guard 那條路徑。
+
+**預防**：
+- 下單這條路徑風險高、卻是最容易「本機測過就以為沒事」的地方——本機用的 SDK 版本、Docker image 裡實際裝的 SDK 版本可能不一致，光靠本機跑過不代表 VM 上真的能跑。
+- 任何呼叫第三方 SDK enum/常數的程式碼，都要有測試真的呼叫到那一行，不能只測外層的 guard/例外路徑；「有測試」不等於「測到了會出錯的地方」。
+- 順帶一提：這次也看到 shioaji 印出 `Order() is deprecated, use StockOrder() or FuturesOrder()` 的警告——目前還能用，但下次 SDK 大版本升級時這個可能會變成下一個要修的坑，先記一筆。
