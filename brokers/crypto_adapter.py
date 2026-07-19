@@ -4,9 +4,11 @@ Wraps CCXT to provide a simple duck-typed interface compatible with
 signal_monitor's ``fetch_ohlcv`` protocol, plus optional order/position
 methods when API credentials are supplied.
 
-Credentials can be passed explicitly or loaded from environment variables
-using the ``CRYPTO_`` prefix convention (``CRYPTO_API_KEY``,
-``CRYPTO_API_SECRET``, ``CRYPTO_EXCHANGE_ID``, ``CRYPTO_SANDBOX``).
+Reusable across any CCXT-supported exchange (set via ``exchange_id``), so
+credential loading takes an explicit prefix per exchange rather than a fixed
+one — e.g. ``CryptoCredentials.from_env("BINANCE")`` reads ``BINANCE_API_KEY``,
+``BINANCE_API_SECRET``, ``BINANCE_EXCHANGE_ID``, ``BINANCE_SANDBOX``. Adding a
+second exchange means picking a new prefix (e.g. ``OKX_*``), not new code.
 """
 
 from __future__ import annotations
@@ -39,6 +41,24 @@ def _timeframe_to_delta(timeframe: str) -> pd.Timedelta:
     """Convert CCXT timeframe string to a pandas Timedelta."""
     from librae.core.utils import interval_to_timedelta
     return interval_to_timedelta(timeframe)
+
+
+def _patch_binance_sandbox_urls(exchange) -> None:
+    """Redirect Binance sandbox URLs from the deprecated testnet.binance.vision
+    to demo-api.binance.com.
+
+    Binance migrated Spot Testnet ("Demo Trading") to demo-api.binance.com;
+    testnet.binance.vision no longer accepts authenticated requests. ccxt's
+    set_sandbox_mode() hasn't been updated for this yet (ccxt/ccxt#27266,
+    open as of 2026-07). Remove this patch once ccxt ships a fix upstream.
+    """
+    for section in ("api",):
+        urls = exchange.urls.get(section)
+        if not isinstance(urls, dict):
+            continue
+        for key, url in urls.items():
+            if isinstance(url, str) and "testnet.binance.vision" in url:
+                urls[key] = url.replace("testnet.binance.vision", "demo-api.binance.com")
 
 
 @dataclass
@@ -99,6 +119,8 @@ class CryptoAdapter:
         self._exchange = exchange_class(config)
         if sandbox:
             self._exchange.set_sandbox_mode(True)
+            if exchange_id == "binance":
+                _patch_binance_sandbox_urls(self._exchange)
 
         self._read_only = not bool(api_key)
         self._exchange_id = exchange_id

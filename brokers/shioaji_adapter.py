@@ -83,11 +83,10 @@ class ShioajiAdapter:
             )
 
         self._api = sj.Shioaji(simulation=simulation)
-        self._api.login(
-            api_key=creds.api_key,
-            secret_key=creds.secret_key,
-            person_id=creds.person_id,
-        )
+        # login() takes no person_id (removed upstream — it returns the
+        # accounts tied to api_key instead); person_id is still needed by
+        # activate_ca() below to pick which account's CA to activate.
+        self._api.login(api_key=creds.api_key, secret_key=creds.secret_key)
         logger.info("Shioaji login successful (simulation=%s)", simulation)
 
         self._read_only = True

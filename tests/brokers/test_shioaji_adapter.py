@@ -6,7 +6,7 @@ Marked tw_live so they are skipped when shioaji is not installed.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -156,3 +156,51 @@ class TestLifecycle:
         with adapter:
             pass
         adapter._api.logout.assert_called_once()
+
+
+class TestInit:
+    """ShioajiAdapter.__init__ itself — the fixtures above all bypass it via
+    __new__, so login/CA-activation/read_only were never actually tested."""
+
+    def _mock_sj(self, mock_api: MagicMock) -> MagicMock:
+        mock_sj = MagicMock()
+        mock_sj.Shioaji.return_value = mock_api
+        return mock_sj
+
+    def test_missing_credentials_raises(self):
+        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        with patch("brokers.shioaji_adapter._require_shioaji"):
+            with pytest.raises(ValueError, match="credentials"):
+                ShioajiAdapter(credentials=ShioajiCredentials(api_key="", secret_key=""))
+
+    def test_login_without_ca_path_is_read_only(self):
+        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        mock_api = MagicMock()
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)):
+            adapter = ShioajiAdapter(
+                credentials=ShioajiCredentials(api_key="k", secret_key="s", person_id="p"),
+            )
+        mock_api.login.assert_called_once_with(api_key="k", secret_key="s")
+        mock_api.activate_ca.assert_not_called()
+        assert adapter._read_only is True
+
+    def test_login_with_ca_path_enables_trading(self):
+        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        mock_api = MagicMock()
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)):
+            adapter = ShioajiAdapter(
+                credentials=ShioajiCredentials(
+                    api_key="k", secret_key="s", person_id="p",
+                    ca_path="/path/to/ca", ca_password="pw",
+                ),
+            )
+        mock_api.activate_ca.assert_called_once_with(ca_path="/path/to/ca", ca_passwd="pw", person_id="p")
+        assert adapter._read_only is False
+
+    def test_simulation_flag_passed_through(self):
+        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        mock_api = MagicMock()
+        mock_sj = self._mock_sj(mock_api)
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+            ShioajiAdapter(credentials=ShioajiCredentials(api_key="k", secret_key="s"), simulation=True)
+        mock_sj.Shioaji.assert_called_once_with(simulation=True)

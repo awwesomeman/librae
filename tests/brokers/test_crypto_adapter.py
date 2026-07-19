@@ -123,3 +123,50 @@ def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
     result = authed_adapter.place_order(signal)
     assert result["id"] == "ord_1"
     mock_ccxt_exchange.create_order.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 5: sandbox mode — CryptoAdapter.__init__ itself (not the bypassed
+# __new__ fixtures above), since that's the only place set_sandbox_mode /
+# the binance URL patch actually run.
+# ---------------------------------------------------------------------------
+
+def _build_adapter_via_init(exchange_id: str, mock_exchange: MagicMock, **kwargs) -> CryptoAdapter:
+    with patch("brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
+        mock_exchange_cls = MagicMock(return_value=mock_exchange)
+        mock_require_ccxt.return_value = MagicMock(**{exchange_id: mock_exchange_cls})
+        return CryptoAdapter(exchange_id=exchange_id, api_key="k", api_secret="s", sandbox=True, **kwargs)
+
+
+def test_sandbox_enables_ccxt_sandbox_mode():
+    mock_exchange = MagicMock()
+    mock_exchange.urls = {"api": {"public": "https://testnet.binance.vision/api/v3"}}
+    _build_adapter_via_init("binance", mock_exchange)
+    mock_exchange.set_sandbox_mode.assert_called_once_with(True)
+
+
+def test_sandbox_patches_deprecated_binance_testnet_url():
+    """Regression: ccxt's set_sandbox_mode() for binance still points to the
+    deprecated testnet.binance.vision (ccxt/ccxt#27266, open as of 2026-07).
+    Binance migrated Spot Testnet ("Demo Trading") to demo-api.binance.com;
+    the old host no longer accepts authenticated requests."""
+    mock_exchange = MagicMock()
+    mock_exchange.urls = {
+        "api": {
+            "public": "https://testnet.binance.vision/api/v3",
+            "private": "https://testnet.binance.vision/api/v3",
+            # different domain (futures testnet) — must be left untouched
+            "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
+        }
+    }
+    _build_adapter_via_init("binance", mock_exchange)
+    assert mock_exchange.urls["api"]["public"] == "https://demo-api.binance.com/api/v3"
+    assert mock_exchange.urls["api"]["private"] == "https://demo-api.binance.com/api/v3"
+    assert mock_exchange.urls["api"]["fapiPublic"] == "https://testnet.binancefuture.com/fapi/v1"
+
+
+def test_sandbox_patch_not_applied_to_non_binance_exchange():
+    mock_exchange = MagicMock()
+    mock_exchange.urls = {"api": {"public": "https://testnet.example.com/api/v3"}}
+    _build_adapter_via_init("okx", mock_exchange)
+    assert mock_exchange.urls["api"]["public"] == "https://testnet.example.com/api/v3"
