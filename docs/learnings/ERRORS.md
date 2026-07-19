@@ -107,3 +107,63 @@ editable: true            # <-- 允許 runtime 修改
 **預防**：
 - 指標計算應集中在後端（single source of truth），前端只做呈現
 - 涉及方向性的計算（PnL、return）必須考慮 side/direction
+
+## 2026-07-19 GCP VM 手動貼 SSH 公鑰沒生效，改用 gcloud CLI 寫入 metadata
+
+**症狀**：照 GCP Console「編輯 VM → 安全殼層金鑰 → 新增項目」貼公鑰、儲存後，`ssh <user>@<vm-ip>` 仍然 `Permission denied (publickey)`。改用 `gcloud compute ssh` 卻能正常連線。
+
+**根因**：查 VM instance metadata（`gcloud compute instances describe <instance> --zone=<zone> --format="value(metadata.items)"`）發現手動貼上去的公鑰**根本沒有出現在 metadata 裡**——Console 那次儲存沒有真的存進去（原因不明）。不是 OS Login 把 metadata key 忽略掉（另外查過 `enable-oslogin` 在專案和實例層級都沒被設定）。`gcloud compute ssh` 能連是因為它用自己一套獨立機制（`~/.ssh/google_compute_engine` + 自動寫入的短效 `google-ssh` metadata key），跟手動貼的那把公鑰完全無關，容易誤以為「金鑰有生效」。
+
+**修法**：改用指令直接寫入 metadata，不透過網頁手動貼：
+```bash
+# 先讀出既有 ssh-keys，跟新公鑰合併成一個檔案（add-metadata 是整個值覆蓋，不是 append）
+gcloud compute instances add-metadata <instance> --zone=<zone> \
+  --metadata-from-file ssh-keys=<合併後的檔案路徑>
+```
+寫入後等 20-30 秒讓 VM 上的開機代理程式同步，再測 `ssh <user>@<vm-ip>`。
+
+**預防**：
+- Console 手動貼 SSH 公鑰後，用 `gcloud compute instances describe <instance> --format="value(metadata.items)"` 實際查一次確認金鑰真的寫進去了，不要只看畫面上「已儲存」就假設有效。
+- 有 `gcloud` CLI 可用時，優先用 `add-metadata` 寫入，比網頁手動編輯可靠，也方便之後腳本化重現。
+
+## 2026-07-19 ccxt Binance sandbox 指向已棄用的 testnet.binance.vision
+
+**症狀**：`CryptoAdapter(sandbox=True)` 呼叫 Binance demo API 時得到 `ccxt.base.errors.AuthenticationError: binance {"code":-2015,...}`，一開始誤判成 API key 沒設 IP 白名單。
+
+**根因**：ccxt 4.5.66 的 `set_sandbox_mode(True)` 對 Binance spot 仍然指向 Binance 已棄用的 `testnet.binance.vision`；Binance 現行的 demo 環境網域是 `demo-api.binance.com`（上游 issue：ccxt/ccxt#27266，2026-07 仍開著）。
+
+**修法**：`brokers/crypto_adapter.py` 加 `_patch_binance_sandbox_urls()`，在 `set_sandbox_mode(True)` 之後手動把 `exchange.urls['api']` 裡 `testnet.binance.vision` 字串取代成 `demo-api.binance.com`，只對 `exchange_id == "binance"` 生效。
+
+**預防**：
+- 遇到 sandbox/demo 環境的認證錯誤，先確認實際打到的網域對不對（`exchange.urls`），不要直接假設是金鑰或白名單問題。
+- ccxt 對特定交易所的 sandbox URL 可能落後交易所自己的遷移，升級 ccxt 版本後應該重新檢查這個 patch 還需不需要。
+
+## 2026-07-19 Shioaji login() 不再接受 person_id
+
+**症狀**：`ShioajiAdapter.__init__` 呼叫 `self._api.login(api_key=..., secret_key=..., person_id=...)` 得到 `TypeError: Shioaji.login() got an unexpected keyword argument 'person_id'`（已安裝 shioaji 1.3.3）。
+
+**根因**：Shioaji SDK 上游把 `login()` 的簽名改了——`person_id` 不再是 `login()` 的參數，改成從 `api_key` 對應的帳號自動決定；`person_id` 現在只有 `activate_ca()`（選擇要用哪個帳號的憑證）才需要。
+
+**修法**：`login()` 呼叫拿掉 `person_id`，只在後面 `activate_ca(ca_path=..., ca_passwd=..., person_id=...)` 才傳。
+
+**預防**：Shioaji SDK 版本升級後，函式簽名可能跟著變，遇到 `TypeError: unexpected keyword argument` 先查該版本的實際簽名，不要假設官方文件範例一定跟裝到的版本一致。
+
+## 2026-07-19 psycopg2 SimpleConnectionPool 不驗證連線，壞掉的連線會一直被重複發放
+
+**症狀**：本機長時間（約 1 小時）跑背景 `LiveTrader` 測試，中途 Tailscale 斷線又重連後，`DB update_heartbeat failed: connection already closed` 開始每次心跳都報錯，直到手動重啟程式才恢復。
+
+**根因**：`psycopg2.pool.SimpleConnectionPool` 在 `getconn()` 時不會驗證連線是否還活著——網路短暫中斷把某條連線弄壞後，pool 仍然把這條壞掉的連線繼續發放出去，之後每次用到就失敗，直到程式重啟、pool 被重建。
+
+**修法**：`db/__init__.py` 的 `get_conn()` 改成 `pool.putconn(conn, close=bool(conn.closed))`——歸還連線時如果 `conn.closed` 是真的，直接丟棄而不是放回 pool 重複使用。
+
+**預防**：用 `SimpleConnectionPool` 時，任何長時間跑的程序都要在歸還連線前檢查 `conn.closed`，不能假設 pool 自己會處理壞連線；跟資料庫之間有不穩定網路（VPN/Tailscale）時尤其容易踩到。
+
+## 2026-07-19 Shioaji API key 只有模擬權限，正式登入報「Token doesn't have production permission」
+
+**症狀**：幫 `get_ohlcv(..., data_source="shioaji")` 寫歷史資料 fetcher，預設用 `ShioajiAdapter()`（`simulation=False`）登入，得到 `Exception: {'status': {'status_code': 400}, ... 'detail': "Token doesn't have production permission."}`。
+
+**根因**：本機這把 `SHIOAJI_API_KEY` 是唯讀、只申請了模擬（simulation）環境的登入權限，沒有開正式環境登入權限——這跟「有沒有 CA、能不能下單」是兩件事，login 本身的模擬/正式權限是另一層限制。
+
+**修法**：歷史資料 fetcher（`strategies/data/ohlcv.py` 的 `_shioaji_fetcher`）固定用 `ShioajiAdapter(simulation=True)` 登入——回測用歷史資料本來就不需要正式權限，也讓只有模擬權限的 key 能用。
+
+**預防**：Shioaji 的「模擬 vs 正式」是登入層級的權限，不是下單層級（下單層級是有沒有 CA），申請/使用 key 時兩層要分開確認；純資料用途沒有理由要求正式登入權限。
