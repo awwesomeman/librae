@@ -7,6 +7,12 @@
 # script never redefines what the containers look like, only how the files
 # get there.
 #
+# Deliberately only syncs .env, never .env.secrets (trading-enabled API
+# keys) — that file must be created directly on the remote host (see
+# .env.secrets.example) so a re-run of this script can never clobber a live
+# key with an empty local value, and the key never has to exist on the dev
+# machine at all.
+#
 # Usage: ./deploy/cloud_deploy.sh <user>@<host>
 # Requires locally: rsync, ssh, curl, python3 (scripts/dev_push_dashboard.py).
 # Requires on the remote host: Docker + docker-compose-plugin only, e.g.
@@ -52,7 +58,13 @@ done
 
 # Datasource is auto-provisioned from app/grafana/provisioning/ (same as
 # VPS-native deploy) — no separate API call needed here.
-python3 "${PROJECT_ROOT}/scripts/dev_push_dashboard.py" \
+# Prefer the project venv (has `requests` etc. via pyproject deps) over
+# system python3, which may not have it installed at all.
+PYTHON_BIN="python3"
+if [[ -x "${PROJECT_ROOT}/.venv/bin/python3" ]]; then
+    PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python3"
+fi
+"${PYTHON_BIN}" "${PROJECT_ROOT}/scripts/dev_push_dashboard.py" \
     --grafana-url "http://localhost:3000" \
     --grafana-password "${GF_SECURITY_ADMIN_PASSWORD}"
 

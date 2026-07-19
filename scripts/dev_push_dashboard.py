@@ -20,7 +20,7 @@ import re
 import subprocess
 import sys
 
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
 
 def get_timescaledb_uid(base_url: str, auth: tuple[str, str]) -> tuple[str | None, str | None]:
     """Query Grafana API for TimescaleDB/PostgreSQL datasource."""
-    r = requests.get(f"{base_url}/api/datasources", auth=auth, timeout=10)
+    r = httpx.get(f"{base_url}/api/datasources", auth=auth, timeout=10)
     r.raise_for_status()
     for ds in r.json():
         name = ds.get("name", "").lower()
@@ -67,7 +67,7 @@ def delete_old_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Remove legacy per-mode dashboards from Grafana."""
     old_uids = ["backtest_dashboard", "sim_dashboard", "live_dashboard"]
     for uid in old_uids:
-        r = requests.delete(f"{base_url}/api/dashboards/uid/{uid}", auth=auth, timeout=10)
+        r = httpx.delete(f"{base_url}/api/dashboards/uid/{uid}", auth=auth, timeout=10)
         if r.status_code == 404:
             continue
         r.raise_for_status()
@@ -82,7 +82,7 @@ def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
         with open(fpath) as f:
             d = json.load(f)
         d.pop("id", None)
-        r = requests.post(
+        r = httpx.post(
             f"{base_url}/api/dashboards/db",
             json={"dashboard": d, "folderId": 0, "overwrite": True},
             auth=auth,
