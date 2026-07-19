@@ -22,7 +22,10 @@ fi
 IMAGE="${TRADE_IMAGE:?Set TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade}"
 
 echo "Building ${IMAGE}:latest..."
-docker build -t "${IMAGE}:latest" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"
+# --platform linux/amd64: cloud VMs are almost always x86_64 regardless of
+# what the dev machine is (e.g. Apple Silicon Macs build arm64 by default,
+# which a typical VM can't run at all — "no matching manifest" on pull).
+docker build --platform linux/amd64 -t "${IMAGE}:latest" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"
 
 echo "Pushing ${IMAGE}:latest..."
 docker push "${IMAGE}:latest"
