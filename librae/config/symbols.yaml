@@ -39,6 +39,15 @@ BTCUSDT:
   # multiplier/tick_size omitted on purpose — spot auto-defaults to
   # multiplier=1.0, tick_size falls back to markets.yaml's crypto default (0.01).
 
+BTCUSDT_QUARTERLY:
+  market: crypto
+  data_source: binance_futures_continuous
+  instrument_type: contract_quarterly
+  continuous_alias: true
+  # Binance USDT-M linear contract, contractSize=1 BTC per contract (verified
+  # via ccxt binanceusdm market info) — 1 contract == 1 BTC notional.
+  multiplier: 1.0
+
 TXFR1:
   market: tw_futures
   data_source: shioaji

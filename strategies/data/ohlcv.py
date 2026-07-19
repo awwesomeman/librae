@@ -106,6 +106,62 @@ def _ccxt_fetcher(exchange_id: str) -> Callable[[str, str, datetime, datetime], 
 register_ohlcv_fetcher("binance_spot", _ccxt_fetcher("binance"))
 
 
+def _binance_continuous_fetcher(
+    exchange_id: str = "binanceusdm",
+) -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
+    """Build a get_ohlcv-compatible fetcher for Binance quarterly futures.
+
+    Symbol convention: ``"<PAIR>_QUARTERLY"`` (e.g. ``"BTCUSDT_QUARTERLY"``)
+    maps to ``pair=<PAIR>, contractType=CURRENT_QUARTER``. Binance resolves
+    server-side which dated contract (e.g. ``BTCUSDT_260925``) is currently
+    front — unlike registering the dated symbol directly, this alias never
+    needs updating as the front contract rolls each quarter (see
+    ``CryptoAdapter.fetch_continuous_ohlcv``).
+    """
+    def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        from brokers.crypto_adapter import CryptoAdapter
+
+        if not symbol.endswith("_QUARTERLY"):
+            raise ValueError(
+                "binance_futures_continuous expects a '<PAIR>_QUARTERLY' "
+                f"symbol, got {symbol!r}"
+            )
+        pair = symbol[: -len("_QUARTERLY")]
+
+        adapter = CryptoAdapter(exchange_id=exchange_id)
+        limit = 1500
+        since_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+
+        pages: list[pd.DataFrame] = []
+        while since_ms <= end_ms:
+            page = adapter.fetch_continuous_ohlcv(
+                pair, "CURRENT_QUARTER", interval, limit, since=since_ms,
+            )
+            if page.empty:
+                break
+            pages.append(page)
+            last_ts_ms = int(page["ts"].iloc[-1].timestamp() * 1000)
+            next_since_ms = last_ts_ms + 1
+            if next_since_ms <= since_ms:
+                break  # no progress — avoid looping forever
+            since_ms = next_since_ms
+            if len(page) < limit:
+                break  # short page — caught up to the exchange's latest data
+
+        if not pages:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+
+        df = pd.concat(pages, ignore_index=True).rename(columns={"ts": "timestamp"})
+        df = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+        return df.reset_index(drop=True)
+
+    return _fetch
+
+
+register_ohlcv_fetcher("binance_futures_continuous", _binance_continuous_fetcher())
+
+
 def _shioaji_fetcher() -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
     """Build a get_ohlcv-compatible fetcher backed by ShioajiAdapter.
 
@@ -171,7 +227,8 @@ def get_ohlcv(
         timeframe:       Candle interval in any supported format
                          (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
         data_source:     Data source key registered via ``register_ohlcv_fetcher``.
-                         Built-in: ``'binance_spot'``, ``'shioaji'``.
+                         Built-in: ``'binance_spot'``, ``'binance_futures_continuous'``,
+                         ``'shioaji'``.
         start:           Start of the requested time range.
         end:             End of the requested time range. Defaults to now.
         warmup_periods:  Extra bars to fetch before ``start`` for indicator warm-up.

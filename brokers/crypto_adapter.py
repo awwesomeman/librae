@@ -182,6 +182,68 @@ class CryptoAdapter:
 
         return df
 
+    def fetch_continuous_ohlcv(
+        self,
+        pair: str,
+        contract_type: str,
+        timeframe: str,
+        limit: int = 200,
+        *,
+        since: int | None = None,
+    ) -> pd.DataFrame:
+        """Fetch OHLCV for a Binance continuous futures contract (e.g. quarterly).
+
+        Unlike ``fetch_ohlcv``, this queries by ``(pair, contract_type)``
+        rather than a dated contract symbol (e.g. ``"BTCUSDT_260925"``) —
+        Binance resolves server-side which concrete contract is currently
+        ``CURRENT_QUARTER``/``NEXT_QUARTER``/``PERPETUAL``, so the caller
+        never has to track the expiry date or re-register a new symbol each
+        quarter as the front contract rolls. Only supported on
+        ``binanceusdm``/``binancecoinm`` — this hits Binance's
+        ``continuousKlines`` REST endpoint directly (fapi/dapi), not a
+        general ccxt feature other exchanges expose.
+
+        Args:
+            pair: Underlying pair, e.g. ``"BTCUSDT"`` — not a dated symbol.
+            contract_type: ``"PERPETUAL"``, ``"CURRENT_QUARTER"``, or
+                ``"NEXT_QUARTER"``.
+            timeframe: Candle interval (e.g. ``"1h"``, ``"1d"``).
+            limit: Max candles per page (Binance caps at 1500).
+            since: Start timestamp in milliseconds.
+
+        Returns columns: ``[ts, open, high, low, close, volume]``
+        where ``ts`` is a UTC-aware ``datetime``.
+        """
+        if self._exchange_id not in ("binanceusdm", "binancecoinm"):
+            raise ValueError(
+                "fetch_continuous_ohlcv requires exchange_id='binanceusdm' or "
+                f"'binancecoinm', got {self._exchange_id!r}"
+            )
+        method = (
+            self._exchange.fapiPublicGetContinuousKlines
+            if self._exchange_id == "binanceusdm"
+            else self._exchange.dapiPublicGetContinuousKlines
+        )
+        params: dict[str, Any] = {
+            "pair": pair,
+            "contractType": contract_type,
+            "interval": timeframe,
+            "limit": limit,
+        }
+        if since is not None:
+            params["startTime"] = since
+
+        raw = method(params)
+        df = pd.DataFrame(raw, columns=[
+            "ts", "open", "high", "low", "close", "volume", "close_ts",
+            "quote_volume", "trades", "taker_buy_base", "taker_buy_quote", "ignore",
+        ])
+        df = df[["ts", "open", "high", "low", "close", "volume"]].copy()
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        for col in ("open", "high", "low", "close", "volume"):
+            df[col] = df[col].astype(float)
+        return df
+
     # ------------------------------------------------------------------
     # Order management (requires API key)
     # ------------------------------------------------------------------
