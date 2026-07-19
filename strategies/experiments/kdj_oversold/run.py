@@ -2,12 +2,8 @@
 """KDJ Oversold — backtest + sim runner.
 
 Usage:
-    python -m experiments.kdj_oversold.run          # backtest
-    python -m experiments.kdj_oversold.run --sim    # sim (real-time monitoring)
-
-Note: currently broken — imports `from .utils import ...` but this folder has
-no utils.py (missing since before this file was last touched). Needs
-DEFAULT_PARAMS/SIGNAL_NAME/prepare_signals written before run_backtest() works.
+    python -m strategies.experiments.kdj_oversold.run          # backtest
+    python -m strategies.experiments.kdj_oversold.run --sim    # sim (real-time monitoring)
 """
 from __future__ import annotations
 
