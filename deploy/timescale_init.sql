@@ -153,3 +153,36 @@ CREATE TABLE IF NOT EXISTS ohlcv_coverage_ranges (
 );
 CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
     ON ohlcv_coverage_ranges(symbol, timeframe, data_source, range_started_at);
+
+-- ============================================================
+-- external_factors — 通用第三方因子資料 (hypertable)
+-- 收「有外部抓取成本」的原始序列（funding rate、open interest 等）；
+-- 從 OHLCV 現算的衍生特徵（cross_asset、regime）不進這張表，因為隨時能
+-- 重算，不需要 gap-tracking。schema 刻意跟 ohlcv 一致（symbol/ts + 一個
+-- long 欄位），新資料源只是新的 factor_name，不需要 migration。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS external_factors (
+    ts              TIMESTAMPTZ NOT NULL,
+    symbol          TEXT NOT NULL,
+    factor_name     TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    value           DOUBLE PRECISION NOT NULL
+);
+SELECT create_hypertable('external_factors', 'ts', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, source, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, source);
+
+-- ============================================================
+-- external_factor_coverage_ranges — get_factor() cache 覆蓋區間追蹤
+-- (非 hypertable，跟 ohlcv_coverage_ranges 同一種設計)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS external_factor_coverage_ranges (
+    id              SERIAL PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    factor_name     TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    range_started_at     TIMESTAMPTZ NOT NULL,
+    range_ended_at       TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
+    ON external_factor_coverage_ranges(symbol, factor_name, source, range_started_at);

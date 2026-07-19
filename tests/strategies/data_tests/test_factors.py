@@ -1,0 +1,94 @@
+"""Tests for strategies.data.factors — unified third-party factor fetching
+with coverage-tracked caching. Mirrors test_ohlcv.py's TestGetOhlcv structure
+since get_factor() shares the same DB-first + gap-fill design as get_ohlcv."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
+
+from strategies.data.factors import (
+    FACTOR_COLUMNS,
+    get_factor,
+    register_factor_fetcher,
+)
+
+START = datetime(2024, 1, 1, tzinfo=timezone.utc)
+END = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+
+def _make_factor_df(n: int = 5, start_ts: datetime | None = None) -> pd.DataFrame:
+    start = start_ts or START
+    ts = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame({"timestamp": ts, "value": [float(i) for i in range(n)]})
+
+
+class TestGetFactor:
+    @patch("strategies.data.factors._merge_coverage")
+    @patch("strategies.data.factors._upsert_db")
+    @patch("strategies.data.factors._query_db")
+    @patch("strategies.data.factors._query_coverage")
+    def test_fully_covered_skips_fetcher(self, mock_cov, mock_db, mock_upsert, mock_merge):
+        mock_cov.return_value = [(START, END)]
+        mock_db.return_value = _make_factor_df(5)
+        mock_fetcher = MagicMock()
+        register_factor_fetcher("test_factor_covered", mock_fetcher, source="test-source")
+
+        result = get_factor("BTCUSDT", "test_factor_covered", start=START, end=END)
+
+        assert len(result) == 5
+        mock_fetcher.assert_not_called()
+        mock_upsert.assert_not_called()
+        mock_merge.assert_not_called()
+
+    @patch("strategies.data.factors._merge_coverage")
+    @patch("strategies.data.factors._upsert_db")
+    @patch("strategies.data.factors._query_db")
+    @patch("strategies.data.factors._query_coverage")
+    def test_no_coverage_fetches_and_upserts(self, mock_cov, mock_db, mock_upsert, mock_merge):
+        mock_cov.return_value = []
+        fetched = _make_factor_df(5)
+        mock_db.return_value = fetched
+        mock_fetcher = MagicMock(return_value=fetched)
+        register_factor_fetcher("test_factor_nocov", mock_fetcher, source="test-source")
+
+        result = get_factor("BTCUSDT", "test_factor_nocov", start=START, end=END)
+
+        mock_fetcher.assert_called_once_with("BTCUSDT", START, END)
+        mock_upsert.assert_called_once()
+        mock_merge.assert_called_once_with("BTCUSDT", "test_factor_nocov", "test-source", START, END)
+        assert len(result) == 5
+
+    @patch("strategies.data.factors._query_coverage")
+    def test_coverage_unavailable_falls_back_to_fetcher(self, mock_cov):
+        mock_cov.return_value = None
+        fetched = _make_factor_df(3)
+        mock_fetcher = MagicMock(return_value=fetched)
+        register_factor_fetcher("test_factor_nodbfallback", mock_fetcher, source="test-source")
+
+        result = get_factor("BTCUSDT", "test_factor_nodbfallback", start=START, end=END)
+
+        mock_fetcher.assert_called_once_with("BTCUSDT", START, END)
+        assert len(result) == 3
+        assert list(result.columns) == FACTOR_COLUMNS
+
+    def test_unknown_factor_raises(self):
+        with pytest.raises(ValueError, match="No fetcher registered"):
+            get_factor("BTCUSDT", "nonexistent_factor", start=START)
+
+    @patch("strategies.data.factors._merge_coverage")
+    @patch("strategies.data.factors._upsert_db")
+    @patch("strategies.data.factors._query_db")
+    @patch("strategies.data.factors._query_coverage")
+    def test_source_is_recorded_from_registration_not_caller(self, mock_cov, mock_db, mock_upsert, mock_merge):
+        """source isn't a caller-facing param — it's whatever the fetcher was registered with."""
+        mock_cov.return_value = []
+        fetched = _make_factor_df(2)
+        mock_db.return_value = fetched
+        register_factor_fetcher("test_factor_source", MagicMock(return_value=fetched), source="my-provider")
+
+        get_factor("BTCUSDT", "test_factor_source", start=START, end=END)
+
+        mock_merge.assert_called_once_with("BTCUSDT", "test_factor_source", "my-provider", START, END)

@@ -191,6 +191,60 @@ def get_ohlcv_coverage_ranges(
     return [(r[0], r[1]) for r in rows]
 
 
+def get_external_factor_coverage_ranges(
+    symbol: str,
+    factor_name: str,
+    source: str,
+    dsn: str = TIMESCALE_DSN,
+) -> list[tuple[datetime, datetime]]:
+    """Return this factor key's cached (range_started_at, range_ended_at) pairs,
+    sorted. Same shape/semantics as get_ohlcv_coverage_ranges()."""
+    sql = """
+        SELECT range_started_at, range_ended_at FROM external_factor_coverage_ranges
+        WHERE symbol = %s AND factor_name = %s AND source = %s
+        ORDER BY range_started_at
+    """
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (symbol, factor_name, source))
+        rows = cur.fetchall()
+        cur.close()
+    return [(r[0], r[1]) for r in rows]
+
+
+def load_external_factor(
+    symbol: str,
+    factor_name: str,
+    source: str,
+    *,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    dsn: str = TIMESCALE_DSN,
+) -> pd.DataFrame:
+    """Load cached factor values for (symbol, factor_name, source).
+
+    Returns DataFrame with columns [timestamp, value], tz-aware UTC, sorted
+    ascending — same shape get_factor()'s fetchers must return.
+    """
+    sql = """
+        SELECT ts AS timestamp, value FROM external_factors
+        WHERE symbol = %s AND factor_name = %s AND source = %s
+    """
+    params: list = [symbol, factor_name, source]
+    if started_at:
+        sql += " AND ts >= %s"
+        params.append(started_at)
+    if ended_at:
+        sql += " AND ts <= %s"
+        params.append(ended_at)
+    sql += " ORDER BY ts"
+    with get_conn(dsn) as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if not df.empty:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df
+
+
 def load_ohlcv(
     run_id: str | None = None,
     *,

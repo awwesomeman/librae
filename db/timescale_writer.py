@@ -13,7 +13,8 @@ Naming convention:
                 upsert the result
 
 Tables: backtest_runs, equity_curve, trade_events,
-strategy_performance, ohlcv, signal_events, ohlcv_coverage_ranges.
+strategy_performance, ohlcv, signal_events, ohlcv_coverage_ranges,
+external_factors, external_factor_coverage_ranges.
 """
 from __future__ import annotations
 
@@ -389,6 +390,51 @@ def write_ohlcv(
     return len(rows)
 
 
+def _merge_coverage_ranges(
+    cur: "PgCursor",
+    table: str,
+    key_cols: tuple[str, ...],
+    key_values: tuple[str, ...],
+    range_started_at: datetime,
+    range_ended_at: datetime,
+) -> None:
+    """Shared read-modify-write interval merge, used by every *_coverage_ranges
+    table (``ohlcv_coverage_ranges``, ``external_factor_coverage_ranges``, ...).
+
+    Merges [range_started_at, range_ended_at] with any existing rows for
+    ``key_values`` that it now overlaps or touches, so the row count per key
+    stays small instead of growing one row per fetch. ``table``/``key_cols``
+    are trusted internal literals (not user input), so f-string interpolation
+    here is safe — values are still passed as bind params.
+    """
+    where = " AND ".join(f"{col} = %s" for col in key_cols)
+    cur.execute(
+        f"""SELECT id, range_started_at, range_ended_at FROM {table}
+            WHERE {where} ORDER BY range_started_at""",
+        key_values,
+    )
+    rows = [{"id": r[0], "range_started_at": r[1], "range_ended_at": r[2]} for r in cur.fetchall()]
+    rows.append({"id": None, "range_started_at": range_started_at, "range_ended_at": range_ended_at})
+    rows.sort(key=lambda r: r["range_started_at"])
+
+    merged: list[tuple[datetime, datetime]] = []
+    for row in rows:
+        if merged and row["range_started_at"] <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], row["range_ended_at"]))
+        else:
+            merged.append((row["range_started_at"], row["range_ended_at"]))
+
+    old_ids = [r["id"] for r in rows if r["id"] is not None]
+    if old_ids:
+        cur.execute(f"DELETE FROM {table} WHERE id = ANY(%s)", (old_ids,))
+    psycopg2.extras.execute_values(
+        cur,
+        f"""INSERT INTO {table} ({", ".join(key_cols)}, range_started_at, range_ended_at)
+            VALUES %s""",
+        [(*key_values, rs, re) for rs, re in merged],
+    )
+
+
 def merge_ohlcv_coverage_ranges(
     symbol: str,
     timeframe: str,
@@ -405,31 +451,79 @@ def merge_ohlcv_coverage_ranges(
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(
-            """SELECT id, range_started_at, range_ended_at FROM ohlcv_coverage_ranges
-               WHERE symbol = %s AND timeframe = %s AND data_source = %s
-               ORDER BY range_started_at""",
-            (symbol, timeframe, data_source),
+        _merge_coverage_ranges(
+            cur, "ohlcv_coverage_ranges", ("symbol", "timeframe", "data_source"),
+            (symbol, timeframe, data_source), range_started_at, range_ended_at,
         )
-        rows = [{"id": r[0], "range_started_at": r[1], "range_ended_at": r[2]} for r in cur.fetchall()]
-        rows.append({"id": None, "range_started_at": range_started_at, "range_ended_at": range_ended_at})
-        rows.sort(key=lambda r: r["range_started_at"])
+        cur.close()
 
-        merged: list[tuple[datetime, datetime]] = []
-        for row in rows:
-            if merged and row["range_started_at"] <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], row["range_ended_at"]))
-            else:
-                merged.append((row["range_started_at"], row["range_ended_at"]))
 
-        old_ids = [r["id"] for r in rows if r["id"] is not None]
-        if old_ids:
-            cur.execute("DELETE FROM ohlcv_coverage_ranges WHERE id = ANY(%s)", (old_ids,))
+def write_external_factor(
+    df: pd.DataFrame,
+    symbol: str,
+    factor_name: str,
+    source: str,
+    dsn: str = TIMESCALE_DSN,
+) -> int:
+    """Write a factor DataFrame to TimescaleDB external_factors table.
+
+    Expects df with columns: timestamp (tz-aware UTC), value.
+    Returns number of rows written. Mirrors write_ohlcv()'s shape/tz handling.
+    """
+    if df is None or df.empty:
+        return 0
+
+    ts_series = pd.to_datetime(df["timestamp"])
+    if ts_series.dt.tz is None:
+        raise ValueError(
+            "Factor timestamps are timezone-naive — "
+            "fetcher must provide tz-aware datetimes "
+            "(e.g. pd.to_datetime(..., utc=True))"
+        )
+    ts_utc = ts_series.dt.tz_convert("UTC")
+
+    rows = list(zip(
+        ts_utc.apply(_to_dt),
+        [symbol] * len(df),
+        [factor_name] * len(df),
+        [source] * len(df),
+        df["value"].astype(float),
+    ))
+
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO ohlcv_coverage_ranges (symbol, timeframe, data_source, range_started_at, range_ended_at)
-               VALUES %s""",
-            [(symbol, timeframe, data_source, rs, re) for rs, re in merged],
+            """INSERT INTO external_factors (ts, symbol, factor_name, source, value)
+               VALUES %s
+               ON CONFLICT (ts, symbol, factor_name, source) DO NOTHING""",
+            rows,
+            page_size=2000,
+        )
+        cur.close()
+
+    return len(rows)
+
+
+def merge_external_factor_coverage_ranges(
+    symbol: str,
+    factor_name: str,
+    source: str,
+    range_started_at: datetime,
+    range_ended_at: datetime,
+    dsn: str = TIMESCALE_DSN,
+) -> None:
+    """Record [range_started_at, range_ended_at] as cached for this factor key.
+
+    Same merge semantics as merge_ohlcv_coverage_ranges(), keyed by
+    (symbol, factor_name, source) instead of (symbol, timeframe, data_source).
+    """
+    range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        _merge_coverage_ranges(
+            cur, "external_factor_coverage_ranges", ("symbol", "factor_name", "source"),
+            (symbol, factor_name, source), range_started_at, range_ended_at,
         )
         cur.close()
 
