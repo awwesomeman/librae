@@ -50,6 +50,11 @@ class ShioajiCredentials(CredentialConfig):
     person_id: str = ""
     ca_path: str = ""
     ca_password: str = ""
+    sandbox: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sandbox, str):
+            self.sandbox = self.sandbox.lower() == "true"
 
 
 class ShioajiAdapter:
@@ -58,9 +63,15 @@ class ShioajiAdapter:
     Parameters
     ----------
     credentials : ShioajiCredentials | None
-        If None, loads from env vars with ``SHIOAJI_`` prefix.
+        If None, loads from env vars with ``SHIOAJI_`` prefix (including
+        ``SHIOAJI_SANDBOX``).
     simulation : bool
-        If True, use Shioaji simulation mode (paper trading).
+        If True, use Shioaji simulation mode (paper trading). Mirrors
+        CryptoAdapter's ``sandbox`` param — deliberately orthogonal to
+        RunConfig.mode (sim/live): mode decides whether LiveExecutor
+        submits real orders at all, this decides which Shioaji venue an
+        adapter instance talks to. ``credentials.sandbox`` takes
+        precedence when both are supplied, same as CryptoAdapter.
 
     Unlike CryptoAdapter, Shioaji **requires** login for all operations
     including market data. The adapter logs in during ``__init__``.
@@ -74,6 +85,7 @@ class ShioajiAdapter:
     ) -> None:
         sj = _require_shioaji()
         creds = credentials or ShioajiCredentials.from_env("SHIOAJI")
+        simulation = creds.sandbox or simulation
 
         if not creds.api_key or not creds.secret_key:
             raise ValueError(

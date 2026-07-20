@@ -107,6 +107,7 @@ cmd_start() {
                 -e SHIOAJI_PERSON_ID="${SHIOAJI_PERSON_ID:-}"
                 -e SHIOAJI_CA_PATH="${SHIOAJI_CA_PATH:-}"
                 -e SHIOAJI_CA_PASSWORD="${SHIOAJI_CA_PASSWORD:-}"
+                -e SHIOAJI_SANDBOX="${SHIOAJI_SANDBOX:-false}"
             )
             if [[ -n "${SHIOAJI_CA_PATH:-}" && -f "${PROJECT_ROOT}/${SHIOAJI_CA_PATH}" ]]; then
                 volume_args+=(-v "${PROJECT_ROOT}/.secrets:/app/.secrets:ro")

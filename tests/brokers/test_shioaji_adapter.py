@@ -262,3 +262,22 @@ class TestInit:
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             ShioajiAdapter(credentials=ShioajiCredentials(api_key="k", secret_key="s"), simulation=True)
         mock_sj.Shioaji.assert_called_once_with(simulation=True)
+
+    def test_credentials_sandbox_overrides_simulation_param(self):
+        """ShioajiCredentials.sandbox (SHIOAJI_SANDBOX) takes precedence,
+        mirroring CryptoCredentials.sandbox — orthogonal to RunConfig.mode,
+        deliberately not derived from it (see librae/live/engine.py)."""
+        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        mock_api = MagicMock()
+        mock_sj = self._mock_sj(mock_api)
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+            ShioajiAdapter(
+                credentials=ShioajiCredentials(api_key="k", secret_key="s", sandbox=True),
+                simulation=False,
+            )
+        mock_sj.Shioaji.assert_called_once_with(simulation=True)
+
+    def test_sandbox_string_env_value_coerced_to_bool(self):
+        from brokers.shioaji_adapter import ShioajiCredentials
+        creds = ShioajiCredentials(api_key="k", secret_key="s", sandbox="true")
+        assert creds.sandbox is True

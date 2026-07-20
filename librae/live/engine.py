@@ -89,7 +89,13 @@ class LiveTrader:
             self._fetcher = adapter
         elif cfg.market == "tw_futures":
             from brokers.shioaji_adapter import ShioajiAdapter
-            _shioaji = ShioajiAdapter(simulation=(cfg.mode != "live"))
+            # simulation is resolved from ShioajiCredentials.sandbox (SHIOAJI_SANDBOX
+            # env var) — deliberately orthogonal to cfg.mode, same as CryptoAdapter's
+            # sandbox: mode decides whether fills are mirrored as real orders at all,
+            # sandbox decides which venue this session talks to. This lets "live" mode
+            # (order submission enabled) be drilled end-to-end against Shioaji's paper
+            # environment by setting SHIOAJI_SANDBOX=true, without touching real money.
+            _shioaji = ShioajiAdapter()
             self._fetcher = lambda symbol, tf, limit, *, drop_incomplete=False: (
                 _shioaji.fetch_ohlcv(symbol, tf, limit=limit)
             )
