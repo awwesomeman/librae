@@ -361,3 +361,60 @@ class TestCryptoLiveAutoWiring:
         explicit = MagicMock()
         trader, _ = self._build(monkeypatch, order_adapter=explicit)
         assert trader._executor._order_adapter is explicit
+
+
+class TestShioajiLiveAutoWiring:
+    """tw_futures live mode: engine.py reuses the single authenticated
+    ShioajiAdapter for both fetching and order placement (order_adapter=None
+    auto-wires to the same instance as the fetcher) — never covered
+    end-to-end: a strategy signal actually reaching Shioaji's place_order."""
+
+    def _shioaji_cfg(self, **overrides):
+        overrides.setdefault("symbols", ["TXFR1"])
+        overrides.setdefault("market", "tw_futures")
+        overrides.setdefault("data_source", "shioaji")
+        return _test_cfg(**overrides)
+
+    def test_auto_builds_order_adapter_from_shioaji(self):
+        with patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            trader = LiveTrader(
+                _HoldStrategy(), _simple_feature_fn, cfg=self._shioaji_cfg(mode="live"),
+                cost_model=_zero_cost_model(),
+                on_bar=None, on_order_event=None, on_ohlcv=None,
+                on_heartbeat=None, on_signal_outcome=None,
+            )
+
+        # Same authenticated session used for fetching and for order placement.
+        assert trader._executor._order_adapter is mock_cls.return_value
+
+    def test_strategy_signal_triggers_shioaji_place_order(self):
+        """End-to-end: strategy emits a buy, next bar's fill is mirrored to
+        the auto-wired ShioajiAdapter via LiveExecutor.submit_order."""
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        with patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls:
+            mock_shioaji = MagicMock()
+            mock_shioaji.place_order.return_value = {"id": "1", "status": "filled"}
+            mock_shioaji.fetch_ohlcv.side_effect = lambda symbol, tf, limit: fetcher()
+            mock_cls.return_value = mock_shioaji
+
+            trader = LiveTrader(
+                _AlwaysBuyStrategy(), _simple_feature_fn,
+                cfg=self._shioaji_cfg(mode="live"),
+                cost_model=_zero_cost_model(),
+                on_bar=None, on_order_event=None, on_ohlcv=None,
+                on_heartbeat=None, on_signal_outcome=None,
+            )
+            trader.run(max_iterations=2)
+
+        # Iteration 1: buy queued. Iteration 2: buy fills — mirrored to Shioaji.
+        assert mock_shioaji.place_order.call_count >= 1
+        first_call_signal = mock_shioaji.place_order.call_args_list[0].args[0]
+        assert first_call_signal["side"] == "buy"
+        assert first_call_signal["symbol"] == "TXFR1"
