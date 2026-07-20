@@ -1,0 +1,13 @@
+# tw_futures_test — THROWAWAY strategy, not a real trading strategy.
+#
+# Sole purpose: drive an end-to-end "strategy signal -> LiveTrader ->
+# place_order" test against Shioaji's sandbox (see architecture.md's
+# "mode vs sandbox" section). Delete this directory once that test is done.
+#
+# CLI runtime flags：python -m strategies.tw_futures_test.run --help
+
+strategy:
+  name: tw_futures_test
+  symbol: TMFR1   # 微台 — smallest margin of the three registered tw_futures contracts
+  initial_balance: 100000
+  timeframe: M1   # fastest Shioaji granularity, minimizes wait for a bar close
