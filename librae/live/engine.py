@@ -212,7 +212,10 @@ class LiveTrader:
                 poll_seconds=self._cfg.poll_seconds,
                 params=self._cfg.params,
                 perf_params=self._cfg.perf_params,
-                config_hash=self._cfg.config_hash,
+                # config_hash intentionally omitted: idx_backtest_runs_config_hash is a
+                # unique index meant for backtest dedup (check_existing_run) -- sim/live
+                # runs legitimately restart with an identical config (e.g. after a
+                # crash) and must never collide on it.
             )
         except Exception as e:
             logger.warning("DB write_run_metadata failed: %s", e)
