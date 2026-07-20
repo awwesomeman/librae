@@ -72,6 +72,13 @@ TMFR1:
   multiplier: 10.0  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
   tick_size: 1.0
 
+MU:
+  market: us_equity
+  data_source: ibkr
+  instrument_type: spot
+  # multiplier/tick_size omitted — spot auto-defaults to multiplier=1.0,
+  # tick_size falls back to markets.yaml's us_equity default (0.01).
+
 # Not registered yet — reference values for when they're actually added:
 #   個股 (individual TW stocks): market: tw_equity, instrument_type: spot —
 #     multiplier auto-defaults to 1.0 like any spot instrument, no per-stock
@@ -80,3 +87,9 @@ TMFR1:
 #     ever needed, it's a function of price, not a single per-symbol
 #     constant; don't build that machinery until an actual stock strategy
 #     needs it (markets.yaml's approximate default is fine until then).
+#
+#   MUUSDT (Binance TradFi perpetual tracking MU's price, contractType
+#     TRADIFI_PERPETUAL/underlyingType EQUITY — confirmed via fapi
+#     exchangeInfo 2026-07-20): would need its own data_source fetcher
+#     first (get_ohlcv's binance_spot/binance_futures_continuous fetchers
+#     don't cover this contract family) before it can be registered here.

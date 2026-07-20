@@ -49,6 +49,9 @@ tw-live = [
 research = [
   "yfinance>=0.2",  # only needed for data/regime.py's DXY trend fetch
 ]
+us-live = [
+  "ib-async>=1.0",  # IBKRAdapter (brokers/ibkr_adapter.py) — wraps IB Gateway/TWS socket API
+]
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
@@ -63,6 +66,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
   "tw_live: tests requiring shioaji (deselect with: -m 'not tw_live')",
+  "us_live: tests requiring ib_async (deselect with: -m 'not us_live')",
 ]
 
 [build-system]

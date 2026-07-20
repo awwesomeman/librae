@@ -207,6 +207,37 @@ def _shioaji_fetcher() -> Callable[[str, str, datetime, datetime], pd.DataFrame]
 register_ohlcv_fetcher("shioaji", _shioaji_fetcher())
 
 
+def _ibkr_fetcher() -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
+    """Build a get_ohlcv-compatible fetcher backed by IBKRAdapter.
+
+    Like Shioaji, IBKR needs an authenticated session (a running, logged-in
+    TWS/IB Gateway) for every call — the adapter connects once, lazily, and
+    is reused across gap-fill calls in a process rather than reconnected
+    per call. Always read-only (trading_enabled=False) — historical OHLCV
+    is research/backtest, never order placement.
+    """
+    _adapter_holder: dict = {}
+
+    def _get_adapter():
+        if "adapter" not in _adapter_holder:
+            from brokers.ibkr_adapter import IBKRAdapter
+            _adapter_holder["adapter"] = IBKRAdapter(trading_enabled=False)
+        return _adapter_holder["adapter"]
+
+    def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        adapter = _get_adapter()
+        df = adapter.fetch_ohlcv(symbol, interval, start=start, end=end)
+        if df.empty:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+        df = df.rename(columns={"ts": "timestamp"})
+        return df[(df["timestamp"] >= start) & (df["timestamp"] <= end)].reset_index(drop=True)
+
+    return _fetch
+
+
+register_ohlcv_fetcher("ibkr", _ibkr_fetcher())
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -228,7 +259,7 @@ def get_ohlcv(
                          (ccxt: ``'1h'``, ``'5m'``; canonical: ``'H1'``, ``'M5'``).
         data_source:     Data source key registered via ``register_ohlcv_fetcher``.
                          Built-in: ``'binance_spot'``, ``'binance_futures_continuous'``,
-                         ``'shioaji'``.
+                         ``'shioaji'``, ``'ibkr'``.
         start:           Start of the requested time range.
         end:             End of the requested time range. Defaults to now.
         warmup_periods:  Extra bars to fetch before ``start`` for indicator warm-up.
