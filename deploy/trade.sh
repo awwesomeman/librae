@@ -120,7 +120,7 @@ cmd_start() {
         --network "${NETWORK}" \
         --restart unless-stopped \
         "${env_args[@]}" \
-        "${volume_args[@]}" \
+        ${volume_args[@]+"${volume_args[@]}"} \
         "${image}" \
         python -m "strategies.${strategy}.run" \
         --mode "${mode}" \

@@ -72,6 +72,7 @@ python -m strategies.trendpullback.run --mode live --poll-seconds 60
 - 兩種市場都是**輪詢（poll）＋比對最後一根 K 棒時間戳**的 bar-driven 設計，不是 WebSocket/snapshot 訂閱：crypto 打 ccxt `fetch_ohlcv`（Binance REST `/klines`），Shioaji 打 `kbars()`——兩邊資料源跟 backtest 一致，才不會出現「backtest 賺錢、live 對不上」的落差。
 - `market: tw_futures` 時 `LiveTrader` 自動建立已認證的 `ShioajiAdapter`；否則（crypto）自動建立帶 `BINANCE_*` credentials 的 `CryptoAdapter`——兩者都同時當市場資料來源和下單通道，credentials 放哪見下方「設定檔總覽」。之後加第二個 crypto 交易所，只需換一個 prefix（例如 `OKX_*`），不用改共用邏輯。
 - 常駐在 VM 上跑：見 [`architecture.md`「VM 部署與策略管理」](architecture.md#vm-部署與策略管理)，`./deploy/trade.sh start trendpullback sim 60` / `./deploy/trade.sh start trendpullback live 60`，停用 `./deploy/trade.sh stop trendpullback [sim|live]`。
+- 第一次要對某個 symbol 跑 `live` 之前，先讀 [`architecture.md`「mode 與 sandbox」](architecture.md#modesimlive-vs-sandbox測試網模擬環境)：`mode`（策略要不要真的送單）跟 `sandbox`（送到測試網還是正式站）是兩個獨立開關，`live` + `BINANCE_SANDBOX=true`/`SHIOAJI_SANDBOX=true` 可以安全演練整條下單路徑，不動真錢。
 - 掛掉偵測：`scripts/check_heartbeat.py --loop`，`backtest_runs.last_heartbeat` 超過 `3 × poll_seconds` 沒更新就用 Telegram 告警。
 
 ---
@@ -118,7 +119,7 @@ cd deploy && docker compose -f docker-compose.local.yml up -d
 | `python -m strategies.trendpullback.run --mode live --poll-seconds 60` | 策略實盤 |
 | `./deploy/build_push.sh` | 本機 build + push trade image（策略程式碼改了才需要） |
 | `./deploy/trade.sh start trendpullback sim 60` / `trade.sh stop trendpullback sim` | 啟停常駐 sim 容器（本機或 VM 上執行皆可） |
-| `./deploy/trade.sh start trendpullback live 60` / `trade.sh stop trendpullback live` | 啟停常駐 live 容器（真實下單，crypto 限定） |
+| `./deploy/trade.sh start trendpullback live 60` / `trade.sh stop trendpullback live` | 啟停常駐 live 容器（真實下單，crypto/tw_futures 皆可） |
 | `python scripts/check_heartbeat.py --loop` | 監控 sim/live 是否掛掉 |
 | `python -m app.grafana.generate_dashboards` | 重新產生 Grafana JSON |
 
