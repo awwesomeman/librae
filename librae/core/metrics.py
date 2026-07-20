@@ -1,11 +1,15 @@
 """Performance metrics module — QuantStats adapter + custom metrics.
 
-Standard metrics (Sharpe, Sortino, MDD, Calmar, etc.) delegated to QuantStats.
+Standard metrics (Sharpe, Sortino, MDD, Calmar, etc.) delegated to QuantStats,
+which always uses ddof=1 internally (not configurable — verified against
+quantstats.stats.sharpe source, so this project doesn't expose a fake ddof knob).
 Custom metrics not in QuantStats (exposure_ratio, avg_hold_periods) computed here.
 compute_all() is the single entry point, accepts primitive sequences.
 
-annual_periods is now explicit (trading days/year, e.g. 365 for crypto, 252 for TW).
-Internally multiplied by periods_per_day(timeframe) if needed.
+The annualization factor fed to QuantStats is always inferred from actual bar
+density (see _infer_annual_periods) so intraday timeframes annualize correctly.
+annual_periods (trading days/year, e.g. 365 for crypto, 252 for TW) is only a
+fallback for when density can't be inferred (<2 bars).
 """
 from __future__ import annotations
 
@@ -27,18 +31,20 @@ logger = logging.getLogger(__name__)
 SECONDS_PER_YEAR = 365.25 * 86400
 
 
-def _infer_annual_periods(index: pd.DatetimeIndex) -> int:
+def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
     """Infer how many bars fit in one year from actual data density.
 
     Uses ``n_bars / span_years`` — the true observed bar rate — so it
     correctly handles markets with limited trading hours (e.g. 5h/day
-    futures) and any bar frequency (H1, D1, W1, etc.).
+    futures) and any bar frequency (H1, D1, W1, etc.). Falls back to
+    ``fallback`` (the configured trading-days/year) when there isn't
+    enough data to infer a rate from.
     """
     if len(index) < 2:
-        return 252
+        return fallback
     span_seconds = (index[-1] - index[0]).total_seconds()
     if span_seconds <= 0:
-        return 252
+        return fallback
     span_years = span_seconds / SECONDS_PER_YEAR
     return max(1, int(round(len(index) / span_years)))
 
@@ -54,7 +60,6 @@ def compute_all(
     trade_quantities: Sequence[float] | None = None,
     risk_free_rate: float = 0.0,
     annual_periods: int = 365,
-    ddof: int = 1,  # TODO: not yet wired to QuantStats (sharpe/sortino use default ddof=1)
 ) -> StrategyMetrics:
     """Compute all metrics from equity curve + trades.
 
@@ -68,9 +73,10 @@ def compute_all(
         exposed_periods: Number of bars with at least one open position.
         trade_quantities: Per-trade closed quantity (for quantity-weighted avg return).
         risk_free_rate: Annual risk-free rate (crypto=0, TW=0.015).
-        annual_periods: Trading days per year (crypto=365, TW=252).
-            compute_all infers periods_per_day from actual data and multiplies.
-        ddof: Degrees of freedom for standard deviation.
+        annual_periods: Trading days per year (crypto=365, TW=252). Used only
+            as a fallback when bar density can't be inferred from timestamps
+            (<2 bars) — otherwise the real annualization factor is inferred
+            from actual bar density, see _infer_annual_periods.
 
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
@@ -106,19 +112,11 @@ def compute_all(
     calmar: float | None = None
     ann_return: float | None = None
     if annualize:
-        # WHY: use explicitly provided annual_periods * periods_per_day
-        # as primary, with sanity check against inferred value.
-        inferred = _infer_annual_periods(ts_index)
-        # annual_periods is trading days/year, inferred is total bars/year
-        # They should be roughly proportional. Log warning if >20% off.
-        if inferred > 0 and abs(inferred - annual_periods) / inferred > 0.20:
-            # This is expected when annual_periods is days and inferred is bars
-            # Only warn if annual_periods was explicitly set much higher than inferred
-            pass
-
-        # WHY: use inferred periods (actual bar density) for QuantStats
-        # because QuantStats expects bars-per-year, not trading-days-per-year.
-        periods = inferred
+        # WHY: QuantStats expects bars-per-year, not trading-days-per-year,
+        # so annualization always uses actual bar density (correct for any
+        # timeframe — H1, D1, ...); annual_periods is only the fallback for
+        # when density can't be inferred.
+        periods = _infer_annual_periods(ts_index, fallback=annual_periods)
         # Convert annual risk_free_rate to per-bar rate for QuantStats
         rf_per_bar = risk_free_rate / periods if periods > 0 else 0.0
 

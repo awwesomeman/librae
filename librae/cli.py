@@ -260,7 +260,6 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         annualize=annualize,
         risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
         annual_periods=int(perf.get("annual_periods", default_annual)),
-        ddof=int(perf.get("ddof", 1)),
         poll_seconds=poll_seconds,
         no_db=no_db,
         dry_run=dry_run,

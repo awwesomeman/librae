@@ -15,7 +15,6 @@ strategy:
   perf:
     risk_free_rate: 0.0
     annual_periods: 365
-    ddof: 1
     annualize: true
 
 telegram:

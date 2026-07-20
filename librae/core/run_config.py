@@ -82,7 +82,6 @@ class RunConfig:
     annualize: bool = True
     risk_free_rate: float = 0.0
     annual_periods: int = 365
-    ddof: int = 1
 
     # === Behavior params (not stored in DB) ===
     poll_seconds: int = 60
@@ -108,7 +107,6 @@ class RunConfig:
             "annualize": self.annualize,
             "risk_free_rate": self.risk_free_rate,
             "annual_periods": self.annual_periods,
-            "ddof": self.ddof,
         }
 
     @cached_property
@@ -165,7 +163,6 @@ class RunConfig:
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",
             f"  annual_periods: {self.annual_periods}",
-            f"  ddof:        {self.ddof}",
             "  --- behavior (not stored in DB) ---",
             f"  no_db:       {self.no_db}",
             f"  dry_run:     {self.dry_run}",
