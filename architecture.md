@@ -46,7 +46,8 @@ flowchart LR
 brokers (券商/交易所 adapter)  →  librae (core → backtest / live)  →  db (timescale_writer / timescale_reader)  →  Grafana / Streamlit
 ```
 
-- `brokers/`：每個券商/交易所一個 adapter（`ShioajiAdapter`、`CryptoAdapter`），提供 `fetch_ohlcv` / `place_order` / `get_position` / `info`，供 live engine 抓資料與下單。設計細節見下方「Broker Adapter 設計」。
+- `brokers/`：每個券商/交易所一個 adapter（`ShioajiAdapter`、`CryptoAdapter`、`IBKRAdapter`），提供 `fetch_ohlcv` / `place_order` / `get_position` / `info`，供 live engine 抓資料與下單。設計細節見下方「Broker Adapter 設計」。
+- `strategies/data/`：策略/回測要用的市場資料與第三方因子的唯一存取層，`get_ohlcv()`/`get_factor()` 統一走 DB-first + 缺口補值。設計細節見下方「資料存取層設計」。
 - `librae/core/`：策略執行的共用邏輯（`strategy.py` 定義 Position/Action/Fill，`executor.py` 定義 TradeResult/OrderEvent 與撮合邏輯），backtest 與 live 共用。
 - `librae/backtest/engine.py`：逐 bar 回測引擎，產出 `BacktestOutput`（`librae/backtest/schema.py` 定義的 DB 持久化用 dataclass：RunMetadata/EquityCurvePoint/OrderEventRecord/StrategyMetrics）。
 - `librae/live/engine.py`：sim/live 模式的即時輪詢引擎，同一份 executor 邏輯，即時寫入 DB，資料/下單透過 `brokers/` adapter。
@@ -62,6 +63,22 @@ brokers (券商/交易所 adapter)  →  librae (core → backtest / live)  → 
 - OHLCV 回傳統一 schema：`[ts, open, high, low, close, volume]`，`ts` 為 UTC-aware datetime；timeframe 字串轉換共用 `librae/core/utils.py`（`interval_to_timedelta` 等），不在各 adapter 重複實作。
 - 需要型別約束時用 `typing.Protocol`，**在呼叫端就近宣告最小介面**，不做涵蓋全部能力的共用介面 —— 例如 `librae/live/executor.py` 的 `OrderAdapter` Protocol 只宣告 `place_order`，因為 executor 只用到這個方法。
 - 曾嘗試以 async ABC 分層（`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter`）搭配 `MarketHub` 統一 dispatch（見 `docs/decisions/2026-03-26-market-adapter-architecture.md`），因 Shioaji（stateful login+CA）與 CCXT（stateless per-call REST）的 auth 模型差異太大、且無 adapter 真正使用該分層而移除；**現況以扁平 duck-typed class 為準，不要重新引入跨券商的共用階層**。
+
+## 資料存取層設計（`strategies/data/`）
+
+兩個獨立的分類軸，分別解決兩個不同的「會變亂」問題：
+
+**軸一：`providers/` vs 概念檔案**——`strategies/data/providers/` 只放**純 API/SDK client**（目前唯一案例：`providers/finmind.py`），零商業邏輯，一個外部資料供應商一個檔案；概念檔案（`funding.py`、`open_interest.py`、`cross_asset.py`、`tw_futures_chip.py`、`tw_market_flow.py`...）留在 `strategies/data/` 最上層，依「這個因子代表什麼」命名，不是依「從哪個 API 來」命名。同一個 provider 可以被多個概念檔案 import（`tw_futures_chip.py` 跟 `tw_market_flow.py` 都用 `providers/finmind.py`，因為兩者回答的問題不同：前者是「TX 期貨/選擇權籌碼」，後者是「全市場現貨資金流」），加新資料集只需要在對應的概念檔案加一個 fetcher，不會讓 provider client 越長越肥。
+
+**軸二：`get_ohlcv()` vs `get_factor()`**——两者是同一套 DB-first + 缺口追蹤引擎（`compute_coverage_gaps` 共用，見「資料流」小節），差別只在快取的表跟粒度：`get_ohlcv()`（`ohlcv.py`）固定 schema `[timestamp, open, high, low, close, volume]`，`data_source` 對應到一個 `register_ohlcv_fetcher` 註冊的 fetcher（`binance_spot`/`shioaji`/`ibkr`...）；`get_factor()`（`factors.py`）是任意外部時序，固定 schema `[timestamp, value]`，`factor_name` 對應到一個 `register_factor_fetcher` 註冊的 fetcher，寫進共用的 `external_factors` long table（見「資料庫設計規範」），新因子不用 migration。**只有真的有抓取成本（API call、rate limit）的資料才進 `get_factor()`**——從已快取 OHLCV 現場算出來的特徵（`cross_asset.py`、`regime.py`）不算,它們沒有「缺口」的概念,直接算就好,不要為了統一而硬塞進快取引擎。
+
+**`attach_*_features(ohlcv, ..., start, end) -> DataFrame` 慣例**：每個概念檔案暴露的组合函式，把該檔案管的因子掛到一份 OHLCV DataFrame 上。一律用 `utils.py` 的 `merge_asof_backward()`（backward asof-merge）以及 `attach_or_zero_fill()`（merge 或補 0，因子還沒查到資料時的統一慣例）——backward-only 是防前視偏誤的關鍵：外部因子只在「已公布」的時間點才能被那個時間點之後的 bar 看到,絕對不能變成 forward-fill 或誤用 nearest。這兩個 helper 只寫一次、所有 `attach_*_features` 共用，不要各自重新發明 merge 邏輯。
+
+**Pseudo-symbol 慣例**：`get_factor()`/`external_factors` 的 cache key 一定要有 `symbol`，但有些因子是全市場級別、沒有真實對應的可交易標的（例如 `tw_market_flow.py` 的全市場融資融券餘額）——這種情況用一個固定的假 symbol（目前是 `"TWSE"`）當 cache key，純粹是資料庫層的識別用途，**不是** `symbols.yaml` 註冊的真實交易標的，也不會出現在 `librae/config/symbols.py` 的 registry 裡。查 DB 時看到 `symbol='TWSE'` 的列，代表的是市場級別聚合資料，不是某個叫 TWSE 的可交易商品。
+
+**Provider 自己的 id 對應**：外部資料源常有自己的一套代號（FinMind 的 `TX`/`MTX`/`TMF`/`TXO`），跟 `symbols.yaml` 的專案 symbol（`TXFR1`/`MXFR1`/`TMFR1`）不是同一套。這層對應目前是各消費該 provider 的概念檔案自己維護一個小 dict（例如 `tw_futures_chip.py` 的 `_FUTURES_ID_MAP`），**不進 `symbols.yaml`**——`symbols.yaml` 是「這個 symbol 在哪個市場、用哪個 data_source、契約經濟性質」的 registry，不是「每個 provider 怎麼稱呼這個 symbol」的翻譯表；後者若某天多到需要跨檔案共用，才考慮抽成獨立模組，現在只有 2-3 個 entry 不值得為此加一層抽象。
+
+**什麼時候開新的概念檔案 vs 加進既有檔案**：同一個問題領域（「這個因子在回答什麼」）加進既有檔案；不同問題領域即使來自同一個 provider 也分開檔案（`tw_futures_chip.py` 的「期貨籌碼」跟 `tw_market_flow.py` 的「現貨資金流」是兩個不同問題）。單一檔案超過約 200 行、或混進第二個問題領域，是該拆的訊號。
 
 ## 資料流
 

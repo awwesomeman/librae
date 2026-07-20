@@ -64,6 +64,51 @@ def compute_coverage_gaps(
     return gaps
 
 
+def merge_asof_backward(base: pd.DataFrame, other: pd.DataFrame, on: str = "timestamp") -> pd.DataFrame:
+    """Backward asof-merge `other` onto `base` on a shared UTC timestamp column.
+
+    Shared by every ``attach_*_features`` in strategies/data/ (funding,
+    open_interest, cross_asset, ...) — each base row only sees `other` rows
+    at or before its own timestamp, so joining a lower-frequency or
+    differently-timed external series never leaks a future value into a
+    bar that predates it. Both frames are copied and re-sorted; neither
+    input is mutated.
+    """
+    base = base.copy()
+    other = other.copy()
+    base[on] = pd.to_datetime(base[on], utc=True).astype("datetime64[ns, UTC]")
+    other[on] = pd.to_datetime(other[on], utc=True).astype("datetime64[ns, UTC]")
+    base = base.sort_values(on)
+    other = other.sort_values(on)
+    return pd.merge_asof(base, other, on=on, direction="backward")
+
+
+def taipei_date_to_utc(date_str: str) -> pd.Timestamp:
+    """Convert a Taipei calendar-day string (``"YYYY-MM-DD"``) to its UTC
+    midnight timestamp. Shared by every Taiwan daily-frequency factor
+    (tw_futures_chip.py, tw_market_flow.py, ...) that gets a bare date
+    string back from its data source, not an intraday timestamp."""
+    return pd.Timestamp(date_str, tz="Asia/Taipei").tz_convert("UTC")
+
+
+def attach_or_zero_fill(df: pd.DataFrame, col: str, series: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Merge `series[value_col]` onto `df` as `col` via ``merge_asof_backward``,
+    or fill `col` with 0.0 if `series` is empty ("no data available yet",
+    not a real zero reading — same convention every attach_*_features uses).
+
+    Shared by any attach_*_features that merges several optional external
+    factors in a loop (tw_futures_chip.py, tw_market_flow.py, ...) — pulls
+    the merge-or-zero-fill boilerplate out of each loop body.
+    """
+    if series.empty:
+        df = df.copy()
+        df[col] = 0.0
+        return df
+    df = merge_asof_backward(df, series.rename(columns={value_col: col}))
+    df[col] = df[col].fillna(0.0)
+    return df
+
+
 def resample_ohlcv(df: pd.DataFrame, rule: str = "1D") -> pd.DataFrame:
     """Resample OHLCV DataFrame to a different timeframe.
 

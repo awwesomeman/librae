@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 
+from strategies.data.providers import alternative_me, yahoo
+
 
 def compute_vol_regime(df: pd.DataFrame, window: int = 14, baseline: int = 120) -> pd.Series:
     """"high_vol" / "low_vol" — today's ATR ratio vs its own rolling baseline.
@@ -26,35 +28,24 @@ def compute_vol_regime(df: pd.DataFrame, window: int = 14, baseline: int = 120) 
 
 
 def fetch_historical_fng(limit: int = 1000) -> pd.DataFrame:
-    """Fetch historical Fear & Greed Index from alternative.me. Returns an
-    empty frame (caller falls back to neutral) if the request fails —
-    external API availability shouldn't crash the research pipeline."""
-    import httpx
-
-    url = f"https://api.alternative.me/fng/?limit={limit}&format=json"
-    try:
-        r = httpx.get(url, timeout=15)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        records = [
-            {"date": pd.to_datetime(int(item["timestamp"]), unit="s").date(), "fng_value": int(item["value"])}
-            for item in data
-        ]
-        return pd.DataFrame(records)
-    except Exception:
+    """Historical Fear & Greed Index, shaped as [date, fng_value]. Empty
+    frame (caller falls back to neutral) if the underlying request failed
+    — see ``providers.alternative_me.fetch_fng``."""
+    records = [
+        {"date": pd.to_datetime(int(item["timestamp"]), unit="s").date(), "fng_value": int(item["value"])}
+        for item in alternative_me.fetch_fng(limit=limit)
+    ]
+    if not records:
         return pd.DataFrame(columns=["date", "fng_value"])
+    return pd.DataFrame(records)
 
 
 def fetch_dxy_trend(start: str, end: str) -> pd.DataFrame:
-    """Daily US Dollar Index (DX-Y.NYB) trend label — no crypto-exchange or
-    Shioaji equivalent, so this is the one place this repo reaches for
-    yfinance directly. Requires the ``research`` extra (``pip install -e '.[research]'``)."""
-    import yfinance as yf
-
-    dxy_raw = yf.download("DX-Y.NYB", start=start, end=end, progress=False)
-    if isinstance(dxy_raw.columns, pd.MultiIndex):
-        dxy_raw.columns = dxy_raw.columns.get_level_values(0)
-    dxy_raw = dxy_raw.reset_index().rename(columns={"Date": "date"})
+    """Daily US Dollar Index (DX-Y.NYB) trend label, shaped as [date, dxy_trend]
+    — "strong_dxy" when Close is above its own 20-day SMA, else "weak_dxy".
+    Raw download via ``providers.yahoo.fetch_daily``; requires the
+    ``research`` extra (``pip install -e '.[research]'``)."""
+    dxy_raw = yahoo.fetch_daily("DX-Y.NYB", start, end)
     dxy_raw["date"] = pd.to_datetime(dxy_raw["date"]).dt.date
     dxy_raw["dxy_sma_20"] = dxy_raw["Close"].rolling(20).mean()
     dxy_raw["dxy_trend"] = np.where(dxy_raw["Close"] > dxy_raw["dxy_sma_20"], "strong_dxy", "weak_dxy")

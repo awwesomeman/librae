@@ -12,6 +12,7 @@ from __future__ import annotations
 import pandas as pd
 
 from strategies.data.ohlcv import get_ohlcv
+from strategies.data.utils import merge_asof_backward
 
 
 def attach_cross_asset_features(
@@ -38,14 +39,10 @@ def attach_cross_asset_features(
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
     ref = get_ohlcv(ref_symbol, ref_timeframe, data_source=ref_data_source, start=start, end=end)
-    ref = ref[["timestamp", "close"]].rename(columns={"close": "ref_close"}).sort_values("timestamp")
-    ref["timestamp"] = pd.to_datetime(ref["timestamp"], utc=True)
+    ref = ref[["timestamp", "close"]].rename(columns={"close": "ref_close"})
     ref["ref_ret"] = ref["ref_close"].pct_change()
 
-    df = df.sort_values("timestamp")
-    df["timestamp"] = df["timestamp"].astype("datetime64[ns, UTC]")
-    ref["timestamp"] = ref["timestamp"].astype("datetime64[ns, UTC]")
-    df = pd.merge_asof(df, ref[["timestamp", "ref_close", "ref_ret"]], on="timestamp", direction="backward")
+    df = merge_asof_backward(df, ref[["timestamp", "ref_close", "ref_ret"]])
 
     own_ret = df["close"].pct_change()
     df[f"xasset_corr_{window}"] = own_ret.rolling(window).corr(df["ref_ret"])

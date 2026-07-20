@@ -28,6 +28,7 @@ from datetime import datetime
 import pandas as pd
 
 from strategies.data.factors import get_factor, register_factor_fetcher
+from strategies.data.utils import merge_asof_backward
 
 _SOURCE = "data.binance.vision"
 _BASE_URL = "https://data.binance.vision/data/futures/um/daily/metrics"
@@ -127,10 +128,6 @@ def attach_oi_features(ohlcv: pd.DataFrame, symbol_raw: str, start: str, end: st
     if oi.empty:
         return df
 
-    df = df.sort_values("timestamp")
-    oi = oi.sort_values("timestamp")
-    df["timestamp"] = df["timestamp"].astype("datetime64[ns, UTC]")
-    oi["timestamp"] = oi["timestamp"].astype("datetime64[ns, UTC]")
-    df = pd.merge_asof(df, oi, on="timestamp", direction="backward")
+    df = merge_asof_backward(df, oi)
     df["open_interest_change_24h"] = (df["open_interest"] / df["open_interest"].shift(24) - 1.0) * 100.0
     return df

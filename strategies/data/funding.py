@@ -22,6 +22,7 @@ from datetime import datetime
 import pandas as pd
 
 from strategies.data.factors import get_factor, register_factor_fetcher
+from strategies.data.utils import merge_asof_backward
 
 _EXCHANGE_ID = "binanceusdm"
 
@@ -114,12 +115,7 @@ def attach_funding_features(ohlcv: pd.DataFrame, symbol: str, start: str, end: s
         df["funding_cum_3"] = 0.0
         return df
 
-    df = df.sort_values("timestamp")
-    funding = funding.sort_values("timestamp")
-    # merge_asof requires identical datetime64 resolution on both sides.
-    df["timestamp"] = df["timestamp"].astype("datetime64[ns, UTC]")
-    funding["timestamp"] = funding["timestamp"].astype("datetime64[ns, UTC]")
-    df = pd.merge_asof(df, funding, on="timestamp", direction="backward")
+    df = merge_asof_backward(df, funding)
     df["funding_rate"] = df["funding_rate"].fillna(0.0)
 
     roll = df["funding_rate"].rolling(9, min_periods=9)
