@@ -21,13 +21,13 @@ fi
 
 IMAGE="${TRADE_IMAGE:?Set TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade}"
 
-echo "Building ${IMAGE}:latest..."
-# --platform linux/amd64: cloud VMs are almost always x86_64 regardless of
-# what the dev machine is (e.g. Apple Silicon Macs build arm64 by default,
-# which a typical VM can't run at all — "no matching manifest" on pull).
-docker build --platform linux/amd64 -t "${IMAGE}:latest" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"
-
-echo "Pushing ${IMAGE}:latest..."
-docker push "${IMAGE}:latest"
+echo "Building + pushing ${IMAGE}:latest (linux/amd64 + linux/arm64)..."
+# Multi-arch manifest under one tag: cloud VMs are almost always x86_64,
+# but this same image is also pulled straight from a dev machine (e.g.
+# Apple Silicon Macs) to run trade.sh locally against a sandbox. docker
+# pull/run auto-selects the layer matching the puller's own host arch --
+# no per-machine detection logic needed on our side, just publish both.
+docker buildx build --platform linux/amd64,linux/arm64 \
+    -t "${IMAGE}:latest" -f "${SCRIPT_DIR}/Dockerfile" --push "${PROJECT_ROOT}"
 
 echo "Done. On the VM: cd deploy && ./trade.sh start <strategy> [sim|live] [poll_seconds]"
