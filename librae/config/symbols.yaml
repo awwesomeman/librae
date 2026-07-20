@@ -56,9 +56,23 @@ TXFR1:
   multiplier: 200.0  # 臺股期貨（大台）— required, no safe default for contract_* types
   tick_size: 1.0      # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
 
+MXFR1:
+  market: tw_futures
+  data_source: shioaji
+  instrument_type: contract_monthly
+  continuous_alias: true
+  multiplier: 50.0  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
+  tick_size: 1.0
+
+TMFR1:
+  market: tw_futures
+  data_source: shioaji
+  instrument_type: contract_monthly
+  continuous_alias: true
+  multiplier: 10.0  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
+  tick_size: 1.0
+
 # Not registered yet — reference values for when they're actually added:
-#   MXFR1 (小型臺指期貨): multiplier: 50.0
-#   TMFR1 (微型臺指期貨): multiplier: 10.0
 #   個股 (individual TW stocks): market: tw_equity, instrument_type: spot —
 #     multiplier auto-defaults to 1.0 like any spot instrument, no per-stock
 #     registration needed. tick_size does vary by price band in Taiwan
