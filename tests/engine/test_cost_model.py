@@ -68,8 +68,8 @@ class TestFromMarket:
     def test_futures_margin_rate(self) -> None:
         market = get_market("tw_futures")
         cm = CostModel.from_market(market, multiplier=200.0, tick_size=1.0)
-        assert np.isclose(cm.long_margin_rate, 0.067)
-        assert np.isclose(cm.short_margin_rate, 0.067)
+        assert np.isclose(cm.long_margin_rate, 0.075)
+        assert np.isclose(cm.short_margin_rate, 0.075)
 
     def test_us_equity_margin_rate(self) -> None:
         market = get_market("us_equity")

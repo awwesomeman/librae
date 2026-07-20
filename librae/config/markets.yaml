@@ -14,16 +14,31 @@
 # pairs); override per-symbol in symbols.yaml when precision matters (e.g.
 # a specific futures contract's real tick).
 #
-# min_commission/long_margin_rate/short_margin_rate are kept at this
-# market-level for now but are UNVERIFIED for per-instrument variation
-# within tw_futures (unlike multiplier, which was confirmed wrong via real
-# Shioaji contract data) — don't assume they're safe to reuse for MXF/TMF
-# without checking first.
+# long_margin_rate/short_margin_rate ARE verified safe to share across
+# TXF/MXF/TMF (2026-07-20, via taifex.com.tw's 保證金 + 契約規格 pages):
+# TAIFEX's published 原始保證金 for TX/MXF/TMF was 636,000/159,000/31,800 TWD
+# (2026-07-06 revision) — an exact 20:5:1 ratio, matching the 200:50:10
+# multiplier ratio. Margin scales proportionally with contract size, so a
+# single market-level rate (margin / notional) is structurally correct for
+# all three, not an approximation that happens to work for TXF alone.
+# 0.075 reflects that revision at TAIEX ~42,671 (636,000 / (42,671 * 200));
+# TAIFEX revises the absolute NTD figure periodically independent of index
+# level, so this will drift and is not meant to be exact — re-derive from
+# https://www.taifex.com.tw/cht/5/indexMarging when it matters.
+#
+# min_commission is NOT exchange-set — taifex.com.tw's feeSchedules page
+# states the exchange only regulates its own clearing fee; the fee a
+# broker (e.g. Shioaji/永豐期貨) actually charges retail clients is
+# negotiated bilaterally, with no exchange-mandated floor. 100.0 here is a
+# backtest assumption about a typical retail floor, not a verifiable
+# exchange fact — check the specific broker's fee schedule if it matters.
 #
 # Cost fields:
 #   commission_rate  — per-side rate (0.001 = 0.1%)
 #   min_commission   — per-side floor in quote currency (0.0 if none)
-#   tax_rate         — per-side tax rate (0.00002 = 0.002%)
+#   tax_rate         — per-side tax rate (0.00002 = 0.002%; verified via
+#                      taifex.com.tw: 股價指數期貨類 交易稅 = 契約金額 x 十萬分之2,
+#                      flat rate regardless of contract size — same for TX/MXF/TMF)
 #   slippage_ticks   — per-side slippage in ticks (backtest assumption, not a market fact)
 
 crypto:
@@ -41,8 +56,8 @@ tw_futures:
   tax_rate: 0.00002
   slippage_ticks: 1
   tick_size: 1.0
-  long_margin_rate: 0.067
-  short_margin_rate: 0.067
+  long_margin_rate: 0.075
+  short_margin_rate: 0.075
 
 us_equity:
   commission_rate: 0.0
