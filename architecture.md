@@ -275,6 +275,26 @@ Binance key 在交易所後台申請時：VM 這把要開「交易」權限，�
 
 Shioaji 一樣：VM 上放 full 權限 key + CA 憑證，本機日常開發只留一把「唯讀」權限的 key、不要放 CA（`ShioajiAdapter` 沒填 `SHIOAJI_CA_PATH` 會自動進 read-only，下單方法直接拋錯，不怕手滑打到真單 API）。CA 憑證上雲端這件事風險在於：VM 被入侵 = key 外洩；Tailscale 只降低「誰連得到這台 VM」的風險，不降低「VM 本身被攻破」的風險，這是兩回事——是刻意接受的風險換取自動化部署，不是沒考慮過。
 
+#### `mode`（sim/live）vs `sandbox`（測試網/模擬環境）
+
+兩個正交的開關，容易搞混：
+
+- **`mode`**：策略要不要真的送單。`sim` 只本地記帳，從不呼叫 `place_order`；`live` 才會把成交鏡射成真實訂單送到 broker。
+- **`sandbox`**（`.env.secrets` 的 `BINANCE_SANDBOX`/`SHIOAJI_SANDBOX`，跟 `api_key` 同一套 `CredentialConfig.from_env` 載入機制）：訂單送到哪個環境，跟策略邏輯無關。`false` 正式站；`true` 測試網/模擬帳戶（假錢）。
+
+常用組合：
+
+| mode | sandbox | 用途 |
+|------|---------|------|
+| sim | false（預設） | 日常開發：抓正式行情，不下單 |
+| live | true | 上線前端到端演練：真送單邏輯，但送到模擬環境，驗證訊號→下單全流程不動真錢 |
+| live | false | 正式上線交易 |
+
+兩個 broker 的模擬環境不同，準備測試 key 的方式也不同：
+
+- **Binance**：測試網是獨立站點，需要另外申請一把只認測試網的 key，跟正式 key 互不相通。
+- **Shioaji**：模擬交易跟正式站共用同一組 key/CA，靠 `simulation` 參數切換，不用另申請 key。但 CA 啟用跟「key 有沒有交易權限」是兩關：sandbox 一樣要 CA 成功才能下單；Token 交易權限是永豐後台另開的，跟 CA/sandbox 無關——本機唯讀 key 就算 CA 啟用成功，送單仍會被擋（`401 Token doesn't have permission`）。要測 live+sandbox 的完整送單路徑，得用 VM 上那把有交易權限的 key。
+
 常用管理指令：
 
 | 指令 | 說明 |
