@@ -132,6 +132,7 @@ class TestPlaceOrder:
         mock_sj.StockPriceType.LMT = "STK_LMT"
         mock_sj.StockPriceType.MKT = "STK_MKT"
         mock_sj.OrderType.ROD = "ROD"
+        mock_sj.OrderType.IOC = "IOC"
         return mock_sj
 
     def test_futures_limit_order_uses_futures_price_type(self):
@@ -169,7 +170,27 @@ class TestPlaceOrder:
             adapter.place_order({"symbol": "2330", "side": "sell", "quantity": 1000})
 
         adapter._api.Order.assert_called_once_with(
-            price=0, quantity=1000, action="SELL", price_type="STK_MKT", order_type="ROD",
+            price=0, quantity=1000, action="SELL", price_type="STK_MKT", order_type="IOC",
+        )
+
+    def test_futures_market_order_uses_ioc(self):
+        """TAIFEX rejects market orders with ROD time-in-force (op_code 9938:
+        "市價單不允許當日有效委託(ROD)") -- caught live 2026-07-20. Market orders
+        must be IOC; only resting limit orders may use ROD."""
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._is_futures = MagicMock(return_value=True)
+        mock_trade = MagicMock()
+        mock_trade.status.id = "order789"
+        mock_trade.status.status = "Filled"
+        adapter._api.place_order.return_value = mock_trade
+        adapter._api.Order = MagicMock(return_value="mock_order")
+
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()):
+            adapter.place_order({"symbol": "TMFR1", "side": "buy", "quantity": 1})
+
+        adapter._api.Order.assert_called_once_with(
+            price=0, quantity=1, action="BUY", price_type="FUT_MKT", order_type="IOC",
         )
 
 

@@ -223,12 +223,19 @@ class ShioajiAdapter:
         else:
             price_type = sj.StockPriceType.LMT if is_limit else sj.StockPriceType.MKT
 
+        # Market orders (MKT) are rejected by TAIFEX/TWSE with ROD (rest-of-day)
+        # time-in-force -- confirmed live 2026-07-20, op_code 9938: "市價單不允許
+        # 當日有效委託(ROD)". A market order that stays resting all day is a
+        # contradiction in terms; it must be IOC (fill immediately or cancel).
+        # Limit orders keep ROD, which is a legitimate resting order.
+        order_type = sj.OrderType.ROD if is_limit else sj.OrderType.IOC
+
         order = self._api.Order(
             price=signal.get("price", 0),
             quantity=int(signal["quantity"]),
             action=action,
             price_type=price_type,
-            order_type=sj.OrderType.ROD,
+            order_type=order_type,
         )
         trade = self._api.place_order(contract, order)
         return {
