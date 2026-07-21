@@ -4,6 +4,21 @@ from __future__ import annotations
 import pandas as pd
 
 
+def split_is_val_oos(
+    df: pd.DataFrame, is_train_end: str, is_val_end: str, oos_end: str,
+) -> dict[str, pd.DataFrame]:
+    """Slice a DatetimeIndex-ed DataFrame into IS-Train/IS-Val/OOS, per
+    strategies/experiments/RESEARCH_METHODOLOGY.md's ② — split order is
+    fixed; OOS is only ever read after IS-Train/IS-Val decisions are
+    already final. Generic (not factor-specific) — any research script
+    slicing a sample into these three windows can use this."""
+    return {
+        "IS-Train": df.loc[:is_train_end],
+        "IS-Val": df.loc[is_train_end:is_val_end],
+        "OOS": df.loc[is_val_end:oos_end],
+    }
+
+
 def merge_htf_column(
     detail: pd.DataFrame,
     htf_series: pd.Series,

@@ -2,6 +2,8 @@
 
 一個資料夾 = 一個探索過的想法
 
+跨 `experiments/` 與已部署策略、「這個因子測過沒有」的索引見 [`strategies/FACTOR_ANALYSIS.md`](../FACTOR_ANALYSIS.md)。
+
 - `kdj_oversold/`、`trendmaster/`：用本專案的 `RunConfig`/`librae` 跑的實驗，`run.py` 可直接執行。
 - 其餘（`adaptive_switching/`、`funding_crowding_reversal/`、`mtf_*/`、`range_oscillator/`）：
   用 `factrix` 做因子研究後**已經有結論、大多是「不建議上線」**的策略家族，只保留研究腳本

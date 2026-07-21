@@ -12,6 +12,11 @@ strategy:
     max_hold_periods: 24
     warmup_periods: 720
     sample: oos
+    # gate_timeframe: 1D   # daily trend gate (default, pairs with timeframe: H1).
+    #   For the former trendpullback_m5 (M5 base + M30 gate — merged into this
+    #   folder), set timeframe: M5 and gate_timeframe: 30min. Neither passed
+    #   factor validation as of report.md — this is a config knob, not a
+    #   recommended combination.
 
   # 績效參數 — 只影響報表呈現，存 DB backtest_runs.perf_params
   perf:

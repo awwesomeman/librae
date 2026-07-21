@@ -177,6 +177,49 @@ class TestDailyMergeNoLeak:
                 f"H1 bars on {prev_day.date()} leaked trend from {flip_day.date()}"
             )
 
+    def test_d1_trend_change_not_visible_same_day(self):
+        """When D1 trend flips on day N, H1 bars on day N itself — before
+        day N's own session has actually closed — must NOT see it; only bars
+        from day N+1 onward may. resample_ohlcv left-labels the D1 index (day
+        N's row starts at day N's 00:00), so a naive backward merge_asof
+        against an un-shifted gate leaks day N's own still-forming trend onto
+        day N's own H1 bars starting at 00:00 — this is the specific bug
+        merge_trend_gate's shift(1) fixes."""
+        h1_base = _make_ohlcv()
+        h1 = compute_features(h1_base)
+        d1 = compute_daily_gate(resample_to_daily(h1_base))
+        merged = merge_trend_gate(h1, d1)
+
+        d1_trend = (
+            (d1["close"] > d1["ema20"])
+            & (d1["ema20"] > d1["ema20_prev"])
+        ).fillna(False)
+
+        changes = d1_trend.ne(d1_trend.shift(1))
+        change_days = d1_trend.index[changes & (d1_trend.index > d1_trend.index[1])]
+        if len(change_days) == 0:
+            pytest.skip("No trend change in test data")
+
+        flip_day = change_days[0]
+        new_trend_value = d1_trend.loc[flip_day]
+        next_day = flip_day + pd.Timedelta(days=1)
+
+        flip_day_h1 = merged.loc[(merged.index >= flip_day) & (merged.index < next_day)]
+        if len(flip_day_h1) > 0:
+            assert (flip_day_h1["daily_trend"] != new_trend_value).all(), (
+                f"H1 bars on {flip_day.date()} itself saw that day's own "
+                "not-yet-closed trend flip — same-day look-ahead."
+            )
+
+        next_day_h1 = merged.loc[
+            (merged.index >= next_day) & (merged.index < next_day + pd.Timedelta(days=1))
+        ]
+        if len(next_day_h1) > 0:
+            assert (next_day_h1["daily_trend"] == new_trend_value).all(), (
+                f"H1 bars on {next_day.date()} should see {flip_day.date()}'s "
+                "now-completed trend flip."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Test 3: Engine next-bar execution timing

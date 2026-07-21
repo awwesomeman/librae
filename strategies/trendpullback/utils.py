@@ -12,7 +12,7 @@ import pandas as pd
 import pandas_ta_classic as ta
 
 from strategies.data.utils import resample_ohlcv
-from strategies.utils import merge_htf_column
+from strategies.module.utils import merge_htf_column
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +25,12 @@ DEFAULT_PARAMS: dict = {
     "pullback_factor": 0.3,
     "max_hold_periods": 24,
     "vol_threshold": 0.9,
+    # HTF trend-gate resample rule (pandas offset alias) — "1D" pairs with
+    # base timeframe H1 (the deployed default), "30min" pairs with M5 (the
+    # former trendpullback_m5 family, merged into this one — see report.md's
+    # H1-vs-M5 comparison; neither passed factor validation, M5 OOS was
+    # worse, kept here only as a config knob, not a recommendation).
+    "gate_timeframe": "1D",
 }
 
 
@@ -112,17 +118,21 @@ def compute_exit_conditions(df: pd.DataFrame, params: dict | None = None) -> pd.
 
 
 def prepare_signals(h1_base: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
-    """Add features + signals to an H1 OHLCV DataFrame.
+    """Add features + signals to a base-timeframe OHLCV DataFrame (H1 by
+    default; any timeframe works as long as `params["gate_timeframe"]` is a
+    coarser pandas offset alias — e.g. base=M5/gate="30min" for the former
+    trendpullback_m5 family).
 
     Expects h1_base with DatetimeIndex named 'ts' and OHLCV columns.
     Returns the same DataFrame with added indicator and signal columns.
-    Handles short datasets (< 20 D1 bars) by skipping daily gate.
+    Handles short datasets (< 20 gate-timeframe bars) by skipping the gate.
     """
+    p = {**DEFAULT_PARAMS, **(params or {})}
     h1 = compute_features(h1_base, params)
-    d1 = resample_to_daily(h1_base)
-    if len(d1) >= 20:
-        d1 = compute_daily_gate(d1, params)
-        h1 = merge_trend_gate(h1, d1)
+    gate_df = resample_ohlcv(h1_base, p["gate_timeframe"])
+    if len(gate_df) >= 20:
+        gate_df = compute_daily_gate(gate_df, params)
+        h1 = merge_trend_gate(h1, gate_df)
     else:
         h1["daily_trend"] = True
     h1["entry_signal"] = compute_entry_conditions(h1, params).values
@@ -137,5 +147,19 @@ def compute_trend_bool(gate: pd.DataFrame) -> pd.Series:
 
 
 def merge_trend_gate(detail: pd.DataFrame, gate: pd.DataFrame) -> pd.DataFrame:
-    """Merge higher-TF EMA trend gate into lower-TF (no look-ahead)."""
-    return merge_htf_column(detail, compute_trend_bool(gate), column="daily_trend")
+    """Merge higher-TF EMA trend gate into lower-TF (no look-ahead).
+
+    ``compute_trend_bool(gate)`` at day D's index uses day D's own close/
+    ema20 — not fully known until day D's session closes. ``resample_ohlcv``
+    left-labels the D1 index (day D's row starts at day D's 00:00), so
+    without the ``shift(1)`` here, ``merge_htf_column``'s backward asof-merge
+    would attach day D's (still-forming) gate to day D's own H1 bars,
+    including its 00:00 bar — a same-day look-ahead. Shifting by one D1 bar
+    makes day D's index carry day D-1's already-completed gate instead, so
+    every H1 bar on day D only ever sees a gate that was knowable before that
+    day began. The first day has no prior gate and becomes NaN, which
+    ``merge_htf_column``'s ``fillna(fill_value=False)`` already turns into a
+    safe "no signal" default.
+    """
+    trend_bool = compute_trend_bool(gate).shift(1)
+    return merge_htf_column(detail, trend_bool, column="daily_trend")
