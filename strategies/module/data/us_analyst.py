@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from strategies.module.data.factors import load_snapshot_factor, write_snapshot_factor
+from strategies.module.data.factors import collect_snapshot_factor, load_snapshot_factor
 from strategies.module.data.providers import finnhub as finnhub_client
 
 _FACTOR_RECOMMENDATION = "us_analyst_recommendation_score"
@@ -37,7 +37,7 @@ def collect_analyst_recommendation(symbol: str) -> int:
         if total == 0:
             continue
         score = sum(r[k] * w for k, w in _RECOMMENDATION_WEIGHTS.items()) / total
-        written += write_snapshot_factor(
+        written += collect_snapshot_factor(
             symbol, _FACTOR_RECOMMENDATION, _SOURCE, score,
             frequency="MN1", ts=pd.Timestamp(r["period"], tz="UTC"),
         )
@@ -55,7 +55,7 @@ def collect_earnings_surprise(symbol: str) -> int:
         if actual is None or not estimate:
             continue
         surprise_pct = (actual - estimate) / abs(estimate) * 100
-        written += write_snapshot_factor(
+        written += collect_snapshot_factor(
             symbol, _FACTOR_EARNINGS_SURPRISE, _SOURCE, surprise_pct,
             frequency="IRREGULAR", ts=pd.Timestamp(r["date"], tz="UTC"),
         )

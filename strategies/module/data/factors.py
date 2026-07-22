@@ -29,7 +29,7 @@ registered (factor_name, source, frequency) rows into the DB's
 ``factor_registry`` table — that's what ``data_inventory`` reads frequency
 from.
 
-Path B — snapshot-only sources (write_snapshot_factor / load_snapshot_factor)
+Path B — snapshot-only sources (collect_snapshot_factor / load_snapshot_factor)
 -------------------------------------------------------------------------
 get_factor()'s coverage-tracked gap-fill assumes a fetcher can answer an
 arbitrary historical range — call it once with a wide [start, end], the
@@ -43,12 +43,12 @@ entire requested range covered after the first call and then silently
 never notice any new period that appears later — same failure mode that
 originally forced ``us_chip.py``'s short interest off yfinance.
 
-For these, call write_snapshot_factor() periodically (cron/manual) — no
+For these, call collect_snapshot_factor() periodically (cron/manual) — no
 coverage bookkeeping, just append whatever's new — and read back with
 load_snapshot_factor(), not get_factor() (which would reject an
 unregistered factor_name outright).
 
-    write_snapshot_factor("MU", "us_social_mentions", "apewisdom", 473, frequency="H1")
+    collect_snapshot_factor("MU", "us_social_mentions", "apewisdom", 473, frequency="H1")
     df = load_snapshot_factor("MU", "us_social_mentions", "apewisdom", start="2026-01-01")
 """
 from __future__ import annotations
@@ -198,7 +198,7 @@ def sync_factor_registry() -> None:
 # instead of register_factor_fetcher()/get_factor())
 # ---------------------------------------------------------------------------
 
-def write_snapshot_factor(
+def collect_snapshot_factor(
     symbol: str, factor_name: str, source: str, value: float, *,
     frequency: str, ts: datetime | None = None, instrument_type: str = "spot",
 ) -> int:
@@ -227,7 +227,7 @@ def load_snapshot_factor(
     symbol: str, factor_name: str, source: str, *,
     start: str | None = None, end: str | None = None, instrument_type: str = "spot",
 ) -> pd.DataFrame:
-    """Read back what write_snapshot_factor() has written so far — direct DB
+    """Read back what collect_snapshot_factor() has written so far — direct DB
     read, bypasses get_factor()'s fetcher-registry requirement."""
     from db.timescale_reader import load_external_factor
 

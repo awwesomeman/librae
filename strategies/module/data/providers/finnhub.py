@@ -14,7 +14,7 @@ correctly (no third-party relay lag/parsing).
 Free tier also caps historical depth to a fixed trailing window (~4 periods)
 regardless of ``from``/``to`` params — verified live, those params are
 silently ignored. See ``us_analyst.py`` for why that forces the
-write_snapshot_factor() path, not register_factor_fetcher().
+collect_snapshot_factor() path, not register_factor_fetcher().
 """
 from __future__ import annotations
 

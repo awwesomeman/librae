@@ -8,7 +8,7 @@ timestamp is collection time (when this ran).
 """
 from __future__ import annotations
 
-from strategies.module.data.factors import load_snapshot_factor, write_snapshot_factor
+from strategies.module.data.factors import collect_snapshot_factor, load_snapshot_factor
 from strategies.module.data.providers import apewisdom
 
 _FACTOR_MENTIONS = "us_social_mentions"
@@ -26,8 +26,8 @@ def collect_social_mentions(symbol: str, filter_: str = _DEFAULT_FILTER) -> int:
     if match is None:
         return 0
 
-    written = write_snapshot_factor(symbol, _FACTOR_MENTIONS, _SOURCE, match["mentions"], frequency="H1")
-    written += write_snapshot_factor(symbol, _FACTOR_RANK, _SOURCE, match["rank"], frequency="H1")
+    written = collect_snapshot_factor(symbol, _FACTOR_MENTIONS, _SOURCE, match["mentions"], frequency="H1")
+    written += collect_snapshot_factor(symbol, _FACTOR_RANK, _SOURCE, match["rank"], frequency="H1")
     return written
 
 

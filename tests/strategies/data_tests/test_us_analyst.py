@@ -18,7 +18,7 @@ def test_collect_analyst_recommendation_writes_weighted_score_per_period():
         return 1
 
     with patch("strategies.module.data.us_analyst.finnhub_client.fetch", return_value=rows):
-        with patch("strategies.module.data.us_analyst.write_snapshot_factor", side_effect=_fake_write):
+        with patch("strategies.module.data.us_analyst.collect_snapshot_factor", side_effect=_fake_write):
             written = collect_analyst_recommendation("MU")
 
     assert written == 2
@@ -32,7 +32,7 @@ def test_collect_analyst_recommendation_writes_weighted_score_per_period():
 def test_collect_analyst_recommendation_skips_zero_total():
     rows = [{"period": "2026-07-01", "strongBuy": 0, "buy": 0, "hold": 0, "sell": 0, "strongSell": 0}]
     with patch("strategies.module.data.us_analyst.finnhub_client.fetch", return_value=rows):
-        with patch("strategies.module.data.us_analyst.write_snapshot_factor") as mock_write:
+        with patch("strategies.module.data.us_analyst.collect_snapshot_factor") as mock_write:
             written = collect_analyst_recommendation("MU")
     assert written == 0
     mock_write.assert_not_called()
@@ -50,7 +50,7 @@ def test_collect_earnings_surprise_computes_percent_and_skips_unreported():
         return 1
 
     with patch("strategies.module.data.us_analyst.finnhub_client.fetch", return_value=payload):
-        with patch("strategies.module.data.us_analyst.write_snapshot_factor", side_effect=_fake_write):
+        with patch("strategies.module.data.us_analyst.collect_snapshot_factor", side_effect=_fake_write):
             written = collect_earnings_surprise("MU")
 
     assert written == 1
