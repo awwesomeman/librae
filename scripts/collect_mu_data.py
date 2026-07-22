@@ -14,11 +14,20 @@ from __future__ import annotations
 import argparse
 import logging
 
+from strategies.module.data import macro  # noqa: F401  (registers factor fetchers)
+from strategies.module.data import us_chip  # noqa: F401  (registers factor fetchers)
 from strategies.module.data import us_corporate_actions  # noqa: F401  (registers factor fetchers)
 from strategies.module.data import us_fundamentals  # noqa: F401  (registers factor fetchers)
+from strategies.module.data import us_insider  # noqa: F401  (registers factor fetchers)
 from strategies.module.data.factors import get_factor, sync_factor_registry
 from strategies.module.data.ohlcv import get_ohlcv
-from strategies.module.data.us_chip import collect_short_interest, load_short_interest
+from strategies.module.data.us_analyst import (
+    collect_analyst_recommendation,
+    collect_earnings_surprise,
+    load_analyst_recommendation,
+    load_earnings_surprise,
+)
+from strategies.module.data.us_social import collect_social_mentions, load_social_mentions, load_social_rank
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -30,6 +39,13 @@ FUNDAMENTAL_FACTORS = [
     "us_inventory", "us_shares_outstanding",
 ]
 CORPORATE_ACTION_FACTORS = ["us_dividend", "us_split"]
+INSIDER_FACTORS = ["us_insider_net_shares"]
+CHIP_FACTORS = ["us_short_interest", "us_short_volume_ratio"]
+MACRO_FACTORS = [
+    "us_credit_spread", "us_financial_conditions", "us_mortgage_rate", "us_vix", "us_yield_curve_10y2y",
+    "us_semiconductor_production", "us_supply_chain_pressure",
+]
+MACRO_SYMBOL = "MACRO"  # pseudo-symbol — see macro.py's module docstring
 
 
 def main() -> None:
@@ -44,7 +60,7 @@ def main() -> None:
     ohlcv = get_ohlcv(SYMBOL, "1d", data_source="yahoo", start=args.start, end=args.end)
     print(f"{len(ohlcv)} bars, {ohlcv['timestamp'].min()} -> {ohlcv['timestamp'].max()}" if not ohlcv.empty else "no bars")
 
-    for factor_name in FUNDAMENTAL_FACTORS + CORPORATE_ACTION_FACTORS:
+    for factor_name in FUNDAMENTAL_FACTORS + CORPORATE_ACTION_FACTORS + INSIDER_FACTORS + CHIP_FACTORS:
         print(f"\n=== {SYMBOL} {factor_name} ===")
         df = get_factor(SYMBOL, factor_name, start=args.start, end=args.end)
         if df.empty:
@@ -52,11 +68,30 @@ def main() -> None:
             continue
         print(df.to_string(index=False))
 
-    print(f"\n=== {SYMBOL} us_short_interest (source=yahoo, append-only) ===")
-    n = collect_short_interest(SYMBOL)
+    print(f"\n=== {SYMBOL} us_social_mentions/us_social_rank (source=apewisdom, append-only) ===")
+    n = collect_social_mentions(SYMBOL)
     print(f"{n} new row(s) written")
-    df = load_short_interest(SYMBOL, start=args.start, end=args.end)
-    print(df.to_string(index=False) if not df.empty else "no data")
+    mentions = load_social_mentions(SYMBOL, start=args.start, end=args.end)
+    rank = load_social_rank(SYMBOL, start=args.start, end=args.end)
+    print(mentions.to_string(index=False) if not mentions.empty else "no mentions data")
+    print(rank.to_string(index=False) if not rank.empty else "no rank data")
+
+    for factor_name in MACRO_FACTORS:
+        print(f"\n=== {MACRO_SYMBOL} {factor_name} (source=fred) ===")
+        df = get_factor(MACRO_SYMBOL, factor_name, start=args.start, end=args.end)
+        print(df.to_string(index=False) if not df.empty else "no data")
+
+    print(f"\n=== {SYMBOL} us_analyst_recommendation_score (source=finnhub, append-only) ===")
+    n = collect_analyst_recommendation(SYMBOL)
+    print(f"{n} new row(s) written")
+    reco = load_analyst_recommendation(SYMBOL, start=args.start, end=args.end)
+    print(reco.to_string(index=False) if not reco.empty else "no data")
+
+    print(f"\n=== {SYMBOL} us_earnings_surprise_pct (source=finnhub, append-only) ===")
+    n = collect_earnings_surprise(SYMBOL)
+    print(f"{n} new row(s) written")
+    surprise = load_earnings_surprise(SYMBOL, start=args.start, end=args.end)
+    print(surprise.to_string(index=False) if not surprise.empty else "no data")
 
     print(f"\n=== {SECTOR_CONTEXT_SYMBOL} daily OHLCV (sector context, data_source=yahoo) ===")
     sector = get_ohlcv(SECTOR_CONTEXT_SYMBOL, "1d", data_source="yahoo", start=args.start, end=args.end)
