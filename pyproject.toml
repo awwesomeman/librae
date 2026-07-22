@@ -48,6 +48,7 @@ tw-live = [
 ]
 research = [
   "yfinance>=0.2",  # only needed for data/regime.py's DXY trend fetch
+  "xlrd>=2.0",  # only needed for providers/nyfed.py's GSCPI .xls parse (legacy binary format, not modern .xlsx)
 ]
 us-live = [
   "ib-async>=1.0",  # IBKRAdapter (brokers/ibkr_adapter.py) — wraps IB Gateway/TWS socket API
