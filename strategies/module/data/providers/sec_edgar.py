@@ -6,6 +6,10 @@ policy — generic/unlabeled clients get rate-limited or blocked). Reads
 falls back to a placeholder that still identifies this project rather than
 spoofing a browser UA — set the env var for anything beyond light local use.
 
+No API key. Documented fair-access limit: 10 requests/second — see
+https://www.sec.gov/os/webmaster-faq#developers. No per-day cap, unlike
+FinMind/FMP-style commercial tiers.
+
 Ticker -> CIK mapping: SEC's own bulk lookup file
 (``https://www.sec.gov/files/company_tickers.json``) would need a network
 call just to resolve symbols this repo already knows, so tickers actually
@@ -42,3 +46,36 @@ def fetch_company_facts(ticker: str) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
+
+
+def fetch_submissions(ticker: str) -> dict:
+    """Raw filing-history JSON for `ticker` — same submissions endpoint SEC's
+    own EDGAR full-text search uses. Unlike companyfacts (XBRL financial
+    concepts only), ``filings.recent`` here lists *every* filing type
+    against the issuer's own CIK, including Form 3/4/5 insider ownership
+    filings — no separate insider-specific endpoint needed.
+
+    Raises:
+        ValueError: If `ticker` has no entry in ``TICKER_TO_CIK``.
+    """
+    cik = TICKER_TO_CIK.get(ticker.upper())
+    if cik is None:
+        raise ValueError(f"No CIK mapping for ticker={ticker!r}. Add it to TICKER_TO_CIK.")
+
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def fetch_filing_document(cik: str, accession_number: str, document: str) -> bytes:
+    """Raw bytes of one document within a filing (e.g. a Form 4's
+    ``primarydocument.xml``) — `cik` unpadded is fine, `accession_number`
+    with or without dashes, both normalized here since submissions JSON and
+    EDGAR's own Archives paths spell them differently."""
+    cik_num = str(int(cik))
+    accession_nodash = accession_number.replace("-", "")
+    url = f"https://www.sec.gov/Archives/edgar/data/{cik_num}/{accession_nodash}/{document}"
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read()
