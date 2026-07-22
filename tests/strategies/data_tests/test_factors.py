@@ -12,7 +12,9 @@ import pytest
 from strategies.module.data.factors import (
     FACTOR_COLUMNS,
     get_factor,
+    load_snapshot_factor,
     register_factor_fetcher,
+    write_snapshot_factor,
 )
 
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -92,3 +94,38 @@ class TestGetFactor:
         get_factor("BTCUSDT", "test_factor_source", start=START, end=END)
 
         mock_merge.assert_called_once_with("BTCUSDT", "test_factor_source", "my-provider", "spot", START, END)
+
+
+class TestSnapshotFactor:
+    """write_snapshot_factor/load_snapshot_factor — Path B, no coverage tracking."""
+
+    @patch("db.timescale_writer.write_external_factor")
+    @patch("db.timescale_writer.write_factor_registry")
+    def test_write_snapshot_factor_defaults_timestamp_to_now(self, mock_registry, mock_write):
+        mock_write.return_value = 1
+        with patch("strategies.module.data.factors.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+            written = write_snapshot_factor("MU", "us_social_mentions", "apewisdom", 473, frequency="H1")
+
+        assert written == 1
+        mock_registry.assert_called_once_with([{"factor_name": "us_social_mentions", "source": "apewisdom", "frequency": "H1"}])
+        df = mock_write.call_args[0][0]
+        assert df["timestamp"].iloc[0] == pd.Timestamp("2026-07-22T12:00:00Z")
+        assert df["value"].iloc[0] == 473.0
+
+    @patch("db.timescale_writer.write_external_factor")
+    @patch("db.timescale_writer.write_factor_registry")
+    def test_write_snapshot_factor_uses_explicit_ts_when_given(self, mock_registry, mock_write):
+        mock_write.return_value = 1
+        write_snapshot_factor("MU", "us_earnings_surprise", "finnhub", 17.3, frequency="IRREGULAR", ts=datetime(2026, 6, 24, tzinfo=timezone.utc))
+
+        df = mock_write.call_args[0][0]
+        assert df["timestamp"].iloc[0] == pd.Timestamp("2026-06-24T00:00:00Z")
+
+    @patch("db.timescale_reader.load_external_factor")
+    def test_load_snapshot_factor_delegates_to_db_reader(self, mock_load):
+        mock_load.return_value = _make_factor_df(2)
+        result = load_snapshot_factor("MU", "us_social_mentions", "apewisdom", start="2026-01-01")
+
+        mock_load.assert_called_once_with("MU", "us_social_mentions", "apewisdom", instrument_type="spot", started_at="2026-01-01", ended_at=None)
+        assert len(result) == 2
