@@ -103,7 +103,7 @@
 - 不需要完整實作規劃，重點是捕捉核心邏輯與參考依據
 - 當策略進入實作階段，在檔案中標注連結到 `strategies/<name>/` 程式碼
 
-## studies/
+## research/
 
 研究過程中的文獻整理與專題筆記。
 
@@ -113,6 +113,14 @@
 **寫入準則：**
 - 研究過程中遇到的論文、文章、網站、開源專案，一律收錄到 `literature_review.md`
 - 單一主題需要較長篇幅整理時，另建獨立檔案並在 `literature_review.md` 中交叉引用
+
+## spikes/
+
+技術選型/工具評估的實測紀錄——不是「要不要做」的決策（那是 decisions/），是「這個工具/API 能不能用、實測結果如何」。
+
+- 每個評估主題一份檔案，命名簡潔（e.g. `framework_selection.md`、`rejected_apis.md`）
+- 允許持續累加新的評估段落（用日期分段），不像 decisions/ 那樣寫死不回溯修改
+- 側重「實測過什麼、結果是什麼」，不需要 decisions/ 的必填 frontmatter
 
 ## guides/
 

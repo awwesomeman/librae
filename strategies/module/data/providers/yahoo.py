@@ -6,6 +6,10 @@ this repo reaches for yfinance. Requires the ``research`` extra
 (``pip install -e '.[research]'``) — yfinance is imported lazily inside
 the function so importing this module (or anything that imports it)
 doesn't require the extra to be installed.
+
+No API key — yfinance scrapes Yahoo's undocumented internal endpoints, no
+official rate limit, but heavy/bursty use gets IP-soft-blocked with 429s
+(no published threshold). Not suitable for high-frequency polling.
 """
 from __future__ import annotations
 
@@ -95,8 +99,10 @@ def fetch_short_interest_snapshot(ticker: str) -> dict:
     """Raw ``sharesShort``/``dateShortInterest`` (+ prior-month pair) from
     yfinance's ``Ticker.info`` — the same FINRA bi-monthly settlement-date
     short interest data, just pre-parsed by Yahoo. Only ever the current
-    reading + one prior month, never a backfillable history (see
-    ``us_chip.py``, which handles that constraint)."""
+    reading + one prior month, never a backfillable history — fine for
+    ``us_entry_snapshot.py``'s live "what does the market look like right
+    now" use case, but that's why the backtestable factor pipeline
+    (``us_chip.py``) queries FINRA's own API directly instead of this."""
     import yfinance as yf
 
     info = yf.Ticker(ticker).info
