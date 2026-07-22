@@ -195,6 +195,8 @@ refresh_* — 從其他表重新計算衍生/聚合資料並 upsert 結果
 
 例：`save_backtest_output`（一次寫 5 張表，多表協調器）、`write_trade_event`（單表整列寫入）、`update_heartbeat`（單表局部更新一個欄位）、`merge_ohlcv_coverage_ranges`（要先讀既有區間才能決定合併結果）、`refresh_performance`（從 `equity_curve` + `trade_events` 重新算 KPI 寫回 `strategy_performance`）。
 
+**重複資料衝突處理**：`write_ohlcv()`/`write_external_factor()` 的 SQL 都是 `ON CONFLICT (...) DO NOTHING`——同一個主鍵（ts + symbol + timeframe/factor_name + data_source/source + instrument_type）已存在時，新抓到的值直接丟棄，DB 裡舊值不變（保留最先寫入的，不是保留最新的）。這是刻意的，跟 `us_fundamentals.py`'s `_first_disclosure()` 保留最早申報值、只警告不覆蓋是同一套 point-in-time 正確性哲學：回測要重現「當時看到的數字」，不能讓資料源事後的訂正悄悄改寫過去某個時間點的快照。
+
 ### `db/timescale_reader.py`（三類動詞，寫在該檔案的 module docstring）
 
 ```
