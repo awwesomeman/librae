@@ -8,10 +8,12 @@
 #   ./deploy/trade.sh stop  --all
 #   mode: sim (default, no real orders) | live (places real orders)
 #
-# Example:
-#   ./deploy/trade.sh start trendpullback
-#   ./deploy/trade.sh start trendpullback live 30
-#   ./deploy/trade.sh stop trendpullback live
+# Example (substitute a strategy that actually has a strategy.py + config.yaml
+# under strategies/ — see strategies/FACTOR_ANALYSIS.md for which ones, if
+# any, currently pass factor validation and are deployable):
+#   ./deploy/trade.sh start <strategy>
+#   ./deploy/trade.sh start <strategy> live 30
+#   ./deploy/trade.sh stop <strategy> live
 #
 # Local dev (no TRADE_IMAGE set in .env): builds the image from this checkout,
 # needs the full repo — same as always.

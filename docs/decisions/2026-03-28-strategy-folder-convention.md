@@ -1,7 +1,13 @@
 # 2026-03-28 — 策略資料夾結構規範 + 模組遷移
 
-> 狀態：implemented
-> 注記：strategies/<name>/ 結構已落地，monitoring/ 目錄已清除
+> 狀態：partially superseded — `run.py`/`strategy.py` 已合併為單一檔案（`strategy.py` 同時是
+> `BaseStrategy` 子類 + CLI entrypoint），原因是 `librae.cli` 的共用 runner 已把 DB/Backtest/
+> LiveTrader 的重依賴改成呼叫時才 import，不再需要靠拆檔案避免拖進 import chain；下方「三檔案」
+> 敘述僅供歷史參考。
+> 注記：strategies/<name>/ 結構已落地，monitoring/ 目錄已清除。`trendpullback` 因子驗證未過
+> （見 strategies/experiments/trendpullback/report.md）已從 strategies/trendpullback/ 降級移至
+> strategies/experiments/trendpullback/，不再是本規範的 production 範例——目前沒有任何策略通過
+> 驗證進入 production，strategies/ 下只有 experiments/ 與 module/。
 
 ## 背景
 

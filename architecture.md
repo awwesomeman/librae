@@ -47,7 +47,7 @@ brokers (券商/交易所 adapter)  →  librae (core → backtest / live)  → 
 ```
 
 - `brokers/`：每個券商/交易所一個 adapter（`ShioajiAdapter`、`CryptoAdapter`、`IBKRAdapter`），提供 `fetch_ohlcv` / `place_order` / `get_position` / `info`，供 live engine 抓資料與下單。設計細節見下方「Broker Adapter 設計」。
-- `strategies/data/`：策略/回測要用的市場資料與第三方因子的唯一存取層，`get_ohlcv()`/`get_factor()` 統一走 DB-first + 缺口補值。設計細節見下方「資料存取層設計」。
+- `strategies/module/data/`：策略/回測要用的市場資料與第三方因子的唯一存取層，`get_ohlcv()`/`get_factor()` 統一走 DB-first + 缺口補值。設計細節見下方「資料存取層設計」。
 - `librae/core/`：策略執行的共用邏輯（`strategy.py` 定義 Position/Action/Fill，`executor.py` 定義 TradeResult/OrderEvent 與撮合邏輯），backtest 與 live 共用。
 - `librae/backtest/engine.py`：逐 bar 回測引擎，產出 `BacktestOutput`（`librae/backtest/schema.py` 定義的 DB 持久化用 dataclass：RunMetadata/EquityCurvePoint/OrderEventRecord/StrategyMetrics）。
 - `librae/live/engine.py`：sim/live 模式的即時輪詢引擎，同一份 executor 邏輯，即時寫入 DB，資料/下單透過 `brokers/` adapter。
@@ -64,11 +64,11 @@ brokers (券商/交易所 adapter)  →  librae (core → backtest / live)  → 
 - 需要型別約束時用 `typing.Protocol`，**在呼叫端就近宣告最小介面**，不做涵蓋全部能力的共用介面 —— 例如 `librae/live/executor.py` 的 `OrderAdapter` Protocol 只宣告 `place_order`，因為 executor 只用到這個方法。
 - 曾嘗試以 async ABC 分層（`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter`）搭配 `MarketHub` 統一 dispatch（見 `docs/decisions/2026-03-26-market-adapter-architecture.md`），因 Shioaji（stateful login+CA）與 CCXT（stateless per-call REST）的 auth 模型差異太大、且無 adapter 真正使用該分層而移除；**現況以扁平 duck-typed class 為準，不要重新引入跨券商的共用階層**。
 
-## 資料存取層設計（`strategies/data/`）
+## 資料存取層設計（`strategies/module/data/`）
 
 兩個獨立的分類軸，分別解決兩個不同的「會變亂」問題：
 
-**軸一：`providers/` vs 概念檔案**——`strategies/data/providers/` 只放**純 API/SDK client**（目前唯一案例：`providers/finmind.py`），零商業邏輯，一個外部資料供應商一個檔案；概念檔案（`funding.py`、`open_interest.py`、`cross_asset.py`、`tw_futures_chip.py`、`tw_market_flow.py`...）留在 `strategies/data/` 最上層，依「這個因子代表什麼」命名，不是依「從哪個 API 來」命名。同一個 provider 可以被多個概念檔案 import（`tw_futures_chip.py` 跟 `tw_market_flow.py` 都用 `providers/finmind.py`，因為兩者回答的問題不同：前者是「TX 期貨/選擇權籌碼」，後者是「全市場現貨資金流」），加新資料集只需要在對應的概念檔案加一個 fetcher，不會讓 provider client 越長越肥。
+**軸一：`providers/` vs 概念檔案**——`strategies/module/data/providers/` 只放**純 API/SDK client**（目前唯一案例：`providers/finmind.py`），零商業邏輯，一個外部資料供應商一個檔案；概念檔案（`funding.py`、`open_interest.py`、`cross_asset.py`、`tw_futures_chip.py`、`tw_market_flow.py`...）留在 `strategies/module/data/` 最上層，依「這個因子代表什麼」命名，不是依「從哪個 API 來」命名。同一個 provider 可以被多個概念檔案 import（`tw_futures_chip.py` 跟 `tw_market_flow.py` 都用 `providers/finmind.py`，因為兩者回答的問題不同：前者是「TX 期貨/選擇權籌碼」，後者是「全市場現貨資金流」），加新資料集只需要在對應的概念檔案加一個 fetcher，不會讓 provider client 越長越肥。
 
 **軸二：`get_ohlcv()` vs `get_factor()`**——两者是同一套 DB-first + 缺口追蹤引擎（`compute_coverage_gaps` 共用，見「資料流」小節），差別只在快取的表跟粒度：`get_ohlcv()`（`ohlcv.py`）固定 schema `[timestamp, open, high, low, close, volume]`，`data_source` 對應到一個 `register_ohlcv_fetcher` 註冊的 fetcher（`binance_spot`/`shioaji`/`ibkr`...）；`get_factor()`（`factors.py`）是任意外部時序，固定 schema `[timestamp, value]`，`factor_name` 對應到一個 `register_factor_fetcher` 註冊的 fetcher，寫進共用的 `external_factors` long table（見「資料庫設計規範」），新因子不用 migration。**只有真的有抓取成本（API call、rate limit）的資料才進 `get_factor()`**——從已快取 OHLCV 現場算出來的特徵（`cross_asset.py`、`regime.py`）不算,它們沒有「缺口」的概念,直接算就好,不要為了統一而硬塞進快取引擎。
 
@@ -264,8 +264,10 @@ docker login ghcr.io -u <github 帳號>   # 密碼欄貼 PAT，不要用 GitHub 
 ./deploy/build_push.sh
 
 # 2. VM 上（deploy/ 已經被 cloud_deploy.sh 同步過去，.env 也有 TRADE_IMAGE）：
-cd deploy && ./trade.sh start trendpullback sim 60    # 訊號推播，不下真單
-cd deploy && ./trade.sh start trendpullback live 60   # 真實下單（見下方風險說明）
+# <strategy_name> = strategies/<name>/ 底下通過因子驗證、有 run.py 的 production 策略
+# （目前沒有任何策略在此狀態——見 strategies/FACTOR_ANALYSIS.md）
+cd deploy && ./trade.sh start <strategy_name> sim 60    # 訊號推播，不下真單
+cd deploy && ./trade.sh start <strategy_name> live 60   # 真實下單（見下方風險說明）
 ```
 
 `trade.sh start` 看到 `.env` 有 `TRADE_IMAGE` 就會改成 `docker pull` 而不是本地 build——VM 上完全不需要原始碼。
@@ -317,8 +319,8 @@ Shioaji 一樣：VM 上放 full 權限 key + CA 憑證，本機日常開發只�
 | 指令 | 說明 |
 |------|------|
 | `./deploy/build_push.sh` | 本機 build + push trade image（策略程式碼改了才需要） |
-| `./deploy/trade.sh start trendpullback sim 60` / `trade.sh stop trendpullback sim` | 啟停常駐 sim 容器（本機或 VM 上執行皆可） |
-| `./deploy/trade.sh start trendpullback live 60` / `trade.sh stop trendpullback live` | 啟停常駐 live 容器（真實下單，crypto 限定） |
+| `./deploy/trade.sh start <strategy_name> sim 60` / `trade.sh stop <strategy_name> sim` | 啟停常駐 sim 容器（本機或 VM 上執行皆可） |
+| `./deploy/trade.sh start <strategy_name> live 60` / `trade.sh stop <strategy_name> live` | 啟停常駐 live 容器（真實下單，crypto 限定） |
 | `python scripts/check_heartbeat.py --loop` | 監控 sim/live 是否掛掉（`backtest_runs.last_heartbeat` 超過 3 × poll_seconds 沒更新就 Telegram 告警） |
 
 ## 維護規則

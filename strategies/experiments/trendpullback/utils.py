@@ -11,7 +11,7 @@ from __future__ import annotations
 import pandas as pd
 import pandas_ta_classic as ta
 
-from strategies.data.utils import resample_ohlcv
+from strategies.module.data.utils import resample_ohlcv
 from strategies.module.utils import merge_htf_column
 
 

@@ -16,7 +16,7 @@ import pytest
 from librae.core.cost_model import CostModel
 from librae.backtest.engine import Backtest
 from librae.core.strategy import Action, BaseStrategy
-from strategies.trendpullback.utils import (
+from strategies.experiments.trendpullback.utils import (
     merge_trend_gate,
     compute_daily_gate,
     compute_features,
@@ -126,56 +126,13 @@ class TestSignalNoFutureLeak:
 # ---------------------------------------------------------------------------
 
 class TestDailyMergeNoLeak:
-    """H1 bars must only see completed (past) daily bars."""
+    """H1 bars must only see completed (past) daily bars.
 
-    def test_backward_merge_direction(self):
-        """Verify merge_asof uses backward direction (no forward peek)."""
-        h1_base = _make_ohlcv()
-        h1 = compute_features(h1_base)
-        d1 = compute_daily_gate(resample_to_daily(h1_base))
-
-        merged = merge_trend_gate(h1, d1)
-
-        assert not merged["daily_trend"].isna().any()
-
-        # First few H1 bars (before first complete D1) should be False
-        first_d1_ts = d1.index[0]
-        early_bars = merged.loc[merged.index < first_d1_ts]
-        if len(early_bars) > 0:
-            assert (early_bars["daily_trend"] == False).all(), (
-                "H1 bars before first D1 close should have daily_trend=False"
-            )
-
-    def test_d1_trend_change_not_visible_before_close(self):
-        """When D1 trend flips on day N, H1 bars on day N-1 must not see it."""
-        h1_base = _make_ohlcv()
-        h1 = compute_features(h1_base)
-        d1 = compute_daily_gate(resample_to_daily(h1_base))
-        merged = merge_trend_gate(h1, d1)
-
-        # Find a day where daily_trend changes
-        d1_trend = (
-            (d1["close"] > d1["ema20"])
-            & (d1["ema20"] > d1["ema20_prev"])
-        ).fillna(False)
-
-        changes = d1_trend.ne(d1_trend.shift(1))
-        change_days = d1_trend.index[changes & (d1_trend.index > d1_trend.index[1])]
-        if len(change_days) == 0:
-            pytest.skip("No trend change in test data")
-
-        flip_day = change_days[0]
-        new_trend_value = d1_trend.loc[flip_day]
-
-        # H1 bars on the day BEFORE the flip must NOT have the new trend value
-        prev_day = flip_day - pd.Timedelta(days=1)
-        prev_day_h1 = merged.loc[
-            (merged.index >= prev_day) & (merged.index < flip_day)
-        ]
-        if len(prev_day_h1) > 0:
-            assert (prev_day_h1["daily_trend"] != new_trend_value).all(), (
-                f"H1 bars on {prev_day.date()} leaked trend from {flip_day.date()}"
-            )
+    merge_htf_column's own merge mechanics (backward direction, fillna,
+    dtype) are covered generically by tests/strategies/test_module_utils.py
+    — this class only tests whether *this family's* merge_trend_gate
+    remembered to shift(1) its gate before calling the shared merge, which
+    the shared function has no way to verify on its own."""
 
     def test_d1_trend_change_not_visible_same_day(self):
         """When D1 trend flips on day N, H1 bars on day N itself — before
