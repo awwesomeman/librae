@@ -243,7 +243,7 @@ CREATE TABLE IF NOT EXISTS factor_registry (
 -- ============================================================
 CREATE OR REPLACE VIEW data_inventory AS
 SELECT
-    'ohlcv' AS category,
+    'ohlcv' AS table_name,
     symbol,
     data_source AS source,
     timeframe AS frequency,
@@ -258,7 +258,7 @@ GROUP BY symbol, data_source, timeframe, instrument_type
 UNION ALL
 
 SELECT
-    'external_factor' AS category,
+    'external_factors' AS table_name,
     ef.symbol,
     ef.source,
     fr.frequency,
@@ -271,4 +271,4 @@ FROM external_factors ef
 LEFT JOIN factor_registry fr USING (factor_name)
 GROUP BY ef.symbol, ef.source, fr.frequency, ef.instrument_type, ef.factor_name
 
-ORDER BY category, symbol, factor_name;
+ORDER BY table_name, symbol, factor_name;
