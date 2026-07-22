@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from strategies.data.ohlcv import get_ohlcv
+from strategies.module.data.ohlcv import get_ohlcv
 from db.timescale_writer import save_signal_results
 from librae.core.utils import generate_run_id, to_canonical
 
@@ -52,8 +52,9 @@ def run_backtest() -> None:
 def run_sim() -> None:
     raise NotImplementedError(
         "Sim mode not wired up — this experiment predates LiveTrader's "
-        "cfg=RunConfig wiring (see strategies/trendpullback/run.py for the "
-        "current pattern)."
+        "cfg=RunConfig wiring — no currently-deployed strategy has this "
+        "wired up (see strategies/FACTOR_ANALYSIS.md; the two attempts so "
+        "far both failed factor validation and moved to experiments/)."
     )
 
 

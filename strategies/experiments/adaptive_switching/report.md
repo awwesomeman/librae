@@ -1,125 +1,116 @@
-# Adaptive Switching — 研究報告
+# Adaptive Switching — 回溯驗證報告
 
-**時間**: 2026-07-12 | **決策資產**: BTC | **跨資產**: BTC, ETH, TXFR1
-**樣本切分**: IS-Train 2024-08-01~2025-04-30 | IS-Val ~2025-09-30 | OOS ~2026-06-01 | 跨資產窗口 2025-01-01~2026-06-01（同參數不重調）
+| 項目 | 內容 |
+|---|---|
+| 決策資產 | BTCUSDT |
+| 跨資產穩健性 | ETHUSDT（同參數不重調） |
+| 基礎頻率 | H1（gate=1D） |
+| 樣本切分 | IS-Train 2024-01-01~2024-12-31 / IS-Val ~2025-08-31 / OOS ~2026-07-01 |
 
-流程依 `strategies/README.md` 的 ①~⑧ 順序執行。
+未建立 `strategy.py`（因子驗證未過）。
 
-## Bug（已修復）
-`vol_ratio` 的 pivot 計算在 TXFR1 上因重複 `(date,hour)` 列崩潰 → 改用 `groupby().last().unstack()`，已修復並在⑦驗證不再崩潰。
+## 策略結構
 
-## ③-freq 基礎頻率橫掃（IS-Train，1H/4H/1D）
-mom_factor/rsi_demeaned 在 1H 上所有 forward period 都不顯著（見下方③），依 README ③ 換基礎頻率重新取資料橫掃，而非死守 1H。mom_factor lookback 隨基礎頻率調整（1H: 12 bars / 4H: 3 bars / 1D: 1 bar，皆對應約 12h 窗口，1D 上收斂為 1 bar 因日線沒有次日內窗口）；forward period 以 bar 數表示。
+三個候選，皆由 `prepare_signals(mode=...)` 產生：
 
-**多重檢定校正方法**：用 `utils/stats.py` 的手刻 `holm_bonferroni`（Holm step-down，控制 **FWER**），不是 factrix 現成工具。原因：這個網格搜尋的決策形態是「掃過 base_tf×factor×horizon 全部組合、挑單一贏家」，需要的是 FWER（控制「至少挑錯一次」的機率），不是 FDR（控制「誤判佔比的期望值」，適合「篩一批因子、全部留著用」的情境，不適合「只挑最強的那一個」）。**factrix 公開 API 目前只有 FDR 工具**（`fx.stats.bhy_adjusted_p`/`fx.multi_factor.bhy`/`bhy_hierarchical`）——`factrix/_stats/multiple_testing.py` 雖然有 `holm_step_down`/`bonferroni`，但那是底線開頭的 private module，未被 `factrix/__init__.py` 或公開的 `factrix/stats/` 引用，不能當作穩定 API 依賴。這是 README ③ 認定的真實 factrix 缺口，故此處保留手刻，不換成 `bhy_adjusted_p`（先前一度換過，回頭發現那其實是換錯了統計目標，已改回）。
+- **Momentum-only**：日線 `mom_1D_10` 符號決定多空方向，`mom_1H_12` > 0.5% 進場、< -0.2%（多）出場，空單對稱。
+- **RSI-only**：同一個日線方向 gate，RSI(14) < 30 進場多單、> 65 出場；RSI > 70 進場空單、< 35 出場。
+- **Adaptive switching**：逐 bar 依波動 regime（ATR 比值分類的 high_vol/low_vol）選子策略——高波動用 momentum 訊號、低波動用 RSI 訊號。
 
-| 基礎頻率 | 因子 | Forward(bars) | Hit Rate | p (raw) | p (Holm) |
-|---|---|---|---|---|---|
-| 1h | mom_factor | 1 | 0.4886 | 0.9717 | 1.0000 |
-| 1h | rsi_demeaned | 1 | 0.4952 | 0.7987 | 1.0000 |
-| 1h | mom_factor | 4 | 0.4754 | 0.9807 | 0.8867 |
-| 1h | rsi_demeaned | 4 | 0.4724 | 0.9900 | 0.4784 |
-| 1h | mom_factor | 12 | 0.4834 | 0.7826 | 1.0000 |
-| 1h | rsi_demeaned | 12 | 0.4649 | 0.9509 | 1.0000 |
-| 1h | mom_factor | 24 | 0.4649 | 0.8735 | 1.0000 |
-| 1h | rsi_demeaned | 24 | 0.4834 | 0.7446 | 1.0000 |
-| 4h | mom_factor | 1 | 0.4842 | 0.9145 | 1.0000 |
-| 4h | rsi_demeaned | 1 | 0.5071 | 0.3360 | 1.0000 |
-| 4h | mom_factor | 2 | 0.4882 | 0.7649 | 1.0000 |
-| 4h | rsi_demeaned | 2 | 0.5068 | 0.3707 | 1.0000 |
-| 4h | mom_factor | 3 | 0.4694 | 0.9301 | 1.0000 |
-| 4h | rsi_demeaned | 3 | 0.5065 | 0.3934 | 1.0000 |
-| 4h | mom_factor | 6 | 0.5019 | 0.5633 | 1.0000 |
-| 4h | rsi_demeaned | 6 | 0.5279 | 0.2439 | 1.0000 |
-| 1d | mom_factor | 1 | 0.5136 | 0.3394 | 1.0000 |
-| 1d | rsi_demeaned | 1 | 0.4942 | 0.6034 | 1.0000 |
-| 1d | mom_factor | 2 | 0.4297 | 0.9686 | 1.0000 |
-| 1d | rsi_demeaned | 2 | 0.4375 | 0.9374 | 1.0000 |
-| 1d | mom_factor | 3 | 0.4824 | 0.6392 | 1.0000 |
-| 1d | rsi_demeaned | 3 | 0.5294 | 0.3934 | 1.0000 |
-| 1d | mom_factor | 5 | 0.5294 | 0.2985 | 1.0000 |
-| 1d | rsi_demeaned | 5 | 0.4902 | 0.6113 | 1.0000 |
+Regime 分類器改用 `strategies.module.data.regime.compute_vol_regime`（原始研究的成交量比值定義只適用 24/7 連續市場，在非連續交易時段會崩潰）——同一個「用波動 regime 切換」的假設，換成已驗證、無前視偏誤的共用實作。
 
-Holm-Bonferroni 校正（n=24 個檢定，跨 base_tf × factor × horizon 一起校正，alpha=0.05）後，沒有任何組合顯著。1H/4H/1D 三個基礎頻率上，mom/rsi 皆未通過校正後的顯著性門檻——這不是 1H 特有的問題，換粗/細基礎頻率沒有找到可用的邊際。
+## 因子顯著性：mom_1h / rsi_demeaned 多頻率橫掃（IS-Train）
 
-## ③ 因子分析：多頻率橫掃（IS-Train）
-| 因子 | 持有期 | Hit Rate | p-value |
+| 因子 | Forward(h) | Hit Rate | p (raw) | p (Holm) |
+|---|---|---|---|---|
+| mom_1h | 1 | 0.4908 | 0.9737 | 0.3685 |
+| rsi_demeaned | 1 | 0.4860 | 0.9985 | **0.0235（PASS）** |
+| mom_1h | 4 | 0.4899 | 0.8586 | 1.0000 |
+| rsi_demeaned | 4 | 0.4882 | 0.9037 | 1.0000 |
+| mom_1h | 12 | 0.5190 | 0.1530 | 1.0000 |
+| rsi_demeaned | 12 | 0.5025 | 0.4945 | 1.0000 |
+| mom_1h | 24 | 0.5127 | 0.3446 | 1.0000 |
+| rsi_demeaned | 24 | 0.5127 | 0.4107 | 1.0000 |
+
+Holm 校正（n=8）後唯一通過的格子：`rsi_demeaned @ h=1`，hit rate 0.4860 < 0.5——RSI 去均值後的符號越極端，下一小時報酬方向反而相反，符合均值回歸假設。`mom_1h` 在任何 horizon 上都未通過校正。
+
+## 因子邊際穩定性（oos_decay，IS-Train 內部 70/30 切分）
+
+| 因子 | Horizon | 存活率 | 反號 | 狀態 |
+|---|---|---|---|---|
+| mom_1h | 1h | 4.0736 | 是 | VETOED |
+| rsi_demeaned | 1h | 0.3159 | 否 | VETOED |
+
+兩個因子都被否決：`mom_1h` 前後半段效應方向相反；`rsi_demeaned` 存活率 0.3159 遠低於 0.5 門檻——**唯一通過 Holm 校正的格子在 IS-Train 內部自己都不穩定**，不構成可用邊際。
+
+## Vol-regime 切片檢定（IS-Train，h=1）
+
+| 因子 | Regime | Hit Rate | p-value |
 |---|---|---|---|
-| mom_1H_12 | 1h | 0.4882 | 0.9734 |
-| rsi_demeaned | 1h | 0.4942 | 0.8350 |
-| mom_1H_12 | 4h | 0.4927 | 0.7444 |
-| rsi_demeaned | 4h | 0.4850 | 0.8959 |
-| mom_1H_12 | 12h | 0.5029 | 0.4631 |
-| rsi_demeaned | 12h | 0.5182 | 0.2135 |
-| mom_1H_12 | 24h | 0.4483 | 0.9573 |
-| rsi_demeaned | 24h | 0.4444 | 0.9665 |
+| mom_1h | low_vol | 0.4852 | 0.9915 |
+| mom_1h | high_vol | 0.4969 | 0.6515 |
+| rsi_demeaned | low_vol | 0.4852 | 0.9955 |
+| rsi_demeaned | high_vol | 0.4869 | 0.9574 |
 
-## ③b 因子邊際穩定性（oos_decay，IS-Train 內部 70/30 切分）
-| 因子 | 頻率 | 存活率 | 反號 | 狀態 |
-|---|---|---|---|---|
-| mom_1H_12 | 1h | 1.2543 | 是 | VETOED |
-| rsi_demeaned | 24h | 126.0146 | 否 | PASS |
+兩個因子在 high_vol/low_vol 兩側 p 值都遠大於 0.05，**沒有任何切片顯示顯著方向性**——直接削弱切換機制的核心假設：如果動量該在高波動有效、RSI 該在低波動有效，這裡應該至少有一側顯著。
 
-存活率（絕對值 mean_OOS / mean_IS）< 0.5 或反號代表這個因子在 IS-Train 內部自己都不穩定，不用等到 IS-Val 就已經是警訊。mom_1H_12 反號（VETOED）就是這種警訊。rsi_demeaned 存活率 126 這種遠大於 1 的數字通常是 mean_IS 接近 0 造成的分母效應，不代表真的穩定 126 倍，解讀時不應直接當作「非常穩健」的證據。
+## 策略候選比較（IS-Val，BTCUSDT，零成本）
 
-## ③c Vol-ratio Regime 切片檢定（IS-Train，用③挑出的頻率）
-mom_1H_12 @ 1h：
-| Regime | Hit Rate | p-value |
-|---|---|---|
-| false | 0.4910 | 0.8920 |
-| true | 0.4808 | 0.9544 |
-
-rsi 去均值 @ 24h：
-| Regime | Hit Rate | p-value |
-|---|---|---|
-| false | 0.4497 | 0.9152 |
-| true | 0.5068 | 0.5610 |
-
-## ④ 頻率/持有期決定
-mom_1H_12 在 1h 最穩定顯著、但效應方向是「reversal」（hit rate 0.4882 < 0.5，p=0.9734 接近 1，跟策略假設的「動量突破」方向相反）；rsi_demeaned 在 24h 最穩定顯著，方向為「reversal」。策略部署檔（adaptive_switching_strategy.py）目前逐 1H bar 判斷進出場，跟橫掃出來的最適頻率不完全一致——這裡誠實記錄落差，不回頭改動已部署的策略頻率（見結論）。
-
-## ⑤ 策略候選比較（IS-Val）
 | 版本 | 淨報酬 | Sharpe | 最大回撤 | 交易次數 |
 |---|---|---|---|---|
-| Momentum-only | -15.58% | -1.4952 | -20.83% | 226 |
-| RSI-only | -2.93% | -0.2823 | -10.33% | 90 |
-| Adaptive switching | -18.00% | -1.9462 | -21.62% | 190 |
+| Momentum-only | +4.25% | 0.3552 | -14.42% | 212 |
+| RSI-only | +21.99% | 1.0938 | -18.43% | 32 |
+| Adaptive switching | -0.73% | 0.1261 | -20.25% | 152 |
 
-## ⑤b 盲測 OOS
+RSI-only 明顯最好，Adaptive switching 三者中最差且淨報酬為負。
+
+## OOS 盲測（BTCUSDT，零成本）
+
 | 版本 | 淨報酬 | Sharpe | 最大回撤 | 交易次數 |
 |---|---|---|---|---|
-| Momentum-only | -19.64% | -0.7361 | -28.82% | 423 |
-| RSI-only | 23.76% | 1.3028 | -15.55% | 162 |
-| Adaptive switching | -15.72% | -0.5911 | -33.81% | 350 |
+| Momentum-only | +19.58% | 0.8392 | -17.64% | 266 |
+| RSI-only | -4.19% | -0.0338 | -23.88% | 40 |
+| Adaptive switching | +1.13% | 0.2016 | -25.32% | 196 |
 
-## ⑥ MAE/MFE SL/TP 校準（IS-Train）
-**校準結果**：SL=2.88% / TP=2.27%（156 個進場事件）
+**排序反轉**：IS-Val 最好的 RSI-only 在 OOS 變最差（典型過擬合），IS-Val 最差的 Momentum-only 在 OOS 反而最好。Adaptive switching 在兩個窗口都沒有優於當期最好的單一子策略。
 
-Held-out（交易級交叉檢查，套用 IS-Train 校準出的固定 SL/TP，不重新校準）：
-| 區間 | 無SL/TP | Sharpe | +SL/TP | Sharpe |
+## MAE/MFE 分布（switch 模式，IS-Train 進場事件）
+
+268 個進場事件：median MAE = -1.00% / median MFE = 1.30% / P75 |MAE| = 1.82%。因子本身不穩定，僅記錄分布，不套用 SL/TP。
+
+## 跨資產穩健性（ETHUSDT，同參數，不重調，零成本）
+
+IS-Val：
+
+| 版本 | 淨報酬 | Sharpe | 最大回撤 | 交易次數 |
 |---|---|---|---|---|
-| IS-Val | -14.93% | -2.0016 | -13.55% | -1.9196 |
-| OOS | -13.24% | -0.4825 | -20.93% | -1.2347 |
+| Momentum-only | +156.50% | 2.8874 | -22.95% | 238 |
+| RSI-only | +22.56% | 0.9004 | -36.71% | 30 |
+| Adaptive switching | +130.22% | 2.7089 | -21.45% | 149 |
 
-## ⑦ 正式引擎交叉驗證（BacktestService，跨資產同參數不重調）
-| 資產 | 累積報酬 | Sharpe | 最大回撤 | 交易次數 |
-|---|---|---|---|---|
-| BTC | -20.55% | -0.37 | -36.31% | 371 |
-| ETH | 189.41% | 1.43 | -21.1% | 406 |
-| TXFR1 | -14.62% | -0.76 | -24.73% | 182 |
+OOS：
 
-MAE/MFE SL/TP 疊加（正式引擎）：
-| 資產 | 無SL/TP | Sharpe | +SL/TP | Sharpe |
+| 版本 | 淨報酬 | Sharpe | 最大回撤 | 交易次數 |
 |---|---|---|---|---|
-| BTC | -20.55% | -0.37 | -34.46% | -0.73 |
-| ETH | 189.41% | 1.43 | -5.48% | 0.08 |
-| TXFR1 | -14.62% | -0.76 | -21.56% | -1.26 |
+| Momentum-only | -15.18% | -0.2212 | -34.57% | 316 |
+| RSI-only | -10.77% | -0.1140 | -37.29% | 48 |
+| Adaptive switching | -20.32% | -0.4083 | -42.24% | 215 |
+
+ETH 上 IS-Val 三個版本都是正報酬，但 **OOS 全部翻負**，且 Adaptive switching 是三者中最差——跟 BTC 模式不同，沒有任何候選同時在 BTC+ETH、IS-Val+OOS 四種組合下都站得住腳。
 
 ## 結論
-- **切換機制是否加值**：見⑤/⑤b。IS-Val 上 Adaptive switching（Sharpe -1.9462）是三者中最差的，並未優於兩個單一子策略中較好的一個（RSI-only -0.2823 / Momentum-only -1.4952）；OOS 盲測同樣顯示切換機制沒有加值（Adaptive switching -0.5911 vs RSI-only 1.3028 / Momentum-only -0.7361）——**兩個獨立窗口（IS-Val、OOS）都指向同一個結論，比只看單一 OOS 窗口更站得住腳**：切換機制沒有加值，且部分窗口下反而是三者中最差的。
-- **mom_1H_12 的方向跟策略假設相反**：③顯示 mom_1H_12 最穩定顯著是在 1h、效應方向是「reversal」（hit rate 0.4882<0.5），但策略把它當「動量突破」訊號使用（正值視為看漲延續）——因子分析結果本身就不支持這個因子的使用方式，這比切換門檻的問題更根本。且 mom_1H_12 的 oos_decay 反號（③b，VETOED），代表這個「顯著」在 IS-Train 內部就不穩定，不需要等到 IS-Val 才發現問題。
-- **頻率落差**：③橫掃出的最穩定頻率（1h/24h）跟部署策略固定逐 1H bar 判斷（見④）不完全一致——這是已知的方法論落差，尚未回頭調整部署頻率。
-- ③c 的 regime 切片檢定顯示兩個因子在 `is_trend_regime` 兩側的 hit rate/p-value 都沒有達到常見顯著門檻，vol_ratio 1.15 這個切換門檻缺乏資料支持，與原始版本的結論一致。
-- TXFR1 的 pivot 崩潰已修復並在⑦驗證正常運作；`vol_ratio` 假設 24/7 市場，TXFR1（日盤限定）語意仍不對齊，數字僅供框架驗證參考。
-- MAE/MFE SL/TP 疊加需依⑦數字判斷是否加值，不假設對所有家族都有害——見上表。
-- **基礎頻率橫掃（③-freq）**：1H 上的不顯著不是頻率選錯——換 4H/1D 重新取資料橫掃、跨 base_tf×factor×horizon 做 Holm-Bonferroni 校正（手刻，FWER control——這個「掃網格挑單一贏家」的決策形態需要 FWER，而 factrix 公開 API 沒有 FWER 工具，見③-freq 說明）後，三個基礎頻率上 mom/rsi 都沒有通過顯著性門檻，代表 mom/rsi 這兩個因子在 BTC 上（至少在這個樣本窗口）本身就不具備可用邊際，不是 1H 這個起始假設的問題。既然三個已測基礎頻率都沒有找到顯著因子，依 README ④「若因子在所有已嘗試的頻率下都不穩定，代表它可能不夠格進入⑤」，本次不再嘗試多頻率合成（multi-timeframe combination）——在單一頻率邊際都不存在的前提下疊加 MTF 只會增加多重檢定風險，不會製造出原本沒有的邊際。目前部署的 1H adaptive switching 邏輯（④~⑧ 沿用既有結果）維持原結論：不建議上線。
+
+- **切換機制沒有加值**：BTC 上兩個獨立窗口都沒有優於當期最好的單一子策略；ETH 上 IS-Val 表現不錯，但 OOS 是三者中最差。
+- **唯一通過 Holm 校正的因子（`rsi_demeaned @ h=1`）沒有通過內部穩定性檢查**（存活率 0.3159），不構成可推廣邊際。
+- **Regime 切片檢定沒有支持切換假設**：高低波動兩側 p 值都遠高於 0.05——切換的前提本身缺乏資料支持,不只是門檻沒調好。
+- **RSI-only 在 BTC/ETH 的 IS-Val 都是典型過擬合訊號**：IS-Val Sharpe 不錯（BTC 1.09 / ETH 0.90），OOS 都轉負。Momentum-only 則資產間不一致。
+- 以上皆為零成本數字，交易次數（32~316 筆）疊加真實成本後，本來就薄弱或不一致的邊際大概率進一步惡化。
+
+**建議：不建議上線 Adaptive switching，也不建議把 RSI-only/Momentum-only 任一單獨拿去部署**——三個候選都沒有同時在 BTC+ETH、IS-Val+OOS 四種組合下一致站得住腳，因子層面也沒有找到穩健、方向正確、通過雙重檢查的邊際。
+
+## 已知限制
+
+- 因子顯著性用固定 h=1（橫掃出的最穩定值），但部署邏輯逐 bar 用連續門檻判斷進出場，不是預測固定 horizon 方向。
+- 只驗證了 BTC 決策 + ETH 穩健性，未測非連續交易市場資產。
+- MAE/MFE 分布只做診斷用途，因子本身不穩定，未疊加 SL/TP 回測驗證。
+- 未做動量/RSI 門檻本身的橫掃（0.5%/-0.2%、30/65/70/35 是否最優）——本報告驗證的是原始部署參數。

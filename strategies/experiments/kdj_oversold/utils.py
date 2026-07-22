@@ -16,6 +16,10 @@ DEFAULT_PARAMS: dict = {
     "kdj_length": 9,
     "kdj_signal": 3,
     "j_threshold": 20,
+    # Below: only read by factor_research.py's backtest candidate — run.py's
+    # DB-signal-quality path (prepare_signals) never touches these.
+    "exit_j_threshold": 80,
+    "max_hold_periods": 24,
 }
 
 
@@ -38,3 +42,12 @@ def prepare_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFram
     out["kdj_j"] = kdj[f"J_{p['kdj_length']}_{p['kdj_signal']}"]
     out["entry_signal"] = (out["kdj_j"] < p["j_threshold"]).astype(int)
     return out
+
+
+def compute_exit_signal(df: pd.DataFrame, params: dict | None = None) -> pd.Series:
+    """Mean-reversion exit: J recovered back above exit_j_threshold. Used
+    only by factor_research.py's backtest candidate (see run.py's
+    DB-signal-quality path — it has no exit concept). max_hold_periods is
+    a forced exit enforced by the Strategy, not here."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    return (df["kdj_j"] > p["exit_j_threshold"]).fillna(False)
