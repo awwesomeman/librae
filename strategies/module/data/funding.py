@@ -14,9 +14,25 @@ an uncached range is cheap.
 
 Binance's live open-interest-history endpoint only retains ~30 days; see
 data/open_interest.py for the archive-based alternative with full history.
+
+``basis_premium`` — perp-vs-spot premium index (%), the raw input funding
+rate is derived/clamped from. Same problem domain as funding_rate, so it
+lives here rather than a new file, even though the source archive
+(data.binance.vision's ``premiumIndexKlines``) is OHLC-per-interval — only
+the close is kept, get_factor()'s schema has no room for a full OHLC row.
+Unlike OI/ratio metrics elsewhere, an exact-0 premium is a real reading
+(perp trading exactly at spot), not an outage — no zero-forward-fill here.
+
+Uses the raw no-slash symbol (``"BTCUSDT"``, matching open_interest.py),
+not funding_rate's ccxt slashed format (``"BTC/USDT:USDT"``) — this fetcher
+doesn't go through ccxt at all.
 """
 from __future__ import annotations
 
+import io
+import urllib.error
+import urllib.request
+import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -25,6 +41,9 @@ from strategies.module.data.factors import get_factor, register_factor_fetcher
 from strategies.module.data.utils import merge_asof_backward
 
 _EXCHANGE_ID = "binanceusdm"
+_PREMIUM_SOURCE = "data.binance.vision"
+_PREMIUM_BASE_URL = "https://data.binance.vision/data/futures/um/daily/premiumIndexKlines"
+_PREMIUM_INTERVAL = "1h"
 
 
 def _fetch_funding_rate_page(symbol: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
@@ -72,6 +91,54 @@ def _fetch_funding_rate_page(symbol: str, start_dt: datetime, end_dt: datetime) 
 register_factor_fetcher(
     "funding_rate", _fetch_funding_rate_page, source=_EXCHANGE_ID, frequency="H8",
     instrument_type="contract_perpetual",  # funding rate only exists for perpetuals
+)
+
+
+def _fetch_premium_day(symbol_raw: str, day: pd.Timestamp) -> pd.DataFrame:
+    """One day's hourly premium-index file, or an empty frame for a day the
+    archive doesn't have yet (a 404 here is an expected gap, not an error)."""
+    date_str = day.strftime("%Y-%m-%d")
+    url = f"{_PREMIUM_BASE_URL}/{symbol_raw}/{_PREMIUM_INTERVAL}/{symbol_raw}-{_PREMIUM_INTERVAL}-{date_str}.zip"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = urllib.request.urlopen(req, timeout=15).read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return pd.DataFrame(columns=["timestamp", "value"])
+        raise
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        raw = pd.read_csv(io.BytesIO(zf.read(zf.namelist()[0])))
+    return pd.DataFrame({
+        "timestamp": pd.to_datetime(raw["open_time"], unit="ms", utc=True),
+        "value": raw["close"].astype(float),
+    })
+
+
+def _fetch_basis_premium(symbol_raw: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    """One-day-file-per-day fetch over [start_dt, end_dt] — same pagination
+    shape as open_interest.py's fetcher (get_factor() only calls this for
+    sub-ranges not already cached)."""
+    start_day = pd.Timestamp(start_dt).normalize()
+    end_day = min(
+        pd.Timestamp(end_dt).normalize(),
+        pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1),
+    )
+    if end_day < start_day:
+        return pd.DataFrame(columns=["timestamp", "value"])
+
+    frames = []
+    day = start_day
+    while day <= end_day:
+        frames.append(_fetch_premium_day(symbol_raw, day))
+        day += pd.Timedelta(days=1)
+
+    return pd.concat(frames, ignore_index=True).drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
+
+
+register_factor_fetcher(
+    "basis_premium", _fetch_basis_premium, source=_PREMIUM_SOURCE, frequency="H1",
+    instrument_type="contract_perpetual",
 )
 
 
