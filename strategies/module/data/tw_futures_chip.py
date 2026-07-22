@@ -69,7 +69,7 @@ def _futures_net_oi_fetcher(institution_key: str):
 for _key in finmind_client.INSTITUTION_KEYS:
     register_factor_fetcher(
         f"twfut_{_key}_net_oi", _futures_net_oi_fetcher(_key),
-        source=_SOURCE, instrument_type="contract_monthly",
+        source=_SOURCE, frequency="D1", instrument_type="contract_monthly",
     )
 
 
@@ -106,7 +106,7 @@ for _key in finmind_client.INSTITUTION_KEYS:
     for _cp in ("call", "put"):
         register_factor_fetcher(
             f"twopt_{_key}_{_cp}_net_oi", _option_net_oi_fetcher(_key, _cp),
-            source=_SOURCE, instrument_type="contract_monthly",
+            source=_SOURCE, frequency="D1", instrument_type="contract_monthly",
         )
 
 
@@ -133,7 +133,7 @@ def _dealer_mm_volume_fetcher(symbol: str, start_dt: datetime, end_dt: datetime)
     return _sum_volume_by_date(rows)
 
 
-register_factor_fetcher("twfut_dealer_mm_volume", _dealer_mm_volume_fetcher, source=_SOURCE, instrument_type="contract_monthly")
+register_factor_fetcher("twfut_dealer_mm_volume", _dealer_mm_volume_fetcher, source=_SOURCE, frequency="D1", instrument_type="contract_monthly")
 
 
 def fetch_twfut_dealer_mm_volume_history(symbol: str, start: str, end: str) -> pd.DataFrame:

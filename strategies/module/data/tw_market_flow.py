@@ -55,8 +55,8 @@ def _margin_balance_fetcher(name: str):
     return _fetch
 
 
-register_factor_fetcher("tw_market_margin_balance", _margin_balance_fetcher("MarginPurchase"), source=_SOURCE, instrument_type="spot")
-register_factor_fetcher("tw_market_short_balance", _margin_balance_fetcher("ShortSale"), source=_SOURCE, instrument_type="spot")
+register_factor_fetcher("tw_market_margin_balance", _margin_balance_fetcher("MarginPurchase"), source=_SOURCE, frequency="D1", instrument_type="spot")
+register_factor_fetcher("tw_market_short_balance", _margin_balance_fetcher("ShortSale"), source=_SOURCE, frequency="D1", instrument_type="spot")
 
 
 def fetch_tw_margin_balance_history(factor: str, start: str, end: str) -> pd.DataFrame:
@@ -83,7 +83,7 @@ def _market_net_buy_fetcher(name: str):
 for _key, _label in finmind_client.MARKET_INSTITUTION_LABELS.items():
     register_factor_fetcher(
         f"tw_market_{_key}_net_buy", _market_net_buy_fetcher(_label),
-        source=_SOURCE, instrument_type="spot",
+        source=_SOURCE, frequency="D1", instrument_type="spot",
     )
 
 

@@ -22,7 +22,7 @@ from strategies.module.data.tw_market_flow import (
 def test_margin_and_short_balance_registered():
     assert "tw_market_margin_balance" in _FACTOR_FETCHERS
     assert "tw_market_short_balance" in _FACTOR_FETCHERS
-    _fn, source, instrument_type = _FACTOR_FETCHERS["tw_market_margin_balance"]
+    _fn, source, instrument_type, _freq = _FACTOR_FETCHERS["tw_market_margin_balance"]
     assert source == "finmind"
     assert instrument_type == "spot"
 

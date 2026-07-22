@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
+    -- Caller-selectable axis (register_ohlcv_fetcher) — same symbol
+    -- legitimately has multiple valid values (research: 'yahoo', live:
+    -- 'ibkr'). Unlike external_factors.source, this IS meant to be chosen
+    -- per call, not just a fixed provenance tag.
     data_source     TEXT NOT NULL,
     instrument_type TEXT NOT NULL DEFAULT 'spot',
     open            DOUBLE PRECISION,
@@ -177,6 +181,10 @@ CREATE TABLE IF NOT EXISTS external_factors (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
+    -- Descriptive provenance tag, NOT a caller-selectable axis like
+    -- ohlcv.data_source — fixed 1:1 per factor_name at registration time
+    -- (register_factor_fetcher), recorded for audit/debugging only. Don't
+    -- expect two rows with the same factor_name and different source.
     source          TEXT NOT NULL,
     instrument_type TEXT NOT NULL DEFAULT 'spot',
     value           DOUBLE PRECISION NOT NULL,
@@ -206,3 +214,61 @@ CREATE TABLE IF NOT EXISTS external_factor_coverage_ranges (
 );
 CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
     ON external_factor_coverage_ranges(symbol, factor_name, source, instrument_type, range_started_at);
+
+-- ============================================================
+-- factor_registry — 每個 factor_name 的更新頻率（一 factor_name 一行，
+-- 不是每筆 fact row 都存一次）。由 register_factor_fetcher() 呼叫時的
+-- domain 知識寫死，不是從 ts 間隔統計推算——sync_factor_registry() 寫入。
+-- frequency 沿用 librae/core/utils.py 既有的 canonical 字母代碼
+-- (M5/H8/D1/W2/MN3 ...)，另加 'IRREGULAR' 給沒有固定格點的真實事件資料
+-- (股利、分割)。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS factor_registry (
+    factor_name TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,
+    frequency   TEXT NOT NULL
+);
+
+-- ============================================================
+-- data_inventory — 「目前收錄哪些資料」的即時清單 (view, 非手動維護)
+-- 直接查 ohlcv/external_factors 本身算出來，新增 factor 不用同步更新任何
+-- 文件——避免命名/清單 drift（見 2026-07 決策討論：不建 UUID catalog table，
+-- 靠 DB 自身當唯一真相）。
+--
+-- frequency：ohlcv 直接用自己本來就有、規則的 timeframe 欄位；
+-- external_factors 沒有等效欄位，改 JOIN factor_registry（domain 知識寫死，
+-- 見上面 factor_registry 的註解）——不再用相鄰 ts 統計推算，因為樣本少的
+-- factor（例如目前只有 2 筆的 us_short_interest）統計出來的間隔不可靠，
+-- 也會隨新資料進來一直變動，不是穩定的描述。
+-- ============================================================
+CREATE OR REPLACE VIEW data_inventory AS
+SELECT
+    'ohlcv' AS category,
+    symbol,
+    data_source AS source,
+    timeframe AS frequency,
+    instrument_type,
+    NULL::TEXT AS factor_name,
+    count(*) AS rows,
+    min(ts) AS start_ts,
+    max(ts) AS end_ts
+FROM ohlcv
+GROUP BY symbol, data_source, timeframe, instrument_type
+
+UNION ALL
+
+SELECT
+    'external_factor' AS category,
+    ef.symbol,
+    ef.source,
+    fr.frequency,
+    ef.instrument_type,
+    ef.factor_name,
+    count(*) AS rows,
+    min(ef.ts) AS start_ts,
+    max(ef.ts) AS end_ts
+FROM external_factors ef
+LEFT JOIN factor_registry fr USING (factor_name)
+GROUP BY ef.symbol, ef.source, fr.frequency, ef.instrument_type, ef.factor_name
+
+ORDER BY category, symbol, factor_name;

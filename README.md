@@ -17,6 +17,8 @@ cp .env.secrets.example .env.secrets   # 若要跑 Shioaji 再填 SHIOAJI_*（�
 
 之後所有指令都透過 `uv run` 執行（例如 `uv run pytest tests/ -q`），或 `source .venv/bin/activate` 後直接跑——下面「常用指令」為求簡潔省略了 `uv run` 前綴。
 
+> **注意**：`.env` 沒有 `export`，單純 `source .env` 只在目前 shell 建立變數，不會傳給 python 子行程（`os.getenv` 拿到 `None`，DB 連線悄悄 fallback 回 `localhost`）。要嘛 `uv run --env-file .env <script>`，要嘛 `set -a; source .env; set +a` 之後再跑 python。
+
 ---
 
 ## 策略開發流程

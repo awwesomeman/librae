@@ -21,7 +21,13 @@ Adding a new factor source
         return df
 
     register_factor_fetcher("my_factor", my_fetcher, source="my-provider",
-                             instrument_type="contract_perpetual")
+                             frequency="D1", instrument_type="contract_perpetual")
+
+Call ``sync_factor_registry()`` once after importing whichever factor
+modules you need (e.g. at the top of a collection script) to push the
+registered (factor_name, source, frequency) rows into the DB's
+``factor_registry`` table — that's what ``data_inventory`` reads frequency
+from.
 """
 from __future__ import annotations
 
@@ -37,16 +43,22 @@ logger = logging.getLogger(__name__)
 
 FACTOR_COLUMNS = ["timestamp", "value"]
 
+# Sentinel `frequency` for factors with no fixed grid (real-world event
+# dates like dividends/splits) — deliberately outside librae.core.utils'
+# canonical M/H/D/W/MN vocabulary, which only covers actual regular
+# intervals; giving it a name here (not a bare string) avoids typos.
+FREQUENCY_IRREGULAR = "IRREGULAR"
+
 # ---------------------------------------------------------------------------
 # Fetcher registry
 # ---------------------------------------------------------------------------
 
-# factor_name -> (fetcher, source label, instrument_type) stored alongside cached rows
-_FACTOR_FETCHERS: dict[str, tuple[Callable, str, str]] = {}
+# factor_name -> (fetcher, source label, instrument_type, frequency) stored alongside cached rows
+_FACTOR_FETCHERS: dict[str, tuple[Callable, str, str, str]] = {}
 
 
 def register_factor_fetcher(
-    factor_name: str, fn: Callable, *, source: str, instrument_type: str = "spot",
+    factor_name: str, fn: Callable, *, source: str, frequency: str, instrument_type: str = "spot",
 ) -> None:
     """Register a fetcher under ``factor_name``.
 
@@ -56,6 +68,16 @@ def register_factor_fetcher(
         source: Label recorded on every cached row (e.g. ``'binanceusdm'``) —
             purely descriptive, not a separate selection axis; one
             factor_name maps to exactly one fetcher/source.
+        frequency: How often this factor actually gets new data, stated from
+            domain knowledge — hardcoded here, not inferred from timestamp
+            gaps in whatever happens to be cached so far (a fresh/sparse
+            factor's actual gaps are a bad estimate of its true frequency).
+            Same canonical vocabulary as ohlcv timeframes (librae/core/utils
+            .to_canonical: ``'M5'``, ``'H1'``, ``'D1'``, ``'W1'``, ``'MN3'``
+            ...), plus ``'IRREGULAR'`` for real-world event dates with no
+            fixed grid (dividends, splits). Surfaced in the
+            ``factor_registry`` table via ``sync_factor_registry()``, one
+            row per factor_name — not repeated on every cached row.
         instrument_type: Contract expiry structure this factor is inherently
             about (see librae/config/symbols.py's ALLOWED_INSTRUMENT_TYPES).
             Fixed per factor_name, not resolved per-symbol — funding_rate and
@@ -64,7 +86,7 @@ def register_factor_fetcher(
             APIs both use the ticker "BTCUSDT", so this can't be inferred
             from the symbol alone).
     """
-    _FACTOR_FETCHERS[factor_name] = (fn, source, instrument_type)
+    _FACTOR_FETCHERS[factor_name] = (fn, source, instrument_type, frequency)
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +121,7 @@ def get_factor(
             f"Available: {sorted(_FACTOR_FETCHERS)}. "
             "Register one with register_factor_fetcher()."
         )
-    fetcher, source, instrument_type = _FACTOR_FETCHERS[factor_name]
+    fetcher, source, instrument_type, _frequency = _FACTOR_FETCHERS[factor_name]
 
     end_dt = parse_dt(end) if end else datetime.now(timezone.utc)
     start_dt = parse_dt(start)
@@ -131,6 +153,22 @@ def get_factor(
     if fetched_parts:
         return pd.concat(fetched_parts, ignore_index=True)
     return pd.DataFrame(columns=FACTOR_COLUMNS)
+
+
+def sync_factor_registry() -> None:
+    """Upsert every currently-registered (factor_name, source, frequency)
+    into the DB's ``factor_registry`` table. Call once after importing the
+    factor modules you need — not at import time inside
+    register_factor_fetcher() itself, which must stay DB-free so importing
+    a factor module never requires a DB connection to be configured."""
+    try:
+        from db.timescale_writer import write_factor_registry
+        write_factor_registry([
+            {"factor_name": name, "source": source, "frequency": frequency}
+            for name, (_fn, source, _instrument_type, frequency) in _FACTOR_FETCHERS.items()
+        ])
+    except Exception as e:
+        logger.warning("factor_registry sync failed: %s", e)
 
 
 # ---------------------------------------------------------------------------

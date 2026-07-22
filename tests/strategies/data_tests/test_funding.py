@@ -12,7 +12,7 @@ from strategies.module.data.funding import fetch_funding_rate_history
 
 def test_funding_rate_registered_with_binanceusdm_source():
     assert "funding_rate" in _FACTOR_FETCHERS
-    _fn, source, instrument_type = _FACTOR_FETCHERS["funding_rate"]
+    _fn, source, instrument_type, _freq = _FACTOR_FETCHERS["funding_rate"]
     assert source == "binanceusdm"
     assert instrument_type == "contract_perpetual"
 

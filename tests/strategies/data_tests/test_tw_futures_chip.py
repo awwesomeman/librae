@@ -23,7 +23,7 @@ from strategies.module.data.tw_futures_chip import (
 def test_futures_net_oi_registered(institution):
     factor_name = f"twfut_{institution}_net_oi"
     assert factor_name in _FACTOR_FETCHERS
-    _fn, source, instrument_type = _FACTOR_FETCHERS[factor_name]
+    _fn, source, instrument_type, _freq = _FACTOR_FETCHERS[factor_name]
     assert source == "finmind"
     assert instrument_type == "contract_monthly"
 

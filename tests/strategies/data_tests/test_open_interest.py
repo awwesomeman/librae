@@ -13,7 +13,7 @@ from strategies.module.data.open_interest import _fetch_oi_range, fetch_open_int
 
 def test_open_interest_registered_with_archive_source():
     assert "open_interest" in _FACTOR_FETCHERS
-    _fn, source, instrument_type = _FACTOR_FETCHERS["open_interest"]
+    _fn, source, instrument_type, _freq = _FACTOR_FETCHERS["open_interest"]
     assert source == "data.binance.vision"
     assert instrument_type == "contract_perpetual"
 

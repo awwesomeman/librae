@@ -70,7 +70,7 @@ def _fetch_funding_rate_page(symbol: str, start_dt: datetime, end_dt: datetime) 
 
 
 register_factor_fetcher(
-    "funding_rate", _fetch_funding_rate_page, source=_EXCHANGE_ID,
+    "funding_rate", _fetch_funding_rate_page, source=_EXCHANGE_ID, frequency="H8",
     instrument_type="contract_perpetual",  # funding rate only exists for perpetuals
 )
 

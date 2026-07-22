@@ -238,6 +238,38 @@ def _ibkr_fetcher() -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
 register_ohlcv_fetcher("ibkr", _ibkr_fetcher())
 
 
+def _yahoo_fetcher() -> Callable[[str, str, datetime, datetime], pd.DataFrame]:
+    """Build a get_ohlcv-compatible fetcher backed by yfinance (providers/yahoo.py).
+
+    Daily only — yfinance's intraday history is capped at ~60 days, a poor
+    fit for this multi-year DB cache. yfinance's daily bars are also
+    split/dividend-adjusted while a broker feed (e.g. IBKR) isn't — expect
+    a mismatch around corporate actions when moving research -> live.
+    """
+    def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        if interval != "1d":
+            raise ValueError(f"yahoo data_source only supports daily ('1d') bars, got {interval!r}")
+
+        from strategies.module.data.providers.yahoo import fetch_daily
+
+        raw = fetch_daily(symbol, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if raw.empty:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+
+        df = raw.rename(columns={
+            "date": "timestamp", "Open": "open", "High": "high",
+            "Low": "low", "Close": "close", "Volume": "volume",
+        })
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+        return df[OHLCV_COLUMNS].reset_index(drop=True)
+
+    return _fetch
+
+
+register_ohlcv_fetcher("yahoo", _yahoo_fetcher())
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

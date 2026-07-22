@@ -513,6 +513,33 @@ def write_external_factor(
     return len(rows)
 
 
+def write_factor_registry(entries: list[dict], dsn: str = TIMESCALE_DSN) -> int:
+    """Upsert (factor_name, source, frequency) rows into factor_registry.
+
+    One row per factor_name — not a per-cached-row write like
+    write_external_factor(). See strategies/module/data/factors.py's
+    sync_factor_registry(), the only caller.
+    """
+    if not entries:
+        return 0
+
+    rows = [(e["factor_name"], e["source"], e["frequency"]) for e in entries]
+
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO factor_registry (factor_name, source, frequency)
+               VALUES %s
+               ON CONFLICT (factor_name) DO UPDATE SET
+                   source = EXCLUDED.source, frequency = EXCLUDED.frequency""",
+            rows,
+        )
+        cur.close()
+
+    return len(rows)
+
+
 def merge_external_factor_coverage_ranges(
     symbol: str,
     factor_name: str,

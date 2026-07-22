@@ -34,7 +34,7 @@ class TestGetFactor:
         mock_cov.return_value = [(START, END)]
         mock_db.return_value = _make_factor_df(5)
         mock_fetcher = MagicMock()
-        register_factor_fetcher("test_factor_covered", mock_fetcher, source="test-source")
+        register_factor_fetcher("test_factor_covered", mock_fetcher, source="test-source", frequency="D1")
 
         result = get_factor("BTCUSDT", "test_factor_covered", start=START, end=END)
 
@@ -52,7 +52,7 @@ class TestGetFactor:
         fetched = _make_factor_df(5)
         mock_db.return_value = fetched
         mock_fetcher = MagicMock(return_value=fetched)
-        register_factor_fetcher("test_factor_nocov", mock_fetcher, source="test-source")
+        register_factor_fetcher("test_factor_nocov", mock_fetcher, source="test-source", frequency="D1")
 
         result = get_factor("BTCUSDT", "test_factor_nocov", start=START, end=END)
 
@@ -66,7 +66,7 @@ class TestGetFactor:
         mock_cov.return_value = None
         fetched = _make_factor_df(3)
         mock_fetcher = MagicMock(return_value=fetched)
-        register_factor_fetcher("test_factor_nodbfallback", mock_fetcher, source="test-source")
+        register_factor_fetcher("test_factor_nodbfallback", mock_fetcher, source="test-source", frequency="D1")
 
         result = get_factor("BTCUSDT", "test_factor_nodbfallback", start=START, end=END)
 
@@ -87,7 +87,7 @@ class TestGetFactor:
         mock_cov.return_value = []
         fetched = _make_factor_df(2)
         mock_db.return_value = fetched
-        register_factor_fetcher("test_factor_source", MagicMock(return_value=fetched), source="my-provider")
+        register_factor_fetcher("test_factor_source", MagicMock(return_value=fetched), source="my-provider", frequency="D1")
 
         get_factor("BTCUSDT", "test_factor_source", start=START, end=END)
 
