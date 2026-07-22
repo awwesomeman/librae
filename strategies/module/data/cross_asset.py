@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from strategies.data.ohlcv import get_ohlcv
-from strategies.data.utils import merge_asof_backward
+from strategies.module.data.ohlcv import get_ohlcv
+from strategies.module.data.utils import merge_asof_backward
 
 
 def attach_cross_asset_features(

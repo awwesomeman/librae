@@ -1,6 +1,6 @@
 """台指期/選擇權籌碼與流動性 — FinMind-sourced, TX/MTX/TMF derivatives ecosystem.
 
-Three factor families, all from ``strategies.data.providers.finmind`` (see
+Three factor families, all from ``strategies.module.data.providers.finmind`` (see
 that module's docstring for the full dataset tracking table):
 
     twfut_{dealer,trust,foreign}_net_oi              — futures net open interest
@@ -18,9 +18,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from strategies.data.factors import get_factor, register_factor_fetcher
-from strategies.data.providers import finmind as finmind_client
-from strategies.data.utils import taipei_date_to_utc
+from strategies.module.data.factors import get_factor, register_factor_fetcher
+from strategies.module.data.providers import finmind as finmind_client
+from strategies.module.data.utils import taipei_date_to_utc
 
 _SOURCE = "finmind"
 
@@ -162,7 +162,7 @@ def attach_tw_futures_chip_features(ohlcv: pd.DataFrame, symbol: str, start: str
     later bars carries no look-ahead; intraday bars on the publish day
     itself would — this is a daily/next-day signal, not for intrabar use.
     """
-    from strategies.data.utils import attach_or_zero_fill
+    from strategies.module.data.utils import attach_or_zero_fill
 
     df = ohlcv.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)

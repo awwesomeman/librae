@@ -8,7 +8,7 @@ def split_is_val_oos(
     df: pd.DataFrame, is_train_end: str, is_val_end: str, oos_end: str,
 ) -> dict[str, pd.DataFrame]:
     """Slice a DatetimeIndex-ed DataFrame into IS-Train/IS-Val/OOS, per
-    strategies/experiments/RESEARCH_METHODOLOGY.md's ② — split order is
+    strategies/RESEARCH_METHODOLOGY.md's 2 — split order is
     fixed; OOS is only ever read after IS-Train/IS-Val decisions are
     already final. Generic (not factor-specific) — any research script
     slicing a sample into these three windows can use this."""
@@ -46,6 +46,11 @@ def merge_htf_column(
         right_on="_htf_ts",
         direction="backward",
     ).set_index(idx_name).drop(columns=["_htf_ts"], errors="ignore")
-    out[column] = out[column].fillna(fill_value)
+    # WHY astype(bool): htf_series.shift(1) (the caller's usual no-lookahead
+    # fix) upcasts a bool Series to object (NaN in the first slot), and
+    # fillna() alone doesn't cast it back — leaves an object-dtype column of
+    # Python bool instances, which trips numpy's "~ on bool" deprecation
+    # warning on any later bitwise negation (e.g. ``~df["daily_trend_up"]``).
+    out[column] = out[column].fillna(fill_value).astype(bool)
 
     return out

@@ -1,6 +1,6 @@
 """Thin FinMind REST client — one function, no business logic.
 
-Shared by every FinMind-backed factor file under ``strategies/data/``
+Shared by every FinMind-backed factor file under ``strategies/module/data/``
 (``tw_futures_chip.py``, ``tw_market_flow.py``, ...): base URL, optional
 ``FINMIND_TOKEN`` auth, and API-level error surfacing. What a dataset's
 rows *mean* belongs in the caller, not here — this file only ever grows

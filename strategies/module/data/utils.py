@@ -40,7 +40,7 @@ def compute_coverage_gaps(
 ) -> list[tuple[datetime, datetime]]:
     """Sub-ranges of [start_dt, end_dt] not covered by any of ``ranges`` (sorted).
 
-    Shared by every DB-first + coverage-tracked cache in strategies/data/
+    Shared by every DB-first + coverage-tracked cache in strategies/module/data/
     (``ohlcv.py``'s ``get_ohlcv``, ``factors.py``'s ``get_factor``) — the gap
     math is identical regardless of what's being cached, only the DB
     tables/keys differ.
@@ -67,7 +67,7 @@ def compute_coverage_gaps(
 def merge_asof_backward(base: pd.DataFrame, other: pd.DataFrame, on: str = "timestamp") -> pd.DataFrame:
     """Backward asof-merge `other` onto `base` on a shared UTC timestamp column.
 
-    Shared by every ``attach_*_features`` in strategies/data/ (funding,
+    Shared by every ``attach_*_features`` in strategies/module/data/ (funding,
     open_interest, cross_asset, ...) — each base row only sees `other` rows
     at or before its own timestamp, so joining a lower-frequency or
     differently-timed external series never leaks a future value into a

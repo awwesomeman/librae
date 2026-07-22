@@ -1,6 +1,6 @@
 """Thin alternative.me client — Fear & Greed Index, no business logic.
 
-Used by ``strategies/data/regime.py`` (fng_regime). ``httpx`` is a core
+Used by ``strategies/module/data/regime.py`` (fng_regime). ``httpx`` is a core
 dependency (no extra needed), unlike the yfinance client next to this file.
 """
 from __future__ import annotations

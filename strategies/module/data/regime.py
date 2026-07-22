@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 
-from strategies.data.providers import alternative_me, yahoo
+from strategies.module.data.providers import alternative_me, yahoo
 
 
 def compute_vol_regime(df: pd.DataFrame, window: int = 14, baseline: int = 120) -> pd.Series:

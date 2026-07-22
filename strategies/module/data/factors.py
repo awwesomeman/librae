@@ -31,7 +31,7 @@ from typing import Callable
 
 import pandas as pd
 
-from strategies.data.utils import compute_coverage_gaps, parse_dt
+from strategies.module.data.utils import compute_coverage_gaps, parse_dt
 
 logger = logging.getLogger(__name__)
 

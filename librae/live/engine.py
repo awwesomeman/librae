@@ -298,7 +298,7 @@ class LiveTrader:
     def _build_warmup_fetcher(self) -> Callable:
         def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
             """DB-first warmup: reads historical bars from DB, fills gaps from API."""
-            from strategies.data.ohlcv import get_ohlcv
+            from strategies.module.data.ohlcv import get_ohlcv
             from librae.core.utils import interval_to_timedelta
 
             warmup_start = datetime.now(tz=timezone.utc) - interval_to_timedelta(tf_ccxt) * limit

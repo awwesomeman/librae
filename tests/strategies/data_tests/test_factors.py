@@ -1,4 +1,4 @@
-"""Tests for strategies.data.factors — unified third-party factor fetching
+"""Tests for strategies.module.data.factors — unified third-party factor fetching
 with coverage-tracked caching. Mirrors test_ohlcv.py's TestGetOhlcv structure
 since get_factor() shares the same DB-first + gap-fill design as get_ohlcv."""
 from __future__ import annotations
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from strategies.data.factors import (
+from strategies.module.data.factors import (
     FACTOR_COLUMNS,
     get_factor,
     register_factor_fetcher,
@@ -26,10 +26,10 @@ def _make_factor_df(n: int = 5, start_ts: datetime | None = None) -> pd.DataFram
 
 
 class TestGetFactor:
-    @patch("strategies.data.factors._merge_coverage")
-    @patch("strategies.data.factors._upsert_db")
-    @patch("strategies.data.factors._query_db")
-    @patch("strategies.data.factors._query_coverage")
+    @patch("strategies.module.data.factors._merge_coverage")
+    @patch("strategies.module.data.factors._upsert_db")
+    @patch("strategies.module.data.factors._query_db")
+    @patch("strategies.module.data.factors._query_coverage")
     def test_fully_covered_skips_fetcher(self, mock_cov, mock_db, mock_upsert, mock_merge):
         mock_cov.return_value = [(START, END)]
         mock_db.return_value = _make_factor_df(5)
@@ -43,10 +43,10 @@ class TestGetFactor:
         mock_upsert.assert_not_called()
         mock_merge.assert_not_called()
 
-    @patch("strategies.data.factors._merge_coverage")
-    @patch("strategies.data.factors._upsert_db")
-    @patch("strategies.data.factors._query_db")
-    @patch("strategies.data.factors._query_coverage")
+    @patch("strategies.module.data.factors._merge_coverage")
+    @patch("strategies.module.data.factors._upsert_db")
+    @patch("strategies.module.data.factors._query_db")
+    @patch("strategies.module.data.factors._query_coverage")
     def test_no_coverage_fetches_and_upserts(self, mock_cov, mock_db, mock_upsert, mock_merge):
         mock_cov.return_value = []
         fetched = _make_factor_df(5)
@@ -61,7 +61,7 @@ class TestGetFactor:
         mock_merge.assert_called_once_with("BTCUSDT", "test_factor_nocov", "test-source", "spot", START, END)
         assert len(result) == 5
 
-    @patch("strategies.data.factors._query_coverage")
+    @patch("strategies.module.data.factors._query_coverage")
     def test_coverage_unavailable_falls_back_to_fetcher(self, mock_cov):
         mock_cov.return_value = None
         fetched = _make_factor_df(3)
@@ -78,10 +78,10 @@ class TestGetFactor:
         with pytest.raises(ValueError, match="No fetcher registered"):
             get_factor("BTCUSDT", "nonexistent_factor", start=START)
 
-    @patch("strategies.data.factors._merge_coverage")
-    @patch("strategies.data.factors._upsert_db")
-    @patch("strategies.data.factors._query_db")
-    @patch("strategies.data.factors._query_coverage")
+    @patch("strategies.module.data.factors._merge_coverage")
+    @patch("strategies.module.data.factors._upsert_db")
+    @patch("strategies.module.data.factors._query_db")
+    @patch("strategies.module.data.factors._query_coverage")
     def test_source_is_recorded_from_registration_not_caller(self, mock_cov, mock_db, mock_upsert, mock_merge):
         """source isn't a caller-facing param — it's whatever the fetcher was registered with."""
         mock_cov.return_value = []

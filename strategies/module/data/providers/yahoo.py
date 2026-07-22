@@ -1,6 +1,6 @@
 """Thin Yahoo Finance (yfinance) client — no business logic.
 
-Used by ``strategies/data/regime.py`` (dxy_trend) — no crypto-exchange or
+Used by ``strategies/module/data/regime.py`` (dxy_trend) — no crypto-exchange or
 Shioaji equivalent for a US Dollar Index series, so this is the one place
 this repo reaches for yfinance. Requires the ``research`` extra
 (``pip install -e '.[research]'``) — yfinance is imported lazily inside

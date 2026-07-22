@@ -266,7 +266,7 @@ def load_ohlcv(
 
     instrument_type is an optional filter (None = don't filter, e.g. for
     dashboards that haven't been updated to pass it) — internal callers
-    that write/read the same key (strategies/data/ohlcv.py) should always
+    that write/read the same key (strategies/module/data/ohlcv.py) should always
     pass it explicitly to avoid silently mixing rows of different contract
     types that happen to share a symbol/data_source.
     """

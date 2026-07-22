@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from strategies.data.ohlcv import (
+from strategies.module.data.ohlcv import (
     OHLCV_COLUMNS,
     _ccxt_fetcher,
     _compute_gaps,
@@ -44,11 +44,11 @@ def _make_ccxt_page(n: int = 5, start_ts: datetime | None = None) -> pd.DataFram
 class TestGetOhlcv:
     """get_ohlcv coverage-first with API gap-fill."""
 
-    @patch("strategies.data.ohlcv._merge_coverage")
-    @patch("strategies.data.ohlcv._upsert_db")
-    @patch("strategies.data.ohlcv._fetch_from_api")
-    @patch("strategies.data.ohlcv._query_db")
-    @patch("strategies.data.ohlcv._query_coverage")
+    @patch("strategies.module.data.ohlcv._merge_coverage")
+    @patch("strategies.module.data.ohlcv._upsert_db")
+    @patch("strategies.module.data.ohlcv._fetch_from_api")
+    @patch("strategies.module.data.ohlcv._query_db")
+    @patch("strategies.module.data.ohlcv._query_coverage")
     def test_fully_covered_skips_api(self, mock_cov, mock_db, mock_api, mock_upsert, mock_merge):
         """Fully covered range → return DB data, never call API."""
         mock_cov.return_value = [(START, START + pd.Timedelta(hours=799))]
@@ -62,11 +62,11 @@ class TestGetOhlcv:
         mock_upsert.assert_not_called()
         mock_merge.assert_not_called()
 
-    @patch("strategies.data.ohlcv._merge_coverage")
-    @patch("strategies.data.ohlcv._upsert_db")
-    @patch("strategies.data.ohlcv._fetch_from_api")
-    @patch("strategies.data.ohlcv._query_db")
-    @patch("strategies.data.ohlcv._query_coverage")
+    @patch("strategies.module.data.ohlcv._merge_coverage")
+    @patch("strategies.module.data.ohlcv._upsert_db")
+    @patch("strategies.module.data.ohlcv._fetch_from_api")
+    @patch("strategies.module.data.ohlcv._query_db")
+    @patch("strategies.module.data.ohlcv._query_coverage")
     def test_no_coverage_fetches_api_and_upserts(self, mock_cov, mock_db, mock_api, mock_upsert, mock_merge):
         """No coverage → fetch full range from API, upsert, mark covered, re-read from DB."""
         mock_cov.return_value = []
@@ -81,11 +81,11 @@ class TestGetOhlcv:
         mock_merge.assert_called_once_with("BTCUSDT", "1h", "binance_spot", START, END, "spot")
         assert len(result) == 5
 
-    @patch("strategies.data.ohlcv._merge_coverage")
-    @patch("strategies.data.ohlcv._upsert_db")
-    @patch("strategies.data.ohlcv._fetch_from_api")
-    @patch("strategies.data.ohlcv._query_db")
-    @patch("strategies.data.ohlcv._query_coverage")
+    @patch("strategies.module.data.ohlcv._merge_coverage")
+    @patch("strategies.module.data.ohlcv._upsert_db")
+    @patch("strategies.module.data.ohlcv._fetch_from_api")
+    @patch("strategies.module.data.ohlcv._query_db")
+    @patch("strategies.module.data.ohlcv._query_coverage")
     def test_disjoint_coverage_only_fetches_the_gap(self, mock_cov, mock_db, mock_api, mock_upsert, mock_merge):
         """A range disjoint from what's cached fetches only the missing slice, not the whole span."""
         cached_start = END - pd.Timedelta(days=1)
@@ -97,8 +97,8 @@ class TestGetOhlcv:
 
         mock_api.assert_called_once_with("BTCUSDT", "1h", START, cached_start, "binance_spot")
 
-    @patch("strategies.data.ohlcv._fetch_from_api")
-    @patch("strategies.data.ohlcv._query_coverage")
+    @patch("strategies.module.data.ohlcv._fetch_from_api")
+    @patch("strategies.module.data.ohlcv._query_coverage")
     def test_coverage_unavailable_falls_back_to_api(self, mock_cov, mock_api):
         """DB completely unavailable → return API data directly, no caching attempted."""
         mock_cov.return_value = None
@@ -114,10 +114,10 @@ class TestGetOhlcv:
         with pytest.raises(ValueError, match="No OHLCV fetcher"):
             get_ohlcv("BTCUSDT", "1h", data_source="nonexistent_exchange", start=START)
 
-    @patch("strategies.data.ohlcv._merge_coverage")
-    @patch("strategies.data.ohlcv._upsert_db")
-    @patch("strategies.data.ohlcv._query_db")
-    @patch("strategies.data.ohlcv._query_coverage")
+    @patch("strategies.module.data.ohlcv._merge_coverage")
+    @patch("strategies.module.data.ohlcv._upsert_db")
+    @patch("strategies.module.data.ohlcv._query_db")
+    @patch("strategies.module.data.ohlcv._query_coverage")
     def test_custom_fetcher_registration(self, mock_cov, mock_db, mock_upsert, mock_merge):
         """Registered custom fetcher is used for its source name."""
         custom_df = _make_ohlcv_df(2)
@@ -271,7 +271,7 @@ class TestShioajiFetcher:
         assert list(result.columns) == OHLCV_COLUMNS
 
     def test_registered_under_shioaji(self):
-        from strategies.data.ohlcv import _OHLCV_FETCHERS
+        from strategies.module.data.ohlcv import _OHLCV_FETCHERS
         assert "shioaji" in _OHLCV_FETCHERS
 
 

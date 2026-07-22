@@ -19,11 +19,15 @@ import functools
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
+import pandas as pd
 import yaml
 
 from librae.core.run_config import RunConfig
+
+if TYPE_CHECKING:
+    from librae.core.strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +344,77 @@ def run_dispatch(
         "live": run_realtime,
     }
     dispatch[cfg.mode](cfg)
+
+
+
+# ---------------------------------------------------------------------------
+# Generic runner bodies — the part of every strategy's run.py that's
+# dictated by the engine's own fixed API (fetch -> prepare_signals ->
+# MultiIndex -> Backtest/LiveTrader -> save), not by strategy-specific
+# choices. Each strategy's run.py only supplies its own already-constructed
+# `strategy` instance and its own `prepare_signals` function; everything
+# downstream of that is identical by construction across strategies.
+# ---------------------------------------------------------------------------
+
+
+def run_backtest_generic(
+    cfg: RunConfig,
+    strategy: "BaseStrategy",
+    prepare_signals: Callable[[pd.DataFrame, dict], pd.DataFrame],
+) -> None:
+    """Shared backtest body: fetch -> prepare_signals -> MultiIndex ->
+    Backtest.run() -> save to DB. ``strategy`` must already be constructed
+    (how its params map from ``cfg.params`` is strategy-specific and stays
+    in the caller's ``run.py``)."""
+    from db.timescale_writer import save_strategy_results
+    from librae.backtest.engine import Backtest
+    from strategies.module.data.ohlcv import get_ohlcv
+
+    params = cfg.params or {}
+    logger.info("[1/3] Fetching & preparing %s %s...", cfg.symbol, cfg.timeframe)
+    raw = get_ohlcv(cfg.symbol, cfg.timeframe, data_source=cfg.data_source,
+                     start=cfg.start, end=cfg.end,
+                     warmup_periods=params.get("warmup_periods", 0))
+    df = raw.set_index("timestamp")
+    df.index.name = "ts"
+    df = prepare_signals(df, params)
+    mi = pd.MultiIndex.from_arrays([[cfg.symbol] * len(df), df.index], names=["symbol", "datetime"])
+    df = df.set_index(mi)
+    logger.info("       bars=%d", len(df))
+
+    logger.info("[2/3] Running backtest...")
+    bt = Backtest(data=df, strategy=strategy, cfg=cfg)
+    benchmark_prices = df.xs(cfg.symbol, level="symbol")["close"]
+    bt.add_benchmark(benchmark_prices)
+    bt.run()
+
+    output = bt.build_output()
+    metrics = output.metrics
+    sharpe_str = f"{metrics.sharpe:.3f}" if metrics.sharpe is not None else "N/A"
+    logger.info("       trades=%d  sharpe=%s  mdd=%.4f  ret=%.4f",
+                metrics.trades, sharpe_str, metrics.max_drawdown, metrics.total_return)
+
+    if not cfg.no_db:
+        try:
+            counts = save_strategy_results(output, df, cfg)
+            logger.info("       DB: %s", counts)
+        except Exception as e:
+            logger.warning("DB write skipped: %s", e)
+
+
+def run_realtime_generic(
+    cfg: RunConfig,
+    strategy: "BaseStrategy",
+    prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
+) -> None:
+    """Shared sim/live body — just wires LiveTrader. Kept as its own
+    function (rather than inlined per strategy) so every run.py calls the
+    same pair (run_backtest_generic / run_realtime_generic) instead of one
+    side being generic and the other hand-rolled."""
+    from librae.live.engine import LiveTrader
+
+    trader = LiveTrader(strategy, prepare_signals, cfg=cfg)
+    trader.run()
 
 
 def setup_logging() -> None:

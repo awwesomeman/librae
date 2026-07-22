@@ -1,6 +1,6 @@
 """全市場資金流 — FinMind-sourced, TWSE cash market (not derivatives-specific).
 
-Two factor families from ``strategies.data.providers.finmind`` (see that
+Two factor families from ``strategies.module.data.providers.finmind`` (see that
 module's docstring for the full dataset tracking table):
 
     tw_market_margin_balance, tw_market_short_balance          — market-wide 融資融券餘額
@@ -19,9 +19,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from strategies.data.factors import get_factor, register_factor_fetcher
-from strategies.data.providers import finmind as finmind_client
-from strategies.data.utils import taipei_date_to_utc
+from strategies.module.data.factors import get_factor, register_factor_fetcher
+from strategies.module.data.providers import finmind as finmind_client
+from strategies.module.data.utils import taipei_date_to_utc
 
 _SOURCE = "finmind"
 _MARKET_WIDE_SYMBOL = "TWSE"
@@ -115,7 +115,7 @@ def attach_tw_market_flow_features(ohlcv: pd.DataFrame, start: str, end: str) ->
     ``tw_futures_chip.attach_tw_futures_chip_features`` — see that
     function's docstring.
     """
-    from strategies.data.utils import attach_or_zero_fill
+    from strategies.module.data.utils import attach_or_zero_fill
 
     df = ohlcv.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)

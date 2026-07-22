@@ -6,7 +6,7 @@ long (and vice versa) — a real, continuously-updated positioning signal, not
 something inferred from price alone.
 
 Public ccxt endpoint, no auth. Cached in TimescaleDB via
-``strategies.data.factors.get_factor`` (factor_name='funding_rate') — same
+``strategies.module.data.factors.get_factor`` (factor_name='funding_rate') — same
 DB-first + gap-tracked cache as ohlcv, so a re-run on a different machine
 (e.g. the VM) doesn't need to re-download anything already fetched
 elsewhere; a multi-year history is only ~700 rows either way, so refetching
@@ -21,8 +21,8 @@ from datetime import datetime
 
 import pandas as pd
 
-from strategies.data.factors import get_factor, register_factor_fetcher
-from strategies.data.utils import merge_asof_backward
+from strategies.module.data.factors import get_factor, register_factor_fetcher
+from strategies.module.data.utils import merge_asof_backward
 
 _EXCHANGE_ID = "binanceusdm"
 

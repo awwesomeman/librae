@@ -10,7 +10,7 @@ such retention limit.
 Unlike funding rate (~700 rows via a single paginated API call, cheap enough
 to refetch every run — see data/funding.py), a multi-year window here means
 one file download per day (the archive only publishes daily zips, no monthly
-bundle for this metric). Cached via ``strategies.data.factors.get_factor``
+bundle for this metric). Cached via ``strategies.module.data.factors.get_factor``
 (factor_name='open_interest') — the same DB-backed, gap-tracked cache as
 funding/ohlcv, not a local parquet file: a local file cache doesn't follow
 the code to a VM/second machine, so every environment would re-download the
@@ -27,8 +27,8 @@ from datetime import datetime
 
 import pandas as pd
 
-from strategies.data.factors import get_factor, register_factor_fetcher
-from strategies.data.utils import merge_asof_backward
+from strategies.module.data.factors import get_factor, register_factor_fetcher
+from strategies.module.data.utils import merge_asof_backward
 
 _SOURCE = "data.binance.vision"
 _BASE_URL = "https://data.binance.vision/data/futures/um/daily/metrics"

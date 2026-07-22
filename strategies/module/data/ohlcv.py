@@ -35,7 +35,7 @@ from typing import Callable
 
 import pandas as pd
 
-from strategies.data.utils import compute_coverage_gaps, parse_dt
+from strategies.module.data.utils import compute_coverage_gaps, parse_dt
 from librae.core.utils import interval_to_timedelta, to_canonical, to_ccxt
 
 logger = logging.getLogger(__name__)
@@ -423,6 +423,6 @@ def _merge_coverage(
         logger.warning("Coverage merge failed: %s", e)
 
 
-# Re-exported for backwards compatibility — moved to strategies/data/utils.py
+# Re-exported for backwards compatibility — moved to strategies/module/data/utils.py
 # so factors.py's get_factor() can share the same gap math.
 _compute_gaps = compute_coverage_gaps
