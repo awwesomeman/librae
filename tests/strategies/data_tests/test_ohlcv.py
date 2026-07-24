@@ -97,18 +97,39 @@ class TestGetOhlcv:
 
         mock_api.assert_called_once_with("BTCUSDT", "1h", START, cached_start, "binance_spot")
 
-    @patch("strategies.module.data.ohlcv._fetch_from_api")
-    @patch("strategies.module.data.ohlcv._query_coverage")
-    def test_coverage_unavailable_falls_back_to_api(self, mock_cov, mock_api):
-        """DB completely unavailable → return API data directly, no caching attempted."""
-        mock_cov.return_value = None
-        mock_api.return_value = _make_ohlcv_df(3)
+    @patch("db.timescale_reader.get_ohlcv_coverage_ranges")
+    def test_coverage_query_failure_falls_back_to_uncached_fetch(self, mock_get_ranges):
+        """A failed *coverage read* is self-healing — cache-aside pattern:
+        treat it as a miss and fetch live, don't crash the caller. This is
+        deliberately asymmetric with the write side (_upsert_db/_merge_coverage
+        must still raise, see test_upsert_failure_raises_before_marking_covered)
+        — a swallowed write failure could mark data covered that was never
+        persisted, but a swallowed read failure just costs a redundant fetch."""
+        mock_get_ranges.side_effect = RuntimeError("connection refused")
+        fetched = _make_ohlcv_df(3)
 
-        result = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start=START, end=END)
+        with patch("strategies.module.data.ohlcv._fetch_from_api", return_value=fetched) as mock_api, \
+             patch("strategies.module.data.ohlcv._upsert_db"), \
+             patch("strategies.module.data.ohlcv._merge_coverage"), \
+             patch("strategies.module.data.ohlcv._query_db", return_value=pd.DataFrame(columns=OHLCV_COLUMNS)):
+            result = get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start=START, end=END)
 
         mock_api.assert_called_once()
         assert len(result) == 3
-        assert list(result.columns) == OHLCV_COLUMNS
+
+    @patch("strategies.module.data.ohlcv._upsert_db")
+    @patch("strategies.module.data.ohlcv._fetch_from_api")
+    @patch("strategies.module.data.ohlcv._query_coverage")
+    def test_upsert_failure_raises_before_marking_covered(self, mock_cov, mock_api, mock_upsert):
+        """A write failure must not let _merge_coverage mark the range as
+        cached — otherwise every future read of that range silently comes
+        back empty forever, with no error anywhere."""
+        mock_cov.return_value = []
+        mock_api.return_value = _make_ohlcv_df(5)
+        mock_upsert.side_effect = RuntimeError("write failed")
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            get_ohlcv("BTCUSDT", "1h", data_source="binance_spot", start=START, end=END)
 
     def test_unknown_source_raises(self):
         with pytest.raises(ValueError, match="No OHLCV fetcher"):
@@ -131,6 +152,48 @@ class TestGetOhlcv:
 
         mock_fetcher.assert_called_once()
         assert len(result) == 2
+
+
+class TestDbHelpersPropagateExceptions:
+    """Regression test for the exact failure mode the raise-don't-swallow
+    fix elsewhere in this session was for: _query_db/_upsert_db/
+    _merge_coverage must let a DB exception propagate, not swallow it back
+    into an empty "looks like no data" result. _query_coverage is the
+    deliberate exception — see its own test below. Patches the underlying
+    db.* functions directly (not the wrapper being tested) so a regression
+    that re-adds a try/except inside the wrapper itself — which
+    TestGetOhlcv's tests above can't detect, since they patch these same
+    wrappers away — gets caught here."""
+
+    @patch("db.timescale_reader.load_ohlcv")
+    def test_query_db_propagates(self, mock_load):
+        from strategies.module.data.ohlcv import _query_db
+        mock_load.side_effect = RuntimeError("db down")
+        with pytest.raises(RuntimeError, match="db down"):
+            _query_db("BTCUSDT", "1h", START, END, "binance_spot", "spot")
+
+    @patch("db.timescale_writer.write_ohlcv")
+    def test_upsert_db_propagates(self, mock_write):
+        from strategies.module.data.ohlcv import _upsert_db
+        mock_write.side_effect = RuntimeError("db down")
+        with pytest.raises(RuntimeError, match="db down"):
+            _upsert_db(_make_ohlcv_df(1), "BTCUSDT", "1h", "binance_spot", "spot")
+
+    @patch("db.timescale_reader.get_ohlcv_coverage_ranges")
+    def test_query_coverage_fails_soft(self, mock_get):
+        """Deliberately asymmetric with the other three: a coverage *read*
+        failure is self-healing (worst case, a redundant re-fetch), so it's
+        swallowed into [] rather than raised."""
+        from strategies.module.data.ohlcv import _query_coverage
+        mock_get.side_effect = RuntimeError("db down")
+        assert _query_coverage("BTCUSDT", "1h", "binance_spot", "spot") == []
+
+    @patch("db.timescale_writer.merge_ohlcv_coverage_ranges")
+    def test_merge_coverage_propagates(self, mock_merge):
+        from strategies.module.data.ohlcv import _merge_coverage
+        mock_merge.side_effect = RuntimeError("db down")
+        with pytest.raises(RuntimeError, match="db down"):
+            _merge_coverage("BTCUSDT", "1h", "binance_spot", START, END, "spot")
 
 
 class TestComputeGaps:
@@ -196,18 +259,41 @@ class TestCcxtFetcher:
 
     @patch("brokers.crypto_adapter.CryptoAdapter")
     def test_paginates_full_pages(self, mock_adapter_cls):
-        """A full page (== limit) triggers another fetch; a short page stops."""
+        """A full page (== limit) triggers another fetch; pagination only
+        stops on an empty page or once `since` passes `end` — not merely
+        because a page came back shorter than `limit` (that's not a safe
+        signal the exchange has no more data, see _ccxt_fetcher's docstring;
+        a short-but-nonempty page must trigger one more fetch to confirm)."""
         mock_adapter = MagicMock()
         mock_adapter_cls.return_value = mock_adapter
         page1 = _make_ccxt_page(1000, start_ts=START)
         page2 = _make_ccxt_page(5, start_ts=START + pd.Timedelta(hours=1000))
-        mock_adapter.fetch_ohlcv.side_effect = [page1, page2]
+        page3 = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        mock_adapter.fetch_ohlcv.side_effect = [page1, page2, page3]
 
         fetch = _ccxt_fetcher("binance")
         result = fetch("BTCUSDT", "1h", START, START + pd.Timedelta(hours=1010))
 
-        assert mock_adapter.fetch_ohlcv.call_count == 2
+        assert mock_adapter.fetch_ohlcv.call_count == 3
         assert len(result) == 1005
+
+    @patch("brokers.crypto_adapter.CryptoAdapter")
+    def test_short_page_mid_history_does_not_truncate_range(self, mock_adapter_cls):
+        """Regression test: a short-but-nonempty page mid-history (e.g. a
+        transient rate-limit response or exchange-side partial page) must
+        not be mistaken for "caught up to now" — previously this silently
+        truncated the fetched range with no error."""
+        mock_adapter = MagicMock()
+        mock_adapter_cls.return_value = mock_adapter
+        short_mid_page = _make_ccxt_page(3, start_ts=START)  # short, but not near `end`
+        later_page = _make_ccxt_page(5, start_ts=START + pd.Timedelta(hours=100))
+        mock_adapter.fetch_ohlcv.side_effect = [short_mid_page, later_page]
+
+        fetch = _ccxt_fetcher("binance")
+        result = fetch("BTCUSDT", "1h", START, START + pd.Timedelta(hours=104))
+
+        assert mock_adapter.fetch_ohlcv.call_count == 2
+        assert len(result) == 8
 
     @patch("brokers.crypto_adapter.CryptoAdapter")
     def test_empty_result_returns_empty_frame(self, mock_adapter_cls):

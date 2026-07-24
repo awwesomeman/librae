@@ -70,6 +70,14 @@ def _ccxt_fetcher(exchange_id: str) -> Callable[[str, str, datetime, datetime], 
     Paginates via ``since`` until [start, end] is covered — a single ccxt
     call is capped at ~1000 bars, so large windows need multiple pages.
     Works read-only (no API key needed) for any ccxt exchange id.
+
+    Termination relies only on an *empty* page or the ``since`` cursor
+    passing ``end`` — deliberately not "page shorter than limit", which
+    looks like "caught up to now" but isn't a safe inference (a rate-limit
+    response or an exchange-side partial page can also come back short
+    mid-history); trusting that silently truncated the fetched range with
+    no error. The cost is one extra (empty) call at the very end of every
+    fetch — cheap relative to the data-loss risk.
     """
     def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
         from brokers.crypto_adapter import CryptoAdapter
@@ -90,8 +98,6 @@ def _ccxt_fetcher(exchange_id: str) -> Callable[[str, str, datetime, datetime], 
             if next_since_ms <= since_ms:
                 break  # no progress — avoid looping forever
             since_ms = next_since_ms
-            if len(page) < limit:
-                break  # short page — caught up to the exchange's latest data
 
         if not pages:
             return pd.DataFrame(columns=OHLCV_COLUMNS)
@@ -105,6 +111,15 @@ def _ccxt_fetcher(exchange_id: str) -> Callable[[str, str, datetime, datetime], 
 
 register_ohlcv_fetcher("binance_spot", _ccxt_fetcher("binance"))
 
+# Binance USDⓈ-M perpetual OHLCV — symbol is ccxt's perpetual format
+# ("BTC/USDT:USDT", same as funding.py's funding-rate symbol), NOT the raw
+# "BTCUSDT" used by open_interest.py's archive-based fetchers. Needed for
+# real carry-trade backtesting (spot vs perp price path, not just the
+# derived basis_premium % — see funding.py's basis_premium docstring for
+# why that's a coarser proxy, insufficient to model real hedge-rebalance
+# P&L between funding settlements).
+register_ohlcv_fetcher("binance_perp", _ccxt_fetcher("binanceusdm"))
+
 
 def _binance_continuous_fetcher(
     exchange_id: str = "binanceusdm",
@@ -117,6 +132,9 @@ def _binance_continuous_fetcher(
     front — unlike registering the dated symbol directly, this alias never
     needs updating as the front contract rolls each quarter (see
     ``CryptoAdapter.fetch_continuous_ohlcv``).
+
+    Pagination termination: see ``_ccxt_fetcher``'s docstring — same
+    empty-page-or-since-past-end rule, not "page shorter than limit".
     """
     def _fetch(symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
         from brokers.crypto_adapter import CryptoAdapter
@@ -146,8 +164,6 @@ def _binance_continuous_fetcher(
             if next_since_ms <= since_ms:
                 break  # no progress — avoid looping forever
             since_ms = next_since_ms
-            if len(page) < limit:
-                break  # short page — caught up to the exchange's latest data
 
         if not pages:
             return pd.DataFrame(columns=OHLCV_COLUMNS)
@@ -322,16 +338,10 @@ def get_ohlcv(
 
     # 1. Find gaps against tracked coverage (may be several disjoint ranges)
     coverage = _query_coverage(symbol, tf_ccxt, data_source, instrument_type)
-    if coverage is None:
-        # DB unavailable — skip caching, fetch the full range directly.
-        logger.warning("Coverage lookup failed, fetching full range from API (no cache)")
-        return _fetch_from_api(symbol, tf_ccxt, start_dt, end_dt, data_source)
-
     gaps = _compute_gaps(coverage, start_dt, end_dt)
     if not gaps:
         logger.debug("DB hit: %s %s (fully covered)", symbol, tf_ccxt)
-        db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source, instrument_type)
-        return db_df if db_df is not None else pd.DataFrame(columns=OHLCV_COLUMNS)
+        return _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source, instrument_type)
     logger.info("DB partial: %s %s, %d gaps to fill", symbol, tf_ccxt, len(gaps))
 
     # 2. Fill gaps from API → upsert bars + mark covered (even if a gap
@@ -347,10 +357,10 @@ def get_ohlcv(
 
     # 3. Re-read from DB (merges existing + newly upserted data)
     db_df = _query_db(symbol, tf_ccxt, start_dt, end_dt, data_source, instrument_type)
-    if db_df is not None and not db_df.empty:
+    if not db_df.empty:
         return db_df
 
-    # 4. Fallback: DB unavailable, return already-fetched API data
+    # 4. Fallback: legitimately no bars in this range (e.g. exchange holiday)
     if fetched_parts:
         return pd.concat(fetched_parts, ignore_index=True)
     return pd.DataFrame(columns=OHLCV_COLUMNS)
@@ -379,26 +389,38 @@ def _resolve_instrument_type(symbol: str) -> str:
         return "spot"
 
 
+
+# _query_db/_upsert_db/_merge_coverage don't catch exceptions — a failure
+# there must raise, not degrade into a fallback that's hard to notice. In
+# particular _upsert_db runs right before _merge_coverage marks the same
+# range as cached: swallowing a write failure there would mark data as
+# covered that was never persisted, producing a permanent, silent
+# empty-result hole on every future read of that range. get_ohlcv() never
+# calls _merge_coverage for a gap unless _upsert_db (or an empty API result)
+# got there first, so this ordering alone is enough to protect the
+# invariant — _query_coverage below is the one exception, and it's safe.
+#
+# _query_coverage IS fail-soft (returns [] on failure): a failed *read* of
+# what's cached is self-healing — worst case is a redundant API re-fetch of
+# an already-cached range, not a corrupted cache invariant like a swallowed
+# write would cause. Standard cache-aside pattern: read failure -> treat as
+# miss, write failure -> must be visible.
+
 def _query_db(
     symbol: str, tf_ccxt: str, start_dt: datetime, end_dt: datetime,
     data_source: str, instrument_type: str,
-) -> pd.DataFrame | None:
-    """Query ohlcv table. Returns None if DB is unavailable."""
-    try:
-        from db.timescale_reader import load_ohlcv
+) -> pd.DataFrame:
+    from db.timescale_reader import load_ohlcv
 
-        df = load_ohlcv(
-            symbol=symbol, timeframe=to_canonical(tf_ccxt),
-            data_source=data_source, instrument_type=instrument_type,
-            started_at=start_dt.isoformat(), ended_at=end_dt.isoformat(),
-        )
-        if df.empty:
-            return df
-        df = df.rename(columns={"_time": "timestamp"})
-        return df[OHLCV_COLUMNS].reset_index(drop=True)
-    except Exception as e:
-        logger.warning("DB query failed: %s", e)
-        return None
+    df = load_ohlcv(
+        symbol=symbol, timeframe=to_canonical(tf_ccxt),
+        data_source=data_source, instrument_type=instrument_type,
+        started_at=start_dt.isoformat(), ended_at=end_dt.isoformat(),
+    )
+    if df.empty:
+        return df
+    df = df.rename(columns={"_time": "timestamp"})
+    return df[OHLCV_COLUMNS].reset_index(drop=True)
 
 
 def _fetch_from_api(
@@ -416,43 +438,34 @@ def _fetch_from_api(
 def _upsert_db(
     df: pd.DataFrame, symbol: str, tf_ccxt: str, data_source: str, instrument_type: str,
 ) -> None:
-    """Write OHLCV to DB via existing writer."""
-    try:
-        from db.timescale_writer import write_ohlcv
+    from db.timescale_writer import write_ohlcv
 
-        work = df
-        if "timestamp" in work.columns:
-            work = work.set_index("timestamp")
-            work.index.name = "ts"
-        write_ohlcv(work, symbol, tf_ccxt, data_source=data_source, instrument_type=instrument_type)
-    except Exception as e:
-        logger.warning("DB upsert failed: %s", e)
+    work = df
+    if "timestamp" in work.columns:
+        work = work.set_index("timestamp")
+        work.index.name = "ts"
+    write_ohlcv(work, symbol, tf_ccxt, data_source=data_source, instrument_type=instrument_type)
 
 
 def _query_coverage(
     symbol: str, tf_ccxt: str, data_source: str, instrument_type: str,
-) -> list[tuple[datetime, datetime]] | None:
-    """Query cached coverage ranges for this key. Returns None if DB is unavailable."""
+) -> list[tuple[datetime, datetime]]:
+    from db.timescale_reader import get_ohlcv_coverage_ranges
     try:
-        from db.timescale_reader import get_ohlcv_coverage_ranges
         return get_ohlcv_coverage_ranges(symbol, to_canonical(tf_ccxt), data_source, instrument_type)
-    except Exception as e:
-        logger.warning("Coverage query failed: %s", e)
-        return None
+    except Exception:
+        logger.warning("Coverage query failed for %s %s — treating as uncached", symbol, tf_ccxt)
+        return []
 
 
 def _merge_coverage(
     symbol: str, tf_ccxt: str, data_source: str, start_dt: datetime, end_dt: datetime,
     instrument_type: str,
 ) -> None:
-    """Mark [start_dt, end_dt] as cached for this key."""
-    try:
-        from db.timescale_writer import merge_ohlcv_coverage_ranges
-        merge_ohlcv_coverage_ranges(
-            symbol, to_canonical(tf_ccxt), data_source, start_dt, end_dt, instrument_type,
-        )
-    except Exception as e:
-        logger.warning("Coverage merge failed: %s", e)
+    from db.timescale_writer import merge_ohlcv_coverage_ranges
+    merge_ohlcv_coverage_ranges(
+        symbol, to_canonical(tf_ccxt), data_source, start_dt, end_dt, instrument_type,
+    )
 
 
 # Re-exported for backwards compatibility — moved to strategies/module/data/utils.py

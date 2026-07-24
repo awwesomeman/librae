@@ -6,6 +6,7 @@ No exchange-specific logic belongs here.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Callable
 
 import pandas as pd
 
@@ -81,6 +82,23 @@ def merge_asof_backward(base: pd.DataFrame, other: pd.DataFrame, on: str = "time
     base = base.sort_values(on)
     other = other.sort_values(on)
     return pd.merge_asof(base, other, on=on, direction="backward")
+
+
+def merge_native_transform_backward(
+    ohlcv: pd.DataFrame, native: pd.DataFrame, transform: Callable[[pd.DataFrame], pd.DataFrame], on: str = "timestamp",
+) -> pd.DataFrame:
+    """Run `transform` on `native` (its own pre-merge frequency) before
+    asof-merging onto `ohlcv`. Structural fix for the funding_z_3d
+    window-semantics bug (RESEARCH_METHODOLOGY.md's known pitfalls): a
+    rolling/z-score/pct_change computed *after* merging a coarser-frequency
+    source onto `ohlcv`'s own base_tf silently means "N bars of base_tf",
+    not "N native periods". Routing through here makes that mistake
+    structurally hard — `transform` only ever sees `native` at its own
+    frequency. `transform` adds columns to `native` sorted by `on`; keep the
+    raw value column too if it should also be merged.
+    """
+    native = transform(native.sort_values(on).copy())
+    return merge_asof_backward(ohlcv, native, on=on)
 
 
 def taipei_date_to_utc(date_str: str) -> pd.Timestamp:

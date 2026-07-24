@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 
 from strategies.module.data.factors import (
-    FACTOR_COLUMNS,
     collect_snapshot_factor,
     get_factor,
     load_snapshot_factor,
@@ -63,18 +62,39 @@ class TestGetFactor:
         mock_merge.assert_called_once_with("BTCUSDT", "test_factor_nocov", "test-source", "spot", START, END)
         assert len(result) == 5
 
-    @patch("strategies.module.data.factors._query_coverage")
-    def test_coverage_unavailable_falls_back_to_fetcher(self, mock_cov):
-        mock_cov.return_value = None
+    @patch("db.timescale_reader.get_external_factor_coverage_ranges")
+    def test_coverage_query_failure_falls_back_to_uncached_fetch(self, mock_get_ranges):
+        """A failed *coverage read* is self-healing — cache-aside pattern:
+        treat it as a miss and fetch live, don't crash the caller. This is
+        deliberately asymmetric with the write side (_upsert_db/_merge_coverage
+        must still raise, see test_upsert_failure_raises_before_marking_covered)
+        — a swallowed write failure could mark data covered that was never
+        persisted, but a swallowed read failure just costs a redundant fetch."""
+        mock_get_ranges.side_effect = RuntimeError("connection refused")
         fetched = _make_factor_df(3)
         mock_fetcher = MagicMock(return_value=fetched)
-        register_factor_fetcher("test_factor_nodbfallback", mock_fetcher, source="test-source", frequency="D1")
+        register_factor_fetcher("test_factor_dbdown", mock_fetcher, source="test-source", frequency="D1")
 
-        result = get_factor("BTCUSDT", "test_factor_nodbfallback", start=START, end=END)
+        with patch("strategies.module.data.factors._upsert_db"), patch("strategies.module.data.factors._merge_coverage"), patch("strategies.module.data.factors._query_db", return_value=pd.DataFrame(columns=["timestamp", "value"])):
+            result = get_factor("BTCUSDT", "test_factor_dbdown", start=START, end=END)
 
         mock_fetcher.assert_called_once_with("BTCUSDT", START, END)
         assert len(result) == 3
-        assert list(result.columns) == FACTOR_COLUMNS
+
+    @patch("strategies.module.data.factors._upsert_db")
+    @patch("strategies.module.data.factors._query_db")
+    @patch("strategies.module.data.factors._query_coverage")
+    def test_upsert_failure_raises_before_marking_covered(self, mock_cov, mock_db, mock_upsert):
+        """A write failure must not let _merge_coverage mark the range as
+        cached — otherwise every future read of that range silently comes
+        back empty forever, with no error anywhere."""
+        mock_cov.return_value = []
+        mock_upsert.side_effect = RuntimeError("write failed")
+        fetched = _make_factor_df(3)
+        register_factor_fetcher("test_factor_writefail", MagicMock(return_value=fetched), source="test-source", frequency="D1")
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            get_factor("BTCUSDT", "test_factor_writefail", start=START, end=END)
 
     def test_unknown_factor_raises(self):
         with pytest.raises(ValueError, match="No fetcher registered"):
@@ -94,6 +114,48 @@ class TestGetFactor:
         get_factor("BTCUSDT", "test_factor_source", start=START, end=END)
 
         mock_merge.assert_called_once_with("BTCUSDT", "test_factor_source", "my-provider", "spot", START, END)
+
+
+class TestDbHelpersPropagateExceptions:
+    """Regression test for the exact failure mode the DELETE-and-fallback
+    fix elsewhere in this session was for: _query_db/_upsert_db/
+    _merge_coverage must let a DB exception propagate, not swallow it back
+    into an empty/None "looks like no data" result. _query_coverage is the
+    deliberate exception — see its own test below. Patches the underlying
+    db.* functions directly (not the wrapper being tested) so a regression
+    that re-adds a try/except inside the wrapper itself — which
+    TestGetFactor's tests above can't detect, since they patch these same
+    wrappers away — gets caught here."""
+
+    @patch("db.timescale_reader.load_external_factor")
+    def test_query_db_propagates(self, mock_load):
+        from strategies.module.data.factors import _query_db
+        mock_load.side_effect = RuntimeError("db down")
+        with pytest.raises(RuntimeError, match="db down"):
+            _query_db("BTCUSDT", "funding_rate", "src", "spot", START, END)
+
+    @patch("db.timescale_writer.write_external_factor")
+    def test_upsert_db_propagates(self, mock_write):
+        from strategies.module.data.factors import _upsert_db
+        mock_write.side_effect = RuntimeError("db down")
+        with pytest.raises(RuntimeError, match="db down"):
+            _upsert_db(_make_factor_df(1), "BTCUSDT", "funding_rate", "src", "spot")
+
+    @patch("db.timescale_reader.get_external_factor_coverage_ranges")
+    def test_query_coverage_fails_soft(self, mock_get):
+        """Deliberately asymmetric with the other three: a coverage *read*
+        failure is self-healing (worst case, a redundant re-fetch), so it's
+        swallowed into [] rather than raised."""
+        from strategies.module.data.factors import _query_coverage
+        mock_get.side_effect = RuntimeError("db down")
+        assert _query_coverage("BTCUSDT", "funding_rate", "src", "spot") == []
+
+    @patch("db.timescale_writer.merge_external_factor_coverage_ranges")
+    def test_merge_coverage_propagates(self, mock_merge):
+        from strategies.module.data.factors import _merge_coverage
+        mock_merge.side_effect = RuntimeError("db down")
+        with pytest.raises(RuntimeError, match="db down"):
+            _merge_coverage("BTCUSDT", "funding_rate", "src", "spot", START, END)
 
 
 class TestSnapshotFactor:

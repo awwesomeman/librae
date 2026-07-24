@@ -38,7 +38,7 @@ from datetime import datetime
 import pandas as pd
 
 from strategies.module.data.factors import get_factor, register_factor_fetcher
-from strategies.module.data.utils import merge_asof_backward
+from strategies.module.data.utils import merge_native_transform_backward
 
 _EXCHANGE_ID = "binanceusdm"
 _PREMIUM_SOURCE = "data.binance.vision"
@@ -109,6 +109,11 @@ def _fetch_premium_day(symbol_raw: str, day: pd.Timestamp) -> pd.DataFrame:
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         raw = pd.read_csv(io.BytesIO(zf.read(zf.namelist()[0])))
+    if "open_time" not in raw.columns:
+        # Some early archive days ship a different/legacy column schema
+        # (observed on 2020-01-01/2020-06-01) -- same "gap, not an error"
+        # treatment as a 404.
+        return pd.DataFrame(columns=["timestamp", "value"])
     return pd.DataFrame({
         "timestamp": pd.to_datetime(raw["open_time"], unit="ms", utc=True),
         "value": raw["close"].astype(float),
@@ -127,11 +132,14 @@ def _fetch_basis_premium(symbol_raw: str, start_dt: datetime, end_dt: datetime) 
     if end_day < start_day:
         return pd.DataFrame(columns=["timestamp", "value"])
 
-    frames = []
-    day = start_day
-    while day <= end_day:
-        frames.append(_fetch_premium_day(symbol_raw, day))
-        day += pd.Timedelta(days=1)
+    from concurrent.futures import ThreadPoolExecutor
+
+    days = pd.date_range(start_day, end_day, freq="1D")
+    def _fetch_one(d):
+        return _fetch_premium_day(symbol_raw, d)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        frames = list(executor.map(_fetch_one, days))
 
     return pd.concat(frames, ignore_index=True).drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
 
@@ -165,12 +173,12 @@ def attach_funding_features(ohlcv: pd.DataFrame, symbol: str, start: str, end: s
 
     Adds:
         funding_rate:   raw per-8h rate, forward-filled from the last print.
-        funding_z_3d:   rolling z-score over ~3 days of prints (9 events) —
-                        "how extreme is crowding right now vs its own recent range".
-        funding_cum_3:  cumulative last-3-prints funding — "has crowding
-                        been sustained", not just one extreme print.
+        funding_z_3d:   rolling z-score over ~3 days of prints (9 events).
+        funding_cum_3:  cumulative last-3-prints funding.
 
-    All three are 0.0 if no funding data is available for `symbol`.
+    z-score/cum computed on funding's own native 8h cadence via
+    ``merge_native_transform_backward`` (see that function — base_tf-drift
+    pitfall in RESEARCH_METHODOLOGY.md). All three 0.0 if no data for `symbol`.
     """
     df = ohlcv.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -182,10 +190,14 @@ def attach_funding_features(ohlcv: pd.DataFrame, symbol: str, start: str, end: s
         df["funding_cum_3"] = 0.0
         return df
 
-    df = merge_asof_backward(df, funding)
-    df["funding_rate"] = df["funding_rate"].fillna(0.0)
+    def _add_z_and_cum(native: pd.DataFrame) -> pd.DataFrame:
+        roll = native["funding_rate"].rolling(9, min_periods=9)
+        native["funding_z_3d"] = ((native["funding_rate"] - roll.mean()) / (roll.std() + 1e-9)).fillna(0.0)
+        native["funding_cum_3"] = native["funding_rate"].rolling(3, min_periods=3).sum().fillna(0.0)
+        return native
 
-    roll = df["funding_rate"].rolling(9, min_periods=9)
-    df["funding_z_3d"] = ((df["funding_rate"] - roll.mean()) / (roll.std() + 1e-9)).fillna(0.0)
-    df["funding_cum_3"] = df["funding_rate"].rolling(3, min_periods=3).sum().fillna(0.0)
+    df = merge_native_transform_backward(df, funding, _add_z_and_cum)
+    df["funding_rate"] = df["funding_rate"].fillna(0.0)
+    df["funding_z_3d"] = df["funding_z_3d"].fillna(0.0)
+    df["funding_cum_3"] = df["funding_cum_3"].fillna(0.0)
     return df

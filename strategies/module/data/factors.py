@@ -149,15 +149,10 @@ def get_factor(
     start_dt = parse_dt(start)
 
     coverage = _query_coverage(symbol, factor_name, source, instrument_type)
-    if coverage is None:
-        logger.warning("Coverage lookup failed, fetching full range from API (no cache)")
-        return fetcher(symbol, start_dt, end_dt)
-
     gaps = compute_coverage_gaps(coverage, start_dt, end_dt)
     if not gaps:
         logger.debug("DB hit: %s %s (fully covered)", symbol, factor_name)
-        db_df = _query_db(symbol, factor_name, source, instrument_type, start_dt, end_dt)
-        return db_df if db_df is not None else pd.DataFrame(columns=FACTOR_COLUMNS)
+        return _query_db(symbol, factor_name, source, instrument_type, start_dt, end_dt)
     logger.info("DB partial: %s %s, %d gaps to fill", symbol, factor_name, len(gaps))
 
     fetched_parts: list[pd.DataFrame] = []
@@ -169,7 +164,7 @@ def get_factor(
         _merge_coverage(symbol, factor_name, source, instrument_type, gap_start, gap_end)
 
     db_df = _query_db(symbol, factor_name, source, instrument_type, start_dt, end_dt)
-    if db_df is not None and not db_df.empty:
+    if not db_df.empty:
         return db_df
 
     if fetched_parts:
@@ -238,51 +233,56 @@ def load_snapshot_factor(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# _query_db/_upsert_db/_merge_coverage don't catch exceptions — a failure
+# there must raise, not degrade into a fallback that's hard to notice. In
+# particular _upsert_db runs right before _merge_coverage marks the same
+# range as cached: swallowing a write failure there would mark data as
+# covered that was never persisted, producing a permanent, silent
+# empty-result hole on every future read of that range. get_factor() never
+# calls _merge_coverage for a gap unless _upsert_db (or an empty API result)
+# got there first, so this ordering alone is enough to protect the
+# invariant — _query_coverage below is the one exception, and it's safe.
+#
+# _query_coverage IS fail-soft (returns [] on failure): a failed *read* of
+# what's cached is self-healing — worst case is a redundant API re-fetch of
+# an already-cached range, not a corrupted cache invariant like a swallowed
+# write would cause. Standard cache-aside pattern: read failure -> treat as
+# miss, write failure -> must be visible.
+
 def _query_db(
     symbol: str, factor_name: str, source: str, instrument_type: str,
     start_dt: datetime, end_dt: datetime,
-) -> pd.DataFrame | None:
-    try:
-        from db.timescale_reader import load_external_factor
-
-        return load_external_factor(
-            symbol, factor_name, source, instrument_type=instrument_type,
-            started_at=start_dt.isoformat(), ended_at=end_dt.isoformat(),
-        )
-    except Exception as e:
-        logger.warning("DB query failed: %s", e)
-        return None
+) -> pd.DataFrame:
+    from db.timescale_reader import load_external_factor
+    return load_external_factor(
+        symbol, factor_name, source, instrument_type=instrument_type,
+        started_at=start_dt.isoformat(), ended_at=end_dt.isoformat(),
+    )
 
 
 def _upsert_db(
     df: pd.DataFrame, symbol: str, factor_name: str, source: str, instrument_type: str,
 ) -> None:
-    try:
-        from db.timescale_writer import write_external_factor
-        write_external_factor(df, symbol, factor_name, source, instrument_type)
-    except Exception as e:
-        logger.warning("DB upsert failed: %s", e)
+    from db.timescale_writer import write_external_factor
+    write_external_factor(df, symbol, factor_name, source, instrument_type)
 
 
 def _query_coverage(
     symbol: str, factor_name: str, source: str, instrument_type: str,
-) -> list[tuple[datetime, datetime]] | None:
+) -> list[tuple[datetime, datetime]]:
+    from db.timescale_reader import get_external_factor_coverage_ranges
     try:
-        from db.timescale_reader import get_external_factor_coverage_ranges
         return get_external_factor_coverage_ranges(symbol, factor_name, source, instrument_type)
-    except Exception as e:
-        logger.warning("Coverage query failed: %s", e)
-        return None
+    except Exception:
+        logger.warning("Coverage query failed for %s/%s — treating as uncached", symbol, factor_name)
+        return []
 
 
 def _merge_coverage(
     symbol: str, factor_name: str, source: str, instrument_type: str,
     start_dt: datetime, end_dt: datetime,
 ) -> None:
-    try:
-        from db.timescale_writer import merge_external_factor_coverage_ranges
-        merge_external_factor_coverage_ranges(
-            symbol, factor_name, source, start_dt, end_dt, instrument_type,
-        )
-    except Exception as e:
-        logger.warning("Coverage merge failed: %s", e)
+    from db.timescale_writer import merge_external_factor_coverage_ranges
+    merge_external_factor_coverage_ranges(
+        symbol, factor_name, source, start_dt, end_dt, instrument_type,
+    )

@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from strategies.module.utils import merge_htf_column
+from strategies.module.utils import merge_htf_column, split_is_val_oos
 
 
 def _htf_series(n_days: int = 5) -> pd.Series:
@@ -63,3 +63,23 @@ def test_output_dtype_is_bool_even_after_shift():
     merged = merge_htf_column(detail, htf, column="g", fill_value=False)
 
     assert merged["g"].dtype == bool
+
+
+def test_split_is_val_oos_boundaries_are_disjoint_and_exhaustive():
+    """Regression test: label-based .loc[a:b] is inclusive on both ends, so
+    naively chaining df.loc[:x], df.loc[x:y], df.loc[y:z] leaked the x and y
+    boundary bars into two splits at once — a real train/val/test overlap
+    bug. Each boundary bar must belong to exactly one split, and every row
+    in the input must land in exactly one output split."""
+    idx = pd.date_range("2024-01-01", periods=10, freq="D")
+    df = pd.DataFrame({"x": range(10)}, index=idx)
+
+    splits = split_is_val_oos(df, "2024-01-04", "2024-01-07", "2024-01-10")
+
+    all_ts = pd.concat([splits["IS-Train"], splits["IS-Val"], splits["OOS"]]).index
+    assert len(all_ts) == len(df)
+    assert all_ts.is_unique
+    assert pd.Timestamp("2024-01-04") in splits["IS-Train"].index
+    assert pd.Timestamp("2024-01-04") not in splits["IS-Val"].index
+    assert pd.Timestamp("2024-01-07") in splits["IS-Val"].index
+    assert pd.Timestamp("2024-01-07") not in splits["OOS"].index

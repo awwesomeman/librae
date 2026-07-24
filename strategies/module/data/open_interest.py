@@ -55,10 +55,15 @@ from typing import Callable
 import pandas as pd
 
 from strategies.module.data.factors import get_factor, register_factor_fetcher
-from strategies.module.data.utils import merge_asof_backward
+from strategies.module.data.utils import merge_asof_backward, merge_native_transform_backward
 
 _SOURCE = "data.binance.vision"
 _BASE_URL = "https://data.binance.vision/data/futures/um/daily/metrics"
+
+# OI's native cadence is 5 minutes (frequency="M5" below); 288 native periods
+# = 24h regardless of the caller's own OHLCV base_tf.
+_OI_NATIVE_MINUTES = 5
+_OI_24H_PERIODS = 24 * 60 // _OI_NATIVE_MINUTES
 
 # factor_name -> raw column name in the metrics CSV
 _COLUMNS = {
@@ -109,11 +114,14 @@ def _metrics_column_fetcher(raw_column: str) -> Callable[[str, datetime, datetim
         if end_day < start_day:
             return pd.DataFrame(columns=["timestamp", "value"])
 
-        frames = []
-        day = start_day
-        while day <= end_day:
-            frames.append(_fetch_day(symbol_raw, day, raw_column))
-            day += pd.Timedelta(days=1)
+        from concurrent.futures import ThreadPoolExecutor
+
+        days = pd.date_range(start_day, end_day, freq="1D")
+        def _fetch_one(d):
+            return _fetch_day(symbol_raw, d, raw_column)
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            frames = list(executor.map(_fetch_one, days))
 
         combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
         # data.binance.vision occasionally reports a run of exact-zero
@@ -159,6 +167,11 @@ def attach_oi_features(ohlcv: pd.DataFrame, symbol_raw: str, start: str, end: st
     Leaves the column absent entirely (rather than a neutral 0.0 fill) if the
     fetch is empty — callers should treat a missing column as "no OI data",
     not silently assume a value.
+
+    Computed on OI's own native 5-min cadence via ``merge_native_transform_backward``
+    (same base_tf-drift pitfall as funding.py's funding_z_3d, see that
+    function) — a plain shift on ohlcv's own base_tf would silently mean "24
+    bars of the caller's timeframe" instead of 24 real hours.
     """
     df = ohlcv.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -167,9 +180,13 @@ def attach_oi_features(ohlcv: pd.DataFrame, symbol_raw: str, start: str, end: st
     if oi.empty:
         return df
 
-    df = merge_asof_backward(df, oi)
-    df["open_interest_change_24h"] = (df["open_interest"] / df["open_interest"].shift(24) - 1.0) * 100.0
-    return df
+    def _add_change_24h(native: pd.DataFrame) -> pd.DataFrame:
+        native["open_interest_change_24h"] = (
+            native["open_interest"] / native["open_interest"].shift(_OI_24H_PERIODS) - 1.0
+        ) * 100.0
+        return native
+
+    return merge_native_transform_backward(df, oi, _add_change_24h)
 
 
 def attach_positioning_features(ohlcv: pd.DataFrame, symbol_raw: str, start: str, end: str) -> pd.DataFrame:

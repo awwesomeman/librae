@@ -11,11 +11,18 @@ def split_is_val_oos(
     strategies/RESEARCH_METHODOLOGY.md's 2 — split order is
     fixed; OOS is only ever read after IS-Train/IS-Val decisions are
     already final. Generic (not factor-specific) — any research script
-    slicing a sample into these three windows can use this."""
+    slicing a sample into these three windows can use this.
+
+    Each boundary bar belongs to exactly one split (the earlier one) —
+    label-based ``.loc[a:b]`` is inclusive on both ends, so naively chaining
+    ``df.loc[:x]``, ``df.loc[x:y]``, ``df.loc[y:z]`` would leak the ``x`` and
+    ``y`` bars into two splits at once.
+    """
+    is_train_end_ts, is_val_end_ts = pd.Timestamp(is_train_end), pd.Timestamp(is_val_end)
     return {
         "IS-Train": df.loc[:is_train_end],
-        "IS-Val": df.loc[is_train_end:is_val_end],
-        "OOS": df.loc[is_val_end:oos_end],
+        "IS-Val": df.loc[df.index > is_train_end_ts].loc[:is_val_end],
+        "OOS": df.loc[df.index > is_val_end_ts].loc[:oos_end],
     }
 
 
