@@ -33,8 +33,7 @@ from librae.config.market_config import MarketConfig
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_FORCE_CLOSE, OrderEvent, TradePnL, TradeResult,
-    build_close_event, check_stop_targets, eval_equity, process_actions,
-    resolve_fill_price,
+    build_close_event, eval_equity, run_pending_and_stops,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
@@ -201,30 +200,19 @@ class Backtest:
         for step, ts in enumerate(self._timeline):
             bars = all_bars[ts]
 
-            # ── Step 1: execute previous bar's pending actions at current bar's price ──
-            if pending_actions:
-                result_actions = process_actions(
-                    pending_actions, positions, cash, ts,
-                    get_price=lambda sym, action: resolve_fill_price(
-                        bars.get(sym, {}), action, default_fill=self._fill_price),
-                    get_cost_model=self._get_cost_model,
-                    primary_symbol=primary_symbol,
-                )
-                trades.extend(result_actions.trades)
-                all_events.extend(result_actions.events)
-                cash += result_actions.cash_delta
-                pending_actions = []
-
-            # ── Step 1.5: stop-loss / take-profit — checked every bar so a
-            # triggered stop fills and is reflected in this bar's equity,
-            # same as a resting broker-side stop order would ──
-            if positions:
-                result_stops = check_stop_targets(
-                    positions, bars, ts, get_cost_model=self._get_cost_model,
-                )
-                trades.extend(result_stops.trades)
-                all_events.extend(result_stops.events)
-                cash += result_stops.cash_delta
+            # ── Steps 1+1.5: fill previous bar's pending actions at current
+            # bar's price, then check stop-loss/take-profit — shared with the
+            # live engine (librae.core.executor.run_pending_and_stops) so the
+            # two can't silently drift out of sync on this sequence ──
+            cash, step_result = run_pending_and_stops(
+                ts, positions, cash, pending_actions, bars,
+                get_cost_model=self._get_cost_model,
+                default_fill=self._fill_price,
+                primary_symbol=primary_symbol,
+            )
+            trades.extend(step_result.trades)
+            all_events.extend(step_result.events)
+            pending_actions = []
 
             # ── Step 2: equity snapshot (reflects just-executed trades) ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, bars)

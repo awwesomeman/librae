@@ -29,6 +29,16 @@ def _zero_cost_model() -> CostModel:
     return CostModel.zero()
 
 
+def _mock_order_adapter() -> MagicMock:
+    """order_adapter mock with a realistic flat get_position() — a bare
+    MagicMock's auto-generated get_position() return value is truthy/
+    float-coercible by default, which _reconcile_positions() would
+    misread as a real open position at startup."""
+    adapter = MagicMock()
+    adapter.get_position.return_value = {"symbol": "", "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+    return adapter
+
+
 def _make_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
     """Create a simple OHLCV DataFrame with known timestamps."""
     base = datetime(2025, 1, 1, start_hour, 0, 0, tzinfo=timezone.utc)
@@ -87,6 +97,20 @@ class TestLiveExecutor:
 
         mock_telegram.send_signal.assert_called_once_with(
             strategy="Test", symbol="BTCUSDT", side="EXIT", price=105.0,
+        )
+
+    def test_notify_entry_sends_telegram(self):
+        """Regression test: only notify_exit existed — an operator watching
+        Telegram would never see when a position opened, only when it
+        closed."""
+        cm = _zero_cost_model()
+        mock_telegram = MagicMock()
+        mock_telegram.enabled = True
+        ex = LiveExecutor(cm, simulation=True, telegram=mock_telegram, strategy_name="Test")
+        ex.notify_entry("BTCUSDT", "long", 100.0, "open")
+
+        mock_telegram.send_signal.assert_called_once_with(
+            strategy="Test", symbol="BTCUSDT", side="LONG", price=100.0,
         )
 
     def test_live_requires_order_adapter(self):
@@ -275,6 +299,23 @@ class TestLiveTrader:
         # Iteration 1: buy. Iteration 2: close (has position)
         # notify_exit is called by LiveTrader._process_bar after trades
 
+    def test_open_calls_notify_entry(self):
+        """Regression test: an open/add fill must notify entry, symmetric
+        with the existing close -> notify_exit wiring."""
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        runner = self._make_runner(strategy=_AlwaysBuyStrategy(), fetcher=fetcher)
+        runner._executor.notify_entry = MagicMock()
+        runner.run(max_iterations=2)
+
+        # Iteration 1: buy queued. Iteration 2: buy fills at bar2's open (103.5).
+        runner._executor.notify_entry.assert_called_once_with("BTCUSDT", "long", 103.5, "open")
+
     def test_cash_deducted_on_entry(self):
         """Cash should decrease after a buy."""
         cash_values: list[float] = []
@@ -302,7 +343,7 @@ class TestLiveTrader:
 
     def test_live_mode_places_real_orders(self):
         """End-to-end: live mode should call order_adapter.place_order on fills."""
-        mock_order_adapter = MagicMock()
+        mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
 
         call_num = 0
@@ -329,6 +370,187 @@ class TestLiveTrader:
         cfg = _test_cfg(mode="live")
         with pytest.raises(ValueError, match="order_adapter"):
             self._make_runner(cfg=cfg)
+
+    def test_reconciles_open_broker_position_at_startup(self):
+        """Regression test: a process restart previously always assumed
+        flat/full-balance, even if the broker actually had a real open
+        position — a strategy could then double-open on the broker, or a
+        legitimate opposite-side signal could be rejected against a
+        position the broker doesn't actually have."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.return_value = {
+            "symbol": "BTCUSDT", "size": 2.0, "avg_price": 95.0, "unrealized_pnl": 10.0,
+        }
+
+        runner = self._make_runner(
+            strategy=_HoldStrategy(), cfg=_test_cfg(mode="live"), order_adapter=mock_order_adapter,
+        )
+        runner.run(max_iterations=1)
+
+        pos = runner._positions["BTCUSDT"]
+        assert pos.side == "long"
+        assert pos.quantity == 2.0
+        assert pos.entry_price == 95.0
+
+    def test_reconciles_short_broker_position(self):
+        """Negative size from the broker must reconcile as a short."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.return_value = {
+            "symbol": "BTCUSDT", "size": -3.0, "avg_price": 110.0, "unrealized_pnl": 0.0,
+        }
+
+        runner = self._make_runner(
+            strategy=_HoldStrategy(), cfg=_test_cfg(mode="live"), order_adapter=mock_order_adapter,
+        )
+        runner.run(max_iterations=1)
+
+        pos = runner._positions["BTCUSDT"]
+        assert pos.side == "short"
+        assert pos.quantity == 3.0
+
+    def test_reconciliation_failure_does_not_crash_startup(self):
+        """A broken get_position() call must not crash the whole run —
+        reconciliation is best-effort, trading must still proceed flat."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.side_effect = RuntimeError("broker down")
+
+        runner = self._make_runner(cfg=_test_cfg(mode="live"), order_adapter=mock_order_adapter)
+        runner.run(max_iterations=1)  # must not raise
+
+        assert runner._positions == {}
+
+    def test_stop_loss_triggers_and_closes_position(self):
+        """Regression test: the live engine never called check_stop_targets,
+        so a strategy-set stop_price was stored on the position but never
+        enforced — a position could blow through its stop with no exit
+        until the strategy itself issued a close."""
+        class BuyWithStopStrategy(BaseStrategy):
+            def on_bar(self, ctx: Context) -> list[Action]:
+                if not ctx.positions.get(ctx.symbol):
+                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0, stop_price=95.0)]
+                return []
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            df = _make_ohlcv_df(n=5, start_hour=call_num)
+            if call_num >= 3:
+                df["low"] = 90.0  # bar 3's range breaches the 95.0 stop
+            return df
+
+        runner = self._make_runner(strategy=BuyWithStopStrategy(), fetcher=fetcher)
+        runner.run(max_iterations=3)
+
+        # bar1: buy queued. bar2: buy fills. bar3: stop-loss force-closes.
+        assert "BTCUSDT" not in runner._positions
+
+    def test_feature_failure_fills_pending_action_at_correct_bar(self):
+        """Regression test: previously, a feature_fn exception returned
+        before popping/filling the previous bar's pending action, silently
+        deferring it to whichever LATER bar's feature computation happened
+        to succeed — filling at that bar's price instead of the intended
+        immediate-next-bar price."""
+        call_num = 0
+        fill_prices: list[float] = []
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            base = datetime(2025, 1, 1, call_num, tzinfo=timezone.utc)
+            ts = pd.date_range(base, periods=5, freq="h", tz=timezone.utc)
+            level = call_num * 100.0  # distinct price level per call
+            return pd.DataFrame({
+                "ts": ts, "open": level - 0.5, "high": level + 1.0,
+                "low": level - 1.0, "close": level, "volume": 1000.0,
+            })
+
+        def flaky_feature_fn(h1_base: pd.DataFrame) -> pd.DataFrame:
+            if call_num == 2:
+                raise RuntimeError("feature blip")
+            return _simple_feature_fn(h1_base)
+
+        class BuyOnceStrategy(BaseStrategy):
+            def on_bar(self, ctx: Context) -> list[Action]:
+                if not ctx.positions.get(ctx.symbol):
+                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        def on_order_event(event):
+            if event.event_type == "open":
+                fill_prices.append(event.price)
+
+        runner = self._make_runner(
+            strategy=BuyOnceStrategy(), fetcher=fetcher, feature_fn=flaky_feature_fn,
+        )
+        runner._on_order_event = on_order_event
+        runner.run(max_iterations=3)
+
+        # bar1 (level=100): strategy queues a buy. bar2 (level=200): feature_fn
+        # raises, but the pending buy must still fill at bar2's own price
+        # (open=199.5) -- not silently deferred to bar3's price (299.5).
+        assert fill_prices == [199.5]
+
+    def test_order_failure_alert_uses_fill_quantity_and_does_not_crash(self):
+        """Regression test: the order-failed alert message referenced
+        event.quantity, but OrderEvent only has fill_quantity -- building
+        that message raised AttributeError, so a failed live order crashed
+        the poll cycle (counted as a generic error) instead of alerting."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.place_order.side_effect = RuntimeError("connection refused")
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        cfg = _test_cfg(mode="live")
+        runner = self._make_runner(
+            strategy=_AlwaysBuyStrategy(), fetcher=fetcher, cfg=cfg,
+            order_adapter=mock_order_adapter,
+        )
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=2)  # must not raise / not be swallowed as a poll error
+
+        order_failed = [kw for m, kw in alerts if m == "send_alert" and "Order Failed" in kw["title"]]
+        assert order_failed
+        assert "qty=1.0000" in order_failed[0]["message"]
+
+    def test_db_write_alerts_after_consecutive_failures(self):
+        """Regression test: DB write failures were silently swallowed
+        forever with no escalation. After CONSECUTIVE_ERROR_THRESHOLD
+        consecutive failures, one Telegram alert must fire; a later success
+        resets the counter so a renewed outage can alert again."""
+        runner = self._make_runner()
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        failing_fn = MagicMock(side_effect=RuntimeError("db down"))
+        failing_fn.__name__ = "failing_fn"
+
+        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD - 1):
+            runner._db_write(failing_fn)
+        assert not alerts  # not yet at threshold
+
+        runner._db_write(failing_fn)
+        assert len(alerts) == 1
+        assert alerts[0][0] == "send_alert"
+        assert "DB Write Failing" in alerts[0][1]["title"]
+
+        ok_fn = MagicMock(return_value=None)
+        ok_fn.__name__ = "ok_fn"
+        runner._db_write(ok_fn)
+        assert runner._db_write_failures == 0
+
+        # A renewed outage must alert again, not stay silent forever.
+        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD):
+            runner._db_write(failing_fn)
+        assert len(alerts) == 2
 
 
 class TestCryptoLiveAutoWiring:
@@ -399,7 +621,7 @@ class TestShioajiLiveAutoWiring:
             return _make_ohlcv_df(n=5, start_hour=call_num)
 
         with patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls:
-            mock_shioaji = MagicMock()
+            mock_shioaji = _mock_order_adapter()
             mock_shioaji.place_order.return_value = {"id": "1", "status": "filled"}
             mock_shioaji.fetch_ohlcv.side_effect = lambda symbol, tf, limit: fetcher()
             mock_cls.return_value = mock_shioaji

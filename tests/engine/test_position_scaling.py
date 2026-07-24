@@ -596,3 +596,38 @@ class TestMarginRate:
         # outlay_per_unit = 20000 * 50 * 0.1 = 100000
         # qty = 100000 / 100000 = 1.0
         assert positions["TEST"].quantity == pytest.approx(1.0)
+
+
+class TestSizePosition:
+    """_size_position must fully deploy cash even when min_commission (a flat
+    per-trade floor, not a per-unit cost) is set — regression coverage for a
+    bug where pricing 1 unit and extrapolating linearly treated the floor as
+    if it were charged on every unit, undersizing the position."""
+
+    def test_rate_based_commission_with_floor_uses_full_cash(self):
+        cm = CostModel(
+            multiplier=1.0, commission_rate=0.001, min_commission=50.0,
+            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+        )
+        positions: dict[str, PositionState] = {}
+        _run_actions(
+            [Action(type="long", symbol="TEST")],
+            positions, cash=100_000.0, prices={"TEST": 100.0}, cm=cm,
+        )
+        outlay = cm.estimate_entry_outlay(100.0, positions["TEST"].quantity, side="long")
+        assert outlay == pytest.approx(100_000.0)
+
+    def test_flat_only_commission_uses_full_cash(self):
+        """tw_futures-shaped model: commission_rate=0.0, so commission is
+        always exactly min_commission regardless of quantity."""
+        cm = CostModel(
+            multiplier=1.0, commission_rate=0.0, min_commission=100.0,
+            slippage_ticks=0.0, tick_size=1.0, tax_rate=0.0,
+        )
+        positions: dict[str, PositionState] = {}
+        _run_actions(
+            [Action(type="long", symbol="TEST")],
+            positions, cash=10_000.0, prices={"TEST": 50.0}, cm=cm,
+        )
+        outlay = cm.estimate_entry_outlay(50.0, positions["TEST"].quantity, side="long")
+        assert outlay == pytest.approx(10_000.0)

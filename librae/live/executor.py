@@ -77,6 +77,14 @@ class LiveExecutor:
     def strategy_name(self) -> str:
         return self._strategy_name
 
+    @property
+    def order_adapter(self) -> OrderAdapter | None:
+        """None in simulation mode. In live mode, the same adapter instance
+        used to place orders — exposed so callers can also read back
+        broker-side state via its duck-typed ``get_position()`` (e.g. for
+        startup reconciliation)."""
+        return self._order_adapter
+
     def submit_order(self, event: "OrderEvent") -> dict | None:
         """Mirror a local fill as a real order at the broker.
 
@@ -123,6 +131,20 @@ class LiveExecutor:
                 strategy=self._strategy_name,
                 symbol=symbol,
                 side="EXIT",
+                price=price,
+            )
+
+    def notify_entry(self, symbol: str, side: str, price: float, event_type: str) -> None:
+        """Send entry/add notification (called by LiveTrader on open/add
+        events) — symmetric with notify_exit, so an operator watching
+        Telegram sees when a position opens, not only when it closes."""
+        label = side.upper() if event_type == "open" else f"{side.upper()} ADD"
+        logger.info("SIGNAL %s %s @ %.2f", label, symbol, price)
+        if self._telegram and self._telegram.enabled:
+            self._telegram.send_signal(
+                strategy=self._strategy_name,
+                symbol=symbol,
+                side=label,
                 price=price,
             )
 

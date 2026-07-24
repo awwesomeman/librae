@@ -442,11 +442,32 @@ def resolve_fill_price(
 
 
 def _size_position(cost_model: CostModel, price: float, cash: float, side: Literal["long", "short"]) -> float:
-    """Compute position size using all available cash."""
-    outlay_per_unit = cost_model.estimate_entry_outlay(price, 1.0, side)
-    if outlay_per_unit < EPSILON:
+    """Largest quantity whose estimate_entry_outlay fits in cash.
+
+    Solved directly rather than by pricing 1 unit and extrapolating linearly:
+    min_commission is a flat per-trade floor, not a per-unit cost, so a
+    1-unit outlay estimate prices it as if it were charged on every unit —
+    massively undersizing the position once the real (much larger) quantity
+    would clear the floor via the rate-based commission alone.
+    """
+    notional_per_unit = price * cost_model.multiplier
+    linear = (
+        notional_per_unit * (cost_model.margin_rate(side) + cost_model.tax_rate)
+        + cost_model.slippage_ticks * cost_model.tick_size * cost_model.multiplier
+    )
+    if linear < EPSILON:
         return 0.0
-    return cash / outlay_per_unit
+    marginal_commission = notional_per_unit * cost_model.commission_rate
+
+    # Below breakeven_qty, commission is pinned at the flat floor; above it,
+    # commission scales with quantity. Solve in whichever regime `cash`
+    # actually falls into.
+    breakeven_qty = cost_model.min_commission / marginal_commission if marginal_commission > EPSILON else float("inf")
+    if cash <= linear * breakeven_qty + cost_model.min_commission:
+        qty = (cash - cost_model.min_commission) / linear
+    else:
+        qty = cash / (linear + marginal_commission)
+    return max(qty, 0.0)
 
 
 def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) -> Fill | None:
@@ -631,3 +652,56 @@ def process_actions(
                 reduce_position(pos, trade.quantity)
 
     return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
+
+
+# ---------------------------------------------------------------------------
+# Combined pending-fill + stop-check step (shared by backtest + live engines)
+# ---------------------------------------------------------------------------
+
+
+def run_pending_and_stops(
+    ts: datetime,
+    positions: dict[str, PositionState],
+    cash: float,
+    pending_actions: list[Action],
+    bars: dict[str, dict[str, float]],
+    *,
+    get_cost_model: Callable[[str], CostModel],
+    default_fill: str,
+    primary_symbol: str,
+) -> tuple[float, ActionResults]:
+    """Fill this bar's pending actions, then check stop-loss/take-profit —
+    the two steps that must always run together, in this order, before a
+    strategy sees the bar. Combined into one function (previously hand-copied
+    separately by the backtest and live engines) specifically because that
+    duplication once let live's copy silently drop the stop-loss/take-profit
+    step while backtest's kept it — a real bug, not hypothetical. Sharing
+    this makes that class of drift structurally impossible.
+
+    Returns (updated cash, combined ActionResults for both steps).
+    """
+    trades: list[TradeResult] = []
+    events: list[OrderEvent] = []
+    cash_delta_total = 0.0
+
+    if pending_actions:
+        fill_result = process_actions(
+            pending_actions, positions, cash, ts,
+            get_price=lambda sym, action: resolve_fill_price(
+                bars.get(sym, {}), action, default_fill=default_fill),
+            get_cost_model=get_cost_model,
+            primary_symbol=primary_symbol,
+        )
+        trades.extend(fill_result.trades)
+        events.extend(fill_result.events)
+        cash_delta_total += fill_result.cash_delta
+        cash += fill_result.cash_delta
+
+    if positions:
+        stop_result = check_stop_targets(positions, bars, ts, get_cost_model=get_cost_model)
+        trades.extend(stop_result.trades)
+        events.extend(stop_result.events)
+        cash_delta_total += stop_result.cash_delta
+        cash += stop_result.cash_delta
+
+    return cash, ActionResults(trades=trades, events=events, cash_delta=cash_delta_total)

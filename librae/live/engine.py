@@ -16,11 +16,11 @@ import types
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 import pandas as pd
 
-from librae.core.executor import eval_equity, process_actions, resolve_fill_price
+from librae.core.executor import ActionResults, eval_equity, run_pending_and_stops
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
@@ -170,6 +170,7 @@ class LiveTrader:
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
+        self._db_write_failures: int = 0
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -193,10 +194,28 @@ class LiveTrader:
     # --- Callback builders ---
 
     def _db_write(self, fn: Callable[..., object], *args: object, **kwargs: object) -> None:
+        """Best-effort DB write — swallows failures so a DB blip never
+        interrupts the live trading loop (self._cash/self._positions are
+        authoritative and independent of these writes). But a *sustained*
+        outage must not stay invisible forever: CONSECUTIVE_ERROR_THRESHOLD
+        in a row (same threshold as the poll-cycle error alert) fires one
+        Telegram alert, then resets on the next success so it can fire
+        again if the outage continues."""
         try:
             fn(*args, **kwargs)
+            self._db_write_failures = 0
         except Exception as e:
-            logger.warning("DB %s failed: %s", fn.__name__, e)
+            self._db_write_failures += 1
+            logger.warning("DB %s failed (%d consecutive): %s", fn.__name__, self._db_write_failures, e)
+            if self._db_write_failures == self.CONSECUTIVE_ERROR_THRESHOLD:
+                self._notify(
+                    "send_alert",
+                    title=f"[{self._executor.strategy_name}] DB Write Failing",
+                    message=(
+                        f"{self._db_write_failures} consecutive DB write failures "
+                        f"(last: {fn.__name__}). Check DB connectivity — trading continues."
+                    ),
+                )
 
     def _register_run(self) -> None:
         from db.timescale_writer import write_run_metadata
@@ -325,10 +344,56 @@ class LiveTrader:
         fn = getattr(telegram, method)
         self._notify_pool.submit(fn, **kwargs)
 
+    def _reconcile_positions(self) -> None:
+        """Adopt real broker positions into local state at startup.
+
+        Without this, a process restart while a real position is open left
+        self._positions/self._cash assuming flat/full-balance — the local
+        book and the broker's actual book could silently diverge forever
+        (double-open on the broker, or reject a legitimate opposite-side
+        signal while the broker is actually flat).
+
+        No-op in sim mode (order_adapter is None there — nothing to
+        reconcile against). Only reconciles *positions*, not cash: no
+        adapter currently exposes an account-balance query, so self._cash
+        still starts from cfg.initial_balance — a known, separate gap.
+        """
+        adapter = self._executor.order_adapter
+        if adapter is None:
+            return
+        for symbol in self._symbols:
+            try:
+                broker_pos = adapter.get_position(symbol)
+                size = float(broker_pos.get("size") or 0)
+                if not size:
+                    continue
+
+                side: Literal["long", "short"] = "long" if size > 0 else "short"
+                avg_price = float(broker_pos.get("avg_price") or 0.0)
+                quantity = abs(size)
+                self._positions[symbol] = PositionState(
+                    symbol=symbol, side=side, entry_price=avg_price, quantity=quantity,
+                    entry_at=datetime.now(tz=timezone.utc), periods_held=0,
+                    entry_commission=0.0, entry_slippage=0.0, entry_tax=0.0,
+                    total_entry_cost=avg_price * quantity * self._executor.cost_model.multiplier,
+                )
+                logger.warning(
+                    "Reconciled %s position from broker at startup: %s %.4f @ %.2f "
+                    "(cash NOT adjusted — no account-balance API available; "
+                    "initial_balance is used as-is)",
+                    symbol, side, quantity, avg_price,
+                )
+            except Exception:
+                logger.exception(
+                    "Position reconciliation failed for %s — starting flat "
+                    "for this symbol, verify manually", symbol,
+                )
+
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._running = True
         self._setup_signal_handlers()
+        self._reconcile_positions()
         iteration = 0
         strategy_name = self._executor.strategy_name
         symbols_str = ",".join(self._symbols)
@@ -453,61 +518,86 @@ class LiveTrader:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
 
+    def _apply_action_results(self, result: ActionResults) -> None:
+        """Apply event/trade side effects (DB recording, live order
+        submission, Telegram alerts) from a combined run_pending_and_stops()
+        result — cash is already applied by the caller via that function's
+        returned value, not here, so a stop-loss/take-profit fill goes
+        through the exact same recording/submission/alerting path as a
+        strategy-issued close, not a separate hand-rolled copy."""
+        for event in result.events:
+            logger.info("Order event: %s %s %s %.4f @ %.2f",
+                        event.event_type, event.side, event.symbol,
+                        event.fill_quantity, event.price)
+            if self._on_order_event:
+                self._on_order_event(event)
+
+            if event.event_type in ("open", "add"):
+                self._executor.notify_entry(event.symbol, event.side, event.price, event.event_type)
+
+            if not self._executor.simulation:
+                order_result = self._executor.submit_order(event)
+                if order_result is None:
+                    self._notify(
+                        "send_alert",
+                        title=f"[{self._executor.strategy_name}] Order Failed",
+                        message=(
+                            f"{event.event_type} {event.symbol} "
+                            f"qty={event.fill_quantity:.4f} — check broker manually"
+                        ),
+                    )
+
+        for trade in result.trades:
+            self._trade_count += 1
+            self._executor.notify_exit(trade.symbol, trade.exit_price)
+            logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
+
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Run feature pipeline + strategy on a completed bar.
 
         Uses pending-then-execute pattern to eliminate look-ahead bias:
         previous bar's actions are filled at *this* bar's price, then the
         strategy sees this bar and produces the *next* bar's pending actions.
+
+        Order execution (pending-action fills, stop-loss/take-profit) runs
+        on raw OHLCV and does not depend on feature computation succeeding
+        — a feature-pipeline failure must not leave a real pending fill
+        silently deferred to a later, unrelated bar's price, and must not
+        block stop-loss/take-profit enforcement.
         """
         h1 = raw_df.set_index("ts")
         h1.index.name = "ts"
+        raw_bar = h1.iloc[-1].to_dict()
+        price = float(raw_bar.get("close", 0.0))
+        self._last_prices[symbol] = price
+
+        # ── Steps 1+1.5: fill previous bar's pending actions at current
+        # bar's price, then check stop-loss/take-profit — shared with the
+        # backtest engine (librae.core.executor.run_pending_and_stops) so
+        # the two can't silently drift out of sync on this sequence ──
+        prev_actions = self._pending_actions.pop(symbol, [])
+        self._cash, step_result = run_pending_and_stops(
+            ts, self._positions, self._cash, prev_actions, {symbol: raw_bar},
+            get_cost_model=self._get_cost_model,
+            default_fill=self._fill_price,
+            primary_symbol=symbol,
+        )
+        self._apply_action_results(step_result)
+
         try:
             featured = self._feature_fn(h1)
         except Exception:
-            logger.exception("Feature computation failed for %s", symbol)
+            logger.exception(
+                "Feature computation failed for %s — pending fills/stops above "
+                "still applied, skipping strategy decision for this bar", symbol,
+            )
+            self._record_equity(ts)
             return
 
         last_row = featured.iloc[-1]
         bar = last_row.to_dict()
-        price = float(bar.get("close", 0.0))
+        price = float(bar.get("close", price))
         self._last_prices[symbol] = price
-
-        # ── Step 1: execute previous bar's pending actions at current bar's price ──
-        prev_actions = self._pending_actions.pop(symbol, [])
-        if prev_actions:
-            result = process_actions(
-                prev_actions, self._positions, self._cash, ts,
-                get_price=lambda s, action, _bar=bar, _sym=symbol: resolve_fill_price(
-                    _bar if s == _sym else {}, action, default_fill=self._fill_price),
-                get_cost_model=lambda s: self._executor.cost_model,
-                primary_symbol=symbol,
-            )
-            self._cash += result.cash_delta
-
-            for event in result.events:
-                logger.info("Order event: %s %s %s %.4f @ %.2f",
-                            event.event_type, event.side, event.symbol,
-                            event.fill_quantity, event.price)
-                if self._on_order_event:
-                    self._on_order_event(event)
-
-                if not self._executor.simulation:
-                    order_result = self._executor.submit_order(event)
-                    if order_result is None:
-                        self._notify(
-                            "send_alert",
-                            title=f"[{self._executor.strategy_name}] Order Failed",
-                            message=(
-                                f"{event.event_type} {event.symbol} "
-                                f"qty={event.quantity:.4f} — check broker manually"
-                            ),
-                        )
-
-            for trade in result.trades:
-                self._trade_count += 1
-                self._executor.notify_exit(trade.symbol, trade.exit_price)
-                logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
 
         if self._on_signal_outcome:
             sig = bar.get("entry_signal")
