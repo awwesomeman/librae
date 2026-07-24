@@ -17,6 +17,12 @@
 # Requires locally: rsync, ssh, curl, python3 (scripts/dev_push_dashboard.py).
 # Requires on the remote host: Docker + docker-compose-plugin only, e.g.
 # `apt install -y docker.io docker-compose-plugin` — no git, no repo.
+#
+# Disk sizing is on the operator: named volumes land on Docker's data-root
+# (default /var/lib/docker, i.e. the root disk). Multi-disk host? Repoint
+# both dockerd (/etc/docker/daemon.json "data-root") and, if containerd runs
+# standalone, /etc/containerd/config.toml "root" — before running this —
+# or the DB fills the root disk and crashes regardless of other disks' space.
 set -euo pipefail
 
 TARGET="${1:?Usage: cloud_deploy.sh <user>@<host>}"

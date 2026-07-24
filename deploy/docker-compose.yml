@@ -1,3 +1,9 @@
+# Named volumes below land wherever the host's Docker data-root is
+# (`docker info | grep "Docker Root Dir"`, defaults to /var/lib/docker) —
+# this file has no way to point them at a specific disk. On a host with
+# more than one disk, make sure Docker's data-root is the one with room for
+# the DB's growth (set via /etc/docker/daemon.json's "data-root") *before*
+# running this compose file — see cloud_deploy.sh's host requirements.
 services:
   grafana:
     env_file: ../.env
