@@ -20,7 +20,7 @@ from typing import Any
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig
+from .base import AdapterInfo, CredentialConfig, find_position
 
 logger = logging.getLogger(__name__)
 
@@ -281,12 +281,10 @@ class CryptoAdapter:
         """
         self._require_auth()
         positions = self._exchange.fetch_positions([symbol])
-        for pos in positions:
-            if pos.get("symbol") == symbol:
-                return {
-                    "symbol": symbol,
-                    "size": float(pos.get("contracts", 0)),
-                    "avg_price": float(pos.get("entryPrice", 0) or 0),
-                    "unrealized_pnl": float(pos.get("unrealizedPnl", 0) or 0),
-                }
-        return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+        return find_position(
+            positions, symbol,
+            matches=lambda p: p.get("symbol") == symbol,
+            size=lambda p: float(p.get("contracts", 0)),
+            avg_price=lambda p: float(p.get("entryPrice", 0) or 0),
+            pnl=lambda p: float(p.get("unrealizedPnl", 0) or 0),
+        )

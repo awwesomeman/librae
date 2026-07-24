@@ -22,7 +22,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig
+from .base import AdapterInfo, CredentialConfig, find_position
 from .taipei_time import resample_taifex_ohlcv, shioaji_ts_ns_to_epoch
 
 logger = logging.getLogger(__name__)
@@ -246,17 +246,14 @@ class ShioajiAdapter:
     def get_position(self, symbol: str) -> dict:
         """Return current position for *symbol*."""
         self._require_auth()
-
         positions = self._api.list_positions()
-        for pos in positions:
-            if pos.code == symbol:
-                return {
-                    "symbol": symbol,
-                    "size": pos.quantity,
-                    "avg_price": pos.price,
-                    "unrealized_pnl": getattr(pos, "pnl", 0),
-                }
-        return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+        return find_position(
+            positions, symbol,
+            matches=lambda p: p.code == symbol,
+            size=lambda p: p.quantity,
+            avg_price=lambda p: p.price,
+            pnl=lambda p: getattr(p, "pnl", 0),
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle

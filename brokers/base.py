@@ -18,7 +18,33 @@ from __future__ import annotations
 import dataclasses
 import os
 from dataclasses import dataclass
-from typing import Self
+from typing import Any, Callable, Iterable, Self
+
+
+# ---------------------------------------------------------------------------
+# get_position() shared shape
+# ---------------------------------------------------------------------------
+
+
+def find_position(
+    positions: Iterable[Any],
+    symbol: str,
+    *,
+    matches: Callable[[Any], bool],
+    size: Callable[[Any], float],
+    avg_price: Callable[[Any], float],
+    pnl: Callable[[Any], float] = lambda pos: 0.0,
+) -> dict:
+    """Scan *positions* for *symbol* and return the shape every adapter's
+    get_position() must return: ``{symbol, size, avg_price, unrealized_pnl}``
+    (zeroed if not found). Shared by CryptoAdapter/ShioajiAdapter/IBKRAdapter,
+    which differ only in how to pull these fields off their own native
+    position object.
+    """
+    for pos in positions:
+        if matches(pos):
+            return {"symbol": symbol, "size": size(pos), "avg_price": avg_price(pos), "unrealized_pnl": pnl(pos)}
+    return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
 
 
 # ---------------------------------------------------------------------------

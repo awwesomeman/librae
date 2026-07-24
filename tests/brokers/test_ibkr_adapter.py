@@ -25,6 +25,7 @@ def _make_adapter(*, trading_enabled: bool = False):
     adapter = IBKRAdapter.__new__(IBKRAdapter)
     adapter._ib = MagicMock()
     adapter._read_only = not trading_enabled
+    adapter._contract_cache = {}
     return adapter
 
 
@@ -226,3 +227,21 @@ class TestResolveContract:
         with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             with pytest.raises(ValueError, match="Unknown symbol"):
                 adapter._resolve_contract("NOTREAL")
+
+    def test_second_call_for_same_symbol_is_cached(self):
+        """Regression test: qualifyContracts is a blocking IBKR round trip —
+        resolving the same symbol twice (e.g. a live poll loop hitting the
+        same symbols repeatedly) must not re-issue it."""
+        adapter = _make_adapter()
+        mock_contract = MagicMock()
+        adapter._ib.qualifyContracts.return_value = [mock_contract]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Stock.return_value = "unqualified_stock"
+
+        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+            first = adapter._resolve_contract("MU")
+            second = adapter._resolve_contract("MU")
+
+        assert first is mock_contract
+        assert second is mock_contract
+        adapter._ib.qualifyContracts.assert_called_once()

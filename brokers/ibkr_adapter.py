@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig
+from .base import AdapterInfo, CredentialConfig, find_position
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,7 @@ class IBKRAdapter:
 
         self._ib = ib_async.IB()
         self._read_only = not trading_enabled
+        self._contract_cache: dict[str, object] = {}
         self._ib.connect(
             creds.host, int(creds.port), clientId=int(creds.client_id),
             readonly=self._read_only,
@@ -239,16 +240,12 @@ class IBKRAdapter:
         adapters' position snapshot.
         """
         self._require_auth()
-
-        for pos in self._ib.positions():
-            if pos.contract.symbol == symbol:
-                return {
-                    "symbol": symbol,
-                    "size": pos.position,
-                    "avg_price": pos.avgCost,
-                    "unrealized_pnl": 0.0,
-                }
-        return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0.0}
+        return find_position(
+            self._ib.positions(), symbol,
+            matches=lambda p: p.contract.symbol == symbol,
+            size=lambda p: p.position,
+            avg_price=lambda p: p.avgCost,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -271,13 +268,21 @@ class IBKRAdapter:
 
     def _resolve_contract(self, symbol: str):
         """Resolve a ticker string to a qualified IBKR Stock contract
-        (SMART routing, USD) — qualifyContracts hits IBKR to fill in
-        conId/exchange details and confirms the symbol actually exists."""
+        (SMART routing, USD) — qualifyContracts hits IBKR (a blocking
+        request/response round trip) to fill in conId/exchange details and
+        confirms the symbol actually exists. Cached per symbol so a live
+        poll loop hitting the same symbols repeatedly doesn't pay that
+        round trip on every fetch/order call — mirrors ShioajiAdapter's
+        contract lookup, which is already a cheap local dict lookup against
+        contracts downloaded once at login."""
+        if symbol in self._contract_cache:
+            return self._contract_cache[symbol]
         ib_async = _require_ib_async()
         contract = ib_async.Stock(symbol, "SMART", "USD")
         qualified = self._ib.qualifyContracts(contract)
         if not qualified:
             raise ValueError(f"Unknown symbol: {symbol}")
+        self._contract_cache[symbol] = qualified[0]
         return qualified[0]
 
 
