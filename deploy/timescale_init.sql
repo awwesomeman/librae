@@ -146,8 +146,15 @@ CREATE TABLE IF NOT EXISTS signal_events (
     CONSTRAINT chk_signal_type CHECK (signal_type IN ('entry', 'exit'))
 );
 SELECT create_hypertable('signal_events', 'ts', if_not_exists => TRUE);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_events_unique
-    ON signal_events (ts, strategy, symbol, mode, timeframe, signal_type);
+-- run_id is part of the dedup key so re-writing one run's signals (e.g. a
+-- parameter-sweep re-run) can never collide with / silently overwrite
+-- another run's rows for the same (ts, strategy, symbol, ...) — same
+-- per-run isolation as equity_curve/trade_events. DROP+CREATE (not
+-- IF NOT EXISTS) so re-running this script also migrates an
+-- already-provisioned DB from the old (pre-run_id) index definition.
+DROP INDEX IF EXISTS idx_signal_events_unique;
+CREATE UNIQUE INDEX idx_signal_events_unique
+    ON signal_events (ts, run_id, strategy, symbol, mode, timeframe, signal_type);
 CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
     ON signal_events (strategy, symbol, mode, ts DESC);

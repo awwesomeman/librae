@@ -63,7 +63,7 @@ _SIGNAL_INSERT_SQL = """INSERT INTO signal_events
            (ts, run_id, strategy, symbol, mode, timeframe,
             signal_value, price, signal_type)
            VALUES %s
-           ON CONFLICT (ts, strategy, symbol, mode, timeframe, signal_type)
+           ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)
            DO NOTHING"""
 
 
@@ -296,10 +296,10 @@ def save_backtest_output(
         if has_signals:
             cur.execute(
                 """DELETE FROM signal_events
-                   WHERE strategy = %s AND symbol = %s AND mode = 'backtest'
+                   WHERE run_id = %s AND strategy = %s AND symbol = %s AND mode = 'backtest'
                      AND timeframe = %s
                      AND ts BETWEEN %s AND %s""",
-                (meta.strategy, meta.symbol, tf,
+                (meta.run_id, meta.strategy, meta.symbol, tf,
                  _to_dt(meta.started_at), _to_dt(meta.ended_at)),
             )
         if signal_series is not None and not signal_series.empty:
@@ -587,7 +587,7 @@ def write_signal_event(
     sql = """INSERT INTO signal_events
                (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price, signal_type)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (ts, strategy, symbol, mode, timeframe, signal_type)
+               ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)
                DO NOTHING"""
     values = (_to_dt(ts), run_id, strategy, symbol, mode, timeframe,
               signal_value, price, signal_type)
@@ -620,8 +620,10 @@ def write_equity_curve_point(
                 benchmark_period_return, strategy)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, ts) DO UPDATE SET
-                 equity=EXCLUDED.equity, drawdown=EXCLUDED.drawdown,
-                 period_return=EXCLUDED.period_return, strategy=EXCLUDED.strategy""",
+                 equity=EXCLUDED.equity, benchmark_equity=EXCLUDED.benchmark_equity,
+                 drawdown=EXCLUDED.drawdown, period_return=EXCLUDED.period_return,
+                 benchmark_period_return=EXCLUDED.benchmark_period_return,
+                 strategy=EXCLUDED.strategy""",
             (
                 _to_dt(ts), run_id, equity, benchmark_equity,
                 drawdown, period_return, benchmark_period_return, strategy,
@@ -842,12 +844,17 @@ def save_signal_results(
                     cur=cur,
                 )
 
+            # run_id may be None here (ad-hoc signal-quality analysis without
+            # a full backtest run) — "IS NOT DISTINCT FROM" matches NULL = NULL
+            # too, so that case still only clears its own prior (run_id=NULL)
+            # rows, not every run_id's.
             cur.execute(
                 """DELETE FROM signal_events
-                   WHERE strategy = %s AND symbol = %s AND mode = %s
+                   WHERE run_id IS NOT DISTINCT FROM %s
+                     AND strategy = %s AND symbol = %s AND mode = %s
                      AND timeframe = %s
                      AND ts BETWEEN %s AND %s""",
-                (strategy, symbol, mode, tf,
+                (run_id, strategy, symbol, mode, tf,
                  _to_dt(started_at), _to_dt(ended_at)),
             )
             if has_entry:

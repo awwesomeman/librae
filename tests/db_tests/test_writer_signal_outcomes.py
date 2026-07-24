@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-from db.timescale_writer import save_signal_results, save_strategy_results, write_signal_event
+from db.timescale_writer import (
+    save_signal_results,
+    save_strategy_results,
+    write_equity_curve_point,
+    write_signal_event,
+)
 from tests.conftest import make_test_cfg
 
 
@@ -14,6 +19,35 @@ def _test_cfg(**overrides) -> "RunConfig":
     overrides.setdefault("mode", "backtest")
     overrides.setdefault("params", {"a": 1})
     return make_test_cfg(**overrides)
+
+
+class TestWriteEquityCurvePoint:
+    """write_equity_curve_point single-row upsert."""
+
+    @patch("db.timescale_writer.get_conn")
+    def test_on_conflict_updates_every_inserted_column(self, mock_conn_ctx):
+        """Regression test: ON CONFLICT DO UPDATE previously omitted
+        benchmark_equity/benchmark_period_return, so a re-write with
+        different benchmark values would silently keep the first write's
+        (or NULL) values forever."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn_ctx.return_value = mock_conn
+
+        write_equity_curve_point(
+            ts=datetime(2024, 6, 1, tzinfo=timezone.utc), run_id="test-run-001",
+            equity=105_000.0, drawdown=-0.02, period_return=0.01,
+            benchmark_equity=101_000.0, benchmark_period_return=0.005,
+            strategy="test_strat",
+        )
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "ON CONFLICT" in sql
+        for col in ("equity", "benchmark_equity", "drawdown", "period_return", "benchmark_period_return", "strategy"):
+            assert f"{col}=EXCLUDED.{col}" in sql
 
 
 class TestWriteSignalEvent:
@@ -39,6 +73,10 @@ class TestWriteSignalEvent:
         assert "signal_events" in sql
         assert "ON CONFLICT" in sql
         assert "DO NOTHING" in sql
+        # Regression test: run_id must be part of the dedup key, or two
+        # different runs' signals for the same (ts, strategy, symbol, ...)
+        # would collide and silently drop one run's row.
+        assert "ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)" in sql
 
     @patch("db.timescale_writer.get_conn")
     def test_accepts_cursor(self, mock_conn_ctx):
@@ -152,6 +190,36 @@ class TestSaveSignalResults:
         assert mock_cur.execute.call_count >= 1
         # Verify batch INSERT was called
         mock_exec_values.assert_called_once()
+
+    @patch("db.timescale_writer.write_ohlcv", return_value=10)
+    @patch("db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("db.timescale_writer.get_conn")
+    def test_delete_scoped_to_own_run_id(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+        """Regression test: re-running save_signal_results for the same
+        (strategy, symbol, timeframe) over an overlapping date range must
+        only clear its own run's prior signal_events rows, not silently
+        delete/overwrite a different run's rows for that same window."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn_ctx.return_value = mock_conn
+
+        n = 5
+        idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
+        df = pd.DataFrame({
+            "open": range(n), "high": range(n), "low": range(n),
+            "close": range(n), "volume": [100] * n,
+            "entry_signal": [1.0] * n,
+        }, index=idx)
+
+        save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot", run_id="run-A")
+
+        delete_call = next(c for c in mock_cur.execute.call_args_list if "DELETE FROM signal_events" in c.args[0])
+        sql, params = delete_call.args
+        assert "run_id IS NOT DISTINCT FROM" in sql
+        assert params[0] == "run-A"
 
     @patch("db.timescale_writer.write_ohlcv", return_value=0)
     @patch("db.timescale_writer.psycopg2.extras.execute_values")
