@@ -1,27 +1,34 @@
 # librae
 
-量化回測與即時交易引擎。`db/`、`brokers/`、`notifications/`、`orchestration/` 是 db 落地、broker 下單、通知、CLI 組裝的擴充範例——都是選用的，`librae` 本身不強制依賴任何一個。
+Backtest and live-trading engine. `db/`, `brokers/`, `notifications/`, `orchestration/` are optional reference implementations for DB persistence, broker order routing, notifications, and CLI wiring — `librae` itself never hard-depends on any of them.
 
 ---
 
-## Quick Start（本機）
+## Quick Start (local)
 
-支援 Python 3.12 / 3.13 / 3.14（CI 三個版本都跑，見 `.github/workflows/core-tests.yml`）。
+Supports Python 3.12 / 3.13 / 3.14 (CI runs all three, see `.github/workflows/core-tests.yml`).
 
 ```bash
 git clone git@github-librae:awwesomeman/librae.git
 cd librae
-uv sync --extra test --extra dev   # 開發/測試用；要跑 brokers/ 的 shioaji/ib_async 才需要加 --extra tw-live/--extra us-live
-git config core.hooksPath .githooks   # commit 前跑 ruff check + format --check
+uv sync --extra test --extra dev --extra db --extra crypto-live   # for dev/tests; add --extra tw-live/--extra us-live only if you need brokers/'s shioaji/ib_async
+git config core.hooksPath .githooks   # runs ruff check + format --check before each commit
 ```
 
-之後所有指令都透過 `uv run` 執行（例如 `uv run pytest tests/ -q`），或 `source .venv/bin/activate` 後直接跑。
+Run everything through `uv run` afterwards (e.g. `uv run pytest tests/ -q`), or `source .venv/bin/activate` and run commands directly.
+
+### Environment variables
+
+librae's own code (`db/`, `brokers/`, `notifications/`) reads config from env vars — it never reads a `.env` file itself; loading one is the caller's job (`uv run --env-file .env ...`, direnv, or your own `load_dotenv()` call).
+
+- **Cloned this repo?** `cp .env.example .env` at the repo root — this template also covers the `deploy/` reference examples below (docker-compose, Grafana). Secrets with real trading/signing power (`BINANCE_API_KEY`/`SHIOAJI_*`) live in a separate `.env.secrets` (`cp .env.secrets.example .env.secrets`), which no deploy script ever syncs across machines.
+- **`pip install librae` only, no clone?** Run `librae init` — it scaffolds a minimal `.env.example` covering just the variables librae's own code reads (`TIMESCALE_DSN`, `TELEGRAM_*`, `BINANCE_*`, `SHIOAJI_*`, `IBKR_*`), with no docker-compose/Grafana-specific settings.
 
 ---
 
-## 回測引擎 (librae)
+## Backtest engine (librae)
 
-量化回測與即時交易引擎。提供策略執行、持倉管理、成本模擬、績效計算的完整框架，**回測、模擬、實盤共用同一份策略，零修改**。
+Backtest and live-trading engine. Provides a full framework for strategy execution, position management, cost simulation, and performance metrics — **backtest, sim, and live trading share the exact same strategy code, unmodified.**
 
 ```python
 from librae import Backtest, BaseStrategy, Action, Context, RunConfig
@@ -36,55 +43,65 @@ class MyStrategy(BaseStrategy):
             return [Action(type="long", symbol=ctx.symbol)]
         return []
 
-df = fetch_and_prepare(symbol, months)          # 你的 ETL，資料格式見下方連結
+df = fetch_and_prepare(symbol, months)          # your own ETL, data format linked below
 bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
 bt.run()
 output = bt.build_output()                      # BacktestOutput
 ```
 
-引擎的目錄結構、依賴方向、風控/保證金/對帳/staleness 偵測細節、核心型別、設計決策、Config API 完整說明見 [`architecture.md`「回測引擎設計」](architecture.md#回測引擎設計librae)。
+For the engine's directory layout, dependency direction, risk/margin/reconciliation/staleness-detection details, core types, design decisions, and the full Config API, see [`architecture.md`'s "Backtest Engine Design"](architecture.md#backtest-engine-design-librae).
 
 ---
 
-## 擴充範例
+## Reference implementations
 
-引擎本身不 import 這些套件——`LiveTrader` 用建構子參數（`adapter`/`order_adapter`/`cost_model`/`notifier`）注入，或 `cfg.no_db=True` 時完全跳過，未注入時才 lazy import 以下預設實作。
+The engine itself never imports these packages — `LiveTrader` injects them via constructor params (`adapter`/`order_adapter`/`cost_model`/`notifier`), skips them entirely under `cfg.no_db=True`, and only lazy-imports the defaults below when nothing is injected.
 
-| 目錄 | 對應注入點 | 說明 |
+| Directory | Injection point | Description |
 |---|---|---|
-| `db/` | db 寫入 callback | TimescaleDB 讀寫；schema 見 `db/timescale_init.sql`，範例資料見 `db/seed_fake_data.sql` |
-| `brokers/` | `adapter` / `order_adapter` | Shioaji（台灣期貨）、CCXT（crypto）、IBKR adapter |
-| `notifications/` | `notifier` | Telegram 通知 |
-| `orchestration/` | — | `cli.py`：`RunConfig` 建構 + CLI 參數合併，組裝上面三者注入引擎的參考寫法 |
+| `db/` | DB write callback | TimescaleDB read/write; schema in `db/timescale_init.sql`, sample data in `db/seed_fake_data.sql`; needs `pip install librae[db]` |
+| `brokers/` | `adapter` / `order_adapter` | Shioaji (Taiwan futures, `[tw-live]`), CCXT (crypto, `[crypto-live]`), IBKR (`[us-live]`) adapters |
+| `notifications/` | `notifier` | Telegram notifications |
+| `orchestration/` | — | `cli.py`: `RunConfig` construction + CLI arg merging; a reference for wiring the three above into the engine |
 
-自己接資料庫/broker/通知只需實作對應的 duck-typed 介面，不需要用這幾個套件。
+To wire your own database/broker/notifier, just implement the corresponding duck-typed interface — none of these packages are required, and their dependencies (`psycopg2-binary`, `ccxt`, `shioaji`, `ib-async`) are all optional extras, not base installs.
+
+### Optional ops examples
+
+These aren't engine injection points — they're a self-contained reference for running librae as a scheduled/VM deployment with Docker and Grafana. Use them as-is, ignore them, or swap in your own tooling.
+
+| Directory | Description |
+|---|---|
+| `deploy/` | Dockerfile, docker-compose (TimescaleDB + Grafana), and VM deploy/trade scripts (`cloud_deploy.sh`, `trade.sh`, `build_push.sh`) |
+| `app/` | Grafana dashboard provisioning (datasources, dashboard JSON, `generate_dashboards.py`) |
+| `scripts/` | One-off ops scripts (heartbeat check, dashboard push) |
 
 ---
 
-## 常用指令
+## Common commands
 
-| 指令 | 說明 |
+| Command | Description |
 |------|------|
-| `pytest tests/ -q` | 跑測試 |
-| `ruff check .` | Lint（範圍見 `pyproject.toml` `[tool.ruff]`） |
-| `ruff format .` | 格式化 |
+| `pytest tests/ -q` | Run tests |
+| `ruff check .` | Lint (scope defined in `pyproject.toml`'s `[tool.ruff]`) |
+| `ruff format .` | Format |
 
 ---
 
-## 設定檔總覽
+## Config file overview
 
-| 檔案 | 設定什麼 | 是否進 git |
+| File | What it configures | Tracked in git |
 |------|---------|-----------|
-| `librae/config/markets.yaml` | 市場成本 + 保證金參數（也可外部注入，繞過此檔，見 `get_market(markets=)`） | yes |
-| `librae/config/symbols.yaml` | symbol → market/data_source 對應 | yes |
-| `db/timescale_init.sql` | DB schema（`db/` 擴充範例用） | yes |
+| `librae/config/markets.yaml` | Market cost + margin parameters (can also be injected externally, bypassing this file — see `get_market(markets=)`) | yes |
+| `librae/config/symbols.yaml` | symbol → market/data_source mapping | yes |
+| `db/timescale_init.sql` | DB schema (for the `db/` reference example) | yes |
 
 ---
 
-## 相關文件
+## Related documents
 
-- [「回測引擎 (librae)」](#回測引擎-librae)（本文件）— 引擎架構、API、類型系統
-- [`architecture.md`](architecture.md) — 系統分層、命名慣例
-- [`docs/decisions/`](docs/decisions/) — 架構決策記錄
-- [`docs/plans/`](docs/plans/) — 執行計劃
-- [`docs/learnings/ERRORS.md`](docs/learnings/ERRORS.md) — 除錯記錄（症狀/根因/修法/預防）
+- [Backtest engine (librae)](#backtest-engine-librae) (this document) — engine architecture, API, type system
+- [`architecture.md`](architecture.md) — system layering, naming conventions
+- [`docs/decisions/`](docs/decisions/) — architecture decision records
+- [`docs/plans/`](docs/plans/) — execution plans
+- [`docs/learnings/ERRORS.md`](docs/learnings/ERRORS.md) — debugging log (symptom/root cause/fix/prevention)
