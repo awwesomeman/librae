@@ -128,6 +128,41 @@ class TestSlippage:
         assert np.isclose(slip, 100.0)
 
 
+class TestDynamicSlippage:
+    """bar_volume/impact_coef default to disabled — every pre-existing
+    calc_slippage(qty) call site above is unaffected."""
+
+    def test_bar_volume_omitted_unaffected(self, crypto_cost: CostModel) -> None:
+        assert crypto_cost.calc_slippage(0.5) == crypto_cost.calc_slippage(0.5, bar_volume=None)
+
+    def test_zero_impact_coef_unaffected_even_with_bar_volume(self, crypto_cost: CostModel) -> None:
+        # crypto_cost fixture has impact_coef=0.0 (dataclass default)
+        assert crypto_cost.calc_slippage(0.5) == crypto_cost.calc_slippage(0.5, bar_volume=10.0)
+
+    def test_impact_scales_with_participation(self) -> None:
+        cm = CostModel(
+            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+            slippage_ticks=1.0, tick_size=0.01, tax_rate=0.0, impact_coef=10.0,
+        )
+        # 10% participation (qty=10 / volume=100) -> +1 impact tick -> 2 ticks total
+        slip_10pct = cm.calc_slippage(10.0, bar_volume=100.0)
+        assert np.isclose(slip_10pct, 2.0 * 0.01 * 10.0 * 1.0)
+
+        # 50% participation -> +5 impact ticks -> 6 ticks total, strictly worse
+        slip_50pct = cm.calc_slippage(50.0, bar_volume=100.0)
+        assert np.isclose(slip_50pct / 50.0, 6.0 * 0.01)
+        assert slip_50pct / 50.0 > slip_10pct / 10.0  # higher participation -> worse per-unit cost
+
+    def test_zero_or_missing_bar_volume_skips_impact(self) -> None:
+        cm = CostModel(
+            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+            slippage_ticks=1.0, tick_size=0.01, tax_rate=0.0, impact_coef=10.0,
+        )
+        base = cm.calc_slippage(10.0)
+        assert cm.calc_slippage(10.0, bar_volume=0.0) == base
+        assert cm.calc_slippage(10.0, bar_volume=None) == base
+
+
 # ── Tax ───────────────────────────────────────────────────────────────────
 
 

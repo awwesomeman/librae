@@ -179,7 +179,9 @@ class LiveTrader:
         self._positions: dict[str, PositionState] = {}
         self._cash: float = cfg.initial_balance
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open")
-        self._max_position_pct, self._max_drawdown_pct = validate_risk_params(cfg.params)
+        self._max_position_pct, self._max_drawdown_pct, self._max_volume_participation_pct = (
+            validate_risk_params(cfg.params)
+        )
         self._halted: bool = False
         self._pending_actions: dict[str, list[Action]] = {}
         self._equity_peak: float = cfg.initial_balance
@@ -590,6 +592,7 @@ class LiveTrader:
             default_fill=self._fill_price,
             primary_symbol=symbol,
             max_position_notional=max_position_notional,
+            max_volume_participation_pct=self._max_volume_participation_pct,
         )
         self._apply_action_results(step_result)
 

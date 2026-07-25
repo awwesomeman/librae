@@ -397,20 +397,28 @@ def check_stop_targets(
     return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
 
 
-def validate_risk_params(params: dict | None) -> tuple[float | None, float | None]:
-    """Validate and extract max_position_pct/max_drawdown_pct from cfg.params.
+def validate_risk_params(
+    params: dict | None,
+) -> tuple[float | None, float | None, float | None]:
+    """Validate and extract max_position_pct/max_drawdown_pct/
+    max_volume_participation_pct from cfg.params.
 
-    Both are optional (None = disabled) but must be > 0 if set. Shared by
+    All are optional (None = disabled) but must be > 0 if set. Shared by
     Backtest and LiveTrader so the same rule can't drift between them.
     """
     p = params or {}
     max_position_pct = p.get("max_position_pct")
     max_drawdown_pct = p.get("max_drawdown_pct")
+    max_volume_participation_pct = p.get("max_volume_participation_pct")
     if max_position_pct is not None and max_position_pct <= 0:
         raise ValueError(f"max_position_pct must be > 0, got {max_position_pct}")
     if max_drawdown_pct is not None and max_drawdown_pct <= 0:
         raise ValueError(f"max_drawdown_pct must be > 0, got {max_drawdown_pct}")
-    return max_position_pct, max_drawdown_pct
+    if max_volume_participation_pct is not None and not (0 < max_volume_participation_pct <= 1):
+        raise ValueError(
+            f"max_volume_participation_pct must be in (0, 1], got {max_volume_participation_pct}"
+        )
+    return max_position_pct, max_drawdown_pct, max_volume_participation_pct
 
 
 def liquidate_all(
@@ -526,40 +534,72 @@ def _size_position(cost_model: CostModel, price: float, cash: float, side: Liter
     return max(qty, 0.0)
 
 
+def _shrink_fill(
+    fill: Fill, cost_model: CostModel, target_qty: float, bar_volume: float | None,
+) -> Fill | None:
+    """Rebuild a fill at a smaller target_qty, recomputing commission/
+    slippage/tax — they scale with quantity, so a naive quantity clamp
+    would overcharge relative to what's actually being filled. Returns
+    None if target_qty <= 0, or fill unchanged if target_qty isn't smaller.
+    """
+    if target_qty <= EPSILON:
+        return None
+    if target_qty >= fill.quantity - EPSILON:
+        return fill
+    return Fill(
+        symbol=fill.symbol,
+        side=fill.side,
+        price=fill.price,
+        quantity=target_qty,
+        commission=cost_model.calc_commission(fill.price, target_qty),
+        slippage=cost_model.calc_slippage(target_qty, bar_volume=bar_volume),
+        tax=cost_model.calc_tax(fill.price, target_qty),
+    )
+
+
 def _cap_fill_to_notional(
     fill: Fill, existing_qty: float, cost_model: CostModel, max_notional: float,
+    *, bar_volume: float | None = None,
 ) -> Fill | None:
     """Shrink a fill so (existing_qty + fill.quantity) * price * multiplier
-    stays within max_notional. Recomputes commission/slippage/tax for the
-    reduced quantity — they scale with quantity, so a naive quantity clamp
-    would overcharge relative to what's actually being filled. Returns None
-    if there's no room at all (existing position already at/over the cap).
+    stays within max_notional. Returns None if there's no room at all
+    (existing position already at/over the cap).
     """
     unit_notional = fill.price * cost_model.multiplier
     room = max_notional - existing_qty * unit_notional
     if room <= EPSILON:
         return None
-    capped_qty = min(fill.quantity, room / unit_notional)
-    if capped_qty <= EPSILON:
-        return None
-    if capped_qty >= fill.quantity - EPSILON:
-        return fill
-    logger.info(
-        "Position cap: %s %s clamped qty %.6f -> %.6f (max_notional=%.2f)",
-        fill.side, fill.symbol, fill.quantity, capped_qty, max_notional,
-    )
-    return Fill(
-        symbol=fill.symbol,
-        side=fill.side,
-        price=fill.price,
-        quantity=capped_qty,
-        commission=cost_model.calc_commission(fill.price, capped_qty),
-        slippage=cost_model.calc_slippage(capped_qty),
-        tax=cost_model.calc_tax(fill.price, capped_qty),
-    )
+    target_qty = min(fill.quantity, room / unit_notional)
+    capped = _shrink_fill(fill, cost_model, target_qty, bar_volume)
+    if capped is not None and capped is not fill:
+        logger.info(
+            "Position cap: %s %s clamped qty %.6f -> %.6f (max_notional=%.2f)",
+            fill.side, fill.symbol, fill.quantity, capped.quantity, max_notional,
+        )
+    return capped
 
 
-def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) -> Fill | None:
+def _cap_fill_to_volume(
+    fill: Fill, cost_model: CostModel, max_qty: float, *, bar_volume: float | None = None,
+) -> Fill | None:
+    """Shrink a fill to at most max_qty (typically max_volume_participation_pct
+    * bar_volume) — a per-fill "how much of this bar's liquidity can I touch"
+    constraint, unlike the notional cap which accumulates across a position.
+    """
+    target_qty = min(fill.quantity, max_qty)
+    capped = _shrink_fill(fill, cost_model, target_qty, bar_volume)
+    if capped is not None and capped is not fill:
+        logger.info(
+            "Volume cap: %s %s clamped qty %.6f -> %.6f (max_qty=%.6f)",
+            fill.side, fill.symbol, fill.quantity, capped.quantity, max_qty,
+        )
+    return capped
+
+
+def make_fill(
+    action: Action, price: float, cash: float, cost_model: CostModel,
+    *, bar_volume: float | None = None,
+) -> Fill | None:
     """Build a Fill for a long/short action. Returns None if rejected."""
     if action.type not in ("long", "short"):
         return None
@@ -576,7 +616,7 @@ def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) 
         price=price,
         quantity=qty,
         commission=cost_model.calc_commission(price, qty),
-        slippage=cost_model.calc_slippage(qty),
+        slippage=cost_model.calc_slippage(qty, bar_volume=bar_volume),
         tax=cost_model.calc_tax(price, qty),
     )
 
@@ -616,13 +656,18 @@ def build_trade_result(
 def _try_fill(
     action: Action, price: float, available_cash: float, cost_model: CostModel,
     *, max_notional: float | None = None, existing_qty: float = 0.0,
+    max_volume_qty: float | None = None, bar_volume: float | None = None,
 ) -> tuple[Fill | None, float]:
     """Attempt a fill and validate cash sufficiency. Returns (fill, outlay) or (None, 0)."""
-    fill = make_fill(action, price, available_cash, cost_model)
+    fill = make_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
     if not fill or fill.quantity <= 0:
         return None, 0.0
     if max_notional is not None:
-        fill = _cap_fill_to_notional(fill, existing_qty, cost_model, max_notional)
+        fill = _cap_fill_to_notional(fill, existing_qty, cost_model, max_notional, bar_volume=bar_volume)
+        if fill is None:
+            return None, 0.0
+    if max_volume_qty is not None:
+        fill = _cap_fill_to_volume(fill, cost_model, max_volume_qty, bar_volume=bar_volume)
         if fill is None:
             return None, 0.0
     outlay = cost_model.estimate_entry_outlay(price, fill.quantity, action.type)
@@ -641,6 +686,8 @@ def process_actions(
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
+    max_volume_participation_pct: float | None = None,
+    get_volume: Callable[[str], float | None] | None = None,
 ) -> ActionResults:
     """Process a bar's actions: open, scale, partial/full close.
 
@@ -650,6 +697,11 @@ def process_actions(
     max_position_notional, when set, caps every symbol's post-fill notional
     (existing + added) to this value — applied identically to new entries
     and scale-ins.
+
+    max_volume_participation_pct, when set together with get_volume, caps
+    each fill (not cumulative like max_position_notional) to that fraction
+    of the symbol's bar volume. get_volume also feeds CostModel.calc_slippage's
+    participation-scaled impact component even when no cap is configured.
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
@@ -670,11 +722,21 @@ def process_actions(
         if action.type in ("long", "short"):
             desired_side: Literal["long", "short"] = action.type
 
+            bar_volume = get_volume(sym) if get_volume else None
+            # WHY: `bar_volume is not None`, not truthy — a real zero-volume
+            # bar must cap to 0 (reject the fill outright), not be treated
+            # the same as "no volume data available" (which skips the cap).
+            max_volume_qty = (
+                max_volume_participation_pct * bar_volume
+                if max_volume_participation_pct and bar_volume is not None else None
+            )
+
             if sym not in positions:
                 # OPEN NEW
                 fill, outlay = _try_fill(
                     action, price, cash + cash_delta, cost_model,
                     max_notional=max_position_notional, existing_qty=0.0,
+                    max_volume_qty=max_volume_qty, bar_volume=bar_volume,
                 )
                 if fill:
                     cash_delta -= outlay
@@ -709,6 +771,7 @@ def process_actions(
                 fill, outlay = _try_fill(
                     action, price, cash + cash_delta, cost_model,
                     max_notional=max_position_notional, existing_qty=positions[sym].quantity,
+                    max_volume_qty=max_volume_qty, bar_volume=bar_volume,
                 )
                 if fill:
                     cash_delta -= outlay
@@ -775,6 +838,7 @@ def run_pending_and_stops(
     default_fill: str,
     primary_symbol: str,
     max_position_notional: float | None = None,
+    max_volume_participation_pct: float | None = None,
 ) -> tuple[float, ActionResults]:
     """Fill this bar's pending actions, then check stop-loss/take-profit —
     the two steps that must always run together, in this order, before a
@@ -798,6 +862,8 @@ def run_pending_and_stops(
             get_cost_model=get_cost_model,
             primary_symbol=primary_symbol,
             max_position_notional=max_position_notional,
+            max_volume_participation_pct=max_volume_participation_pct,
+            get_volume=lambda sym: bars.get(sym, {}).get("volume"),
         )
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)

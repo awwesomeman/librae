@@ -135,7 +135,9 @@ class Backtest:
 
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open") if cfg else "open"
-        self._max_position_pct, self._max_drawdown_pct = validate_risk_params(cfg.params if cfg else None)
+        self._max_position_pct, self._max_drawdown_pct, self._max_volume_participation_pct = (
+            validate_risk_params(cfg.params if cfg else None)
+        )
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
@@ -220,6 +222,7 @@ class Backtest:
                 default_fill=self._fill_price,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
+                max_volume_participation_pct=self._max_volume_participation_pct,
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)

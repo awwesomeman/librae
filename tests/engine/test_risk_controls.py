@@ -12,6 +12,7 @@ from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     REASON_FORCE_CLOSE,
     _cap_fill_to_notional,
+    _cap_fill_to_volume,
     liquidate_all,
     process_actions,
 )
@@ -48,7 +49,8 @@ def _make_multiindex_df(bars: list[dict[str, float]], symbol: str = "BTCUSDT") -
     dt = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
     idx = pd.MultiIndex.from_arrays([[symbol] * n, dt], names=["symbol", "datetime"])
     df = pd.DataFrame(bars, index=idx)
-    df["volume"] = 100.0
+    if "volume" not in df.columns:
+        df["volume"] = 100.0  # bars carrying their own "volume" key win instead
     return df
 
 
@@ -81,6 +83,29 @@ class TestCapFillToNotional:
     def test_under_cap_returns_fill_unchanged(self):
         fill = _make_fill(price=100.0, quantity=1.0)
         capped = _cap_fill_to_notional(fill, existing_qty=0.0, cost_model=_zero_cost(), max_notional=1000.0)
+        assert capped is fill
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _cap_fill_to_volume
+# ---------------------------------------------------------------------------
+
+
+class TestCapFillToVolume:
+
+    def test_caps_a_fresh_fill(self):
+        fill = _make_fill(price=100.0, quantity=10.0)
+        capped = _cap_fill_to_volume(fill, cost_model=_zero_cost(), max_qty=4.0)
+        assert capped.quantity == pytest.approx(4.0)
+
+    def test_zero_max_qty_returns_none(self):
+        fill = _make_fill(price=100.0, quantity=10.0)
+        capped = _cap_fill_to_volume(fill, cost_model=_zero_cost(), max_qty=0.0)
+        assert capped is None
+
+    def test_under_cap_returns_fill_unchanged(self):
+        fill = _make_fill(price=100.0, quantity=1.0)
+        capped = _cap_fill_to_volume(fill, cost_model=_zero_cost(), max_qty=10.0)
         assert capped is fill
 
 
@@ -134,6 +159,54 @@ class TestProcessActionsPositionCap:
         )
         assert len(result.events) == 1
         assert result.events[0].fill_quantity == pytest.approx(3.0)
+
+
+class TestProcessActionsVolumeCap:
+
+    def test_oversized_open_gets_clamped_to_participation(self):
+        actions = [Action(type="long", symbol="TEST")]
+        result = process_actions(
+            actions, {}, 10_000.0, TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_volume_participation_pct=0.1,
+            get_volume=lambda s: 50.0,
+        )
+        assert len(result.events) == 1
+        assert result.events[0].fill_quantity == pytest.approx(5.0)  # 0.1 * 50
+
+    def test_zero_bar_volume_rejects_rather_than_skips_cap(self):
+        """Regression test: a real zero-volume bar must reject the fill
+        outright (0% of 0 volume = 0), not be treated as "no volume data
+        available" and let an uncapped fill through — the exact opposite
+        of what a volume-participation cap is supposed to guarantee."""
+        actions = [Action(type="long", symbol="TEST")]
+        result = process_actions(
+            actions, {}, 10_000.0, TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_volume_participation_pct=0.1,
+            get_volume=lambda s: 0.0,
+        )
+        assert result.events == []
+
+    def test_missing_volume_data_skips_cap(self):
+        """No volume data (get_volume returns None) is a different case
+        from a real zero-volume bar — the cap can't be computed, so it's
+        skipped rather than treated as a hard reject."""
+        actions = [Action(type="long", symbol="TEST")]
+        result = process_actions(
+            actions, {}, 10_000.0, TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_volume_participation_pct=0.1,
+            get_volume=lambda s: None,
+        )
+        assert len(result.events) == 1
+        assert result.events[0].fill_quantity == pytest.approx(100.0)  # full cash sizing, uncapped
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +284,71 @@ class TestMaxPositionCap:
         # Uncapped, all ~10_000 cash at price 100 would size ~100 units.
         # max_position_pct=0.3 against last-known equity (10_000) caps notional at 3_000 -> 30 units.
         assert result.trades[0].quantity == pytest.approx(30.0)
+
+
+class TestMaxVolumeParticipation:
+
+    def test_open_clamped_to_pct_of_bar_volume(self):
+        bars = [
+            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 20.0},  # fill happens here
+            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+        ]
+        cfg = make_test_cfg(
+            mode="backtest", initial_balance=10_000.0, params={"max_volume_participation_pct": 0.5},
+        )
+        bt = Backtest(_make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost())
+        result = bt.run()
+
+        assert len(result.trades) == 1
+        # Uncapped, all ~10_000 cash at price 100 would size ~100 units.
+        # max_volume_participation_pct=0.5 * bar[2].volume(20) caps it at 10 units.
+        assert result.trades[0].quantity == pytest.approx(10.0)
+
+
+class TestDynamicSlippage:
+
+    def test_lower_bar_volume_produces_higher_slippage(self):
+        """Same fixed-size entry, only the fill bar's volume differs -> the
+        low-volume run's participation-scaled slippage must be strictly
+        higher, proving impact_coef actually moves the number end-to-end."""
+
+        class OpenFixedQtyStrategy(BaseStrategy):
+            def on_bar(self, ctx: Context) -> list[Action]:
+                if ctx.period_index == 1 and ctx.symbol not in ctx.positions:
+                    return [Action(type="long", symbol=ctx.symbol, quantity=5.0)]
+                return []
+
+        cost_model = CostModel(
+            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+            slippage_ticks=1.0, tick_size=0.01, tax_rate=0.0, impact_coef=10.0,
+        )
+
+        def _bars(fill_bar_volume: float) -> list[dict[str, float]]:
+            return [
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": fill_bar_volume},
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+            ]
+
+        def _open_slippage(fill_bar_volume: float) -> float:
+            bt = Backtest(
+                _make_multiindex_df(_bars(fill_bar_volume)), OpenFixedQtyStrategy(), cost_model=cost_model,
+            )
+            result = bt.run()
+            open_events = [e for e in result.order_events if e.event_type == "open"]
+            assert len(open_events) == 1
+            return open_events[0].slippage
+
+        high_vol_slippage = _open_slippage(1000.0)   # 0.5% participation
+        low_vol_slippage = _open_slippage(10.0)       # 50% participation
+
+        assert low_vol_slippage > high_vol_slippage
+        # participation=0.005 -> +0.05 impact ticks -> 1.05 ticks -> 1.05*0.01*5 = 0.0525
+        assert high_vol_slippage == pytest.approx(0.0525)
+        # participation=0.5 -> +5 impact ticks -> 6 ticks -> 6*0.01*5 = 0.30
+        assert low_vol_slippage == pytest.approx(0.30)

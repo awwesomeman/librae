@@ -45,6 +45,7 @@ class MarketConfig:
     tick_size: float
     long_margin_rate: float
     short_margin_rate: float
+    impact_coef: float = 0.0
 
 
 def _default_markets_path() -> Path:
@@ -79,6 +80,7 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfi
             tick_size=float(mdata.get("tick_size", 0.01)),
             long_margin_rate=float(mdata.get("long_margin_rate", 1.0)),
             short_margin_rate=float(mdata.get("short_margin_rate", 1.0)),
+            impact_coef=float(mdata.get("impact_coef", 0.0)),
         )
 
     return markets

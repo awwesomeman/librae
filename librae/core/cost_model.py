@@ -44,6 +44,9 @@ class CostModel:
             Spot=1.0 (pay full notional), futures=initial_margin/notional (e.g. 0.067).
         short_margin_rate: Fraction of notional deducted from cash when opening a short.
             US equity=0.5 (Reg T 50%), TW equity=0.9 (融券保證金 90%), futures same as long.
+        impact_coef: Extra slippage_ticks-equivalent at 100% single-bar volume
+            participation, scaled linearly down to 0 at 0% participation.
+            0 (default) disables market impact entirely.
     """
 
     multiplier: float
@@ -54,6 +57,7 @@ class CostModel:
     tax_rate: float
     long_margin_rate: float = 1.0
     short_margin_rate: float = 1.0
+    impact_coef: float = 0.0
 
     @classmethod
     def zero(cls) -> CostModel:
@@ -61,7 +65,7 @@ class CostModel:
         return cls(
             multiplier=1.0, commission_rate=0.0, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
-            long_margin_rate=1.0, short_margin_rate=1.0,
+            long_margin_rate=1.0, short_margin_rate=1.0, impact_coef=0.0,
         )
 
     @classmethod
@@ -125,6 +129,7 @@ class CostModel:
             tax_rate=market.tax_rate,
             long_margin_rate=market.long_margin_rate,
             short_margin_rate=market.short_margin_rate,
+            impact_coef=market.impact_coef,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
@@ -140,9 +145,19 @@ class CostModel:
         notional = price * quantity * self.multiplier
         return max(abs(notional) * self.commission_rate, self.min_commission)
 
-    def calc_slippage(self, quantity: float) -> float:
-        """Single-side slippage cost in quote currency."""
-        return self.slippage_ticks * self.tick_size * abs(quantity) * self.multiplier
+    def calc_slippage(self, quantity: float, *, bar_volume: float | None = None) -> float:
+        """Single-side slippage cost in quote currency.
+
+        bar_volume (optional): when given together with impact_coef > 0,
+        adds a market-impact component that scales linearly with how much
+        of the bar's volume this fill consumes. Omitted (the default at
+        every existing call site) reproduces the flat slippage_ticks-only
+        cost unchanged.
+        """
+        ticks = self.slippage_ticks
+        if bar_volume and bar_volume > 0 and self.impact_coef > 0:
+            ticks += self.impact_coef * (abs(quantity) / bar_volume)
+        return ticks * self.tick_size * abs(quantity) * self.multiplier
 
     def calc_tax(self, price: float, quantity: float) -> float:
         """Per-side transaction tax. Applied symmetrically on both buy and sell."""

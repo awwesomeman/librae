@@ -111,17 +111,20 @@ plot_trades_by_run_id(run_id)                    # 或者：不重跑回測，�
 
 ### 風控 (risk controls)
 
-引擎層級強制，策略無法繞過；兩者皆預設關閉（`None`）。backtest/live 共用同一份 `core.executor.liquidate_all`/`_cap_fill_to_notional`。
+引擎層級強制，策略無法繞過；三者皆預設關閉（`None`）。backtest/live 共用同一份 `core.executor.liquidate_all`/`_cap_fill_to_notional`/`_cap_fill_to_volume`。
 
 ```python
 cfg = RunConfig(..., params={
-    "max_position_pct": 0.3,   # 單一部位 notional 上限 = 30% 最新已知權益
-    "max_drawdown_pct": 0.2,   # 權益從高點回落 20% -> 全平倉並永久停止進場
+    "max_position_pct": 0.3,             # 單一部位 notional 上限 = 30% 最新已知權益
+    "max_drawdown_pct": 0.2,             # 權益從高點回落 20% -> 全平倉並永久停止進場
+    "max_volume_participation_pct": 0.1, # 單筆成交量上限 = 10% 該根 bar 的 volume
 })
 ```
 
 - `max_position_pct`：新倉/加碼皆會被裁量（裁量後重算 commission/slippage/tax），不是直接拒絕。
 - `max_drawdown_pct`：觸發後呼叫 `liquidate_all()` 全平倉，並停止呼叫策略 `on_bar()`（live 仍持續 polling/監控，只是不再進場）；一次觸發即永久生效，需重啟該次 run。
+- `max_volume_participation_pct`：只限制單筆成交（新倉/加碼），不是累加 vs 部位大小；跟 `max_position_pct` 一樣是裁量不拒絕。只作用於進場 —— 出場（策略平倉、停損/停利、force close、回撤熔斷平倉）不受此限制。
+- 成交量感知的滑價（`CostModel.impact_coef`）跟這個開關無關、預設也是關閉：只要有成交量資料傳入，且該市場/symbol 的 `impact_coef > 0`（在 `markets.yaml`/`symbols.yaml`/`cost_overrides` 設定），滑價就會隨單筆成交佔該 bar volume 的比例線性放大，無論有沒有設定上限。
 
 ### 模擬監控 (sim)
 
@@ -165,7 +168,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `Fill` | 成交回報：price, quantity, commission, slippage, tax |
 | `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + periods_held |
 | `TradePnL` | PnL 拆解：gross_pnl, net_pnl, commission, slippage, tax |
-| `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate |
+| `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, impact_coef（成交量衝擊係數，預設 0 關閉） |
 
 ### Output 層
 
