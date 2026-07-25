@@ -3,7 +3,7 @@
 Pure rendering only: consumes already-computed BacktestOutput.order_events
 and never recomputes fills/PnL, so the chart can never drift from
 compute_all()'s numbers (the sole source of truth, also written to
-strategy_performance/trade_events for Grafana).
+strategy_performance/trade_events for any downstream dashboard).
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ def plot_trades_by_run_id(run_id: str, *, symbol: str | None = None, block: bool
 
     No backtest re-run needed: reads the exact order_events/OHLCV that
     build_output()/db.timescale_writer already wrote for this run_id, so the
-    chart can't drift from what's in strategy_performance/Grafana.
+    chart can't drift from what's in strategy_performance/any downstream dashboard.
 
     symbol defaults to the run's primary symbol (backtest_runs.symbol).
     """

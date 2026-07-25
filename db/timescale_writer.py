@@ -579,7 +579,7 @@ def write_factor_registry(entries: list[dict], dsn: str = TIMESCALE_DSN) -> int:
     """Upsert (factor_name, source, frequency) rows into factor_registry.
 
     One row per factor_name — not a per-cached-row write like
-    write_external_factor(). See strategies/module/data/factors.py's
+    write_external_factor(). Called by the factor data-access layer's
     sync_factor_registry(), the only caller.
     """
     if not entries:

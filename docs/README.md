@@ -57,6 +57,7 @@
 | [04-01 OHLCV 遷移](decisions/2026-04-01-ohlcv-migrate-to-timescaledb.md) | superseded | data, db | 提議新建 market_data 表 → 未實作，04-02 改為修改現有 ohlcv 表（移除 run_id） |
 | [04-02 DB Schema 整合](decisions/2026-04-02-db-schema-consolidation.md) | implemented | schema, db, engine, grafana | 7→6 表精簡；新增 signal_outcomes；ohlcv 去重；params JSONB；寫入流程統一 |
 | [04-02 Signal Monitor 審查](decisions/2026-04-02-signal-monitor-dashboard-review.md) | accepted | grafana, signal | 訊號預測力指標（IC/IC_IR/Balanced Accuracy）；Grafana=監控 / Streamlit=診斷 |
+| [04-04 Order Detail Panel](decisions/2026-04-04-order-detail-panel-research.md) | accepted | grafana | Order Events 面板欄位設計研究 |
 
 ## plans/
 
@@ -82,7 +83,6 @@
 
 | 檔案 | 狀態 | 範圍 | 摘要 |
 |------|------|------|------|
-| [implementation_plan](plans/implementation_plan.md) | in-progress | 全系統 | 端到端回測 + 訊號訂閱 + 即時交易平台總計畫 |
 | [enhance_librae](plans/enhance_librae.md) | in-progress | engine, executor, schema | 引擎層整合優化索引（Position Lifecycle + Performance） |
 | [enhance_librae_position_lifecycle](plans/enhance_librae_position_lifecycle.md) | implemented | engine, executor, schema, db, grafana | Short + Scaling + Partial Close 持倉生命週期 |
 | [enhance_librae_performance](plans/enhance_librae_performance.md) | implemented | engine, strategy, data | Context __slots__、cache trim、look-ahead fix 微優化 |
@@ -94,6 +94,7 @@
 | [refactor_librae_strategy_protocol_executor](plans/refactor_librae_strategy_protocol_executor.md) | completed | engine, strategy, executor | Strategy Protocol + Executor 分離 |
 | [refactor_config_management](plans/refactor_config_management.md) | planning | config, telegram, notification | 統一 YAML + env var + CLI 設定管理 |
 | [refactor_grafana_strategy](plans/refactor_grafana_strategy.md) | implemented | grafana, schema, db | Order Events 面板（部位生命週期可視化） |
+| [refactor_librae_decouple](plans/refactor_librae_decouple.md) | done | librae, db, brokers, notifications, orchestration, app, deploy | 解耦成獨立回測引擎；repo 改名；ruff/CI 基礎設施；策略研究內容搬出，db/broker/通知/dashboard/部署留作擴充範例 |
 
 ## strategies/
 

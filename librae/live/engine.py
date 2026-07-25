@@ -65,7 +65,8 @@ class LiveTrader:
         on_ohlcv: Same pattern as on_bar.
         on_heartbeat: Same pattern as on_bar.
         on_signal_outcome: Same pattern as on_bar.
-        warmup_fetcher: _UNSET -> DB-first warmup; None -> API-only; callable -> use it.
+        warmup_fetcher: _UNSET or None -> plain API fetch via adapter; callable ->
+            use it (e.g. a DB-first fetcher supplied by the caller's data layer).
         notifier: _UNSET -> build default TelegramAdapter from cfg (skipped
             entirely when cfg.no_db); None -> no notifications; object -> use it
             (must implement TelegramAdapter's duck-typed interface).
@@ -387,23 +388,13 @@ class LiveTrader:
         return TelegramAdapter(config=tg_config, credentials=tg_creds)
 
     def _build_warmup_fetcher(self) -> Callable:
+        """Default warmup: plain API fetch via self._fetcher — librae has no
+        data-access layer of its own to warm up from. A DB-first fetcher
+        (read cached history, gap-fill from API) needs a data-access layer
+        that lives outside librae; pass warmup_fetcher= explicitly for that."""
+
         def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
-            """DB-first warmup: reads historical bars from DB, fills gaps from API."""
-            from strategies.module.data.ohlcv import get_ohlcv
-
-            from librae.core.utils import interval_to_timedelta
-
-            warmup_start = datetime.now(tz=UTC) - interval_to_timedelta(tf_ccxt) * limit
-            df = get_ohlcv(
-                symbol, tf_ccxt, data_source=self._cfg.data_source, start=warmup_start.isoformat()
-            )
-            if df.empty:
-                return self._fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
-            if "timestamp" in df.columns and "ts" not in df.columns:
-                df = df.rename(columns={"timestamp": "ts"})
-            if len(df) > limit:
-                df = df.iloc[-limit:]
-            return df.reset_index(drop=True)
+            return self._fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
 
         return warmup_fetcher
 

@@ -1,7 +1,7 @@
 [project]
 name = "librae"
 version = "0.1.0"
-description = "Quant strategy research platform — Librae backtest engine, multi-asset support"
+description = "Librae — quant backtest and live-trading engine, multi-asset support"
 readme = "README.md"
 authors = [
   { name = "Jason Pan", email = "atk50715@gmail.com" }
@@ -37,6 +37,9 @@ dependencies = [
 Repository = "https://github.com/awwesomeman/librae"
 Issues = "https://github.com/awwesomeman/librae/issues"
 
+[project.scripts]
+librae = "librae._scaffold:main"
+
 [project.optional-dependencies]
 tw-live = [
   # >=1.5, not >=1.4: shioaji's own version sequence jumps 1.3.3 -> 1.5.0
@@ -48,11 +51,6 @@ tw-live = [
   # tests couldn't catch — caught 2026-07-20 running a real sandbox login.
   "shioaji>=1.5",
 ]
-research = [
-  "yfinance>=0.2",  # only needed for data/regime.py's DXY trend fetch
-  "xlrd>=2.0",  # only needed for providers/nyfed.py's GSCPI .xls parse (legacy binary format, not modern .xlsx)
-  "scikit-learn>=1.4",  # multi-factor composite signal models (e.g. strategies/experiments/btc_4h_multifactor)
-]
 us-live = [
   "ib-async>=1.0",  # IBKRAdapter (brokers/ibkr_adapter.py) — wraps IB Gateway/TWS socket API
 ]
@@ -61,7 +59,7 @@ test = [
   "pytest-asyncio>=0.23",
 ]
 viz = [
-  "lightweight-charts>=2.0",  # local trade-chart exploration only (librae/backtest/charts.py); Grafana handles ops dashboards
+  "lightweight-charts>=2.0",  # local trade-chart exploration only (librae/backtest/charts.py)
 ]
 dev = [
   "ruff==0.16.0",
@@ -69,7 +67,10 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["librae*", "strategies*", "brokers*", "db*", "app*", "notifications*", "orchestration*", "tests*"]
+include = ["librae*", "brokers*", "db*", "notifications*", "orchestration*", "app*", "tests*"]
+
+[tool.setuptools.package-data]
+librae = ["_scaffold/env.example"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -82,10 +83,8 @@ markers = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-# strategies/ is migrating out (docs/plans/refactor_librae_decouple.md) and
-# isn't worth cleaning up pre-move.
 src = ["librae", "notifications", "orchestration", "db", "brokers", "app", "scripts"]
-extend-exclude = ["strategies", "tests/strategies", "*.md"]  # *.md: don't reformat doc code fences
+extend-exclude = ["*.md"]  # don't reformat doc code fences
 
 [tool.ruff.lint]
 # Standard rule set: pycodestyle (E/W), pyflakes (F), isort (I), bugbear (B),
