@@ -20,7 +20,10 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 import pandas as pd
 
-from librae.core.executor import ActionResults, eval_equity, run_pending_and_stops
+from librae.core.executor import (
+    REASON_DRAWDOWN_BREACH, ActionResults, eval_equity, liquidate_all,
+    run_pending_and_stops, validate_risk_params,
+)
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
@@ -176,6 +179,8 @@ class LiveTrader:
         self._positions: dict[str, PositionState] = {}
         self._cash: float = cfg.initial_balance
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open")
+        self._max_position_pct, self._max_drawdown_pct = validate_risk_params(cfg.params)
+        self._halted: bool = False
         self._pending_actions: dict[str, list[Action]] = {}
         self._equity_peak: float = cfg.initial_balance
         self._prev_equity: float = cfg.initial_balance
@@ -576,13 +581,25 @@ class LiveTrader:
         # backtest engine (librae.core.executor.run_pending_and_stops) so
         # the two can't silently drift out of sync on this sequence ──
         prev_actions = self._pending_actions.pop(symbol, [])
+        max_position_notional = (
+            self._max_position_pct * self._prev_equity if self._max_position_pct else None
+        )
         self._cash, step_result = run_pending_and_stops(
             ts, self._positions, self._cash, prev_actions, {symbol: raw_bar},
             get_cost_model=self._get_cost_model,
             default_fill=self._fill_price,
             primary_symbol=symbol,
+            max_position_notional=max_position_notional,
         )
         self._apply_action_results(step_result)
+
+        # ── Step 1.5: equity/drawdown check — right after this bar's fills
+        # and stops are applied, before the strategy sees the bar. Mirrors
+        # the backtest engine's ordering so a drawdown breach halts new
+        # entries on the same cycle it's detected, not one cycle later ──
+        self._record_equity(ts)
+        if self._halted:
+            return
 
         try:
             featured = self._feature_fn(h1)
@@ -591,7 +608,6 @@ class LiveTrader:
                 "Feature computation failed for %s — pending fills/stops above "
                 "still applied, skipping strategy decision for this bar", symbol,
             )
-            self._record_equity(ts)
             return
 
         last_row = featured.iloc[-1]
@@ -624,8 +640,7 @@ class LiveTrader:
         self._period_indices[symbol] = period_index + 1
         self._pending_actions[symbol] = actions
 
-        # Record equity and OHLCV after processing
-        self._record_equity(ts)
+        # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
             self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
@@ -654,12 +669,19 @@ class LiveTrader:
         )
 
     def _record_equity(self, ts: datetime) -> None:
-        """Calculate equity + drawdown, call on_bar callback, and send periodic status."""
+        """Calculate equity + drawdown, check the max-drawdown circuit
+        breaker, call on_bar callback, and send periodic status."""
         equity = self._eval_equity()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
         period_return = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
         self._prev_equity = equity
+
+        if (
+            self._max_drawdown_pct and not self._halted
+            and drawdown <= -self._max_drawdown_pct
+        ):
+            self._flatten_and_halt(ts, drawdown)
 
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, period_return)
@@ -682,3 +704,31 @@ class LiveTrader:
                     daily_pnl=period_return * equity,
                     position=pos_str,
                 )
+
+    def _flatten_and_halt(self, ts: datetime, drawdown: float) -> None:
+        """Force-close every open position and permanently halt new entries
+        for the rest of this run — the max-drawdown circuit breaker. Reuses
+        _apply_action_results so live mode submits a real closing order to
+        the broker through the exact same path as any other close."""
+        result = liquidate_all(
+            self._positions, {}, ts,
+            get_cost_model=self._get_cost_model,
+            reason=REASON_DRAWDOWN_BREACH,
+            fallback_price=self._get_last_price,
+        )
+        self._cash += result.cash_delta
+        self._apply_action_results(result)
+        self._halted = True
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
+            message=(
+                f"drawdown={drawdown:.2%} <= -{self._max_drawdown_pct:.2%} "
+                "— flattened all positions and halted"
+            ),
+        )
+        logger.warning(
+            "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
+            "— all positions force-closed",
+            ts, drawdown * 100, self._max_drawdown_pct * 100,
+        )

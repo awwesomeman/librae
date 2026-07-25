@@ -552,6 +552,46 @@ class TestLiveTrader:
             runner._db_write(failing_fn)
         assert len(alerts) == 2
 
+    def test_max_drawdown_breach_flattens_and_halts(self):
+        """A drawdown breach must flatten the open position, alert, and
+        permanently stop new entries — the strategy is never called again
+        even though it would otherwise keep re-buying."""
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            df = _make_ohlcv_df(n=5, start_hour=call_num)
+            if call_num >= 3:
+                df["open"] = 50.0
+                df["high"] = 55.0
+                df["low"] = 45.0
+                df["close"] = 50.0
+            return df
+
+        class BuyOnceStrategy(BaseStrategy):
+            def on_bar(self, ctx: Context) -> list[Action]:
+                if not ctx.positions.get(ctx.symbol):
+                    return [Action(type="long", symbol=ctx.symbol)]
+                return []
+
+        cfg = _test_cfg(params={"warmup_periods": 5, "max_drawdown_pct": 0.2})
+        runner = self._make_runner(strategy=BuyOnceStrategy(), fetcher=fetcher, cfg=cfg)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        # bar1: buy queued. bar2: buy fills (~all cash). bar3: price craters
+        # -> breach detected before the strategy sees the bar -> flattened +
+        # halted. bar4: confirms the halt sticks (no re-buy, no 2nd alert).
+        runner.run(max_iterations=4)
+
+        assert runner._halted is True
+        assert runner._positions == {}
+        breach_alerts = [
+            kw for m, kw in alerts if m == "send_alert" and "Max Drawdown Breach" in kw["title"]
+        ]
+        assert len(breach_alerts) == 1
+
 
 class TestCryptoLiveAutoWiring:
     """LiveTrader without an explicit adapter= override (the real code path

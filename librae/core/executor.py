@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 REASON_STOP_LOSS = "stop_loss"
 REASON_TAKE_PROFIT = "take_profit"
 REASON_FORCE_CLOSE = "force_close"
+REASON_DRAWDOWN_BREACH = "drawdown_breach"
 
 
 @dataclass(frozen=True)
@@ -396,6 +397,61 @@ def check_stop_targets(
     return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
 
 
+def validate_risk_params(params: dict | None) -> tuple[float | None, float | None]:
+    """Validate and extract max_position_pct/max_drawdown_pct from cfg.params.
+
+    Both are optional (None = disabled) but must be > 0 if set. Shared by
+    Backtest and LiveTrader so the same rule can't drift between them.
+    """
+    p = params or {}
+    max_position_pct = p.get("max_position_pct")
+    max_drawdown_pct = p.get("max_drawdown_pct")
+    if max_position_pct is not None and max_position_pct <= 0:
+        raise ValueError(f"max_position_pct must be > 0, got {max_position_pct}")
+    if max_drawdown_pct is not None and max_drawdown_pct <= 0:
+        raise ValueError(f"max_drawdown_pct must be > 0, got {max_drawdown_pct}")
+    return max_position_pct, max_drawdown_pct
+
+
+def liquidate_all(
+    positions: dict[str, PositionState],
+    bars: dict[str, dict[str, float]],
+    ts: datetime,
+    *,
+    get_cost_model: Callable[[str], CostModel],
+    reason: str,
+    fallback_price: Callable[[str, PositionState], float] | None = None,
+) -> ActionResults:
+    """Force-close every open position right now, at this bar's close price.
+
+    Shared by end-of-run liquidation and the max-drawdown circuit breaker —
+    both need identical "flatten everything" semantics. Mutates *positions*
+    in place. fallback_price is used only when a symbol has no bar this
+    step (e.g. the backtest's final bar, which falls back to entry_price).
+    """
+    trades: list[TradeResult] = []
+    events: list[OrderEvent] = []
+    cash_delta = 0.0
+
+    for sym in list(positions.keys()):
+        pos = positions[sym]
+        bar = bars.get(sym)
+        if bar is not None and bar.get("close") is not None:
+            price = bar["close"]
+        elif fallback_price is not None:
+            price = fallback_price(sym, pos)
+        else:
+            continue
+        cost_model = get_cost_model(sym)
+        trade, event, proceeds, _ = build_close_event(pos, ts, price, cost_model, reason)
+        trades.append(trade)
+        events.append(event)
+        cash_delta += proceeds
+        del positions[sym]
+
+    return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
+
+
 # ---------------------------------------------------------------------------
 # Fill price resolution (shared by backtest + live engines)
 # ---------------------------------------------------------------------------
@@ -470,6 +526,39 @@ def _size_position(cost_model: CostModel, price: float, cash: float, side: Liter
     return max(qty, 0.0)
 
 
+def _cap_fill_to_notional(
+    fill: Fill, existing_qty: float, cost_model: CostModel, max_notional: float,
+) -> Fill | None:
+    """Shrink a fill so (existing_qty + fill.quantity) * price * multiplier
+    stays within max_notional. Recomputes commission/slippage/tax for the
+    reduced quantity — they scale with quantity, so a naive quantity clamp
+    would overcharge relative to what's actually being filled. Returns None
+    if there's no room at all (existing position already at/over the cap).
+    """
+    unit_notional = fill.price * cost_model.multiplier
+    room = max_notional - existing_qty * unit_notional
+    if room <= EPSILON:
+        return None
+    capped_qty = min(fill.quantity, room / unit_notional)
+    if capped_qty <= EPSILON:
+        return None
+    if capped_qty >= fill.quantity - EPSILON:
+        return fill
+    logger.info(
+        "Position cap: %s %s clamped qty %.6f -> %.6f (max_notional=%.2f)",
+        fill.side, fill.symbol, fill.quantity, capped_qty, max_notional,
+    )
+    return Fill(
+        symbol=fill.symbol,
+        side=fill.side,
+        price=fill.price,
+        quantity=capped_qty,
+        commission=cost_model.calc_commission(fill.price, capped_qty),
+        slippage=cost_model.calc_slippage(capped_qty),
+        tax=cost_model.calc_tax(fill.price, capped_qty),
+    )
+
+
 def make_fill(action: Action, price: float, cash: float, cost_model: CostModel) -> Fill | None:
     """Build a Fill for a long/short action. Returns None if rejected."""
     if action.type not in ("long", "short"):
@@ -526,11 +615,16 @@ def build_trade_result(
 
 def _try_fill(
     action: Action, price: float, available_cash: float, cost_model: CostModel,
+    *, max_notional: float | None = None, existing_qty: float = 0.0,
 ) -> tuple[Fill | None, float]:
     """Attempt a fill and validate cash sufficiency. Returns (fill, outlay) or (None, 0)."""
     fill = make_fill(action, price, available_cash, cost_model)
     if not fill or fill.quantity <= 0:
         return None, 0.0
+    if max_notional is not None:
+        fill = _cap_fill_to_notional(fill, existing_qty, cost_model, max_notional)
+        if fill is None:
+            return None, 0.0
     outlay = cost_model.estimate_entry_outlay(price, fill.quantity, action.type)
     if available_cash - outlay < -EPSILON:
         return None, 0.0
@@ -546,11 +640,16 @@ def process_actions(
     get_price: Callable[[str, Action], float | None],
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
+    max_position_notional: float | None = None,
 ) -> ActionResults:
     """Process a bar's actions: open, scale, partial/full close.
 
     Shared by backtest and live engines to avoid logic duplication.
     Mutates *positions* dict in place. Returns trades, events, and cash delta.
+
+    max_position_notional, when set, caps every symbol's post-fill notional
+    (existing + added) to this value — applied identically to new entries
+    and scale-ins.
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
@@ -573,7 +672,10 @@ def process_actions(
 
             if sym not in positions:
                 # OPEN NEW
-                fill, outlay = _try_fill(action, price, cash + cash_delta, cost_model)
+                fill, outlay = _try_fill(
+                    action, price, cash + cash_delta, cost_model,
+                    max_notional=max_position_notional, existing_qty=0.0,
+                )
                 if fill:
                     cash_delta -= outlay
                     positions[sym] = PositionState(
@@ -604,7 +706,10 @@ def process_actions(
                 if action.quantity is None:
                     logger.debug("Scaling %s requires explicit quantity, skipping", sym)
                     continue
-                fill, outlay = _try_fill(action, price, cash + cash_delta, cost_model)
+                fill, outlay = _try_fill(
+                    action, price, cash + cash_delta, cost_model,
+                    max_notional=max_position_notional, existing_qty=positions[sym].quantity,
+                )
                 if fill:
                     cash_delta -= outlay
                     scale_into_position(positions[sym], fill, cost_model)
@@ -669,6 +774,7 @@ def run_pending_and_stops(
     get_cost_model: Callable[[str], CostModel],
     default_fill: str,
     primary_symbol: str,
+    max_position_notional: float | None = None,
 ) -> tuple[float, ActionResults]:
     """Fill this bar's pending actions, then check stop-loss/take-profit —
     the two steps that must always run together, in this order, before a
@@ -691,6 +797,7 @@ def run_pending_and_stops(
                 bars.get(sym, {}), action, default_fill=default_fill),
             get_cost_model=get_cost_model,
             primary_symbol=primary_symbol,
+            max_position_notional=max_position_notional,
         )
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)

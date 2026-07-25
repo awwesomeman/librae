@@ -11,7 +11,7 @@
 ```
 core/                       共用 domain model（純計算，無 I/O）
 ├── strategy.py             BaseStrategy, Action, Context, Position, PositionState, Fill
-├── executor.py             make_fill, process_actions, calc_trade_pnl, close_position, scale_into_position, reduce_position
+├── executor.py             make_fill, process_actions, calc_trade_pnl, close_position, scale_into_position, reduce_position, liquidate_all
 ├── cost_model.py           CostModel（手續費 / 滑價 / 稅 / 合約乘數 / 保證金）
 ├── metrics.py              compute_all（QuantStats adapter）
 ├── run_config.py           RunConfig — 統一執行參數（frozen dataclass）
@@ -109,6 +109,20 @@ plot_trades_by_run_id(run_id)                    # 或者：不重跑回測，�
 
 `plot_trades_by_run_id` 讀的是 `db.timescale_reader.load_trade_events`/`load_ohlcv`——跟 Grafana 同一份 `trade_events`/`ohlcv` 表，同源保證不 drift。
 
+### 風控 (risk controls)
+
+引擎層級強制，策略無法繞過；兩者皆預設關閉（`None`）。backtest/live 共用同一份 `core.executor.liquidate_all`/`_cap_fill_to_notional`。
+
+```python
+cfg = RunConfig(..., params={
+    "max_position_pct": 0.3,   # 單一部位 notional 上限 = 30% 最新已知權益
+    "max_drawdown_pct": 0.2,   # 權益從高點回落 20% -> 全平倉並永久停止進場
+})
+```
+
+- `max_position_pct`：新倉/加碼皆會被裁量（裁量後重算 commission/slippage/tax），不是直接拒絕。
+- `max_drawdown_pct`：觸發後呼叫 `liquidate_all()` 全平倉，並停止呼叫策略 `on_bar()`（live 仍持續 polling/監控，只是不再進場）；一次觸發即永久生效，需重啟該次 run。
+
 ### 模擬監控 (sim)
 
 ```python
@@ -170,6 +184,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `make_fill(action, price, cash, cost_model)` | 模擬成交（backtest 直接用） |
 | `process_actions(actions, ...)` | 共用 action 迴圈（backtest + live 共用） |
 | `close_position(pos, exit_price, cost_model)` | 平倉 PnL + proceeds |
+| `liquidate_all(positions, bars, ts, ...)` | 全平倉（end-of-run / 最大回撤熔斷共用） |
 | `scale_into_position(pos, fill, cost_model)` | 同方向加碼（weighted avg entry） |
 | `reduce_position(pos, quantity, exit_price, cost_model)` | 部分平倉 |
 | `calc_trade_pnl(...)` | 單筆交易 PnL 拆解 |

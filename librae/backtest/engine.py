@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 from librae.config.market_config import MarketConfig
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
-    REASON_FORCE_CLOSE, OrderEvent, TradePnL, TradeResult,
-    build_close_event, eval_equity, run_pending_and_stops,
+    REASON_DRAWDOWN_BREACH, REASON_FORCE_CLOSE, OrderEvent, TradePnL, TradeResult,
+    eval_equity, liquidate_all, run_pending_and_stops, validate_risk_params,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
@@ -135,6 +135,7 @@ class Backtest:
 
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open") if cfg else "open"
+        self._max_position_pct, self._max_drawdown_pct = validate_risk_params(cfg.params if cfg else None)
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
@@ -199,6 +200,9 @@ class Backtest:
         exposed_periods = 0
         primary_symbol = self._symbols[0]
         pending_actions: list[Action] = []
+        equity_peak = self._initial_balance
+        last_equity = self._initial_balance
+        halted = False
 
         for step, ts in enumerate(self._timeline):
             bars = all_bars[ts]
@@ -207,11 +211,15 @@ class Backtest:
             # bar's price, then check stop-loss/take-profit — shared with the
             # live engine (librae.core.executor.run_pending_and_stops) so the
             # two can't silently drift out of sync on this sequence ──
+            max_position_notional = (
+                self._max_position_pct * last_equity if self._max_position_pct else None
+            )
             cash, step_result = run_pending_and_stops(
                 ts, positions, cash, pending_actions, bars,
                 get_cost_model=self._get_cost_model,
                 default_fill=self._fill_price,
                 primary_symbol=primary_symbol,
+                max_position_notional=max_position_notional,
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
@@ -224,18 +232,49 @@ class Backtest:
             if positions:
                 exposed_periods += 1
 
+            # ── Step 2.5: max-drawdown circuit breaker — flatten everything
+            # and stop trading for the rest of the run. Exit costs from this
+            # liquidation land in cash and only show up in the *next* bar's
+            # equity snapshot (one bar after the recorded breach point) —
+            # same approximation already implicit in how stop-loss exits
+            # relate to the equity curve; not worth a mid-loop re-append ──
+            equity_peak = max(equity_peak, mtm)
+            if (
+                self._max_drawdown_pct and not halted and equity_peak > 0
+                and (mtm - equity_peak) / equity_peak <= -self._max_drawdown_pct
+            ):
+                dd_result = liquidate_all(
+                    positions, bars, ts,
+                    get_cost_model=self._get_cost_model,
+                    reason=REASON_DRAWDOWN_BREACH,
+                )
+                trades.extend(dd_result.trades)
+                all_events.extend(dd_result.events)
+                cash += dd_result.cash_delta
+                halted = True
+                logger.warning(
+                    "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
+                    "— all positions force-closed",
+                    ts, (mtm - equity_peak) / equity_peak * 100, self._max_drawdown_pct * 100,
+                )
+
+            last_equity = mtm
+
             # ── Step 3: strategy decision (produces next bar's pending actions) ──
-            ctx = Context(
-                ts=ts,
-                symbol=primary_symbol,
-                symbols=self._symbols,
-                bar=bars.get(primary_symbol, {}),
-                bars=bars,
-                positions=pos_snapshot,
-                cash=cash,
-                period_index=step,
-            )
-            pending_actions = self._strategy.on_bar(ctx)
+            if halted:
+                pending_actions = []
+            else:
+                ctx = Context(
+                    ts=ts,
+                    symbol=primary_symbol,
+                    symbols=self._symbols,
+                    bar=bars.get(primary_symbol, {}),
+                    bars=bars,
+                    positions=pos_snapshot,
+                    cash=cash,
+                    period_index=step,
+                )
+                pending_actions = self._strategy.on_bar(ctx)
 
             self._increment_periods_held(positions)
 
@@ -244,18 +283,15 @@ class Backtest:
         if self._timeline:
             last_ts = self._timeline[-1]
             last_bars = all_bars[last_ts]
-            for sym in list(positions.keys()):
-                pos = positions[sym]
-                last_bar = last_bars.get(sym)
-                price = last_bar["close"] if last_bar is not None else pos.entry_price
-                cost_model = self._get_cost_model(sym)
-                trade, event, proceeds, _ = build_close_event(
-                    pos, last_ts, price, cost_model, REASON_FORCE_CLOSE,
-                )
-                trades.append(trade)
-                all_events.append(event)
-                cash += proceeds
-                del positions[sym]
+            close_result = liquidate_all(
+                positions, last_bars, last_ts,
+                get_cost_model=self._get_cost_model,
+                reason=REASON_FORCE_CLOSE,
+                fallback_price=lambda sym, pos: pos.entry_price,
+            )
+            trades.extend(close_result.trades)
+            all_events.extend(close_result.events)
+            cash += close_result.cash_delta
 
         self._result = BacktestResult(
             trades=trades,
