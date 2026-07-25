@@ -288,6 +288,32 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `send_alert()` | `notifications.error` | `True` |
 | `send_status()` | `notifications.status.enabled` | `False` |
 
+#### LiveTrader callback signatures (writing your own db sink or notifier)
+
+`LiveTrader`'s constructor injection points ("Reference implementations" in the root README) are duck-typed, not formal `Protocol`s (only `order_adapter` has one, in `librae/live/executor.py`) — this table is the actual call signature for each, so you don't have to reverse-engineer them from `librae/live/engine.py` or the `db`/`notifications` reference implementations.
+
+| Param | Called as |
+|---|---|
+| `on_bar` | `on_bar(run_id, ts, equity, drawdown, period_return)` — once per bar |
+| `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
+| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
+| `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
+| `on_heartbeat` | `on_heartbeat(run_id)` |
+| `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
+| `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
+
+`notifier`'s 5 methods, with their exact kwargs:
+
+| Method | kwargs |
+|---|---|
+| `send_signal` | `strategy, symbol, side, price` |
+| `send_startup` | `strategy, symbol, mode, run_id` |
+| `send_shutdown` | `strategy, symbol, reason` |
+| `send_alert` | `title, message` |
+| `send_status` | `strategy, symbol, equity, drawdown, daily_pnl, position` |
+
+All seven params (`on_*`, `warmup_fetcher`, `notifier`) follow the same `_UNSET` sentinel resolution: pass a value explicitly → use it; leave unset and `cfg.no_db=True` → `None` (there's no separate `no_notify` flag — `notifier` is gated by the same `cfg.no_db`); otherwise lazy-import the default (`db.timescale_writer`/`notifications.telegram`).
+
 #### parse_with_config (CLI + YAML merging)
 
 A strategy's `run.py` uses this set of functions to merge CLI args with config.yaml.

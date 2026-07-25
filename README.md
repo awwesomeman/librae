@@ -76,6 +76,12 @@ These aren't engine injection points — they're a self-contained reference for 
 | `app/` | Grafana dashboard provisioning (datasources, dashboard JSON, `generate_dashboards.py`) |
 | `scripts/` | One-off ops scripts (heartbeat check, dashboard push) |
 
+### Deploying without `deploy/`
+
+`deploy/`'s docker-compose/Grafana stack assumes a clone of this repo. If you're using librae as a `pip install`ed library instead, there's no separate deployment story to learn — `LiveTrader.run()` is just a blocking polling loop, so running it in production means putting that process under whatever supervisor you already use (a systemd unit, `pm2`, a bare `docker run`, or a cron job for periodic sim checks) — nothing librae-specific about it.
+
+Monitoring works the same way: without Grafana, implement `on_heartbeat`/`on_bar` yourself (a log line, a Prometheus pushgateway call, a health-check file — whatever your stack already reads) and pass your own `notifier` for alerts instead of Telegram. See ["LiveTrader callback signatures"](architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier) in `architecture.md` for the exact callback signatures to implement.
+
 ---
 
 ## Common commands
