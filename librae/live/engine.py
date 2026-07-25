@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 import pandas as pd
 
+from librae.core import EPSILON
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH, ActionResults, eval_equity, liquidate_all,
     run_pending_and_stops, validate_risk_params,
@@ -361,9 +362,10 @@ class LiveTrader:
         signal while the broker is actually flat).
 
         No-op in sim mode (order_adapter is None there — nothing to
-        reconcile against). Only reconciles *positions*, not cash: no
-        adapter currently exposes an account-balance query, so self._cash
-        still starts from cfg.initial_balance — a known, separate gap.
+        reconcile against). Only reconciles *positions* — cash drift is
+        checked separately by _reconcile_cash() (alert-only, doesn't
+        adopt the broker's number the way this method does for positions;
+        see that method's docstring for why).
         """
         adapter = self._executor.order_adapter
         if adapter is None:
@@ -385,9 +387,7 @@ class LiveTrader:
                     total_entry_cost=avg_price * quantity * self._executor.cost_model.multiplier,
                 )
                 logger.warning(
-                    "Reconciled %s position from broker at startup: %s %.4f @ %.2f "
-                    "(cash NOT adjusted — no account-balance API available; "
-                    "initial_balance is used as-is)",
+                    "Reconciled %s position from broker at startup: %s %.4f @ %.2f",
                     symbol, side, quantity, avg_price,
                 )
             except Exception:
@@ -396,11 +396,66 @@ class LiveTrader:
                     "for this symbol, verify manually", symbol,
                 )
 
+    # 1% — same style as CONSECUTIVE_ERROR_THRESHOLD: an engine constant,
+    # not a cfg.params knob (nothing in this run should reasonably need a
+    # different tolerance).
+    CASH_RECONCILE_TOLERANCE_PCT = 0.01
+
+    def _reconcile_cash(self) -> None:
+        """Best-effort: alert on cash/broker drift at startup, never
+        auto-adjusts self._cash.
+
+        Unlike _reconcile_positions (where the broker's side/quantity is
+        unambiguous and a wrong local position is actively dangerous for
+        signal generation), "free"/"total" balance semantics vary by
+        account mode and don't map cleanly onto this engine's cash concept
+        — auto-overwriting risks replacing a good local number with a
+        misread one. Detect and alert, let a human decide.
+
+        Duck-typed and best-effort in two more ways: adapters without a
+        get_balance() method (Shioaji/IBKR, as of this writing) are
+        silently skipped, and a symbol not in CCXT's "BASE/QUOTE" format
+        (e.g. tw_futures) is skipped too — nothing to compare against.
+        """
+        adapter = self._executor.order_adapter
+        get_balance = getattr(adapter, "get_balance", None) if adapter else None
+        if get_balance is None:
+            return
+
+        if "/" not in self._symbols[0]:
+            return
+        currency = self._symbols[0].split("/")[-1]
+
+        try:
+            balance = get_balance(currency)
+        except Exception:
+            logger.exception("Cash reconciliation failed for %s — skipping", currency)
+            return
+
+        broker_total = balance["total"]
+        drift_pct = abs(broker_total - self._cash) / max(self._cash, EPSILON)
+        if drift_pct <= self.CASH_RECONCILE_TOLERANCE_PCT:
+            return
+
+        logger.warning(
+            "Cash drift: local=%.2f broker=%.2f (%s), not auto-adjusted",
+            self._cash, broker_total, currency,
+        )
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Cash Reconciliation Drift",
+            message=(
+                f"local_cash={self._cash:.2f} broker_balance={broker_total:.2f} "
+                f"({currency}) — drift {drift_pct:.2%}, review manually"
+            ),
+        )
+
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._running = True
         self._setup_signal_handlers()
         self._reconcile_positions()
+        self._reconcile_cash()
         iteration = 0
         strategy_name = self._executor.strategy_name
         symbols_str = ",".join(self._symbols)

@@ -108,6 +108,30 @@ def test_readonly_get_position_raises(readonly_adapter):
         readonly_adapter.get_position("BTC/USDT")
 
 
+def test_readonly_get_balance_raises(readonly_adapter):
+    with pytest.raises(NotImplementedError, match="read-only"):
+        readonly_adapter.get_balance("USDT")
+
+
+# ---------------------------------------------------------------------------
+# Test 3b: get_balance
+# ---------------------------------------------------------------------------
+
+def test_authed_get_balance_parses_free_used_total(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.fetch_balance.return_value = {
+        "USDT": {"free": 900.0, "used": 100.0, "total": 1000.0},
+        "info": {},
+    }
+    balance = authed_adapter.get_balance("USDT")
+    assert balance == {"free": 900.0, "used": 100.0, "total": 1000.0}
+
+
+def test_get_balance_missing_currency_returns_zeros(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.fetch_balance.return_value = {"BTC": {"free": 1.0, "used": 0.0, "total": 1.0}}
+    balance = authed_adapter.get_balance("USDT")
+    assert balance == {"free": 0.0, "used": 0.0, "total": 0.0}
+
+
 # ---------------------------------------------------------------------------
 # Test 4: authed adapter can call place_order
 # ---------------------------------------------------------------------------

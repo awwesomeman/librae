@@ -274,6 +274,17 @@ class CryptoAdapter:
         )
         return result
 
+    def get_balance(self, currency: str) -> dict[str, float]:
+        """Return real free/used/total balance for *currency* from the exchange."""
+        self._require_auth()
+        balance = self._exchange.fetch_balance()
+        entry = balance.get(currency) or {}
+        return {
+            "free": float(entry.get("free", 0) or 0),
+            "used": float(entry.get("used", 0) or 0),
+            "total": float(entry.get("total", 0) or 0),
+        }
+
     def get_position(self, symbol: str) -> dict:
         """Return current position for *symbol*.
 

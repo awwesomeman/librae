@@ -126,6 +126,13 @@ cfg = RunConfig(..., params={
 - `max_volume_participation_pct`：只限制單筆成交（新倉/加碼），不是累加 vs 部位大小；跟 `max_position_pct` 一樣是裁量不拒絕。只作用於進場 —— 出場（策略平倉、停損/停利、force close、回撤熔斷平倉）不受此限制。
 - 成交量感知的滑價（`CostModel.impact_coef`）跟這個開關無關、預設也是關閉：只要有成交量資料傳入，且該市場/symbol 的 `impact_coef > 0`（在 `markets.yaml`/`symbols.yaml`/`cost_overrides` 設定），滑價就會隨單筆成交佔該 bar volume 的比例線性放大，無論有沒有設定上限。
 
+### 對帳 (reconciliation, live only)
+
+`LiveTrader.run()` 啟動時自動執行，`sim` 模式（無 `order_adapter`）為 no-op：
+
+- **部位**（`_reconcile_positions`）：直接採信 broker 回傳的 `get_position()`，覆蓋本地 `self._positions`——部位方向/數量是無歧義的，錯誤的本地部位對訊號判斷是實際風險。
+- **現金**（`_reconcile_cash`，目前僅 `CryptoAdapter`/CCXT 支援，其他 broker adapter 沒有 `get_balance()` 會被 duck-type 跳過）：只告警不覆蓋。落差超過 `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT`（預設 1%，engine 常數而非 `cfg.params`）才發 Telegram alert，`self._cash` 永遠以本地帳本為準——broker 的 free/total 餘額語意會隨帳戶模式（現貨/合約/cross-margin）不同，貿然覆蓋可能讓本來正確的本地狀態被錯讀的數字污染。
+
 ### 模擬監控 (sim)
 
 ```python

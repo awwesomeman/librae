@@ -419,6 +419,65 @@ class TestLiveTrader:
 
         assert runner._positions == {}
 
+    def test_cash_drift_beyond_tolerance_alerts_without_adjusting_cash(self):
+        """Drift past CASH_RECONCILE_TOLERANCE_PCT must alert with both
+        numbers but never mutate self._cash — reconciliation is alert-only,
+        unlike position reconciliation which does adopt the broker's side."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_balance.return_value = {"free": 50_000.0, "used": 0.0, "total": 50_000.0}
+
+        cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
+        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=1)
+
+        drift_alerts = [
+            kw for m, kw in alerts if m == "send_alert" and "Cash Reconciliation Drift" in kw["title"]
+        ]
+        assert len(drift_alerts) == 1
+        assert "local_cash=100000.00" in drift_alerts[0]["message"]
+        assert "broker_balance=50000.00" in drift_alerts[0]["message"]
+        assert runner._cash == 100_000.0  # unchanged — alert-only, never auto-adjusted
+
+    def test_cash_drift_within_tolerance_does_not_alert(self):
+        mock_order_adapter = _mock_order_adapter()
+        # 0.5% drift, under the 1% CASH_RECONCILE_TOLERANCE_PCT default
+        mock_order_adapter.get_balance.return_value = {"free": 99_500.0, "used": 0.0, "total": 99_500.0}
+
+        cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
+        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=1)
+
+        assert not [kw for m, kw in alerts if m == "send_alert" and "Cash Reconciliation" in kw["title"]]
+
+    def test_adapter_without_get_balance_is_skipped(self):
+        """Shioaji/IBKR-style adapters (no get_balance()) must be silently
+        skipped — no alert, no exception, startup proceeds normally."""
+        mock_order_adapter = _mock_order_adapter()
+        del mock_order_adapter.get_balance
+
+        cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
+        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=1)  # must not raise
+
+        assert not [kw for m, kw in alerts if m == "send_alert" and "Cash Reconciliation" in kw["title"]]
+
+    def test_cash_reconciliation_failure_does_not_crash_startup(self):
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_balance.side_effect = RuntimeError("broker down")
+
+        cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
+        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        runner.run(max_iterations=1)  # must not raise
+
     def test_stop_loss_triggers_and_closes_position(self):
         """Regression test: the live engine never called check_stop_targets,
         so a strategy-set stop_price was stored on the position but never
