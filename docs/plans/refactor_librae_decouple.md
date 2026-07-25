@@ -1,6 +1,7 @@
 # Refactor Librae: Decouple into a Standalone Backtest Engine
 
-> 狀態：Phase 0/1/3/4 已落地（一次做完，2026-07-25）；Phase 2 併入 Phase 4 一併完成
+> 狀態：Phase 0/1/3/4 已落地（一次做完，2026-07-25）；Phase 2 併入 Phase 4 一併完成；Phase 5（repo 工程化基礎設施）2026-07-25 一併完成
+> Commits：`8d94a27`（Phase 0/1/3/4）、`fe1b125`（README/architecture.md 整合）、`e8ca1ea`（Phase 5：ruff + CI + Python 版本矩陣）
 > 範圍：librae/core, librae/live, librae/backtest, librae/config, librae/cli, db, brokers
 > 建立日期：2026-07-25
 > 依據：[refactor_librae_api](refactor_librae_api.md)（沿用其 RunConfig/引擎 wiring 基礎，本計劃在其上做邊界切割）
@@ -126,43 +127,55 @@ tidal (client) 直接在自己 process 內建構 TidalServer，完全跳過 ZMQ 
 
 物理搬成獨立 repo 是否要做、何時做，留到 Phase 1-3 跑穩之後再評估——邏輯獨立比物理搬遷優先。
 
+### Phase 5 — Repo 工程化基礎設施（不在原計劃範圍，2026-07-25 一併完成）
+
+跟「解耦」本身無關，但都是支撐「librae 未來要能被單獨拿去用」這個終局目標的基礎工程：
+
+- **文件整合**：`librae/README.md` 刪除，內容依性質拆到根目錄 `README.md`（精簡版，一段描述 + 一個範例）與 `architecture.md`（完整架構/API/設計決策，跟既有的 Broker Adapter/資料存取層設計並列）。順便修掉解耦時留下的 `librae.cli`/`librae.notifications` 路徑殘留引用。
+- **ruff lint + format**：`pyproject.toml` 新增 `[tool.ruff]`，範圍涵蓋 `librae/`、`notifications/`、`orchestration/`、`db/`、`brokers/`、`app/`、`scripts/`、`tests/`（`strategies/` 排除，遷移中不值得先清）。實際發現的 lint 問題直接修（import 排序、`datetime.UTC`、`zip(strict=True)`、`ibkr_adapter.py` 一段永遠等價的死 if/else 分支、缺漏的 `TYPE_CHECKING` import 等），不是加規則忽略——唯一例外是 `librae/__init__.py` 的 import/`__all__` 排序，那是刻意照 API 分類分組，保留 per-file-ignore。
+- **CI**：三個 workflow（`core-tests`/`tw-live-tests`/`us-live-tests`）統一改用 `uv sync --frozen`（原本是裸 `pip install`，跟本機開發脫鉤），Python 版本從 3.11（低於 `requires-python>=3.12`，先前的 bug）改成 3.12/3.13/3.14 矩陣，事前已用 `uv run --python X pytest` 逐版本本機驗證過（含 `tw_live`/`us_live` 標記測試）。新增 `lint.yml`（ruff check + format --check）與 `us-live-tests.yml`（`us_live` marker 原本沒有對應的 CI job）。
+- **本地 pre-commit hook**：`.githooks/pre-commit` 鏡射 CI 的 lint 檢查，`git config core.hooksPath .githooks` 啟用。
+- **`LICENSE`**：`pyproject.toml` 宣稱 MIT 但沒有實體檔案，補上。
+
+**明確跳過**（見對話記錄，非本次疏漏）：`CHANGELOG.md`（沒有版本發布可掛，`docs/decisions/`+`docs/plans/` 已覆蓋）、mkdocs（使用者已排除）、`mypy`/commitizen/PyPI release pipeline/多 OS 測試矩陣（等 librae 真正物理獨立成自己的套件時才有意義）。
+
 ---
 
-## 預期專案架構（Phase 1-4 完成後）
+## 實際落地的專案架構（2026-07-25）
+
+Phase 1 執行時發現 `_UNSET` sentinel callback 模式已經達到跟 Protocol 抽象一樣的效果（見上方「現況耦合盤點」的結論），所以**沒有新增 `sinks.py`**——下面是實際落地的樣子，取代本節原先規劃但未採用的 `ResultSink`/`OrderExecutor`/`Notifier` Protocol 設計：
 
 ```
-librae/                          # 目標：可獨立 pip install 的純回測引擎，零 db/broker/strategies 依賴
+librae/                          # 零 db/broker/strategies 依賴
 ├── __init__.py                  # 對外 API：Backtest, LiveTrader, BaseStrategy,
-│                                 # Context, Position, Action, RunConfig, MarketConfig,
-│                                 # ResultSink, OrderExecutor, Notifier（Protocol）
+│                                 # Context, Position, Action, RunConfig, MarketConfig
 ├── core/
 │   ├── strategy.py              # BaseStrategy / Context / Position / Action — 不動
 │   ├── executor.py              # process_actions — 不動
-│   ├── cost_model.py            # 不動
+│   ├── cost_model.py            # from_config() 新增 markets= 參數
 │   ├── run_config.py            # 不動，純參數容器
 │   ├── metrics.py               # 不動
-│   ├── sinks.py                 # 新增：ResultSink / OrderExecutor / Notifier Protocol
 │   └── utils.py
 ├── backtest/
-│   ├── engine.py                # Backtest — 資料由呼叫方傳入，不再自己抓
-│   ├── charts.py                # 吃資料參數，不再直接 import db.timescale_reader
+│   ├── engine.py                # Backtest — 資料由呼叫方傳入
+│   ├── charts.py                # 核心渲染函式吃資料參數；plot_trades_by_run_id 是唯一還碰 db 的便利 wrapper
 │   └── schema.py
 ├── live/
-│   ├── engine.py                # LiveTrader — sink/executor/notifier 皆為建構子注入
-│   └── executor.py
+│   ├── engine.py                # LiveTrader — adapter/order_adapter/cost_model/notifier 皆為建構子注入
+│   │                             # （notifier=_UNSET sentinel，跟 db callback 同一套模式，不是獨立 Protocol）
+│   └── executor.py              # TelegramAdapter import 移到 TYPE_CHECKING
 └── config/
-    ├── market_config.py         # get_market() 可接外部注入的 config dict
+    ├── market_config.py         # get_market(name, markets=) 可接外部注入的 registry
     └── symbols.py
 
 # --- librae 之外，同一個 repo 內（物理搬遷前的中繼狀態）---
 
-db/                               # 不搬動位置；實作 ResultSink 的範例（timescaledb）
-brokers/                          # 不搬動位置；實作 OrderExecutor 的範例（shioaji/ccxt/ibkr）
-notifications/                    # 新的頂層目錄；從 librae/notifications/ 搬出，實作 Notifier 的範例（telegram）
+db/                               # 不搬動位置；LiveTrader 的 db callback 範例（timescaledb）
+brokers/                          # 不搬動位置；adapter/order_adapter 的範例（shioaji/ccxt/ibkr）
+notifications/                    # 新頂層目錄；從 librae/notifications/ 搬出，notifier 的範例（telegram）
 orchestration/
 └── cli.py                        # 原 librae/cli.py：build_config / run_dispatch / with_dedup_check
-                                   # 組裝 RunConfig，把 db/brokers/notifications 實例注入 librae 引擎
-strategies/                       # 策略研究層：因子/regime/資料抓取，不變
+strategies/                       # 策略研究層：因子/regime/資料抓取，不變（下一步遷移目標）
 scripts/                          # 一次性資料腳本，不變
 ```
 
