@@ -12,17 +12,20 @@ Supports Python 3.12 / 3.13 / 3.14 (CI runs all three, see `.github/workflows/co
 git clone git@github-librae:awwesomeman/librae.git
 cd librae
 uv sync --extra test --extra dev --extra db --extra crypto-live   # for dev/tests; add --extra tw-live/--extra us-live only if you need brokers/'s shioaji/ib_async
+cp .env.example .env   # placeholder values are enough to run the test suite — see "Environment variables" below
 git config core.hooksPath .githooks   # runs ruff check + format --check before each commit
+uv run pytest tests/ -q
 ```
 
 Run everything through `uv run` afterwards (e.g. `uv run pytest tests/ -q`), or `source .venv/bin/activate` and run commands directly.
 
 ### Environment variables
 
-librae's own code (`db/`, `brokers/`, `notifications/`) reads config from env vars — it never reads a `.env` file itself; loading one is the caller's job (`uv run --env-file .env ...`, direnv, or your own `load_dotenv()` call).
+librae's own code (`db/`, `brokers/`, `notifications/`) reads config from env vars — it never reads a `.env` file itself; loading one is the caller's job (`uv run --env-file .env ...`, direnv, or your own `load_dotenv()` call). `tests/conftest.py` does this loading for you when running `pytest` locally.
 
 - **Cloned this repo?** `cp .env.example .env` at the repo root — this template also covers the `deploy/` reference examples below (docker-compose, Grafana). Secrets with real trading/signing power (`BINANCE_API_KEY`/`SHIOAJI_*`) live in a separate `.env.secrets` (`cp .env.secrets.example .env.secrets`), which no deploy script ever syncs across machines.
 - **`pip install librae` only, no clone?** Run `librae init` — it scaffolds a minimal `.env.example` covering just the variables librae's own code reads (`TIMESCALE_DSN`, `TELEGRAM_*`, `BINANCE_*`, `SHIOAJI_*`, `IBKR_*`), with no docker-compose/Grafana-specific settings.
+- **Running the test suite needs no real infrastructure**: `db`/`brokers` tests mock `psycopg2`/`ccxt` entirely — `TIMESCALE_DSN` only needs to be a non-empty string (the `.env.example` placeholder works as-is) so `db/__init__.py`'s import-time check passes; no TimescaleDB, broker credentials, or Telegram token required to get a green `pytest` run.
 
 ---
 
