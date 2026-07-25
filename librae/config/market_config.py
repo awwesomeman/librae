@@ -46,6 +46,7 @@ class MarketConfig:
     long_margin_rate: float
     short_margin_rate: float
     impact_coef: float = 0.0
+    maintenance_margin_rate: float = 0.0
 
 
 def _default_markets_path() -> Path:
@@ -81,6 +82,7 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfi
             long_margin_rate=float(mdata.get("long_margin_rate", 1.0)),
             short_margin_rate=float(mdata.get("short_margin_rate", 1.0)),
             impact_coef=float(mdata.get("impact_coef", 0.0)),
+            maintenance_margin_rate=float(mdata.get("maintenance_margin_rate", 0.0)),
         )
 
     return markets

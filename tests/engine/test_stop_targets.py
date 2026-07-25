@@ -10,6 +10,7 @@ from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_FORCE_CLOSE,
+    REASON_LIQUIDATION,
     REASON_STOP_LOSS,
     REASON_TAKE_PROFIT,
     resolve_stop_exit,
@@ -26,6 +27,15 @@ from librae.core.strategy import Action, BaseStrategy, Context, PositionState
 
 def _zero_cost() -> CostModel:
     return CostModel.zero()
+
+
+def _leveraged_cost(margin_rate: float = 0.1, maintenance_margin_rate: float = 0.05) -> CostModel:
+    return CostModel(
+        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+        slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+        long_margin_rate=margin_rate, short_margin_rate=margin_rate,
+        maintenance_margin_rate=maintenance_margin_rate,
+    )
 
 
 def _make_pos(side="long", stop=None, tp=None) -> PositionState:
@@ -56,43 +66,84 @@ class TestResolveStopExit:
     def test_long_stop_hit_fills_at_stop_price(self):
         pos = _make_pos(side="long", stop=95.0)
         bar = {"open": 98.0, "high": 99.0, "low": 94.0, "close": 96.0}
-        assert resolve_stop_exit(pos, bar) == (95.0, REASON_STOP_LOSS)
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (95.0, REASON_STOP_LOSS)
 
     def test_long_stop_gap_down_fills_at_open(self):
         """Gap through the stop — real fill is worse than the stop price."""
         pos = _make_pos(side="long", stop=95.0)
         bar = {"open": 90.0, "high": 91.0, "low": 88.0, "close": 89.0}
-        assert resolve_stop_exit(pos, bar) == (90.0, REASON_STOP_LOSS)
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (90.0, REASON_STOP_LOSS)
 
     def test_long_take_profit_fills_exactly_at_target(self):
         pos = _make_pos(side="long", tp=110.0)
         bar = {"open": 105.0, "high": 112.0, "low": 104.0, "close": 108.0}
-        assert resolve_stop_exit(pos, bar) == (110.0, REASON_TAKE_PROFIT)
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (110.0, REASON_TAKE_PROFIT)
 
     def test_short_stop_hit_on_high(self):
         pos = _make_pos(side="short", stop=105.0)
         bar = {"open": 102.0, "high": 106.0, "low": 101.0, "close": 104.0}
-        assert resolve_stop_exit(pos, bar) == (105.0, REASON_STOP_LOSS)
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (105.0, REASON_STOP_LOSS)
 
     def test_short_take_profit_hit_on_low(self):
         pos = _make_pos(side="short", tp=90.0)
         bar = {"open": 95.0, "high": 96.0, "low": 88.0, "close": 91.0}
-        assert resolve_stop_exit(pos, bar) == (90.0, REASON_TAKE_PROFIT)
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (90.0, REASON_TAKE_PROFIT)
 
     def test_stop_loss_wins_when_both_hit_same_bar(self):
         pos = _make_pos(side="long", stop=95.0, tp=110.0)
         bar = {"open": 98.0, "high": 111.0, "low": 94.0, "close": 100.0}
-        assert resolve_stop_exit(pos, bar) == (95.0, REASON_STOP_LOSS)
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (95.0, REASON_STOP_LOSS)
 
     def test_no_trigger_returns_none(self):
         pos = _make_pos(side="long", stop=95.0, tp=110.0)
         bar = {"open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
-        assert resolve_stop_exit(pos, bar) is None
+        assert resolve_stop_exit(pos, bar, _zero_cost()) is None
 
     def test_no_stop_or_target_set_returns_none(self):
         pos = _make_pos(side="long")
         bar = {"open": 50.0, "high": 200.0, "low": 1.0, "close": 100.0}
-        assert resolve_stop_exit(pos, bar) is None
+        assert resolve_stop_exit(pos, bar, _zero_cost()) is None
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: liquidation (resolve_stop_exit + CostModel.liquidation_price)
+# ---------------------------------------------------------------------------
+
+
+class TestLiquidation:
+
+    def test_long_liquidation_fills_at_liq_price(self):
+        # entry=100, margin_rate=0.1, maintenance=0.05 -> liq_price=95
+        pos = _make_pos(side="long")
+        bar = {"open": 100.0, "high": 101.0, "low": 90.0, "close": 92.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (95.0, REASON_LIQUIDATION)
+
+    def test_long_liquidation_gap_down_fills_at_open(self):
+        pos = _make_pos(side="long")
+        bar = {"open": 90.0, "high": 91.0, "low": 85.0, "close": 88.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (90.0, REASON_LIQUIDATION)
+
+    def test_short_liquidation_fills_at_liq_price(self):
+        # entry=100, margin_rate=0.1, maintenance=0.05 -> liq_price=105
+        pos = _make_pos(side="short")
+        bar = {"open": 100.0, "high": 110.0, "low": 99.0, "close": 105.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (105.0, REASON_LIQUIDATION)
+
+    def test_liquidation_wins_over_looser_stop_same_bar(self):
+        # liq_price=95 (leverage), stop_price=80 (looser) — both crossed by
+        # this bar's low=70, but liquidation is checked first and wins.
+        pos = _make_pos(side="long", stop=80.0)
+        bar = {"open": 100.0, "high": 101.0, "low": 70.0, "close": 75.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (95.0, REASON_LIQUIDATION)
+
+    def test_disabled_by_default_never_triggers(self):
+        # margin_rate=0.1 (leveraged) but maintenance_margin_rate=0 (default,
+        # disabled) -> liquidation_price() is None regardless of price.
+        pos = _make_pos(side="long")
+        bar = {"open": 50.0, "high": 60.0, "low": 1.0, "close": 40.0}
+        cost_model = _leveraged_cost(margin_rate=0.1, maintenance_margin_rate=0.0)
+        assert resolve_stop_exit(pos, bar, cost_model) is None
+
 
 
 # ---------------------------------------------------------------------------
@@ -170,3 +221,23 @@ class TestStopTargetIntegration:
         close_events = [e for e in result.order_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_FORCE_CLOSE
+
+    def test_leveraged_position_gets_liquidated(self):
+        # Fill at bar2's open=100 -> liq_price=95 (margin_rate=0.1,
+        # maintenance=0.05). Bar3 gaps down through it.
+        bars = [
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 90, "high": 92, "low": 85, "close": 87},
+            {"open": 87, "high": 88, "low": 86, "close": 87},
+        ]
+        strategy = OpenWithStopAtBar1(stop_price=None, take_profit_price=None)
+        bt = Backtest(_make_multiindex_df(bars), strategy, cost_model=_leveraged_cost())
+        result = bt.run()
+
+        assert len(result.trades) == 1
+        assert result.trades[0].exit_price == pytest.approx(90.0)  # gapped through -> fills at open
+        close_events = [e for e in result.order_events if e.event_type == "close"]
+        assert len(close_events) == 1
+        assert close_events[0].reason == REASON_LIQUIDATION

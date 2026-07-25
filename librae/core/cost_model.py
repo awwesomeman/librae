@@ -47,6 +47,11 @@ class CostModel:
         impact_coef: Extra slippage_ticks-equivalent at 100% single-bar volume
             participation, scaled linearly down to 0 at 0% participation.
             0 (default) disables market impact entirely.
+        maintenance_margin_rate: Fraction of entry notional required to keep
+            a leveraged position open. Single rate for both sides (unlike
+            long/short_margin_rate — maintenance-margin tiers on the venues
+            this matters for, crypto perps, aren't side-dependent). 0
+            (default) disables liquidation simulation entirely.
     """
 
     multiplier: float
@@ -58,6 +63,7 @@ class CostModel:
     long_margin_rate: float = 1.0
     short_margin_rate: float = 1.0
     impact_coef: float = 0.0
+    maintenance_margin_rate: float = 0.0
 
     @classmethod
     def zero(cls) -> CostModel:
@@ -66,6 +72,7 @@ class CostModel:
             multiplier=1.0, commission_rate=0.0, min_commission=0.0,
             slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
             long_margin_rate=1.0, short_margin_rate=1.0, impact_coef=0.0,
+            maintenance_margin_rate=0.0,
         )
 
     @classmethod
@@ -130,6 +137,7 @@ class CostModel:
             long_margin_rate=market.long_margin_rate,
             short_margin_rate=market.short_margin_rate,
             impact_coef=market.impact_coef,
+            maintenance_margin_rate=market.maintenance_margin_rate,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
@@ -182,3 +190,26 @@ class CostModel:
         """Estimate total cash outlay for entering a position (for sizing)."""
         notional = price * quantity * self.multiplier
         return notional * self.margin_rate(side) + self.total_cost(price, quantity)
+
+    def liquidation_price(self, entry_price: float, side: Literal["long", "short"]) -> float | None:
+        """Approximate isolated-margin liquidation price (ignores fees/
+        funding, same simplification level as the rest of this margin
+        model). None if maintenance_margin_rate is disabled (0, the
+        default) or the side's margin_rate doesn't leave a valid
+        maintenance buffer (misconfigured — fail safe, not a crash, since
+        this is a safety feature).
+
+        Derivation (long): liquidates when margin_locked + unrealized_pnl
+        <= maintenance_requirement, i.e.
+        entry_notional*margin_rate + (mark-entry)*qty*mult <= entry_notional*maintenance_margin_rate.
+        Solving for mark (entry_notional = entry_price*qty*mult cancels
+        qty*mult) gives the formula below; short is the mirror image.
+        """
+        if self.maintenance_margin_rate <= 0:
+            return None
+        margin_rate = self.margin_rate(side)
+        if margin_rate <= self.maintenance_margin_rate:
+            return None
+        if side == "long":
+            return entry_price * (1 + self.maintenance_margin_rate - margin_rate)
+        return entry_price * (1 - self.maintenance_margin_rate + margin_rate)

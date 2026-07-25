@@ -34,6 +34,7 @@ REASON_STOP_LOSS = "stop_loss"
 REASON_TAKE_PROFIT = "take_profit"
 REASON_FORCE_CLOSE = "force_close"
 REASON_DRAWDOWN_BREACH = "drawdown_breach"
+REASON_LIQUIDATION = "liquidation"
 
 
 @dataclass(frozen=True)
@@ -330,21 +331,38 @@ def build_close_event(
 # ---------------------------------------------------------------------------
 
 
-def resolve_stop_exit(pos: PositionState, bar: dict[str, float]) -> tuple[float, str] | None:
-    """Check whether this bar's range triggers pos's stop-loss or take-profit.
+def resolve_stop_exit(
+    pos: PositionState, bar: dict[str, float], cost_model: CostModel,
+) -> tuple[float, str] | None:
+    """Check whether this bar's range triggers pos's liquidation, stop-loss,
+    or take-profit.
 
-    stop_price is modeled as a stop-market order: once the bar's range
-    reaches it, it fills at the *worse* of (stop_price, bar open) to capture
-    gap-through risk. take_profit_price is modeled as a limit order: it
-    fills exactly at that price once touched. Stop-loss is checked first —
-    if both would trigger on the same bar, the conservative outcome wins.
+    Liquidation is checked first: it's the hardest, most conservative
+    constraint a real exchange enforces — if it triggers, no soft stop
+    order would have executed first in reality, so it always wins over a
+    stop/TP that would also trigger the same bar. It's modeled the same
+    way as stop_price: fills at the *worse* of (liquidation_price, bar
+    open) to capture gap-through risk. Disabled (never triggers) unless
+    cost_model.maintenance_margin_rate is set — see CostModel.liquidation_price.
 
-    Returns (fill_price, reason) or None if neither is triggered.
+    Otherwise: stop_price is modeled as a stop-market order (worse-of-gap
+    fill); take_profit_price is modeled as a limit order (fills exactly at
+    that price once touched). Stop-loss is checked before take-profit — if
+    both would trigger on the same bar, the conservative outcome wins.
+
+    Returns (fill_price, reason) or None if nothing is triggered.
     """
     high, low, open_ = bar.get("high"), bar.get("low"), bar.get("open")
     if high is None or low is None or open_ is None:
         return None
     is_long = pos.side == "long"
+
+    liq_price = cost_model.liquidation_price(pos.entry_price, pos.side)
+    if liq_price is not None:
+        triggered = low <= liq_price if is_long else high >= liq_price
+        if triggered:
+            fill = min(liq_price, open_) if is_long else max(liq_price, open_)
+            return fill, REASON_LIQUIDATION
 
     if pos.stop_price is not None:
         triggered = low <= pos.stop_price if is_long else high >= pos.stop_price
@@ -383,11 +401,11 @@ def check_stop_targets(
         if bar is None:
             continue
         pos = positions[sym]
-        hit = resolve_stop_exit(pos, bar)
+        cost_model = get_cost_model(sym)
+        hit = resolve_stop_exit(pos, bar, cost_model)
         if hit is None:
             continue
         price, reason = hit
-        cost_model = get_cost_model(sym)
         trade, event, proceeds, _ = build_close_event(pos, ts, price, cost_model, reason)
         trades.append(trade)
         events.append(event)

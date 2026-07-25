@@ -163,6 +163,44 @@ class TestDynamicSlippage:
         assert cm.calc_slippage(10.0, bar_volume=None) == base
 
 
+# ── Liquidation ───────────────────────────────────────────────────────────
+
+
+class TestLiquidationPrice:
+    """maintenance_margin_rate defaults to 0 (disabled) — every fixture
+    above (crypto_cost/tw_futures_cost) leaves it unset, so this needs its
+    own leveraged fixture."""
+
+    @pytest.fixture
+    def leveraged_cost(self) -> CostModel:
+        return CostModel(
+            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+            long_margin_rate=0.1, short_margin_rate=0.1, maintenance_margin_rate=0.05,
+        )
+
+    def test_long_formula(self, leveraged_cost: CostModel) -> None:
+        # entry*(1 + maintenance - margin) = 100*(1+0.05-0.1) = 95
+        assert leveraged_cost.liquidation_price(100.0, "long") == pytest.approx(95.0)
+
+    def test_short_formula(self, leveraged_cost: CostModel) -> None:
+        # entry*(1 - maintenance + margin) = 100*(1-0.05+0.1) = 105
+        assert leveraged_cost.liquidation_price(100.0, "short") == pytest.approx(105.0)
+
+    def test_disabled_when_maintenance_margin_rate_zero(self, crypto_cost: CostModel) -> None:
+        assert crypto_cost.liquidation_price(100.0, "long") is None
+
+    def test_disabled_when_margin_rate_leaves_no_buffer(self) -> None:
+        # margin_rate <= maintenance_margin_rate: already under-margined at
+        # entry, not a sane liquidation price to compute — fail safe.
+        cm = CostModel(
+            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
+            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+            long_margin_rate=0.05, short_margin_rate=0.05, maintenance_margin_rate=0.05,
+        )
+        assert cm.liquidation_price(100.0, "long") is None
+
+
 # ── Tax ───────────────────────────────────────────────────────────────────
 
 

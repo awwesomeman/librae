@@ -126,6 +126,12 @@ cfg = RunConfig(..., params={
 - `max_volume_participation_pct`：只限制單筆成交（新倉/加碼），不是累加 vs 部位大小；跟 `max_position_pct` 一樣是裁量不拒絕。只作用於進場 —— 出場（策略平倉、停損/停利、force close、回撤熔斷平倉）不受此限制。
 - 成交量感知的滑價（`CostModel.impact_coef`）跟這個開關無關、預設也是關閉：只要有成交量資料傳入，且該市場/symbol 的 `impact_coef > 0`（在 `markets.yaml`/`symbols.yaml`/`cost_overrides` 設定），滑價就會隨單筆成交佔該 bar volume 的比例線性放大，無論有沒有設定上限。
 
+### 保證金 / 強平模擬
+
+`CostModel.maintenance_margin_rate`（預設 0 = 關閉，跟 `impact_coef` 同一套「屬於市場/商品，不是 `cfg.params`」的設定方式，走 `markets.yaml`/`symbols.yaml`/`cost_overrides`）。設定後 `resolve_stop_exit`（backtest/live 共用）在每根 bar 都會檢查部位是否觸及 `CostModel.liquidation_price(entry_price, side)` 算出的強平價，觸及就以 `REASON_LIQUIDATION` 強制平倉，用跟 `stop_price` 一樣的 gap-through 邏輯（缺口跳空時取較差的（強平價, bar open））。強平檢查優先於停損/停利——同一根 bar 兩者都觸發時，強平（交易所實際會執行的最保守結果）優先。
+
+公式是簡化過的 isolated margin 近似值（忽略手續費/資金費率，維持這個引擎既有保證金模型的簡化程度）：多單 `entry*(1 + maintenance_margin_rate - margin_rate)`，空單 `entry*(1 - maintenance_margin_rate + margin_rate)`。現貨（`margin_rate=1.0`）不設 `maintenance_margin_rate` 就永遠不會觸發。
+
 ### 對帳 (reconciliation, live only)
 
 `LiveTrader.run()` 啟動時自動執行，`sim` 模式（無 `order_adapter`）為 no-op：
@@ -179,7 +185,7 @@ trader.run()  # DB 寫入、Telegram、heartbeat、KPI 更新全由引擎處理
 | `Fill` | 成交回報：price, quantity, commission, slippage, tax |
 | `TradeResult` | 完成交易：entry/exit 全資訊 + PnL + periods_held |
 | `TradePnL` | PnL 拆解：gross_pnl, net_pnl, commission, slippage, tax |
-| `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, impact_coef（成交量衝擊係數，預設 0 關閉） |
+| `CostModel` | 成本模型（frozen）：multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, impact_coef（成交量衝擊係數，預設 0 關閉）, maintenance_margin_rate（維持保證金率，預設 0 關閉強平模擬） |
 
 ### Output 層
 
