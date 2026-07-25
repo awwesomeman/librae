@@ -5,6 +5,7 @@ Defines the contract between strategies and the engine:
 - Engine provides Context with market data + portfolio state
 - Engine executes Actions via Executor
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -58,6 +59,12 @@ class Action:
     """What the strategy wants the engine to do.
 
     Attributes:
+        quantity: None sizes using all available cash (single-asset default).
+            When on_bar returns multiple long/short Actions for the same bar
+            (e.g. a cross-sectional/stock-picking strategy opening several
+            symbols at once), leaving quantity=None on more than one of them
+            lets the first-processed Action consume all cash and starves the
+            rest — set explicit per-symbol quantity (e.g. equal-weight sizing).
         fill_price: How to resolve the execution price on the *next* bar.
             str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
             float — limit price; fills only if next bar's low <= price <= high.
