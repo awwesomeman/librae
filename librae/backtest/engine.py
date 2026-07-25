@@ -142,7 +142,10 @@ class Backtest:
             self._strategy_name = resolved_name
         else:
             cls_name = type(strategy).__name__
-            self._strategy_name = re.sub(r"(?<!^)(?=[A-Z])", "_", cls_name).lower()
+            if cls_name.endswith("Strategy") and len(cls_name) > 8:
+                cls_name = cls_name[:-8]
+            s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", cls_name)
+            self._strategy_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s).lower()
 
     # --- Public properties ---
 

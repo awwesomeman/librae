@@ -27,7 +27,7 @@ dependencies = [
   "pyyaml>=6.0",
   "psycopg2-binary>=2.9",
   "pyarrow>=14.0",
-  "factrix>=0.17",  # 0.17 is the first version with public factrix.stats.holm_adjusted_p
+  "factrix>=0.19",  # updated to 0.19.0
   "ccxt>=4.0",  # was only lazily imported (brokers/crypto_adapter.py) and never declared
 ]
 
@@ -57,6 +57,9 @@ us-live = [
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
+]
+viz = [
+  "lightweight-charts>=2.0",  # local trade-chart exploration only (librae/backtest/charts.py); Grafana handles ops dashboards
 ]
 
 [tool.setuptools.packages.find]

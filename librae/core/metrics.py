@@ -196,3 +196,105 @@ def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: int | float) -> float |
     except Exception:
         logger.warning("QuantStats %s failed, returning None", fn.__name__)
         return None
+
+
+def generate_tearsheet(
+    equity_values: Sequence[float],
+    timestamps: Sequence[datetime],
+    output_path: str = "tearsheet.html",
+    title: str = "Strategy Performance Report",
+    benchmark_values: Sequence[float] | None = None,
+) -> str:
+    """Generate QuantStats HTML tearsheet report with interactive plots and tables."""
+    import quantstats as qs
+
+    if not equity_values or len(equity_values) < 2:
+        logger.warning("Not enough equity curve points to generate tearsheet")
+        return ""
+
+    eq_arr = np.array(equity_values, dtype=np.float64)
+    ts_index = pd.DatetimeIndex(timestamps[1:]) if len(timestamps) > 1 else pd.DatetimeIndex([])
+    returns = pd.Series(
+        np.diff(eq_arr) / (eq_arr[:-1] + EPSILON),
+        index=ts_index,
+        dtype=np.float64,
+    )
+
+    benchmark_returns = None
+    if benchmark_values and len(benchmark_values) == len(equity_values):
+        b_arr = np.array(benchmark_values, dtype=np.float64)
+        benchmark_returns = pd.Series(
+            np.diff(b_arr) / (b_arr[:-1] + EPSILON),
+            index=ts_index,
+            dtype=np.float64,
+        )
+
+    qs.reports.html(returns, benchmark=benchmark_returns, output=output_path, title=title)
+    return output_path
+
+
+def compute_trade_mae_mfe(
+    order_events: Sequence[OrderEventRecord],
+    ohlcv: pd.DataFrame,
+) -> dict[str, float]:
+    """Compute MAE and MFE percentiles across executed trades.
+
+    Args:
+        order_events: Sequence of OrderEventRecord from BacktestOutput.
+        ohlcv: Single-symbol OHLCV DataFrame with DatetimeIndex and 'high', 'low'.
+
+    Returns:
+        Dict containing:
+        - n: total completed trades count
+        - median_mae: median MAE % (max adverse drawdown during hold)
+        - p75_abs_mae: 75th percentile of MAE % (recommended SL candidate)
+        - median_mfe: median MFE % (recommended TP candidate)
+        - p75_mfe: 75th percentile of MFE %
+    """
+    if not order_events:
+        return {"n": 0, "median_mae": 0.0, "p75_abs_mae": 0.0, "median_mfe": 0.0, "p75_mfe": 0.0}
+
+    pairs: list[tuple[OrderEventRecord, OrderEventRecord]] = []
+    open_ev: OrderEventRecord | None = None
+    for ev in order_events:
+        if ev.event_type == "open":
+            open_ev = ev
+        elif ev.event_type == "close" and open_ev is not None:
+            pairs.append((open_ev, ev))
+            open_ev = None
+
+    if not pairs:
+        return {"n": 0, "median_mae": 0.0, "p75_abs_mae": 0.0, "median_mfe": 0.0, "p75_mfe": 0.0}
+
+    df_no_tz = ohlcv.copy()
+    if df_no_tz.index.tz is not None:
+        df_no_tz.index = df_no_tz.index.tz_localize(None)
+
+    maes, mfes = [], []
+    for entry_ev, exit_ev in pairs:
+        t_entry = entry_ev.ts.replace(tzinfo=None) if entry_ev.ts.tzinfo else entry_ev.ts
+        t_exit = exit_ev.ts.replace(tzinfo=None) if exit_ev.ts.tzinfo else exit_ev.ts
+        w = df_no_tz.loc[(df_no_tz.index >= t_entry) & (df_no_tz.index <= t_exit)]
+        if not w.empty:
+            max_h = float(w["high"].max())
+            min_l = float(w["low"].min())
+            if entry_ev.side == "short":
+                mfe = (entry_ev.price - min_l) / entry_ev.price * 100.0
+                mae = (max_h - entry_ev.price) / entry_ev.price * 100.0
+            else:
+                mfe = (max_h - entry_ev.price) / entry_ev.price * 100.0
+                mae = (entry_ev.price - min_l) / entry_ev.price * 100.0
+            mfes.append(mfe)
+            maes.append(mae)
+
+    if not mfes:
+        return {"n": 0, "median_mae": 0.0, "p75_abs_mae": 0.0, "median_mfe": 0.0, "p75_mfe": 0.0}
+
+    arr_mae, arr_mfe = np.array(maes), np.array(mfes)
+    return {
+        "n": len(arr_mae),
+        "median_mae": float(np.median(arr_mae)),
+        "p75_abs_mae": float(np.percentile(np.abs(arr_mae), 75)),
+        "median_mfe": float(np.median(arr_mfe)),
+        "p75_mfe": float(np.percentile(arr_mfe, 75)),
+    }

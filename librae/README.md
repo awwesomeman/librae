@@ -19,7 +19,8 @@ core/                       共用 domain model（純計算，無 I/O）
 
 backtest/                   回測 runtime
 ├── engine.py               Backtest — bar-by-bar 執行 + build_output()
-└── schema.py               BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord
+├── schema.py               BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord
+└── charts.py               plot_trades — lightweight-charts 疊 order_events 進出場點（純渲染，不重算，本地研究用；[extra: viz]）
 
 live/                       即時 / 模擬 runtime
 ├── engine.py               LiveTrader — polling loop + 信號偵測
@@ -88,6 +89,25 @@ output = bt.build_output()                      # BacktestOutput
 ```
 
 **資料格式**：MultiIndex DataFrame `(symbol, datetime)` + OHLCV + 自訂特徵欄位。
+
+### 多資產 / 選股策略
+
+引擎本身是 portfolio-level 設計（`positions` 是 `dict[symbol]`，`equity_curve`/`metrics` 皆為組合層級），`on_bar()` 可在同一根 bar 回傳多個不同 symbol 的 `Action`，不需改動 engine/executor/schema。唯一要注意：`Action.quantity=None` 預設用光可用現金（單資產便利預設），同一 bar 開多檔部位時必須自行算好每檔 `quantity`（見 `strategy.py` 中 `Action.quantity` docstring），否則第一個 Action 會吃光現金。
+
+### 本地看進出場點 (trade chart)
+
+`pip install -e ".[viz]"` 後使用。純渲染 `build_output()` 已算好的 `order_events`，不重新模擬/計算，數字保證跟 `strategy_performance`/Grafana 一致（SSOT 見上方「多資產 / 選股策略」段落）。
+
+```python
+from librae.backtest.charts import plot_trades, plot_trades_by_run_id
+
+ohlcv = df.xs(symbol, level="symbol")            # 單一 symbol 的 OHLCV
+plot_trades(ohlcv, output.order_events, symbol)  # 剛跑完回測，手上已有 output
+
+plot_trades_by_run_id(run_id)                    # 或者：不重跑回測，直接從 DB 讀已落地的 run
+```
+
+`plot_trades_by_run_id` 讀的是 `db.timescale_reader.load_trade_events`/`load_ohlcv`——跟 Grafana 同一份 `trade_events`/`ohlcv` 表，同源保證不 drift。
 
 ### 模擬監控 (sim)
 
