@@ -1,15 +1,18 @@
 # librae
 
-量化策略研究與即時監控平台。自建回測引擎 ([librae](librae/README.md)) + 策略框架 + TimescaleDB + Grafana。
+量化策略研究與即時監控平台。自建回測引擎 ([librae](#回測引擎-librae)) + 策略框架 + TimescaleDB + Grafana。
 
 ---
 
 ## Quick Start（本機）
 
+支援 Python 3.12 / 3.13 / 3.14（CI 三個版本都跑，見 `.github/workflows/core-tests.yml`）。
+
 ```bash
 git clone git@github-librae:awwesomeman/librae.git
 cd librae
-uv sync --extra test   # 開發/測試用；只要跑本機 tw_futures live 才需要再加 --extra tw-live
+uv sync --extra test --extra dev   # 開發/測試用；只要跑本機 tw_futures live 才需要再加 --extra tw-live
+git config core.hooksPath .githooks   # commit 前跑 ruff check + format --check
 
 cp .env.example .env   # 填入 TIMESCALE_DSN、密碼
 cp .env.secrets.example .env.secrets   # 若要跑 Shioaji 再填 SHIOAJI_*（這份不會被任何 deploy 腳本同步出去）
@@ -18,6 +21,33 @@ cp .env.secrets.example .env.secrets   # 若要跑 Shioaji 再填 SHIOAJI_*（�
 之後所有指令都透過 `uv run` 執行（例如 `uv run pytest tests/ -q`），或 `source .venv/bin/activate` 後直接跑——下面「常用指令」為求簡潔省略了 `uv run` 前綴。
 
 > **注意**：`.env` 沒有 `export`，單純 `source .env` 只在目前 shell 建立變數，不會傳給 python 子行程（`os.getenv` 拿到 `None`，DB 連線悄悄 fallback 回 `localhost`）。要嘛 `uv run --env-file .env <script>`，要嘛 `set -a; source .env; set +a` 之後再跑 python。
+
+---
+
+## 回測引擎 (librae)
+
+量化回測與即時交易引擎。提供策略執行、持倉管理、成本模擬、績效計算的完整框架，**回測、模擬、實盤共用同一份策略，零修改**。
+
+```python
+from librae import Backtest, BaseStrategy, Action, Context, RunConfig
+
+class MyStrategy(BaseStrategy):
+    def on_bar(self, ctx: Context) -> list[Action]:
+        if ctx.positions.get(ctx.symbol):
+            if ctx.bar.get("exit_signal"):
+                return [Action(type="close", symbol=ctx.symbol)]
+            return []
+        if ctx.bar.get("entry_signal"):
+            return [Action(type="long", symbol=ctx.symbol)]
+        return []
+
+df = fetch_and_prepare(symbol, months)          # 你的 ETL，資料格式見下方連結
+bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
+bt.run()
+output = bt.build_output()                      # BacktestOutput
+```
+
+引擎的目錄結構、依賴方向、風控/保證金/對帳/staleness 偵測細節、核心型別、設計決策、Config API 完整說明見 [`architecture.md`「回測引擎設計」](architecture.md#回測引擎設計librae)。
 
 ---
 
@@ -32,7 +62,7 @@ def run_backtest(cfg: RunConfig) -> None: ...
 def run_realtime(cfg: RunConfig) -> None: ...
 
 def main() -> None:
-    from librae.cli import run_dispatch
+    from orchestration.cli import run_dispatch
     run_dispatch(STRATEGY_NAME, __file__, run_backtest, run_realtime)
 ```
 
@@ -124,6 +154,8 @@ cd deploy && docker compose -f docker-compose.local.yml up -d
 | 指令 | 說明 |
 |------|------|
 | `pytest tests/ -q` | 跑測試 |
+| `ruff check .` | Lint（範圍見 `pyproject.toml` `[tool.ruff]`，`strategies/` 尚未納入） |
+| `ruff format .` | 格式化（同上排除 `strategies/`） |
 | `python -m strategies.<name>.strategy --mode backtest` | 策略回測（`<name>` 需要有已驗證通過的 `strategy.py`——目前有哪些，見 `strategies/FACTOR_ANALYSIS.md`） |
 | `python -m strategies.<name>.strategy --mode sim --poll-seconds 60` | 策略模擬（不下真單） |
 | `python -m strategies.<name>.strategy --mode live --poll-seconds 60` | 策略實盤 |
@@ -151,7 +183,7 @@ cd deploy && docker compose -f docker-compose.local.yml up -d
 
 ## 相關文件
 
-- [`librae/README.md`](librae/README.md) — 引擎架構、API、類型系統
+- [「回測引擎 (librae)」](#回測引擎-librae)（本文件）— 引擎架構、API、類型系統
 - [`architecture.md`](architecture.md) — 系統分層、命名慣例、VM 部署與策略管理
 - [`docs/decisions/`](docs/decisions/) — 架構決策記錄
 - [`docs/plans/`](docs/plans/) — 執行計劃

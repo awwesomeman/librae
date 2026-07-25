@@ -61,6 +61,9 @@ test = [
 viz = [
   "lightweight-charts>=2.0",  # local trade-chart exploration only (librae/backtest/charts.py); Grafana handles ops dashboards
 ]
+dev = [
+  "ruff==0.16.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -73,6 +76,29 @@ markers = [
   "tw_live: tests requiring shioaji (deselect with: -m 'not tw_live')",
   "us_live: tests requiring ib_async (deselect with: -m 'not us_live')",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# strategies/ is migrating out (docs/plans/refactor_librae_decouple.md) and
+# isn't worth cleaning up pre-move.
+src = ["librae", "notifications", "orchestration", "db", "brokers", "app", "scripts"]
+extend-exclude = ["strategies", "tests/strategies"]
+
+[tool.ruff.lint]
+# Standard rule set: pycodestyle (E/W), pyflakes (F), isort (I), bugbear (B),
+# pyupgrade (UP), simplify (SIM), ruff-specific (RUF). No D (pydocstyle) —
+# docstrings here are prose/WHY-comments, not Google/NumPy structured.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "E501",   # line too long — `ruff format` handles wrapping
+  "RUF001", "RUF002", "RUF003",  # fire on intentional CJK punctuation in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Grouped by API area (schema, engine, cost model, strategy types, ...), not
+# alphabetical — sorting would scramble the intended reading order.
+"librae/__init__.py" = ["I001", "RUF022"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
