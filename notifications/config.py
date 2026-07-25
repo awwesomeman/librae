@@ -1,7 +1,7 @@
 """Typed configuration for Telegram notifications.
 
 Behavior settings (enabled, which notifications to send) come from YAML config.
-Secrets (bot_token, chat_id) come from environment variables via CredentialConfig.
+Secrets (bot_token, chat_id) come from environment variables via TelegramCredentials.from_env().
 
 Usage:
     config = TelegramConfig.from_dict(yaml_dict.get("telegram", {}))

@@ -21,7 +21,7 @@ import json
 import os
 import urllib.request
 
-_USER_AGENT = os.environ.get("SEC_EDGAR_USER_AGENT", "quant-strategy-lab research-contact@example.com")
+_USER_AGENT = os.environ.get("SEC_EDGAR_USER_AGENT", "librae research-contact@example.com")
 
 # ticker -> 10-digit zero-padded CIK
 TICKER_TO_CIK = {

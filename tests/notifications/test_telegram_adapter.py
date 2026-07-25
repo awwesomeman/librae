@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from librae.config.notification import NotificationConfig, TelegramConfig
-from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
+from notifications.config import NotificationConfig, TelegramConfig
+from notifications.telegram import TelegramAdapter, TelegramCredentials
 
 
 class TestTelegramCredentials:
@@ -35,7 +35,7 @@ class TestTelegramAdapter:
         chat_id: str = "123",
     ) -> TelegramAdapter:
         """Helper to build adapter with explicit config."""
-        from librae.config.notification import StatusConfig
+        from notifications.config import StatusConfig
         config = TelegramConfig(
             enabled=enabled,
             notifications=NotificationConfig(

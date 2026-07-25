@@ -1,4 +1,4 @@
-# quant-strategy-lab
+# librae
 
 量化策略研究與即時監控平台。自建回測引擎 ([librae](librae/README.md)) + 策略框架 + TimescaleDB + Grafana。
 
@@ -7,8 +7,8 @@
 ## Quick Start（本機）
 
 ```bash
-git clone git@github-quant-strategy:awwesomeman/quant-strategy-lab.git
-cd quant-strategy-lab
+git clone git@github-librae:awwesomeman/librae.git
+cd librae
 uv sync --extra test   # 開發/測試用；只要跑本機 tw_futures live 才需要再加 --extra tw-live
 
 cp .env.example .env   # 填入 TIMESCALE_DSN、密碼

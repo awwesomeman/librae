@@ -88,10 +88,20 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfi
     return markets
 
 
-def get_market(market_name: str, path: str | Path | None = None) -> MarketConfig:
-    """Get a single market config by name."""
-    markets = load_market_configs(path)
-    if market_name not in markets:
-        available = list(markets.keys())
+def get_market(
+    market_name: str,
+    path: str | Path | None = None,
+    markets: dict[str, MarketConfig] | None = None,
+) -> MarketConfig:
+    """Get a single market config by name.
+
+    markets: a pre-built registry to look up in directly, bypassing the
+        bundled markets.yaml entirely. Lets a caller outside this package
+        register its own markets (e.g. `get_market("my_market", markets={...})`)
+        without touching librae's own config file. Takes priority over `path`.
+    """
+    resolved = markets if markets is not None else load_market_configs(path)
+    if market_name not in resolved:
+        available = list(resolved.keys())
         raise KeyError(f"Market '{market_name}' not found. Available: {available}")
-    return markets[market_name]
+    return resolved[market_name]

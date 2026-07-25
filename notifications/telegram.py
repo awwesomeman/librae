@@ -4,7 +4,7 @@ Secrets (bot_token, chat_id): loaded via TelegramCredentials.from_env("TELEGRAM"
 Behavior (enabled, notification toggles): loaded via TelegramConfig.from_dict().
 
 Usage:
-    from librae.config.notification import TelegramConfig
+    from notifications.config import TelegramConfig
     config = TelegramConfig.from_dict({"enabled": True})
     creds = TelegramCredentials.from_env("TELEGRAM")
     adapter = TelegramAdapter(config=config, credentials=creds)
@@ -12,14 +12,15 @@ Usage:
 """
 from __future__ import annotations
 
+import dataclasses
 import html
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from brokers.base import CredentialConfig
-from librae.config.notification import NotificationConfig, TelegramConfig
+from notifications.config import NotificationConfig, TelegramConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ EMOJI_SUCCESS = "\u2714\ufe0f"  # ✔️
 
 
 @dataclass
-class TelegramCredentials(CredentialConfig):
+class TelegramCredentials:
     """Telegram API secrets from environment variables.
 
     Env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
@@ -38,6 +39,23 @@ class TelegramCredentials(CredentialConfig):
 
     bot_token: str = ""
     chat_id: str = ""
+
+    @classmethod
+    def from_env(cls, prefix: str, **overrides: str) -> "TelegramCredentials":
+        """Build from env vars ``{prefix}_{FIELD_UPPER}``; overrides win.
+
+        Self-contained on purpose (not brokers/base.py's CredentialConfig)
+        — a notification adapter has no business depending on brokers.
+        """
+        kwargs: dict[str, str] = {}
+        for f in dataclasses.fields(cls):
+            if f.name in overrides:
+                kwargs[f.name] = overrides[f.name]
+            else:
+                env_val = os.environ.get(f"{prefix}_{f.name.upper()}")
+                if env_val is not None:
+                    kwargs[f.name] = env_val
+        return cls(**kwargs)
 
 
 class TelegramAdapter:

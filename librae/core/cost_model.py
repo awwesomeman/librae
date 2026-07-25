@@ -80,12 +80,17 @@ class CostModel:
         cls,
         cfg: RunConfig,
         override: CostModel | None = None,
+        markets: dict[str, "MarketConfig"] | None = None,
     ) -> CostModel:
         """Resolve cost model with standard priority:
         explicit override > cfg.cost_overrides > symbols.yaml per-symbol
         multiplier (spot auto-1.0, contract_* required-explicit) and
         tick_size (optional override) > market-level defaults for
         everything else (see librae/config/symbols.py's module docstring).
+
+        markets: pre-built registry passed through to get_market() —
+            lets a caller resolve cfg.market against markets it built
+            itself instead of librae's bundled markets.yaml.
 
         Raises:
             ValueError: cfg.symbol isn't registered in symbols.yaml (so no
@@ -96,7 +101,7 @@ class CostModel:
         if override is not None:
             return override
         from librae.config.market_config import get_market
-        mc = get_market(cfg.market)
+        mc = get_market(cfg.market, markets=markets)
 
         from librae.config.symbols import get_symbol
         try:

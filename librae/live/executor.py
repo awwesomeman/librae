@@ -14,10 +14,10 @@ import logging
 from typing import TYPE_CHECKING, Protocol
 
 from librae.core.cost_model import CostModel
-from librae.notifications.telegram import TelegramAdapter
 
 if TYPE_CHECKING:
     from librae.core.executor import OrderEvent
+    from notifications.telegram import TelegramAdapter
 
 logger = logging.getLogger(__name__)
 

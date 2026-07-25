@@ -13,7 +13,7 @@ Usage:
     python scripts/check_heartbeat.py --loop --interval 60
 
     # Cron (every 5 minutes)
-    */5 * * * * cd /path/to/quant-strategy-lab && .venv/bin/python scripts/check_heartbeat.py
+    */5 * * * * cd /path/to/librae && .venv/bin/python scripts/check_heartbeat.py
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ import logging
 import time
 
 from db import get_conn
-from librae.config.notification import TelegramConfig
-from librae.notifications.telegram import EMOJI_WARNING, TelegramAdapter, TelegramCredentials
+from notifications.config import TelegramConfig
+from notifications.telegram import EMOJI_WARNING, TelegramAdapter, TelegramCredentials
 
 logger = logging.getLogger(__name__)
 

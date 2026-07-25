@@ -58,6 +58,9 @@ class LiveTrader:
         on_heartbeat: Same pattern as on_bar.
         on_signal_outcome: Same pattern as on_bar.
         warmup_fetcher: _UNSET -> DB-first warmup; None -> API-only; callable -> use it.
+        notifier: _UNSET -> build default TelegramAdapter from cfg (skipped
+            entirely when cfg.no_db); None -> no notifications; object -> use it
+            (must implement TelegramAdapter's duck-typed interface).
     """
 
     def __init__(
@@ -69,6 +72,7 @@ class LiveTrader:
         adapter: OHLCVFetcher | None = None,
         order_adapter: object | None = None,
         cost_model: CostModel | None = None,
+        notifier: object | None = _UNSET,
         on_bar: Callable[..., None] | None | object = _UNSET,
         on_order_event: Callable[..., None] | None | object = _UNSET,
         on_ohlcv: Callable[..., None] | None | object = _UNSET,
@@ -76,10 +80,8 @@ class LiveTrader:
         on_signal_outcome: Callable[..., None] | None | object = _UNSET,
         warmup_fetcher: Callable[..., pd.DataFrame] | None | object = _UNSET,
     ) -> None:
-        from librae.config.notification import TelegramConfig
         from librae.core.cost_model import CostModel
         from librae.core.utils import generate_run_id, interval_to_timedelta, to_ccxt
-        from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
 
         self._strategy = strategy
         self._feature_fn = feature_fn
@@ -129,13 +131,16 @@ class LiveTrader:
         # --- Build cost_model ---
         resolved_cm = CostModel.from_config(cfg, override=cost_model)
 
-        # --- Build telegram ---
-        tg_config = TelegramConfig.from_dict(cfg.telegram_config or {})
-        tg_creds = TelegramCredentials.from_env("TELEGRAM")
-        telegram = TelegramAdapter(config=tg_config, credentials=tg_creds)
-        # Disable telegram if dry_run
-        if cfg.dry_run:
-            telegram = None
+        # --- Resolve notifier (Telegram by default; injectable) ---
+        # cfg.no_db gates this the same way it gates the db callbacks below
+        # (dry_run implies no_db — see RunConfig.__post_init__), so a fully
+        # local run never imports the notifications package.
+        if notifier is not _UNSET:
+            resolved_notifier = notifier
+        elif cfg.no_db:
+            resolved_notifier = None
+        else:
+            resolved_notifier = self._build_notifier()
 
         # --- Build run_id ---
         strategy_name = cfg.strategy_name
@@ -147,7 +152,7 @@ class LiveTrader:
         is_live = cfg.mode == "live"
         self._executor = LiveExecutor(
             resolved_cm, simulation=not is_live,
-            telegram=telegram, strategy_name=strategy_name,
+            telegram=resolved_notifier, strategy_name=strategy_name,
             order_adapter=order_adapter if is_live else None,
         )
 
@@ -323,6 +328,18 @@ class LiveTrader:
                 signal_type=signal_type,
             )
         return on_signal_event_cb
+
+    def _build_notifier(self) -> object | None:
+        """Default notifier: TelegramAdapter built from cfg.telegram_config
+        + TELEGRAM_* env vars. Lazy import so a fully local run (cfg.no_db,
+        or an explicit notifier= override) never touches the notifications
+        package."""
+        from notifications.config import TelegramConfig
+        from notifications.telegram import TelegramAdapter, TelegramCredentials
+
+        tg_config = TelegramConfig.from_dict(self._cfg.telegram_config or {})
+        tg_creds = TelegramCredentials.from_env("TELEGRAM")
+        return TelegramAdapter(config=tg_config, credentials=tg_creds)
 
     def _build_warmup_fetcher(self) -> Callable:
         def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:

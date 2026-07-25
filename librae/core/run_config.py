@@ -5,7 +5,7 @@ RunConfig is a frozen dataclass that holds all parameters for a run:
 - Perf params (stored in DB backtest_runs.perf_params, display only)
 - Behavior params (not stored in DB)
 
-The sole factory is build_config() in librae/cli.py.
+The sole factory is build_config() in orchestration/cli.py.
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def _get_code_rev() -> str:
 class RunConfig:
     """Unified parameter container for all execution paths.
 
-    Created exclusively by build_config() in librae/cli.py.
+    Created exclusively by build_config() in orchestration/cli.py.
     Passed through: CLI -> engine -> DB writer.
     """
 

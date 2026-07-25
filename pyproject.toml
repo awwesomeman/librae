@@ -1,5 +1,5 @@
 [project]
-name = "quant-strategy-lab"
+name = "librae"
 version = "0.1.0"
 description = "Quant strategy research platform — Librae backtest engine, multi-asset support"
 readme = "README.md"
@@ -32,8 +32,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/awwesomeman/quant-strategy-lab"
-Issues = "https://github.com/awwesomeman/quant-strategy-lab/issues"
+Repository = "https://github.com/awwesomeman/librae"
+Issues = "https://github.com/awwesomeman/librae/issues"
 
 [project.optional-dependencies]
 tw-live = [
@@ -64,7 +64,7 @@ viz = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["librae*", "strategies*", "brokers*", "db*", "app*", "tests*"]
+include = ["librae*", "strategies*", "brokers*", "db*", "app*", "notifications*", "orchestration*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

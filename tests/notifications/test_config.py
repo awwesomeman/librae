@@ -1,7 +1,7 @@
 """Tests for NotificationConfig and TelegramConfig dataclasses."""
 from __future__ import annotations
 
-from librae.config.notification import NotificationConfig, StatusConfig, TelegramConfig
+from notifications.config import NotificationConfig, StatusConfig, TelegramConfig
 
 
 class TestStatusConfig:
