@@ -6,7 +6,7 @@ Skills: python, quant
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -43,6 +43,23 @@ def _make_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
     """Create a simple OHLCV DataFrame with known timestamps."""
     base = datetime(2025, 1, 1, start_hour, 0, 0, tzinfo=timezone.utc)
     ts = pd.date_range(base, periods=n, freq="h", tz=timezone.utc)
+    prices = np.arange(100.0, 100.0 + n, 1.0)
+    return pd.DataFrame({
+        "ts": ts,
+        "open": prices - 0.5,
+        "high": prices + 1.0,
+        "low": prices - 1.0,
+        "close": prices,
+        "volume": np.full(n, 1000.0),
+    })
+
+
+def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
+    """Same shape as _make_ohlcv_df but with the last row's ts fixed to
+    ts_end — used for staleness tests, where wall-clock-relative timing
+    matters (unlike _make_ohlcv_df's fixed 2025-01-01 base, which reads
+    as "very stale" relative to real now())."""
+    ts = pd.date_range(end=ts_end, periods=n, freq="h", tz=timezone.utc)
     prices = np.arange(100.0, 100.0 + n, 1.0)
     return pd.DataFrame({
         "ts": ts,
@@ -477,6 +494,55 @@ class TestLiveTrader:
         cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
         runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
         runner.run(max_iterations=1)  # must not raise
+
+    def test_stale_data_alerts_once_edge_triggered(self):
+        """A feed stuck on the same old bar must alert exactly once, not
+        every poll cycle — CONSECUTIVE_ERROR_THRESHOLD only covers raised
+        exceptions, this covers a fetch that succeeds but never advances."""
+        stale_ts = datetime.now(timezone.utc) - timedelta(hours=10)
+        runner = self._make_runner(fetcher=lambda *a, **kw: _make_ohlcv_df_at(stale_ts))
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=3)
+
+        stale_alerts = [kw for m, kw in alerts if m == "send_alert" and "Stale Data" in kw["title"]]
+        assert len(stale_alerts) == 1
+
+    def test_fresh_data_does_not_alert(self):
+        fresh_ts = datetime.now(timezone.utc)
+        runner = self._make_runner(fetcher=lambda *a, **kw: _make_ohlcv_df_at(fresh_ts))
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=3)
+
+        assert not [kw for m, kw in alerts if m == "send_alert" and "Stale Data" in kw["title"]]
+
+    def test_stale_data_realerts_after_recovery(self):
+        """Recovery must re-arm the alert — a second, independent staleness
+        episode later has to alert again, not stay silent forever after the
+        first one fired. Calls _check_staleness directly rather than
+        through the full poll cycle: _fetch_with_cache's dedup-by-timestamp
+        layer would discard a synthetic "goes stale again" refetch as
+        "not newer than what's cached" — a real staleness episode is the
+        cache legitimately having nothing new to return, not a timestamp
+        regression, and a fast unit test can't just wait out the clock to
+        make an already-cached bar age past the threshold for real."""
+        runner = self._make_runner()
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        stale_ts = datetime.now(timezone.utc) - timedelta(hours=10)
+        fresh_ts = datetime.now(timezone.utc)
+
+        runner._check_staleness("BTCUSDT", stale_ts)  # goes stale -> alert #1
+        runner._check_staleness("BTCUSDT", fresh_ts)  # recovers -> no alert
+        runner._check_staleness("BTCUSDT", stale_ts)  # stale again -> alert #2
+
+        stale_alerts = [kw for m, kw in alerts if m == "send_alert" and "Stale Data" in kw["title"]]
+        assert len(stale_alerts) == 2
+        assert runner._stale_alerted.get("BTCUSDT") is True
 
     def test_stop_loss_triggers_and_closes_position(self):
         """Regression test: the live engine never called check_stop_targets,

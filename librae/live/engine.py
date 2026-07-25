@@ -78,7 +78,7 @@ class LiveTrader:
     ) -> None:
         from librae.config.notification import TelegramConfig
         from librae.core.cost_model import CostModel
-        from librae.core.utils import generate_run_id, to_ccxt
+        from librae.core.utils import generate_run_id, interval_to_timedelta, to_ccxt
         from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
 
         self._strategy = strategy
@@ -86,6 +86,7 @@ class LiveTrader:
         self._cfg = cfg
         self._symbols = cfg.symbols
         self._timeframe = to_ccxt(cfg.timeframe)
+        self._interval_delta = interval_to_timedelta(self._timeframe)
         self._poll_seconds = cfg.poll_seconds
 
         # --- Build adapter ---
@@ -176,6 +177,7 @@ class LiveTrader:
         self._consecutive_errors: int = 0
         self._db_write_failures: int = 0
         self._last_bar_ts: dict[str, datetime] = {}
+        self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
         self._cash: float = cfg.initial_balance
@@ -344,6 +346,14 @@ class LiveTrader:
     # unreachable), not a transient blip — worth alerting the operator.
     CONSECUTIVE_ERROR_THRESHOLD = 3
 
+    # WHY: a completed bar's own timestamp is always ~1 interval behind wall
+    # clock even when the feed is perfectly healthy (see _check_staleness) —
+    # this is how many *additional* full intervals of no progress are
+    # tolerated on top of that before alerting. Pure monitoring, no effect
+    # on trading, so it's an engine constant like CONSECUTIVE_ERROR_THRESHOLD
+    # rather than a cfg.params opt-in.
+    STALE_DATA_TOLERANCE_BARS = 2
+
     def _notify(self, method: str, **kwargs: object) -> None:
         """Submit a Telegram notification to the background thread pool."""
         telegram = self._executor.telegram
@@ -351,6 +361,30 @@ class LiveTrader:
             return
         fn = getattr(telegram, method)
         self._notify_pool.submit(fn, **kwargs)
+
+    def _check_staleness(self, symbol: str, latest_ts: datetime) -> None:
+        """Alert if the latest fetched bar hasn't advanced in wall-clock
+        time — catches a feed that stops updating without ever raising an
+        exception (CONSECUTIVE_ERROR_THRESHOLD only covers raised errors).
+        Edge-triggered: alerts once when crossing into stale, not every
+        poll cycle, and re-arms once fresh data resumes.
+        """
+        age = datetime.now(timezone.utc) - latest_ts
+        threshold = (self.STALE_DATA_TOLERANCE_BARS + 1) * self._interval_delta
+        is_stale = age > threshold
+        was_stale = self._stale_alerted.get(symbol, False)
+
+        if is_stale and not was_stale:
+            self._stale_alerted[symbol] = True
+            logger.warning("Stale data: %s latest bar age=%s (threshold=%s)", symbol, age, threshold)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Stale Data: {symbol}",
+                message=f"Latest bar is {age} old (threshold {threshold}) — feed may have stopped updating.",
+            )
+        elif not is_stale and was_stale:
+            self._stale_alerted[symbol] = False
+            logger.info("Stale data recovered: %s", symbol)
 
     def _reconcile_positions(self) -> None:
         """Adopt real broker positions into local state at startup.
@@ -534,6 +568,7 @@ class LiveTrader:
                 continue
 
             latest_ts = df["ts"].iloc[-1].to_pydatetime()
+            self._check_staleness(symbol, latest_ts)
             prev_ts = self._last_bar_ts.get(symbol)
 
             if prev_ts is not None and latest_ts <= prev_ts:

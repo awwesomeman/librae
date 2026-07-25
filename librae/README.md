@@ -133,6 +133,10 @@ cfg = RunConfig(..., params={
 - **部位**（`_reconcile_positions`）：直接採信 broker 回傳的 `get_position()`，覆蓋本地 `self._positions`——部位方向/數量是無歧義的，錯誤的本地部位對訊號判斷是實際風險。
 - **現金**（`_reconcile_cash`，目前僅 `CryptoAdapter`/CCXT 支援，其他 broker adapter 沒有 `get_balance()` 會被 duck-type 跳過）：只告警不覆蓋。落差超過 `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT`（預設 1%，engine 常數而非 `cfg.params`）才發 Telegram alert，`self._cash` 永遠以本地帳本為準——broker 的 free/total 餘額語意會隨帳戶模式（現貨/合約/cross-margin）不同，貿然覆蓋可能讓本來正確的本地狀態被錯讀的數字污染。
 
+### 資料 staleness 偵測 (live only)
+
+每個 poll cycle 都會檢查，跟上面對帳不同、不是只在啟動時跑一次。`_check_staleness` 比對最新一根 bar 的時間戳跟現在時間的差距，超過 `(LiveTrader.STALE_DATA_TOLERANCE_BARS + 1) * timeframe`（預設 tolerance=2，即 3 個 timeframe 沒有新資料）才發告警——`+1`是因為即使 feed 完全正常，一根已收盤 bar 的時間戳本來就會落後現在時間約 1 個 timeframe，這是預期的，不能當成 stale。純監控功能，不影響交易行為（不會 halt、不會擋新倉），所以是 always-on 的 engine 常數，跟 `CONSECUTIVE_ERROR_THRESHOLD` 同一套設計理由；跟後者的差別是 `CONSECUTIVE_ERROR_THRESHOLD` 只抓 fetch 拋例外的情況，這個抓的是 fetch 成功但資料不再更新（exchange API 靜默卡住）。edge-triggered：從新鮮轉 stale 才發一次，不會每個 cycle 洗版，資料恢復後會重新武裝、下次 stale 還會再告警一次。
+
 ### 模擬監控 (sim)
 
 ```python
