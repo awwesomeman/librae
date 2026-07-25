@@ -5,9 +5,11 @@ and never recomputes fills/PnL, so the chart can never drift from
 compute_all()'s numbers (the sole source of truth, also written to
 strategy_performance/trade_events for Grafana).
 """
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -49,7 +51,7 @@ def _to_utc(ts) -> pd.Timestamp:
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 
-def _build_markers(order_events: Sequence["OrderEventRecord"], symbol: str) -> list[dict]:
+def _build_markers(order_events: Sequence[OrderEventRecord], symbol: str) -> list[dict]:
     """Convert one symbol's OrderEventRecords into lightweight-charts markers.
 
     entry = open/add (covers scale-ins), exit = close/reduce (covers partial
@@ -64,22 +66,26 @@ def _build_markers(order_events: Sequence["OrderEventRecord"], symbol: str) -> l
         time = _to_utc(ev.ts)
 
         if ev.event_type in _ENTRY_EVENTS:
-            markers.append({
-                "time": time,
-                "position": "below" if is_long else "above",
-                "shape": "arrow_up" if is_long else "arrow_down",
-                "color": _LONG_COLOR if is_long else _SHORT_COLOR,
-                "text": f"{'BUY' if is_long else 'SELL'} @ {ev.price:.4g}",
-            })
+            markers.append(
+                {
+                    "time": time,
+                    "position": "below" if is_long else "above",
+                    "shape": "arrow_up" if is_long else "arrow_down",
+                    "color": _LONG_COLOR if is_long else _SHORT_COLOR,
+                    "text": f"{'BUY' if is_long else 'SELL'} @ {ev.price:.4g}",
+                }
+            )
         elif ev.event_type in _EXIT_EVENTS:
             ret = f" ({ev.net_return:+.1f}%)" if ev.net_return is not None else ""
-            markers.append({
-                "time": time,
-                "position": "above" if is_long else "below",
-                "shape": "arrow_down" if is_long else "arrow_up",
-                "color": _SHORT_COLOR if is_long else _LONG_COLOR,
-                "text": f"EXIT @ {ev.price:.4g}{ret}",
-            })
+            markers.append(
+                {
+                    "time": time,
+                    "position": "above" if is_long else "below",
+                    "shape": "arrow_down" if is_long else "arrow_up",
+                    "color": _SHORT_COLOR if is_long else _LONG_COLOR,
+                    "text": f"EXIT @ {ev.price:.4g}{ret}",
+                }
+            )
 
     markers.sort(key=lambda m: m["time"])
     return markers
@@ -102,7 +108,7 @@ def _prepare_ohlcv(ohlcv: pd.DataFrame) -> pd.DataFrame:
 
 def plot_trades(
     ohlcv: pd.DataFrame,
-    order_events: Sequence["OrderEventRecord"],
+    order_events: Sequence[OrderEventRecord],
     symbol: str,
     *,
     block: bool = True,
@@ -123,9 +129,12 @@ def plot_trades(
     chart.layout(background_color=_BG_COLOR, text_color=_TEXT_COLOR)
     chart.grid(color=_GRID_COLOR)
     chart.candle_style(
-        up_color=_CANDLE_UP, down_color=_CANDLE_DOWN,
-        wick_up_color=_CANDLE_UP, wick_down_color=_CANDLE_DOWN,
-        border_up_color=_CANDLE_UP, border_down_color=_CANDLE_DOWN,
+        up_color=_CANDLE_UP,
+        down_color=_CANDLE_DOWN,
+        wick_up_color=_CANDLE_UP,
+        wick_down_color=_CANDLE_DOWN,
+        border_up_color=_CANDLE_UP,
+        border_down_color=_CANDLE_DOWN,
     )
     chart.volume_config(up_color=_VOLUME_UP, down_color=_VOLUME_DOWN)  # must precede set()
     chart.set(_prepare_ohlcv(ohlcv))
@@ -141,7 +150,7 @@ def plot_trades(
     return chart
 
 
-def _df_to_order_events(df: pd.DataFrame) -> list["OrderEventRecord"]:
+def _df_to_order_events(df: pd.DataFrame) -> list[OrderEventRecord]:
     """load_trade_events() output (``_time`` column) -> OrderEventRecord list.
 
     Reuses the same schema type as an in-memory run so _build_markers has a
@@ -167,5 +176,7 @@ def plot_trades_by_run_id(run_id: str, *, symbol: str | None = None, block: bool
 
     ohlcv = load_ohlcv(run_id=run_id).set_index("_time")
     order_events = _df_to_order_events(load_trade_events(run_id))
-    resolved_symbol = symbol or (order_events[0].symbol if order_events else ohlcv["symbol"].iloc[0])
+    resolved_symbol = symbol or (
+        order_events[0].symbol if order_events else ohlcv["symbol"].iloc[0]
+    )
     return plot_trades(ohlcv, order_events, resolved_symbol, block=block)

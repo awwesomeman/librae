@@ -12,10 +12,10 @@ import pytest
 
 from brokers.crypto_adapter import CryptoAdapter
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_ccxt_exchange():
@@ -58,6 +58,7 @@ def authed_adapter(mock_ccxt_exchange):
 # Test 1: fetch_ohlcv returns correct DataFrame format
 # ---------------------------------------------------------------------------
 
+
 def test_fetch_ohlcv_dataframe_format(readonly_adapter, mock_ccxt_exchange):
     df = readonly_adapter.fetch_ohlcv("BTC/USDT", "1h", limit=3)
 
@@ -71,25 +72,33 @@ def test_fetch_ohlcv_dataframe_format(readonly_adapter, mock_ccxt_exchange):
     for col in ["open", "high", "low", "close", "volume"]:
         assert pd.api.types.is_numeric_dtype(df[col])
 
-    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("BTC/USDT", timeframe="1h", limit=3, since=None)
+    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with(
+        "BTC/USDT", timeframe="1h", limit=3, since=None
+    )
 
 
 # ---------------------------------------------------------------------------
 # Test 2: symbol passthrough (CCXT uses slash format natively)
 # ---------------------------------------------------------------------------
 
+
 def test_symbol_passthrough(readonly_adapter, mock_ccxt_exchange):
     readonly_adapter.fetch_ohlcv("BTC/USDT", "4h", limit=10)
-    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("BTC/USDT", timeframe="4h", limit=10, since=None)
+    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with(
+        "BTC/USDT", timeframe="4h", limit=10, since=None
+    )
 
     mock_ccxt_exchange.fetch_ohlcv.reset_mock()
     readonly_adapter.fetch_ohlcv("ETH/USDT", "1d", limit=50)
-    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with("ETH/USDT", timeframe="1d", limit=50, since=None)
+    mock_ccxt_exchange.fetch_ohlcv.assert_called_once_with(
+        "ETH/USDT", timeframe="1d", limit=50, since=None
+    )
 
 
 # ---------------------------------------------------------------------------
 # Test 3: read-only mode raises NotImplementedError on place_order
 # ---------------------------------------------------------------------------
+
 
 def test_readonly_place_order_raises(readonly_adapter):
     signal = {
@@ -117,6 +126,7 @@ def test_readonly_get_balance_raises(readonly_adapter):
 # Test 3b: get_balance
 # ---------------------------------------------------------------------------
 
+
 def test_authed_get_balance_parses_free_used_total(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.fetch_balance.return_value = {
         "USDT": {"free": 900.0, "used": 100.0, "total": 1000.0},
@@ -127,7 +137,9 @@ def test_authed_get_balance_parses_free_used_total(authed_adapter, mock_ccxt_exc
 
 
 def test_get_balance_missing_currency_returns_zeros(authed_adapter, mock_ccxt_exchange):
-    mock_ccxt_exchange.fetch_balance.return_value = {"BTC": {"free": 1.0, "used": 0.0, "total": 1.0}}
+    mock_ccxt_exchange.fetch_balance.return_value = {
+        "BTC": {"free": 1.0, "used": 0.0, "total": 1.0}
+    }
     balance = authed_adapter.get_balance("USDT")
     assert balance == {"free": 0.0, "used": 0.0, "total": 0.0}
 
@@ -135,6 +147,7 @@ def test_get_balance_missing_currency_returns_zeros(authed_adapter, mock_ccxt_ex
 # ---------------------------------------------------------------------------
 # Test 4: authed adapter can call place_order
 # ---------------------------------------------------------------------------
+
 
 def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
@@ -155,11 +168,14 @@ def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
 # the binance URL patch actually run.
 # ---------------------------------------------------------------------------
 
+
 def _build_adapter_via_init(exchange_id: str, mock_exchange: MagicMock, **kwargs) -> CryptoAdapter:
     with patch("brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
         mock_exchange_cls = MagicMock(return_value=mock_exchange)
         mock_require_ccxt.return_value = MagicMock(**{exchange_id: mock_exchange_cls})
-        return CryptoAdapter(exchange_id=exchange_id, api_key="k", api_secret="s", sandbox=True, **kwargs)
+        return CryptoAdapter(
+            exchange_id=exchange_id, api_key="k", api_secret="s", sandbox=True, **kwargs
+        )
 
 
 def test_sandbox_enables_ccxt_sandbox_mode():

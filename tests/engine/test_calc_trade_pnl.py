@@ -1,8 +1,8 @@
 """Tests for librae.core.executor.calc_trade_pnl — shared PnL calculation."""
+
 from __future__ import annotations
 
 import pytest
-
 from librae.core.cost_model import CostModel
 from librae.core.executor import TradePnL, calc_trade_pnl
 
@@ -25,8 +25,11 @@ class TestCalcTradePnl:
     def test_long_profit(self) -> None:
         cm = _crypto_cost_model()
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=110.0, quantity=10.0,
-            side="long", cost_model=cm,
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=10.0,
+            side="long",
+            cost_model=cm,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=0.0,
         )
@@ -40,8 +43,11 @@ class TestCalcTradePnl:
     def test_long_loss(self) -> None:
         cm = _crypto_cost_model()
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=90.0, quantity=10.0,
-            side="long", cost_model=cm,
+            entry_price=100.0,
+            exit_price=90.0,
+            quantity=10.0,
+            side="long",
+            cost_model=cm,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=0.0,
         )
@@ -51,8 +57,11 @@ class TestCalcTradePnl:
     def test_short_profit(self) -> None:
         cm = _crypto_cost_model()
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=90.0, quantity=10.0,
-            side="short", cost_model=cm,
+            entry_price=100.0,
+            exit_price=90.0,
+            quantity=10.0,
+            side="short",
+            cost_model=cm,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=0.0,
         )
@@ -61,9 +70,13 @@ class TestCalcTradePnl:
     def test_zero_cost_model(self) -> None:
         cm = CostModel.zero()
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=110.0, quantity=1.0,
-            side="long", cost_model=cm,
-            entry_commission=0.0, entry_slippage=0.0,
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=1.0,
+            side="long",
+            cost_model=cm,
+            entry_commission=0.0,
+            entry_slippage=0.0,
         )
         assert pnl.gross_pnl == pnl.net_pnl  # no costs
         assert pnl.commission == 0.0
@@ -72,13 +85,19 @@ class TestCalcTradePnl:
 
     def test_with_tax(self) -> None:
         cm = CostModel(
-            multiplier=1.0, commission_rate=0.001, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01,
+            multiplier=1.0,
+            commission_rate=0.001,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
             tax_rate=0.003,  # 0.3% sell tax
         )
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=110.0, quantity=10.0,
-            side="long", cost_model=cm,
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=10.0,
+            side="long",
+            cost_model=cm,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=0.0,
         )
@@ -87,14 +106,18 @@ class TestCalcTradePnl:
 
     def test_consistent_with_backtest_close(self) -> None:
         """calc_trade_pnl result matches close_position + build_trade_result."""
-        from librae.core.executor import close_position, build_trade_result
+        from librae.core.executor import build_trade_result, close_position
         from librae.core.strategy import PositionState
+
         cm = _crypto_cost_model()
 
         pos = PositionState(
-            symbol="TEST", side="long",
-            entry_price=100.0, quantity=10.0,
-            entry_at=None, periods_held=5,
+            symbol="TEST",
+            side="long",
+            entry_price=100.0,
+            quantity=10.0,
+            entry_at=None,
+            periods_held=5,
             entry_commission=cm.calc_commission(100.0, 10.0),
             entry_slippage=cm.calc_slippage(10.0),
             entry_tax=cm.calc_tax(100.0, 10.0),
@@ -104,8 +127,11 @@ class TestCalcTradePnl:
         trade = build_trade_result(pos, None, 110.0, pos.quantity, pnl_close)
 
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=110.0, quantity=10.0,
-            side="long", cost_model=cm,
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=10.0,
+            side="long",
+            cost_model=cm,
             entry_commission=pos.entry_commission,
             entry_slippage=pos.entry_slippage,
         )
@@ -121,13 +147,19 @@ class TestCalcTradePnl:
         """Multiplier is correctly applied (futures instruments)."""
         cm = CostModel(
             multiplier=200.0,  # futures
-            commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
             tax_rate=0.0,
         )
         pnl = calc_trade_pnl(
-            entry_price=100.0, exit_price=101.0, quantity=1.0,
-            side="long", cost_model=cm,
-            entry_commission=0.0, entry_slippage=0.0,
+            entry_price=100.0,
+            exit_price=101.0,
+            quantity=1.0,
+            side="long",
+            cost_model=cm,
+            entry_commission=0.0,
+            entry_slippage=0.0,
         )
         assert pnl.gross_pnl == pytest.approx(200.0)  # 1 point * 200 multiplier

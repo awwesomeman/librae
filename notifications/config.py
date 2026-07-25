@@ -6,6 +6,7 @@ Secrets (bot_token, chat_id) come from environment variables via TelegramCredent
 Usage:
     config = TelegramConfig.from_dict(yaml_dict.get("telegram", {}))
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -40,7 +41,9 @@ class NotificationConfig:
             error=bool(d.get("error", cls.error)),
             status=StatusConfig(
                 enabled=bool(status_raw.get("enabled", StatusConfig.enabled)),
-                interval_periods=int(status_raw.get("interval_periods", StatusConfig.interval_periods)),
+                interval_periods=int(
+                    status_raw.get("interval_periods", StatusConfig.interval_periods)
+                ),
             ),
         )
 

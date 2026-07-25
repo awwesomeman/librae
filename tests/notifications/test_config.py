@@ -1,4 +1,5 @@
 """Tests for NotificationConfig and TelegramConfig dataclasses."""
+
 from __future__ import annotations
 
 from notifications.config import NotificationConfig, StatusConfig, TelegramConfig
@@ -30,9 +31,11 @@ class TestNotificationConfig:
         assert cfg.startup is True  # unchanged
 
     def test_from_dict_nested_status(self):
-        cfg = NotificationConfig.from_dict({
-            "status": {"enabled": True, "interval_periods": 6},
-        })
+        cfg = NotificationConfig.from_dict(
+            {
+                "status": {"enabled": True, "interval_periods": 6},
+            }
+        )
         assert cfg.status.enabled is True
         assert cfg.status.interval_periods == 6
         assert cfg.signal is True  # unchanged
@@ -50,14 +53,16 @@ class TestTelegramConfig:
         assert cfg.enabled is False
 
     def test_from_dict_enabled_with_notifications(self):
-        cfg = TelegramConfig.from_dict({
-            "enabled": True,
-            "chat_id": "12345",
-            "notifications": {
-                "signal": False,
-                "status": {"enabled": True},
-            },
-        })
+        cfg = TelegramConfig.from_dict(
+            {
+                "enabled": True,
+                "chat_id": "12345",
+                "notifications": {
+                    "signal": False,
+                    "status": {"enabled": True},
+                },
+            }
+        )
         assert cfg.enabled is True
         assert cfg.chat_id == "12345"
         assert cfg.notifications.signal is False

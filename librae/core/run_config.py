@@ -7,6 +7,7 @@ RunConfig is a frozen dataclass that holds all parameters for a run:
 
 The sole factory is build_config() in orchestration/cli.py.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -118,19 +119,22 @@ class RunConfig:
         Excludes: perf params, behavior params.
         """
         blob = json.dumps(
-            _sanitize_for_hash({
-                "strategy_name": self.strategy_name,
-                "symbols": sorted(self.symbols),
-                "timeframe": self.timeframe,
-                "market": self.market,
-                "data_source": self.data_source,
-                "initial_balance": self.initial_balance,
-                "start": self.start,
-                "end": self.end,
-                "params": self.params,
-                "cost_overrides": self.cost_overrides,
-            }),
-            sort_keys=True, default=str,
+            _sanitize_for_hash(
+                {
+                    "strategy_name": self.strategy_name,
+                    "symbols": sorted(self.symbols),
+                    "timeframe": self.timeframe,
+                    "market": self.market,
+                    "data_source": self.data_source,
+                    "initial_balance": self.initial_balance,
+                    "start": self.start,
+                    "end": self.end,
+                    "params": self.params,
+                    "cost_overrides": self.cost_overrides,
+                }
+            ),
+            sort_keys=True,
+            default=str,
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
@@ -139,10 +143,11 @@ class RunConfig:
         code_rev = _get_code_rev()
         tg = self.telegram_config or {}
         # Mask bot_token if present
-        masked_tg = {
-            k: (_mask_token(str(v)) if "token" in k.lower() else v)
-            for k, v in tg.items()
-        } if tg else None
+        masked_tg = (
+            {k: (_mask_token(str(v)) if "token" in k.lower() else v) for k, v in tg.items()}
+            if tg
+            else None
+        )
 
         lines = [
             "=" * 60,

@@ -18,6 +18,7 @@ pytestmark = pytest.mark.us_live
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_adapter(*, trading_enabled: bool = False):
     """Build an IBKRAdapter with mocked internals (no real connect())."""
     from brokers.ibkr_adapter import IBKRAdapter
@@ -32,18 +33,24 @@ def _make_adapter(*, trading_enabled: bool = False):
 def _make_bars_df():
     """Simulate ib_async.util.df(bars) output — 'date' column is
     UTC-aware (formatDate=2), not exchange-local strings."""
-    return pd.DataFrame({
-        "date": pd.to_datetime(
-            ["2026-04-01 13:30:00+00:00", "2026-04-01 13:31:00+00:00", "2026-04-01 13:32:00+00:00"],
-        ),
-        "open": [800.0, 801.0, 803.0],
-        "high": [802.0, 804.0, 805.0],
-        "low": [799.0, 800.0, 802.0],
-        "close": [801.0, 803.0, 804.0],
-        "volume": [1000, 1200, 900],
-        "average": [800.5, 802.0, 803.5],
-        "barCount": [50, 60, 45],
-    })
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2026-04-01 13:30:00+00:00",
+                    "2026-04-01 13:31:00+00:00",
+                    "2026-04-01 13:32:00+00:00",
+                ],
+            ),
+            "open": [800.0, 801.0, 803.0],
+            "high": [802.0, 804.0, 805.0],
+            "low": [799.0, 800.0, 802.0],
+            "close": [801.0, 803.0, 804.0],
+            "volume": [1000, 1200, 900],
+            "average": [800.5, 802.0, 803.5],
+            "barCount": [50, 60, 45],
+        }
+    )
 
 
 def _mock_ib_async_module(bars_df):
@@ -56,13 +63,17 @@ def _mock_ib_async_module(bars_df):
 # fetch_ohlcv
 # ---------------------------------------------------------------------------
 
+
 class TestFetchOhlcv:
     def test_returns_correct_columns(self):
         adapter = _make_adapter()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=_mock_ib_async_module(_make_bars_df())):
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async",
+            return_value=_mock_ib_async_module(_make_bars_df()),
+        ):
             df = adapter.fetch_ohlcv("MU", "1m")
 
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
@@ -74,7 +85,10 @@ class TestFetchOhlcv:
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         adapter._ib.reqHistoricalData.return_value = []
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=_mock_ib_async_module(pd.DataFrame())):
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async",
+            return_value=_mock_ib_async_module(pd.DataFrame()),
+        ):
             df = adapter.fetch_ohlcv("MU", "1m")
 
         assert df.empty
@@ -85,7 +99,10 @@ class TestFetchOhlcv:
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=_mock_ib_async_module(_make_bars_df())):
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async",
+            return_value=_mock_ib_async_module(_make_bars_df()),
+        ):
             df = adapter.fetch_ohlcv("MU", "1m", limit=2)
 
         assert len(df) == 2
@@ -102,8 +119,13 @@ class TestFetchOhlcv:
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=_mock_ib_async_module(_make_bars_df())):
-            df = adapter.fetch_ohlcv("MU", "1m", start="2026-04-01T13:31:00Z", end="2026-04-01T13:32:00Z")
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async",
+            return_value=_mock_ib_async_module(_make_bars_df()),
+        ):
+            df = adapter.fetch_ohlcv(
+                "MU", "1m", start="2026-04-01T13:31:00Z", end="2026-04-01T13:32:00Z"
+            )
 
         assert len(df) == 2  # first bar (13:30) excluded — before start
         call_kwargs = adapter._ib.reqHistoricalData.call_args.kwargs
@@ -113,6 +135,7 @@ class TestFetchOhlcv:
 # ---------------------------------------------------------------------------
 # Read-only guard
 # ---------------------------------------------------------------------------
+
 
 class TestReadOnlyGuard:
     def test_place_order_raises_without_trading_enabled(self):
@@ -132,11 +155,21 @@ class TestReadOnlyGuard:
 # place_order
 # ---------------------------------------------------------------------------
 
+
 class TestPlaceOrder:
     def _mock_ib_async_module(self):
         mock = MagicMock()
-        mock.MarketOrder.side_effect = lambda action, qty: {"action": action, "qty": qty, "type": "MKT"}
-        mock.LimitOrder.side_effect = lambda action, qty, price: {"action": action, "qty": qty, "price": price, "type": "LMT"}
+        mock.MarketOrder.side_effect = lambda action, qty: {
+            "action": action,
+            "qty": qty,
+            "type": "MKT",
+        }
+        mock.LimitOrder.side_effect = lambda action, qty, price: {
+            "action": action,
+            "qty": qty,
+            "price": price,
+            "type": "LMT",
+        }
         return mock
 
     def test_market_order_uses_market_order_class(self):
@@ -147,11 +180,14 @@ class TestPlaceOrder:
         mock_trade.orderStatus.status = "PendingSubmit"
         adapter._ib.placeOrder.return_value = mock_trade
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()):
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()
+        ):
             result = adapter.place_order({"symbol": "MU", "side": "buy", "quantity": 100})
 
         adapter._ib.placeOrder.assert_called_once_with(
-            "mock_contract", {"action": "BUY", "qty": 100, "type": "MKT"},
+            "mock_contract",
+            {"action": "BUY", "qty": 100, "type": "MKT"},
         )
         assert result == {"id": "123", "status": "PendingSubmit"}
 
@@ -163,14 +199,22 @@ class TestPlaceOrder:
         mock_trade.orderStatus.status = "Submitted"
         adapter._ib.placeOrder.return_value = mock_trade
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()):
-            result = adapter.place_order({
-                "symbol": "MU", "side": "sell", "quantity": 50,
-                "order_type": "limit", "price": 900.0,
-            })
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()
+        ):
+            result = adapter.place_order(
+                {
+                    "symbol": "MU",
+                    "side": "sell",
+                    "quantity": 50,
+                    "order_type": "limit",
+                    "price": 900.0,
+                }
+            )
 
         adapter._ib.placeOrder.assert_called_once_with(
-            "mock_contract", {"action": "SELL", "qty": 50, "price": 900.0, "type": "LMT"},
+            "mock_contract",
+            {"action": "SELL", "qty": 50, "price": 900.0, "type": "LMT"},
         )
         assert result == {"id": "456", "status": "Submitted"}
 
@@ -178,6 +222,7 @@ class TestPlaceOrder:
 # ---------------------------------------------------------------------------
 # get_position
 # ---------------------------------------------------------------------------
+
 
 class TestGetPosition:
     def test_found(self):
@@ -205,6 +250,7 @@ class TestGetPosition:
 # _resolve_contract
 # ---------------------------------------------------------------------------
 
+
 class TestResolveContract:
     def test_qualified_contract_returned(self):
         adapter = _make_adapter()
@@ -224,9 +270,11 @@ class TestResolveContract:
         adapter._ib.qualifyContracts.return_value = []
         mock_ib_async = MagicMock()
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
-            with pytest.raises(ValueError, match="Unknown symbol"):
-                adapter._resolve_contract("NOTREAL")
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="Unknown symbol"),
+        ):
+            adapter._resolve_contract("NOTREAL")
 
     def test_second_call_for_same_symbol_is_cached(self):
         """Regression test: qualifyContracts is a blocking IBKR round trip —

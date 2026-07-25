@@ -1,4 +1,5 @@
 """Tests for the Telegram notification adapter."""
+
 from __future__ import annotations
 
 import os
@@ -36,10 +37,13 @@ class TestTelegramAdapter:
     ) -> TelegramAdapter:
         """Helper to build adapter with explicit config."""
         from notifications.config import StatusConfig
+
         config = TelegramConfig(
             enabled=enabled,
             notifications=NotificationConfig(
-                signal=signal, startup=startup, error=error,
+                signal=signal,
+                startup=startup,
+                error=error,
                 status=StatusConfig(enabled=status_enabled),
             ),
         )

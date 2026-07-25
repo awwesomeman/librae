@@ -2,6 +2,7 @@
 
 Pure functions, no Shioaji API involved.
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -68,13 +69,16 @@ class TestResampleTaifexOhlcv:
             ["2026-04-01 08:45", "2026-04-01 09:00", "2026-04-01 09:30"],
             tz="Asia/Taipei",
         ).tz_convert("UTC")
-        df = pd.DataFrame({
-            "open": [100.0, 101.0, 102.0],
-            "high": [105.0, 106.0, 107.0],
-            "low": [99.0, 100.0, 101.0],
-            "close": [104.0, 105.0, 106.0],
-            "volume": [10.0, 20.0, 30.0],
-        }, index=idx)
+        df = pd.DataFrame(
+            {
+                "open": [100.0, 101.0, 102.0],
+                "high": [105.0, 106.0, 107.0],
+                "low": [99.0, 100.0, 101.0],
+                "close": [104.0, 105.0, 106.0],
+                "volume": [10.0, 20.0, 30.0],
+            },
+            index=idx,
+        )
         df.index.name = "ts"
 
         out = resample_taifex_ohlcv(df, target_seconds=3600)

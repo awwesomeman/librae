@@ -3,30 +3,36 @@
 Verifies open/add/reduce/close events have correct
 entry_price, remaining_quantity, pnl, net_return, and reason.
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
-
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import OrderEvent, process_actions
 from librae.core.strategy import Action, BaseStrategy, PositionState
 
-
-TS = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 ZERO_COST = CostModel.zero()
 
 
-def _run(actions_list: list[Action], cost_model: CostModel = ZERO_COST,
-         positions: dict[str, PositionState] | None = None, cash: float = 100_000.0):
+def _run(
+    actions_list: list[Action],
+    cost_model: CostModel = ZERO_COST,
+    positions: dict[str, PositionState] | None = None,
+    cash: float = 100_000.0,
+):
     """Run process_actions and return (events, trades, positions)."""
     if positions is None:
         positions = {}
     result = process_actions(
-        actions_list, positions, cash, TS,
+        actions_list,
+        positions,
+        cash,
+        TS,
         get_price=lambda sym, action: 100.0,
         get_cost_model=lambda sym: cost_model,
         primary_symbol="TEST",
@@ -65,11 +71,20 @@ class TestOpenEvent:
 
 class TestAddEvent:
     def test_scale_in_produces_add(self):
-        positions = {"TEST": PositionState(
-            symbol="TEST", side="long", entry_price=90.0, quantity=5.0,
-            entry_at=TS, periods_held=3, entry_commission=0, entry_slippage=0, entry_tax=0,
-            total_entry_cost=450.0,
-        )}
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=90.0,
+                quantity=5.0,
+                entry_at=TS,
+                periods_held=3,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=450.0,
+            )
+        }
         events, _, _ = _run(
             [Action(type="long", symbol="TEST", quantity=5.0)],
             positions=positions,
@@ -86,11 +101,20 @@ class TestAddEvent:
 
 class TestReduceCloseEvents:
     def test_partial_close_produces_reduce(self):
-        positions = {"TEST": PositionState(
-            symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
-            total_entry_cost=800.0,
-        )}
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=10.0,
+                entry_at=TS,
+                periods_held=5,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=800.0,
+            )
+        }
         events, trades, _ = _run(
             [Action(type="close", symbol="TEST", quantity=4.0)],
             positions=positions,
@@ -110,11 +134,20 @@ class TestReduceCloseEvents:
         assert np.isclose(e.pnl, 80.0)
 
     def test_full_close_produces_close(self):
-        positions = {"TEST": PositionState(
-            symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
-            total_entry_cost=800.0,
-        )}
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=10.0,
+                entry_at=TS,
+                periods_held=5,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=800.0,
+            )
+        }
         events, _, pos = _run(
             [Action(type="close", symbol="TEST")],
             positions=positions,
@@ -128,11 +161,20 @@ class TestReduceCloseEvents:
 
     def test_close_qty_exceeds_position_clamped(self):
         """action.quantity > pos.quantity should be clamped, not inflate the event."""
-        positions = {"TEST": PositionState(
-            symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
-            total_entry_cost=800.0,
-        )}
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=10.0,
+                entry_at=TS,
+                periods_held=5,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=800.0,
+            )
+        }
         events, trades, pos = _run(
             [Action(type="close", symbol="TEST", quantity=999.0)],
             positions=positions,
@@ -146,11 +188,20 @@ class TestReduceCloseEvents:
         assert "TEST" not in pos
 
     def test_close_reason_carried(self):
-        positions = {"TEST": PositionState(
-            symbol="TEST", side="long", entry_price=80.0, quantity=10.0,
-            entry_at=TS, periods_held=5, entry_commission=0, entry_slippage=0, entry_tax=0,
-            total_entry_cost=800.0,
-        )}
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=10.0,
+                entry_at=TS,
+                periods_held=5,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=800.0,
+            )
+        }
         events, _, _ = _run(
             [Action(type="close", symbol="TEST", reason="stop loss")],
             positions=positions,
@@ -169,7 +220,10 @@ class TestComplexLifecycle:
             for p in positions.values():
                 p.periods_held += periods_held_increment
             result = process_actions(
-                actions, positions, 1_000_000.0, TS,
+                actions,
+                positions,
+                1_000_000.0,
+                TS,
                 get_price=lambda sym, action: price,
                 get_cost_model=lambda sym: ZERO_COST,
                 primary_symbol="TEST",
@@ -216,7 +270,10 @@ class TestShortLifecycle:
 
         def run_at(actions, price, positions):
             result = process_actions(
-                actions, positions, 1_000_000.0, TS,
+                actions,
+                positions,
+                1_000_000.0,
+                TS,
                 get_price=lambda sym, action: price,
                 get_cost_model=lambda sym: ZERO_COST,
                 primary_symbol="TEST",
@@ -245,13 +302,19 @@ class TestEngineIntegration:
         idx = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
         prices = 100.0 + np.cumsum(np.random.default_rng(42).normal(0.5, 1, n))
         mi = pd.MultiIndex.from_arrays(
-            [["TEST"] * n, idx], names=["symbol", "datetime"],
+            [["TEST"] * n, idx],
+            names=["symbol", "datetime"],
         )
-        df = pd.DataFrame({
-            "open": prices, "high": prices * 1.001,
-            "low": prices * 0.999, "close": prices,
-            "volume": np.full(n, 100.0),
-        }, index=mi)
+        df = pd.DataFrame(
+            {
+                "open": prices,
+                "high": prices * 1.001,
+                "low": prices * 0.999,
+                "close": prices,
+                "volume": np.full(n, 100.0),
+            },
+            index=mi,
+        )
 
         class BuyBar5CloseBar20(BaseStrategy):
             def on_bar(self, ctx):
@@ -261,8 +324,13 @@ class TestEngineIntegration:
                     return [Action(type="close", symbol=ctx.symbol, reason="test exit")]
                 return []
 
-        bt = Backtest(df, BuyBar5CloseBar20(), initial_balance=10_000,
-                      cost_model=ZERO_COST, data_source="test")
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar20(),
+            initial_balance=10_000,
+            cost_model=ZERO_COST,
+            data_source="test",
+        )
         result = bt.run()
 
         # Should have open + close events (+ possible force_close at end)

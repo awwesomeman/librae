@@ -7,29 +7,37 @@ Wiring is internalized: pass cfg=RunConfig to __init__,
 the engine builds adapter, cost_model, callbacks, telegram internally.
 Use on_bar=None etc. to disable specific callbacks (e.g. in tests).
 """
+
 from __future__ import annotations
 
 import logging
 import signal
 import time
 import types
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, Literal
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
 from librae.core import EPSILON
 from librae.core.executor import (
-    REASON_DRAWDOWN_BREACH, ActionResults, eval_equity, liquidate_all,
-    run_pending_and_stops, validate_risk_params,
+    REASON_DRAWDOWN_BREACH,
+    ActionResults,
+    eval_equity,
+    liquidate_all,
+    run_pending_and_stops,
+    validate_risk_params,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 
 from .executor import LiveExecutor
 
 if TYPE_CHECKING:
+    from librae.core.cost_model import CostModel
+    from librae.core.executor import OrderEvent
     from librae.core.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
@@ -73,12 +81,12 @@ class LiveTrader:
         order_adapter: object | None = None,
         cost_model: CostModel | None = None,
         notifier: object | None = _UNSET,
-        on_bar: Callable[..., None] | None | object = _UNSET,
-        on_order_event: Callable[..., None] | None | object = _UNSET,
-        on_ohlcv: Callable[..., None] | None | object = _UNSET,
-        on_heartbeat: Callable[..., None] | None | object = _UNSET,
-        on_signal_outcome: Callable[..., None] | None | object = _UNSET,
-        warmup_fetcher: Callable[..., pd.DataFrame] | None | object = _UNSET,
+        on_bar: Callable[..., None] | object | None = _UNSET,
+        on_order_event: Callable[..., None] | object | None = _UNSET,
+        on_ohlcv: Callable[..., None] | object | None = _UNSET,
+        on_heartbeat: Callable[..., None] | object | None = _UNSET,
+        on_signal_outcome: Callable[..., None] | object | None = _UNSET,
+        warmup_fetcher: Callable[..., pd.DataFrame] | object | None = _UNSET,
     ) -> None:
         from librae.core.cost_model import CostModel
         from librae.core.utils import generate_run_id, interval_to_timedelta, to_ccxt
@@ -96,6 +104,7 @@ class LiveTrader:
             self._fetcher = adapter
         elif cfg.market == "tw_futures":
             from brokers.shioaji_adapter import ShioajiAdapter
+
             # simulation is resolved from ShioajiCredentials.sandbox (SHIOAJI_SANDBOX
             # env var) — deliberately orthogonal to cfg.mode, same as CryptoAdapter's
             # sandbox: mode decides whether fills are mirrored as real orders at all,
@@ -112,6 +121,7 @@ class LiveTrader:
                 order_adapter = _shioaji
         else:
             from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
+
             if cfg.mode == "live":
                 # BINANCE_API_KEY/BINANCE_API_SECRET required for live — read-only
                 # CryptoAdapter() (no creds) would fail place_order at trade time.
@@ -145,14 +155,18 @@ class LiveTrader:
         # --- Build run_id ---
         strategy_name = cfg.strategy_name
         self._run_id = generate_run_id(
-            f"{strategy_name}_{cfg.market}", cfg.symbol, cfg.timeframe,
+            f"{strategy_name}_{cfg.market}",
+            cfg.symbol,
+            cfg.timeframe,
         )
 
         # --- Build executor ---
         is_live = cfg.mode == "live"
         self._executor = LiveExecutor(
-            resolved_cm, simulation=not is_live,
-            telegram=resolved_notifier, strategy_name=strategy_name,
+            resolved_cm,
+            simulation=not is_live,
+            telegram=resolved_notifier,
+            strategy_name=strategy_name,
             order_adapter=order_adapter if is_live else None,
         )
 
@@ -221,7 +235,9 @@ class LiveTrader:
             self._db_write_failures = 0
         except Exception as e:
             self._db_write_failures += 1
-            logger.warning("DB %s failed (%d consecutive): %s", fn.__name__, self._db_write_failures, e)
+            logger.warning(
+                "DB %s failed (%d consecutive): %s", fn.__name__, self._db_write_failures, e
+            )
             if self._db_write_failures == self.CONSECUTIVE_ERROR_THRESHOLD:
                 self._notify(
                     "send_alert",
@@ -234,6 +250,7 @@ class LiveTrader:
 
     def _register_run(self) -> None:
         from db.timescale_writer import write_run_metadata
+
         try:
             write_run_metadata(
                 run_id=self._run_id,
@@ -241,7 +258,7 @@ class LiveTrader:
                 symbol=self._cfg.symbol,
                 timeframe=self._cfg.timeframe,
                 mode=self._cfg.mode,
-                started_at=datetime.now(tz=timezone.utc),
+                started_at=datetime.now(tz=UTC),
                 data_source=self._cfg.data_source,
                 poll_seconds=self._cfg.poll_seconds,
                 params=self._cfg.params,
@@ -256,25 +273,36 @@ class LiveTrader:
 
     def _build_on_bar(self) -> Callable:
         from db.timescale_writer import write_equity_curve_point
+
         strategy = self._cfg.strategy_name
 
-        def on_bar(run_id_: str, ts: datetime, equity: float, drawdown: float, period_return: float) -> None:
+        def on_bar(
+            run_id_: str, ts: datetime, equity: float, drawdown: float, period_return: float
+        ) -> None:
             self._db_write(
-                write_equity_curve_point, ts=ts, run_id=run_id_, equity=equity,
-                drawdown=drawdown, period_return=period_return, strategy=strategy,
+                write_equity_curve_point,
+                ts=ts,
+                run_id=run_id_,
+                equity=equity,
+                drawdown=drawdown,
+                period_return=period_return,
+                strategy=strategy,
             )
+
         return on_bar
 
     def _build_on_order_event(self) -> Callable:
         from db.timescale_writer import refresh_performance, write_trade_event
+
         from librae.core.utils import make_event_id
+
         run_id = self._run_id
         strategy = self._cfg.strategy_name
         timeframe = self._cfg.timeframe
         cfg = self._cfg
         _event_seq = 0
 
-        def on_order_event(event: "OrderEvent") -> None:
+        def on_order_event(event: OrderEvent) -> None:
             nonlocal _event_seq
             _event_seq += 1
             fields = asdict(event)
@@ -286,21 +314,27 @@ class LiveTrader:
             self._db_write(write_trade_event, **fields)
             if event.event_type in ("close", "reduce"):
                 self._db_write(refresh_performance, run_id, cfg=cfg)
+
         return on_order_event
 
     def _build_on_ohlcv(self) -> Callable:
         from db.timescale_writer import write_ohlcv
 
         def on_ohlcv(symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
-            row = pd.DataFrame([{
-                "ts": ts,
-                "open": bar.get("open", 0),
-                "high": bar.get("high", 0),
-                "low": bar.get("low", 0),
-                "close": bar.get("close", 0),
-                "volume": bar.get("volume", 0),
-            }]).set_index("ts")
+            row = pd.DataFrame(
+                [
+                    {
+                        "ts": ts,
+                        "open": bar.get("open", 0),
+                        "high": bar.get("high", 0),
+                        "low": bar.get("low", 0),
+                        "close": bar.get("close", 0),
+                        "volume": bar.get("volume", 0),
+                    }
+                ]
+            ).set_index("ts")
             self._db_write(write_ohlcv, row, symbol, timeframe_, data_source=self._cfg.data_source)
+
         return on_ohlcv
 
     def _build_on_heartbeat(self) -> Callable:
@@ -308,25 +342,36 @@ class LiveTrader:
 
         def on_heartbeat(run_id_: str) -> None:
             self._db_write(update_heartbeat, run_id_)
+
         return on_heartbeat
 
     def _build_on_signal_outcome(self) -> Callable:
         from db.timescale_writer import write_signal_event
+
         run_id = self._run_id
         strategy = self._cfg.strategy_name
         timeframe = self._cfg.timeframe
 
         def on_signal_event_cb(
-            symbol: str, ts: datetime, signal_value: float, price: float,
+            symbol: str,
+            ts: datetime,
+            signal_value: float,
+            price: float,
             signal_type: str = "entry",
         ) -> None:
             self._db_write(
                 write_signal_event,
-                ts=ts, run_id=run_id, strategy=strategy, symbol=symbol,
-                mode=self._cfg.mode, timeframe=timeframe,
-                signal_value=signal_value, price=price,
+                ts=ts,
+                run_id=run_id,
+                strategy=strategy,
+                symbol=symbol,
+                mode=self._cfg.mode,
+                timeframe=timeframe,
+                signal_value=signal_value,
+                price=price,
                 signal_type=signal_type,
             )
+
         return on_signal_event_cb
 
     def _build_notifier(self) -> object | None:
@@ -345,11 +390,13 @@ class LiveTrader:
         def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
             """DB-first warmup: reads historical bars from DB, fills gaps from API."""
             from strategies.module.data.ohlcv import get_ohlcv
+
             from librae.core.utils import interval_to_timedelta
 
-            warmup_start = datetime.now(tz=timezone.utc) - interval_to_timedelta(tf_ccxt) * limit
-            df = get_ohlcv(symbol, tf_ccxt, data_source=self._cfg.data_source,
-                           start=warmup_start.isoformat())
+            warmup_start = datetime.now(tz=UTC) - interval_to_timedelta(tf_ccxt) * limit
+            df = get_ohlcv(
+                symbol, tf_ccxt, data_source=self._cfg.data_source, start=warmup_start.isoformat()
+            )
             if df.empty:
                 return self._fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
             if "timestamp" in df.columns and "ts" not in df.columns:
@@ -357,6 +404,7 @@ class LiveTrader:
             if len(df) > limit:
                 df = df.iloc[-limit:]
             return df.reset_index(drop=True)
+
         return warmup_fetcher
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
@@ -386,14 +434,16 @@ class LiveTrader:
         Edge-triggered: alerts once when crossing into stale, not every
         poll cycle, and re-arms once fresh data resumes.
         """
-        age = datetime.now(timezone.utc) - latest_ts
+        age = datetime.now(UTC) - latest_ts
         threshold = (self.STALE_DATA_TOLERANCE_BARS + 1) * self._interval_delta
         is_stale = age > threshold
         was_stale = self._stale_alerted.get(symbol, False)
 
         if is_stale and not was_stale:
             self._stale_alerted[symbol] = True
-            logger.warning("Stale data: %s latest bar age=%s (threshold=%s)", symbol, age, threshold)
+            logger.warning(
+                "Stale data: %s latest bar age=%s (threshold=%s)", symbol, age, threshold
+            )
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Stale Data: {symbol}",
@@ -432,19 +482,29 @@ class LiveTrader:
                 avg_price = float(broker_pos.get("avg_price") or 0.0)
                 quantity = abs(size)
                 self._positions[symbol] = PositionState(
-                    symbol=symbol, side=side, entry_price=avg_price, quantity=quantity,
-                    entry_at=datetime.now(tz=timezone.utc), periods_held=0,
-                    entry_commission=0.0, entry_slippage=0.0, entry_tax=0.0,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=avg_price,
+                    quantity=quantity,
+                    entry_at=datetime.now(tz=UTC),
+                    periods_held=0,
+                    entry_commission=0.0,
+                    entry_slippage=0.0,
+                    entry_tax=0.0,
                     total_entry_cost=avg_price * quantity * self._executor.cost_model.multiplier,
                 )
                 logger.warning(
                     "Reconciled %s position from broker at startup: %s %.4f @ %.2f",
-                    symbol, side, quantity, avg_price,
+                    symbol,
+                    side,
+                    quantity,
+                    avg_price,
                 )
             except Exception:
                 logger.exception(
                     "Position reconciliation failed for %s — starting flat "
-                    "for this symbol, verify manually", symbol,
+                    "for this symbol, verify manually",
+                    symbol,
                 )
 
     # 1% — same style as CONSECUTIVE_ERROR_THRESHOLD: an engine constant,
@@ -490,7 +550,9 @@ class LiveTrader:
 
         logger.warning(
             "Cash drift: local=%.2f broker=%.2f (%s), not auto-adjusted",
-            self._cash, broker_total, currency,
+            self._cash,
+            broker_total,
+            currency,
         )
         self._notify(
             "send_alert",
@@ -513,7 +575,9 @@ class LiveTrader:
 
         logger.info(
             "LiveTrader started: symbols=%s, timeframe=%s, poll=%ss",
-            self._symbols, self._timeframe, self._poll_seconds,
+            self._symbols,
+            self._timeframe,
+            self._poll_seconds,
         )
         self._notify(
             "send_startup",
@@ -568,9 +632,11 @@ class LiveTrader:
 
     def _setup_signal_handlers(self) -> None:
         """Handle SIGTERM/SIGINT for graceful shutdown."""
+
         def _handler(signum: int, frame: types.FrameType | None) -> None:
             logger.info("Received signal %d, shutting down gracefully", signum)
             self.stop()
+
         signal.signal(signal.SIGTERM, _handler)
         signal.signal(signal.SIGINT, _handler)
 
@@ -608,7 +674,10 @@ class LiveTrader:
                     df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
                 else:
                     df = self._fetcher(
-                        symbol, self._timeframe, self._warmup_periods, drop_incomplete=True,
+                        symbol,
+                        self._timeframe,
+                        self._warmup_periods,
+                        drop_incomplete=True,
                     )
                 self._ohlcv_cache[symbol] = df
                 return df
@@ -624,7 +693,7 @@ class LiveTrader:
             if not new_bars.empty:
                 cached = pd.concat([cached, new_bars], ignore_index=True)
                 if len(cached) > self._warmup_periods:
-                    cached = cached.iloc[-self._warmup_periods:]
+                    cached = cached.iloc[-self._warmup_periods :]
                 self._ohlcv_cache[symbol] = cached
 
             return cached
@@ -640,9 +709,14 @@ class LiveTrader:
         through the exact same recording/submission/alerting path as a
         strategy-issued close, not a separate hand-rolled copy."""
         for event in result.events:
-            logger.info("Order event: %s %s %s %.4f @ %.2f",
-                        event.event_type, event.side, event.symbol,
-                        event.fill_quantity, event.price)
+            logger.info(
+                "Order event: %s %s %s %.4f @ %.2f",
+                event.event_type,
+                event.side,
+                event.symbol,
+                event.fill_quantity,
+                event.price,
+            )
             if self._on_order_event:
                 self._on_order_event(event)
 
@@ -694,7 +768,11 @@ class LiveTrader:
             self._max_position_pct * self._prev_equity if self._max_position_pct else None
         )
         self._cash, step_result = run_pending_and_stops(
-            ts, self._positions, self._cash, prev_actions, {symbol: raw_bar},
+            ts,
+            self._positions,
+            self._cash,
+            prev_actions,
+            {symbol: raw_bar},
             get_cost_model=self._get_cost_model,
             default_fill=self._fill_price,
             primary_symbol=symbol,
@@ -716,7 +794,8 @@ class LiveTrader:
         except Exception:
             logger.exception(
                 "Feature computation failed for %s — pending fills/stops above "
-                "still applied, skipping strategy decision for this bar", symbol,
+                "still applied, skipping strategy decision for this bar",
+                symbol,
             )
             return
 
@@ -767,13 +846,14 @@ class LiveTrader:
     def _get_last_price(self, sym: str, ps: PositionState) -> float:
         return self._last_prices.get(sym, ps.entry_price)
 
-    def _get_cost_model(self, _sym: str) -> "CostModel":
+    def _get_cost_model(self, _sym: str) -> CostModel:
         return self._executor.cost_model
 
     def _eval_equity_snapshot(self) -> tuple[float, dict[str, Position]]:
         """Shared MTM + snapshot computation."""
         return eval_equity(
-            self._cash, self._positions,
+            self._cash,
+            self._positions,
             get_price=self._get_last_price,
             get_cost_model=self._get_cost_model,
         )
@@ -783,14 +863,13 @@ class LiveTrader:
         breaker, call on_bar callback, and send periodic status."""
         equity = self._eval_equity()
         self._equity_peak = max(self._equity_peak, equity)
-        drawdown = (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
+        drawdown = (
+            (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
+        )
         period_return = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
         self._prev_equity = equity
 
-        if (
-            self._max_drawdown_pct and not self._halted
-            and drawdown <= -self._max_drawdown_pct
-        ):
+        if self._max_drawdown_pct and not self._halted and drawdown <= -self._max_drawdown_pct:
             self._flatten_and_halt(ts, drawdown)
 
         if self._on_bar:
@@ -821,7 +900,9 @@ class LiveTrader:
         _apply_action_results so live mode submits a real closing order to
         the broker through the exact same path as any other close."""
         result = liquidate_all(
-            self._positions, {}, ts,
+            self._positions,
+            {},
+            ts,
             get_cost_model=self._get_cost_model,
             reason=REASON_DRAWDOWN_BREACH,
             fallback_price=self._get_last_price,
@@ -840,5 +921,7 @@ class LiveTrader:
         logger.warning(
             "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
             "— all positions force-closed",
-            ts, drawdown * 100, self._max_drawdown_pct * 100,
+            ts,
+            drawdown * 100,
+            self._max_drawdown_pct * 100,
         )

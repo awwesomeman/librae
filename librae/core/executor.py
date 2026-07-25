@@ -14,14 +14,17 @@ Position sizing is the strategy's responsibility (set Action.quantity).
 If strategy doesn't specify quantity, executor uses all available cash
 for initial entries only. Scaling requires explicit quantity.
 """
+
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Literal
+from typing import Literal
 
 from librae.core import EPSILON
+
 from .cost_model import CostModel
 from .strategy import Action, Fill, Position, PositionState
 
@@ -313,14 +316,22 @@ def build_close_event(
     trade = build_trade_result(pos, ts, exit_price, close_qty, pnl)
     remaining_qty = 0.0 if fully_closed else max(0.0, pos.quantity - close_qty)
     event = OrderEvent(
-        ts=ts, symbol=pos.symbol, side=pos.side,
+        ts=ts,
+        symbol=pos.symbol,
+        side=pos.side,
         event_type="close" if fully_closed else "reduce",
-        fill_quantity=close_qty, price=exit_price,
-        entry_price=pos.entry_price, remaining_quantity=remaining_qty,
+        fill_quantity=close_qty,
+        price=exit_price,
+        entry_price=pos.entry_price,
+        remaining_quantity=remaining_qty,
         notional=exit_price * close_qty * cost_model.multiplier,
-        commission=pnl.commission, slippage=pnl.slippage, tax=pnl.tax,
-        pnl=pnl.net_pnl, net_return=pnl.net_return,
-        entry_at=pos.entry_at, periods_held=pos.periods_held,
+        commission=pnl.commission,
+        slippage=pnl.slippage,
+        tax=pnl.tax,
+        pnl=pnl.net_pnl,
+        net_return=pnl.net_return,
+        entry_at=pos.entry_at,
+        periods_held=pos.periods_held,
         reason=reason,
     )
     return trade, event, proceeds, fully_closed
@@ -332,7 +343,9 @@ def build_close_event(
 
 
 def resolve_stop_exit(
-    pos: PositionState, bar: dict[str, float], cost_model: CostModel,
+    pos: PositionState,
+    bar: dict[str, float],
+    cost_model: CostModel,
 ) -> tuple[float, str] | None:
     """Check whether this bar's range triggers pos's liquidation, stop-loss,
     or take-profit.
@@ -523,7 +536,9 @@ def resolve_fill_price(
 # ---------------------------------------------------------------------------
 
 
-def _size_position(cost_model: CostModel, price: float, cash: float, side: Literal["long", "short"]) -> float:
+def _size_position(
+    cost_model: CostModel, price: float, cash: float, side: Literal["long", "short"]
+) -> float:
     """Largest quantity whose estimate_entry_outlay fits in cash.
 
     Solved directly rather than by pricing 1 unit and extrapolating linearly:
@@ -544,7 +559,11 @@ def _size_position(cost_model: CostModel, price: float, cash: float, side: Liter
     # Below breakeven_qty, commission is pinned at the flat floor; above it,
     # commission scales with quantity. Solve in whichever regime `cash`
     # actually falls into.
-    breakeven_qty = cost_model.min_commission / marginal_commission if marginal_commission > EPSILON else float("inf")
+    breakeven_qty = (
+        cost_model.min_commission / marginal_commission
+        if marginal_commission > EPSILON
+        else float("inf")
+    )
     if cash <= linear * breakeven_qty + cost_model.min_commission:
         qty = (cash - cost_model.min_commission) / linear
     else:
@@ -553,7 +572,10 @@ def _size_position(cost_model: CostModel, price: float, cash: float, side: Liter
 
 
 def _shrink_fill(
-    fill: Fill, cost_model: CostModel, target_qty: float, bar_volume: float | None,
+    fill: Fill,
+    cost_model: CostModel,
+    target_qty: float,
+    bar_volume: float | None,
 ) -> Fill | None:
     """Rebuild a fill at a smaller target_qty, recomputing commission/
     slippage/tax — they scale with quantity, so a naive quantity clamp
@@ -576,8 +598,12 @@ def _shrink_fill(
 
 
 def _cap_fill_to_notional(
-    fill: Fill, existing_qty: float, cost_model: CostModel, max_notional: float,
-    *, bar_volume: float | None = None,
+    fill: Fill,
+    existing_qty: float,
+    cost_model: CostModel,
+    max_notional: float,
+    *,
+    bar_volume: float | None = None,
 ) -> Fill | None:
     """Shrink a fill so (existing_qty + fill.quantity) * price * multiplier
     stays within max_notional. Returns None if there's no room at all
@@ -592,13 +618,21 @@ def _cap_fill_to_notional(
     if capped is not None and capped is not fill:
         logger.info(
             "Position cap: %s %s clamped qty %.6f -> %.6f (max_notional=%.2f)",
-            fill.side, fill.symbol, fill.quantity, capped.quantity, max_notional,
+            fill.side,
+            fill.symbol,
+            fill.quantity,
+            capped.quantity,
+            max_notional,
         )
     return capped
 
 
 def _cap_fill_to_volume(
-    fill: Fill, cost_model: CostModel, max_qty: float, *, bar_volume: float | None = None,
+    fill: Fill,
+    cost_model: CostModel,
+    max_qty: float,
+    *,
+    bar_volume: float | None = None,
 ) -> Fill | None:
     """Shrink a fill to at most max_qty (typically max_volume_participation_pct
     * bar_volume) — a per-fill "how much of this bar's liquidity can I touch"
@@ -609,14 +643,22 @@ def _cap_fill_to_volume(
     if capped is not None and capped is not fill:
         logger.info(
             "Volume cap: %s %s clamped qty %.6f -> %.6f (max_qty=%.6f)",
-            fill.side, fill.symbol, fill.quantity, capped.quantity, max_qty,
+            fill.side,
+            fill.symbol,
+            fill.quantity,
+            capped.quantity,
+            max_qty,
         )
     return capped
 
 
 def make_fill(
-    action: Action, price: float, cash: float, cost_model: CostModel,
-    *, bar_volume: float | None = None,
+    action: Action,
+    price: float,
+    cash: float,
+    cost_model: CostModel,
+    *,
+    bar_volume: float | None = None,
 ) -> Fill | None:
     """Build a Fill for a long/short action. Returns None if rejected."""
     if action.type not in ("long", "short"):
@@ -672,16 +714,24 @@ def build_trade_result(
 
 
 def _try_fill(
-    action: Action, price: float, available_cash: float, cost_model: CostModel,
-    *, max_notional: float | None = None, existing_qty: float = 0.0,
-    max_volume_qty: float | None = None, bar_volume: float | None = None,
+    action: Action,
+    price: float,
+    available_cash: float,
+    cost_model: CostModel,
+    *,
+    max_notional: float | None = None,
+    existing_qty: float = 0.0,
+    max_volume_qty: float | None = None,
+    bar_volume: float | None = None,
 ) -> tuple[Fill | None, float]:
     """Attempt a fill and validate cash sufficiency. Returns (fill, outlay) or (None, 0)."""
     fill = make_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
     if not fill or fill.quantity <= 0:
         return None, 0.0
     if max_notional is not None:
-        fill = _cap_fill_to_notional(fill, existing_qty, cost_model, max_notional, bar_volume=bar_volume)
+        fill = _cap_fill_to_notional(
+            fill, existing_qty, cost_model, max_notional, bar_volume=bar_volume
+        )
         if fill is None:
             return None, 0.0
     if max_volume_qty is not None:
@@ -746,15 +796,21 @@ def process_actions(
             # the same as "no volume data available" (which skips the cap).
             max_volume_qty = (
                 max_volume_participation_pct * bar_volume
-                if max_volume_participation_pct and bar_volume is not None else None
+                if max_volume_participation_pct and bar_volume is not None
+                else None
             )
 
             if sym not in positions:
                 # OPEN NEW
                 fill, outlay = _try_fill(
-                    action, price, cash + cash_delta, cost_model,
-                    max_notional=max_position_notional, existing_qty=0.0,
-                    max_volume_qty=max_volume_qty, bar_volume=bar_volume,
+                    action,
+                    price,
+                    cash + cash_delta,
+                    cost_model,
+                    max_notional=max_position_notional,
+                    existing_qty=0.0,
+                    max_volume_qty=max_volume_qty,
+                    bar_volume=bar_volume,
                 )
                 if fill:
                     cash_delta -= outlay
@@ -772,14 +828,23 @@ def process_actions(
                         stop_price=action.stop_price,
                         take_profit_price=action.take_profit_price,
                     )
-                    events.append(OrderEvent(
-                        ts=ts, symbol=sym, side=fill.side, event_type="open",
-                        fill_quantity=fill.quantity, price=price,
-                        entry_price=price, remaining_quantity=fill.quantity,
-                        notional=price * fill.quantity * cost_model.multiplier,
-                        commission=fill.commission, slippage=fill.slippage,
-                        tax=fill.tax, reason=reason,
-                    ))
+                    events.append(
+                        OrderEvent(
+                            ts=ts,
+                            symbol=sym,
+                            side=fill.side,
+                            event_type="open",
+                            fill_quantity=fill.quantity,
+                            price=price,
+                            entry_price=price,
+                            remaining_quantity=fill.quantity,
+                            notional=price * fill.quantity * cost_model.multiplier,
+                            commission=fill.commission,
+                            slippage=fill.slippage,
+                            tax=fill.tax,
+                            reason=reason,
+                        )
+                    )
 
             elif positions[sym].side == desired_side:
                 # SCALE IN — must specify quantity
@@ -787,9 +852,14 @@ def process_actions(
                     logger.debug("Scaling %s requires explicit quantity, skipping", sym)
                     continue
                 fill, outlay = _try_fill(
-                    action, price, cash + cash_delta, cost_model,
-                    max_notional=max_position_notional, existing_qty=positions[sym].quantity,
-                    max_volume_qty=max_volume_qty, bar_volume=bar_volume,
+                    action,
+                    price,
+                    cash + cash_delta,
+                    cost_model,
+                    max_notional=max_position_notional,
+                    existing_qty=positions[sym].quantity,
+                    max_volume_qty=max_volume_qty,
+                    bar_volume=bar_volume,
                 )
                 if fill:
                     cash_delta -= outlay
@@ -801,20 +871,31 @@ def process_actions(
                         pos.stop_price = action.stop_price
                     if action.take_profit_price is not None:
                         pos.take_profit_price = action.take_profit_price
-                    events.append(OrderEvent(
-                        ts=ts, symbol=sym, side=pos.side, event_type="add",
-                        fill_quantity=fill.quantity, price=price,
-                        entry_price=pos.entry_price, remaining_quantity=pos.quantity,
-                        notional=price * fill.quantity * cost_model.multiplier,
-                        commission=fill.commission, slippage=fill.slippage,
-                        tax=fill.tax, reason=reason,
-                    ))
+                    events.append(
+                        OrderEvent(
+                            ts=ts,
+                            symbol=sym,
+                            side=pos.side,
+                            event_type="add",
+                            fill_quantity=fill.quantity,
+                            price=price,
+                            entry_price=pos.entry_price,
+                            remaining_quantity=pos.quantity,
+                            notional=price * fill.quantity * cost_model.multiplier,
+                            commission=fill.commission,
+                            slippage=fill.slippage,
+                            tax=fill.tax,
+                            reason=reason,
+                        )
+                    )
 
             else:
                 # OPPOSITE SIDE — reject
                 logger.warning(
                     "Rejected %s %s: already %s — close first",
-                    action.type, sym, positions[sym].side,
+                    action.type,
+                    sym,
+                    positions[sym].side,
                 )
 
         elif action.type == "close" and sym in positions:
@@ -826,7 +907,12 @@ def process_actions(
                 continue
 
             trade, event, proceeds, fully_closed = build_close_event(
-                pos, ts, price, cost_model, reason, quantity=close_qty,
+                pos,
+                ts,
+                price,
+                cost_model,
+                reason,
+                quantity=close_qty,
             )
             trades.append(trade)
             events.append(event)
@@ -874,9 +960,13 @@ def run_pending_and_stops(
 
     if pending_actions:
         fill_result = process_actions(
-            pending_actions, positions, cash, ts,
+            pending_actions,
+            positions,
+            cash,
+            ts,
             get_price=lambda sym, action: resolve_fill_price(
-                bars.get(sym, {}), action, default_fill=default_fill),
+                bars.get(sym, {}), action, default_fill=default_fill
+            ),
             get_cost_model=get_cost_model,
             primary_symbol=primary_symbol,
             max_position_notional=max_position_notional,

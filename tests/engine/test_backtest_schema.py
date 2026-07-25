@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from librae.backtest.schema import (
     BacktestOutput,
     EquityCurvePoint,
@@ -13,9 +12,9 @@ from librae.backtest.schema import (
     StrategyMetrics,
 )
 
-NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc)
-START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
-END = datetime(2026, 3, 5, 23, 59, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=UTC)
+START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=UTC)
+END = datetime(2026, 3, 5, 23, 59, 0, tzinfo=UTC)
 
 
 def _make_run_metadata(**kwargs) -> RunMetadata:
@@ -36,7 +35,7 @@ def _make_run_metadata(**kwargs) -> RunMetadata:
 def _make_equity_curve() -> list[EquityCurvePoint]:
     return [
         EquityCurvePoint(
-            ts=datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc),
+            ts=datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC),
             equity=1_000_000.0,
             period_return=0.0,
             drawdown=0.0,
@@ -44,7 +43,7 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
             benchmark_period_return=0.0,
         ),
         EquityCurvePoint(
-            ts=datetime(2026, 3, 2, 10, 0, 0, tzinfo=timezone.utc),
+            ts=datetime(2026, 3, 2, 10, 0, 0, tzinfo=UTC),
             equity=1_005_000.0,
             period_return=0.005,
             drawdown=0.0,
@@ -128,5 +127,3 @@ def test_equity_curve_point_benchmark_optional() -> None:
     )
     assert pt.benchmark_equity is None
     assert pt.benchmark_period_return is None
-
-

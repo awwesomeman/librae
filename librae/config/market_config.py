@@ -20,6 +20,7 @@ explicit, no fallback.
 
 Per-instrument details (symbol, min_qty, exchange) belong to the broker layer.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -62,7 +63,7 @@ def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfi
     """
     yaml_path = Path(path) if path else _default_markets_path()
 
-    with open(yaml_path, "r") as f:
+    with open(yaml_path) as f:
         raw = yaml.safe_load(f)
 
     if not raw or not isinstance(raw, dict):

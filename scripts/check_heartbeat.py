@@ -15,6 +15,7 @@ Usage:
     # Cron (every 5 minutes)
     */5 * * * * cd /path/to/librae && .venv/bin/python scripts/check_heartbeat.py
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,13 +38,16 @@ def find_stale_runs() -> list[dict[str, str]]:
     """Query DB for sim/live runs with stale heartbeats."""
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT run_id, strategy, symbol, mode, poll_seconds, last_heartbeat_at
             FROM backtest_runs
             WHERE mode IN ('sim', 'live')
               AND last_heartbeat_at IS NOT NULL
               AND last_heartbeat_at < NOW() - (poll_seconds * %s || ' seconds')::interval
-        """, (STALE_MULTIPLIER,))
+        """,
+            (STALE_MULTIPLIER,),
+        )
         rows = cur.fetchall()
         cur.close()
 
@@ -70,7 +74,9 @@ def check_and_alert(adapter: TelegramAdapter) -> int:
     for run in stale:
         logger.warning(
             "Stale heartbeat: %s/%s (last: %s)",
-            run["strategy"], run["symbol"], run["last_heartbeat_at"],
+            run["strategy"],
+            run["symbol"],
+            run["last_heartbeat_at"],
         )
         adapter.send_alert(
             title=f"{EMOJI_WARNING} [{run['strategy']}] Heartbeat Timeout",
@@ -87,7 +93,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Heartbeat monitor for sim/live services")
     parser.add_argument("--loop", action="store_true", help="run continuously")
-    parser.add_argument("--interval", type=int, default=60, help="seconds between checks (with --loop)")
+    parser.add_argument(
+        "--interval", type=int, default=60, help="seconds between checks (with --loop)"
+    )
     args = parser.parse_args()
 
     config = TelegramConfig(enabled=True)
@@ -99,8 +107,11 @@ def main() -> None:
         return
 
     if args.loop:
-        logger.info("Heartbeat monitor started (interval=%ds, stale=%d×poll)",
-                     args.interval, STALE_MULTIPLIER)
+        logger.info(
+            "Heartbeat monitor started (interval=%ds, stale=%d×poll)",
+            args.interval,
+            STALE_MULTIPLIER,
+        )
         while True:
             try:
                 check_and_alert(adapter)

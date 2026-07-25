@@ -1,9 +1,10 @@
 """Database integration layer."""
+
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
-from typing import Generator
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 
 import psycopg2
 import psycopg2.pool
@@ -15,11 +16,11 @@ def _load_dotenv() -> None:
     env_path = os.path.join(root_dir, ".env")
     if not os.path.isfile(env_path):
         return
-    with open(env_path, "r", encoding="utf-8") as f:
+    with open(env_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line.startswith("export "):
-                line = line[len("export "):].strip()
+                line = line[len("export ") :].strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, val = line.split("=", 1)
@@ -42,7 +43,9 @@ if not TIMESCALE_DSN:
 _pool = None
 
 
-def get_pool(dsn: str = TIMESCALE_DSN, minconn: int = 1, maxconn: int = 5) -> psycopg2.pool.SimpleConnectionPool:
+def get_pool(
+    dsn: str = TIMESCALE_DSN, minconn: int = 1, maxconn: int = 5
+) -> psycopg2.pool.SimpleConnectionPool:
     """Return a shared SimpleConnectionPool (lazy-init, auto-recreate)."""
     global _pool
     if _pool is None or _pool.closed:
@@ -65,10 +68,8 @@ def get_conn(dsn: str = TIMESCALE_DSN) -> Generator[psycopg2.extensions.connecti
         yield conn
         conn.commit()
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         pool.putconn(conn, close=bool(conn.closed))

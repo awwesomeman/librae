@@ -3,9 +3,10 @@
 This generates a reproducible OHLCV DataFrame using a fixed seed,
 simulating ~30 days of hourly BTC data.
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
@@ -40,17 +41,19 @@ def generate_btc_h1_ohlcv(
 
     volume = rng.uniform(100, 2000, size=n_bars)
 
-    start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-    timestamps = pd.date_range(start=start, periods=n_bars, freq="h", tz=timezone.utc)
+    start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+    timestamps = pd.date_range(start=start, periods=n_bars, freq="h", tz=UTC)
 
-    return pd.DataFrame({
-        "timestamp": timestamps,
-        "open": np.round(open_prices, 2),
-        "high": np.round(high_prices, 2),
-        "low": np.round(low_prices, 2),
-        "close": np.round(close_prices, 2),
-        "volume": np.round(volume, 2),
-    })
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": np.round(open_prices, 2),
+            "high": np.round(high_prices, 2),
+            "low": np.round(low_prices, 2),
+            "close": np.round(close_prices, 2),
+            "volume": np.round(volume, 2),
+        }
+    )
 
 
 def run_simple_sma_crossover(
@@ -87,20 +90,28 @@ def run_simple_sma_crossover(
         elif position == 1 and fast_sma[i] < slow_sma[i] and fast_sma[i - 1] >= slow_sma[i - 1]:
             exit_price = close[i]
             pnl_points = exit_price - entry_price
-            trades.append({
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "pnl_points": pnl_points,
-                "pnl_return": pnl_points / entry_price,
-                "holding_periods": i - entry_idx,
-            })
+            trades.append(
+                {
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "pnl_points": pnl_points,
+                    "pnl_return": pnl_points / entry_price,
+                    "holding_periods": i - entry_idx,
+                }
+            )
             position = 0
 
     if not trades:
         return {
-            "trades": 0, "ann_return": 0.0, "ann_sharpe": 0.0,
-            "mdd": 0.0, "pf": 0.0, "win_rate": 0.0,
-            "avg_ret": 0.0, "avg_pnl_points": 0.0, "equity": 1.0,
+            "trades": 0,
+            "ann_return": 0.0,
+            "ann_sharpe": 0.0,
+            "mdd": 0.0,
+            "pf": 0.0,
+            "win_rate": 0.0,
+            "avg_ret": 0.0,
+            "avg_pnl_points": 0.0,
+            "equity": 1.0,
         }
 
     returns = [t["pnl_return"] for t in trades]

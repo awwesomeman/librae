@@ -1,16 +1,15 @@
 """Tests for librae.core.utils — timeframe utilities and ID generation."""
+
 from __future__ import annotations
 
 import pandas as pd
 import pytest
-
 from librae.core.utils import (
     generate_run_id,
     infer_timeframe,
     to_canonical,
     to_ccxt,
 )
-
 
 # ---------------------------------------------------------------------------
 # infer_timeframe

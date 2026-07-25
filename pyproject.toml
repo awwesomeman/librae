@@ -15,6 +15,8 @@ classifiers = [
     "Topic :: Office/Business :: Financial :: Investment",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
@@ -83,7 +85,7 @@ line-length = 100
 # strategies/ is migrating out (docs/plans/refactor_librae_decouple.md) and
 # isn't worth cleaning up pre-move.
 src = ["librae", "notifications", "orchestration", "db", "brokers", "app", "scripts"]
-extend-exclude = ["strategies", "tests/strategies"]
+extend-exclude = ["strategies", "tests/strategies", "*.md"]  # *.md: don't reformat doc code fences
 
 [tool.ruff.lint]
 # Standard rule set: pycodestyle (E/W), pyflakes (F), isort (I), bugbear (B),

@@ -1,4 +1,5 @@
 """Tests for CLI config merge logic (parse_with_config)."""
+
 from __future__ import annotations
 
 import sys
@@ -19,10 +20,12 @@ def _clear_argv(monkeypatch):
 @pytest.fixture()
 def config_yaml(tmp_path):
     """Write a temporary config YAML and return its path."""
+
     def _write(content: str) -> Path:
         p = tmp_path / "config.yaml"
         p.write_text(textwrap.dedent(content))
         return p
+
     return _write
 
 
@@ -54,8 +57,8 @@ class TestParseWithConfig:
         monkeypatch.setattr(sys, "argv", ["test", "--mode", "live"])
         p = base_parser("test")
         ns = parse_with_config(p, config_path=cfg)
-        assert ns.mode == "live"          # CLI wins
-        assert ns.poll_seconds == 30      # YAML default kept
+        assert ns.mode == "live"  # CLI wins
+        assert ns.poll_seconds == 30  # YAML default kept
 
     def test_structured_keys_attached_as_dict(self, config_yaml):
         cfg = config_yaml("""\
@@ -86,7 +89,7 @@ class TestParseWithConfig:
     def test_missing_config_file_warns(self, tmp_path, caplog):
         p = base_parser("test")
         ns = parse_with_config(p, config_path=tmp_path / "nonexistent.yaml")
-        assert ns.mode == "backtest"      # falls back to argparse default
+        assert ns.mode == "backtest"  # falls back to argparse default
         assert "Config file not found" in caplog.text
 
     def test_cli_config_flag_overrides_config_path(self, config_yaml, monkeypatch):

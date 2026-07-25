@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from librae.backtest.schema import (
     REQUIRED_BACKTEST_TOP_LEVEL_KEYS,
     ensure_snake_case_keys,

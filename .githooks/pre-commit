@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Mirrors .github/workflows/lint.yml: fail locally instead of in CI.
+# strategies/ is excluded — migrating out, not onboarded to lint.
+# Bypass with: git commit --no-verify
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.py$' | grep -v '^strategies/' || true)
+if [ -z "$staged" ]; then
+    exit 0
+fi
+
+echo "[pre-commit] ruff check..."
+echo "$staged" | xargs uv run ruff check || {
+    echo "[pre-commit] FAIL — fix with: uv run ruff check --fix <files>"
+    exit 1
+}
+
+echo "[pre-commit] ruff format --check..."
+echo "$staged" | xargs uv run ruff format --check || {
+    echo "[pre-commit] FAIL — fix with: uv run ruff format <files>"
+    exit 1
+}

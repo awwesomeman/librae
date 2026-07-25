@@ -3,22 +3,22 @@
 Tests compute_all() which accepts primitive sequences (equity values,
 timestamps, TradePnL objects).
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-
-from librae.core.cost_model import CostModel
 from librae.backtest.engine import Backtest
-from librae.core.strategy import Action, BaseStrategy
-from librae.core.metrics import compute_all
 from librae.backtest.schema import StrategyMetrics
+from librae.core.cost_model import CostModel
+from librae.core.metrics import compute_all
+from librae.core.strategy import Action, BaseStrategy
 
-START = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-END = datetime(2024, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
+START = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+END = datetime(2024, 2, 1, 0, 0, 0, tzinfo=UTC)
 
 
 def _make_trade_pnl(
@@ -31,10 +31,16 @@ def _make_trade_pnl(
 ) -> SimpleNamespace:
     """Duck-typed TradePnL for tests."""
     return SimpleNamespace(
-        gross_pnl=gross_pnl, net_pnl=net_pnl,
-        commission=commission, slippage=slippage, tax=tax,
-        gross_return=0.0, net_return=net_return,
-        exit_commission=0.0, exit_slippage=0.0, exit_tax=tax,
+        gross_pnl=gross_pnl,
+        net_pnl=net_pnl,
+        commission=commission,
+        slippage=slippage,
+        tax=tax,
+        gross_return=0.0,
+        net_return=net_return,
+        exit_commission=0.0,
+        exit_slippage=0.0,
+        exit_tax=tax,
     )
 
 
@@ -76,9 +82,9 @@ class TestComputeAllMetrics:
 
     def test_win_rate(self) -> None:
         pnls = [
-            _make_trade_pnl(net_pnl=10, net_return=0.1),   # win
+            _make_trade_pnl(net_pnl=10, net_return=0.1),  # win
             _make_trade_pnl(net_pnl=-10, net_return=-0.1),  # loss
-            _make_trade_pnl(net_pnl=5, net_return=0.05),    # win
+            _make_trade_pnl(net_pnl=5, net_return=0.05),  # win
         ]
         m = _call_compute_all([10_000.0, 10_100.0, 9_900.0, 10_050.0], pnls)
         assert np.isclose(m.win_rate, 2 / 3)
@@ -98,8 +104,11 @@ class TestComputeAllMetrics:
 
     def test_cost_totals(self) -> None:
         pnl = _make_trade_pnl(
-            gross_pnl=10.0, net_pnl=6.5,
-            commission=2.0, slippage=1.0, tax=0.5,
+            gross_pnl=10.0,
+            net_pnl=6.5,
+            commission=2.0,
+            slippage=1.0,
+            tax=0.5,
             net_return=0.065,
         )
         m = _call_compute_all([10_000.0, 10_003.0, 10_006.5], [pnl])
@@ -129,13 +138,19 @@ class TestComputeAllWithEngine:
         idx = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
         prices = 100.0 + np.cumsum(np.random.default_rng(42).normal(0.5, 1, n))
         mi = pd.MultiIndex.from_arrays(
-            [["TEST"] * n, idx], names=["symbol", "datetime"],
+            [["TEST"] * n, idx],
+            names=["symbol", "datetime"],
         )
-        df = pd.DataFrame({
-            "open": prices, "high": prices * 1.001,
-            "low": prices * 0.999, "close": prices,
-            "volume": np.full(n, 100.0),
-        }, index=mi)
+        df = pd.DataFrame(
+            {
+                "open": prices,
+                "high": prices * 1.001,
+                "low": prices * 0.999,
+                "close": prices,
+                "volume": np.full(n, 100.0),
+            },
+            index=mi,
+        )
 
         class BuyBar10CloseBar30(BaseStrategy):
             def on_bar(self, ctx):
@@ -146,12 +161,16 @@ class TestComputeAllWithEngine:
                 return []
 
         cost = CostModel(
-            multiplier=1.0, commission_rate=0.001,
-            min_commission=0.0, slippage_ticks=0.0,
-            tick_size=0.01, tax_rate=0.0,
+            multiplier=1.0,
+            commission_rate=0.001,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
         )
-        bt = Backtest(df, BuyBar10CloseBar30(), initial_balance=10_000,
-                      cost_model=cost, data_source="test")
+        bt = Backtest(
+            df, BuyBar10CloseBar30(), initial_balance=10_000, cost_model=cost, data_source="test"
+        )
         bt.run()
         output = bt.build_output()
 
@@ -162,27 +181,43 @@ class TestComputeAllWithEngine:
 
 
 def test_compute_trade_mae_mfe():
-    from librae.core.metrics import compute_trade_mae_mfe
     from librae.backtest.schema import OrderEventRecord
+    from librae.core.metrics import compute_trade_mae_mfe
 
     idx = pd.date_range("2026-03-01", periods=10, freq="1h", tz="UTC")
     df = pd.DataFrame(
         {
             "open": [100] * 10,
             "high": [100, 105, 110, 102, 100, 100, 108, 100, 100, 100],
-            "low":  [100,  95,  90,  98, 100, 100,  92, 100, 100, 100],
+            "low": [100, 95, 90, 98, 100, 100, 92, 100, 100, 100],
             "close": [100] * 10,
         },
         index=idx,
     )
 
     ev_open = OrderEventRecord(
-        event_id="e1", ts=idx[0], symbol="BTCUSDT", side="long", event_type="open",
-        fill_quantity=1.0, price=100.0, entry_price=100.0, remaining_quantity=1.0, notional=100.0,
+        event_id="e1",
+        ts=idx[0],
+        symbol="BTCUSDT",
+        side="long",
+        event_type="open",
+        fill_quantity=1.0,
+        price=100.0,
+        entry_price=100.0,
+        remaining_quantity=1.0,
+        notional=100.0,
     )
     ev_close = OrderEventRecord(
-        event_id="e2", ts=idx[3], symbol="BTCUSDT", side="long", event_type="close",
-        fill_quantity=1.0, price=102.0, entry_price=100.0, remaining_quantity=0.0, notional=102.0,
+        event_id="e2",
+        ts=idx[3],
+        symbol="BTCUSDT",
+        side="long",
+        event_type="close",
+        fill_quantity=1.0,
+        price=102.0,
+        entry_price=100.0,
+        remaining_quantity=0.0,
+        notional=102.0,
     )
 
     res = compute_trade_mae_mfe([ev_open, ev_close], df)
@@ -192,27 +227,43 @@ def test_compute_trade_mae_mfe():
 
 
 def test_compute_trade_mae_mfe_short():
-    from librae.core.metrics import compute_trade_mae_mfe
     from librae.backtest.schema import OrderEventRecord
+    from librae.core.metrics import compute_trade_mae_mfe
 
     idx = pd.date_range("2026-03-01", periods=5, freq="1h", tz="UTC")
     df = pd.DataFrame(
         {
             "open": [100] * 5,
             "high": [100, 103, 120, 102, 100],  # spikes up to 120 -> adverse for a short
-            "low":  [100,  99,  98,  95, 100],  # dips to 95 -> favorable for a short
+            "low": [100, 99, 98, 95, 100],  # dips to 95 -> favorable for a short
             "close": [100] * 5,
         },
         index=idx,
     )
 
     ev_open = OrderEventRecord(
-        event_id="e1", ts=idx[0], symbol="BTCUSDT", side="short", event_type="open",
-        fill_quantity=1.0, price=100.0, entry_price=100.0, remaining_quantity=1.0, notional=100.0,
+        event_id="e1",
+        ts=idx[0],
+        symbol="BTCUSDT",
+        side="short",
+        event_type="open",
+        fill_quantity=1.0,
+        price=100.0,
+        entry_price=100.0,
+        remaining_quantity=1.0,
+        notional=100.0,
     )
     ev_close = OrderEventRecord(
-        event_id="e2", ts=idx[3], symbol="BTCUSDT", side="short", event_type="close",
-        fill_quantity=1.0, price=98.0, entry_price=100.0, remaining_quantity=0.0, notional=98.0,
+        event_id="e2",
+        ts=idx[3],
+        symbol="BTCUSDT",
+        side="short",
+        event_type="close",
+        fill_quantity=1.0,
+        price=98.0,
+        entry_price=100.0,
+        remaining_quantity=0.0,
+        notional=98.0,
     )
 
     res = compute_trade_mae_mfe([ev_open, ev_close], df)

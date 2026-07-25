@@ -16,11 +16,12 @@ Tables: backtest_runs, equity_curve, trade_events,
 strategy_performance, ohlcv, signal_events, ohlcv_coverage_ranges,
 external_factors, external_factor_coverage_ranges.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import psycopg2
@@ -31,9 +32,9 @@ if TYPE_CHECKING:
     from psycopg2.extensions import cursor as PgCursor
 
 import pandas as pd
-
 from librae.backtest.schema import BacktestOutput
 from librae.core.utils import to_canonical
+
 from db import TIMESCALE_DSN, get_conn
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def _to_dt(ts: Any) -> datetime | None:
                 f"Timezone-naive datetime {ts!r} — "
                 "provide tz-aware timestamps (e.g. with tzinfo=timezone.utc)"
             )
-        return ts.astimezone(timezone.utc)
+        return ts.astimezone(UTC)
     return ts
 
 
@@ -85,10 +86,7 @@ def _extract_signals(
     Returns (symbol_df, signal_series). Handles both MultiIndex and
     single-level DatetimeIndex inputs.
     """
-    if isinstance(df.index, pd.MultiIndex):
-        symbol_df = df.xs(symbol, level="symbol")
-    else:
-        symbol_df = df
+    symbol_df = df.xs(symbol, level="symbol") if isinstance(df.index, pd.MultiIndex) else df
     raw = symbol_df[signal_column].astype(float)
     signal_series = raw.dropna()
     signal_series = signal_series[signal_series != 0]
@@ -131,11 +129,19 @@ def write_run_metadata(
     params_val = json.dumps(params) if params is not None else None
     perf_val = json.dumps(perf_params) if perf_params is not None else None
     values = (
-        run_id, strategy, symbol, timeframe, data_source,
-        _to_dt(started_at), _to_dt(ended_at),
-        _to_dt(run_at) or datetime.now(tz=timezone.utc),
-        mode, poll_seconds,
-        params_val, perf_val, config_hash,
+        run_id,
+        strategy,
+        symbol,
+        timeframe,
+        data_source,
+        _to_dt(started_at),
+        _to_dt(ended_at),
+        _to_dt(run_at) or datetime.now(tz=UTC),
+        mode,
+        poll_seconds,
+        params_val,
+        perf_val,
+        config_hash,
     )
     if cur is not None:
         cur.execute(sql, values)
@@ -212,9 +218,14 @@ def save_backtest_output(
         cur = conn.cursor()
 
         write_run_metadata(
-            run_id=meta.run_id, strategy=meta.strategy, symbol=meta.symbol,
-            timeframe=meta.timeframe, mode=meta.mode,
-            started_at=meta.started_at, ended_at=meta.ended_at, run_at=meta.run_at,
+            run_id=meta.run_id,
+            strategy=meta.strategy,
+            symbol=meta.symbol,
+            timeframe=meta.timeframe,
+            mode=meta.mode,
+            started_at=meta.started_at,
+            ended_at=meta.ended_at,
+            run_at=meta.run_at,
             data_source=meta.data_source,
             params=params,
             perf_params=perf_params,
@@ -234,9 +245,13 @@ def save_backtest_output(
         if output.equity_curve:
             eq_rows = [
                 (
-                    _to_dt(eq.ts), meta.run_id, eq.equity,
-                    eq.benchmark_equity, eq.drawdown,
-                    eq.period_return, eq.benchmark_period_return,
+                    _to_dt(eq.ts),
+                    meta.run_id,
+                    eq.equity,
+                    eq.benchmark_equity,
+                    eq.drawdown,
+                    eq.period_return,
+                    eq.benchmark_period_return,
                     meta.strategy,
                 )
                 for eq in output.equity_curve
@@ -256,16 +271,28 @@ def save_backtest_output(
         if output.order_events:
             event_rows = [
                 (
-                    ev.event_id, meta.run_id,
-                    meta.strategy, meta.mode, tf,
+                    ev.event_id,
+                    meta.run_id,
+                    meta.strategy,
+                    meta.mode,
+                    tf,
                     _to_dt(ev.ts),
-                    ev.symbol, ev.side, ev.event_type,
-                    ev.fill_quantity, ev.price, ev.entry_price,
-                    ev.remaining_quantity, ev.notional,
-                    ev.commission, ev.slippage, ev.tax,
-                    ev.pnl, ev.net_return,
+                    ev.symbol,
+                    ev.side,
+                    ev.event_type,
+                    ev.fill_quantity,
+                    ev.price,
+                    ev.entry_price,
+                    ev.remaining_quantity,
+                    ev.notional,
+                    ev.commission,
+                    ev.slippage,
+                    ev.tax,
+                    ev.pnl,
+                    ev.net_return,
                     _to_dt(ev.entry_at) if ev.entry_at else None,
-                    ev.periods_held, ev.reason,
+                    ev.periods_held,
+                    ev.reason,
                 )
                 for ev in output.order_events
             ]
@@ -289,9 +316,8 @@ def save_backtest_output(
 
         # signal_events (from feature-layer signal_series)
         sig_count = 0
-        has_signals = (
-            (signal_series is not None and not signal_series.empty)
-            or (exit_signal_series is not None and not exit_signal_series.empty)
+        has_signals = (signal_series is not None and not signal_series.empty) or (
+            exit_signal_series is not None and not exit_signal_series.empty
         )
         if has_signals:
             cur.execute(
@@ -299,21 +325,45 @@ def save_backtest_output(
                    WHERE run_id = %s AND strategy = %s AND symbol = %s AND mode = 'backtest'
                      AND timeframe = %s
                      AND ts BETWEEN %s AND %s""",
-                (meta.run_id, meta.strategy, meta.symbol, tf,
-                 _to_dt(meta.started_at), _to_dt(meta.ended_at)),
+                (
+                    meta.run_id,
+                    meta.strategy,
+                    meta.symbol,
+                    tf,
+                    _to_dt(meta.started_at),
+                    _to_dt(meta.ended_at),
+                ),
             )
         if signal_series is not None and not signal_series.empty:
             entry_rows = [
-                (_to_dt(ts), meta.run_id, meta.strategy, meta.symbol, "backtest",
-                 tf, float(val), None, "entry")
+                (
+                    _to_dt(ts),
+                    meta.run_id,
+                    meta.strategy,
+                    meta.symbol,
+                    "backtest",
+                    tf,
+                    float(val),
+                    None,
+                    "entry",
+                )
                 for ts, val in signal_series.items()
             ]
             psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, entry_rows, page_size=1000)
             sig_count += len(entry_rows)
         if exit_signal_series is not None and not exit_signal_series.empty:
             exit_rows = [
-                (_to_dt(ts), meta.run_id, meta.strategy, meta.symbol, "backtest",
-                 tf, float(val), None, "exit")
+                (
+                    _to_dt(ts),
+                    meta.run_id,
+                    meta.strategy,
+                    meta.symbol,
+                    "backtest",
+                    tf,
+                    float(val),
+                    None,
+                    "exit",
+                )
                 for ts, val in exit_signal_series.items()
             ]
             psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
@@ -366,18 +416,21 @@ def write_ohlcv(
         )
     ts_utc = ts_series.dt.tz_convert("UTC")
 
-    rows = list(zip(
-        ts_utc.apply(_to_dt),
-        [symbol] * len(df),
-        [timeframe] * len(df),
-        [data_source] * len(df),
-        [instrument_type] * len(df),
-        df["open"].astype(float),
-        df["high"].astype(float),
-        df["low"].astype(float),
-        df["close"].astype(float),
-        df.get("volume", pd.Series([0.0] * len(df))).astype(float),
-    ))
+    rows = list(
+        zip(
+            ts_utc.apply(_to_dt),
+            [symbol] * len(df),
+            [timeframe] * len(df),
+            [data_source] * len(df),
+            [instrument_type] * len(df),
+            df["open"].astype(float),
+            df["high"].astype(float),
+            df["low"].astype(float),
+            df["close"].astype(float),
+            df.get("volume", pd.Series([0.0] * len(df))).astype(float),
+            strict=True,
+        )
+    )
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
@@ -396,7 +449,7 @@ def write_ohlcv(
 
 
 def _merge_coverage_ranges(
-    cur: "PgCursor",
+    cur: PgCursor,
     table: str,
     key_cols: tuple[str, ...],
     key_values: tuple[str, ...],
@@ -419,7 +472,9 @@ def _merge_coverage_ranges(
         key_values,
     )
     rows = [{"id": r[0], "range_started_at": r[1], "range_ended_at": r[2]} for r in cur.fetchall()]
-    rows.append({"id": None, "range_started_at": range_started_at, "range_ended_at": range_ended_at})
+    rows.append(
+        {"id": None, "range_started_at": range_started_at, "range_ended_at": range_ended_at}
+    )
     rows.sort(key=lambda r: r["range_started_at"])
 
     merged: list[tuple[datetime, datetime]] = []
@@ -458,8 +513,12 @@ def merge_ohlcv_coverage_ranges(
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         _merge_coverage_ranges(
-            cur, "ohlcv_coverage_ranges", ("symbol", "timeframe", "data_source", "instrument_type"),
-            (symbol, timeframe, data_source, instrument_type), range_started_at, range_ended_at,
+            cur,
+            "ohlcv_coverage_ranges",
+            ("symbol", "timeframe", "data_source", "instrument_type"),
+            (symbol, timeframe, data_source, instrument_type),
+            range_started_at,
+            range_ended_at,
         )
         cur.close()
 
@@ -489,14 +548,17 @@ def write_external_factor(
         )
     ts_utc = ts_series.dt.tz_convert("UTC")
 
-    rows = list(zip(
-        ts_utc.apply(_to_dt),
-        [symbol] * len(df),
-        [factor_name] * len(df),
-        [source] * len(df),
-        [instrument_type] * len(df),
-        df["value"].astype(float),
-    ))
+    rows = list(
+        zip(
+            ts_utc.apply(_to_dt),
+            [symbol] * len(df),
+            [factor_name] * len(df),
+            [source] * len(df),
+            [instrument_type] * len(df),
+            df["value"].astype(float),
+            strict=True,
+        )
+    )
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
@@ -559,8 +621,12 @@ def merge_external_factor_coverage_ranges(
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         _merge_coverage_ranges(
-            cur, "external_factor_coverage_ranges", ("symbol", "factor_name", "source", "instrument_type"),
-            (symbol, factor_name, source, instrument_type), range_started_at, range_ended_at,
+            cur,
+            "external_factor_coverage_ranges",
+            ("symbol", "factor_name", "source", "instrument_type"),
+            (symbol, factor_name, source, instrument_type),
+            range_started_at,
+            range_ended_at,
         )
         cur.close()
 
@@ -589,8 +655,17 @@ def write_signal_event(
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)
                DO NOTHING"""
-    values = (_to_dt(ts), run_id, strategy, symbol, mode, timeframe,
-              signal_value, price, signal_type)
+    values = (
+        _to_dt(ts),
+        run_id,
+        strategy,
+        symbol,
+        mode,
+        timeframe,
+        signal_value,
+        price,
+        signal_type,
+    )
     if cur is not None:
         cur.execute(sql, values)
     else:
@@ -625,8 +700,14 @@ def write_equity_curve_point(
                  benchmark_period_return=EXCLUDED.benchmark_period_return,
                  strategy=EXCLUDED.strategy""",
             (
-                _to_dt(ts), run_id, equity, benchmark_equity,
-                drawdown, period_return, benchmark_period_return, strategy,
+                _to_dt(ts),
+                run_id,
+                equity,
+                benchmark_equity,
+                drawdown,
+                period_return,
+                benchmark_period_return,
+                strategy,
             ),
         )
         cur.close()
@@ -673,15 +754,28 @@ def write_trade_event(
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
-                event_id, run_id,
-                strategy, mode, timeframe,
-                _to_dt(ts), symbol, side, event_type,
-                fill_quantity, price, entry_price,
-                remaining_quantity, notional,
-                commission, slippage, tax,
-                pnl, net_return,
+                event_id,
+                run_id,
+                strategy,
+                mode,
+                timeframe,
+                _to_dt(ts),
+                symbol,
+                side,
+                event_type,
+                fill_quantity,
+                price,
+                entry_price,
+                remaining_quantity,
+                notional,
+                commission,
+                slippage,
+                tax,
+                pnl,
+                net_return,
                 _to_dt(entry_at) if entry_at else None,
-                periods_held, reason,
+                periods_held,
+                reason,
             ),
         )
         cur.close()
@@ -722,11 +816,21 @@ def write_strategy_performance(
                  total_slippage=EXCLUDED.total_slippage,
                  total_tax=EXCLUDED.total_tax"""
     params = (
-        run_id, metrics.total_return, metrics.annual_return,
-        metrics.sharpe, metrics.sortino, metrics.calmar,
-        metrics.max_drawdown, metrics.win_rate, metrics.profit_factor,
-        metrics.trades, metrics.avg_trade_return, metrics.exposure_ratio,
-        metrics.benchmark_return, metrics.total_commission, metrics.total_slippage,
+        run_id,
+        metrics.total_return,
+        metrics.annual_return,
+        metrics.sharpe,
+        metrics.sortino,
+        metrics.calmar,
+        metrics.max_drawdown,
+        metrics.win_rate,
+        metrics.profit_factor,
+        metrics.trades,
+        metrics.avg_trade_return,
+        metrics.exposure_ratio,
+        metrics.benchmark_return,
+        metrics.total_commission,
+        metrics.total_slippage,
         metrics.total_tax,
     )
     if cur is not None:
@@ -751,6 +855,7 @@ def refresh_performance(
     from types import SimpleNamespace as _NS
 
     from db.timescale_reader import load_equity_curve, load_trade_events
+
     _CLOSE_TYPES = ["close", "reduce"]
     from librae.core.metrics import compute_all
 
@@ -767,15 +872,19 @@ def refresh_performance(
     timestamps = [r["_time"] for r in eq_records]
     trade_pnls = [
         _NS(
-            gross_pnl=(r.get("pnl", 0) or 0) + (r.get("commission", 0) or 0)
-                      + (r.get("slippage", 0) or 0) + (r.get("tax", 0) or 0),
+            gross_pnl=(r.get("pnl", 0) or 0)
+            + (r.get("commission", 0) or 0)
+            + (r.get("slippage", 0) or 0)
+            + (r.get("tax", 0) or 0),
             net_pnl=r.get("pnl", 0) or 0,
             commission=r.get("commission", 0) or 0,
             slippage=r.get("slippage", 0) or 0,
             tax=r.get("tax", 0) or 0,
             gross_return=0.0,
             net_return=r.get("net_return", 0.0) or 0.0,
-            exit_commission=0.0, exit_slippage=0.0, exit_tax=0.0,
+            exit_commission=0.0,
+            exit_slippage=0.0,
+            exit_tax=0.0,
         )
         for r in trade_rows
     ]
@@ -835,8 +944,13 @@ def save_signal_results(
 
             if run_id is not None:
                 write_run_metadata(
-                    run_id, strategy, symbol, tf, mode,
-                    started_at=_to_dt(started_at), ended_at=_to_dt(ended_at),
+                    run_id,
+                    strategy,
+                    symbol,
+                    tf,
+                    mode,
+                    started_at=_to_dt(started_at),
+                    ended_at=_to_dt(ended_at),
                     data_source=data_source,
                     config_hash=cfg.config_hash if cfg else None,
                     perf_params=cfg.perf_params if cfg else None,
@@ -854,8 +968,7 @@ def save_signal_results(
                      AND strategy = %s AND symbol = %s AND mode = %s
                      AND timeframe = %s
                      AND ts BETWEEN %s AND %s""",
-                (run_id, strategy, symbol, mode, tf,
-                 _to_dt(started_at), _to_dt(ended_at)),
+                (run_id, strategy, symbol, mode, tf, _to_dt(started_at), _to_dt(ended_at)),
             )
             if has_entry:
                 entry_rows = [

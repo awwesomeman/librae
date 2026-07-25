@@ -1,12 +1,11 @@
 """Tests for CostModel: spot vs futures PnL, commission, slippage, tax."""
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
-
-from librae.core.cost_model import CostModel
 from librae.config.market_config import get_market
-
+from librae.core.cost_model import CostModel
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -141,8 +140,13 @@ class TestDynamicSlippage:
 
     def test_impact_scales_with_participation(self) -> None:
         cm = CostModel(
-            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=1.0, tick_size=0.01, tax_rate=0.0, impact_coef=10.0,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=1.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            impact_coef=10.0,
         )
         # 10% participation (qty=10 / volume=100) -> +1 impact tick -> 2 ticks total
         slip_10pct = cm.calc_slippage(10.0, bar_volume=100.0)
@@ -155,8 +159,13 @@ class TestDynamicSlippage:
 
     def test_zero_or_missing_bar_volume_skips_impact(self) -> None:
         cm = CostModel(
-            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=1.0, tick_size=0.01, tax_rate=0.0, impact_coef=10.0,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=1.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            impact_coef=10.0,
         )
         base = cm.calc_slippage(10.0)
         assert cm.calc_slippage(10.0, bar_volume=0.0) == base
@@ -174,9 +183,15 @@ class TestLiquidationPrice:
     @pytest.fixture
     def leveraged_cost(self) -> CostModel:
         return CostModel(
-            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
-            long_margin_rate=0.1, short_margin_rate=0.1, maintenance_margin_rate=0.05,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            long_margin_rate=0.1,
+            short_margin_rate=0.1,
+            maintenance_margin_rate=0.05,
         )
 
     def test_long_formula(self, leveraged_cost: CostModel) -> None:
@@ -194,9 +209,15 @@ class TestLiquidationPrice:
         # margin_rate <= maintenance_margin_rate: already under-margined at
         # entry, not a sane liquidation price to compute — fail safe.
         cm = CostModel(
-            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
-            long_margin_rate=0.05, short_margin_rate=0.05, maintenance_margin_rate=0.05,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            long_margin_rate=0.05,
+            short_margin_rate=0.05,
+            maintenance_margin_rate=0.05,
         )
         assert cm.liquidation_price(100.0, "long") is None
 
@@ -239,9 +260,16 @@ class TestTotalCost:
 class TestFromConfig:
     def _cfg(self, symbol: str, market: str = "tw_futures", data_source: str = "shioaji", **kwargs):
         from librae.core.run_config import RunConfig
+
         return RunConfig(
-            strategy_name="x", symbols=[symbol], timeframe="5m", market=market,
-            data_source=data_source, initial_balance=100_000.0, mode="backtest", **kwargs,
+            strategy_name="x",
+            symbols=[symbol],
+            timeframe="5m",
+            market=market,
+            data_source=data_source,
+            initial_balance=100_000.0,
+            mode="backtest",
+            **kwargs,
         )
 
     def test_registered_symbol_uses_its_own_multiplier(self) -> None:
@@ -262,17 +290,22 @@ class TestFromConfig:
         assert cm.tick_size == 1.0  # tw_futures market default
 
     def test_crypto_spot_unaffected(self) -> None:
-        cm = CostModel.from_config(self._cfg("BTCUSDT", market="crypto", data_source="binance_spot"))
+        cm = CostModel.from_config(
+            self._cfg("BTCUSDT", market="crypto", data_source="binance_spot")
+        )
         assert cm.multiplier == 1.0
 
     def test_spot_symbol_without_explicit_multiplier_defaults_to_one(self) -> None:
         """BTCUSDT doesn't declare multiplier in symbols.yaml at all — spot
         auto-defaults, no per-symbol registration needed."""
         from librae.config.symbols import get_symbol
+
         assert get_symbol("BTCUSDT").multiplier == 1.0
 
     def test_spot_symbol_tick_size_falls_back_to_market_default(self) -> None:
-        cm = CostModel.from_config(self._cfg("BTCUSDT", market="crypto", data_source="binance_spot"))
+        cm = CostModel.from_config(
+            self._cfg("BTCUSDT", market="crypto", data_source="binance_spot")
+        )
         assert cm.tick_size == 0.01  # crypto market default — BTCUSDT doesn't override it
 
     def test_explicit_cost_overrides_win_over_symbol_multiplier(self) -> None:

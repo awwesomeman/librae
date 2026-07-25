@@ -6,6 +6,7 @@ Naming convention:
     derive_* — computes a differently-shaped result from stored data; not a
                raw table read
 """
+
 from __future__ import annotations
 
 import json

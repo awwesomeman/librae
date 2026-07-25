@@ -18,6 +18,7 @@ pytestmark = pytest.mark.tw_live
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_adapter(*, ca_activated: bool = False):
     """Build a ShioajiAdapter with mocked internals (no real login)."""
     from brokers.shioaji_adapter import ShioajiAdapter
@@ -56,6 +57,7 @@ def _make_kbars_response():
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestFetchOhlcv:
     def test_returns_correct_columns(self):
         adapter = _make_adapter()
@@ -77,7 +79,8 @@ class TestFetchOhlcv:
         df = adapter.fetch_ohlcv("TXFR1", "1m")
 
         expected = pd.to_datetime(
-            ["2026-04-01 01:00", "2026-04-01 01:05", "2026-04-01 01:10"], utc=True,
+            ["2026-04-01 01:00", "2026-04-01 01:05", "2026-04-01 01:10"],
+            utc=True,
         )
         assert list(df["ts"]) == list(expected)
 
@@ -145,14 +148,25 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
         adapter._api.Order = MagicMock(return_value="mock_order")
 
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()):
-            result = adapter.place_order({
-                "symbol": "TXFR1", "side": "buy", "quantity": 1,
-                "order_type": "limit", "price": 17000,
-            })
+        with patch(
+            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()
+        ):
+            result = adapter.place_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "limit",
+                    "price": 17000,
+                }
+            )
 
         adapter._api.Order.assert_called_once_with(
-            price=17000, quantity=1, action="BUY", price_type="FUT_LMT", order_type="ROD",
+            price=17000,
+            quantity=1,
+            action="BUY",
+            price_type="FUT_LMT",
+            order_type="ROD",
         )
         assert result == {"id": "order123", "status": "PendingSubmit"}
 
@@ -166,11 +180,17 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
         adapter._api.Order = MagicMock(return_value="mock_order")
 
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()):
+        with patch(
+            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()
+        ):
             adapter.place_order({"symbol": "2330", "side": "sell", "quantity": 1000})
 
         adapter._api.Order.assert_called_once_with(
-            price=0, quantity=1000, action="SELL", price_type="STK_MKT", order_type="IOC",
+            price=0,
+            quantity=1000,
+            action="SELL",
+            price_type="STK_MKT",
+            order_type="IOC",
         )
 
     def test_futures_market_order_uses_ioc(self):
@@ -186,11 +206,17 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
         adapter._api.Order = MagicMock(return_value="mock_order")
 
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()):
+        with patch(
+            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()
+        ):
             adapter.place_order({"symbol": "TMFR1", "side": "buy", "quantity": 1})
 
         adapter._api.Order.assert_called_once_with(
-            price=0, quantity=1, action="BUY", price_type="FUT_MKT", order_type="IOC",
+            price=0,
+            quantity=1,
+            action="BUY",
+            price_type="FUT_MKT",
+            order_type="IOC",
         )
 
 
@@ -248,14 +274,20 @@ class TestInit:
 
     def test_missing_credentials_raises(self):
         from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
-        with patch("brokers.shioaji_adapter._require_shioaji"):
-            with pytest.raises(ValueError, match="credentials"):
-                ShioajiAdapter(credentials=ShioajiCredentials(api_key="", secret_key=""))
+
+        with (
+            patch("brokers.shioaji_adapter._require_shioaji"),
+            pytest.raises(ValueError, match="credentials"),
+        ):
+            ShioajiAdapter(credentials=ShioajiCredentials(api_key="", secret_key=""))
 
     def test_login_without_ca_path_is_read_only(self):
         from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+
         mock_api = MagicMock()
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)):
+        with patch(
+            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
             adapter = ShioajiAdapter(
                 credentials=ShioajiCredentials(api_key="k", secret_key="s", person_id="p"),
             )
@@ -265,23 +297,34 @@ class TestInit:
 
     def test_login_with_ca_path_enables_trading(self):
         from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+
         mock_api = MagicMock()
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)):
+        with patch(
+            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
             adapter = ShioajiAdapter(
                 credentials=ShioajiCredentials(
-                    api_key="k", secret_key="s", person_id="p",
-                    ca_path="/path/to/ca", ca_password="pw",
+                    api_key="k",
+                    secret_key="s",
+                    person_id="p",
+                    ca_path="/path/to/ca",
+                    ca_password="pw",
                 ),
             )
-        mock_api.activate_ca.assert_called_once_with(ca_path="/path/to/ca", ca_passwd="pw", person_id="p")
+        mock_api.activate_ca.assert_called_once_with(
+            ca_path="/path/to/ca", ca_passwd="pw", person_id="p"
+        )
         assert adapter._read_only is False
 
     def test_simulation_flag_passed_through(self):
         from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+
         mock_api = MagicMock()
         mock_sj = self._mock_sj(mock_api)
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
-            ShioajiAdapter(credentials=ShioajiCredentials(api_key="k", secret_key="s"), simulation=True)
+            ShioajiAdapter(
+                credentials=ShioajiCredentials(api_key="k", secret_key="s"), simulation=True
+            )
         mock_sj.Shioaji.assert_called_once_with(simulation=True)
 
     def test_credentials_sandbox_overrides_simulation_param(self):
@@ -289,6 +332,7 @@ class TestInit:
         mirroring CryptoCredentials.sandbox — orthogonal to RunConfig.mode,
         deliberately not derived from it (see librae/live/engine.py)."""
         from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+
         mock_api = MagicMock()
         mock_sj = self._mock_sj(mock_api)
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
@@ -300,5 +344,6 @@ class TestInit:
 
     def test_sandbox_string_env_value_coerced_to_bool(self):
         from brokers.shioaji_adapter import ShioajiCredentials
+
         creds = ShioajiCredentials(api_key="k", secret_key="s", sandbox="true")
         assert creds.sandbox is True

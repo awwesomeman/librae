@@ -1,14 +1,13 @@
 """Tests for Backtest.build_output() — Step 10 of the refactor plan."""
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import pytest
-
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import BacktestOutput, StrategyMetrics
 from librae.core.strategy import Action, BaseStrategy
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -19,13 +18,19 @@ def _make_df(n: int = 50, symbol: str = "BTCUSDT") -> pd.DataFrame:
     close = 100.0 + np.cumsum(np.random.default_rng(42).normal(0.2, 1, n))
     dt = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
     idx = pd.MultiIndex.from_arrays(
-        [[symbol] * n, dt], names=["symbol", "datetime"],
+        [[symbol] * n, dt],
+        names=["symbol", "datetime"],
     )
-    return pd.DataFrame({
-        "open": close, "high": close * 1.001,
-        "low": close * 0.999, "close": close,
-        "volume": np.full(n, 100.0),
-    }, index=idx)
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "volume": np.full(n, 100.0),
+        },
+        index=idx,
+    )
 
 
 class BuyBar5CloseBar15(BaseStrategy):

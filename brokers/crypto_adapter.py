@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
@@ -29,17 +29,18 @@ def _require_ccxt() -> object:
     """Import and return ccxt, raising a friendly error if missing."""
     try:
         import ccxt
+
         return ccxt
     except ImportError as e:
         raise ImportError(
-            "ccxt is required for CryptoAdapter. "
-            "Install it with: pip install ccxt"
+            "ccxt is required for CryptoAdapter. Install it with: pip install ccxt"
         ) from e
 
 
 def _timeframe_to_delta(timeframe: str) -> pd.Timedelta:
     """Convert CCXT timeframe string to a pandas Timedelta."""
     from librae.core.utils import interval_to_timedelta
+
     return interval_to_timedelta(timeframe)
 
 
@@ -161,7 +162,10 @@ class CryptoAdapter:
         where ``ts`` is a UTC-aware ``datetime``.
         """
         raw = self._exchange.fetch_ohlcv(
-            symbol, timeframe=timeframe, limit=limit, since=since,
+            symbol,
+            timeframe=timeframe,
+            limit=limit,
+            since=since,
         )
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
@@ -169,11 +173,14 @@ class CryptoAdapter:
         if len(df) < limit and since is None:
             logger.warning(
                 "fetch_ohlcv returned %d bars (requested %d) for %s %s",
-                len(df), limit, symbol, timeframe,
+                len(df),
+                limit,
+                symbol,
+                timeframe,
             )
 
         if drop_incomplete and len(df) > 0:
-            now = datetime.now(tz=timezone.utc)
+            now = datetime.now(tz=UTC)
             last_ts = df["ts"].iloc[-1]
             # WHY: if the last bar's timestamp is within the current candle
             # interval, it's still forming and should be dropped
@@ -234,10 +241,23 @@ class CryptoAdapter:
             params["startTime"] = since
 
         raw = method(params)
-        df = pd.DataFrame(raw, columns=[
-            "ts", "open", "high", "low", "close", "volume", "close_ts",
-            "quote_volume", "trades", "taker_buy_base", "taker_buy_quote", "ignore",
-        ])
+        df = pd.DataFrame(
+            raw,
+            columns=[
+                "ts",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_ts",
+                "quote_volume",
+                "trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "ignore",
+            ],
+        )
         df = df[["ts", "open", "high", "low", "close", "volume"]].copy()
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
         for col in ("open", "high", "low", "close", "volume"):
@@ -293,7 +313,8 @@ class CryptoAdapter:
         self._require_auth()
         positions = self._exchange.fetch_positions([symbol])
         return find_position(
-            positions, symbol,
+            positions,
+            symbol,
             matches=lambda p: p.get("symbol") == symbol,
             size=lambda p: float(p.get("contracts", 0)),
             avg_price=lambda p: float(p.get("entryPrice", 0) or 0),

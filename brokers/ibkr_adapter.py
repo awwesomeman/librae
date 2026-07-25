@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -32,10 +32,22 @@ logger = logging.getLogger(__name__)
 
 # ccxt-style timeframe -> IBKR barSizeSetting string.
 _BAR_SIZE_MAP = {
-    "1m": "1 min", "2m": "2 mins", "3m": "3 mins", "5m": "5 mins",
-    "10m": "10 mins", "15m": "15 mins", "20m": "20 mins", "30m": "30 mins",
-    "1h": "1 hour", "2h": "2 hours", "3h": "3 hours", "4h": "4 hours", "8h": "8 hours",
-    "1d": "1 day", "1w": "1 week", "1M": "1 month",
+    "1m": "1 min",
+    "2m": "2 mins",
+    "3m": "3 mins",
+    "5m": "5 mins",
+    "10m": "10 mins",
+    "15m": "15 mins",
+    "20m": "20 mins",
+    "30m": "30 mins",
+    "1h": "1 hour",
+    "2h": "2 hours",
+    "3h": "3 hours",
+    "4h": "4 hours",
+    "8h": "8 hours",
+    "1d": "1 day",
+    "1w": "1 week",
+    "1M": "1 month",
 }
 
 
@@ -43,6 +55,7 @@ def _require_ib_async():
     """Import and return ib_async, raising a friendly error if missing."""
     try:
         import ib_async
+
         return ib_async
     except ImportError as e:
         raise ImportError(
@@ -115,12 +128,17 @@ class IBKRAdapter:
         self._read_only = not trading_enabled
         self._contract_cache: dict[str, object] = {}
         self._ib.connect(
-            creds.host, int(creds.port), clientId=int(creds.client_id),
+            creds.host,
+            int(creds.port),
+            clientId=int(creds.client_id),
             readonly=self._read_only,
         )
         logger.info(
             "IBKR connected host=%s port=%s clientId=%s trading_enabled=%s",
-            creds.host, creds.port, creds.client_id, trading_enabled,
+            creds.host,
+            creds.port,
+            creds.client_id,
+            trading_enabled,
         )
 
     def info(self) -> AdapterInfo:
@@ -164,7 +182,7 @@ class IBKRAdapter:
         contract = self._resolve_contract(symbol)
         bar_size = _to_bar_size(timeframe)
 
-        end_dt = _parse_dt(end) if end else datetime.now(timezone.utc)
+        end_dt = _parse_dt(end) if end else datetime.now(UTC)
         if start:
             start_dt = _parse_dt(start)
             duration = f"{max(1, (end_dt - start_dt).days + 1)} D"
@@ -241,7 +259,8 @@ class IBKRAdapter:
         """
         self._require_auth()
         return find_position(
-            self._ib.positions(), symbol,
+            self._ib.positions(),
+            symbol,
             matches=lambda p: p.contract.symbol == symbol,
             size=lambda p: p.position,
             avg_price=lambda p: p.avgCost,
@@ -288,10 +307,7 @@ class IBKRAdapter:
 
 def _parse_dt(dt: datetime | str) -> datetime:
     """Parse a datetime or 'YYYY-MM-DD' string to a UTC-aware datetime."""
-    if isinstance(dt, str):
-        parsed = pd.Timestamp(dt)
-    else:
-        parsed = pd.Timestamp(dt)
+    parsed = pd.Timestamp(dt)
     if parsed.tzinfo is None:
         parsed = parsed.tz_localize("UTC")
     return parsed.tz_convert("UTC").to_pydatetime()

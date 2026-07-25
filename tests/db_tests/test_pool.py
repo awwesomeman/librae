@@ -7,13 +7,13 @@ network blip kept getting handed out broken and failing every DB write
 forever until the process restarted. These tests cover the pool/connection
 lifecycle itself, not any higher-level DB function.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 import db
+import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -47,9 +47,8 @@ class TestGetConn:
         conn.closed = 0
         pool = _mock_pool(conn)
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
-            with pytest.raises(ValueError):
-                with db.get_conn("dsn"):
-                    raise ValueError("boom")
+            with pytest.raises(ValueError), db.get_conn("dsn"):
+                raise ValueError("boom")
             conn.rollback.assert_called_once()
             pool.putconn.assert_called_once_with(conn, close=False)
 
@@ -67,9 +66,11 @@ class TestGetConn:
         conn.commit.side_effect = _die
         pool = _mock_pool(conn)
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
-            with pytest.raises(Exception, match="connection already closed"):
-                with db.get_conn("dsn"):
-                    pass
+            with (
+                pytest.raises(Exception, match="connection already closed"),
+                db.get_conn("dsn"),
+            ):
+                pass
             pool.putconn.assert_called_once_with(conn, close=True)
 
     def test_rollback_failure_on_dead_connection_does_not_mask_original_error(self):
@@ -78,9 +79,8 @@ class TestGetConn:
         conn.rollback.side_effect = Exception("rollback also fails on dead conn")
         pool = _mock_pool(conn)
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
-            with pytest.raises(ValueError, match="original error"):
-                with db.get_conn("dsn"):
-                    raise ValueError("original error")
+            with pytest.raises(ValueError, match="original error"), db.get_conn("dsn"):
+                raise ValueError("original error")
             pool.putconn.assert_called_once_with(conn, close=True)
 
 

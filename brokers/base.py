@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Self
-
+from typing import Any, Self
 
 # ---------------------------------------------------------------------------
 # get_position() shared shape
@@ -43,7 +43,12 @@ def find_position(
     """
     for pos in positions:
         if matches(pos):
-            return {"symbol": symbol, "size": size(pos), "avg_price": avg_price(pos), "unrealized_pnl": pnl(pos)}
+            return {
+                "symbol": symbol,
+                "size": size(pos),
+                "avg_price": avg_price(pos),
+                "unrealized_pnl": pnl(pos),
+            }
     return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
 
 

@@ -15,6 +15,7 @@ Design references:
 
 All parameters are scalars for vectorbt compatibility in future param sweeps.
 """
+
 from __future__ import annotations
 
 import logging
@@ -69,9 +70,15 @@ class CostModel:
     def zero(cls) -> CostModel:
         """Zero-cost model for research or testing."""
         return cls(
-            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
-            long_margin_rate=1.0, short_margin_rate=1.0, impact_coef=0.0,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            long_margin_rate=1.0,
+            short_margin_rate=1.0,
+            impact_coef=0.0,
             maintenance_margin_rate=0.0,
         )
 
@@ -80,7 +87,7 @@ class CostModel:
         cls,
         cfg: RunConfig,
         override: CostModel | None = None,
-        markets: dict[str, "MarketConfig"] | None = None,
+        markets: dict[str, MarketConfig] | None = None,
     ) -> CostModel:
         """Resolve cost model with standard priority:
         explicit override > cfg.cost_overrides > symbols.yaml per-symbol
@@ -101,9 +108,11 @@ class CostModel:
         if override is not None:
             return override
         from librae.config.market_config import get_market
+
         mc = get_market(cfg.market, markets=markets)
 
         from librae.config.symbols import get_symbol
+
         try:
             sym = get_symbol(cfg.symbol)
             multiplier, tick_size = sym.multiplier, sym.tick_size
@@ -127,7 +136,11 @@ class CostModel:
 
     @classmethod
     def from_market(
-        cls, market: MarketConfig, *, multiplier: float, tick_size: float | None = None,
+        cls,
+        market: MarketConfig,
+        *,
+        multiplier: float,
+        tick_size: float | None = None,
     ) -> CostModel:
         """Build CostModel from MarketConfig (markets.yaml) + a per-symbol
         multiplier (required — see librae/config/symbols.py). tick_size
@@ -191,7 +204,9 @@ class CostModel:
         """Return margin rate for the given side."""
         return self.short_margin_rate if side == "short" else self.long_margin_rate
 
-    def estimate_entry_outlay(self, price: float, quantity: float, side: Literal["long", "short"]) -> float:
+    def estimate_entry_outlay(
+        self, price: float, quantity: float, side: Literal["long", "short"]
+    ) -> float:
         """Estimate total cash outlay for entering a position (for sizing)."""
         notional = price * quantity * self.multiplier
         return notional * self.margin_rate(side) + self.total_cost(price, quantity)

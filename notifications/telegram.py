@@ -10,6 +10,7 @@ Usage:
     adapter = TelegramAdapter(config=config, credentials=creds)
     adapter.send_signal("strat", "BTCUSDT", "BUY", 65000.0)
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -41,7 +42,7 @@ class TelegramCredentials:
     chat_id: str = ""
 
     @classmethod
-    def from_env(cls, prefix: str, **overrides: str) -> "TelegramCredentials":
+    def from_env(cls, prefix: str, **overrides: str) -> TelegramCredentials:
         """Build from env vars ``{prefix}_{FIELD_UPPER}``; overrides win.
 
         Self-contained on purpose (not brokers/base.py's CredentialConfig)
@@ -78,8 +79,7 @@ class TelegramAdapter:
 
         if self._enabled and (not self._token or not self._chat_id):
             logger.warning(
-                "Telegram enabled but bot_token or chat_id missing. "
-                "Disabling notifications."
+                "Telegram enabled but bot_token or chat_id missing. Disabling notifications."
             )
             self._enabled = False
 
@@ -87,6 +87,7 @@ class TelegramAdapter:
         if self._enabled:
             try:
                 import httpx
+
                 self._client = httpx.Client(timeout=10)
             except ImportError:
                 logger.error("httpx not installed — disabling Telegram notifications")
@@ -121,10 +122,12 @@ class TelegramAdapter:
                     continue
                 logger.warning("Telegram API error %d: %s", resp.status_code, resp.text)
             except Exception:
-                logger.exception("Failed to send Telegram message (attempt %d/%d)", attempt + 1, MAX_RETRIES)
+                logger.exception(
+                    "Failed to send Telegram message (attempt %d/%d)", attempt + 1, MAX_RETRIES
+                )
 
             if attempt < MAX_RETRIES - 1:
-                time.sleep(BACKOFF_BASE * (2 ** attempt))
+                time.sleep(BACKOFF_BASE * (2**attempt))
 
         return False
 
@@ -219,4 +222,3 @@ class TelegramAdapter:
             f"Position: <code>{html.escape(position)}</code>",
         ]
         return self.send_text("\n".join(lines))
-

@@ -4,6 +4,7 @@
 Produces a single unified Strategy Dashboard with mode filtering.
 Usage: python app/grafana/generate_dashboards.py
 """
+
 from __future__ import annotations
 
 import copy
@@ -30,7 +31,9 @@ def _color_override(name: str, color: str) -> dict:
     }
 
 
-def _mapping_override(name: str, mappings: dict[str, str], cell_mode: str = "color-background") -> dict:
+def _mapping_override(
+    name: str, mappings: dict[str, str], cell_mode: str = "color-background"
+) -> dict:
     """Build a Grafana field override with value mappings and cell coloring."""
     return {
         "matcher": {"id": "byName", "options": name},
@@ -38,10 +41,12 @@ def _mapping_override(name: str, mappings: dict[str, str], cell_mode: str = "col
             {
                 "id": "mappings",
                 "value": [
-                    {"type": "value", "options": {
-                        k: {"color": v, "index": i}
-                        for i, (k, v) in enumerate(mappings.items())
-                    }},
+                    {
+                        "type": "value",
+                        "options": {
+                            k: {"color": v, "index": i} for i, (k, v) in enumerate(mappings.items())
+                        },
+                    },
                 ],
             },
             {"id": "custom.cellOptions", "value": {"type": cell_mode}},
@@ -136,11 +141,14 @@ STATUS_PANEL: dict = {
     "fieldConfig": {
         "defaults": {
             "mappings": [
-                {"type": "value", "options": {
-                    "1": {"text": "Online", "color": "green", "index": 0},
-                    "0": {"text": "Offline", "color": "red", "index": 1},
-                    "-1": {"text": "-", "color": "text", "index": 2},
-                }},
+                {
+                    "type": "value",
+                    "options": {
+                        "1": {"text": "Online", "color": "green", "index": 0},
+                        "0": {"text": "Offline", "color": "red", "index": 1},
+                        "-1": {"text": "-", "color": "text", "index": 2},
+                    },
+                },
             ],
             "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
             "color": {"mode": "fixed"},
@@ -265,8 +273,12 @@ _KPI_CATALOGUE: dict[str, dict] = {
 # WHY: edit this list to change which KPIs appear on the dashboard.
 # All metrics are always computed and stored in DB — this only controls display.
 DEFAULT_KPIS: list[str] = [
-    "total_return", "max_drawdown", "sharpe",
-    "win_rate", "profit_factor", "trades",
+    "total_return",
+    "max_drawdown",
+    "sharpe",
+    "win_rate",
+    "profit_factor",
+    "trades",
 ]
 
 BASE_PANELS_DEF: list[dict] = [
@@ -281,7 +293,7 @@ BASE_PANELS_DEF: list[dict] = [
         "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\""
+                'SELECT ts AS time, equity AS "Strategy", benchmark_equity AS "Benchmark"'
                 " FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
@@ -313,7 +325,7 @@ BASE_PANELS_DEF: list[dict] = [
         "w": 12,
         "targets": [
             _target(
-                "SELECT ts AS time, drawdown AS \"Drawdown %\""
+                'SELECT ts AS time, drawdown AS "Drawdown %"'
                 " FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
@@ -332,7 +344,9 @@ BASE_PANELS_DEF: list[dict] = [
         },
     },
     {
-        "_type": "fixed", "_x": 0, "_dy": 0,
+        "_type": "fixed",
+        "_x": 0,
+        "_dy": 0,
         "title": "Price Trend",
         "description": "Underlying asset close price. Matched to run's symbol, timeframe, and data source.",
         "type": "timeseries",
@@ -356,9 +370,7 @@ BASE_PANELS_DEF: list[dict] = [
             ),
         ],
         "fieldConfig": {
-            "defaults": {
-                "custom": {"lineWidth": 1, "showPoints": "never"}
-            },
+            "defaults": {"custom": {"lineWidth": 1, "showPoints": "never"}},
             "overrides": [_color_override("close", "#5794F2")],
         },
         "options": {
@@ -368,7 +380,9 @@ BASE_PANELS_DEF: list[dict] = [
     },
     # -- Trade Events (single table replacing old Trade Detail) --
     {
-        "_type": "fixed", "_x": 12, "_dy": 0,
+        "_type": "fixed",
+        "_x": 12,
+        "_dy": 0,
         "title": "Trade Events",
         "description": (
             "Position lifecycle: open/add = entry side, reduce/close = exit side.\n"
@@ -381,21 +395,21 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "SELECT"
-                " ROW_NUMBER() OVER (ORDER BY ts) AS \"#\","
-                " ts AS \"Time\","
-                " event_type AS \"Event\","
-                " symbol AS \"Symbol\","
-                " side AS \"Side\","
-                " ROUND(fill_quantity::numeric,4) AS \"Qty\","
-                " ROUND(price::numeric,2) AS \"Price\","
-                " ROUND(entry_price::numeric,2) AS \"Avg Entry\","
-                " ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\","
-                " ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\","
-                " ROUND(pnl::numeric,2) AS \"Net P&L\","
-                " ROUND(net_return::numeric,2) AS \"Net Return %\","
-                " entry_at AS \"Entry Time\","
-                " periods_held AS \"Periods\","
-                " reason AS \"Reason\""
+                ' ROW_NUMBER() OVER (ORDER BY ts) AS "#",'
+                ' ts AS "Time",'
+                ' event_type AS "Event",'
+                ' symbol AS "Symbol",'
+                ' side AS "Side",'
+                ' ROUND(fill_quantity::numeric,4) AS "Qty",'
+                ' ROUND(price::numeric,2) AS "Price",'
+                ' ROUND(entry_price::numeric,2) AS "Avg Entry",'
+                ' ROUND(remaining_quantity::numeric,4) AS "Pos Qty",'
+                ' ROUND((commission + slippage + tax)::numeric,2) AS "Cost",'
+                ' ROUND(pnl::numeric,2) AS "Net P&L",'
+                ' ROUND(net_return::numeric,2) AS "Net Return %",'
+                ' entry_at AS "Entry Time",'
+                ' periods_held AS "Periods",'
+                ' reason AS "Reason"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
@@ -422,10 +436,15 @@ BASE_PANELS_DEF: list[dict] = [
                         {"id": "custom.cellOptions", "value": {"type": "color-background"}},
                     ],
                 },
-                _mapping_override("Event", {
-                    "open": "blue", "add": "super-light-blue",
-                    "reduce": "orange", "close": "semi-dark-orange",
-                }),
+                _mapping_override(
+                    "Event",
+                    {
+                        "open": "blue",
+                        "add": "super-light-blue",
+                        "reduce": "orange",
+                        "close": "semi-dark-orange",
+                    },
+                ),
                 _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
                 {
                     "matcher": {"id": "byName", "options": "Net Return %"},
@@ -441,7 +460,9 @@ BASE_PANELS_DEF: list[dict] = [
         },
     },
     {
-        "_type": "fixed", "_x": 0, "_dy": 10,
+        "_type": "fixed",
+        "_x": 0,
+        "_dy": 10,
         "title": "Entry / Exit Signals",
         "description": "Signal decision time (1 period before fill). Entry = open/add, Exit = reduce/close.",
         "type": "timeseries",
@@ -456,7 +477,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours'"
                 " WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day'"
                 " ELSE interval '1 hour' END AS time,"
-                " te.price AS \"Entry\""
+                ' te.price AS "Entry"'
                 " FROM trade_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
@@ -472,7 +493,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours'"
                 " WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day'"
                 " ELSE interval '1 hour' END AS time,"
-                " te.price AS \"Exit\""
+                ' te.price AS "Exit"'
                 " FROM trade_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
@@ -482,9 +503,7 @@ BASE_PANELS_DEF: list[dict] = [
             ),
         ],
         "fieldConfig": {
-            "defaults": {
-                "custom": {"lineWidth": 0, "showPoints": "always", "pointSize": 12}
-            },
+            "defaults": {"custom": {"lineWidth": 0, "showPoints": "always", "pointSize": 12}},
             "overrides": [
                 _color_override("Entry", "green"),
                 _color_override("Exit", "red"),
@@ -497,13 +516,16 @@ BASE_PANELS_DEF: list[dict] = [
     },
 ]
 
+
 def _poll_seconds_panel(w: int) -> dict:
     return _stat_panel(
         "Poll Seconds",
-        "SELECT poll_seconds AS \"Seconds\""
-        " FROM backtest_runs WHERE run_id = '${run_id}'",
-        "s", [],
-        w=w, fixed_color="blue", no_value="N/A",
+        "SELECT poll_seconds AS \"Seconds\" FROM backtest_runs WHERE run_id = '${run_id}'",
+        "s",
+        [],
+        w=w,
+        fixed_color="blue",
+        no_value="N/A",
         description="Polling interval in seconds. Only set for sim/live runs.",
     )
 
@@ -535,7 +557,7 @@ EXTRA_PANELS: list[dict] = [
             "  CASE WHEN p.side='long'\n"
             "    THEN (l.close - p.entry_price) * p.remaining_quantity\n"
             "    ELSE (p.entry_price - l.close) * p.remaining_quantity\n"
-            "  END ELSE NULL END AS \"PnL\"\n"
+            '  END ELSE NULL END AS "PnL"\n'
             "FROM pos p, latest l"
         ),
         None,
@@ -545,7 +567,9 @@ EXTRA_PANELS: list[dict] = [
             {"color": "yellow", "value": 0},
             {"color": "green", "value": 100},
         ],
-        w=6, decimals=2, no_value="No Position",
+        w=6,
+        decimals=2,
+        no_value="No Position",
         description="Unrealized P&L of the current open position.",
     ),
     _stat_panel(
@@ -561,11 +585,14 @@ EXTRA_PANELS: list[dict] = [
             "  CASE WHEN side='long' THEN '+' ELSE '-' END\n"
             "  || ROUND(remaining_quantity::numeric, 4) || ' @ '\n"
             "  || ROUND(entry_price::numeric, 2)\n"
-            "ELSE NULL END AS \"Position\"\n"
+            'ELSE NULL END AS "Position"\n'
             "FROM pos"
         ),
-        None, [],
-        w=6, no_value="Flat", fixed_color="blue",
+        None,
+        [],
+        w=6,
+        no_value="Flat",
+        fixed_color="blue",
         description="Current open position: direction, size, entry price.",
     ),
 ]
@@ -678,7 +705,11 @@ def _make_custom_variable(
 
 
 def _make_query_variable(
-    name: str, sql: str, *, hide: int = 0, label: str | None = None,
+    name: str,
+    sql: str,
+    *,
+    hide: int = 0,
+    label: str | None = None,
 ) -> dict:
     """Build a Grafana query-type template variable."""
     v: dict = {
@@ -758,10 +789,7 @@ _SIG_WHERE = (
     "s.run_id = '${run_id}'"
     " AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END"
 )
-_META_INNER = (
-    " SELECT symbol, timeframe, data_source"
-    " FROM backtest_runs WHERE run_id='${run_id}'"
-)
+_META_INNER = " SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
 _OHLCV_WHERE = (
     "ohlcv.symbol = meta.symbol"
     " AND ohlcv.timeframe = meta.timeframe"
@@ -850,7 +878,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             f"  FROM signal_events s\n  WHERE {_SIG_WHERE}\n"
             "  ORDER BY ts DESC LIMIT 1\n)\n"
             "SELECT $expected_direction * (current_close - signal_price)"
-            " / NULLIF(signal_price, 0) AS \"PnL\"\n"
+            ' / NULLIF(signal_price, 0) AS "PnL"\n'
             "FROM latest_signal\n"
             "WHERE current_close IS NOT NULL AND signal_price IS NOT NULL"
         ),
@@ -861,26 +889,32 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             {"color": "yellow", "value": 0},
             {"color": "green", "value": 0.01},
         ],
-        w=4, decimals=3, no_value="N/A",
+        w=4,
+        decimals=3,
+        no_value="N/A",
         description="Latest signal's unrealized return: expected_direction x (current_close - entry_price) / entry_price. Entry = T+1 $fill_price_field (next-bar execution).",
     ),
     _stat_panel(
         "Mean Fwd Return (T+$n)",
-        _FWD_CTE + "SELECT $expected_direction * AVG(ret) AS \"Mean Ret\" FROM fwd",
-        "percentunit", _TH_RED_YELLOW_GREEN,
-        w=4, decimals=3,
+        _FWD_CTE + 'SELECT $expected_direction * AVG(ret) AS "Mean Ret" FROM fwd',
+        "percentunit",
+        _TH_RED_YELLOW_GREEN,
+        w=4,
+        decimals=3,
         description="expected_direction x AVG(forward return over n bars). Entry @ T+1 $fill_price_field, exit @ T+1+n close.",
     ),
     _stat_panel(
         "Edge Ratio (T+$n)",
-        _EXC_CTE + "SELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS \"Edge\" FROM exc",
-        None, _TH_EDGE,
-        w=4, decimals=2,
+        _EXC_CTE + 'SELECT AVG(mfe) / NULLIF(AVG(mae), 0) AS "Edge" FROM exc',
+        None,
+        _TH_EDGE,
+        w=4,
+        decimals=2,
         description="AVG(MFE) / AVG(MAE) over n bars. >2 = healthy, <1 = adverse exceeds favorable.",
     ),
     _stat_panel(
         "Last Signal Age",
-        f"SELECT EXTRACT(EPOCH FROM NOW() - MAX(ts)) / 3600.0 AS \"Age\""
+        f'SELECT EXTRACT(EPOCH FROM NOW() - MAX(ts)) / 3600.0 AS "Age"'
         f" FROM signal_events s WHERE {_SIG_WHERE}",
         "h",
         [
@@ -888,27 +922,32 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
             {"color": "yellow", "value": 24},
             {"color": "red", "value": 48},
         ],
-        w=3, decimals=1,
+        w=3,
+        decimals=1,
         description="Hours since last signal. >48hr may indicate system failure.",
     ),
     _stat_panel(
         "N (Signals)",
-        f"SELECT COUNT(*) AS \"N\" FROM signal_events s"
-        f" WHERE {_SIG_WHERE} AND $__timeFilter(ts)",
-        None, [],
-        w=3, fixed_color="blue",
+        f'SELECT COUNT(*) AS "N" FROM signal_events s WHERE {_SIG_WHERE} AND $__timeFilter(ts)',
+        None,
+        [],
+        w=3,
+        fixed_color="blue",
         description="Total signal count in selected time range.",
     ),
     _stat_panel(
         "Signal Value",
-        f"SELECT signal_value AS \"Value\" FROM signal_events s"
+        f'SELECT signal_value AS "Value" FROM signal_events s'
         f" WHERE {_SIG_WHERE} ORDER BY ts DESC LIMIT 1",
-        None, [],
-        w=3, decimals=3, no_value="N/A", fixed_color="blue",
+        None,
+        [],
+        w=3,
+        decimals=3,
+        no_value="N/A",
+        fixed_color="blue",
         description="Latest signal_value.",
     ),
     _poll_seconds_panel(w=3),
-
     # --- Trend row ---
     {"_type": "row", "title": "Trend"},
     {
@@ -916,17 +955,18 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "title": "Price & Signals",
         "description": "Price (left axis) with signal firing points (right axis, orange dots).",
         "type": "timeseries",
-        "h": 8, "w": 12,
+        "h": 8,
+        "w": 12,
         "targets": [
             _target(
                 f"WITH meta AS ({_META_INNER})"
-                f" SELECT ts AS time, close AS \"Close\" FROM ohlcv, meta"
+                f' SELECT ts AS time, close AS "Close" FROM ohlcv, meta'
                 f" WHERE {_OHLCV_WHERE}"
                 f" AND $__timeFilter(ts) ORDER BY ts",
                 "price",
             ),
             _target(
-                "SELECT ts AS time, signal_value AS \"Signal\""
+                'SELECT ts AS time, signal_value AS "Signal"'
                 f" FROM signal_events s WHERE {_SIG_WHERE}"
                 " AND $__timeFilter(ts) ORDER BY ts",
                 "signals",
@@ -934,16 +974,18 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         ],
         "fieldConfig": {
             "defaults": {"custom": {"lineWidth": 1, "fillOpacity": 0, "axisPlacement": "left"}},
-            "overrides": [{
-                "matcher": {"id": "byName", "options": "Signal"},
-                "properties": [
-                    {"id": "custom.axisPlacement", "value": "right"},
-                    {"id": "custom.drawStyle", "value": "points"},
-                    {"id": "custom.pointSize", "value": 8},
-                    {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
-                    {"id": "custom.lineWidth", "value": 0},
-                ],
-            }],
+            "overrides": [
+                {
+                    "matcher": {"id": "byName", "options": "Signal"},
+                    "properties": [
+                        {"id": "custom.axisPlacement", "value": "right"},
+                        {"id": "custom.drawStyle", "value": "points"},
+                        {"id": "custom.pointSize", "value": 8},
+                        {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
+                        {"id": "custom.lineWidth", "value": 0},
+                    ],
+                }
+            ],
         },
     },
     {
@@ -951,13 +993,15 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "title": "Cumulative Signal Return (T+$n)",
         "description": "Arithmetic sum of per-signal forward returns (not compounded). Entry @ T+1 $fill_price_field, exit @ T+1+n close.",
         "type": "timeseries",
-        "h": 8, "w": 12,
-        "targets": [_target(
-            _FWD_CTE
-            + "SELECT ts AS time,\n"
-            "  SUM($expected_direction * ret) OVER (ORDER BY ts) AS \"Cumulative Return\"\n"
-            "FROM fwd ORDER BY ts"
-        )],
+        "h": 8,
+        "w": 12,
+        "targets": [
+            _target(
+                _FWD_CTE + "SELECT ts AS time,\n"
+                '  SUM($expected_direction * ret) OVER (ORDER BY ts) AS "Cumulative Return"\n'
+                "FROM fwd ORDER BY ts"
+            )
+        ],
         "fieldConfig": {
             "defaults": {"unit": "percentunit", "custom": {"lineWidth": 2, "fillOpacity": 10}},
         },
@@ -967,24 +1011,27 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "title": "Rolling $k Mean Return (T+$n)",
         "description": "Rolling k-signal average of adjusted forward return. Entry @ T+1 $fill_price_field. Declining = edge weakening.",
         "type": "timeseries",
-        "h": 8, "w": 12,
-        "targets": [_target(
-            f"WITH meta AS ({_META_INNER}),\n"
-            "fwd AS (\n"
-            "  SELECT s.ts,\n"
-            "    $expected_direction * (exit_bar.close - entry_bar.entry_price)"
-            " / NULLIF(entry_bar.entry_price, 0) AS adj_return,\n"
-            "    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
-            "  FROM signal_events s, meta\n"
-            f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
-            f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
-            f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.ts)\n"
-            ")\n"
-            "SELECT ts AS time,\n"
-            "  AVG(adj_return) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)"
-            " AS \"Mean Return\"\n"
-            "FROM fwd WHERE rn >= $k ORDER BY ts"
-        )],
+        "h": 8,
+        "w": 12,
+        "targets": [
+            _target(
+                f"WITH meta AS ({_META_INNER}),\n"
+                "fwd AS (\n"
+                "  SELECT s.ts,\n"
+                "    $expected_direction * (exit_bar.close - entry_bar.entry_price)"
+                " / NULLIF(entry_bar.entry_price, 0) AS adj_return,\n"
+                "    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
+                "  FROM signal_events s, meta\n"
+                f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
+                f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
+                f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.ts)\n"
+                ")\n"
+                "SELECT ts AS time,\n"
+                "  AVG(adj_return) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)"
+                ' AS "Mean Return"\n'
+                "FROM fwd WHERE rn >= $k ORDER BY ts"
+            )
+        ],
         "fieldConfig": {
             "defaults": {
                 "unit": "percentunit",
@@ -998,15 +1045,17 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "title": "Rolling $k Edge Ratio (T+$n)",
         "description": "Rolling k-signal AVG(MFE)/AVG(MAE) from T+2 onward (entry bar excluded). >2 = healthy, <1 = adverse exceeds favorable.",
         "type": "timeseries",
-        "h": 8, "w": 12,
-        "targets": [_target(
-            _EXC_CTE
-            + "SELECT ts AS time,\n"
-            "  AVG(mfe) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n"
-            "  / NULLIF(AVG(mae) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n"
-            "  AS \"Edge Ratio\"\n"
-            "FROM exc WHERE rn >= $k ORDER BY ts"
-        )],
+        "h": 8,
+        "w": 12,
+        "targets": [
+            _target(
+                _EXC_CTE + "SELECT ts AS time,\n"
+                "  AVG(mfe) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW)\n"
+                "  / NULLIF(AVG(mae) OVER (ORDER BY ts ROWS BETWEEN ($k - 1) PRECEDING AND CURRENT ROW), 0)\n"
+                '  AS "Edge Ratio"\n'
+                "FROM exc WHERE rn >= $k ORDER BY ts"
+            )
+        ],
         "fieldConfig": {
             "defaults": {
                 "custom": {"lineWidth": 2, "fillOpacity": 10},
@@ -1096,5 +1145,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     main()

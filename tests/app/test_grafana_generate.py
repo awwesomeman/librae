@@ -1,4 +1,5 @@
 """Tests for Grafana dashboard generation."""
+
 from __future__ import annotations
 
 from app.grafana.generate_dashboards import (
@@ -28,6 +29,7 @@ class TestRenderUnifiedDashboard:
     def test_no_strategy_signals_references(self):
         """Ensure no panel SQL references the deleted strategy_signals table."""
         import json
+
         raw = json.dumps(render_unified_dashboard())
         assert "strategy_signals" not in raw
 

@@ -1,4 +1,4 @@
-name: tw-live-tests
+name: us-live-tests
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "conftest.py"
-      - ".github/workflows/tw-live-tests.yml"
+      - ".github/workflows/us-live-tests.yml"
   pull_request:
     paths:
       - "librae/**"
@@ -20,10 +20,10 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "conftest.py"
-      - ".github/workflows/tw-live-tests.yml"
+      - ".github/workflows/us-live-tests.yml"
 
 jobs:
-  tw-live:
+  us-live:
     name: pytest (py${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
@@ -39,8 +39,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install tw-live + test dependencies
-        run: uv sync --frozen --python ${{ matrix.python }} --extra tw-live --extra test
+      - name: Install us-live + test dependencies
+        run: uv sync --frozen --python ${{ matrix.python }} --extra us-live --extra test
 
-      - name: Run tw-live tests
-        run: uv run --python ${{ matrix.python }} pytest -q -m "tw_live" tests/
+      - name: Run us-live tests
+        run: uv run --python ${{ matrix.python }} pytest -q -m "us_live" tests/

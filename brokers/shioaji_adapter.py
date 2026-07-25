@@ -32,6 +32,7 @@ def _require_shioaji():
     """Import and return shioaji, raising a friendly error if missing."""
     try:
         import shioaji
+
         return shioaji
     except ImportError as e:
         raise ImportError(
@@ -178,6 +179,7 @@ class ShioajiAdapter:
         # Resample if requested timeframe is coarser than 1-min
         if timeframe != "1m":
             from librae.core.utils import interval_to_timedelta
+
             target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
             df = resample_taifex_ohlcv(df.set_index("ts"), target_seconds).reset_index()
 
@@ -213,10 +215,7 @@ class ShioajiAdapter:
         # shioaji >=1.4 moved these enums from shioaji.order.* to top-level
         # shioaji.* (member names unchanged) — sj.order.Action etc. raises
         # AttributeError on current versions.
-        action = (
-            sj.Action.Buy if signal["side"] == "buy"
-            else sj.Action.Sell
-        )
+        action = sj.Action.Buy if signal["side"] == "buy" else sj.Action.Sell
         is_limit = signal.get("order_type") == "limit"
         if is_futures:
             price_type = sj.FuturesPriceType.LMT if is_limit else sj.FuturesPriceType.MKT
@@ -248,7 +247,8 @@ class ShioajiAdapter:
         self._require_auth()
         positions = self._api.list_positions()
         return find_position(
-            positions, symbol,
+            positions,
+            symbol,
             matches=lambda p: p.code == symbol,
             size=lambda p: p.quantity,
             avg_price=lambda p: p.price,

@@ -15,25 +15,39 @@ Shared PnL calculation uses calc_trade_pnl() from core.executor.
 Data format: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
 Single-asset is a special case where symbols has one element.
 """
+
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Sequence
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 if TYPE_CHECKING:
-    from librae.backtest.schema import BacktestOutput, EquityCurvePoint, StrategyMetrics
+    from librae.backtest.schema import (
+        BacktestOutput,
+        EquityCurvePoint,
+        OrderEventRecord,
+        StrategyMetrics,
+    )
     from librae.core.run_config import RunConfig
 
 from librae.config.market_config import MarketConfig
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
-    REASON_DRAWDOWN_BREACH, REASON_FORCE_CLOSE, OrderEvent, TradePnL, TradeResult,
-    eval_equity, liquidate_all, run_pending_and_stops, validate_risk_params,
+    REASON_DRAWDOWN_BREACH,
+    REASON_FORCE_CLOSE,
+    OrderEvent,
+    TradePnL,
+    TradeResult,
+    eval_equity,
+    liquidate_all,
+    run_pending_and_stops,
+    validate_risk_params,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
@@ -182,7 +196,9 @@ class Backtest:
 
     def _get_cost_model(self, symbol: str) -> CostModel:
         """Get cost model for a symbol, falling back to __default__."""
-        return self._cost_models.get(symbol) or self._cost_models.get("__default__", CostModel.zero())
+        return self._cost_models.get(symbol) or self._cost_models.get(
+            "__default__", CostModel.zero()
+        )
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
@@ -217,7 +233,11 @@ class Backtest:
                 self._max_position_pct * last_equity if self._max_position_pct else None
             )
             cash, step_result = run_pending_and_stops(
-                ts, positions, cash, pending_actions, bars,
+                ts,
+                positions,
+                cash,
+                pending_actions,
+                bars,
                 get_cost_model=self._get_cost_model,
                 default_fill=self._fill_price,
                 primary_symbol=primary_symbol,
@@ -243,11 +263,15 @@ class Backtest:
             # relate to the equity curve; not worth a mid-loop re-append ──
             equity_peak = max(equity_peak, mtm)
             if (
-                self._max_drawdown_pct and not halted and equity_peak > 0
+                self._max_drawdown_pct
+                and not halted
+                and equity_peak > 0
                 and (mtm - equity_peak) / equity_peak <= -self._max_drawdown_pct
             ):
                 dd_result = liquidate_all(
-                    positions, bars, ts,
+                    positions,
+                    bars,
+                    ts,
                     get_cost_model=self._get_cost_model,
                     reason=REASON_DRAWDOWN_BREACH,
                 )
@@ -258,7 +282,9 @@ class Backtest:
                 logger.warning(
                     "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
                     "— all positions force-closed",
-                    ts, (mtm - equity_peak) / equity_peak * 100, self._max_drawdown_pct * 100,
+                    ts,
+                    (mtm - equity_peak) / equity_peak * 100,
+                    self._max_drawdown_pct * 100,
                 )
 
             last_equity = mtm
@@ -287,7 +313,9 @@ class Backtest:
             last_ts = self._timeline[-1]
             last_bars = all_bars[last_ts]
             close_result = liquidate_all(
-                positions, last_bars, last_ts,
+                positions,
+                last_bars,
+                last_ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
                 fallback_price=lambda sym, pos: pos.entry_price,
@@ -310,7 +338,7 @@ class Backtest:
         self,
         *,
         annualize: bool | None = None,
-    ) -> "BacktestOutput":
+    ) -> BacktestOutput:
         """Compute metrics + build canonical output in one call.
 
         All metadata is auto-derived from the engine state:
@@ -326,7 +354,8 @@ class Backtest:
         Raises RuntimeError if called before run().
         """
         from librae.backtest.schema import (
-            BacktestOutput, RunMetadata,
+            BacktestOutput,
+            RunMetadata,
         )
         from librae.core.metrics import compute_all
 
@@ -337,8 +366,12 @@ class Backtest:
         run_id = self._run_id
 
         timeline = self._timeline
-        started_at = timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
-        ended_at = timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
+        started_at = (
+            timeline[0].to_pydatetime() if hasattr(timeline[0], "to_pydatetime") else timeline[0]
+        )
+        ended_at = (
+            timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
+        )
         symbol = self._symbols[0]
         timeframe = self._timeframe
 
@@ -348,10 +381,16 @@ class Backtest:
         # Build TradePnL list + periods_held from TradeResult
         trade_pnl_list = [
             TradePnL(
-                gross_pnl=t.gross_pnl, net_pnl=t.net_pnl,
-                commission=t.commission, slippage=t.slippage, tax=t.tax,
-                gross_return=t.gross_return, net_return=t.net_return,
-                exit_commission=0.0, exit_slippage=0.0, exit_tax=t.tax,
+                gross_pnl=t.gross_pnl,
+                net_pnl=t.net_pnl,
+                commission=t.commission,
+                slippage=t.slippage,
+                tax=t.tax,
+                gross_return=t.gross_return,
+                net_return=t.net_return,
+                exit_commission=0.0,
+                exit_slippage=0.0,
+                exit_tax=t.tax,
             )
             for t in result.trades
         ]
@@ -385,7 +424,7 @@ class Backtest:
             data_source=self._data_source,
             started_at=started_at,
             ended_at=ended_at,
-            run_at=datetime.now(tz=timezone.utc),
+            run_at=datetime.now(tz=UTC),
         )
 
         event_records = self._build_event_records(result, run_id)
@@ -399,29 +438,36 @@ class Backtest:
         )
 
     @property
-    def metrics(self) -> "StrategyMetrics":
+    def metrics(self) -> StrategyMetrics:
         """Access StrategyMetrics. Raises RuntimeError if build_output not called."""
         if self._metrics is None:
             raise RuntimeError("Call build_output() before accessing metrics")
         return self._metrics
 
     @staticmethod
-    def _build_event_records(result: BacktestResult, run_id: str) -> list["OrderEventRecord"]:
+    def _build_event_records(result: BacktestResult, run_id: str) -> list[OrderEventRecord]:
         """Map OrderEvent -> OrderEventRecord."""
         from librae.backtest.schema import OrderEventRecord
+
         return [
             OrderEventRecord(
                 event_id=make_event_id(run_id, i),
-                ts=e.ts, symbol=e.symbol, side=e.side, event_type=e.event_type,
-                fill_quantity=float(e.fill_quantity), price=float(e.price),
+                ts=e.ts,
+                symbol=e.symbol,
+                side=e.side,
+                event_type=e.event_type,
+                fill_quantity=float(e.fill_quantity),
+                price=float(e.price),
                 entry_price=float(e.entry_price),
                 remaining_quantity=float(e.remaining_quantity),
                 notional=float(e.notional),
-                commission=float(e.commission), slippage=float(e.slippage),
+                commission=float(e.commission),
+                slippage=float(e.slippage),
                 tax=float(e.tax),
                 pnl=float(e.pnl) if e.pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
-                entry_at=e.entry_at, periods_held=e.periods_held,
+                entry_at=e.entry_at,
+                periods_held=e.periods_held,
                 reason=e.reason,
             )
             for i, e in enumerate(result.order_events)
@@ -453,11 +499,16 @@ class Backtest:
                 bm_ret = (bm_eq / prev_bm - 1.0) if prev_bm > 0 else 0.0
                 prev_bm = bm_eq
 
-            equity_points.append(EquityCurvePoint(
-                ts=snap.ts, equity=float(eq),
-                period_return=float(period_return), drawdown=float(drawdown),
-                benchmark_equity=bm_eq, benchmark_period_return=bm_ret,
-            ))
+            equity_points.append(
+                EquityCurvePoint(
+                    ts=snap.ts,
+                    equity=float(eq),
+                    period_return=float(period_return),
+                    drawdown=float(drawdown),
+                    benchmark_equity=bm_eq,
+                    benchmark_period_return=bm_ret,
+                )
+            )
         return equity_points
 
     def _compute_benchmark(self) -> list[float] | None:
@@ -501,12 +552,14 @@ class Backtest:
         bars: dict[str, dict[str, float]],
     ) -> tuple[float, dict[str, Position]]:
         """Compute portfolio MTM value and position snapshot in a single pass."""
+
         def _price(sym: str, ps: PositionState) -> float:
             bar = bars.get(sym)
             return bar["close"] if bar is not None else ps.entry_price
 
         return eval_equity(
-            cash, positions,
+            cash,
+            positions,
             get_price=_price,
             get_cost_model=self._get_cost_model,
         )

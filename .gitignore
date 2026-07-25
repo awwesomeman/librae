@@ -12,6 +12,7 @@ __pycache__/
 
 # Build artifacts
 *.egg-info/
+.ruff_cache/
 
 # Secrets
 .env

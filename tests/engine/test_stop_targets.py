@@ -1,11 +1,11 @@
 """Tests for stop-loss / take-profit: unit-level trigger logic + full-engine integration."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
-
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
@@ -16,7 +16,6 @@ from librae.core.executor import (
     resolve_stop_exit,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, PositionState
-
 
 # ---------------------------------------------------------------------------
 # Helpers — naming mirrors tests/engine/test_position_scaling.py and
@@ -31,19 +30,32 @@ def _zero_cost() -> CostModel:
 
 def _leveraged_cost(margin_rate: float = 0.1, maintenance_margin_rate: float = 0.05) -> CostModel:
     return CostModel(
-        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
-        long_margin_rate=margin_rate, short_margin_rate=margin_rate,
+        multiplier=1.0,
+        commission_rate=0.0,
+        min_commission=0.0,
+        slippage_ticks=0.0,
+        tick_size=0.01,
+        tax_rate=0.0,
+        long_margin_rate=margin_rate,
+        short_margin_rate=margin_rate,
         maintenance_margin_rate=maintenance_margin_rate,
     )
 
 
 def _make_pos(side="long", stop=None, tp=None) -> PositionState:
     return PositionState(
-        symbol="TEST", side=side, entry_price=100.0, quantity=1.0,
-        entry_at=datetime(2026, 1, 1, tzinfo=timezone.utc), periods_held=0,
-        entry_commission=0.0, entry_slippage=0.0, entry_tax=0.0,
-        total_entry_cost=100.0, stop_price=stop, take_profit_price=tp,
+        symbol="TEST",
+        side=side,
+        entry_price=100.0,
+        quantity=1.0,
+        entry_at=datetime(2026, 1, 1, tzinfo=UTC),
+        periods_held=0,
+        entry_commission=0.0,
+        entry_slippage=0.0,
+        entry_tax=0.0,
+        total_entry_cost=100.0,
+        stop_price=stop,
+        take_profit_price=tp,
     )
 
 
@@ -62,7 +74,6 @@ def _make_multiindex_df(bars: list[dict[str, float]], symbol: str = "BTCUSDT") -
 
 
 class TestResolveStopExit:
-
     def test_long_stop_hit_fills_at_stop_price(self):
         pos = _make_pos(side="long", stop=95.0)
         bar = {"open": 98.0, "high": 99.0, "low": 94.0, "close": 96.0}
@@ -111,7 +122,6 @@ class TestResolveStopExit:
 
 
 class TestLiquidation:
-
     def test_long_liquidation_fills_at_liq_price(self):
         # entry=100, margin_rate=0.1, maintenance=0.05 -> liq_price=95
         pos = _make_pos(side="long")
@@ -145,7 +155,6 @@ class TestLiquidation:
         assert resolve_stop_exit(pos, bar, cost_model) is None
 
 
-
 # ---------------------------------------------------------------------------
 # Integration tests: full Backtest run
 # ---------------------------------------------------------------------------
@@ -160,15 +169,18 @@ class OpenWithStopAtBar1(BaseStrategy):
 
     def on_bar(self, ctx: Context) -> list[Action]:
         if ctx.period_index == 1 and ctx.symbol not in ctx.positions:
-            return [Action(
-                type="long", symbol=ctx.symbol,
-                stop_price=self.stop_price, take_profit_price=self.take_profit_price,
-            )]
+            return [
+                Action(
+                    type="long",
+                    symbol=ctx.symbol,
+                    stop_price=self.stop_price,
+                    take_profit_price=self.take_profit_price,
+                )
+            ]
         return []
 
 
 class TestStopTargetIntegration:
-
     def test_stop_loss_force_closes_before_strategy_would(self):
         # Fill at bar1's open=100 -> stop set at 90. Bar3 gaps down through it.
         bars = [

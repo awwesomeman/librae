@@ -13,6 +13,7 @@ frameworks handle this (e.g. QuantConnect LEAN's
 symbol-properties-database.csv: a market-wide wildcard row for equities,
 an explicit row per specific futures contract).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,12 +29,14 @@ import yaml
 # explicit-required) can key off the prefix. Extend this set (and the
 # matching DB CHECK constraint in deploy/timescale_init.sql) when a new
 # type is actually needed — don't pre-enumerate speculative ones.
-ALLOWED_INSTRUMENT_TYPES = frozenset({
-    "spot",
-    "contract_perpetual",
-    "contract_monthly",
-    "contract_quarterly",
-})
+ALLOWED_INSTRUMENT_TYPES = frozenset(
+    {
+        "spot",
+        "contract_perpetual",
+        "contract_monthly",
+        "contract_quarterly",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,7 @@ def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo
     """
     yaml_path = Path(path) if path else _default_symbols_path()
 
-    with open(yaml_path, "r") as f:
+    with open(yaml_path) as f:
         raw = yaml.safe_load(f)
 
     if not raw or not isinstance(raw, dict):

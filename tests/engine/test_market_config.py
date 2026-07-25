@@ -4,10 +4,10 @@ multiplier/tick_size are deliberately NOT covered here — they're
 per-symbol (see test_symbols.py), not market-level; MarketConfig doesn't
 carry them (see librae/config/market_config.py's module docstring for why).
 """
+
 from __future__ import annotations
 
 import pytest
-
 from librae.config.market_config import (
     MarketConfig,
     get_market,

@@ -1,14 +1,13 @@
 """Tests for Backtest v2: Strategy protocol + Executor pattern."""
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import pytest
-
-from librae.core.cost_model import CostModel
 from librae.backtest.engine import Backtest
+from librae.core.cost_model import CostModel
 from librae.core.strategy import Action, BaseStrategy, Context
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -22,7 +21,8 @@ def _make_multiindex_df(
     close = np.array(prices, dtype=np.float64)
     dt = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
     idx = pd.MultiIndex.from_arrays(
-        [[symbol] * n, dt], names=["symbol", "datetime"],
+        [[symbol] * n, dt],
+        names=["symbol", "datetime"],
     )
     return pd.DataFrame(
         {
@@ -47,12 +47,14 @@ def _zero_cost() -> CostModel:
 
 class HoldStrategy(BaseStrategy):
     """Never trades."""
+
     def on_bar(self, ctx: Context) -> list[Action]:
         return []
 
 
 class BuyBar2CloseBar4(BaseStrategy):
     """Buy at bar 2, close at bar 4."""
+
     def on_bar(self, ctx: Context) -> list[Action]:
         if ctx.period_index == 2 and ctx.symbol not in ctx.positions:
             return [Action(type="long", symbol=ctx.symbol)]
@@ -63,6 +65,7 @@ class BuyBar2CloseBar4(BaseStrategy):
 
 class SignalDrivenStrategy(BaseStrategy):
     """Trades based on entry_signal / exit_signal columns in df."""
+
     def __init__(self, max_hold_periods: int = 24):
         self.max_hold_periods = max_hold_periods
 
@@ -82,8 +85,9 @@ class SignalDrivenStrategy(BaseStrategy):
 class TestBacktestBasics:
     def test_no_trades_flat_equity(self) -> None:
         df = _make_multiindex_df([100.0] * 10)
-        bt = Backtest(df, HoldStrategy(), initial_balance=10_000,
-                      cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df, HoldStrategy(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+        )
         result = bt.run()
 
         assert len(result.trades) == 0
@@ -95,8 +99,13 @@ class TestBacktestBasics:
         # Price must still be 100 at bar 3 for entry, 110 at bar 5 for exit.
         prices = [100.0, 100.0, 100.0, 100.0, 110.0, 110.0]
         df = _make_multiindex_df(prices)
-        bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
-                      cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df,
+            BuyBar2CloseBar4(),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -116,8 +125,9 @@ class TestBacktestBasics:
                     return [Action(type="long", symbol=ctx.symbol)]
                 return []
 
-        bt = Backtest(df, BuyBar2(), initial_balance=10_000,
-                      cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df, BuyBar2(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -137,8 +147,13 @@ class TestSignalDrivenStrategy:
         df.iloc[3, df.columns.get_loc("entry_signal")] = True
         df.iloc[6, df.columns.get_loc("exit_signal")] = True
 
-        bt = Backtest(df, SignalDrivenStrategy(), initial_balance=10_000,
-                      cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df,
+            SignalDrivenStrategy(),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -150,8 +165,13 @@ class TestSignalDrivenStrategy:
         df.iloc[2, df.columns.get_loc("entry_signal")] = True
         # No exit signal — should force close at max_hold_periods
 
-        bt = Backtest(df, SignalDrivenStrategy(max_hold_periods=5),
-                      initial_balance=10_000, cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df,
+            SignalDrivenStrategy(max_hold_periods=5),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+        )
         result = bt.run()
 
         assert len(result.trades) >= 1
@@ -167,15 +187,17 @@ class TestMultiAsset:
         rows = []
         for sym, base_price in [("AAA", 100.0), ("BBB", 200.0)]:
             for i in range(n):
-                rows.append({
-                    "symbol": sym,
-                    "datetime": dt[i],
-                    "open": base_price,
-                    "high": base_price * 1.001,
-                    "low": base_price * 0.999,
-                    "close": base_price + i,  # trending up
-                    "volume": 100.0,
-                })
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "datetime": dt[i],
+                        "open": base_price,
+                        "high": base_price * 1.001,
+                        "low": base_price * 0.999,
+                        "close": base_price + i,  # trending up
+                        "volume": 100.0,
+                    }
+                )
 
         df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
 
@@ -196,7 +218,9 @@ class TestMultiAsset:
                             actions.append(Action(type="close", symbol=sym))
                 return actions
 
-        bt = Backtest(df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost(), data_source="test"
+        )
         result = bt.run()
 
         assert len(result.trades) == 2
@@ -210,12 +234,17 @@ class TestWithCosts:
         df = _make_multiindex_df(prices)
 
         cost = CostModel(
-            multiplier=1.0, commission_rate=0.01, min_commission=0.0,
-            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+            multiplier=1.0,
+            commission_rate=0.01,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
         )
 
-        bt = Backtest(df, BuyBar2CloseBar4(), initial_balance=10_000,
-                      cost_model=cost, data_source="test")
+        bt = Backtest(
+            df, BuyBar2CloseBar4(), initial_balance=10_000, cost_model=cost, data_source="test"
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -239,8 +268,9 @@ class TestContext:
                 return []
 
         df = _make_multiindex_df([100.0] * 6)
-        bt = Backtest(df, Spy(), initial_balance=10_000,
-                      cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df, Spy(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+        )
         bt.run()
 
         # Bar 0-1: no position (buy queued at bar 1, not yet filled)
@@ -268,8 +298,9 @@ class TestContext:
                 return []
 
         df = _make_multiindex_df([100.0] * 8)
-        bt = Backtest(df, Tracker(), initial_balance=10_000,
-                      cost_model=_zero_cost(), data_source="test")
+        bt = Backtest(
+            df, Tracker(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+        )
         bt.run()
 
         # WHY: next-bar execution — buy queued at bar 1, fills at bar 2.

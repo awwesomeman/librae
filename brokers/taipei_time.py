@@ -11,6 +11,7 @@ bars must restart their bucketing at these session opens (not a round-hour
 grid), and daily bars must attribute the night session to the day it closes
 into, not the day it opened on.
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -18,10 +19,10 @@ import pandas as pd
 TAIPEI_UTC_OFFSET_SEC = 8 * 3600
 _DAY_SEC = 86400
 
-DAY_SESSION_OPEN_SEC = 8 * 3600 + 45 * 60     # 08:45
-DAY_SESSION_CLOSE_SEC = 13 * 3600 + 45 * 60   # 13:45
-NIGHT_SESSION_OPEN_SEC = 15 * 3600            # 15:00
-NIGHT_SESSION_CLOSE_SEC = 5 * 3600            # 05:00 (next calendar day)
+DAY_SESSION_OPEN_SEC = 8 * 3600 + 45 * 60  # 08:45
+DAY_SESSION_CLOSE_SEC = 13 * 3600 + 45 * 60  # 13:45
+NIGHT_SESSION_OPEN_SEC = 15 * 3600  # 15:00
+NIGHT_SESSION_CLOSE_SEC = 5 * 3600  # 05:00 (next calendar day)
 
 
 def shioaji_ts_ns_to_epoch(ts_ns: int) -> int:
@@ -94,12 +95,14 @@ def resample_taifex_ohlcv(df: pd.DataFrame, target_seconds: int) -> pd.DataFrame
     bucket = pd.to_datetime(bucket_epoch, unit="s", utc=True)
 
     grouped = df.groupby(bucket)
-    out = pd.DataFrame({
-        "open": grouped["open"].first(),
-        "high": grouped["high"].max(),
-        "low": grouped["low"].min(),
-        "close": grouped["close"].last(),
-        "volume": grouped["volume"].sum(),
-    })
+    out = pd.DataFrame(
+        {
+            "open": grouped["open"].first(),
+            "high": grouped["high"].max(),
+            "low": grouped["low"].min(),
+            "close": grouped["close"].last(),
+            "volume": grouped["volume"].sum(),
+        }
+    )
     out.index.name = df.index.name
     return out

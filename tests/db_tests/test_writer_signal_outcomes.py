@@ -1,21 +1,22 @@
 """Tests for signal_events write path in timescale_writer."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-
 from db.timescale_writer import (
     save_signal_results,
     save_strategy_results,
     write_equity_curve_point,
     write_signal_event,
 )
+from librae.core.run_config import RunConfig
 from tests.conftest import make_test_cfg
 
 
-def _test_cfg(**overrides) -> "RunConfig":
+def _test_cfg(**overrides) -> RunConfig:
     overrides.setdefault("mode", "backtest")
     overrides.setdefault("params", {"a": 1})
     return make_test_cfg(**overrides)
@@ -38,15 +39,26 @@ class TestWriteEquityCurvePoint:
         mock_conn_ctx.return_value = mock_conn
 
         write_equity_curve_point(
-            ts=datetime(2024, 6, 1, tzinfo=timezone.utc), run_id="test-run-001",
-            equity=105_000.0, drawdown=-0.02, period_return=0.01,
-            benchmark_equity=101_000.0, benchmark_period_return=0.005,
+            ts=datetime(2024, 6, 1, tzinfo=UTC),
+            run_id="test-run-001",
+            equity=105_000.0,
+            drawdown=-0.02,
+            period_return=0.01,
+            benchmark_equity=101_000.0,
+            benchmark_period_return=0.005,
             strategy="test_strat",
         )
 
         sql = mock_cur.execute.call_args[0][0]
         assert "ON CONFLICT" in sql
-        for col in ("equity", "benchmark_equity", "drawdown", "period_return", "benchmark_period_return", "strategy"):
+        for col in (
+            "equity",
+            "benchmark_equity",
+            "drawdown",
+            "period_return",
+            "benchmark_period_return",
+            "strategy",
+        ):
             assert f"{col}=EXCLUDED.{col}" in sql
 
 
@@ -62,10 +74,16 @@ class TestWriteSignalEvent:
         mock_conn.cursor.return_value = mock_cur
         mock_conn_ctx.return_value = mock_conn
 
-        ts = datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
         write_signal_event(
-            ts=ts, run_id="test-run-001", strategy="test_strat", symbol="BTCUSDT",
-            mode="sim", timeframe="H1", signal_value=1.0, price=50000.0,
+            ts=ts,
+            run_id="test-run-001",
+            strategy="test_strat",
+            symbol="BTCUSDT",
+            mode="sim",
+            timeframe="H1",
+            signal_value=1.0,
+            price=50000.0,
         )
 
         mock_cur.execute.assert_called_once()
@@ -82,11 +100,17 @@ class TestWriteSignalEvent:
     def test_accepts_cursor(self, mock_conn_ctx):
         """When cur is provided, uses it directly without opening connection."""
         mock_cur = MagicMock()
-        ts = datetime(2024, 6, 1, tzinfo=timezone.utc)
+        ts = datetime(2024, 6, 1, tzinfo=UTC)
 
         write_signal_event(
-            ts=ts, run_id="test-run-001", strategy="s", symbol="S", mode="sim",
-            timeframe="H1", signal_value=1.0, cur=mock_cur,
+            ts=ts,
+            run_id="test-run-001",
+            strategy="s",
+            symbol="S",
+            mode="sim",
+            timeframe="H1",
+            signal_value=1.0,
+            cur=mock_cur,
         )
 
         mock_cur.execute.assert_called_once()
@@ -101,7 +125,8 @@ class TestPersistBacktest:
         symbol = "BTCUSDT"
         idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
         mi = pd.MultiIndex.from_arrays(
-            [[symbol] * n, idx], names=["symbol", "datetime"],
+            [[symbol] * n, idx],
+            names=["symbol", "datetime"],
         )
         df = pd.DataFrame(
             {
@@ -110,7 +135,7 @@ class TestPersistBacktest:
                 "low": [max(0, x - 1) for x in range(n)],
                 "close": [x + 0.5 for x in range(n)],
                 "volume": [100.0] * n,
-                "entry_signal": [True if i % 5 == 0 else False for i in range(n)],
+                "entry_signal": [i % 5 == 0 for i in range(n)],
             },
             index=mi,
         )
@@ -119,7 +144,7 @@ class TestPersistBacktest:
     @patch("db.timescale_writer.write_ohlcv", return_value=20)
     @patch("db.timescale_writer.save_backtest_output", return_value={"backtest_runs": 1})
     def test_extracts_signals_and_calls_writer(self, mock_write_bt, mock_write_ohlcv):
-        df, symbol = self._make_featured_df()
+        df, _symbol = self._make_featured_df()
         mock_output = MagicMock()
 
         counts = save_strategy_results(mock_output, df, _test_cfg())
@@ -145,11 +170,17 @@ class TestPersistBacktest:
         idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
         mi = pd.MultiIndex.from_arrays([[symbol] * n, idx], names=["symbol", "datetime"])
         signals = [1.0, 0.0, float("nan"), -1.0, 0.0, 1.0, float("nan"), 0.0, -0.5, 1.0]
-        df = pd.DataFrame({
-            "open": range(n), "high": range(n), "low": range(n),
-            "close": range(n), "volume": [100] * n,
-            "entry_signal": signals,
-        }, index=mi)
+        df = pd.DataFrame(
+            {
+                "open": range(n),
+                "high": range(n),
+                "low": range(n),
+                "close": range(n),
+                "volume": [100] * n,
+                "entry_signal": signals,
+            },
+            index=mi,
+        )
 
         save_strategy_results(MagicMock(), df, _test_cfg())
 
@@ -165,7 +196,9 @@ class TestSaveSignalResults:
     @patch("db.timescale_writer.write_ohlcv", return_value=10)
     @patch("db.timescale_writer.psycopg2.extras.execute_values")
     @patch("db.timescale_writer.get_conn")
-    def test_writes_signal_events_without_backtest(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+    def test_writes_signal_events_without_backtest(
+        self, mock_conn_ctx, mock_exec_values, mock_ohlcv
+    ):
         """Can write signals without BacktestOutput."""
         mock_conn = MagicMock()
         mock_cur = MagicMock()
@@ -176,11 +209,17 @@ class TestSaveSignalResults:
 
         n = 20
         idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
-        df = pd.DataFrame({
-            "open": range(n), "high": range(n), "low": range(n),
-            "close": range(n), "volume": [100] * n,
-            "entry_signal": [1.0 if i % 5 == 0 else 0.0 for i in range(n)],
-        }, index=idx)
+        df = pd.DataFrame(
+            {
+                "open": range(n),
+                "high": range(n),
+                "low": range(n),
+                "close": range(n),
+                "volume": [100] * n,
+                "entry_signal": [1.0 if i % 5 == 0 else 0.0 for i in range(n)],
+            },
+            index=idx,
+        )
 
         counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot")
 
@@ -208,15 +247,23 @@ class TestSaveSignalResults:
 
         n = 5
         idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
-        df = pd.DataFrame({
-            "open": range(n), "high": range(n), "low": range(n),
-            "close": range(n), "volume": [100] * n,
-            "entry_signal": [1.0] * n,
-        }, index=idx)
+        df = pd.DataFrame(
+            {
+                "open": range(n),
+                "high": range(n),
+                "low": range(n),
+                "close": range(n),
+                "volume": [100] * n,
+                "entry_signal": [1.0] * n,
+            },
+            index=idx,
+        )
 
         save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot", run_id="run-A")
 
-        delete_call = next(c for c in mock_cur.execute.call_args_list if "DELETE FROM signal_events" in c.args[0])
+        delete_call = next(
+            c for c in mock_cur.execute.call_args_list if "DELETE FROM signal_events" in c.args[0]
+        )
         sql, params = delete_call.args
         assert "run_id IS NOT DISTINCT FROM" in sql
         assert params[0] == "run-A"
@@ -236,13 +283,20 @@ class TestSaveSignalResults:
         n = 10
         idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
         mi = pd.MultiIndex.from_arrays(
-            [["BTCUSDT"] * n, idx], names=["symbol", "datetime"],
+            [["BTCUSDT"] * n, idx],
+            names=["symbol", "datetime"],
         )
-        df = pd.DataFrame({
-            "open": range(n), "high": range(n), "low": range(n),
-            "close": range(n), "volume": [100] * n,
-            "entry_signal": [1.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, -0.5],
-        }, index=mi)
+        df = pd.DataFrame(
+            {
+                "open": range(n),
+                "high": range(n),
+                "low": range(n),
+                "close": range(n),
+                "volume": [100] * n,
+                "entry_signal": [1.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, -0.5],
+            },
+            index=mi,
+        )
 
         counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot")
 

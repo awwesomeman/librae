@@ -1,8 +1,8 @@
 """Tests for symbol registry (per-symbol market/data_source/contract economics)."""
+
 from __future__ import annotations
 
 import pytest
-
 from librae.config.symbols import (
     ALLOWED_INSTRUMENT_TYPES,
     SymbolInfo,
@@ -48,15 +48,23 @@ class TestInstrumentTypeValidation:
     def test_invalid_instrument_type_raises(self):
         with pytest.raises(ValueError, match="instrument_type"):
             SymbolInfo(
-                symbol="X", market="crypto", data_source="binance_spot",
-                instrument_type="bogus", multiplier=1.0, tick_size=0.01,
+                symbol="X",
+                market="crypto",
+                data_source="binance_spot",
+                instrument_type="bogus",
+                multiplier=1.0,
+                tick_size=0.01,
             )
 
     def test_all_allowed_types_construct_cleanly(self):
         for t in ALLOWED_INSTRUMENT_TYPES:
             SymbolInfo(
-                symbol="X", market="crypto", data_source="binance_spot",
-                instrument_type=t, multiplier=1.0, tick_size=0.01,
+                symbol="X",
+                market="crypto",
+                data_source="binance_spot",
+                instrument_type=t,
+                multiplier=1.0,
+                tick_size=0.01,
             )
 
     def test_missing_instrument_type_in_yaml_raises(self, tmp_path):

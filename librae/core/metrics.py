@@ -11,17 +11,19 @@ density (see _infer_annual_periods) so intraday timeframes annualize correctly.
 annual_periods (trading days/year, e.g. 365 for crypto, 252 for TW) is only a
 fallback for when density can't be inferred (<2 bars).
 """
+
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from librae.backtest.schema import StrategyMetrics
+    from librae.backtest.schema import OrderEventRecord, StrategyMetrics
     from librae.core.executor import TradePnL
 
 from librae.core import EPSILON
@@ -46,7 +48,7 @@ def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
     if span_seconds <= 0:
         return fallback
     span_years = span_seconds / SECONDS_PER_YEAR
-    return max(1, int(round(len(index) / span_years)))
+    return max(1, round(len(index) / span_years))
 
 
 def compute_all(
@@ -84,6 +86,7 @@ def compute_all(
     # WHY: lazy imports — quantstats pulls in matplotlib/scipy (~1-3s),
     # deferred so `import librae` stays fast.
     import quantstats as qs
+
     from librae.backtest.schema import StrategyMetrics
 
     if not equity_values:
@@ -137,8 +140,7 @@ def compute_all(
     # WHY: profit_factor undefined when no losses (all wins) — return None,
     # not 0.0 which misleadingly suggests worst performance.
     profit_factor = (
-        float(wins.sum() / (losses_abs.sum() + EPSILON))
-        if len(losses_abs) > 0 else None
+        float(wins.sum() / (losses_abs.sum() + EPSILON)) if len(losses_abs) > 0 else None
     )
 
     _comp = _safe_qs(qs.stats.comp, returns)

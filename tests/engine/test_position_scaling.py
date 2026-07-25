@@ -3,12 +3,12 @@
 Covers executor unit tests (#1-5), short integration (#6-9),
 scaling integration (#10-14), and edge cases (#15-24).
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     ActionResults,
@@ -19,10 +19,10 @@ from librae.core.executor import (
 )
 from librae.core.strategy import Action, Fill, PositionState
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _zero_cost() -> CostModel:
     return CostModel.zero()
@@ -30,16 +30,24 @@ def _zero_cost() -> CostModel:
 
 def _crypto_cost() -> CostModel:
     return CostModel(
-        multiplier=1.0, commission_rate=0.001, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+        multiplier=1.0,
+        commission_rate=0.001,
+        min_commission=0.0,
+        slippage_ticks=0.0,
+        tick_size=0.01,
+        tax_rate=0.0,
     )
 
 
 def _tw_futures_cost() -> CostModel:
     """Taiwan futures: tax on sell side only."""
     return CostModel(
-        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=1.0, tax_rate=0.00002,
+        multiplier=1.0,
+        commission_rate=0.0,
+        min_commission=0.0,
+        slippage_ticks=0.0,
+        tick_size=1.0,
+        tax_rate=0.00002,
     )
 
 
@@ -53,9 +61,11 @@ def _make_pos(
 ) -> PositionState:
     cm = cm or _zero_cost()
     return PositionState(
-        symbol=symbol, side=side,
-        entry_price=entry_price, quantity=quantity,
-        entry_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        symbol=symbol,
+        side=side,
+        entry_price=entry_price,
+        quantity=quantity,
+        entry_at=datetime(2026, 1, 1, tzinfo=UTC),
         periods_held=periods_held,
         entry_commission=cm.calc_commission(entry_price, quantity),
         entry_slippage=cm.calc_slippage(quantity),
@@ -73,14 +83,17 @@ def _make_fill(
 ) -> Fill:
     cm = cm or _zero_cost()
     return Fill(
-        symbol=symbol, side=side, price=price, quantity=quantity,
+        symbol=symbol,
+        side=side,
+        price=price,
+        quantity=quantity,
         commission=cm.calc_commission(price, quantity),
         slippage=cm.calc_slippage(quantity),
         tax=cm.calc_tax(price, quantity),
     )
 
 
-TS = datetime(2026, 1, 10, tzinfo=timezone.utc)
+TS = datetime(2026, 1, 10, tzinfo=UTC)
 
 
 def _run_actions(
@@ -96,7 +109,10 @@ def _run_actions(
         prices = {"TEST": 100.0}
     cm = cm or _zero_cost()
     return process_actions(
-        actions, positions, cash, TS,
+        actions,
+        positions,
+        cash,
+        TS,
         get_price=lambda s, action: prices.get(s),
         get_cost_model=lambda s: cm,
         primary_symbol="TEST",
@@ -168,7 +184,7 @@ class TestClosePosition:
     def test_partial_close_pnl(self):
         cm = _zero_cost()
         pos = _make_pos(entry_price=100.0, quantity=10.0, cm=cm)
-        pnl, proceeds, fully_closed = close_position(pos, 110.0, cm, quantity=5.0)
+        pnl, _proceeds, fully_closed = close_position(pos, 110.0, cm, quantity=5.0)
 
         assert not fully_closed
         assert pnl.gross_pnl == pytest.approx(50.0)  # (110-100)*5
@@ -191,7 +207,6 @@ class TestClosePosition:
 
 
 class TestShortPositions:
-
     def test_short_profitable(self):
         """#6: sell@100, close@90 → profit."""
         cm = _zero_cost()
@@ -238,7 +253,6 @@ class TestShortPositions:
 
 
 class TestScalingIntegration:
-
     def test_long_scale_and_close(self):
         """#10: buy@100, add@120, close@130 → correct PnL."""
         positions: dict[str, PositionState] = {}
@@ -249,14 +263,21 @@ class TestScalingIntegration:
 
         # Scale in
         actions2 = [Action(type="long", symbol="TEST", quantity=5.0)]
-        result2 = _run_actions(actions2, positions, cash=100_000 + result.cash_delta, prices={"TEST": 120.0})
+        result2 = _run_actions(
+            actions2, positions, cash=100_000 + result.cash_delta, prices={"TEST": 120.0}
+        )
         assert positions["TEST"].quantity == 15.0
         expected_avg = (100.0 * 10.0 + 120.0 * 5.0) / 15.0
         assert positions["TEST"].entry_price == pytest.approx(expected_avg)
 
         # Close all
         actions3 = [Action(type="close", symbol="TEST")]
-        result3 = _run_actions(actions3, positions, cash=100_000 + result.cash_delta + result2.cash_delta, prices={"TEST": 130.0})
+        result3 = _run_actions(
+            actions3,
+            positions,
+            cash=100_000 + result.cash_delta + result2.cash_delta,
+            prices={"TEST": 130.0},
+        )
         assert "TEST" not in positions
         assert len(result3.trades) == 1
         assert result3.trades[0].gross_pnl == pytest.approx((130.0 - expected_avg) * 15.0)
@@ -265,12 +286,19 @@ class TestScalingIntegration:
         """#12: add, partial close, then close rest."""
         cm = _zero_cost()
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0}, cm=cm)
+        _run_actions(
+            [Action(type="long", symbol="TEST", quantity=10.0)],
+            positions,
+            prices={"TEST": 100.0},
+            cm=cm,
+        )
 
         # Partial close 4
         result = _run_actions(
             [Action(type="close", symbol="TEST", quantity=4.0)],
-            positions, prices={"TEST": 120.0}, cm=cm,
+            positions,
+            prices={"TEST": 120.0},
+            cm=cm,
         )
         assert len(result.trades) == 1
         assert result.trades[0].quantity == 4.0
@@ -280,7 +308,9 @@ class TestScalingIntegration:
         # Close rest
         result2 = _run_actions(
             [Action(type="close", symbol="TEST")],
-            positions, prices={"TEST": 130.0}, cm=cm,
+            positions,
+            prices={"TEST": 130.0},
+            cm=cm,
         )
         assert "TEST" not in positions
         assert result2.trades[0].gross_pnl == pytest.approx(180.0)  # (130-100)*6
@@ -310,17 +340,29 @@ class TestScalingIntegration:
         positions: dict[str, PositionState] = {}
 
         # Open short
-        _run_actions([Action(type="short", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0}, cm=cm)
+        _run_actions(
+            [Action(type="short", symbol="TEST", quantity=5.0)],
+            positions,
+            prices={"TEST": 100.0},
+            cm=cm,
+        )
         assert positions["TEST"].side == "short"
 
         # Scale short
-        _run_actions([Action(type="short", symbol="TEST", quantity=3.0)], positions, prices={"TEST": 110.0}, cm=cm)
+        _run_actions(
+            [Action(type="short", symbol="TEST", quantity=3.0)],
+            positions,
+            prices={"TEST": 110.0},
+            cm=cm,
+        )
         assert positions["TEST"].quantity == 8.0
 
         # Partial close (buy-to-cover 4)
         result = _run_actions(
             [Action(type="close", symbol="TEST", quantity=4.0)],
-            positions, prices={"TEST": 90.0}, cm=cm,
+            positions,
+            prices={"TEST": 90.0},
+            cm=cm,
         )
         assert positions["TEST"].quantity == pytest.approx(4.0)
         assert result.trades[0].gross_pnl > 0  # price dropped, short profits
@@ -332,23 +374,30 @@ class TestScalingIntegration:
 
 
 class TestEdgeCases:
-
     def test_scale_without_quantity_rejected(self):
         """#15: scaling requires explicit quantity."""
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0})
+        _run_actions(
+            [Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0}
+        )
 
         # Try to scale without quantity
-        result = _run_actions([Action(type="long", symbol="TEST")], positions, prices={"TEST": 120.0})
+        result = _run_actions(
+            [Action(type="long", symbol="TEST")], positions, prices={"TEST": 120.0}
+        )
         assert positions["TEST"].quantity == 10.0  # unchanged
         assert result.cash_delta == 0.0
 
     def test_buy_while_short_rejected(self):
         """#16: opposite-side action rejected."""
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="short", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0})
+        _run_actions(
+            [Action(type="short", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0}
+        )
 
-        result = _run_actions([Action(type="long", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 90.0})
+        result = _run_actions(
+            [Action(type="long", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 90.0}
+        )
         assert positions["TEST"].side == "short"  # unchanged
         assert result.cash_delta == 0.0
 
@@ -365,7 +414,7 @@ class TestEdgeCases:
         """#18: close with quantity=0 does nothing."""
         cm = _zero_cost()
         pos = _make_pos(cm=cm)
-        pnl, proceeds, fully_closed = close_position(pos, 110.0, cm, quantity=0.0)
+        _pnl, proceeds, fully_closed = close_position(pos, 110.0, cm, quantity=0.0)
 
         assert not fully_closed
         assert proceeds == 0.0
@@ -374,7 +423,7 @@ class TestEdgeCases:
         """#19: very small fractional quantity → costs are non-negative."""
         cm = _crypto_cost()
         pos = _make_pos(entry_price=100.0, quantity=1e-8, cm=cm)
-        pnl, proceeds, _ = close_position(pos, 110.0, cm)
+        pnl, _proceeds, _ = close_position(pos, 110.0, cm)
 
         assert pnl.commission >= 0
         assert pnl.slippage >= 0
@@ -382,12 +431,19 @@ class TestEdgeCases:
     def test_scale_insufficient_cash_rejected(self):
         """#20: scaling rejected when cash insufficient."""
         positions: dict[str, PositionState] = {}
-        _run_actions([Action(type="long", symbol="TEST", quantity=10.0)], positions, cash=1100.0, prices={"TEST": 100.0})
+        _run_actions(
+            [Action(type="long", symbol="TEST", quantity=10.0)],
+            positions,
+            cash=1100.0,
+            prices={"TEST": 100.0},
+        )
 
         # Only ~100 cash left, try to add 10 more @ 100
         result = _run_actions(
             [Action(type="long", symbol="TEST", quantity=10.0)],
-            positions, cash=100.0, prices={"TEST": 100.0},
+            positions,
+            cash=100.0,
+            prices={"TEST": 100.0},
         )
         assert positions["TEST"].quantity == 10.0  # unchanged
         assert result.cash_delta == 0.0
@@ -398,22 +454,30 @@ class TestEdgeCases:
         prices = {"A": 100.0, "B": 200.0}
         cm = _zero_cost()
 
-        _run_actions([
-            Action(type="long", symbol="A", quantity=5.0),
-            Action(type="long", symbol="B", quantity=3.0),
-        ], positions, prices=prices, cm=cm)
+        _run_actions(
+            [
+                Action(type="long", symbol="A", quantity=5.0),
+                Action(type="long", symbol="B", quantity=3.0),
+            ],
+            positions,
+            prices=prices,
+            cm=cm,
+        )
 
         assert positions["A"].quantity == 5.0
         assert positions["B"].quantity == 3.0
 
         # Scale A
-        _run_actions([Action(type="long", symbol="A", quantity=2.0)], positions, prices=prices, cm=cm)
+        _run_actions(
+            [Action(type="long", symbol="A", quantity=2.0)], positions, prices=prices, cm=cm
+        )
         assert positions["A"].quantity == 7.0
         assert positions["B"].quantity == 3.0  # unchanged
 
     def test_equity_with_scaled_position(self):
         """#22: MTM correct after scaling."""
         from librae.core.executor import direction
+
         cm = _zero_cost()
         pos = _make_pos(entry_price=100.0, quantity=10.0, cm=cm)
         scale_into_position(pos, _make_fill(price=120.0, quantity=5.0, cm=cm), cm)
@@ -447,7 +511,10 @@ class TestEdgeCases:
         # Open
         _run_actions(
             [Action(type="long", symbol="TEST")],  # auto-size
-            positions, cash=10_000.0, prices={"TEST": 100.0}, cm=cm,
+            positions,
+            cash=10_000.0,
+            prices={"TEST": 100.0},
+            cm=cm,
         )
         assert "TEST" in positions
         assert positions["TEST"].quantity == pytest.approx(100.0)  # 10000/100
@@ -459,7 +526,9 @@ class TestEdgeCases:
         # Close
         result3 = _run_actions(
             [Action(type="close", symbol="TEST")],
-            positions, prices={"TEST": 110.0}, cm=cm,
+            positions,
+            prices={"TEST": 110.0},
+            cm=cm,
         )
         assert "TEST" not in positions
         assert result3.trades[0].gross_pnl == pytest.approx(1000.0)  # (110-100)*100
@@ -473,18 +542,28 @@ class TestEdgeCases:
 def _us_equity_cost() -> CostModel:
     """US equity: short_margin_rate=0.5 (Reg T)."""
     return CostModel(
-        multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
-        long_margin_rate=1.0, short_margin_rate=0.5,
+        multiplier=1.0,
+        commission_rate=0.0,
+        min_commission=0.0,
+        slippage_ticks=0.0,
+        tick_size=0.01,
+        tax_rate=0.0,
+        long_margin_rate=1.0,
+        short_margin_rate=0.5,
     )
 
 
 def _futures_cost() -> CostModel:
     """Futures: margin_rate=0.1 both sides, multiplier=50."""
     return CostModel(
-        multiplier=50.0, commission_rate=0.0, min_commission=0.0,
-        slippage_ticks=0.0, tick_size=1.0, tax_rate=0.0,
-        long_margin_rate=0.1, short_margin_rate=0.1,
+        multiplier=50.0,
+        commission_rate=0.0,
+        min_commission=0.0,
+        slippage_ticks=0.0,
+        tick_size=1.0,
+        tax_rate=0.0,
+        long_margin_rate=0.1,
+        short_margin_rate=0.1,
     )
 
 
@@ -548,7 +627,10 @@ class TestMarginRate:
         cash_after = initial_cash - outlay
 
         pos = _make_pos(
-            side="long", entry_price=20_000.0, quantity=1.0, cm=cm,
+            side="long",
+            entry_price=20_000.0,
+            quantity=1.0,
+            cm=cm,
         )
         _, proceeds, _ = close_position(pos, 20_000.0, cm)
 
@@ -577,7 +659,8 @@ class TestMarginRate:
 
         # Price drops to 180 → unrealized profit = 2000
         mtm, _ = eval_equity(
-            cash, {"TEST": pos},
+            cash,
+            {"TEST": pos},
             get_price=lambda s, p: 180.0,
             get_cost_model=lambda s: cm,
         )
@@ -590,8 +673,10 @@ class TestMarginRate:
         positions: dict[str, PositionState] = {}
         _run_actions(
             [Action(type="long", symbol="TEST")],
-            positions, cash=100_000.0,
-            prices={"TEST": 20_000.0}, cm=cm,
+            positions,
+            cash=100_000.0,
+            prices={"TEST": 20_000.0},
+            cm=cm,
         )
         # outlay_per_unit = 20000 * 50 * 0.1 = 100000
         # qty = 100000 / 100000 = 1.0
@@ -606,13 +691,20 @@ class TestSizePosition:
 
     def test_rate_based_commission_with_floor_uses_full_cash(self):
         cm = CostModel(
-            multiplier=1.0, commission_rate=0.001, min_commission=50.0,
-            slippage_ticks=0.0, tick_size=0.01, tax_rate=0.0,
+            multiplier=1.0,
+            commission_rate=0.001,
+            min_commission=50.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
         )
         positions: dict[str, PositionState] = {}
         _run_actions(
             [Action(type="long", symbol="TEST")],
-            positions, cash=100_000.0, prices={"TEST": 100.0}, cm=cm,
+            positions,
+            cash=100_000.0,
+            prices={"TEST": 100.0},
+            cm=cm,
         )
         outlay = cm.estimate_entry_outlay(100.0, positions["TEST"].quantity, side="long")
         assert outlay == pytest.approx(100_000.0)
@@ -621,13 +713,20 @@ class TestSizePosition:
         """tw_futures-shaped model: commission_rate=0.0, so commission is
         always exactly min_commission regardless of quantity."""
         cm = CostModel(
-            multiplier=1.0, commission_rate=0.0, min_commission=100.0,
-            slippage_ticks=0.0, tick_size=1.0, tax_rate=0.0,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=100.0,
+            slippage_ticks=0.0,
+            tick_size=1.0,
+            tax_rate=0.0,
         )
         positions: dict[str, PositionState] = {}
         _run_actions(
             [Action(type="long", symbol="TEST")],
-            positions, cash=10_000.0, prices={"TEST": 50.0}, cm=cm,
+            positions,
+            cash=10_000.0,
+            prices={"TEST": 50.0},
+            cm=cm,
         )
         outlay = cm.estimate_entry_outlay(50.0, positions["TEST"].quantity, side="long")
         assert outlay == pytest.approx(10_000.0)

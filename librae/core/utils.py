@@ -6,11 +6,12 @@ Provides:
 - to_ccxt() / to_canonical(): Timeframe format conversion
 - interval_to_timedelta(): Timeframe string → pd.Timedelta
 """
+
 from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -26,7 +27,7 @@ def _sanitize_slug(name: str) -> str:
 
 def generate_run_id(strategy: str, symbol: str, timeframe: str | None = None) -> str:
     """Deterministic-prefix run_id: <strategy>-<symbol>[-<timeframe>]-<ts>-<short_uuid>."""
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dt%H%M")
+    ts = datetime.now(tz=UTC).strftime("%Y%m%dt%H%M")
     short = uuid.uuid4().hex[:6]
     tf = f"-{_sanitize_slug(timeframe)}" if timeframe is not None else ""
     return f"{_sanitize_slug(strategy)}-{_sanitize_slug(symbol)}{tf}-{ts}-{short}"
@@ -57,25 +58,25 @@ def make_event_id(run_id: str, index: int) -> str:
 # so any valid combination (M30, H6, H12, D3, W2, MN3 …) works without
 # requiring an explicit entry in a lookup table.
 
-_CCXT_RE = re.compile(r'^(\d+)([mhdwM])$')
-_CANONICAL_RE = re.compile(r'^([A-Z]+)(\d+)$')
+_CCXT_RE = re.compile(r"^(\d+)([mhdwM])$")
+_CANONICAL_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
 # Canonical prefix → ccxt unit character
 _PREFIX_TO_CCXT_UNIT: dict[str, str] = {
-    "M":  "m",   # minutes
-    "H":  "h",   # hours
-    "D":  "d",   # days
-    "W":  "w",   # weeks
-    "MN": "M",   # months  (ccxt uses uppercase M)
+    "M": "m",  # minutes
+    "H": "h",  # hours
+    "D": "d",  # days
+    "W": "w",  # weeks
+    "MN": "M",  # months  (ccxt uses uppercase M)
 }
 _CCXT_UNIT_TO_PREFIX: dict[str, str] = {v: k for k, v in _PREFIX_TO_CCXT_UNIT.items()}
 
 # Canonical prefix → lambda(n) → pd.Timedelta
 _PREFIX_TO_TIMEDELTA = {
-    "M":  lambda n: pd.Timedelta(minutes=n),
-    "H":  lambda n: pd.Timedelta(hours=n),
-    "D":  lambda n: pd.Timedelta(days=n),
-    "W":  lambda n: pd.Timedelta(weeks=n),
+    "M": lambda n: pd.Timedelta(minutes=n),
+    "H": lambda n: pd.Timedelta(hours=n),
+    "D": lambda n: pd.Timedelta(days=n),
+    "W": lambda n: pd.Timedelta(weeks=n),
     # Monthly is approximate (avg 30.44 days); use with care for gap detection
     "MN": lambda n: pd.Timedelta(days=round(n * 30.44)),
 }
@@ -165,8 +166,8 @@ def interval_to_timedelta(interval: str) -> pd.Timedelta:
 
 _MIN_BARS_FOR_INFERENCE = 5
 _HOUR_MIN = 60
-_DAY_MIN  = 24 * _HOUR_MIN
-_WEEK_MIN = 7  * _DAY_MIN
+_DAY_MIN = 24 * _HOUR_MIN
+_WEEK_MIN = 7 * _DAY_MIN
 
 
 def infer_timeframe(index: pd.DatetimeIndex) -> str:
@@ -211,7 +212,5 @@ def infer_timeframe(index: pd.DatetimeIndex) -> str:
 
     n_min = round(total_minutes)
     if n_min < 1:
-        raise ValueError(
-            f"Bar interval {mode_td} is sub-minute; not supported by canonical labels"
-        )
+        raise ValueError(f"Bar interval {mode_td} is sub-minute; not supported by canonical labels")
     return f"M{n_min}"

@@ -12,18 +12,19 @@ Config merge priority (low -> high):
     strategy config.yaml -> CLI args
 Dict-valued YAML keys (e.g. telegram, strategy) bypass argparse -> attached as dict on Namespace.
 """
+
 from __future__ import annotations
 
 import argparse
 import functools
 import logging
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import yaml
-
 from librae.core.run_config import RunConfig
 
 if TYPE_CHECKING:
@@ -48,18 +49,28 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     Strategy runners call this, then add strategy-specific args before parse_args().
     """
     p = argparse.ArgumentParser(description=description)
-    p.add_argument("--config", type=str, default=None,
-                   help="path to strategy config YAML (overrides built-in config)")
+    p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="path to strategy config YAML (overrides built-in config)",
+    )
     p.add_argument("--mode", default="backtest", choices=["backtest", "sim", "live"])
-    p.add_argument("--poll-seconds", type=int, default=None,
-                   help="seconds between poll cycles (required for sim/live mode — "
-                        "no implicit default, must match the strategy's timeframe)")
+    p.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=None,
+        help="seconds between poll cycles (required for sim/live mode — "
+        "no implicit default, must match the strategy's timeframe)",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
-    p.add_argument("--no-annualize", action="store_true",
-                   help="skip annualized metrics (backtest mode)")
-    p.add_argument("--force", action="store_true",
-                   help="skip config_hash cache, force fresh computation")
+    p.add_argument(
+        "--no-annualize", action="store_true", help="skip annualized metrics (backtest mode)"
+    )
+    p.add_argument(
+        "--force", action="store_true", help="skip config_hash cache, force fresh computation"
+    )
     return p
 
 
@@ -133,7 +144,7 @@ def floor_to_timeframe(dt: datetime, timeframe: str) -> datetime:
         return dt
     epoch = int(dt.timestamp())
     floored_epoch = (epoch // total_secs) * total_secs
-    return datetime.fromtimestamp(floored_epoch, tz=timezone.utc)
+    return datetime.fromtimestamp(floored_epoch, tz=UTC)
 
 
 def _resolve_market_and_data_source(
@@ -201,7 +212,9 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
 
     timeframe = scfg.get("timeframe", "H1")
     market, data_source = _resolve_market_and_data_source(
-        symbols, scfg.get("market"), scfg.get("data_source"),
+        symbols,
+        scfg.get("market"),
+        scfg.get("data_source"),
     )
     initial_balance = float(scfg.get("initial_balance", 100_000))
 
@@ -210,8 +223,9 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     end = params.pop("end", None)
     if start is None and "periods" in params:
         from librae.core.utils import interval_to_timedelta
+
         periods = params.pop("periods")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         end_dt = floor_to_timeframe(now, timeframe)
         start_dt = end_dt - interval_to_timedelta(timeframe) * periods
         start = start_dt.isoformat()
@@ -282,6 +296,7 @@ def with_dedup_check(fn: Callable[[RunConfig], None]) -> Callable[[RunConfig], N
 
     Only for backtest mode. Sim/live paths don't use this.
     """
+
     @functools.wraps(fn)
     def wrapper(cfg: RunConfig) -> None:
         if not cfg.no_db and not cfg.force:
@@ -289,6 +304,7 @@ def with_dedup_check(fn: Callable[[RunConfig], None]) -> Callable[[RunConfig], N
             if existing:
                 return
         fn(cfg)
+
     return wrapper
 
 
@@ -310,16 +326,21 @@ def check_existing_run(cfg: RunConfig) -> str | None:
         # Lightweight path: skip backtest, only recompute metrics
         try:
             from db.timescale_writer import _update_perf_params, refresh_performance
+
             refresh_performance(existing["run_id"], cfg=cfg)
             _update_perf_params(existing["run_id"], cfg.perf_params)
-            logger.info("Recomputed metrics for run_id=%s (perf_params changed)",
-                        existing["run_id"])
+            logger.info(
+                "Recomputed metrics for run_id=%s (perf_params changed)", existing["run_id"]
+            )
         except Exception:
             logger.exception("Failed to recompute metrics, will run full backtest")
             return None
     else:
-        logger.info("Run with config_hash=%s exists (run_id=%s), skipping",
-                     cfg.config_hash, existing["run_id"])
+        logger.info(
+            "Run with config_hash=%s exists (run_id=%s), skipping",
+            cfg.config_hash,
+            existing["run_id"],
+        )
     return existing["run_id"]
 
 
@@ -346,7 +367,6 @@ def run_dispatch(
     dispatch[cfg.mode](cfg)
 
 
-
 # ---------------------------------------------------------------------------
 # Generic runner bodies — the part of every strategy's run.py that's
 # dictated by the engine's own fixed API (fetch -> prepare_signals ->
@@ -359,7 +379,7 @@ def run_dispatch(
 
 def run_backtest_generic(
     cfg: RunConfig,
-    strategy: "BaseStrategy",
+    strategy: BaseStrategy,
     prepare_signals: Callable[[pd.DataFrame, dict], pd.DataFrame],
 ) -> None:
     """Shared backtest body: fetch -> prepare_signals -> MultiIndex ->
@@ -372,9 +392,14 @@ def run_backtest_generic(
 
     params = cfg.params or {}
     logger.info("[1/3] Fetching & preparing %s %s...", cfg.symbol, cfg.timeframe)
-    raw = get_ohlcv(cfg.symbol, cfg.timeframe, data_source=cfg.data_source,
-                     start=cfg.start, end=cfg.end,
-                     warmup_periods=params.get("warmup_periods", 0))
+    raw = get_ohlcv(
+        cfg.symbol,
+        cfg.timeframe,
+        data_source=cfg.data_source,
+        start=cfg.start,
+        end=cfg.end,
+        warmup_periods=params.get("warmup_periods", 0),
+    )
     df = raw.set_index("timestamp")
     df.index.name = "ts"
     df = prepare_signals(df, params)
@@ -391,8 +416,13 @@ def run_backtest_generic(
     output = bt.build_output()
     metrics = output.metrics
     sharpe_str = f"{metrics.sharpe:.3f}" if metrics.sharpe is not None else "N/A"
-    logger.info("       trades=%d  sharpe=%s  mdd=%.4f  ret=%.4f",
-                metrics.trades, sharpe_str, metrics.max_drawdown, metrics.total_return)
+    logger.info(
+        "       trades=%d  sharpe=%s  mdd=%.4f  ret=%.4f",
+        metrics.trades,
+        sharpe_str,
+        metrics.max_drawdown,
+        metrics.total_return,
+    )
 
     if not cfg.no_db:
         try:
@@ -404,7 +434,7 @@ def run_backtest_generic(
 
 def run_realtime_generic(
     cfg: RunConfig,
-    strategy: "BaseStrategy",
+    strategy: BaseStrategy,
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> None:
     """Shared sim/live body — just wires LiveTrader. Kept as its own

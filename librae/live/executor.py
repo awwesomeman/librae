@@ -8,6 +8,7 @@ order is best-effort: a broker rejection/error is logged and alerted, not
 raised, so the poll loop keeps running. Reconciling actual broker fill price
 back into local state is a separate, not-yet-built feature.
 """
+
 from __future__ import annotations
 
 import logging
@@ -16,8 +17,9 @@ from typing import TYPE_CHECKING, Protocol
 from librae.core.cost_model import CostModel
 
 if TYPE_CHECKING:
-    from librae.core.executor import OrderEvent
     from notifications.telegram import TelegramAdapter
+
+    from librae.core.executor import OrderEvent
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ class LiveExecutor:
         startup reconciliation)."""
         return self._order_adapter
 
-    def submit_order(self, event: "OrderEvent") -> dict | None:
+    def submit_order(self, event: OrderEvent) -> dict | None:
         """Mirror a local fill as a real order at the broker.
 
         No-op (returns None) in simulation mode. In live mode, maps the
@@ -112,14 +114,21 @@ class LiveExecutor:
             result = self._order_adapter.place_order(signal)
             logger.info(
                 "Order placed: %s %s (%s) qty=%.4f -> %s",
-                side, event.symbol, event.event_type, event.fill_quantity, result,
+                side,
+                event.symbol,
+                event.event_type,
+                event.fill_quantity,
+                result,
             )
             return result
         except Exception:
             logger.exception(
                 "Order placement FAILED: %s %s (%s) qty=%.4f — "
                 "local state may now diverge from broker, reconcile manually",
-                side, event.symbol, event.event_type, event.fill_quantity,
+                side,
+                event.symbol,
+                event.event_type,
+                event.fill_quantity,
             )
             return None
 
@@ -147,4 +156,3 @@ class LiveExecutor:
                 side=label,
                 price=price,
             )
-

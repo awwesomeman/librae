@@ -9,6 +9,7 @@ Usage:
     python scripts/dev_push_dashboard.py
     python scripts/dev_push_dashboard.py --grafana-url http://host:3000 --grafana-password secret
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,9 +28,17 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Setup Grafana datasource uid and deploy dashboards")
-    p.add_argument("--grafana-url", default=os.environ.get("GRAFANA_URL", "http://localhost:3000"), help="Grafana base URL")
+    p.add_argument(
+        "--grafana-url",
+        default=os.environ.get("GRAFANA_URL", "http://localhost:3000"),
+        help="Grafana base URL",
+    )
     p.add_argument("--grafana-user", default="admin", help="Grafana admin username")
-    p.add_argument("--grafana-password", default=os.environ.get("GRAFANA_PASSWORD", "admin"), help="Grafana admin password")
+    p.add_argument(
+        "--grafana-password",
+        default=os.environ.get("GRAFANA_PASSWORD", "admin"),
+        help="Grafana admin password",
+    )
     return p.parse_args()
 
 
@@ -51,9 +60,11 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
     with open(path) as f:
         content = f.read()
     new_ds = json.dumps({"type": ds_type, "uid": uid})
-    updated = re.sub(r'DATASOURCE\s*:\s*dict\s*=\s*\{[^}]*\}', f'DATASOURCE: dict = {new_ds}', content)
+    updated = re.sub(
+        r"DATASOURCE\s*:\s*dict\s*=\s*\{[^}]*\}", f"DATASOURCE: dict = {new_ds}", content
+    )
     if updated == content:
-        if not re.search(r'DATASOURCE\s*:\s*dict\s*=\s*\{[^}]*\}', content):
+        if not re.search(r"DATASOURCE\s*:\s*dict\s*=\s*\{[^}]*\}", content):
             logger.warning("DATASOURCE pattern not found in %s", path)
         else:
             logger.info("DATASOURCE already up-to-date in %s", path)
@@ -93,7 +104,9 @@ def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     args = parse_args()
     auth = (args.grafana_user, args.grafana_password)
 

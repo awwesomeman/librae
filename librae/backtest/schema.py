@@ -11,12 +11,14 @@ Also contains canonical backend data contracts:
 - Parsing utilities (timestamps, snake_case)
 - Record validation functions
 """
+
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -28,24 +30,46 @@ SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # WHY {4,6} and {6,8}: generator now produces %H%M (4-digit) + hex6,
 # but we accept old IDs with %H%M%S (6-digit) + hex8 still in the DB.
-RUN_ID_PATTERN = re.compile(
-    r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$"
-)
+RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$")
 
 REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
-    "full_sample_period", "train_period", "oos_period", "asset", "freq",
+    "full_sample_period",
+    "train_period",
+    "oos_period",
+    "asset",
+    "freq",
 )
 REQUIRED_PERF_FIELDS: tuple[str, ...] = (
-    "total_return", "max_drawdown", "sharpe", "sortino", "calmar",
-    "profit_factor", "win_rate", "avg_trade_return", "trades", "exposure_ratio",
+    "total_return",
+    "max_drawdown",
+    "sharpe",
+    "sortino",
+    "calmar",
+    "profit_factor",
+    "win_rate",
+    "avg_trade_return",
+    "trades",
+    "exposure_ratio",
 )
 REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
-    "benchmark", "data_source", "last_updated_utc", "summary",
-    "universe", "session_rules", "periods", "cost_model",
-    "risk_limits", "assumptions", "logic", "params",
+    "benchmark",
+    "data_source",
+    "last_updated_utc",
+    "summary",
+    "universe",
+    "session_rules",
+    "periods",
+    "cost_model",
+    "risk_limits",
+    "assumptions",
+    "logic",
+    "params",
 )
 REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
-    "run_metadata", "equity_curve", "order_events", "metrics",
+    "run_metadata",
+    "equity_curve",
+    "order_events",
+    "metrics",
 )
 
 # ---------------------------------------------------------------------------
@@ -160,6 +184,7 @@ class BacktestOutput:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict with ISO datetime strings."""
+
         def _convert(obj: Any) -> Any:
             if isinstance(obj, datetime):
                 return obj.isoformat()
@@ -205,7 +230,9 @@ def require_keys(record: dict[str, Any], keys: tuple[str, ...], record_name: str
         raise ValueError(f"{record_name} missing required keys: {missing}")
 
 
-def validate_record_contract(record: dict[str, Any], required_keys: tuple[str, ...], record_name: str) -> None:
+def validate_record_contract(
+    record: dict[str, Any], required_keys: tuple[str, ...], record_name: str
+) -> None:
     """Validate snake_case keys + required keys in a record."""
     ensure_snake_case_keys(list(record.keys()), record_name)
     require_keys(record, required_keys, record_name)
@@ -237,5 +264,3 @@ def validate_strategy_context(record: dict[str, Any], record_name: str) -> None:
     if not isinstance(summary, dict):
         raise ValueError(f"{record_name}.summary must be an object")
     validate_record_contract(summary, REQUIRED_SUMMARY_KEYS, f"{record_name}.summary")
-
-

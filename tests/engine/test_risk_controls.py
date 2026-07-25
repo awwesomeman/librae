@@ -1,11 +1,11 @@
 """Tests for engine-level risk controls: max-position cap + max-drawdown circuit breaker."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
-
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
@@ -19,7 +19,6 @@ from librae.core.executor import (
 from librae.core.strategy import Action, BaseStrategy, Context, Fill, PositionState
 from tests.conftest import make_test_cfg
 
-
 # ---------------------------------------------------------------------------
 # Helpers — mirrors tests/engine/test_stop_targets.py / test_position_scaling.py
 # ---------------------------------------------------------------------------
@@ -30,18 +29,35 @@ def _zero_cost() -> CostModel:
 
 
 def _make_pos(
-    symbol: str = "TEST", side: str = "long", entry_price: float = 100.0, quantity: float = 10.0,
+    symbol: str = "TEST",
+    side: str = "long",
+    entry_price: float = 100.0,
+    quantity: float = 10.0,
 ) -> PositionState:
     return PositionState(
-        symbol=symbol, side=side, entry_price=entry_price, quantity=quantity,
-        entry_at=datetime(2026, 1, 1, tzinfo=timezone.utc), periods_held=0,
-        entry_commission=0.0, entry_slippage=0.0, entry_tax=0.0,
+        symbol=symbol,
+        side=side,
+        entry_price=entry_price,
+        quantity=quantity,
+        entry_at=datetime(2026, 1, 1, tzinfo=UTC),
+        periods_held=0,
+        entry_commission=0.0,
+        entry_slippage=0.0,
+        entry_tax=0.0,
         total_entry_cost=entry_price * quantity,
     )
 
 
 def _make_fill(price: float = 100.0, quantity: float = 10.0, side: str = "long") -> Fill:
-    return Fill(symbol="TEST", side=side, price=price, quantity=quantity, commission=0.0, slippage=0.0, tax=0.0)
+    return Fill(
+        symbol="TEST",
+        side=side,
+        price=price,
+        quantity=quantity,
+        commission=0.0,
+        slippage=0.0,
+        tax=0.0,
+    )
 
 
 def _make_multiindex_df(bars: list[dict[str, float]], symbol: str = "BTCUSDT") -> pd.DataFrame:
@@ -54,7 +70,7 @@ def _make_multiindex_df(bars: list[dict[str, float]], symbol: str = "BTCUSDT") -
     return df
 
 
-TS = datetime(2026, 1, 10, tzinfo=timezone.utc)
+TS = datetime(2026, 1, 10, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -63,26 +79,33 @@ TS = datetime(2026, 1, 10, tzinfo=timezone.utc)
 
 
 class TestCapFillToNotional:
-
     def test_caps_a_fresh_fill(self):
         fill = _make_fill(price=100.0, quantity=10.0)
-        capped = _cap_fill_to_notional(fill, existing_qty=0.0, cost_model=_zero_cost(), max_notional=300.0)
+        capped = _cap_fill_to_notional(
+            fill, existing_qty=0.0, cost_model=_zero_cost(), max_notional=300.0
+        )
         assert capped.quantity == pytest.approx(3.0)
 
     def test_caps_a_scale_in_against_existing_notional(self):
         fill = _make_fill(price=100.0, quantity=10.0)
-        capped = _cap_fill_to_notional(fill, existing_qty=2.0, cost_model=_zero_cost(), max_notional=500.0)
+        capped = _cap_fill_to_notional(
+            fill, existing_qty=2.0, cost_model=_zero_cost(), max_notional=500.0
+        )
         # room = 500 - 2*100 = 300 -> 3 more units
         assert capped.quantity == pytest.approx(3.0)
 
     def test_no_room_left_returns_none(self):
         fill = _make_fill(price=100.0, quantity=10.0)
-        capped = _cap_fill_to_notional(fill, existing_qty=5.0, cost_model=_zero_cost(), max_notional=500.0)
+        capped = _cap_fill_to_notional(
+            fill, existing_qty=5.0, cost_model=_zero_cost(), max_notional=500.0
+        )
         assert capped is None
 
     def test_under_cap_returns_fill_unchanged(self):
         fill = _make_fill(price=100.0, quantity=1.0)
-        capped = _cap_fill_to_notional(fill, existing_qty=0.0, cost_model=_zero_cost(), max_notional=1000.0)
+        capped = _cap_fill_to_notional(
+            fill, existing_qty=0.0, cost_model=_zero_cost(), max_notional=1000.0
+        )
         assert capped is fill
 
 
@@ -92,7 +115,6 @@ class TestCapFillToNotional:
 
 
 class TestCapFillToVolume:
-
     def test_caps_a_fresh_fill(self):
         fill = _make_fill(price=100.0, quantity=10.0)
         capped = _cap_fill_to_volume(fill, cost_model=_zero_cost(), max_qty=4.0)
@@ -115,7 +137,6 @@ class TestCapFillToVolume:
 
 
 class TestLiquidateAll:
-
     def test_closes_all_positions_and_sums_cash_delta(self):
         positions = {
             "A": _make_pos(symbol="A", side="long", entry_price=100.0, quantity=1.0),
@@ -123,7 +144,11 @@ class TestLiquidateAll:
         }
         bars = {"A": {"close": 110.0}, "B": {"close": 90.0}}
         result = liquidate_all(
-            positions, bars, TS, get_cost_model=lambda s: _zero_cost(), reason=REASON_DRAWDOWN_BREACH,
+            positions,
+            bars,
+            TS,
+            get_cost_model=lambda s: _zero_cost(),
+            reason=REASON_DRAWDOWN_BREACH,
         )
         assert positions == {}
         assert len(result.trades) == 2
@@ -134,7 +159,11 @@ class TestLiquidateAll:
     def test_missing_bar_uses_fallback_price(self):
         positions = {"A": _make_pos(symbol="A", entry_price=100.0, quantity=1.0)}
         result = liquidate_all(
-            positions, {}, TS, get_cost_model=lambda s: _zero_cost(), reason=REASON_FORCE_CLOSE,
+            positions,
+            {},
+            TS,
+            get_cost_model=lambda s: _zero_cost(),
+            reason=REASON_FORCE_CLOSE,
             fallback_price=lambda sym, pos: pos.entry_price,
         )
         assert positions == {}
@@ -147,11 +176,13 @@ class TestLiquidateAll:
 
 
 class TestProcessActionsPositionCap:
-
     def test_oversized_open_gets_clamped(self):
         actions = [Action(type="long", symbol="TEST")]
         result = process_actions(
-            actions, {}, 10_000.0, TS,
+            actions,
+            {},
+            10_000.0,
+            TS,
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
@@ -162,11 +193,13 @@ class TestProcessActionsPositionCap:
 
 
 class TestProcessActionsVolumeCap:
-
     def test_oversized_open_gets_clamped_to_participation(self):
         actions = [Action(type="long", symbol="TEST")]
         result = process_actions(
-            actions, {}, 10_000.0, TS,
+            actions,
+            {},
+            10_000.0,
+            TS,
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
@@ -183,7 +216,10 @@ class TestProcessActionsVolumeCap:
         of what a volume-participation cap is supposed to guarantee."""
         actions = [Action(type="long", symbol="TEST")]
         result = process_actions(
-            actions, {}, 10_000.0, TS,
+            actions,
+            {},
+            10_000.0,
+            TS,
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
@@ -198,7 +234,10 @@ class TestProcessActionsVolumeCap:
         skipped rather than treated as a hard reject."""
         actions = [Action(type="long", symbol="TEST")]
         result = process_actions(
-            actions, {}, 10_000.0, TS,
+            actions,
+            {},
+            10_000.0,
+            TS,
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
@@ -224,19 +263,22 @@ class OpenOnceStrategy(BaseStrategy):
 
 
 class TestMaxDrawdownBreaker:
-
     def test_breach_flattens_and_halts(self):
         bars = [
             {"open": 100, "high": 101, "low": 99, "close": 100},
             {"open": 100, "high": 101, "low": 99, "close": 100},
             {"open": 100, "high": 101, "low": 99, "close": 100},
-            {"open": 60, "high": 65, "low": 55, "close": 60},   # crater -> breach
-            {"open": 60, "high": 61, "low": 59, "close": 60},   # halted: stays flat
+            {"open": 60, "high": 65, "low": 55, "close": 60},  # crater -> breach
+            {"open": 60, "high": 61, "low": 59, "close": 60},  # halted: stays flat
         ]
         cfg = make_test_cfg(
-            mode="backtest", initial_balance=10_000.0, params={"max_drawdown_pct": 0.2},
+            mode="backtest",
+            initial_balance=10_000.0,
+            params={"max_drawdown_pct": 0.2},
         )
-        bt = Backtest(_make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
+        )
         result = bt.run()
 
         close_events = [e for e in result.order_events if e.event_type == "close"]
@@ -265,7 +307,6 @@ class TestMaxDrawdownBreaker:
 
 
 class TestMaxPositionCap:
-
     def test_open_clamped_to_pct_of_equity(self):
         bars = [
             {"open": 100, "high": 101, "low": 99, "close": 100},
@@ -275,9 +316,13 @@ class TestMaxPositionCap:
             {"open": 100, "high": 101, "low": 99, "close": 100},
         ]
         cfg = make_test_cfg(
-            mode="backtest", initial_balance=10_000.0, params={"max_position_pct": 0.3},
+            mode="backtest",
+            initial_balance=10_000.0,
+            params={"max_position_pct": 0.3},
         )
-        bt = Backtest(_make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -287,19 +332,28 @@ class TestMaxPositionCap:
 
 
 class TestMaxVolumeParticipation:
-
     def test_open_clamped_to_pct_of_bar_volume(self):
         bars = [
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 20.0},  # fill happens here
+            {
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 20.0,
+            },  # fill happens here
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
         ]
         cfg = make_test_cfg(
-            mode="backtest", initial_balance=10_000.0, params={"max_volume_participation_pct": 0.5},
+            mode="backtest",
+            initial_balance=10_000.0,
+            params={"max_volume_participation_pct": 0.5},
         )
-        bt = Backtest(_make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -309,7 +363,6 @@ class TestMaxVolumeParticipation:
 
 
 class TestDynamicSlippage:
-
     def test_lower_bar_volume_produces_higher_slippage(self):
         """Same fixed-size entry, only the fill bar's volume differs -> the
         low-volume run's participation-scaled slippage must be strictly
@@ -322,8 +375,13 @@ class TestDynamicSlippage:
                 return []
 
         cost_model = CostModel(
-            multiplier=1.0, commission_rate=0.0, min_commission=0.0,
-            slippage_ticks=1.0, tick_size=0.01, tax_rate=0.0, impact_coef=10.0,
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=1.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            impact_coef=10.0,
         )
 
         def _bars(fill_bar_volume: float) -> list[dict[str, float]]:
@@ -337,15 +395,17 @@ class TestDynamicSlippage:
 
         def _open_slippage(fill_bar_volume: float) -> float:
             bt = Backtest(
-                _make_multiindex_df(_bars(fill_bar_volume)), OpenFixedQtyStrategy(), cost_model=cost_model,
+                _make_multiindex_df(_bars(fill_bar_volume)),
+                OpenFixedQtyStrategy(),
+                cost_model=cost_model,
             )
             result = bt.run()
             open_events = [e for e in result.order_events if e.event_type == "open"]
             assert len(open_events) == 1
             return open_events[0].slippage
 
-        high_vol_slippage = _open_slippage(1000.0)   # 0.5% participation
-        low_vol_slippage = _open_slippage(10.0)       # 50% participation
+        high_vol_slippage = _open_slippage(1000.0)  # 0.5% participation
+        low_vol_slippage = _open_slippage(10.0)  # 50% participation
 
         assert low_vol_slippage > high_vol_slippage
         # participation=0.005 -> +0.05 impact ticks -> 1.05 ticks -> 1.05*0.01*5 = 0.0525

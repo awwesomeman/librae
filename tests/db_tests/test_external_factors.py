@@ -3,13 +3,13 @@ the generic third-party-factor cache (funding rate, open interest, ...).
 Mirrors test_ohlcv_coverage.py + write_ohlcv's coverage since it's the same
 DB-first + gap-tracked-cache design, generalized to (symbol, factor_name,
 source) instead of (symbol, timeframe, data_source)."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-
 from db.timescale_reader import get_external_factor_coverage_ranges, load_external_factor
 from db.timescale_writer import merge_external_factor_coverage_ranges, write_external_factor
 
@@ -26,7 +26,7 @@ class TestGetExternalFactorCoverage:
     @patch("db.timescale_reader.get_conn")
     def test_returns_sorted_ranges(self, mock_conn_ctx):
         mock_cur = MagicMock()
-        r1 = (datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 1, 2, tzinfo=timezone.utc))
+        r1 = (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
         mock_cur.fetchall.return_value = [r1]
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
@@ -42,13 +42,16 @@ class TestMergeExternalFactorCoverage:
     @patch("db.timescale_writer.get_conn")
     def test_merges_touching_ranges(self, mock_conn_ctx, mock_exec_values):
         mock_cur = MagicMock()
-        existing = (1, datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 1, 2, tzinfo=timezone.utc))
+        existing = (1, datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
         mock_cur.fetchall.return_value = [existing]
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         merge_external_factor_coverage_ranges(
-            "BTCUSDT", "funding_rate", "binanceusdm",
-            datetime(2024, 1, 2, tzinfo=timezone.utc), datetime(2024, 1, 3, tzinfo=timezone.utc),
+            "BTCUSDT",
+            "funding_rate",
+            "binanceusdm",
+            datetime(2024, 1, 2, tzinfo=UTC),
+            datetime(2024, 1, 3, tzinfo=UTC),
         )
 
         delete_calls = [c for c in mock_cur.execute.call_args_list if "DELETE" in c[0][0]]
@@ -57,20 +60,23 @@ class TestMergeExternalFactorCoverage:
 
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 1
-        assert inserted_rows[0][4] == datetime(2024, 1, 1, tzinfo=timezone.utc)
-        assert inserted_rows[0][5] == datetime(2024, 1, 3, tzinfo=timezone.utc)
+        assert inserted_rows[0][4] == datetime(2024, 1, 1, tzinfo=UTC)
+        assert inserted_rows[0][5] == datetime(2024, 1, 3, tzinfo=UTC)
 
     @patch("db.timescale_writer.psycopg2.extras.execute_values")
     @patch("db.timescale_writer.get_conn")
     def test_keeps_disjoint_ranges_separate(self, mock_conn_ctx, mock_exec_values):
         mock_cur = MagicMock()
-        existing = (1, datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 1, 2, tzinfo=timezone.utc))
+        existing = (1, datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
         mock_cur.fetchall.return_value = [existing]
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         merge_external_factor_coverage_ranges(
-            "BTCUSDT", "funding_rate", "binanceusdm",
-            datetime(2024, 1, 10, tzinfo=timezone.utc), datetime(2024, 1, 11, tzinfo=timezone.utc),
+            "BTCUSDT",
+            "funding_rate",
+            "binanceusdm",
+            datetime(2024, 1, 10, tzinfo=UTC),
+            datetime(2024, 1, 11, tzinfo=UTC),
         )
 
         inserted_rows = mock_exec_values.call_args[0][2]
@@ -84,6 +90,7 @@ class TestWriteExternalFactor:
     def test_naive_timestamp_raises(self):
         df = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-01"]), "value": [0.01]})
         import pytest
+
         with pytest.raises(ValueError, match="timezone-naive"):
             write_external_factor(df, "BTCUSDT", "funding_rate", "binanceusdm")
 
@@ -92,10 +99,12 @@ class TestWriteExternalFactor:
     def test_writes_expected_rows(self, mock_conn_ctx, mock_exec_values):
         mock_cur = MagicMock()
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
-        df = pd.DataFrame({
-            "timestamp": pd.to_datetime(["2024-01-01T00:00:00Z", "2024-01-01T08:00:00Z"]),
-            "value": [0.0001, -0.0002],
-        })
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(["2024-01-01T00:00:00Z", "2024-01-01T08:00:00Z"]),
+                "value": [0.0001, -0.0002],
+            }
+        )
 
         n = write_external_factor(df, "BTC/USDT:USDT", "funding_rate", "binanceusdm")
 
@@ -109,10 +118,12 @@ class TestLoadExternalFactor:
     def test_returns_tz_aware_frame(self, mock_conn_ctx):
         mock_conn_ctx.return_value.__enter__.return_value = MagicMock()
         with patch("db.timescale_reader.pd.read_sql") as mock_read_sql:
-            mock_read_sql.return_value = pd.DataFrame({
-                "timestamp": pd.to_datetime(["2024-01-01T00:00:00"]),
-                "value": [0.0001],
-            })
+            mock_read_sql.return_value = pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2024-01-01T00:00:00"]),
+                    "value": [0.0001],
+                }
+            )
             result = load_external_factor("BTCUSDT", "open_interest", "data.binance.vision")
 
         assert result["timestamp"].dt.tz is not None

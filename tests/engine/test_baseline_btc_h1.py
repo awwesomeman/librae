@@ -4,16 +4,15 @@ Pins deterministic SMA crossover backtest output on synthetic BTC H1 data
 (seed=42, 720 bars). Any change to sample_data or the simple SMA crossover
 logic will break these assertions, which is the intended behavior.
 """
+
 from __future__ import annotations
 
 import pytest
-
+from librae.backtest.schema import RUN_ID_PATTERN
 from tests.sample_data import (
     generate_btc_h1_ohlcv,
     run_simple_sma_crossover,
 )
-from librae.backtest.schema import RUN_ID_PATTERN
-
 
 # -- Pinned baseline values (seed=42, fast=10, slow=30) --
 EXPECTED_TRADES = 13
@@ -45,7 +44,12 @@ class TestDataReproducibility:
 
     def test_columns(self, btc_h1_data):
         assert list(btc_h1_data.columns) == [
-            "timestamp", "open", "high", "low", "close", "volume",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
         ]
 
     def test_first_close_deterministic(self, btc_h1_data):
