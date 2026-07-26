@@ -77,7 +77,17 @@ class RunConfig:
     start: str | None = None
     end: str | None = None
     params: dict[str, Any] | None = None
+    # Cost-model overrides. cost_overrides applies to every symbol in this
+    # run (falls back to the built-in symbol/market registries for anything not listed);
+    # symbol_overrides applies to one symbol only and wins over
+    # cost_overrides for that symbol — see CostModel.from_config(). This is
+    # the escape hatch for a symbol that isn't in the built-in registry
+    # (no file to edit, no path to point at — just pass
+    # {"MYSYM": {"multiplier": 1.0}}) and for multi-asset runs mixing
+    # symbols with different multipliers (e.g. TXFR1=200 + MXFR1=50 in the
+    # same tw_futures run).
     cost_overrides: dict[str, float] | None = None
+    symbol_overrides: dict[str, dict[str, float]] | None = None
 
     # === Perf params (stored in DB backtest_runs.perf_params, display only) ===
     annualize: bool = True
@@ -115,7 +125,7 @@ class RunConfig:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source,
-        initial_balance, start, end, params, cost_overrides.
+        initial_balance, start, end, params, cost_overrides, symbol_overrides.
         Excludes: perf params, behavior params.
         """
         blob = json.dumps(
@@ -131,6 +141,7 @@ class RunConfig:
                     "end": self.end,
                     "params": self.params,
                     "cost_overrides": self.cost_overrides,
+                    "symbol_overrides": self.symbol_overrides,
                 }
             ),
             sort_keys=True,
@@ -164,6 +175,7 @@ class RunConfig:
             "  --- strategy params (stored in DB) ---",
             f"  params:      {self.params}",
             f"  cost_overrides: {self.cost_overrides}",
+            f"  symbol_overrides: {self.symbol_overrides}",
             "  --- perf params (stored in DB, display only) ---",
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",
