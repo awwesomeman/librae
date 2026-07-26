@@ -1,8 +1,8 @@
 """Per-symbol registry — symbol -> market + data source + contract economics.
 
 Market-level cost params (commission/tax/slippage/margin, plus an
-approximate default tick_size — see markets.yaml) are genuinely shared
-across every instrument in a market and live in markets.yaml (MarketConfig).
+approximate default tick_size — see market_config.py) are genuinely shared
+across every instrument in a market and live there (MarketConfig).
 
 multiplier does NOT get a market-level fallback: for 'spot' instruments
 it's a mathematical invariant (buying spot = 1 unit for 1 unit) and
@@ -12,23 +12,33 @@ and must be declared explicitly, no default — mirrors how mainstream
 frameworks handle this (e.g. QuantConnect LEAN's
 symbol-properties-database.csv: a market-wide wildcard row for equities,
 an explicit row per specific futures contract).
+
+This registry used to live in a bundled symbols.yaml; it's a plain Python
+dict now — that file was never actually included in the built wheel (only
+.py files are, without extra packaging config), so `pip install librae`
+raised FileNotFoundError the moment get_symbol() ran for any built-in
+symbol. A handful of hardcoded entries needs no parser, no packaging
+config, and can't go missing from the wheel.
+
+Registering your own symbol doesn't require editing this file at all —
+RunConfig.symbol_overrides (see CostModel.from_config) covers a one-off or
+per-run override with no file/path needed; only reach for editing this
+registry if you're maintaining a recurring symbol reused across many runs
+in a clone of this repo.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
-import yaml
-
-# Contract expiry structure — orthogonal to continuous_alias (see symbols.yaml
-# module comment). 'spot' is the bare case (direct ownership, not an
-# exchange-traded derivative); everything else is prefixed contract_* so the
-# derivative family is filterable/greppable as a group, and so the
+# Contract expiry structure — orthogonal to continuous_alias (see the
+# per-symbol entries below). 'spot' is the bare case (direct ownership, not
+# an exchange-traded derivative); everything else is prefixed contract_* so
+# the derivative family is filterable/greppable as a group, and so the
 # multiplier-defaulting rule below (spot=1.0 automatic, contract_*
 # explicit-required) can key off the prefix. Extend this set (and the
-# matching DB CHECK constraint in deploy/timescale_init.sql) when a new
-# type is actually needed — don't pre-enumerate speculative ones.
+# matching DB CHECK constraint in db/timescale_init.sql) when a new type is
+# actually needed — don't pre-enumerate speculative ones.
 ALLOWED_INSTRUMENT_TYPES = frozenset(
     {
         "spot",
@@ -44,11 +54,11 @@ class SymbolInfo:
     """Registry entry for a single symbol.
 
     multiplier is always populated once loaded (never None) — either from
-    an explicit symbols.yaml value, or auto-resolved to 1.0 for 'spot'
-    (see load_symbol_registry). tick_size is optional; None means "use
-    markets.yaml's market-level default" (an acceptable approximation —
-    see markets.yaml's module docstring for why tick_size and multiplier
-    have different risk profiles).
+    an explicit value, or auto-resolved to 1.0 for 'spot' (see
+    _build_registry). tick_size is optional; None means "use
+    market_config.py's market-level default" (an acceptable approximation
+    — see this module's docstring for why tick_size and multiplier have
+    different risk profiles).
     """
 
     symbol: str
@@ -62,41 +72,23 @@ class SymbolInfo:
     def __post_init__(self) -> None:
         if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
             raise ValueError(
-                f"symbols.yaml: {self.symbol!r} has instrument_type="
+                f"{self.symbol!r} has instrument_type="
                 f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
             )
 
 
-def _default_symbols_path() -> Path:
-    """Return the default symbols.yaml path."""
-    return Path(__file__).resolve().parent / "symbols.yaml"
-
-
-def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo]:
-    """Load all symbol registry entries from symbols.yaml.
-
-    Returns:
-        Dict mapping symbol to SymbolInfo.
+def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
+    """Validate + construct a symbol registry from a plain raw dict.
 
     Raises:
         ValueError: instrument_type is missing/invalid, or a contract_*
-            instrument is missing 'multiplier' — caught here, at load
+            instrument is missing 'multiplier' — caught here, at build
             time, rather than letting an unvalidated/defaulted value drift
             into a PnL calculation. 'spot' instruments don't need
-            'multiplier' in the YAML at all (defaults to 1.0).
+            'multiplier' at all (defaults to 1.0).
     """
-    yaml_path = Path(path) if path else _default_symbols_path()
-
-    with open(yaml_path) as f:
-        raw = yaml.safe_load(f)
-
-    if not raw or not isinstance(raw, dict):
-        return {}
-
     registry: dict[str, SymbolInfo] = {}
     for symbol, data in raw.items():
-        if not isinstance(data, dict):
-            continue
         instrument_type = str(data.get("instrument_type", ""))
         raw_multiplier = data.get("multiplier")
         if raw_multiplier is not None:
@@ -105,8 +97,8 @@ def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo
             multiplier = 1.0
         else:
             raise ValueError(
-                f"symbols.yaml: {symbol!r} (instrument_type={instrument_type!r}) is "
-                "missing 'multiplier' — only 'spot' gets a safe automatic default (1.0); "
+                f"{symbol!r} (instrument_type={instrument_type!r}) is missing "
+                "'multiplier' — only 'spot' gets a safe automatic default (1.0); "
                 "contract_* instruments vary per contract and must declare it explicitly."
             )
         raw_tick_size = data.get("tick_size")
@@ -122,10 +114,88 @@ def load_symbol_registry(path: str | Path | None = None) -> dict[str, SymbolInfo
     return registry
 
 
-def get_symbol(symbol: str, path: str | Path | None = None) -> SymbolInfo:
+# Built-in reference symbols — see this module's docstring for why these
+# are a plain dict rather than a bundled YAML file.
+_BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
+    {
+        "BTCUSDT": {
+            "market": "crypto",
+            "data_source": "binance_spot",
+            "instrument_type": "spot",
+            # multiplier/tick_size omitted on purpose — spot auto-defaults
+            # to multiplier=1.0, tick_size falls back to market_config.py's
+            # crypto default (0.01).
+        },
+        "BTCUSDT_QUARTERLY": {
+            "market": "crypto",
+            "data_source": "binance_futures_continuous",
+            "instrument_type": "contract_quarterly",
+            "continuous_alias": True,
+            # Binance USDT-M linear contract, contractSize=1 BTC per
+            # contract (verified via ccxt binanceusdm market info) — 1
+            # contract == 1 BTC notional.
+            "multiplier": 1.0,
+        },
+        "TXFR1": {
+            "market": "tw_futures",
+            "data_source": "shioaji",
+            "instrument_type": "contract_monthly",
+            "continuous_alias": True,
+            "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
+            "tick_size": 1.0,  # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
+        },
+        "MXFR1": {
+            "market": "tw_futures",
+            "data_source": "shioaji",
+            "instrument_type": "contract_monthly",
+            "continuous_alias": True,
+            "multiplier": 50.0,  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
+            "tick_size": 1.0,
+        },
+        "TMFR1": {
+            "market": "tw_futures",
+            "data_source": "shioaji",
+            "instrument_type": "contract_monthly",
+            "continuous_alias": True,
+            "multiplier": 10.0,  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
+            "tick_size": 1.0,
+        },
+        "MU": {
+            "market": "us_equity",
+            "data_source": "ibkr",
+            "instrument_type": "spot",
+            # multiplier/tick_size omitted — spot auto-defaults to
+            # multiplier=1.0, tick_size falls back to market_config.py's
+            # us_equity default (0.01).
+        },
+    }
+)
+
+
+# Not registered yet — reference values for when they're actually added:
+#   個股 (individual TW stocks): market: tw_equity, instrument_type: spot —
+#     multiplier auto-defaults to 1.0 like any spot instrument, no per-stock
+#     registration needed. tick_size does vary by price band in Taiwan
+#     (NT$10 以下 0.01、10-50 0.05、50-100 0.1...) — if that precision is
+#     ever needed, it's a function of price, not a single per-symbol
+#     constant; don't build that machinery until an actual stock strategy
+#     needs it (market_config.py's approximate default is fine until then).
+#
+#   MUUSDT (Binance TradFi perpetual tracking MU's price, contractType
+#     TRADIFI_PERPETUAL/underlyingType EQUITY — confirmed via fapi
+#     exchangeInfo 2026-07-20): would need its own data_source fetcher
+#     first (get_ohlcv's binance_spot/binance_futures_continuous fetchers
+#     don't cover this contract family) before it can be registered here.
+
+
+def load_symbol_registry() -> dict[str, SymbolInfo]:
+    """Return the built-in symbol registry (a copy — callers can't mutate it)."""
+    return dict(_BUILTIN_SYMBOLS)
+
+
+def get_symbol(symbol: str) -> SymbolInfo:
     """Get a single symbol's registry entry by name."""
-    registry = load_symbol_registry(path)
-    if symbol not in registry:
-        available = list(registry.keys())
+    if symbol not in _BUILTIN_SYMBOLS:
+        available = list(_BUILTIN_SYMBOLS.keys())
         raise KeyError(f"Symbol '{symbol}' not found. Available: {available}")
-    return registry[symbol]
+    return _BUILTIN_SYMBOLS[symbol]

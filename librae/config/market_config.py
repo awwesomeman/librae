@@ -1,12 +1,24 @@
 """Market-level configuration for backtesting.
 
-Loads a single markets.yaml with one section per market type (crypto, tw_futures, etc.).
-Each section contains cost parameters shared across every instrument traded
-in that market — commission/tax/slippage/margin rate structure, plus
+A small built-in registry, one entry per market type (crypto, tw_futures,
+us_equity), each holding cost parameters shared across every instrument
+traded in that market — commission/tax/slippage/margin rate structure, plus
 tick_size as a low-stakes approximate default (it only feeds a backtest
 slippage-cost estimate, not PnL/margin sizing, so a market-wide value is an
 acceptable default for large, homogeneous universes like equities/crypto
-spot pairs — override per-symbol in symbols.yaml when precision matters).
+spot pairs — override per-symbol in librae/config/symbols.py when precision
+matters).
+
+This registry used to live in a bundled markets.yaml; it's a plain Python
+dict now — that file was never actually included in the built wheel (only
+.py files are, without extra packaging config), so `pip install librae`
+raised FileNotFoundError the moment get_market() ran for any built-in
+market. A handful of hardcoded entries needs no parser, no packaging
+config, and can't go missing from the wheel.
+
+Registering your own market doesn't require editing this file at all:
+get_market(name, markets={...}) / CostModel.from_config(cfg, markets={...})
+take a caller-built registry that bypasses this one entirely.
 
 multiplier is NOT here — mirrors mainstream frameworks (e.g. QuantConnect
 LEAN's symbol-properties-database.csv, which uses a market-wide wildcard
@@ -24,9 +36,6 @@ Per-instrument details (symbol, min_qty, exchange) belong to the broker layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-
-import yaml
 
 
 @dataclass(frozen=True)
@@ -50,58 +59,82 @@ class MarketConfig:
     maintenance_margin_rate: float = 0.0
 
 
-def _default_markets_path() -> Path:
-    """Return the default markets.yaml path."""
-    return Path(__file__).resolve().parent / "markets.yaml"
+# Built-in reference markets — see this module's docstring for why these
+# are plain dataclass instances rather than a bundled YAML file.
+_BUILTIN_MARKETS: dict[str, MarketConfig] = {
+    "crypto": MarketConfig(
+        name="crypto",
+        commission_rate=0.001,
+        min_commission=0.0,
+        tax_rate=0.0,
+        slippage_ticks=2,
+        tick_size=0.01,
+        long_margin_rate=1.0,
+        short_margin_rate=1.0,
+    ),
+    "tw_futures": MarketConfig(
+        name="tw_futures",
+        # min_commission is NOT exchange-set — taifex.com.tw's feeSchedules
+        # page states the exchange only regulates its own clearing fee; the
+        # fee a broker (e.g. Shioaji/永豐期貨) actually charges retail
+        # clients is negotiated bilaterally, with no exchange-mandated
+        # floor. 100.0 here is a backtest assumption about a typical retail
+        # floor, not a verifiable exchange fact — check the specific
+        # broker's fee schedule if it matters.
+        commission_rate=0.0,
+        min_commission=100.0,
+        # tax_rate verified via taifex.com.tw: 股價指數期貨類 交易稅 =
+        # 契約金額 x 十萬分之2, flat rate regardless of contract size — same
+        # for TX/MXF/TMF.
+        tax_rate=0.00002,
+        slippage_ticks=1,
+        tick_size=1.0,
+        # long_margin_rate/short_margin_rate verified safe to share across
+        # TXF/MXF/TMF (2026-07-20, via taifex.com.tw's 保證金 + 契約規格
+        # pages): TAIFEX's published 原始保證金 for TX/MXF/TMF was
+        # 636,000/159,000/31,800 TWD (2026-07-06 revision) — an exact
+        # 20:5:1 ratio, matching the 200:50:10 multiplier ratio. Margin
+        # scales proportionally with contract size, so a single
+        # market-level rate (margin / notional) is structurally correct
+        # for all three, not an approximation that happens to work for
+        # TXF alone. 0.075 reflects that revision at TAIEX ~42,671
+        # (636,000 / (42,671 * 200)); TAIFEX revises the absolute NTD
+        # figure periodically independent of index level, so this will
+        # drift and is not meant to be exact — re-derive from
+        # https://www.taifex.com.tw/cht/5/indexMarging when it matters.
+        long_margin_rate=0.075,
+        short_margin_rate=0.075,
+    ),
+    "us_equity": MarketConfig(
+        name="us_equity",
+        commission_rate=0.0,
+        min_commission=0.0,
+        tax_rate=0.0,
+        slippage_ticks=2,
+        tick_size=0.01,
+        long_margin_rate=1.0,
+        short_margin_rate=0.5,  # Reg T 50% initial margin for short selling
+    ),
+}
 
 
-def load_market_configs(path: str | Path | None = None) -> dict[str, MarketConfig]:
-    """Load all market configs from markets.yaml.
-
-    Returns:
-        Dict mapping market name to MarketConfig.
-    """
-    yaml_path = Path(path) if path else _default_markets_path()
-
-    with open(yaml_path) as f:
-        raw = yaml.safe_load(f)
-
-    if not raw or not isinstance(raw, dict):
-        return {}
-
-    markets: dict[str, MarketConfig] = {}
-    for market_name, mdata in raw.items():
-        if not isinstance(mdata, dict):
-            continue
-        markets[market_name] = MarketConfig(
-            name=market_name,
-            commission_rate=float(mdata.get("commission_rate", 0.0)),
-            min_commission=float(mdata.get("min_commission", 0.0)),
-            tax_rate=float(mdata.get("tax_rate", 0.0)),
-            slippage_ticks=int(mdata.get("slippage_ticks", 0)),
-            tick_size=float(mdata.get("tick_size", 0.01)),
-            long_margin_rate=float(mdata.get("long_margin_rate", 1.0)),
-            short_margin_rate=float(mdata.get("short_margin_rate", 1.0)),
-            impact_coef=float(mdata.get("impact_coef", 0.0)),
-            maintenance_margin_rate=float(mdata.get("maintenance_margin_rate", 0.0)),
-        )
-
-    return markets
+def load_market_configs() -> dict[str, MarketConfig]:
+    """Return the built-in market registry (a copy — callers can't mutate it)."""
+    return dict(_BUILTIN_MARKETS)
 
 
 def get_market(
     market_name: str,
-    path: str | Path | None = None,
     markets: dict[str, MarketConfig] | None = None,
 ) -> MarketConfig:
     """Get a single market config by name.
 
     markets: a pre-built registry to look up in directly, bypassing the
-        bundled markets.yaml entirely. Lets a caller outside this package
-        register its own markets (e.g. `get_market("my_market", markets={...})`)
-        without touching librae's own config file. Takes priority over `path`.
+        built-in one entirely. Lets a caller outside this package register
+        its own markets (e.g. `get_market("my_market", markets={...})`)
+        without touching librae's source.
     """
-    resolved = markets if markets is not None else load_market_configs(path)
+    resolved = markets if markets is not None else _BUILTIN_MARKETS
     if market_name not in resolved:
         available = list(resolved.keys())
         raise KeyError(f"Market '{market_name}' not found. Available: {available}")

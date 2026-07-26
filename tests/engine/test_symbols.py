@@ -6,6 +6,7 @@ import pytest
 from librae.config.symbols import (
     ALLOWED_INSTRUMENT_TYPES,
     SymbolInfo,
+    _build_registry,
     get_symbol,
     load_symbol_registry,
 )
@@ -27,8 +28,8 @@ class TestLoadSymbolRegistry:
         assert btc.data_source == "binance_spot"
         assert btc.instrument_type == "spot"
         assert btc.continuous_alias is False
-        assert btc.multiplier == 1.0  # auto-defaulted — not declared in symbols.yaml
-        assert btc.tick_size is None  # not overridden — CostModel falls back to markets.yaml
+        assert btc.multiplier == 1.0  # auto-defaulted — not declared in the registry
+        assert btc.tick_size is None  # not overridden — CostModel falls back to market_config.py
 
     def test_txfr1_fields(self, registry):
         txf = registry["TXFR1"]
@@ -36,7 +37,7 @@ class TestLoadSymbolRegistry:
         assert txf.data_source == "shioaji"
         assert txf.instrument_type == "contract_monthly"
         assert txf.continuous_alias is True
-        assert txf.multiplier == 200.0  # NOT markets.yaml's tw_futures default (50, = MXF's)
+        assert txf.multiplier == 200.0  # NOT market_config.py's tw_futures default (50, = MXF's)
         assert txf.tick_size == 1.0
 
     def test_symbol_info_is_frozen(self, registry):
@@ -67,41 +68,50 @@ class TestInstrumentTypeValidation:
                 tick_size=0.01,
             )
 
-    def test_missing_instrument_type_in_yaml_raises(self, tmp_path):
-        bad_yaml = tmp_path / "symbols.yaml"
-        bad_yaml.write_text(
-            "BADSYM:\n  market: crypto\n  data_source: binance_spot\n"
-            "  multiplier: 1.0\n  tick_size: 0.01\n"
-        )
+    def test_missing_instrument_type_raises(self):
         with pytest.raises(ValueError, match="instrument_type"):
-            load_symbol_registry(bad_yaml)
+            _build_registry(
+                {"BADSYM": {"market": "crypto", "data_source": "binance_spot", "multiplier": 1.0}}
+            )
 
 
 class TestMultiplierTickSizeValidation:
-    def test_missing_multiplier_raises_for_contract_types(self, tmp_path):
-        bad_yaml = tmp_path / "symbols.yaml"
-        bad_yaml.write_text(
-            "BADSYM:\n  market: tw_futures\n  data_source: shioaji\n"
-            "  instrument_type: contract_monthly\n  tick_size: 1.0\n"
-        )
+    def test_missing_multiplier_raises_for_contract_types(self):
         with pytest.raises(ValueError, match="multiplier"):
-            load_symbol_registry(bad_yaml)
+            _build_registry(
+                {
+                    "BADSYM": {
+                        "market": "tw_futures",
+                        "data_source": "shioaji",
+                        "instrument_type": "contract_monthly",
+                        "tick_size": 1.0,
+                    }
+                }
+            )
 
-    def test_missing_multiplier_defaults_to_one_for_spot(self, tmp_path):
-        good_yaml = tmp_path / "symbols.yaml"
-        good_yaml.write_text(
-            "GOODSYM:\n  market: crypto\n  data_source: binance_spot\n  instrument_type: spot\n"
+    def test_missing_multiplier_defaults_to_one_for_spot(self):
+        registry = _build_registry(
+            {
+                "GOODSYM": {
+                    "market": "crypto",
+                    "data_source": "binance_spot",
+                    "instrument_type": "spot",
+                }
+            }
         )
-        registry = load_symbol_registry(good_yaml)
         assert registry["GOODSYM"].multiplier == 1.0
 
-    def test_missing_tick_size_is_allowed(self, tmp_path):
-        good_yaml = tmp_path / "symbols.yaml"
-        good_yaml.write_text(
-            "GOODSYM:\n  market: crypto\n  data_source: binance_spot\n"
-            "  instrument_type: spot\n  multiplier: 1.0\n"
+    def test_missing_tick_size_is_allowed(self):
+        registry = _build_registry(
+            {
+                "GOODSYM": {
+                    "market": "crypto",
+                    "data_source": "binance_spot",
+                    "instrument_type": "spot",
+                    "multiplier": 1.0,
+                }
+            }
         )
-        registry = load_symbol_registry(good_yaml)
         assert registry["GOODSYM"].tick_size is None
 
 

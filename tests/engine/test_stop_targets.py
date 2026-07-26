@@ -19,7 +19,7 @@ from librae.core.strategy import Action, BaseStrategy, Context, PositionState
 
 # ---------------------------------------------------------------------------
 # Helpers — naming mirrors tests/engine/test_position_scaling.py and
-# tests/engine/test_backtest_v2.py so the shared fixtures stay recognizable
+# tests/engine/test_backtest_engine.py so the shared fixtures stay recognizable
 # across the engine test suite.
 # ---------------------------------------------------------------------------
 

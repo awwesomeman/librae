@@ -1,4 +1,4 @@
-"""Tests for Backtest v2: Strategy protocol + Executor pattern."""
+"""Tests for the Backtest engine: Strategy protocol + Executor pattern."""
 
 from __future__ import annotations
 
@@ -226,6 +226,51 @@ class TestMultiAsset:
         assert len(result.trades) == 2
         symbols_traded = {t.symbol for t in result.trades}
         assert symbols_traded == {"AAA", "BBB"}
+
+    def test_per_symbol_multiplier_resolved_independently_via_cfg(self) -> None:
+        """Regression: a multi-asset cfg= run used to build exactly one
+        CostModel from cfg.symbol (symbols[0]) and apply it to every symbol
+        — TXFR1 (multiplier=200) and MXFR1 (multiplier=50) in the same
+        tw_futures run would have silently shared TXFR1's multiplier."""
+        from librae.core.run_config import RunConfig
+
+        df = pd.concat(
+            [
+                _make_multiindex_df([100.0] * 5, symbol="TXFR1"),
+                _make_multiindex_df([100.0] * 5, symbol="MXFR1"),
+            ]
+        )
+        cfg = RunConfig(
+            strategy_name="t",
+            symbols=["TXFR1", "MXFR1"],
+            timeframe="1h",
+            market="tw_futures",
+            data_source="shioaji",
+            initial_balance=100_000.0,
+            mode="backtest",
+        )
+        bt = Backtest(data=df, strategy=HoldStrategy(), cfg=cfg)
+        assert bt._get_cost_model("TXFR1").multiplier == 200.0
+        assert bt._get_cost_model("MXFR1").multiplier == 50.0
+
+    def test_per_symbol_multiplier_via_symbol_overrides_no_yaml_edit_needed(self) -> None:
+        """An unregistered symbol works via cfg.symbol_overrides alone —
+        no symbols.py registry entry required."""
+        from librae.core.run_config import RunConfig
+
+        df = _make_multiindex_df([1.0] * 5, symbol="MY_CUSTOM_SYMBOL")
+        cfg = RunConfig(
+            strategy_name="t",
+            symbols=["MY_CUSTOM_SYMBOL"],
+            timeframe="1h",
+            market="crypto",
+            data_source="x",
+            initial_balance=100_000.0,
+            mode="backtest",
+            symbol_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
+        )
+        bt = Backtest(data=df, strategy=HoldStrategy(), cfg=cfg)
+        assert bt._get_cost_model("MY_CUSTOM_SYMBOL").multiplier == 1.0
 
 
 class TestWithCosts:
