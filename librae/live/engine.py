@@ -18,7 +18,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import pandas as pd
 
@@ -220,6 +220,7 @@ class LiveTrader:
         self._status_interval: int = tg_obj.notifications.status.interval_periods if tg_obj else 0
 
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tg")
+        self._sleep = time.sleep  # instance attribute so tests can skip real delays
 
     # --- Callback builders ---
 
@@ -503,6 +504,11 @@ class LiveTrader:
     # different tolerance).
     CASH_RECONCILE_TOLERANCE_PCT = 0.01
 
+    # Settlement currency per market, for symbols that aren't a CCXT
+    # "BASE/QUOTE" pair (tw_futures/us_equity don't encode currency in the
+    # symbol itself the way crypto pairs do).
+    _MARKET_CURRENCY: ClassVar[dict[str, str]] = {"tw_futures": "TWD", "us_equity": "USD"}
+
     def _reconcile_cash(self) -> None:
         """Best-effort: alert on cash/broker drift at startup, never
         auto-adjusts self._cash.
@@ -514,19 +520,21 @@ class LiveTrader:
         — auto-overwriting risks replacing a good local number with a
         misread one. Detect and alert, let a human decide.
 
-        Duck-typed and best-effort in two more ways: adapters without a
-        get_balance() method (Shioaji/IBKR, as of this writing) are
-        silently skipped, and a symbol not in CCXT's "BASE/QUOTE" format
-        (e.g. tw_futures) is skipped too — nothing to compare against.
+        Duck-typed and best-effort: adapters without a get_balance() method
+        are silently skipped, as is a market this engine has no settlement
+        currency mapping for — nothing to compare against either way.
         """
         adapter = self._executor.order_adapter
         get_balance = getattr(adapter, "get_balance", None) if adapter else None
         if get_balance is None:
             return
 
-        if "/" not in self._symbols[0]:
-            return
-        currency = self._symbols[0].split("/")[-1]
+        if "/" in self._symbols[0]:
+            currency = self._symbols[0].split("/")[-1]
+        else:
+            currency = self._MARKET_CURRENCY.get(self._cfg.market)
+            if currency is None:
+                return
 
         try:
             balance = get_balance(currency)
@@ -551,6 +559,75 @@ class LiveTrader:
             message=(
                 f"local_cash={self._cash:.2f} broker_balance={broker_total:.2f} "
                 f"({currency}) — drift {drift_pct:.2%}, review manually"
+            ),
+        )
+
+    # Same style as CASH_RECONCILE_TOLERANCE_PCT: engine constants, not
+    # cfg.params knobs — a fill-mismatch alert is a monitoring threshold,
+    # not a per-strategy tuning parameter.
+    RECONCILE_POLL_BACKOFF_SECONDS: tuple[float, ...] = (1, 1, 2, 2, 3)
+    POSITION_RECONCILE_QTY_TOLERANCE_PCT = 0.01
+    POSITION_RECONCILE_PRICE_TOLERANCE_PCT = 0.01
+
+    def _reconcile_fill(self, event: OrderEvent) -> None:
+        """Poll the broker's position after a real fill and alert (never
+        auto-correct) if it doesn't match local state beyond tolerance.
+
+        submit_order's ack tells us the order was placed, not that it filled
+        at the price/quantity local bookkeeping assumed — the broker's own
+        position needs a moment to catch up, hence the retry/backoff instead
+        of a single immediate read. No-op in sim mode (order_adapter is None
+        there) and after a failed submit_order (nothing to reconcile against
+        yet — that path already alerts via 'Order Failed').
+        """
+        adapter = self._executor.order_adapter
+        if adapter is None:
+            return
+
+        position = self._positions.get(event.symbol)
+        expected_qty = position.quantity if position else 0.0
+        expected_price = position.entry_price if position else 0.0
+
+        broker_qty = broker_price = 0.0
+        backoffs = self.RECONCILE_POLL_BACKOFF_SECONDS
+        for attempt, delay in enumerate(backoffs):
+            try:
+                broker_pos = adapter.get_position(event.symbol)
+            except Exception:
+                logger.exception("Fill reconciliation poll failed for %s", event.symbol)
+                return
+
+            broker_qty = abs(float(broker_pos.get("size") or 0))
+            broker_price = float(broker_pos.get("avg_price") or 0.0)
+            qty_ok = abs(
+                broker_qty - expected_qty
+            ) <= self.POSITION_RECONCILE_QTY_TOLERANCE_PCT * max(expected_qty, EPSILON)
+            price_ok = abs(
+                broker_price - expected_price
+            ) <= self.POSITION_RECONCILE_PRICE_TOLERANCE_PCT * max(expected_price, EPSILON)
+            if qty_ok and price_ok:
+                return
+
+            if attempt < len(backoffs) - 1:
+                self._sleep(delay)
+
+        logger.error(
+            "Fill mismatch %s (%s): local qty=%.4f price=%.2f vs broker qty=%.4f "
+            "price=%.2f — not auto-corrected",
+            event.symbol,
+            event.event_type,
+            expected_qty,
+            expected_price,
+            broker_qty,
+            broker_price,
+        )
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Fill Mismatch: {event.symbol}",
+            message=(
+                f"local qty={expected_qty:.4f} price={expected_price:.2f} vs "
+                f"broker qty={broker_qty:.4f} price={broker_price:.2f} "
+                f"({event.event_type}) — verify manually"
             ),
         )
 
@@ -725,6 +802,8 @@ class LiveTrader:
                             f"qty={event.fill_quantity:.4f} — check broker manually"
                         ),
                     )
+                else:
+                    self._reconcile_fill(event)
 
         for trade in result.trades:
             self._trade_count += 1

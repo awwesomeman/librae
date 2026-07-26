@@ -5,8 +5,9 @@ simulation=False (live): mirrors each local fill as a real order via
 order_adapter.place_order(). Local position/PnL bookkeeping (process_actions
 in core/executor.py) remains authoritative for signal generation — the real
 order is best-effort: a broker rejection/error is logged and alerted, not
-raised, so the poll loop keeps running. Reconciling actual broker fill price
-back into local state is a separate, not-yet-built feature.
+raised, so the poll loop keeps running. LiveTrader._reconcile_fill polls the
+broker's position after each fill and alerts on mismatch (never overwrites
+local state — see librae/live/engine.py).
 """
 
 from __future__ import annotations
@@ -104,11 +105,20 @@ class LiveExecutor:
         else:
             side = "sell" if is_entry else "buy"
 
+        # Client-supplied order ID: lets the broker's own audit trail (and,
+        # for adapters that support it, broker-side dedup) tie an order back
+        # to the exact local fill event that triggered it. Deterministic
+        # from the event itself, so resubmitting the same event always
+        # produces the same ID.
+        client_order_id = (
+            f"{self._strategy_name}-{event.symbol}-{event.event_type}-{event.ts:%Y%m%dT%H%M%S}"
+        )
         signal = {
             "symbol": event.symbol,
             "side": side,
             "quantity": event.fill_quantity,
             "order_type": "market",
+            "client_order_id": client_order_id,
         }
         try:
             result = self._order_adapter.place_order(signal)

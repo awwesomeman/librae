@@ -16,7 +16,7 @@ import pytest
 from librae.core.cost_model import CostModel
 from librae.core.executor import OrderEvent
 from librae.core.run_config import RunConfig
-from librae.core.strategy import Action, BaseStrategy, Context
+from librae.core.strategy import Action, BaseStrategy, Context, PositionState
 from librae.live.engine import LiveTrader
 from librae.live.executor import LiveExecutor
 from tests.conftest import make_test_cfg
@@ -31,10 +31,10 @@ def _zero_cost_model() -> CostModel:
 
 
 def _mock_order_adapter() -> MagicMock:
-    """order_adapter mock with a realistic flat get_position() — a bare
-    MagicMock's auto-generated get_position() return value is truthy/
-    float-coercible by default, which _reconcile_positions() would
-    misread as a real open position at startup."""
+    """order_adapter mock with realistic flat get_position()/get_balance() —
+    a bare MagicMock's auto-generated return values are truthy/float-coercible
+    by default, which _reconcile_positions()/_reconcile_cash() would misread
+    as real broker state (an open position, a MagicMock "total") at startup."""
     adapter = MagicMock()
     adapter.get_position.return_value = {
         "symbol": "",
@@ -42,6 +42,7 @@ def _mock_order_adapter() -> MagicMock:
         "avg_price": 0,
         "unrealized_pnl": 0,
     }
+    adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
     return adapter
 
 
@@ -205,14 +206,12 @@ class TestLiveExecutor:
         result = ex.submit_order(event)
 
         assert result == {"id": "123", "status": "filled"}
-        mock_adapter.place_order.assert_called_once_with(
-            {
-                "symbol": "BTCUSDT",
-                "side": expected_order_side,
-                "quantity": 2.0,
-                "order_type": "market",
-            }
-        )
+        sent_signal = mock_adapter.place_order.call_args.args[0]
+        assert sent_signal["symbol"] == "BTCUSDT"
+        assert sent_signal["side"] == expected_order_side
+        assert sent_signal["quantity"] == 2.0
+        assert sent_signal["order_type"] == "market"
+        assert sent_signal["client_order_id"]  # non-empty, deterministic per event
 
     def test_submit_order_returns_none_on_broker_error(self):
         mock_adapter = MagicMock()
@@ -251,7 +250,7 @@ class TestLiveTrader:
         **kwargs,
     ) -> LiveTrader:
         test_cfg = cfg or _test_cfg()
-        return LiveTrader(
+        runner = LiveTrader(
             strategy or _HoldStrategy(),
             feature_fn or _simple_feature_fn,
             cfg=test_cfg,
@@ -265,6 +264,8 @@ class TestLiveTrader:
             warmup_fetcher=None,
             **kwargs,
         )
+        runner._sleep = lambda _seconds: None  # no real delays in unit tests
+        return runner
 
     def test_max_iterations_stops(self):
         runner = self._make_runner()
@@ -540,8 +541,45 @@ class TestLiveTrader:
             kw for m, kw in alerts if m == "send_alert" and "Cash Reconciliation" in kw["title"]
         ]
 
+    def test_tw_futures_market_reconciles_via_market_currency_map(self):
+        """Regression test: tw_futures/us_equity symbols don't contain '/'
+        (unlike CCXT pairs), so _reconcile_cash used to skip them even when
+        the adapter does have get_balance() — the market->currency map is
+        what makes reconciliation actually reach these adapters."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_balance.return_value = {
+            "free": 50_000.0,
+            "used": 0.0,
+            "total": 50_000.0,
+        }
+
+        cfg = _test_cfg(mode="live", symbols=["TXFR1"], market="tw_futures")
+        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=1)
+
+        mock_order_adapter.get_balance.assert_called_once_with("TWD")
+        drift_alerts = [
+            kw
+            for m, kw in alerts
+            if m == "send_alert" and "Cash Reconciliation Drift" in kw["title"]
+        ]
+        assert len(drift_alerts) == 1
+
+    def test_market_without_currency_mapping_is_skipped(self):
+        mock_order_adapter = _mock_order_adapter()
+
+        cfg = _test_cfg(mode="live", symbols=["BTCUSDT"], market="crypto")
+        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+
+        runner.run(max_iterations=1)  # must not raise
+
+        mock_order_adapter.get_balance.assert_not_called()
+
     def test_adapter_without_get_balance_is_skipped(self):
-        """Shioaji/IBKR-style adapters (no get_balance()) must be silently
+        """A duck-typed adapter with no get_balance() at all must be silently
         skipped — no alert, no exception, startup proceeds normally."""
         mock_order_adapter = _mock_order_adapter()
         del mock_order_adapter.get_balance
@@ -801,6 +839,156 @@ class TestLiveTrader:
         assert len(breach_alerts) == 1
 
 
+def _make_position_state(quantity: float, entry_price: float, side="long") -> PositionState:
+    return PositionState(
+        symbol="BTCUSDT",
+        side=side,
+        entry_price=entry_price,
+        quantity=quantity,
+        entry_at=datetime(2025, 1, 1, tzinfo=UTC),
+        periods_held=0,
+        entry_commission=0.0,
+        entry_slippage=0.0,
+        entry_tax=0.0,
+        total_entry_cost=entry_price * quantity,
+    )
+
+
+def _make_fill_event(event_type="open") -> OrderEvent:
+    return OrderEvent(
+        ts=datetime(2025, 1, 1, tzinfo=UTC),
+        symbol="BTCUSDT",
+        side="long",
+        event_type=event_type,
+        fill_quantity=2.0,
+        price=100.0,
+        entry_price=100.0,
+        remaining_quantity=2.0,
+        notional=200.0,
+        commission=0.0,
+        slippage=0.0,
+        tax=0.0,
+    )
+
+
+class TestReconcileFill:
+    """LiveTrader._reconcile_fill: alert-only fill reconciliation against the
+    broker's reported position. Must never mutate self._positions/self._cash
+    — only _reconcile_positions (startup) adopts broker state."""
+
+    def _make_trader(self, order_adapter=None):
+        runner = LiveTrader(
+            _HoldStrategy(),
+            _simple_feature_fn,
+            cfg=_test_cfg(mode="live"),
+            adapter=lambda *a, **kw: _make_ohlcv_df(),
+            cost_model=_zero_cost_model(),
+            order_adapter=order_adapter or _mock_order_adapter(),
+            on_bar=None,
+            on_order_event=None,
+            on_ohlcv=None,
+            on_heartbeat=None,
+            on_signal_outcome=None,
+        )
+        runner._sleep = lambda _seconds: None
+        return runner
+
+    def test_matches_within_tolerance_does_not_alert(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 2.0,
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        runner = self._make_trader(order_adapter=adapter)
+        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner._reconcile_fill(_make_fill_event())
+
+        assert not alerts
+        adapter.get_position.assert_called_once()  # matched on first poll, no retries
+
+    def test_persistent_mismatch_alerts_without_correcting_state(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 1.0,  # broker only shows 1, local expects 2 -> mismatch
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        runner = self._make_trader(order_adapter=adapter)
+        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner._reconcile_fill(_make_fill_event())
+
+        assert adapter.get_position.call_count == len(runner.RECONCILE_POLL_BACKOFF_SECONDS)
+        mismatch_alerts = [
+            kw for m, kw in alerts if m == "send_alert" and "Fill Mismatch" in kw["title"]
+        ]
+        assert len(mismatch_alerts) == 1
+        assert "local qty=2.0000" in mismatch_alerts[0]["message"]
+        assert "broker qty=1.0000" in mismatch_alerts[0]["message"]
+        # Never auto-corrected.
+        assert runner._positions["BTCUSDT"].quantity == 2.0
+
+    def test_matches_after_retry(self):
+        """Broker position lags the fill by a couple of polls, then catches up."""
+        adapter = _mock_order_adapter()
+        responses = [
+            {"symbol": "BTCUSDT", "size": 0.0, "avg_price": 0.0, "unrealized_pnl": 0.0},
+            {"symbol": "BTCUSDT", "size": 0.0, "avg_price": 0.0, "unrealized_pnl": 0.0},
+            {"symbol": "BTCUSDT", "size": 2.0, "avg_price": 100.0, "unrealized_pnl": 0.0},
+        ]
+        adapter.get_position.side_effect = responses
+        runner = self._make_trader(order_adapter=adapter)
+        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner._reconcile_fill(_make_fill_event())
+
+        assert not alerts
+        assert adapter.get_position.call_count == 3
+
+    def test_broker_exception_during_poll_does_not_alert_or_crash(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = RuntimeError("broker down")
+        runner = self._make_trader(order_adapter=adapter)
+        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner._reconcile_fill(_make_fill_event())  # must not raise
+
+        assert not alerts
+
+    def test_noop_when_order_adapter_absent(self):
+        """Sim mode (order_adapter=None internally) has nothing to reconcile against."""
+        runner = self._make_trader()
+        runner._executor._order_adapter = None
+        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
+        adapter_get_position = MagicMock()
+        runner._reconcile_fill(_make_fill_event())  # must not raise
+        adapter_get_position.assert_not_called()
+
+    def test_close_event_expects_flat_position(self):
+        """After a close, self._positions no longer has the symbol — expected
+        qty/price must default to 0, matching a broker that's gone flat too."""
+        adapter = _mock_order_adapter()  # default flat get_position()
+        runner = self._make_trader(order_adapter=adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner._reconcile_fill(_make_fill_event(event_type="close"))
+
+        assert not alerts
+
+
 class TestCryptoLiveAutoWiring:
     """LiveTrader without an explicit adapter= override (the real code path
     used in production) for crypto (non-tw_futures) live mode.
@@ -895,6 +1083,7 @@ class TestShioajiLiveAutoWiring:
                 on_heartbeat=None,
                 on_signal_outcome=None,
             )
+            trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
 
         # Iteration 1: buy queued. Iteration 2: buy fills — mirrored to Shioaji.
