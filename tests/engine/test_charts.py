@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 from librae.backtest.charts import _build_markers, _df_to_order_events, _prepare_ohlcv
 from librae.backtest.schema import OrderEventRecord
 
@@ -73,7 +74,9 @@ def test_build_markers_use_library_recognized_literals():
     spelling (belowBar/arrowUp) silently maps to None and drops the marker's
     position. Guards the exact regression that caused markers to render
     off-position."""
-    from lightweight_charts.util import marker_position, marker_shape
+    lightweight_charts_util = pytest.importorskip("lightweight_charts.util")
+    marker_position = lightweight_charts_util.marker_position
+    marker_shape = lightweight_charts_util.marker_shape
 
     entry = _make_event(side="long", event_type="open")
     markers = _build_markers([entry], "BTCUSDT")

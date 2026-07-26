@@ -5,10 +5,17 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from librae.core.run_config import RunConfig
 
-from orchestration.cli import base_parser, parse_with_config
+from orchestration.cli import (
+    _resolve_market_and_data_source,
+    base_parser,
+    check_existing_run,
+    parse_with_config,
+)
 
 
 @pytest.fixture()
@@ -131,3 +138,67 @@ class TestParseWithConfig:
         p = base_parser("test")
         ns = parse_with_config(p, config_path=cfg)
         assert ns.poll_seconds == 45
+
+
+class TestResolveMarketAndDataSource:
+    """Regression tests: an unregistered symbol universe (e.g. a
+    stock-picking strategy over tickers not in librae/config/symbols.py)
+    used to silently fall back to market='crypto'/data_source='binance_spot'
+    when config.yaml didn't set them — the run would still complete, just
+    with crypto's cost/margin assumptions silently applied to equities."""
+
+    def test_registered_symbol_infers_market(self):
+        market, data_source = _resolve_market_and_data_source(["MU"], None, None)
+        assert (market, data_source) == ("us_equity", "ibkr")
+
+    def test_unregistered_symbols_without_explicit_market_raises(self):
+        with pytest.raises(ValueError, match="market/data_source must be set"):
+            _resolve_market_and_data_source(["AAPL", "MSFT"], None, None)
+
+    def test_unregistered_symbols_with_explicit_market_is_used(self):
+        market, data_source = _resolve_market_and_data_source(["AAPL", "MSFT"], "us_equity", "ibkr")
+        assert (market, data_source) == ("us_equity", "ibkr")
+
+    def test_mixed_registered_and_unregistered_infers_from_registered(self):
+        market, data_source = _resolve_market_and_data_source(["MU", "AAPL"], None, None)
+        assert (market, data_source) == ("us_equity", "ibkr")
+
+
+def _make_cfg(**overrides) -> RunConfig:
+    defaults = dict(
+        strategy_name="test_strat",
+        symbols=["MU"],
+        timeframe="1d",
+        market="us_equity",
+        data_source="local",
+        initial_balance=100_000.0,
+        mode="backtest",
+    )
+    defaults.update(overrides)
+    return RunConfig(**defaults)
+
+
+class TestCheckExistingRun:
+    """check_existing_run must degrade to 'no dedup, just run it' whenever
+    the DB isn't available — an unset TIMESCALE_DSN or an unreachable
+    Postgres shouldn't crash a backtest that only wanted a dedup check."""
+
+    def test_timescale_dsn_unset_returns_none(self, monkeypatch):
+        # Reproduces the real code path: db/__init__.py raises RuntimeError
+        # (not ImportError) at import time when TIMESCALE_DSN isn't set.
+        monkeypatch.delenv("TIMESCALE_DSN", raising=False)
+        monkeypatch.delitem(sys.modules, "db", raising=False)
+        monkeypatch.delitem(sys.modules, "db.timescale_reader", raising=False)
+
+        assert check_existing_run(_make_cfg()) is None
+
+    def test_db_unreachable_skips_dedup_instead_of_raising(self, monkeypatch):
+        monkeypatch.setenv("TIMESCALE_DSN", "postgresql://localhost:1/nonexistent")
+        monkeypatch.delitem(sys.modules, "db", raising=False)
+        monkeypatch.delitem(sys.modules, "db.timescale_reader", raising=False)
+
+        with patch(
+            "db.timescale_reader.get_run_by_config_hash",
+            side_effect=OSError("connection refused"),
+        ):
+            assert check_existing_run(_make_cfg()) is None

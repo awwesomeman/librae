@@ -152,13 +152,15 @@ def _resolve_market_and_data_source(
     market: str | None,
     data_source: str | None,
 ) -> tuple[str, str]:
-    """Resolve market/data_source: symbols.yaml is the default source, config.yaml
+    """Resolve market/data_source: the built-in symbol registry is the default source, config.yaml
     values (if given) are an explicit override — but must agree with the
     registry for any symbol that's actually registered there, so the two
     can't silently drift apart.
 
-    Symbols not in symbols.yaml (e.g. one-off experiment tickers) fall back
-    to config.yaml's values, or crypto/binance_spot if neither is set.
+    Symbols not in the registry (e.g. one-off experiment tickers, or an
+    unregistered stock-picking universe) require config.yaml's market/
+    data_source to be set explicitly — there is no safe universal default
+    to fall back to (see the ValueError below for why).
     """
     from librae.config.symbols import load_symbol_registry
 
@@ -170,17 +172,29 @@ def _resolve_market_and_data_source(
         if market is not None and market != entry.market:
             raise ValueError(
                 f"config.yaml market={market!r} for {sym!r} disagrees with "
-                f"symbols.yaml ({entry.market!r}) — fix one of them."
+                f"the registry ({entry.market!r}) — fix one of them."
             )
         if data_source is not None and data_source != entry.data_source:
             raise ValueError(
                 f"config.yaml data_source={data_source!r} for {sym!r} disagrees "
-                f"with symbols.yaml ({entry.data_source!r}) — fix one of them."
+                f"with the registry ({entry.data_source!r}) — fix one of them."
             )
         market = market or entry.market
         data_source = data_source or entry.data_source
 
-    return market or "crypto", data_source or "binance_spot"
+    if market is None or data_source is None:
+        # WHY no fallback: a silent default here (this used to be
+        # "crypto"/"binance_spot") means an unregistered stock universe that
+        # forgets to set market/data_source in config.yaml gets crypto's
+        # commission/tax/margin_rate applied instead — the backtest still
+        # runs and produces numbers, just silently wrong ones. Loud failure
+        # beats a plausible-looking wrong answer.
+        raise ValueError(
+            "market/data_source must be set in config.yaml — none of "
+            f"{symbols} are in the built-in registry "
+            "(librae/config/symbols.py) to infer them from."
+        )
+    return market, data_source
 
 
 # ---------------------------------------------------------------------------
@@ -317,8 +331,21 @@ def check_existing_run(cfg: RunConfig) -> str | None:
         from db.timescale_reader import get_run_by_config_hash
     except ImportError:
         return None
+    except RuntimeError:
+        # db/__init__.py raises RuntimeError at import time if TIMESCALE_DSN
+        # isn't set — same "no DB available" case as ImportError above.
+        return None
 
-    existing = get_run_by_config_hash(cfg.config_hash)
+    try:
+        existing = get_run_by_config_hash(cfg.config_hash)
+    except Exception:
+        logger.warning(
+            "config_hash dedup check failed (TimescaleDB unreachable?) — "
+            "skipping dedup and running the backtest. Pass --no-db to "
+            "suppress this check entirely.",
+            exc_info=True,
+        )
+        return None
     if not existing:
         return None
 
