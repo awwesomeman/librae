@@ -4,6 +4,10 @@
 > This is the opposite of `docs/decisions/` (a point-in-time record of a decision, never rewritten after the fact) — this file only ever carries "what is true now"; the *why* behind a naming rule lives in the corresponding decision doc, cross-referenced from here.
 >
 > When you add/change a table, column, or a `db/` read/write function, **you must update this document in the same change**. If a naming rule itself changes (as opposed to adding a new entry), add a new decision doc under `docs/decisions/` explaining why, as appropriate.
+>
+> **Scope**: engine layering, the DB access layer, and naming conventions — not deployment/ops. `scripts/`/`app/`/`deploy/` are optional ops tooling (Grafana, Docker, VM scripts), deliberately not architecture; see the root [README's "Optional ops examples"](README.md#optional-ops-examples) instead.
+>
+> **Language**: this repo is English-only outside `docs/` (which stays in the language it was originally written in — mixing languages mid-document isn't worth the churn). Keep descriptions concise and to the point — a one-line WHY beats a paragraph; link to `docs/decisions/` for the full history instead of re-explaining it here.
 
 ## System layering overview
 
@@ -21,11 +25,12 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 
 ## Broker Adapter Design (`brokers/`)
 
-- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`), **duck-typed, no shared ABC**. Shared method signatures: `fetch_ohlcv(symbol, timeframe, ...) -> pd.DataFrame`, `place_order(signal: dict) -> dict`, `get_position(symbol) -> dict`, `info() -> AdapterInfo`.
+- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Shared method signatures: `fetch_ohlcv(symbol, timeframe, ...) -> pd.DataFrame`, `place_order(signal: dict) -> dict`, `get_position(symbol) -> dict`, `info() -> AdapterInfo`.
 - `brokers/base.py` only provides the two pieces that are genuinely shared and byte-for-byte identical: `AdapterInfo` (static metadata) and `CredentialConfig.from_env(prefix)` (the env-var convention `{PREFIX}_{FIELD}`, with `prefix` supplied by the caller — e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are themselves exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as a UTC-aware datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
 - Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a single interface covering every capability — e.g. `librae/live/executor.py`'s `OrderAdapter` Protocol only declares `place_order`, because that's the only method the executor actually uses.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
+- `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias.
 
 ## Backtest Engine Design (`librae/`)
 
@@ -53,9 +58,8 @@ librae/
 │   └── executor.py           LiveExecutor (sim notifications / live order placement)
 │
 └── config/                   configuration management
-    ├── markets.yaml          market parameters (cost model, tick_size, multiplier, margin rate)
-    ├── market_config.py      MarketConfig dataclass + load helpers
-    └── symbols.py            symbol → market/data_source mapping
+    ├── market_config.py      MarketConfig dataclass + built-in market registry (cost model, tick_size, multiplier, margin rate)
+    └── symbols.py            SymbolInfo dataclass + built-in symbol registry (symbol → market/data_source/multiplier)
 
 # Outside librae, at the same level as db/ and brokers/ — reference implementations (swappable, see "Dependency direction" below)
 notifications/                Telegram push notifications (TelegramAdapter + TelegramCredentials)
@@ -149,13 +153,15 @@ cfg = RunConfig(..., params={
 - `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
 - `max_drawdown_pct`: once triggered, calls `liquidate_all()` to close everything, and stops calling the strategy's `on_bar()` (live keeps polling/monitoring, it just stops entering); triggers once and stays in effect permanently — the run needs to be restarted.
 - `max_volume_participation_pct`: caps a single fill (new entry/add) only — it's not cumulative against position size; like `max_position_pct` it caps rather than rejects. Only applies to entries — exits (strategy-driven close, stop-loss/take-profit, force close, drawdown-triggered liquidation) are unaffected.
-- Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `markets.yaml`/`symbols.yaml`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
+- Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 #### Margin / liquidation simulation
 
-`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `cfg.params`" convention as `impact_coef`, configured via `markets.yaml`/`symbols.yaml`/`cost_overrides`). Once set, `resolve_stop_exit` (shared by backtest/live) checks every bar whether a position has hit the liquidation price computed by `CostModel.liquidation_price(entry_price, side)`; if so it force-closes with `REASON_LIQUIDATION`, using the same gap-through logic as `stop_price` (on a gap, take the worse of (liquidation price, bar open)). The liquidation check takes priority over stop-loss/take-profit — if both trigger on the same bar, liquidation (the most conservative outcome an exchange would actually enforce) wins.
+`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `cfg.params`" convention as `impact_coef`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). Once set, `resolve_stop_exit` (shared by backtest/live) checks every bar whether a position has hit the liquidation price computed by `CostModel.liquidation_price(entry_price, side)`; if so it force-closes with `REASON_LIQUIDATION`, using the same gap-through logic as `stop_price` (on a gap, take the worse of (liquidation price, bar open)). The liquidation check takes priority over stop-loss/take-profit — if both trigger on the same bar, liquidation (the most conservative outcome an exchange would actually enforce) wins.
 
 The formula is a simplified isolated-margin approximation (ignoring fees/funding rates, matching the existing simplification level of this engine's margin model): long `entry*(1 + maintenance_margin_rate - margin_rate)`, short `entry*(1 - maintenance_margin_rate + margin_rate)`. Spot (`margin_rate=1.0`) never triggers unless `maintenance_margin_rate` is set.
+
+`margin_rate`/`maintenance_margin_rate` are always a fraction of notional, never an absolute currency figure — there's no config field for e.g. "NT$636,000 initial margin" directly; a caller converts from the exchange's published absolute figure to a ratio before setting it (see `market_config.py`'s `tw_futures` entry for a worked example). Treated as static for the whole run — see `docs/plans/enhance_librae_real_trade.md`'s item B for why, and its known blind spots.
 
 #### Reconciliation (live only)
 
@@ -247,24 +253,39 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 
 ### Config API
 
-> For the full list of config sources (env vars, YAML examples, CLI parameter table) see [the root README's "Config file overview"](../README.md#config-file-overview). This section only covers the internal code-level API.
+> For the full list of config sources (env vars, built-in market/symbol registries, CLI parameter table) see [the root README's "Config overview"](../README.md#config-overview). This section only covers the internal code-level API.
 
 #### MarketConfig (market costs)
 
-Default source: `librae/config/markets.yaml` (read at startup); you can also bypass this file entirely and pass in your own registry (common when using librae as an external package):
+Default source: `librae/config/market_config.py`'s built-in registry; you can also bypass it entirely and pass in your own (common when using librae as an external package):
 
 ```python
 from librae.config.market_config import get_market
 from librae.core.cost_model import CostModel
 
-market = get_market("crypto")            # → MarketConfig (reads librae's built-in markets.yaml)
+market = get_market("crypto")            # → MarketConfig (from librae's built-in registry)
 cost_model = CostModel.from_market(market)
 
-# Or: register your own markets, with no dependency on librae's built-in markets.yaml
+# Or: register your own markets, with no dependency on librae's built-in registry
 my_markets = {"my_market": MarketConfig(name="my_market", commission_rate=0.001, ...)}
 market = get_market("my_market", markets=my_markets)
 cost_model = CostModel.from_config(cfg, markets=my_markets)
 ```
+
+#### Per-symbol overrides (`RunConfig.symbol_overrides`)
+
+`CostModel.from_config(cfg, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `cfg.symbol_overrides[symbol]` > `cfg.cost_overrides` (run-wide fallback) > the built-in symbol registry (`spot` auto-`multiplier=1.0`, `contract_*` required-explicit) > market-level defaults. `symbol` defaults to `cfg.symbol` (`symbols[0]`) when omitted.
+
+`Backtest.__init__` calls this once per symbol in the run (not just `cfg.symbol`) whenever `cfg=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
+
+```python
+cfg = RunConfig(
+    ..., symbols=["TXFR1", "MXFR1"], market="tw_futures",
+    symbol_overrides={"MXFR1": {"multiplier": 55.0}},  # override just this one symbol
+)
+```
+
+This is the mechanism for registering a symbol librae doesn't know about (`pip install`ed with nothing to edit, or a one-off backtest) — `symbol_overrides={"MYSYM": {"multiplier": 1.0}}` needs no file, no path parameter, nothing beyond the `RunConfig` you're already passing to `Backtest`/`LiveTrader`.
 
 #### TelegramAdapter (notifications)
 
@@ -393,7 +414,7 @@ flowchart TD
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
-### Current 9 tables
+### Current 10 tables
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
@@ -406,6 +427,7 @@ flowchart TD
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |
 | `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically | no FK (unique index: ts+symbol+factor_name+source+instrument_type) | yes (`ts`) |
 | `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
+| `factor_registry` | one row per `factor_name` — its update frequency + source, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 
 ### Handling quantity ambiguity
 
@@ -440,7 +462,7 @@ Decision criteria: **single-table vs. multi-table** decides between `write_`/`sa
 
 Examples: `save_backtest_output` (writes 5 tables in one go, a multi-table coordinator), `write_trade_event` (single-table full-row write), `update_heartbeat` (single-table partial update of one field), `merge_ohlcv_coverage_ranges` (must read existing ranges first to decide the merge result), `refresh_performance` (recomputes KPIs from `equity_curve` + `trade_events` and writes them back to `strategy_performance`).
 
-**Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate, following the same point-in-time correctness philosophy as `us_fundamentals.py`'s `_first_disclosure()` (which keeps the earliest disclosed value and only warns instead of overwriting): a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot.
+**Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate: a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot — the same point-in-time-correctness principle applies to any ingestion layer built on top of `db/` (e.g. fundamentals data, where the earliest-disclosed value should win the same way).
 
 ### `db/timescale_reader.py` (three verb categories, documented in that file's module docstring)
 
