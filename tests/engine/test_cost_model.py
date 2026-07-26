@@ -222,6 +222,26 @@ class TestLiquidationPrice:
         assert cm.liquidation_price(100.0, "long") is None
 
 
+# ── margin_rate_from_absolute ───────────────────────────────────────────────
+
+
+class TestMarginRateFromAbsolute:
+    def test_taifex_txf_example(self) -> None:
+        from librae.core.cost_model import margin_rate_from_absolute
+
+        # TAIFEX 大台, 2026-07-06 revision: NT$636,000 initial margin at
+        # index ~42,671, multiplier 200 — matches market_config.py's
+        # tw_futures long/short_margin_rate=0.075 (rounded).
+        rate = margin_rate_from_absolute(636_000, 42_671, 200.0)
+        assert rate == pytest.approx(0.075, abs=0.001)
+
+    def test_zero_or_negative_notional_raises(self) -> None:
+        from librae.core.cost_model import margin_rate_from_absolute
+
+        with pytest.raises(ValueError, match="must be positive"):
+            margin_rate_from_absolute(1000.0, 0.0, 200.0)
+
+
 # ── Tax ───────────────────────────────────────────────────────────────────
 
 
@@ -252,9 +272,9 @@ class TestTotalCost:
 
 
 # ── CostModel.from_config: per-symbol multiplier resolution ──────────────
-# Regression coverage for a real bug: markets.yaml's tw_futures multiplier
+# Regression coverage for a real bug: market_config.py's tw_futures multiplier
 # (50, matching MXF) was silently applied to TXFR1 (real multiplier 200)
-# because from_config() never consulted symbols.yaml at all.
+# because from_config() never consulted the symbol registry at all.
 
 
 class TestFromConfig:
@@ -274,7 +294,7 @@ class TestFromConfig:
 
     def test_registered_symbol_uses_its_own_multiplier(self) -> None:
         cm = CostModel.from_config(self._cfg("TXFR1"))
-        assert cm.multiplier == 200.0  # not markets.yaml's tw_futures default (50)
+        assert cm.multiplier == 200.0  # not market_config.py's tw_futures default (50)
 
     def test_unregistered_symbol_raises_without_cost_overrides(self) -> None:
         with pytest.raises(ValueError, match="multiplier"):
@@ -296,7 +316,7 @@ class TestFromConfig:
         assert cm.multiplier == 1.0
 
     def test_spot_symbol_without_explicit_multiplier_defaults_to_one(self) -> None:
-        """BTCUSDT doesn't declare multiplier in symbols.yaml at all — spot
+        """BTCUSDT doesn't declare multiplier in the registry at all — spot
         auto-defaults, no per-symbol registration needed."""
         from librae.config.symbols import get_symbol
 
@@ -316,3 +336,127 @@ class TestFromConfig:
         explicit = CostModel.zero()
         cm = CostModel.from_config(self._cfg("TXFR1"), override=explicit)
         assert cm is explicit
+
+    def test_symbol_param_resolves_a_different_symbol_than_cfg_symbol(self) -> None:
+        """Multi-asset run: cfg.symbol is symbols[0] (TXFR1), but a caller
+        can resolve any other symbol in the run via symbol=."""
+        cfg = self._cfg("TXFR1")
+        cm = CostModel.from_config(cfg, symbol="MXFR1")
+        assert cm.multiplier == 50.0
+
+    def test_symbol_overrides_unregistered_symbol_without_touching_symbols_yaml(self) -> None:
+        cm = CostModel.from_config(
+            self._cfg(
+                "MY_CUSTOM_SYMBOL",
+                market="crypto",
+                data_source="x",
+                symbol_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
+            )
+        )
+        assert cm.multiplier == 1.0
+
+    def test_symbol_overrides_wins_over_run_wide_cost_overrides(self) -> None:
+        cfg = self._cfg(
+            "TXFR1",
+            cost_overrides={"multiplier": 111.0},
+            symbol_overrides={"TXFR1": {"multiplier": 222.0}},
+        )
+        assert CostModel.from_config(cfg).multiplier == 222.0
+
+    def test_cost_overrides_still_applies_as_fallback_for_symbols_not_listed(self) -> None:
+        """cost_overrides is the run-wide fallback; symbol_overrides only
+        overrides the specific symbols it lists."""
+        cfg = self._cfg(
+            "TXFR1",
+            cost_overrides={"multiplier": 111.0},
+            symbol_overrides={"MXFR1": {"multiplier": 222.0}},
+        )
+        assert CostModel.from_config(cfg, symbol="TXFR1").multiplier == 111.0
+
+
+class TestDescribeSymbols:
+    """describe_symbols(): per-symbol resolved config + provenance, for
+    confirming what a run will actually apply before trusting a backtest."""
+
+    def _cfg(self, symbols: list[str], market="tw_futures", data_source="shioaji", **kwargs):
+        from librae.core.run_config import RunConfig
+
+        return RunConfig(
+            strategy_name="x",
+            symbols=symbols,
+            timeframe="5m",
+            market=market,
+            data_source=data_source,
+            initial_balance=100_000.0,
+            mode="backtest",
+            **kwargs,
+        )
+
+    def test_multiple_registered_futures_report_their_own_multiplier(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        results = describe_symbols(self._cfg(["TXFR1", "MXFR1"]))
+
+        assert [r.symbol for r in results] == ["TXFR1", "MXFR1"]
+        assert results[0].multiplier == 200.0
+        assert results[0].multiplier_source == "registry"
+        assert results[1].multiplier == 50.0
+        assert results[0].error is None
+
+    def test_spot_symbol_reports_auto_default_source(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        results = describe_symbols(
+            self._cfg(["BTCUSDT"], market="crypto", data_source="binance_spot")
+        )
+
+        assert results[0].multiplier == 1.0
+        assert results[0].multiplier_source == "registry (spot auto-default)"
+        assert results[0].tick_size_source == "market_default"
+
+    def test_symbol_override_reported_as_source(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(["MXFR1"], symbol_overrides={"MXFR1": {"multiplier": 55.0}})
+        results = describe_symbols(cfg)
+
+        assert results[0].multiplier == 55.0
+        assert results[0].multiplier_source == "symbol_overrides"
+
+    def test_run_wide_cost_override_reported_as_source(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(["UNREGISTERED"], cost_overrides={"multiplier": 10.0})
+        results = describe_symbols(cfg)
+
+        assert results[0].multiplier == 10.0
+        assert results[0].multiplier_source == "cost_overrides"
+
+    def test_unresolvable_symbol_reports_error_without_raising(self) -> None:
+        """Batch of many symbols: one bad entry must not hide the rest."""
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(["TXFR1", "UNREGISTERED"])
+        results = describe_symbols(cfg)
+
+        assert results[0].error is None
+        assert results[0].multiplier == 200.0
+        assert results[1].error is not None
+        assert "multiplier" in results[1].error
+        assert results[1].multiplier is None
+
+    def test_defaults_to_cfg_symbols_when_omitted(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(["TXFR1", "MXFR1"])
+        results = describe_symbols(cfg)
+
+        assert [r.symbol for r in results] == ["TXFR1", "MXFR1"]
+
+    def test_explicit_symbols_arg_overrides_cfg_symbols(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(["TXFR1"])
+        results = describe_symbols(cfg, symbols=["MXFR1", "TMFR1"])
+
+        assert [r.symbol for r in results] == ["MXFR1", "TMFR1"]

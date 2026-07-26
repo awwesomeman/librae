@@ -2,9 +2,9 @@
 
 Handles commission, slippage, transaction tax, and PnL calculation
 for both spot and futures instruments via a single `multiplier` pattern.
-multiplier always comes from the per-symbol registry (symbols.yaml) —
+multiplier always comes from the per-symbol registry (librae/config/symbols.py) —
 auto-1.0 for spot, required-explicit for contract_* instruments. tick_size
-comes from symbols.yaml when overridden there, otherwise from markets.yaml's
+comes from symbols.py when overridden there, otherwise from market_config.py's
 market-level approximation (see librae/config/symbols.py's module
 docstring for why these two have different risk profiles/fallback rules).
 
@@ -86,27 +86,37 @@ class CostModel:
     def from_config(
         cls,
         cfg: RunConfig,
+        symbol: str | None = None,
         override: CostModel | None = None,
         markets: dict[str, MarketConfig] | None = None,
     ) -> CostModel:
-        """Resolve cost model with standard priority:
-        explicit override > cfg.cost_overrides > symbols.yaml per-symbol
+        """Resolve cost model for one symbol, with standard priority:
+        explicit override > cfg.symbol_overrides[symbol] > cfg.cost_overrides
+        (run-wide fallback) > the built-in symbol registry's per-symbol
         multiplier (spot auto-1.0, contract_* required-explicit) and
         tick_size (optional override) > market-level defaults for
         everything else (see librae/config/symbols.py's module docstring).
 
+        symbol: which symbol to resolve for — defaults to cfg.symbol
+            (symbols[0]). Pass explicitly to resolve a different symbol in
+            a multi-asset run, e.g. one with a different contract
+            multiplier (TXFR1=200 vs MXFR1=50, same tw_futures market).
+
         markets: pre-built registry passed through to get_market() —
             lets a caller resolve cfg.market against markets it built
-            itself instead of librae's bundled markets.yaml.
+            itself instead of librae's built-in market registry.
 
         Raises:
-            ValueError: cfg.symbol isn't registered in symbols.yaml (so no
+            ValueError: `symbol` isn't in the built-in registry (so no
                 multiplier can be resolved at all — not even the spot
                 auto-default, since we don't know the instrument_type) and
-                cfg.cost_overrides doesn't supply multiplier either.
+                neither cfg.symbol_overrides[symbol] nor cfg.cost_overrides
+                supplies multiplier either.
         """
         if override is not None:
             return override
+        symbol = symbol if symbol is not None else cfg.symbol
+
         from librae.config.market_config import get_market
 
         mc = get_market(cfg.market, markets=markets)
@@ -114,24 +124,29 @@ class CostModel:
         from librae.config.symbols import get_symbol
 
         try:
-            sym = get_symbol(cfg.symbol)
+            sym = get_symbol(symbol)
             multiplier, tick_size = sym.multiplier, sym.tick_size
         except KeyError:
             multiplier, tick_size = None, None
 
-        overrides = cfg.cost_overrides or {}
+        # symbol_overrides[symbol] wins over the run-wide cost_overrides
+        # fallback for anything both specify.
+        overrides = dict(cfg.cost_overrides or {})
+        overrides.update((cfg.symbol_overrides or {}).get(symbol, {}))
+
         multiplier = overrides.get("multiplier", multiplier)
         tick_size = overrides.get("tick_size", tick_size)
         if multiplier is None:
             raise ValueError(
-                f"No multiplier for symbol={cfg.symbol!r} — register it in symbols.yaml "
-                "(spot instruments default to 1.0 automatically; contract_* instruments "
-                "need it explicit), or pass cfg.cost_overrides={'multiplier': ...}."
+                f"No multiplier for symbol={symbol!r} — pass cfg.symbol_overrides={{"
+                f"{symbol!r}: {{'multiplier': ...}}}} (or cfg.cost_overrides for a "
+                "single-symbol run), or register it in librae/config/symbols.py's "
+                "built-in registry (spot instruments default to 1.0 automatically; "
+                "contract_* instruments need it explicit)."
             )
 
         base = asdict(cls.from_market(mc, multiplier=multiplier, tick_size=tick_size))
-        if cfg.cost_overrides:
-            base.update(cfg.cost_overrides)
+        base.update(overrides)
         return cls(**base)
 
     @classmethod
@@ -142,7 +157,7 @@ class CostModel:
         multiplier: float,
         tick_size: float | None = None,
     ) -> CostModel:
-        """Build CostModel from MarketConfig (markets.yaml) + a per-symbol
+        """Build CostModel from MarketConfig (librae/config/market_config.py) + a per-symbol
         multiplier (required — see librae/config/symbols.py). tick_size
         defaults to the market's approximate value when not overridden."""
         return cls(
@@ -233,3 +248,127 @@ class CostModel:
         if side == "long":
             return entry_price * (1 + self.maintenance_margin_rate - margin_rate)
         return entry_price * (1 - self.maintenance_margin_rate + margin_rate)
+
+
+@dataclass(frozen=True)
+class SymbolDescription:
+    """One symbol's resolved cost-model config, plus where each value came
+    from — see describe_symbols()."""
+
+    symbol: str
+    market: str
+    data_source: str
+    multiplier: float | None
+    multiplier_source: str
+    tick_size: float | None
+    tick_size_source: str
+    long_margin_rate: float | None
+    short_margin_rate: float | None
+    error: str | None = None
+
+
+def describe_symbols(cfg: RunConfig, symbols: list[str] | None = None) -> list[SymbolDescription]:
+    """Resolve and report each symbol's cost-model config (multiplier,
+    tick_size, margin rates) plus where each value came from —
+    'symbol_overrides' > 'cost_overrides' > 'registry' > 'market_default',
+    matching CostModel.from_config's actual priority. A diagnostic to
+    confirm what's really applied before trusting a backtest, not something
+    the engine consults itself.
+
+    symbols defaults to cfg.symbols when omitted. A symbol that can't
+    resolve (no multiplier anywhere) is reported with its error message
+    instead of raising, so one bad entry in a large batch doesn't hide the
+    rest — this is the main reason to call this on a whole symbol list at
+    once rather than one at a time.
+    """
+    from librae.config.symbols import get_symbol
+
+    results: list[SymbolDescription] = []
+    for sym in symbols if symbols is not None else cfg.symbols:
+        symbol_over = (cfg.symbol_overrides or {}).get(sym, {})
+        cost_over = cfg.cost_overrides or {}
+        try:
+            info = get_symbol(sym)
+        except KeyError:
+            info = None
+
+        try:
+            cm = CostModel.from_config(cfg, symbol=sym)
+        except ValueError as e:
+            results.append(
+                SymbolDescription(
+                    symbol=sym,
+                    market=cfg.market,
+                    data_source=cfg.data_source,
+                    multiplier=None,
+                    multiplier_source="unresolved",
+                    tick_size=None,
+                    tick_size_source="unresolved",
+                    long_margin_rate=None,
+                    short_margin_rate=None,
+                    error=str(e),
+                )
+            )
+            continue
+
+        if "multiplier" in symbol_over:
+            multiplier_source = "symbol_overrides"
+        elif "multiplier" in cost_over:
+            multiplier_source = "cost_overrides"
+        elif info is not None and info.instrument_type == "spot":
+            multiplier_source = "registry (spot auto-default)"
+        else:
+            multiplier_source = "registry"
+
+        if "tick_size" in symbol_over:
+            tick_size_source = "symbol_overrides"
+        elif "tick_size" in cost_over:
+            tick_size_source = "cost_overrides"
+        elif info is not None and info.tick_size is not None:
+            tick_size_source = "registry"
+        else:
+            tick_size_source = "market_default"
+
+        results.append(
+            SymbolDescription(
+                symbol=sym,
+                market=cfg.market,
+                data_source=cfg.data_source,
+                multiplier=cm.multiplier,
+                multiplier_source=multiplier_source,
+                tick_size=cm.tick_size,
+                tick_size_source=tick_size_source,
+                long_margin_rate=cm.long_margin_rate,
+                short_margin_rate=cm.short_margin_rate,
+            )
+        )
+    return results
+
+
+def margin_rate_from_absolute(
+    absolute_margin: float, reference_price: float, multiplier: float
+) -> float:
+    """Convert an exchange-published absolute margin figure (e.g. TAIFEX's
+    NT$636,000 initial margin per 大台 contract) into the margin_rate ratio
+    CostModel/MarketConfig actually take — see market_config.py's tw_futures
+    entry for why the ratio, not the absolute figure, is what this engine
+    treats as stable (docs/plans/enhance_librae_real_trade.md item B).
+
+    Args:
+        absolute_margin: The published currency amount (per contract for
+            futures; per share/unit for anything multiplier-scaled).
+        reference_price: The underlying's price/index level the absolute
+            figure was published against.
+        multiplier: The contract's multiplier (librae/config/symbols.py).
+
+    Example: TAIFEX 大台, 2026-07-06 revision —
+        margin_rate_from_absolute(636_000, 42_671, 200.0) ≈ 0.0745, matching
+        market_config.py's tw_futures long/short_margin_rate=0.075.
+    """
+    notional = reference_price * multiplier
+    if notional <= 0:
+        raise ValueError(
+            f"reference_price*multiplier must be positive, got {notional} "
+            f"(reference_price={reference_price}, multiplier={multiplier})"
+        )
+    return absolute_margin / notional
