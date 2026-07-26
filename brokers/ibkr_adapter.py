@@ -1,8 +1,16 @@
-"""IBKRAdapter — Interactive Brokers adapter for US equities.
+"""IBKRAdapter — Interactive Brokers adapter for US equities and futures.
 
 Wraps ``ib_async`` (community-maintained continuation of the archived
 ``ib_insync``) to provide the same duck-typed interface as
 ShioajiAdapter/CryptoAdapter: ``fetch_ohlcv``, ``place_order``, ``get_position``.
+
+Stocks are SMART-routed by symbol alone (IBKR resolves the exchange).
+Futures aren't — pass ``security_type="FUT"`` plus the contract's listing
+``exchange`` (e.g. ``"CME"`` for ES/NQ, ``"NYMEX"`` for CL, ``"COMEX"`` for
+GC); the adapter resolves to the nearest non-expired contract month via
+``reqContractDetails``, same "always trade/quote the front month" behavior
+as ShioajiAdapter's ``TXFR1``-style rolling alias — it doesn't back-adjust
+a continuous price series itself, that's a data-layer concern.
 
 Unlike Shioaji (login+CA) or CCXT (API key), IBKR authenticates at the
 TWS/IB Gateway process, not per-adapter — the adapter just opens a socket
@@ -160,26 +168,46 @@ class IBKRAdapter:
         start: datetime | str | None = None,
         end: datetime | str | None = None,
         limit: int = 200,
+        security_type: str = "STK",
+        exchange: str | None = None,
+        currency: str = "USD",
+        use_rth: bool = False,
     ) -> pd.DataFrame:
         """Fetch OHLCV via IBKR's reqHistoricalData.
 
         Args:
-            symbol: Stock ticker (e.g. ``"MU"``).
+            symbol: Stock ticker (e.g. ``"MU"``) or futures root (e.g. ``"ES"``).
             timeframe: ccxt-format candle interval — one of
                 ``_BAR_SIZE_MAP`` (e.g. ``"1m"``, ``"1h"``, ``"1d"``).
             start/end: Date range as datetime or ``"YYYY-MM-DD"`` string.
                 If omitted, fetches the most recent *limit* bars.
             limit: Max bars (used only when start/end are omitted).
+            security_type: ``"STK"`` (default) or ``"FUT"``.
+            exchange: Required when security_type="FUT" (e.g. ``"CME"``,
+                ``"NYMEX"``, ``"COMEX"``) — futures aren't SMART-routed.
+                Ignored for stocks (always routed via SMART).
+            currency: Contract currency, default ``"USD"``.
+            use_rth: ``False`` (default, unchanged from prior behavior)
+                includes extended-hours prints. If a live run built on this
+                adapter fetches with a different ``use_rth`` than whatever
+                produced its backtest's historical data, the two see a
+                different bar shape for the same nominal timeframe (extra
+                pre/post-market bars, different daily OHLC) — this adapter
+                can't detect that mismatch itself since it doesn't know
+                where the backtest data came from; the caller is
+                responsible for passing the same value both places.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is a UTC-aware datetime.
 
-        ``useRTH=False`` includes extended-hours prints — IBKR's own
-        pacing/lookback limits per bar size (e.g. 1-sec bars only go back
-        a few days) apply and aren't paginated around here; a window too
-        long for the requested bar size raises from ib_async directly.
+        IBKR's own pacing/lookback limits per bar size (e.g. 1-sec bars only
+        go back a few days) apply and aren't paginated around here; a
+        window too long for the requested bar size raises from ib_async
+        directly.
         """
-        contract = self._resolve_contract(symbol)
+        contract = self._resolve_contract(
+            symbol, security_type=security_type, exchange=exchange, currency=currency
+        )
         bar_size = _to_bar_size(timeframe)
 
         end_dt = _parse_dt(end) if end else datetime.now(UTC)
@@ -195,7 +223,7 @@ class IBKRAdapter:
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow="TRADES",
-            useRTH=False,
+            useRTH=use_rth,
             formatDate=2,  # UTC datetimes, not exchange-local strings
         )
 
@@ -230,17 +258,29 @@ class IBKRAdapter:
 
         Expected *signal* keys: ``symbol``, ``side`` (``"buy"``/``"sell"``),
         ``quantity``, ``order_type`` (``"market"``/``"limit"``),
-        and optionally ``price`` for limit orders.
+        optionally ``price`` for limit orders, optionally ``security_type``
+        (``"STK"`` default, or ``"FUT"``) + ``exchange`` (required for
+        ``"FUT"``) + ``currency`` (default ``"USD"``), and optionally
+        ``client_order_id`` (set as IBKR's ``orderRef`` — an audit-trail tag,
+        not an enforced dedup key; check ``self._ib.openTrades()`` for a
+        matching ``orderRef`` before resubmitting if that matters to the caller).
         """
         self._require_auth()
         ib_async = _require_ib_async()
 
-        contract = self._resolve_contract(signal["symbol"])
+        contract = self._resolve_contract(
+            signal["symbol"],
+            security_type=signal.get("security_type", "STK"),
+            exchange=signal.get("exchange"),
+            currency=signal.get("currency", "USD"),
+        )
         action = "BUY" if signal["side"] == "buy" else "SELL"
         if signal.get("order_type") == "limit":
             order = ib_async.LimitOrder(action, signal["quantity"], signal["price"])
         else:
             order = ib_async.MarketOrder(action, signal["quantity"])
+        if signal.get("client_order_id"):
+            order.orderRef = signal["client_order_id"]
 
         trade = self._ib.placeOrder(contract, order)
         self._ib.sleep(0)  # pump the event loop so orderStatus reflects the ack
@@ -266,6 +306,25 @@ class IBKRAdapter:
             avg_price=lambda p: p.avgCost,
         )
 
+    def get_balance(self, currency: str) -> dict[str, float]:
+        """Return account cash balance for *currency* via IBKR's accountSummary.
+
+        UNVERIFIED against a live TWS/IB Gateway session — ``ib_async`` isn't
+        installed in this dev environment and no live/paper account was
+        available to confirm ``accountSummary()``'s tag semantics match what's
+        assumed here (``TotalCashValue``, per-currency). Based on ib_async's
+        public docs only; confirm against a real session before relying on
+        this for cash-drift alerting (``LiveTrader._reconcile_cash``).
+        """
+        self._require_auth()
+        values = self._ib.accountSummary()
+        total = 0.0
+        for v in values:
+            if v.tag == "TotalCashValue" and v.currency == currency:
+                total = float(v.value)
+                break
+        return {"free": total, "used": 0.0, "total": total}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -285,24 +344,63 @@ class IBKRAdapter:
     # Internal
     # ------------------------------------------------------------------
 
-    def _resolve_contract(self, symbol: str):
-        """Resolve a ticker string to a qualified IBKR Stock contract
-        (SMART routing, USD) — qualifyContracts hits IBKR (a blocking
-        request/response round trip) to fill in conId/exchange details and
-        confirms the symbol actually exists. Cached per symbol so a live
-        poll loop hitting the same symbols repeatedly doesn't pay that
-        round trip on every fetch/order call — mirrors ShioajiAdapter's
-        contract lookup, which is already a cheap local dict lookup against
-        contracts downloaded once at login."""
-        if symbol in self._contract_cache:
-            return self._contract_cache[symbol]
+    def _resolve_contract(
+        self,
+        symbol: str,
+        *,
+        security_type: str = "STK",
+        exchange: str | None = None,
+        currency: str = "USD",
+    ):
+        """Resolve a ticker/futures-root string to a qualified IBKR contract.
+        Both qualifyContracts (stocks) and reqContractDetails (futures) hit
+        IBKR (a blocking request/response round trip); cached per
+        (symbol, security_type, exchange, currency) so a live poll loop
+        hitting the same contract repeatedly doesn't pay that round trip on
+        every fetch/order call — mirrors ShioajiAdapter's contract lookup,
+        which is already a cheap local dict lookup against contracts
+        downloaded once at login.
+
+        Stocks: SMART-routed by symbol alone, IBKR resolves the exchange.
+        Futures: not SMART-routed — `exchange` is required (e.g. "CME" for
+        ES/NQ, "NYMEX" for CL, "COMEX" for GC). Resolves to the nearest
+        non-expired contract month (front month), not a specific expiry —
+        same "always trade/quote whatever's front-month right now" behavior
+        as ShioajiAdapter's TXFR1-style rolling alias.
+        """
+        cache_key = (symbol, security_type, exchange, currency)
+        if cache_key in self._contract_cache:
+            return self._contract_cache[cache_key]
+
+        if security_type not in ("STK", "FUT"):
+            raise ValueError(
+                f"Unsupported security_type: {security_type!r} (expected 'STK' or 'FUT')"
+            )
+        if security_type == "FUT" and not exchange:
+            raise ValueError(
+                "exchange is required for security_type='FUT' (e.g. 'CME', "
+                "'NYMEX', 'COMEX') — futures aren't SMART-routed like stocks."
+            )
+
         ib_async = _require_ib_async()
-        contract = ib_async.Stock(symbol, "SMART", "USD")
-        qualified = self._ib.qualifyContracts(contract)
-        if not qualified:
-            raise ValueError(f"Unknown symbol: {symbol}")
-        self._contract_cache[symbol] = qualified[0]
-        return qualified[0]
+
+        if security_type == "STK":
+            contract = ib_async.Stock(symbol, "SMART", currency)
+            qualified = self._ib.qualifyContracts(contract)
+            if not qualified:
+                raise ValueError(f"Unknown symbol: {symbol}")
+            resolved = qualified[0]
+        else:
+            contract = ib_async.Future(symbol, exchange=exchange, currency=currency)
+            details = self._ib.reqContractDetails(contract)
+            if not details:
+                raise ValueError(f"Unknown future: {symbol} on {exchange}")
+            # Front month = nearest non-expired contract by expiry date.
+            details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
+            resolved = details[0].contract
+
+        self._contract_cache[cache_key] = resolved
+        return resolved
 
 
 def _parse_dt(dt: datetime | str) -> datetime:

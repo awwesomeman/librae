@@ -94,6 +94,21 @@ class TestFetchOhlcv:
         assert df.empty
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
 
+    def test_use_rth_defaults_false_and_is_threaded_through(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
+
+        with patch(
+            "brokers.ibkr_adapter._require_ib_async",
+            return_value=_mock_ib_async_module(_make_bars_df()),
+        ):
+            adapter.fetch_ohlcv("MU", "1m")
+            assert adapter._ib.reqHistoricalData.call_args.kwargs["useRTH"] is False
+
+            adapter.fetch_ohlcv("MU", "1m", use_rth=True)
+            assert adapter._ib.reqHistoricalData.call_args.kwargs["useRTH"] is True
+
     def test_limit_trims_tail(self):
         adapter = _make_adapter()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
@@ -218,6 +233,28 @@ class TestPlaceOrder:
         )
         assert result == {"id": "456", "status": "Submitted"}
 
+    def test_client_order_id_sets_order_ref(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        mock_trade = MagicMock()
+        mock_trade.order.orderId = 789
+        mock_trade.orderStatus.status = "PendingSubmit"
+        adapter._ib.placeOrder.return_value = mock_trade
+        mock_ib_async = MagicMock()  # MarketOrder() returns a MagicMock -- orderRef assignable
+
+        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+            adapter.place_order(
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "quantity": 100,
+                    "client_order_id": "strat-MU-open-20260101T000000",
+                }
+            )
+
+        placed_order = adapter._ib.placeOrder.call_args.args[1]
+        assert placed_order.orderRef == "strat-MU-open-20260101T000000"
+
 
 # ---------------------------------------------------------------------------
 # get_position
@@ -249,6 +286,42 @@ class TestGetPosition:
 # ---------------------------------------------------------------------------
 # _resolve_contract
 # ---------------------------------------------------------------------------
+
+
+class TestGetBalance:
+    def test_returns_total_cash_value_for_currency(self):
+        adapter = _make_adapter(trading_enabled=True)
+
+        def _account_value(tag, currency, value):
+            v = MagicMock()
+            v.tag = tag
+            v.currency = currency
+            v.value = value
+            return v
+
+        adapter._ib.accountSummary.return_value = [
+            _account_value("TotalCashValue", "USD", "12345.67"),
+            _account_value("TotalCashValue", "TWD", "999.0"),
+            _account_value("NetLiquidation", "USD", "50000.0"),
+        ]
+
+        result = adapter.get_balance("USD")
+
+        assert result == {"free": 12345.67, "used": 0.0, "total": 12345.67}
+
+    def test_no_matching_currency_returns_zero(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.accountSummary.return_value = []
+
+        result = adapter.get_balance("USD")
+
+        assert result == {"free": 0.0, "used": 0.0, "total": 0.0}
+
+    def test_requires_trading_enabled(self):
+        adapter = _make_adapter(trading_enabled=False)
+
+        with pytest.raises(NotImplementedError, match="read-only"):
+            adapter.get_balance("USD")
 
 
 class TestResolveContract:
@@ -293,3 +366,67 @@ class TestResolveContract:
         assert first is mock_contract
         assert second is mock_contract
         adapter._ib.qualifyContracts.assert_called_once()
+
+
+class TestResolveContractFutures:
+    def _detail(self, expiry: str, contract):
+        detail = MagicMock()
+        detail.contract = contract
+        contract.lastTradeDateOrContractMonth = expiry
+        return detail
+
+    def test_picks_nearest_non_expired_contract(self):
+        adapter = _make_adapter()
+        near, far = MagicMock(), MagicMock()
+        adapter._ib.reqContractDetails.return_value = [
+            self._detail("20260620", far),
+            self._detail("20260321", near),
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+            result = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+
+        assert result is near
+        mock_ib_async.Future.assert_called_once_with("ES", exchange="CME", currency="USD")
+
+    def test_missing_exchange_raises(self):
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="exchange is required"):
+            adapter._resolve_contract("ES", security_type="FUT")
+
+    def test_unknown_future_raises(self):
+        adapter = _make_adapter()
+        adapter._ib.reqContractDetails.return_value = []
+        mock_ib_async = MagicMock()
+
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="Unknown future"),
+        ):
+            adapter._resolve_contract("NOTREAL", security_type="FUT", exchange="CME")
+
+    def test_unsupported_security_type_raises(self):
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="Unsupported security_type"):
+            adapter._resolve_contract("ES", security_type="OPT")
+
+    def test_stock_and_future_caches_are_independent(self):
+        """Same symbol, different security_type, must not collide in the cache."""
+        adapter = _make_adapter()
+        stock_contract, future_contract = MagicMock(), MagicMock()
+        adapter._ib.qualifyContracts.return_value = [stock_contract]
+        adapter._ib.reqContractDetails.return_value = [self._detail("20260620", future_contract)]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Stock.return_value = "unqualified_stock"
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+            stock_result = adapter._resolve_contract("ES", security_type="STK")
+            future_result = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+
+        assert stock_result is stock_contract
+        assert future_result is future_contract
