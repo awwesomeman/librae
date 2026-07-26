@@ -136,6 +136,8 @@ class TestPlaceOrder:
         mock_sj.StockPriceType.MKT = "STK_MKT"
         mock_sj.OrderType.ROD = "ROD"
         mock_sj.OrderType.IOC = "IOC"
+        mock_sj.FuturesOrder = MagicMock(return_value="mock_order")
+        mock_sj.StockOrder = MagicMock(return_value="mock_order")
         return mock_sj
 
     def test_futures_limit_order_uses_futures_price_type(self):
@@ -146,11 +148,9 @@ class TestPlaceOrder:
         mock_trade.status.id = "order123"
         mock_trade.status.status = "PendingSubmit"
         adapter._api.place_order.return_value = mock_trade
-        adapter._api.Order = MagicMock(return_value="mock_order")
 
-        with patch(
-            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()
-        ):
+        mock_sj = self._mock_shioaji_module()
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             result = adapter.place_order(
                 {
                     "symbol": "TXFR1",
@@ -161,7 +161,7 @@ class TestPlaceOrder:
                 }
             )
 
-        adapter._api.Order.assert_called_once_with(
+        mock_sj.FuturesOrder.assert_called_once_with(
             price=17000,
             quantity=1,
             action="BUY",
@@ -178,14 +178,12 @@ class TestPlaceOrder:
         mock_trade.status.id = "order456"
         mock_trade.status.status = "Filled"
         adapter._api.place_order.return_value = mock_trade
-        adapter._api.Order = MagicMock(return_value="mock_order")
 
-        with patch(
-            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()
-        ):
+        mock_sj = self._mock_shioaji_module()
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             adapter.place_order({"symbol": "2330", "side": "sell", "quantity": 1000})
 
-        adapter._api.Order.assert_called_once_with(
+        mock_sj.StockOrder.assert_called_once_with(
             price=0,
             quantity=1000,
             action="SELL",
@@ -204,14 +202,12 @@ class TestPlaceOrder:
         mock_trade.status.id = "order789"
         mock_trade.status.status = "Filled"
         adapter._api.place_order.return_value = mock_trade
-        adapter._api.Order = MagicMock(return_value="mock_order")
 
-        with patch(
-            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_shioaji_module()
-        ):
+        mock_sj = self._mock_shioaji_module()
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             adapter.place_order({"symbol": "TMFR1", "side": "buy", "quantity": 1})
 
-        adapter._api.Order.assert_called_once_with(
+        mock_sj.FuturesOrder.assert_called_once_with(
             price=0,
             quantity=1,
             action="BUY",
@@ -224,18 +220,17 @@ class TestResolveContract:
     def test_futures_found(self):
         adapter = _make_adapter()
         mock_contract = MagicMock()
-        adapter._api.Contracts.Futures.get.return_value = mock_contract
+        adapter._api.contracts.get.return_value = mock_contract
 
         result = adapter._resolve_contract("TXFR1")
 
         assert result is mock_contract
-        adapter._api.Contracts.Futures.get.assert_called_once_with("TXFR1")
+        adapter._api.contracts.get.assert_called_once_with("TXFR1")
 
-    def test_stocks_fallback(self):
+    def test_stocks_found(self):
         adapter = _make_adapter()
-        adapter._api.Contracts.Futures.get.return_value = None
         mock_contract = MagicMock()
-        adapter._api.Contracts.Stocks.get.return_value = mock_contract
+        adapter._api.contracts.get.return_value = mock_contract
 
         result = adapter._resolve_contract("2330")
 
@@ -243,8 +238,7 @@ class TestResolveContract:
 
     def test_unknown_symbol_raises(self):
         adapter = _make_adapter()
-        adapter._api.Contracts.Futures.get.return_value = None
-        adapter._api.Contracts.Stocks.get.return_value = None
+        adapter._api.contracts.get.return_value = None
 
         with pytest.raises(ValueError, match="Unknown symbol"):
             adapter._resolve_contract("INVALID")
@@ -254,7 +248,7 @@ class TestGetBalance:
     def test_returns_margin_equity_for_twd(self):
         adapter = _make_adapter(ca_activated=True)
         margin = MagicMock()
-        margin.equity_amount = 500_000.0
+        margin.equity = 500_000.0
         margin.available_margin = 300_000.0
         adapter._api.margin.return_value = margin
 

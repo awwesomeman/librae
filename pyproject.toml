@@ -44,14 +44,16 @@ crypto-live = [
                 # declared here as well so `pip install librae[crypto-live]` actually installs it
 ]
 tw-live = [
-  # >=1.5, not >=1.4: shioaji's own version sequence jumps 1.3.3 -> 1.5.0
-  # (no 1.4.x was ever released on PyPI). 1.5+ moved order enums
+  # >=1.7, not >=1.5: brokers/shioaji_adapter.py uses StockOrder()/
+  # FuturesOrder() (place_order) and api.contracts (_resolve_contract) —
+  # the generic Order()/api.Contracts are still present on 1.5.x but emit
+  # DeprecationWarning; confirmed against a real 1.7.0 sandbox session
+  # 2026-07-26 (see docs/plans/enhance_librae_real_trade.md, section F).
+  # 1.5+ itself was required because it moved order enums
   # (Action/FuturesPriceType/StockPriceType/OrderType) from shioaji.order.*
-  # to top-level shioaji.* — brokers/shioaji_adapter.py assumes the
-  # top-level location (see ERRORS.md). >=1.3 alone let uv.lock resolve to
-  # the pre-move 1.3.3 and mask a real AttributeError that only mocked
-  # tests couldn't catch — caught 2026-07-20 running a real sandbox login.
-  "shioaji>=1.5",
+  # to top-level shioaji.* (no 1.4.x was ever released on PyPI, sequence
+  # jumps 1.3.3 -> 1.5.0) — caught 2026-07-20 running a real sandbox login.
+  "shioaji>=1.7",
 ]
 us-live = [
   "ib-async>=1.0",  # IBKRAdapter (brokers/ibkr_adapter.py) — wraps IB Gateway/TWS socket API

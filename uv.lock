@@ -924,7 +924,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "quantstats", specifier = ">=0.0.62" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.0" },
-    { name = "shioaji", marker = "extra == 'tw-live'", specifier = ">=1.5" },
+    { name = "shioaji", marker = "extra == 'tw-live'", specifier = ">=1.7" },
 ]
 provides-extras = ["db", "crypto-live", "tw-live", "us-live", "test", "viz", "dev"]
 

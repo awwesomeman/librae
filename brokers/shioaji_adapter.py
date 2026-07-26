@@ -206,8 +206,16 @@ class ShioajiAdapter:
         ``quantity``, ``order_type`` (``"market"``/``"limit"``),
         and optionally ``price`` for limit orders.
 
-        ``signal.get("client_order_id")`` is intentionally ignored — Shioaji's
-        Order API has no client-supplied order ID / dedup key to attach it to.
+        ``signal.get("client_order_id")`` is intentionally ignored. Shioaji
+        >=1.5's ``FuturesOrder``/``StockOrder`` do have a ``custom_field``
+        that's echoed back in trade/deal callbacks, but the exchange caps it
+        at 6 characters (confirmed live against sandbox 2026-07-26 —
+        ``ValidationError`` StatusCode 422 above that) — too short to hold
+        the deterministic ``{strategy}-{symbol}-{event_type}-{ts}`` IDs
+        ``LiveExecutor`` generates (see ``librae/live/executor.py``), and a
+        truncated/hashed fit risks silent collisions defeating the whole
+        point of a dedup key. Not worth it until there's a real need for
+        broker-side dedup specifically on this adapter.
         """
         self._require_auth()
 
@@ -232,7 +240,12 @@ class ShioajiAdapter:
         # Limit orders keep ROD, which is a legitimate resting order.
         order_type = sj.OrderType.ROD if is_limit else sj.OrderType.IOC
 
-        order = self._api.Order(
+        # shioaji >=1.5 deprecated the generic Order() in favour of
+        # StockOrder()/FuturesOrder() (place_order's type hint is now
+        # Union[StockOrder, FuturesOrder]) — confirmed via DeprecationWarning
+        # running against a real sandbox session 2026-07-26.
+        order_cls = sj.FuturesOrder if is_futures else sj.StockOrder
+        order = order_cls(
             price=signal.get("price", 0),
             quantity=int(signal["quantity"]),
             action=action,
@@ -262,18 +275,17 @@ class ShioajiAdapter:
         """Return futures account margin balance (TWD only — Shioaji futures
         accounts don't hold other currencies).
 
-        UNVERIFIED against a live Shioaji session — no test account was
-        available to confirm ``margin()``'s field names match what's assumed
-        here (``equity_amount`` as total, ``available_margin`` as free).
-        Based on Shioaji's public docs only; confirm against a real session
-        before relying on this for cash-drift alerting
-        (``LiveTrader._reconcile_cash``).
+        Verified against a live Shioaji sandbox session on 2026-07-26:
+        ``margin()`` returns ``Margin(equity=..., available_margin=...,
+        risk_indicator=...)`` — ``equity``, not ``equity_amount`` as
+        previously assumed (that name never matched, so ``total``/``used``
+        silently fell back to 0 regardless of actual account equity).
         """
         self._require_auth()
         if currency != "TWD":
             return {"free": 0.0, "used": 0.0, "total": 0.0}
         margin = self._api.margin()
-        total = float(getattr(margin, "equity_amount", 0) or 0)
+        total = float(getattr(margin, "equity", 0) or 0)
         free = float(getattr(margin, "available_margin", 0) or 0)
         return {"free": free, "used": total - free, "total": total}
 
@@ -301,16 +313,23 @@ class ShioajiAdapter:
 
     def _resolve_contract(self, symbol: str):
         """Resolve a symbol string to a Shioaji contract object."""
-        contract = self._api.Contracts.Futures.get(symbol)
-        if contract is None:
-            contract = self._api.Contracts.Stocks.get(symbol)
+        # api.Contracts (capitalised, split .Futures/.Stocks lookup) is
+        # deprecated in favour of api.contracts (lowercase, "contracts v2")
+        # — confirmed via DeprecationWarning against a real sandbox session
+        # 2026-07-26. api.contracts.futures/.stocks turned out to be
+        # *methods*, not sub-containers with a .get() like the legacy API
+        # (confirmed via AttributeError against the same session) — the v2
+        # container instead exposes a single unified .get(symbol) covering
+        # futures/stocks/options/index, so there's no fallback branch left.
+        contract = self._api.contracts.get(symbol)
         if contract is None:
             raise ValueError(f"Unknown symbol: {symbol}")
         return contract
 
     def _is_futures(self, symbol: str) -> bool:
         """Check if a symbol is a futures contract."""
-        return self._api.Contracts.Futures.get(symbol) is not None
+        contract = self._api.contracts.get(symbol)
+        return contract is not None and contract.security_type == "FUT"
 
 
 def _to_date_str(dt: datetime | str) -> str:

@@ -118,20 +118,69 @@ US 股票兩條腿）才需要在兩個貨幣間對齊損益。`brokers/ibkr_ada
 
 ## F. 券商對帳/一致性缺口 (Broker Reconciliation Gaps)
 
-- **IBKR/Shioaji 現金對帳 — ✅ 已補上，但欄位語意未經真實帳號驗證**
-  (2026-07-26)。`brokers/ibkr_adapter.py::get_balance`（`accountSummary()`
-  查 `TotalCashValue`）、`brokers/shioaji_adapter.py::get_balance`
-  （`margin()` 查 `equity_amount`/`available_margin`）都已實作，兩者
-  docstring 都明確標註「UNVERIFIED against a live session」——本機沒有安裝
-  `ib_async`、也沒有真實 TWS/Shioaji 帳號能確認欄位名稱與語意，只驗證過
-  mock 測試的程式邏輯分支。**這只能在真的連上 Shioaji sandbox
-  (`SHIOAJI_SANDBOX=true`) 或 IBKR paper trading（不需要正式環境/真錢）時
-  才能驗證**——純 backtest 完全碰不到這條路徑（`_reconcile_cash` 只在
-  `mode="live"` 且有 `order_adapter` 時才跑）。
-  同時修掉一個連帶的結構性 bug：`_reconcile_cash` 原本只認得 CCXT
-  `"BASE/QUOTE"` 格式的 symbol 來抓幣別，TW 期貨/美股 symbol（`TXFR1`/`MU`）
-  沒有這個格式，就算加了 `get_balance()` 也永遠不會被呼叫——已改成
-  `market → 結算幣別` 對照表（`LiveTrader._MARKET_CURRENCY`）。
+- **Shioaji 現金/部位對帳 — ✅ 已對 sandbox 真實驗證並修正欄位 bug**
+  (2026-07-26)。用 `SHIOAJI_SANDBOX=true` 實測 `get_balance()`/
+  `get_position()`/`LiveTrader` 啟動流程（見對話記錄，非本檔案細節）：
+  - `get_balance()` 原本假設的欄位名 `equity_amount` 是錯的，Shioaji
+    `margin()` 實際回傳 `Margin(equity=..., available_margin=...,
+    risk_indicator=...)`——已修正為讀 `margin.equity`，`total`/`used`
+    先前會靜默 fallback 成 0，跟帳戶實際餘額無關。`tests/brokers/
+    test_shioaji_adapter.py` 的 mock 已同步更新。
+  - `get_position()`/`list_positions()` 曾遇到 `401 Token doesn't have
+    permission`，跟 IP 白名單無關——根因是永豐 API Key 管理頁只勾了
+    「行情/資料」「帳務」，沒勾「**交易**」。部位查詢實際落在交易權限
+    範圍，不是帳務；這不是程式碼問題，是開通 Key 時的常見 gotcha，
+    值得記錄避免下次重踩。
+  - `LiveTrader` 端到端啟動流程（reconcile_positions/reconcile_cash →
+    訂閱 → 抓 K 棒 → stale data 偵測）在 sandbox 全部驗證正常。
+  - **仍未驗證**：`_reconcile_fill`（真的等到委託成交、確認輪詢邏輯）——
+    實測當下台指期不在交易時段（週日），IOC 市價單送出成功但沒有對手盤
+    可成交，委託停在 `PendingSubmit`。需要在 TAIFEX 開盤時段（平日日盤
+    08:45–13:45 或夜盤 15:00–翌日05:00）重新送一次小單才能補完這段。
+  - IBKR 的 `get_balance()`（`accountSummary()` 查 `TotalCashValue`）**仍未
+    驗證**——本機沒有安裝 `ib_async`、也沒有真實 TWS/IBKR paper 帳號，這次
+    沒有一併測試。docstring 仍標註 UNVERIFIED，之後要測可用 IBKR paper
+    trading（不需要正式環境/真錢）。
+  - **shioaji 升到 1.7.0（PyPI 當前最新穩定版）後續補的三個 API 遷移**
+    (2026-07-26，對照 `pyproject.toml` 的 `tw-live` extra 依賴下限同步調整
+    為 `>=1.7`)：
+    1. `place_order()` 的 `sj.Order()`（泛用）已棄用，改用
+       `sj.FuturesOrder()`/`sj.StockOrder()`——`place_order()` 型別提示已是
+       `Union[StockOrder, FuturesOrder]`。新版建構子多了 `custom_field`
+       欄位，本以為可以拿來裝 `client_order_id`，但實測交易所端有 6 字元
+       上限（`ValidationError` StatusCode 422），裝不下
+       `LiveExecutor` 產生的 `{strategy}-{symbol}-{event_type}-{ts}` 這種
+       ID，硬塞截斷/雜湊又有碰撞風險，維持原本「忽略 client_order_id」的
+       行為，只是原因從「完全沒有掛載點」改成「掛載點太短不夠用」。
+    2. `_resolve_contract`/`_is_futures` 的 `self._api.Contracts`（大寫）已
+       棄用，改 `self._api.contracts`（小寫，「contracts v2」）。**注意
+       v2 容器的形狀跟舊版不同**：不是 `.Futures.get()`/`.Stocks.get()`
+       兩條分開查的路徑，`.futures`/`.stocks` 在 v2 上其實是 method 不是
+       帶 `.get()` 的子容器（直接呼叫會是
+       `AttributeError: 'builtin_function_or_method' object has no
+       attribute 'get'`）——v2 容器本身直接提供統一的
+       `contracts.get(symbol)`，一次涵蓋 futures/stocks/options/index，
+       原本的 fallback 分支整個可以砍掉。這是實測 sandbox 逐層試出來的，
+       官方 `.pyi` type stub 對 `api.Contracts`（大寫、舊版）的欄位描述
+       仍看得到，但沒有精確反映 `api.contracts`（小寫、v2）的實際 runtime
+       形狀，不能只看 stub 就下結論。
+    3. 附帶行為差異：第一次存取 `api.contracts` 會自動訂閱
+       STK/IND/FUT/OPT/WRT 全部類別的合約更新（sandbox log 可見多筆
+       `APISUB/V2/SYS/CONTRACT/TW/*` Subscribe ok），跟舊版 `api.Contracts`
+       是否有相同的隱含訂閱行為未逐一比對，目前沒觀察到副作用，記錄起來
+       以防之後查資料訂閱量異常時想起這裡。
+    - `tests/brokers/test_shioaji_adapter.py` 對應 mock 已同步更新（
+      `sj.FuturesOrder`/`sj.StockOrder`、`adapter._api.contracts.get`）。
+    - 已用 `warnings.catch_warnings` 對真實 sandbox session 跑過
+      `_resolve_contract`/`_is_futures`/`place_order`，確認 0 個
+      DeprecationWarning，全測試套件（438 passed）同步跑過。
+  - **這只能在真的連上 Shioaji sandbox 或 IBKR paper trading 時才能驗證**
+    ——純 backtest 完全碰不到這條路徑（`_reconcile_cash` 只在
+    `mode="live"` 且有 `order_adapter` 時才跑）。
+  - 同時修掉一個連帶的結構性 bug：`_reconcile_cash` 原本只認得 CCXT
+    `"BASE/QUOTE"` 格式的 symbol 來抓幣別，TW 期貨/美股 symbol（`TXFR1`/`MU`）
+    沒有這個格式，就算加了 `get_balance()` 也永遠不會被呼叫——已改成
+    `market → 結算幣別` 對照表（`LiveTrader._MARKET_CURRENCY`）。
 - **Live 抓取的 session 範圍可能跟回測資料不一致**：`IBKRAdapter.fetch_ohlcv`
   新增了 `use_rth` 參數（預設 `False`，維持原行為）——但這個 adapter 沒辦法
   自己偵測 backtest 資料當初是用哪種 session 範圍產生的，呼叫者要自行保證
