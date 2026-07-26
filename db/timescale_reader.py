@@ -128,8 +128,8 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     """
     sql = """
         SELECT sp.run_id, sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
-               sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.trades,
-               sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
+               sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.payoff_ratio,
+               sp.trades, sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
                sp.total_commission, sp.total_slippage, sp.total_tax,
                br.strategy, br.symbol, br.timeframe
         FROM strategy_performance sp

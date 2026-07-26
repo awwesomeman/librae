@@ -46,6 +46,7 @@ REQUIRED_PERF_FIELDS: tuple[str, ...] = (
     "sortino",
     "calmar",
     "profit_factor",
+    "payoff_ratio",
     "win_rate",
     "avg_trade_return",
     "trades",
@@ -157,6 +158,7 @@ class StrategyMetrics:
     # Most strategies (None if not applicable)
     win_rate: float | None = None
     profit_factor: float | None = None
+    payoff_ratio: float | None = None
     avg_trade_return: float | None = None
     exposure_ratio: float | None = None
 

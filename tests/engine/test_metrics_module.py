@@ -270,3 +270,169 @@ def test_compute_trade_mae_mfe_short():
     assert res["n"] == 1
     assert res["median_mae"] == 20.0  # high spiked to 120, adverse move for a short: (120-100)/100
     assert res["median_mfe"] == 5.0  # low dipped to 95, favorable move for a short: (100-95)/100
+
+
+def test_compute_trade_mae_mfe_envelope_curve():
+    """max_periods=N returns a per-offset decay curve, ignoring the trade's actual exit."""
+    from librae.backtest.schema import OrderEventRecord
+    from librae.core.metrics import compute_trade_mae_mfe
+
+    idx = pd.date_range("2026-03-01", periods=10, freq="1h", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [100] * 10,
+            "high": [100, 105, 110, 102, 100, 100, 108, 100, 100, 100],
+            "low": [100, 95, 90, 98, 100, 100, 92, 100, 100, 100],
+            "close": [100] * 10,
+        },
+        index=idx,
+    )
+    ev_open = OrderEventRecord(
+        event_id="e1",
+        ts=idx[0],
+        symbol="BTCUSDT",
+        side="long",
+        event_type="open",
+        fill_quantity=1.0,
+        price=100.0,
+        entry_price=100.0,
+        remaining_quantity=1.0,
+        notional=100.0,
+    )
+    # Closes at idx[3] but the curve should keep walking OHLCV past that point.
+    ev_close = OrderEventRecord(
+        event_id="e2",
+        ts=idx[3],
+        symbol="BTCUSDT",
+        side="long",
+        event_type="close",
+        fill_quantity=1.0,
+        price=102.0,
+        entry_price=100.0,
+        remaining_quantity=0.0,
+        notional=102.0,
+    )
+
+    res = compute_trade_mae_mfe([ev_open, ev_close], df, max_periods=5)
+    assert res["n"] == 1
+    assert res["offsets"] == [1, 2, 3, 4, 5]
+    # T=1 (bar idx[1], high=105): running max so far since entry is still 100 (entry bar).
+    assert res["median_mfe_curve"][0] == 5.0
+    # T=3 (bar idx[3]): running max high across idx[0..3] is 110 -> +10%.
+    assert res["median_mfe_curve"][2] == 10.0
+    # T=5 (bar idx[5], past the trade's actual close at idx[3]): still walks forward.
+    assert res["median_mfe_curve"][4] == 10.0
+
+
+def test_compute_trade_mae_mfe_empty():
+    from librae.core.metrics import compute_trade_mae_mfe
+
+    assert compute_trade_mae_mfe([], pd.DataFrame())["n"] == 0
+    curve = compute_trade_mae_mfe([], pd.DataFrame(), max_periods=10)
+    assert curve["n"] == 0
+    assert curve["offsets"] == []
+
+
+def test_compute_trade_durations():
+    from librae.backtest.schema import OrderEventRecord
+    from librae.core.metrics import compute_trade_durations
+
+    events = [
+        OrderEventRecord(
+            event_id="o1",
+            ts=START,
+            symbol="X",
+            side="long",
+            event_type="open",
+            fill_quantity=1.0,
+            price=100.0,
+            entry_price=100.0,
+            remaining_quantity=1.0,
+            notional=100.0,
+        ),
+        OrderEventRecord(
+            event_id="c1",
+            ts=START,
+            symbol="X",
+            side="long",
+            event_type="close",
+            fill_quantity=1.0,
+            price=105.0,
+            entry_price=100.0,
+            remaining_quantity=0.0,
+            notional=105.0,
+            pnl=5.0,
+            periods_held=7,
+        ),
+        OrderEventRecord(
+            event_id="c2",
+            ts=START,
+            symbol="X",
+            side="long",
+            event_type="close",
+            fill_quantity=1.0,
+            price=95.0,
+            entry_price=100.0,
+            remaining_quantity=0.0,
+            notional=95.0,
+            pnl=-5.0,
+            periods_held=3,
+        ),
+    ]
+    assert compute_trade_durations(events) == [7, 3]
+
+
+def test_compute_pnl_by_trade():
+    from librae.backtest.schema import OrderEventRecord
+    from librae.core.metrics import compute_pnl_by_trade
+
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    t1 = datetime(2026, 1, 2, tzinfo=UTC)
+    events = [
+        OrderEventRecord(
+            event_id="c2",
+            ts=t1,
+            symbol="X",
+            side="long",
+            event_type="close",
+            fill_quantity=1.0,
+            price=95.0,
+            entry_price=100.0,
+            remaining_quantity=0.0,
+            notional=95.0,
+            pnl=-5.0,
+        ),
+        OrderEventRecord(
+            event_id="c1",
+            ts=t0,
+            symbol="X",
+            side="long",
+            event_type="close",
+            fill_quantity=1.0,
+            price=105.0,
+            entry_price=100.0,
+            remaining_quantity=0.0,
+            notional=105.0,
+            pnl=5.0,
+        ),
+    ]
+    # Out-of-order input, but result must follow ts order (5, then 5-5=0).
+    assert compute_pnl_by_trade(events) == [5.0, 0.0]
+
+
+def test_compute_payoff_ratio_none_when_one_sided():
+    pnls = [
+        _make_trade_pnl(net_pnl=10, net_return=0.1),
+        _make_trade_pnl(net_pnl=5, net_return=0.05),
+    ]
+    m = _call_compute_all([10_000.0, 10_010.0, 10_015.0], pnls)
+    assert m.payoff_ratio is None
+
+
+def test_compute_payoff_ratio_value():
+    pnls = [
+        _make_trade_pnl(net_pnl=20, net_return=0.2),
+        _make_trade_pnl(net_pnl=-10, net_return=-0.1),
+    ]
+    m = _call_compute_all([10_000.0, 10_200.0, 10_100.0], pnls)
+    assert np.isclose(m.payoff_ratio, 2.0)

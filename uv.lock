@@ -880,6 +880,7 @@ name = "librae"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyyaml" },
@@ -916,6 +917,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.24" },
     { name = "ib-async", marker = "extra == 'us-live'", specifier = ">=1.0" },
     { name = "lightweight-charts", marker = "extra == 'viz'", specifier = ">=2.0" },
+    { name = "matplotlib", specifier = ">=3.7" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "psycopg2-binary", marker = "extra == 'db'", specifier = ">=2.9" },

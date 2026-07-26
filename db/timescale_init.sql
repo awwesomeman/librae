@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     max_drawdown    DOUBLE PRECISION,
     win_rate        DOUBLE PRECISION,
     profit_factor   DOUBLE PRECISION,
+    payoff_ratio    DOUBLE PRECISION,
     trades          INTEGER,
     avg_trade_return DOUBLE PRECISION,
     exposure_ratio  DOUBLE PRECISION,
@@ -98,6 +99,9 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     total_slippage  DOUBLE PRECISION DEFAULT 0,
     total_tax       DOUBLE PRECISION DEFAULT 0
 );
+-- WHY: existing deployments already ran CREATE TABLE before payoff_ratio existed;
+-- IF NOT EXISTS keeps this script idempotent for both fresh and existing DBs.
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS payoff_ratio DOUBLE PRECISION;
 
 -- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)

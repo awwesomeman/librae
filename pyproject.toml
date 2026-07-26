@@ -24,6 +24,7 @@ dependencies = [
   "pandas>=2.0",
   "numpy>=1.24",
   "quantstats>=0.0.62",
+  "matplotlib>=3.7",  # generate_trade_tearsheet() charts — already a quantstats transitive dep, pinned explicitly
   "httpx>=0.24",  # notifications/telegram.py — small, no heavy transitive deps, not worth its own extra
   "pyyaml>=6.0",
 ]

@@ -795,10 +795,10 @@ def write_strategy_performance(
     """
     sql = """INSERT INTO strategy_performance
                (run_id, total_return, annual_return, sharpe, sortino, calmar,
-                max_drawdown, win_rate, profit_factor, trades,
+                max_drawdown, win_rate, profit_factor, payoff_ratio, trades,
                 avg_trade_return, exposure_ratio, benchmark_return,
                 total_commission, total_slippage, total_tax)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  total_return=EXCLUDED.total_return,
                  annual_return=EXCLUDED.annual_return,
@@ -808,6 +808,7 @@ def write_strategy_performance(
                  max_drawdown=EXCLUDED.max_drawdown,
                  win_rate=EXCLUDED.win_rate,
                  profit_factor=EXCLUDED.profit_factor,
+                 payoff_ratio=EXCLUDED.payoff_ratio,
                  trades=EXCLUDED.trades,
                  avg_trade_return=EXCLUDED.avg_trade_return,
                  exposure_ratio=EXCLUDED.exposure_ratio,
@@ -825,6 +826,7 @@ def write_strategy_performance(
         metrics.max_drawdown,
         metrics.win_rate,
         metrics.profit_factor,
+        metrics.payoff_ratio,
         metrics.trades,
         metrics.avg_trade_return,
         metrics.exposure_ratio,
