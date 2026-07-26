@@ -42,7 +42,7 @@ class TestRenderSignalMonitor:
 
     def test_has_required_fields(self):
         d = render_signal_monitor()
-        assert d["uid"] == "signal-monitor-v2"
+        assert d["uid"] == "signal-monitor"
         assert d["schemaVersion"] == 39
 
     def test_variables(self):
