@@ -374,19 +374,22 @@ class TestScalingIntegration:
 
 
 class TestEdgeCases:
-    def test_scale_without_quantity_rejected(self):
-        """#15: scaling requires explicit quantity."""
+    def test_scale_without_quantity_rejected(self, caplog):
+        """#15: scaling requires explicit quantity — must warn, not just
+        silently no-op, since this is a strategy action being dropped."""
         positions: dict[str, PositionState] = {}
         _run_actions(
             [Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0}
         )
 
         # Try to scale without quantity
-        result = _run_actions(
-            [Action(type="long", symbol="TEST")], positions, prices={"TEST": 120.0}
-        )
+        with caplog.at_level("WARNING"):
+            result = _run_actions(
+                [Action(type="long", symbol="TEST")], positions, prices={"TEST": 120.0}
+            )
         assert positions["TEST"].quantity == 10.0  # unchanged
         assert result.cash_delta == 0.0
+        assert any("requires explicit quantity" in r.message for r in caplog.records)
 
     def test_buy_while_short_rejected(self):
         """#16: opposite-side action rejected."""

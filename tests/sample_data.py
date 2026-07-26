@@ -63,7 +63,11 @@ def run_simple_sma_crossover(
 ) -> dict:
     """Deterministic SMA crossover backtest on OHLCV data.
 
-    Returns a flat metrics dict compatible with the legacy backtest interface.
+    Standalone hand-rolled reimplementation, deliberately independent of
+    librae.backtest.engine.Backtest — used only to pin a fixed baseline
+    (see tests/engine/test_baseline_btc_h1.py) that breaks if numpy/pandas
+    behavior drifts, not to test the real engine. Returns a flat metrics
+    dict private to that test; nothing else in this repo consumes this shape.
     """
     close = df["close"].values
     n = len(close)

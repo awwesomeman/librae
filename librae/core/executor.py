@@ -511,6 +511,13 @@ def resolve_fill_price(
     Returns:
         Resolved price, or None if the order should be rejected
         (limit not reachable, field missing/zero).
+
+    Numeric fill_spec (limit order) assumes full liquidity across the
+    entire [low, high] bar range — if the limit price is anywhere inside
+    that range, the whole requested quantity fills at exactly that price.
+    Real order books don't guarantee that; this is a known simplification,
+    fine for liquid instruments but optimistic for thin/illiquid markets
+    (see docs/plans/enhance_librae_real_trade.md).
     """
     fill_spec = action.fill_price if action.fill_price is not None else default_fill
 
@@ -847,9 +854,11 @@ def process_actions(
                     )
 
             elif positions[sym].side == desired_side:
-                # SCALE IN — must specify quantity
+                # SCALE IN — must specify quantity. Same severity as the
+                # opposite-side rejection below: both are a strategy action
+                # silently turned into a no-op, not a normal/expected path.
                 if action.quantity is None:
-                    logger.debug("Scaling %s requires explicit quantity, skipping", sym)
+                    logger.warning("Scaling %s requires explicit quantity, skipping", sym)
                     continue
                 fill, outlay = _try_fill(
                     action,

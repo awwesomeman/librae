@@ -83,16 +83,28 @@ class BacktestResult:
 class Backtest:
     """Bar-by-bar backtest engine.
 
+    Two supported construction styles:
+      - Direct args (market_config/initial_balance/data_source below): a
+        standalone single-run constructor, no RunConfig needed — the
+        standard choice for tests, notebooks, and simple scripts.
+      - cfg=RunConfig: derives market_config/initial_balance/data_source
+        from cfg and additionally resolves a per-symbol CostModel for every
+        symbol in a multi-asset run — required when running through the
+        CLI/DB pipeline (orchestration/cli.py), which builds a RunConfig.
+    Both are first-class; neither is deprecated. Passing market_config
+    without cfg only works for spot-multiplier instruments (see the
+    ValueError below) — pass cost_model= directly for anything else.
+
     Args:
         data: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
               For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
         strategy: BaseStrategy subclass.
-        cfg: RunConfig (preferred). Derives market_config, initial_balance, etc.
-        market_config: MarketConfig for cost model (legacy, use cfg instead).
-        initial_balance: Starting cash (legacy, use cfg instead).
+        cfg: RunConfig — see "cfg=RunConfig" above.
+        market_config: MarketConfig for cost model — direct-args style.
+        initial_balance: Starting cash — direct-args style.
         strategy_name: Override strategy name (default: from cfg or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
-        data_source: Data source identifier (legacy, use cfg instead).
+        data_source: Data source identifier — direct-args style.
     """
 
     def __init__(
@@ -140,14 +152,23 @@ class Backtest:
             elif market_config is not None:
                 raise ValueError(
                     "market_config alone can't build a CostModel — multiplier comes from "
-                    "symbols.yaml (spot=1.0 auto, contract_* explicit-required), which "
-                    "this legacy path has no symbol for. Pass cost_model= directly (e.g. "
-                    "CostModel.from_market(market_config, multiplier=...)), or use cfg= instead."
+                    "the symbol registry (spot=1.0 auto, contract_* explicit-required), which "
+                    "the direct-args constructor has no symbol for. Pass cost_model= directly "
+                    "(e.g. CostModel.from_market(market_config, multiplier=...)), or use cfg= instead."
                 )
             else:
                 resolved_cm = CostModel.zero()
 
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
+        if cfg is not None and cost_model is None:
+            # Resolve every other symbol in this run independently (each
+            # against its own registry entry/cost_overrides/symbol_overrides
+            # entry) — a multi-asset run isn't guaranteed to share one
+            # multiplier (e.g. tw_futures TXFR1=200 vs MXFR1=50), so only
+            # cfg.symbol (symbols[0]) got a correct CostModel above.
+            for sym in self._symbols:
+                if sym != cfg.symbol:
+                    self._cost_models[sym] = CostModel.from_config(cfg, symbol=sym)
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open") if cfg else "open"
         self._max_position_pct, self._max_drawdown_pct, self._max_volume_participation_pct = (
             validate_risk_params(cfg.params if cfg else None)
