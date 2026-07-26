@@ -1,6 +1,6 @@
 [project]
 name = "librae"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Librae — quant backtest and live-trading engine, multi-asset support"
 readme = "README.md"
 authors = [
@@ -74,6 +74,12 @@ include = ["librae*", "brokers*", "db*", "notifications*", "orchestration*", "ap
 [tool.setuptools.package-data]
 librae = ["_scaffold/env.example"]
 
+[tool.setuptools_scm]
+# Derives the version from git tags/commit distance instead of a hand-maintained
+# string — a `pip install git+...` install (no @<ref> pin) or `pip show librae`
+# always reflects the actual commit, no manual version bump to remember/forget.
+version_file = "librae/_version.py"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -86,7 +92,7 @@ markers = [
 target-version = "py312"
 line-length = 100
 src = ["librae", "notifications", "orchestration", "db", "brokers", "app", "scripts"]
-extend-exclude = ["*.md"]  # don't reformat doc code fences
+extend-exclude = ["*.md", "librae/_version.py"]  # doc code fences; setuptools_scm-generated, gitignored
 
 [tool.ruff.lint]
 # Standard rule set: pycodestyle (E/W), pyflakes (F), isort (I), bugbear (B),
@@ -104,5 +110,5 @@ ignore = [
 "librae/__init__.py" = ["I001", "RUF022"]
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"

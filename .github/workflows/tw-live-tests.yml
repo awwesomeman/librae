@@ -9,7 +9,7 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "conftest.py"
+      - "tests/conftest.py"
       - ".github/workflows/tw-live-tests.yml"
   pull_request:
     paths:
@@ -19,8 +19,12 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "conftest.py"
+      - "tests/conftest.py"
       - ".github/workflows/tw-live-tests.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   tw-live:
@@ -40,7 +44,7 @@ jobs:
           enable-cache: true
 
       - name: Install tw-live + test dependencies
-        run: uv sync --frozen --python ${{ matrix.python }} --extra tw-live --extra test
+        run: uv sync --frozen --python ${{ matrix.python }} --extra tw-live --extra test --extra db
 
       - name: Run tw-live tests
         run: uv run --python ${{ matrix.python }} pytest -q -m "tw_live" tests/
