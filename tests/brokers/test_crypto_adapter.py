@@ -162,6 +162,34 @@ def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.create_order.assert_called_once()
 
 
+def test_place_order_forwards_client_order_id(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
+    signal = {
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "quantity": 0.01,
+        "order_type": "market",
+        "client_order_id": "strat-BTCUSDT-open-20260101T000000",
+    }
+    authed_adapter.place_order(signal)
+    assert (
+        mock_ccxt_exchange.create_order.call_args.kwargs["params"]["clientOrderId"]
+        == "strat-BTCUSDT-open-20260101T000000"
+    )
+
+
+def test_place_order_without_client_order_id_omits_param(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
+    signal = {
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "quantity": 0.01,
+        "order_type": "market",
+    }
+    authed_adapter.place_order(signal)
+    assert "clientOrderId" not in mock_ccxt_exchange.create_order.call_args.kwargs["params"]
+
+
 # ---------------------------------------------------------------------------
 # Test 5: sandbox mode — CryptoAdapter.__init__ itself (not the bypassed
 # __new__ fixtures above), since that's the only place set_sandbox_mode /

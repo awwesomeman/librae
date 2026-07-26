@@ -205,6 +205,9 @@ class ShioajiAdapter:
         Expected *signal* keys: ``symbol``, ``side`` (``"buy"``/``"sell"``),
         ``quantity``, ``order_type`` (``"market"``/``"limit"``),
         and optionally ``price`` for limit orders.
+
+        ``signal.get("client_order_id")`` is intentionally ignored — Shioaji's
+        Order API has no client-supplied order ID / dedup key to attach it to.
         """
         self._require_auth()
 
@@ -254,6 +257,25 @@ class ShioajiAdapter:
             avg_price=lambda p: p.price,
             pnl=lambda p: getattr(p, "pnl", 0),
         )
+
+    def get_balance(self, currency: str) -> dict[str, float]:
+        """Return futures account margin balance (TWD only — Shioaji futures
+        accounts don't hold other currencies).
+
+        UNVERIFIED against a live Shioaji session — no test account was
+        available to confirm ``margin()``'s field names match what's assumed
+        here (``equity_amount`` as total, ``available_margin`` as free).
+        Based on Shioaji's public docs only; confirm against a real session
+        before relying on this for cash-drift alerting
+        (``LiveTrader._reconcile_cash``).
+        """
+        self._require_auth()
+        if currency != "TWD":
+            return {"free": 0.0, "used": 0.0, "total": 0.0}
+        margin = self._api.margin()
+        total = float(getattr(margin, "equity_amount", 0) or 0)
+        free = float(getattr(margin, "available_margin", 0) or 0)
+        return {"free": free, "used": total - free, "total": total}
 
     # ------------------------------------------------------------------
     # Lifecycle

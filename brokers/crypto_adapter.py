@@ -279,18 +279,23 @@ class CryptoAdapter:
         """Place an order.
 
         Expected *signal* keys: ``symbol``, ``side``, ``quantity``,
-        ``order_type`` (``"market"`` or ``"limit"``), and optionally
-        ``price`` for limit orders.
+        ``order_type`` (``"market"`` or ``"limit"``), optionally ``price``
+        for limit orders, and optionally ``client_order_id`` (forwarded as
+        ccxt's unified ``clientOrderId`` param, exchange-side dedup/audit).
         """
         self._require_auth()
         order_type = signal.get("order_type", "market")
         price = signal.get("price")
+        params = {}
+        if signal.get("client_order_id"):
+            params["clientOrderId"] = signal["client_order_id"]
         result = self._exchange.create_order(
             symbol=signal["symbol"],
             type=order_type,
             side=signal["side"],
             amount=signal["quantity"],
             price=price,
+            params=params,
         )
         return result
 

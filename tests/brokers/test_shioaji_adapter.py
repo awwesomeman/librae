@@ -250,6 +250,33 @@ class TestResolveContract:
             adapter._resolve_contract("INVALID")
 
 
+class TestGetBalance:
+    def test_returns_margin_equity_for_twd(self):
+        adapter = _make_adapter(ca_activated=True)
+        margin = MagicMock()
+        margin.equity_amount = 500_000.0
+        margin.available_margin = 300_000.0
+        adapter._api.margin.return_value = margin
+
+        result = adapter.get_balance("TWD")
+
+        assert result == {"free": 300_000.0, "used": 200_000.0, "total": 500_000.0}
+
+    def test_non_twd_currency_returns_zero(self):
+        adapter = _make_adapter(ca_activated=True)
+
+        result = adapter.get_balance("USD")
+
+        assert result == {"free": 0.0, "used": 0.0, "total": 0.0}
+        adapter._api.margin.assert_not_called()
+
+    def test_requires_ca(self):
+        adapter = _make_adapter(ca_activated=False)
+
+        with pytest.raises(NotImplementedError, match="read-only"):
+            adapter.get_balance("TWD")
+
+
 class TestLifecycle:
     def test_close_calls_logout(self):
         adapter = _make_adapter()
