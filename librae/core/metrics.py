@@ -91,7 +91,7 @@ def compute_all(
 
     from librae.backtest.schema import StrategyMetrics
 
-    if not equity_values:
+    if len(equity_values) == 0:
         return StrategyMetrics(total_return=0.0, trades=0)
 
     eq_arr = np.array(equity_values, dtype=np.float64)
@@ -103,20 +103,16 @@ def compute_all(
         dtype=np.float64,
     )
 
-    n_trades = len(trade_pnls)
-    if n_trades == 0 or len(returns) < 2:
-        _comp = _safe_qs(qs.stats.comp, returns) if len(returns) > 0 else None
-        total_ret = _comp if _comp is not None else 0.0
-        return StrategyMetrics(total_return=total_ret, trades=n_trades)
-
-    _dd = _safe_qs(qs.stats.max_drawdown, returns)
+    _comp = _safe_qs(qs.stats.comp, returns) if len(returns) > 0 else None
+    total_ret = _comp if _comp is not None else 0.0
+    _dd = _safe_qs(qs.stats.max_drawdown, returns) if len(returns) > 0 else None
     max_dd = _dd if _dd is not None else 0.0
 
     sharpe: float | None = None
     sortino: float | None = None
     calmar: float | None = None
     ann_return: float | None = None
-    if annualize:
+    if annualize and len(returns) >= 2:
         # WHY: QuantStats expects bars-per-year, not trading-days-per-year,
         # so annualization always uses actual bar density (correct for any
         # timeframe — H1, D1, ...); annual_periods is only the fallback for
@@ -131,7 +127,7 @@ def compute_all(
         calmar = _safe_qs(qs.stats.calmar, returns, periods=periods)
         ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods)
 
-    # Trade-level metrics from TradePnL
+    n_trades = len(trade_pnls)
     net_pnls = np.array([t.net_pnl for t in trade_pnls], dtype=np.float64)
     commissions = np.array([t.commission for t in trade_pnls], dtype=np.float64)
     slippages = np.array([t.slippage for t in trade_pnls], dtype=np.float64)
@@ -139,7 +135,7 @@ def compute_all(
 
     wins = net_pnls[net_pnls > 0]
     losses_abs = np.abs(net_pnls[net_pnls < 0])
-    win_rate = float(len(wins) / n_trades) if n_trades > 0 else 0.0
+    win_rate = float(len(wins) / n_trades) if n_trades > 0 else None
     # WHY: profit_factor undefined when no losses (all wins) — return None,
     # not 0.0 which misleadingly suggests worst performance.
     profit_factor = (
@@ -150,30 +146,29 @@ def compute_all(
         float(wins.mean() / losses_abs.mean()) if len(wins) > 0 and len(losses_abs) > 0 else None
     )
 
-    _comp = _safe_qs(qs.stats.comp, returns)
-    total_ret = _comp if _comp is not None else 0.0
     # WHY: TradePnL.net_return is percentage (*100); convert to ratio
     # for consistency with other StrategyMetrics return fields.
     # Use quantity-weighted average when quantities are available
     # to correctly handle partial closes with different sizes.
     trade_returns = np.array([t.net_return for t in trade_pnls], dtype=np.float64)
-    if trade_quantities is not None:
-        if len(trade_quantities) != n_trades:
-            raise ValueError(
-                f"trade_quantities length ({len(trade_quantities)}) "
-                f"must match trade_pnls length ({n_trades})"
-            )
+    avg_trade_return: float | None = None
+    if trade_quantities is not None and len(trade_quantities) != n_trades:
+        raise ValueError(
+            f"trade_quantities length ({len(trade_quantities)}) "
+            f"must match trade_pnls length ({n_trades})"
+        )
+    if n_trades > 0 and trade_quantities is not None:
         qty_weights = np.array(trade_quantities, dtype=np.float64)
         avg_trade_return = float(np.average(trade_returns, weights=qty_weights)) / 100.0
-    else:
+    elif n_trades > 0:
         avg_trade_return = float(np.mean(trade_returns)) / 100.0
 
-    exposure_ratio = 0.0
+    exposure_ratio: float | None = None
     if exposed_periods is not None and total_periods > 0:
         exposure_ratio = float(exposed_periods / total_periods)
 
     benchmark_return: float | None = None
-    if benchmark_values and len(benchmark_values) >= 2:
+    if benchmark_values is not None and len(benchmark_values) >= 2:
         benchmark_return = float(benchmark_values[-1] / (benchmark_values[0] + EPSILON) - 1.0)
 
     return StrategyMetrics(

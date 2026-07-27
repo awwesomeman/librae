@@ -45,7 +45,12 @@ def _multi_asset_frame(
     opens: dict[str, list[float]],
     closes: dict[str, list[float]] | None = None,
 ) -> pd.DataFrame:
-    timestamps = pd.date_range("2026-01-01", periods=len(next(iter(opens.values()))), freq="h")
+    timestamps = pd.date_range(
+        "2026-01-01",
+        periods=len(next(iter(opens.values()))),
+        freq="h",
+        tz="UTC",
+    )
     rows: list[dict[str, float | str | pd.Timestamp]] = []
     closes = closes or opens
     for symbol in sorted(opens):

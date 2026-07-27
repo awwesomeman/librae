@@ -8,6 +8,7 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.strategy import Action, BaseStrategy, Context
+from tests.conftest import make_test_cfg
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -139,6 +140,74 @@ class TestBacktestBasics:
             Backtest(df, HoldStrategy(), data_source="test")
 
 
+class TestBacktestDataContract:
+    def test_requires_exact_index_names(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df.index = df.index.set_names(["asset", "ts"])
+
+        with pytest.raises(ValueError, match=r"exactly \('symbol', 'datetime'\)"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_requires_all_ohlcv_columns(self) -> None:
+        df = _make_multiindex_df([100.0] * 5).drop(columns="volume")
+
+        with pytest.raises(ValueError, match="missing required OHLCV columns: volume"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_rejects_duplicate_symbol_timestamp(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df = pd.concat([df, df.iloc[[0]]])
+
+        with pytest.raises(ValueError, match=r"unique \(symbol, datetime\)"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_rejects_timezone_naive_timestamps(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        naive = df.index.get_level_values("datetime").tz_localize(None)
+        df.index = pd.MultiIndex.from_arrays(
+            [df.index.get_level_values("symbol"), naive],
+            names=["symbol", "datetime"],
+        )
+
+        with pytest.raises(ValueError, match="timezone-aware"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_rejects_non_monotonic_timestamps_within_symbol(self) -> None:
+        df = _make_multiindex_df([100.0] * 5).iloc[[1, 0, 2, 3, 4]]
+
+        with pytest.raises(ValueError, match="increasing within symbol"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    @pytest.mark.parametrize("value", [np.nan, np.inf, -1.0, 0.0])
+    def test_rejects_invalid_prices(self, value: float) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df.iloc[0, df.columns.get_loc("open")] = value
+
+        with pytest.raises(ValueError, match=r"finite|positive"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_rejects_inconsistent_ohlc(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df.iloc[0, df.columns.get_loc("high")] = 99.0
+
+        with pytest.raises(ValueError, match="OHLC values are inconsistent"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_rejects_negative_volume(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df.iloc[0, df.columns.get_loc("volume")] = -1.0
+
+        with pytest.raises(ValueError, match="volume must be non-negative"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_cfg_symbols_must_match_data(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        cfg = make_test_cfg(mode="backtest", symbols=["ETHUSDT"])
+
+        with pytest.raises(ValueError, match="must exactly match data symbols"):
+            Backtest(df, HoldStrategy(), cfg=cfg, cost_model=_zero_cost())
+
+
 class TestSignalDrivenStrategy:
     def test_entry_exit_signals(self) -> None:
         prices = [100.0] * 10
@@ -187,14 +256,15 @@ class TestMultiAsset:
         rows = []
         for sym, base_price in [("AAA", 100.0), ("BBB", 200.0)]:
             for i in range(n):
+                close = base_price + i
                 rows.append(
                     {
                         "symbol": sym,
                         "datetime": dt[i],
                         "open": base_price,
-                        "high": base_price * 1.001,
+                        "high": close * 1.001,
                         "low": base_price * 0.999,
-                        "close": base_price + i,  # trending up
+                        "close": close,  # trending up
                         "volume": 100.0,
                     }
                 )

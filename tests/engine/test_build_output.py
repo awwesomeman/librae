@@ -134,6 +134,7 @@ class TestBuildOutputValid:
             initial_balance=10_000.0,
             cost_model=cost,
             data_source="test",
+            record_position_snapshots=True,
         )
 
         result = bt.run()
@@ -144,6 +145,9 @@ class TestBuildOutputValid:
         assert output.metrics.total_return == pytest.approx(
             result.final_equity / result.initial_balance - 1.0
         )
+        final_ts = result.equity_curve[-1].ts
+        assert all(snapshot.ts != final_ts for snapshot in result.position_snapshots)
+        assert all(snapshot.ts != final_ts for snapshot in output.position_snapshots)
 
 
 class TestBuildOutputBeforeRun:
@@ -187,6 +191,21 @@ class TestBenchmark:
         # At least some equity curve points should have benchmark values
         bm_points = [p for p in output.equity_curve if p.benchmark_equity is not None]
         assert len(bm_points) > 0
+
+    def test_zero_trade_run_keeps_available_benchmark_metrics(self) -> None:
+        df = _make_df()
+        benchmark_prices = df.xs("BTCUSDT", level="symbol")["close"]
+        bt = Backtest(df, HoldStrategy(), data_source="test")
+        bt.add_benchmark(benchmark_prices)
+
+        bt.run()
+        output = bt.build_output()
+
+        assert output.metrics.trades == 0
+        assert output.metrics.max_drawdown == pytest.approx(0.0)
+        assert output.metrics.benchmark_return == pytest.approx(
+            benchmark_prices.iloc[-1] / benchmark_prices.iloc[0] - 1.0
+        )
 
     def test_benchmark_is_timestamp_aligned_without_future_backfill(self) -> None:
         df = _make_df(n=5)
