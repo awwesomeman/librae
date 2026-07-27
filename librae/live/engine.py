@@ -46,7 +46,8 @@ from librae.core.strategy import (
     StrategyIntent,
 )
 
-from .executor import LiveExecutor, OrderRequest
+from .executor import ExecutionReport, LiveExecutor, OrderRequest
+from .state import LiveRuntimeState, LiveStateStore, TrackedOrder
 
 if TYPE_CHECKING:
     from librae.core.cost_model import CostModel
@@ -80,6 +81,9 @@ class LiveTrader:
         on_signal_outcome: Same pattern as on_bar.
         warmup_fetcher: _UNSET or None -> plain API fetch via adapter; callable ->
             use it (e.g. a DB-first fetcher supplied by the caller's data layer).
+        state_store: _UNSET -> TimescaleDB when DB is enabled; explicit
+            duck-typed store -> use it. Live mode requires a store so
+            placement attempts and fills survive process restarts.
         notifier: _UNSET -> build default TelegramAdapter from cfg (skipped
             entirely when cfg.no_db); None -> no notifications; object -> use it
             (must implement TelegramAdapter's duck-typed interface).
@@ -101,6 +105,7 @@ class LiveTrader:
         on_heartbeat: Callable[..., None] | object | None = _UNSET,
         on_signal_outcome: Callable[..., None] | object | None = _UNSET,
         warmup_fetcher: Callable[..., pd.DataFrame] | object | None = _UNSET,
+        state_store: LiveStateStore | object | None = _UNSET,
     ) -> None:
         from librae.core.cost_model import CostModel
         from librae.core.utils import generate_run_id, interval_to_timedelta, to_ccxt
@@ -184,6 +189,44 @@ class LiveTrader:
             order_adapter=order_adapter if is_live else None,
         )
 
+        # --- Restore restart-critical state before callbacks capture run_id ---
+        self._state_key = f"{cfg.mode}:{cfg.config_hash}"
+        if state_store is not _UNSET:
+            self._state_store = state_store
+        elif cfg.no_db:
+            self._state_store = None
+        else:
+            from db.timescale_state import TimescaleLiveStateStore
+
+            self._state_store = TimescaleLiveStateStore()
+        if is_live and self._state_store is None:
+            raise ValueError(
+                "Live mode requires durable state; enable DB or pass state_store explicitly"
+            )
+
+        self._ohlcv_cache: dict[str, pd.DataFrame] = {}
+        self._consecutive_errors: int = 0
+        self._db_write_failures: int = 0
+        self._last_cycle_ts: datetime | None = None
+        self._stale_alerted: dict[str, bool] = {}
+        self._last_prices: dict[str, float] = {}
+        self._positions: dict[str, PositionState] = {}
+        self._cash: float = cfg.initial_balance
+        self._halted: bool = False
+        self._pending_intent: StrategyIntent = []
+        self._active_orders: list[TrackedOrder] = []
+        self._equity_peak: float = cfg.initial_balance
+        self._prev_equity: float = cfg.initial_balance
+        self._trade_count: int = 0
+        self._event_sequence: int = 0
+        self._period_index: int = 0
+        self._status_period_count: int = 0
+        self._restored_state = False
+        if self._state_store is not None:
+            restored = self._state_store.load(self._state_key)
+            if restored is not None:
+                self._restore_state(restored)
+
         # --- Resolve callbacks (sentinel pattern) ---
         self._warmup_periods = (cfg.params or {}).get("warmup_periods", 720)
 
@@ -206,25 +249,10 @@ class LiveTrader:
         if not cfg.no_db:
             self._register_run()
 
-        self._ohlcv_cache: dict[str, pd.DataFrame] = {}
-        self._consecutive_errors: int = 0
-        self._db_write_failures: int = 0
-        self._last_cycle_ts: datetime | None = None
-        self._stale_alerted: dict[str, bool] = {}
-        self._last_prices: dict[str, float] = {}
-        self._positions: dict[str, PositionState] = {}
-        self._cash: float = cfg.initial_balance
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open")
         self._max_position_pct, self._max_drawdown_pct, self._max_volume_participation_pct = (
             validate_risk_params(cfg.params)
         )
-        self._halted: bool = False
-        self._pending_intent: StrategyIntent = []
-        self._equity_peak: float = cfg.initial_balance
-        self._prev_equity: float = cfg.initial_balance
-        self._trade_count: int = 0
-        self._period_index: int = 0
-        self._status_period_count: int = 0
         self._running: bool = False
 
         # Cache status config
@@ -234,17 +262,75 @@ class LiveTrader:
 
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tg")
         self._sleep = time.sleep  # instance attribute so tests can skip real delays
+        if self._state_store is not None and not self._restored_state:
+            self._persist_state()
+
+    # --- Durable runtime state ---
+
+    def _snapshot_state(self) -> LiveRuntimeState:
+        return LiveRuntimeState(
+            state_key=self._state_key,
+            run_id=self._run_id,
+            config_hash=self._cfg.config_hash,
+            mode=self._cfg.mode,
+            cash=self._cash,
+            positions=deepcopy(self._positions),
+            last_prices=dict(self._last_prices),
+            last_cycle_ts=self._last_cycle_ts,
+            pending_intent=deepcopy(self._pending_intent),
+            active_orders=deepcopy(self._active_orders),
+            equity_peak=self._equity_peak,
+            prev_equity=self._prev_equity,
+            trade_count=self._trade_count,
+            event_sequence=self._event_sequence,
+            period_index=self._period_index,
+            status_period_count=self._status_period_count,
+            halted=self._halted,
+        )
+
+    def _restore_state(self, state: LiveRuntimeState) -> None:
+        if state.state_key != self._state_key:
+            raise ValueError("runtime state key does not match this configuration")
+        if state.config_hash != self._cfg.config_hash or state.mode != self._cfg.mode:
+            raise ValueError("runtime state configuration does not match this run")
+        self._run_id = state.run_id
+        self._cash = state.cash
+        self._positions = state.positions
+        self._last_prices = state.last_prices
+        self._last_cycle_ts = state.last_cycle_ts
+        self._pending_intent = state.pending_intent
+        self._active_orders = state.active_orders
+        self._equity_peak = state.equity_peak
+        self._prev_equity = state.prev_equity
+        self._trade_count = state.trade_count
+        self._event_sequence = state.event_sequence
+        self._period_index = state.period_index
+        self._status_period_count = state.status_period_count
+        self._halted = state.halted
+        self._restored_state = True
+        logger.info(
+            "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d halted=%s",
+            self._state_key,
+            self._run_id,
+            self._last_cycle_ts,
+            len(self._active_orders),
+            self._halted,
+        )
+
+    def _persist_state(self, *orders: TrackedOrder) -> None:
+        """Critical checkpoint write; failures propagate and stop the cycle."""
+        if self._state_store is not None:
+            self._state_store.save(self._snapshot_state(), orders)
 
     # --- Callback builders ---
 
     def _db_write(self, fn: Callable[..., object], *args: object, **kwargs: object) -> None:
-        """Best-effort DB write — swallows failures so a DB blip never
-        interrupts the live trading loop (self._cash/self._positions are
-        authoritative and independent of these writes). But a *sustained*
-        outage must not stay invisible forever: CONSECUTIVE_ERROR_THRESHOLD
-        in a row (same threshold as the poll-cycle error alert) fires one
-        Telegram alert, then resets on the next success so it can fire
-        again if the outage continues."""
+        """Best-effort analytics write; runtime checkpoints use _persist_state.
+
+        Analytics failures do not interrupt trading, but sustained failures
+        alert. Checkpoint failures propagate because trading without durable
+        state would make restart behavior unsafe.
+        """
         try:
             fn(*args, **kwargs)
             self._db_write_failures = 0
@@ -315,18 +401,18 @@ class LiveTrader:
         strategy = self._cfg.strategy_name
         timeframe = self._cfg.timeframe
         cfg = self._cfg
-        _event_seq = 0
 
         def on_order_event(event: OrderEvent) -> None:
-            nonlocal _event_seq
-            _event_seq += 1
+            self._event_sequence += 1
             fields = asdict(event)
-            fields["event_id"] = make_event_id(run_id, _event_seq)
+            fields["event_id"] = make_event_id(run_id, self._event_sequence)
             fields["run_id"] = run_id
             fields["strategy"] = strategy
             fields["mode"] = cfg.mode
             fields["timeframe"] = timeframe
             self._db_write(write_trade_event, **fields)
+            if not self._executor.simulation:
+                self._persist_state()
             if event.event_type in ("close", "reduce"):
                 self._db_write(refresh_performance, run_id, cfg=cfg)
 
@@ -474,19 +560,33 @@ class LiveTrader:
         adapter = self._executor.order_adapter
         if adapter is None:
             return
+        if self._restored_state:
+            try:
+                broker_positions = self._read_broker_positions()
+            except Exception:
+                logger.exception("Broker position reconciliation failed")
+                self._halt_live(
+                    title="Position Reconciliation Failed",
+                    message="Configured broker positions are unavailable",
+                )
+                return
+            if not self._position_books_match(self._positions, broker_positions):
+                self._halt_live(
+                    title="Position Reconciliation Mismatch",
+                    message="Persisted and broker positions differ for configured symbols",
+                )
+            return
         if self._adopt_broker_positions():
+            self._persist_state()
             return
 
-        self._halted = True
-        self._pending_intent = []
-        self._notify(
-            "send_alert",
-            title=f"[{self._executor.strategy_name}] Position Reconciliation Failed",
-            message="Broker positions are unavailable; trading is halted.",
+        self._halt_live(
+            title="Position Reconciliation Failed",
+            message="Configured broker positions are unavailable",
         )
 
     def _read_broker_positions(self) -> dict[str, PositionState]:
-        """Read a complete broker position snapshot or raise."""
+        """Read positions for configured symbols, not the whole account."""
         adapter = self._executor.order_adapter
         if adapter is None:
             return {}
@@ -516,8 +616,41 @@ class LiveTrader:
             )
         return positions
 
+    @staticmethod
+    def _position_books_match(
+        local: dict[str, PositionState],
+        broker: dict[str, PositionState],
+    ) -> bool:
+        if set(local) != set(broker):
+            return False
+        for symbol, expected in local.items():
+            actual = broker[symbol]
+            tolerance = max(EPSILON, expected.quantity * 1e-9)
+            if expected.side != actual.side or abs(expected.quantity - actual.quantity) > tolerance:
+                return False
+        return True
+
+    def _reconcile_open_orders(self) -> None:
+        """Fail closed when a configured symbol has an untracked open order."""
+        if self._executor.simulation:
+            return
+        known_ids = {order.order_id for order in self._active_orders if order.order_id}
+        known_clients = {order.request.client_order_id for order in self._active_orders}
+        orphans: list[str] = []
+        for symbol in self._symbols:
+            for raw in self._executor.list_open_orders(symbol):
+                order_id = str(raw.get("id") or raw.get("order_id") or "")
+                client_id = str(raw.get("clientOrderId") or raw.get("client_order_id") or "")
+                if order_id not in known_ids and client_id not in known_clients:
+                    orphans.append(f"{symbol}:{order_id or client_id or 'unknown'}")
+        if orphans:
+            self._halt_live(
+                title="Orphan Broker Orders",
+                message="Untracked open orders on configured symbols: " + ", ".join(orphans),
+            )
+
     def _adopt_broker_positions(self) -> bool:
-        """Replace the local book atomically from a complete broker snapshot."""
+        """Adopt configured-symbol exposure on a first run."""
         try:
             positions = self._read_broker_positions()
         except Exception:
@@ -599,9 +732,12 @@ class LiveTrader:
         )
 
     def _halt_live(self, *, title: str, message: str) -> None:
-        """Fail closed without inferring fills from a position snapshot."""
+        """Fail closed and cancel every tracked order that may still execute."""
         self._halted = True
         self._pending_intent = []
+        if not self._executor.simulation:
+            self._cancel_active_orders()
+        self._persist_state()
         logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
@@ -613,6 +749,19 @@ class LiveTrader:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._running = True
         self._setup_signal_handlers()
+        if not self._executor.simulation:
+            try:
+                if self._halted:
+                    self._cancel_active_orders()
+                else:
+                    self._advance_live_orders(submit_planned=False)
+                self._reconcile_open_orders()
+            except Exception as exc:
+                logger.exception("Broker order reconciliation failed")
+                self._halt_live(
+                    title="Order Reconciliation Failed",
+                    message=str(exc),
+                )
         self._reconcile_positions()
         self._reconcile_cash()
         iteration = 0
@@ -676,6 +825,16 @@ class LiveTrader:
         """Signal the runner to stop after the current cycle."""
         self._running = False
 
+    def reset_halt(self) -> None:
+        """Start a new risk epoch after explicit operator review."""
+        if self._active_orders:
+            raise RuntimeError("cannot reset halt while broker orders remain unresolved")
+        equity = self._eval_equity()
+        self._halted = False
+        self._equity_peak = equity
+        self._prev_equity = equity
+        self._persist_state()
+
     def _setup_signal_handlers(self) -> None:
         """Handle SIGTERM/SIGINT for graceful shutdown."""
 
@@ -688,6 +847,10 @@ class LiveTrader:
 
     def _poll_cycle(self) -> None:
         """Fetch all symbols and process the latest aligned portfolio cycle."""
+        if not self._executor.simulation and self._active_orders:
+            self._advance_live_orders()
+            if self._active_orders or self._halted:
+                return
         if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
 
@@ -764,8 +927,8 @@ class LiveTrader:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
 
-    def _apply_action_results(self, result: ActionResults) -> None:
-        """Publish side effects after portfolio state has been committed."""
+    def _publish_action_results(self, result: ActionResults) -> None:
+        """Publish notifications and analytics after state is committed."""
         for event in result.events:
             logger.info(
                 "Order event: %s %s %s %.4f @ %.2f",
@@ -782,7 +945,6 @@ class LiveTrader:
                 self._executor.notify_entry(event.symbol, event.side, event.price, event.event_type)
 
         for trade in result.trades:
-            self._trade_count += 1
             self._executor.notify_exit(trade.symbol, trade.exit_price)
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
 
@@ -796,7 +958,8 @@ class LiveTrader:
         """Commit a deterministic simulated fill batch."""
         self._cash = cash
         self._positions = positions
-        self._apply_action_results(result)
+        self._trade_count += len(result.trades)
+        self._publish_action_results(result)
 
     def _plan_live_orders(
         self,
@@ -897,67 +1060,173 @@ class LiveTrader:
         bars: dict[str, dict[str, float]],
         ts: datetime,
     ) -> bool:
-        """Submit current-cycle intent and commit only confirmed executions."""
+        """Persist a deterministic order queue, then advance it serially."""
         try:
             requests = self._plan_live_orders(intent, bars, ts)
         except ValueError as exc:
             self._halt_live(title="Unsupported Live Intent", message=str(exc))
             return False
 
-        for request in requests:
-            report = self._executor.submit_order(request)
-            if report is None:
-                self._halt_live(
-                    title="Order Report Failure",
-                    message=(
-                        f"{request.side} {request.symbol} qty={request.quantity:.4f} "
-                        "did not return a valid broker execution report"
-                    ),
-                )
-                return False
+        if not requests:
+            return True
+        if self._active_orders:
+            raise RuntimeError("cannot enqueue a new intent while broker orders are active")
 
-            if report.has_fill:
-                if report.average_price is None or report.executed_at is None:
+        queued = [TrackedOrder(request=request) for request in requests]
+        self._active_orders.extend(queued)
+        self._persist_state(*queued)
+        self._advance_live_orders()
+        return not self._active_orders and not self._halted
+
+    def _advance_live_orders(self, *, submit_planned: bool = True) -> None:
+        """Poll or submit the head order; dependent orders stay serialized."""
+        while self._active_orders and not self._halted:
+            tracked = self._active_orders[0]
+            request = tracked.request
+            if not tracked.placement_attempted:
+                if not submit_planned:
+                    return
+                # Persist placement-attempted before network I/O. A crash in
+                # the following call is recovered by client-order lookup and
+                # never blindly retried.
+                tracked.placement_attempted = True
+                self._persist_state(tracked)
+                report = self._executor.submit_order(request)
+                if report is None:
+                    report = self._executor.find_order(request)
+                    if report is None:
+                        self._halt_live(
+                            title="Ambiguous Order Placement",
+                            message=(
+                                f"{request.symbol} qty={request.quantity:.4f} client_order_id="
+                                f"{request.client_order_id} was not found after placement failure"
+                            ),
+                        )
+                        return
+            elif tracked.order_id:
+                report = self._executor.get_order(request, tracked.order_id)
+            else:
+                report = self._executor.find_order(request)
+                if report is None:
                     self._halt_live(
-                        title="Execution Report Incomplete",
-                        message=f"{request.symbol} fill is missing price or execution time",
+                        title="Ambiguous Restored Order",
+                        message=(
+                            f"{request.symbol} client_order_id={request.client_order_id} "
+                            "was placement-attempted but cannot be found"
+                        ),
                     )
-                    return False
-                fill = Fill(
-                    symbol=report.symbol,
-                    side="long" if report.side == "buy" else "short",
-                    price=report.average_price,
-                    quantity=report.filled_quantity,
-                    commission=report.commission,
-                    slippage=report.slippage,
-                    tax=report.tax,
-                )
-                try:
-                    self._cash, result = apply_execution_fill(
-                        self._positions,
-                        self._cash,
-                        fill,
-                        report.executed_at,
-                        order_side=report.side,
-                        cost_model=self._get_cost_model(report.symbol),
-                        reason=request.reason,
-                    )
-                except ValueError as exc:
-                    self._halt_live(title="Execution Fill Conflict", message=str(exc))
-                    return False
-                self._apply_action_results(result)
+                    return
 
-            if report.status != "filled":
+            self._apply_order_report(tracked, report)
+            if report.status in ("cancelled", "rejected"):
                 self._halt_live(
-                    title=f"Order {report.status.replace('_', ' ').title()}",
+                    title=f"Order {report.status.title()}",
                     message=(
                         f"{request.symbol} order_id={report.order_id or 'unassigned'} "
-                        f"filled={report.filled_quantity:.4f}/{report.requested_quantity:.4f}; "
-                        "open-order continuation is not yet supported"
+                        f"filled={report.filled_quantity:.4f}/"
+                        f"{report.requested_quantity:.4f}"
                     ),
                 )
-                return False
-        return True
+                return
+            if report.status != "filled":
+                return
+
+    def _apply_order_report(
+        self,
+        tracked: TrackedOrder,
+        report: ExecutionReport,
+    ) -> None:
+        """Apply only the new cumulative-fill delta, then checkpoint it."""
+        request = tracked.request
+        if report.symbol != request.symbol or report.side != request.side:
+            raise ValueError("broker report identity does not match the tracked request")
+        if tracked.order_id and report.order_id != tracked.order_id:
+            raise ValueError("broker order id changed during its lifecycle")
+        if report.filled_quantity + EPSILON < tracked.filled_quantity:
+            raise ValueError("broker cumulative filled quantity moved backwards")
+        if report.requested_quantity > request.quantity + EPSILON:
+            raise ValueError("broker requested quantity exceeds the tracked request")
+
+        result: ActionResults | None = None
+        cumulative_notional = (
+            report.filled_quantity * report.average_price
+            if report.average_price is not None
+            else 0.0
+        )
+        delta_quantity = report.filled_quantity - tracked.filled_quantity
+        if delta_quantity > EPSILON:
+            if report.executed_at is None:
+                raise ValueError("new broker fill is missing execution time")
+            delta_notional = cumulative_notional - tracked.filled_notional
+            if delta_notional <= 0:
+                raise ValueError("broker cumulative fill notional moved backwards")
+            delta_slippage = report.slippage - tracked.slippage
+            delta_tax = report.tax - tracked.tax
+            if delta_slippage < -EPSILON or delta_tax < -EPSILON:
+                raise ValueError("broker cumulative execution costs moved backwards")
+            fill = Fill(
+                symbol=report.symbol,
+                side="long" if report.side == "buy" else "short",
+                price=delta_notional / delta_quantity,
+                quantity=delta_quantity,
+                commission=report.commission - tracked.commission,
+                slippage=max(0.0, delta_slippage),
+                tax=max(0.0, delta_tax),
+            )
+            self._cash, result = apply_execution_fill(
+                self._positions,
+                self._cash,
+                fill,
+                report.executed_at,
+                order_side=report.side,
+                cost_model=self._get_cost_model(report.symbol),
+                reason=request.reason,
+            )
+
+        tracked.order_id = report.order_id or tracked.order_id
+        tracked.status = report.status
+        tracked.filled_quantity = report.filled_quantity
+        tracked.filled_notional = cumulative_notional
+        tracked.commission = report.commission
+        tracked.slippage = report.slippage
+        tracked.tax = report.tax
+        tracked.executed_at = report.executed_at or tracked.executed_at
+        if report.status in ("filled", "cancelled", "rejected"):
+            self._active_orders.remove(tracked)
+        if result is not None:
+            self._trade_count += len(result.trades)
+        self._persist_state(tracked)
+        if result is not None:
+            self._publish_action_results(result)
+
+    def _cancel_active_orders(self) -> None:
+        """Best-effort cancellation used whenever live trading halts."""
+        for tracked in list(self._active_orders):
+            try:
+                if not tracked.placement_attempted:
+                    tracked.status = "cancelled"
+                    self._active_orders.remove(tracked)
+                    self._persist_state(tracked)
+                    continue
+                report = (
+                    self._executor.get_order(tracked.request, tracked.order_id)
+                    if tracked.order_id
+                    else self._executor.find_order(tracked.request)
+                )
+                if report is None:
+                    logger.error(
+                        "Cannot cancel unresolved order %s",
+                        tracked.request.client_order_id,
+                    )
+                    continue
+                if report.status not in ("filled", "cancelled", "rejected"):
+                    report = self._executor.cancel_order(tracked.request, report.order_id)
+                self._apply_order_report(tracked, report)
+            except Exception:
+                logger.exception(
+                    "Failed to cancel tracked order %s",
+                    tracked.request.client_order_id,
+                )
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Process one symbol through the portfolio-cycle path."""
@@ -990,7 +1259,6 @@ class LiveTrader:
 
         if self._executor.simulation:
             pending_intent = self._pending_intent
-            self._pending_intent = []
             max_position_notional = (
                 self._max_position_pct * self._prev_equity if self._max_position_pct else None
             )
@@ -1006,6 +1274,7 @@ class LiveTrader:
                 max_position_notional=max_position_notional,
                 max_volume_participation_pct=self._max_volume_participation_pct,
             )
+            self._pending_intent = []
             self._commit_simulated_results(
                 cash=staged_cash,
                 positions=self._positions,
@@ -1018,6 +1287,7 @@ class LiveTrader:
         # entries on the same cycle it's detected, not one cycle later ──
         self._record_equity(ts)
         if self._halted:
+            self._persist_state()
             return
 
         bars: dict[str, dict[str, float]] = {}
@@ -1067,11 +1337,12 @@ class LiveTrader:
         )
 
         intent = self._strategy.on_bar(ctx)
+        self._period_index += 1
         if self._executor.simulation:
             self._pending_intent = intent
         else:
             self._execute_live_intent(intent, raw_bars, ts)
-        self._period_index += 1
+        self._persist_state()
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
@@ -1162,6 +1433,9 @@ class LiveTrader:
             }
             flattened = self._execute_live_intent(actions, bars, ts)
         self._halted = True
+        if not self._executor.simulation:
+            self._cancel_active_orders()
+        self._persist_state()
         outcome = "flattened all positions" if flattened else "flatten attempt failed"
         self._notify(
             "send_alert",

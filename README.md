@@ -126,8 +126,9 @@ completed bar T, the strategy is called once and its order is submitted
 immediately—before any T+1 bar exists. The T close is only a sizing/reference
 price; local quantity, entry/exit price, costs, and timestamps are committed
 from the broker execution report. An acknowledgement with no fill never opens
-a local position. Partial fills commit only their confirmed quantity, then
-halt until durable open-order continuation is implemented.
+a local position. Open and partial orders remain durable and are polled before
+another strategy decision; cumulative reports apply only their newly confirmed
+fill delta.
 
 Live `Action(fill_price=None)` submits a market order and a numeric
 `fill_price` submits a real broker limit order. Bar-field fills such as
@@ -137,18 +138,28 @@ than converting a historical range touch into a late market order. Protective
 orders require broker-native support. Multi-order baskets remain sequential,
 not atomic.
 
-An injected `order_adapter.place_order()` returns an order mapping. Filled
-responses must include order id/status, requested and filled quantity, average
-price, broker execution timestamp, and an explicit fee/commission amount
-(zero is valid); CCXT's
+An injected `order_adapter` implements `place_order`, `find_order`,
+`get_order`, `list_open_orders`, and `cancel_order`. Filled responses must
+include order id/status, requested and cumulative filled quantity, cumulative
+average price/costs, broker execution timestamp, and an explicit
+fee/commission amount (zero is valid); CCXT's
 `id/status/amount/filled/average/lastTradeTimestamp/fee` shape is accepted
 directly (base fees are converted at average price; unrelated fee currencies
 fail closed). Submitted/accepted/cancelled/rejected states are kept distinct.
-The current engine fails closed on any non-final state; durable polling,
-restart recovery, and cancellation are tracked separately. In particular,
-Shioaji/IBKR commonly return only an initial acknowledgement from
-`place_order`, so no local fill is booked until their adapter supplies the
-complete execution report.
+Placement intent is checkpointed before network I/O; ambiguous retries recover
+by deterministic client id instead of blindly resubmitting. Resting orders
+block later decisions, rejected/cancelled orders halt dependent work,
+halt-on-risk cancels tracked orders, and untracked open orders on configured
+symbols halt for operator review.
+
+TimescaleDB is the default durable state store (`execution_runtime_state` plus
+the `broker_orders` ledger). `cfg.no_db=True` remains valid for simulation,
+but live mode then requires an explicitly injected durable `state_store`;
+`MemoryLiveStateStore` is only for deterministic tests. The processed-cycle
+watermark, pending simulated intent, cash/positions, fills, equity peak, halt
+state, and active order queue restore under the same run id. A persisted halt
+does not disappear on restart; after resolving the cause, call
+`trader.reset_halt()` explicitly.
 
 Runnable versions cover both externally scheduled allocations and dynamic
 Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)
@@ -162,11 +173,11 @@ Runnable examples and what you need to know to turn on `db`/Grafana: [`examples/
 
 ## Reference implementations
 
-`LiveTrader` injects these via constructor params (`adapter`/`order_adapter`/`cost_model`/`notifier`), skips them entirely under `cfg.no_db=True`, and only lazy-imports the defaults below when nothing is injected — the engine itself never imports any of these packages.
+`LiveTrader` injects these via constructor params (`adapter`/`order_adapter`/`cost_model`/`notifier`/`state_store`) and only lazy-imports defaults when needed. `cfg.no_db=True` skips DB callbacks and the default state store; live mode must then receive a durable store explicitly.
 
 | Directory | Injection point | Description |
 |---|---|---|
-| `db/` | DB write callback | TimescaleDB read/write (`db/timescale_init.sql`); needs `pip install librae[db]` |
+| `db/` | DB callback / `state_store` | TimescaleDB analytics plus atomic runtime checkpoint/order ledger (`db/timescale_init.sql`); needs `pip install librae[db]` |
 | `brokers/` | `adapter` / `order_adapter` | Shioaji (TW futures + stocks, `[tw-live]`), CCXT (crypto, `[crypto-live]`), IBKR (US stocks + futures, `[us-live]`) |
 | `notifications/` | `notifier` | Telegram notifications |
 | `orchestration/` | — | `cli.py`: `RunConfig` construction + CLI arg merging |

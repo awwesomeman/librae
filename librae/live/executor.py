@@ -107,6 +107,14 @@ class OrderAdapter(Protocol):
 
     def place_order(self, signal: dict) -> dict: ...
 
+    def find_order(self, client_order_id: str, symbol: str) -> dict | None: ...
+
+    def get_order(self, order_id: str, symbol: str) -> dict: ...
+
+    def list_open_orders(self, symbol: str) -> list[dict]: ...
+
+    def cancel_order(self, order_id: str, symbol: str) -> dict: ...
+
 
 class LiveExecutor:
     """Submit live order requests and normalize broker execution reports."""
@@ -125,6 +133,21 @@ class LiveExecutor:
                 "Live mode (simulation=False) requires an order_adapter capable "
                 "of placing real orders."
             )
+        if not simulation:
+            required = (
+                "place_order",
+                "find_order",
+                "get_order",
+                "list_open_orders",
+                "cancel_order",
+            )
+            missing = [
+                name for name in required if not callable(getattr(order_adapter, name, None))
+            ]
+            if missing:
+                raise ValueError(
+                    "Live order_adapter is missing lifecycle methods: " + ", ".join(missing)
+                )
         self._cost_model = cost_model
         self._simulation = simulation
         self._telegram = telegram
@@ -214,6 +237,28 @@ class LiveExecutor:
         )
         return report
 
+    def find_order(self, request: OrderRequest) -> ExecutionReport | None:
+        """Find a prior placement by deterministic client id."""
+        raw = self._order_adapter.find_order(request.client_order_id, request.symbol)
+        return self._normalize_report(request, raw) if raw is not None else None
+
+    def get_order(self, request: OrderRequest, order_id: str) -> ExecutionReport:
+        """Fetch the latest cumulative state for one broker order."""
+        raw = self._order_adapter.get_order(order_id, request.symbol)
+        return self._normalize_report(request, raw)
+
+    def list_open_orders(self, symbol: str) -> list[dict]:
+        """Return raw open orders for startup orphan detection."""
+        raw = self._order_adapter.list_open_orders(symbol)
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            raise ValueError("broker open orders must be a list of mappings")
+        return raw
+
+    def cancel_order(self, request: OrderRequest, order_id: str) -> ExecutionReport:
+        """Cancel and return the broker's latest cumulative order state."""
+        raw = self._order_adapter.cancel_order(order_id, request.symbol)
+        return self._normalize_report(request, raw)
+
     @classmethod
     def _normalize_report(cls, request: OrderRequest, raw: object) -> ExecutionReport:
         if not isinstance(raw, dict):
@@ -262,7 +307,10 @@ class LiveExecutor:
                 raise ValueError("filled report is missing broker execution timestamp")
             if commission_raw is None:
                 raise ValueError("filled report is missing broker-confirmed commission/fee")
-            if filled_quantity < requested_quantity - EPSILON:
+            if filled_quantity < requested_quantity - EPSILON and status not in (
+                "cancelled",
+                "rejected",
+            ):
                 status = "partial"
             elif status not in ("cancelled", "rejected"):
                 status = "filled"
@@ -296,11 +344,28 @@ class LiveExecutor:
             return "cancelled"
         if status in ("filled", "closed", "complete", "completed"):
             return "filled"
-        if status in ("partial", "partially_filled", "partiallyfilled", "filling"):
+        if status in (
+            "partial",
+            "part_filled",
+            "partfilled",
+            "partially_filled",
+            "partiallyfilled",
+            "filling",
+        ):
             return "partial"
         if status in ("open", "new", "accepted", "submitted"):
             return "accepted"
-        if status in ("pending", "pending_submit", "pendingsubmit", "presubmitted", ""):
+        if status in (
+            "pending",
+            "pending_submit",
+            "pendingsubmit",
+            "pending_cancel",
+            "pendingcancel",
+            "api_pending",
+            "apipending",
+            "presubmitted",
+            "",
+        ):
             return "submitted"
         raise ValueError(f"unsupported broker order status: {raw_status!r}")
 

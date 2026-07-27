@@ -1,7 +1,7 @@
 """ShioajiAdapter — Sinopac Shioaji adapter for Taiwan futures/stocks.
 
-Wraps Shioaji SDK to provide the same duck-typed interface as CryptoAdapter:
-``fetch_ohlcv``, ``place_order``, ``get_position``.
+Wraps Shioaji SDK using the same flat, duck-typed adapter style as
+CryptoAdapter.
 
 Authentication is **required** for all operations (including market data).
 Order placement additionally requires CA certificate activation.
@@ -16,9 +16,12 @@ Install: ``pip install shioaji`` or ``pip install -e '.[tw-live]'``
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from numbers import Real
 
 import pandas as pd
 
@@ -206,16 +209,9 @@ class ShioajiAdapter:
         ``quantity``, ``order_type`` (``"market"``/``"limit"``),
         and optionally ``price`` for limit orders.
 
-        ``signal.get("client_order_id")`` is intentionally ignored. Shioaji
-        >=1.5's ``FuturesOrder``/``StockOrder`` do have a ``custom_field``
-        that's echoed back in trade/deal callbacks, but the exchange caps it
-        at 6 characters (confirmed live against sandbox 2026-07-26 —
-        ``ValidationError`` StatusCode 422 above that) — too short to hold
-        the deterministic ``{strategy}-{symbol}-{event_type}-{ts}`` IDs
-        ``LiveExecutor`` generates (see ``librae/live/executor.py``), and a
-        truncated/hashed fit risks silent collisions defeating the whole
-        point of a dedup key. Not worth it until there's a real need for
-        broker-side dedup specifically on this adapter.
+        Shioaji caps ``custom_field`` at six characters, so a deterministic
+        base32 digest of ``client_order_id`` is used for restart lookup.
+        Duplicate digest matches fail closed instead of guessing ownership.
         """
         self._require_auth()
 
@@ -245,27 +241,137 @@ class ShioajiAdapter:
         # Union[StockOrder, FuturesOrder]) — confirmed via DeprecationWarning
         # running against a real sandbox session 2026-07-26.
         order_cls = sj.FuturesOrder if is_futures else sj.StockOrder
-        order = order_cls(
+        order_kwargs = dict(
             price=signal.get("price", 0),
             quantity=int(signal["quantity"]),
             action=action,
             price_type=price_type,
             order_type=order_type,
         )
+        if signal.get("client_order_id"):
+            order_kwargs["custom_field"] = self._client_tag(signal["client_order_id"])
+        order = order_cls(**order_kwargs)
         trade = self._api.place_order(contract, order)
         return {
             "id": trade.status.id if trade.status else "",
             "status": trade.status.status if trade.status else "unknown",
         }
 
+    def find_order(self, client_order_id: str, symbol: str) -> dict | None:
+        """Find an order by its deterministic six-character custom field."""
+        self._require_auth()
+        tag = self._client_tag(client_order_id)
+        matches = [
+            trade
+            for trade in self._trades(symbol)
+            if str(getattr(trade.order, "custom_field", "") or "") == tag
+        ]
+        if len(matches) > 1:
+            raise ValueError(f"duplicate Shioaji custom_field digest: {tag}")
+        return self._trade_to_order(matches[0]) if matches else None
+
+    def get_order(self, order_id: str, symbol: str) -> dict:
+        """Refresh and return one cumulative Shioaji Trade state."""
+        self._require_auth()
+        for trade in self._trades(symbol):
+            status_id = str(getattr(trade.status, "id", "") or "")
+            order_obj_id = str(getattr(trade.order, "id", "") or "")
+            if order_id in (status_id, order_obj_id):
+                return self._trade_to_order(trade)
+        raise LookupError(f"Shioaji order not found: {order_id}")
+
+    def list_open_orders(self, symbol: str) -> list[dict]:
+        """Return non-final orders after refreshing the account state."""
+        open_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
+        return [
+            self._trade_to_order(trade)
+            for trade in self._trades(symbol)
+            if str(
+                getattr(
+                    getattr(trade.status, "status", ""),
+                    "value",
+                    getattr(trade.status, "status", ""),
+                )
+            )
+            in open_statuses
+        ]
+
+    def cancel_order(self, order_id: str, symbol: str) -> dict:
+        """Cancel a Shioaji Trade object and return its refreshed state."""
+        self._require_auth()
+        for trade in self._trades(symbol):
+            status_id = str(getattr(trade.status, "id", "") or "")
+            order_obj_id = str(getattr(trade.order, "id", "") or "")
+            if order_id in (status_id, order_obj_id):
+                self._api.cancel_order(trade)
+                self._api.update_status(trade=trade)
+                return self._trade_to_order(trade)
+        raise LookupError(f"Shioaji order not found: {order_id}")
+
+    def _trades(self, symbol: str) -> list:
+        contract_code = str(self._resolve_contract(symbol).code)
+        self._api.update_status()
+        return [
+            trade
+            for trade in self._api.list_trades()
+            if str(getattr(trade.contract, "code", "")) == contract_code
+        ]
+
+    @staticmethod
+    def _client_tag(client_order_id: str) -> str:
+        digest = hashlib.sha256(client_order_id.encode()).digest()
+        return base64.b32encode(digest).decode("ascii")[:6]
+
+    @staticmethod
+    def _trade_to_order(trade) -> dict:
+        """Translate a Shioaji Trade into one cumulative execution report."""
+        status = trade.status
+        order = trade.order
+        deals = list(getattr(status, "deals", None) or [])
+        requested = getattr(status, "order_quantity", None)
+        if not isinstance(requested, Real):
+            requested = getattr(order, "quantity", 0)
+        filled = getattr(status, "deal_quantity", 0)
+        filled = float(filled) if isinstance(filled, Real) else 0.0
+        result = {
+            "id": str(getattr(status, "id", "") or getattr(order, "id", "") or ""),
+            "clientOrderId": str(getattr(order, "custom_field", "") or ""),
+            "status": str(
+                getattr(
+                    getattr(status, "status", "unknown"),
+                    "value",
+                    getattr(status, "status", "unknown"),
+                )
+            ),
+            "amount": float(requested),
+            "filled": filled,
+        }
+        if filled and deals:
+            result["average"] = (
+                sum(float(deal.price) * float(deal.quantity) for deal in deals) / filled
+            )
+            result["executed_at"] = max(
+                getattr(deal, "datetime", None) or datetime.fromtimestamp(float(deal.ts), tz=UTC)
+                for deal in deals
+            )
+            commissions = [
+                float(deal.commission)
+                for deal in deals
+                if isinstance(getattr(deal, "commission", None), Real)
+            ]
+            if len(commissions) == len(deals):
+                result["commission"] = sum(commissions)
+        return result
+
     def get_position(self, symbol: str) -> dict:
         """Return current position for *symbol*."""
         self._require_auth()
+        contract_code = str(self._resolve_contract(symbol).code)
         positions = self._api.list_positions()
         return find_position(
             positions,
             symbol,
-            matches=lambda p: p.code == symbol,
+            matches=lambda p: str(p.code) == contract_code,
             size=lambda p: p.quantity,
             avg_price=lambda p: p.price,
             pnl=lambda p: getattr(p, "pnl", 0),

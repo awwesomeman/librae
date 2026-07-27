@@ -1,0 +1,208 @@
+"""Durable runtime state for simulation and live execution.
+
+The engine owns state transitions; stores only provide atomic load/save.
+Broker order history is written separately from the active-order checkpoint so
+completed orders do not make the checkpoint grow without bound.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from typing import Literal, Protocol
+
+from librae.core.strategy import Action, PositionState, RebalanceTargets, StrategyIntent
+
+from .executor import OrderRequest, OrderStatus
+
+
+def _to_utc(value: str | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("runtime-state timestamps must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _intent_to_dict(intent: StrategyIntent) -> dict:
+    if isinstance(intent, RebalanceTargets):
+        return {"kind": "rebalance_targets", "value": asdict(intent)}
+    return {"kind": "actions", "value": [asdict(action) for action in intent]}
+
+
+def _intent_from_dict(raw: dict) -> StrategyIntent:
+    kind = raw.get("kind")
+    value = raw.get("value")
+    if kind == "rebalance_targets" and isinstance(value, dict):
+        return RebalanceTargets(**value)
+    if kind == "actions" and isinstance(value, list):
+        return [Action(**item) for item in value]
+    raise ValueError("invalid persisted strategy intent")
+
+
+@dataclass
+class TrackedOrder:
+    """A broker order plus the cumulative fill already applied locally."""
+
+    request: OrderRequest
+    placement_attempted: bool = False
+    order_id: str = ""
+    status: OrderStatus = "submitted"
+    filled_quantity: float = 0.0
+    filled_notional: float = 0.0
+    commission: float = 0.0
+    slippage: float = 0.0
+    tax: float = 0.0
+    executed_at: datetime | None = None
+
+    def to_dict(self) -> dict:
+        request = asdict(self.request)
+        request["submitted_at"] = self.request.submitted_at.isoformat()
+        return {
+            "request": request,
+            "placement_attempted": self.placement_attempted,
+            "order_id": self.order_id,
+            "status": self.status,
+            "filled_quantity": self.filled_quantity,
+            "filled_notional": self.filled_notional,
+            "commission": self.commission,
+            "slippage": self.slippage,
+            "tax": self.tax,
+            "executed_at": self.executed_at.isoformat() if self.executed_at else None,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> TrackedOrder:
+        request_raw = dict(raw["request"])
+        request_raw["submitted_at"] = _to_utc(request_raw["submitted_at"])
+        return cls(
+            request=OrderRequest(**request_raw),
+            placement_attempted=bool(raw.get("placement_attempted", False)),
+            order_id=str(raw.get("order_id") or ""),
+            status=raw.get("status", "submitted"),
+            filled_quantity=float(raw.get("filled_quantity", 0.0)),
+            filled_notional=float(raw.get("filled_notional", 0.0)),
+            commission=float(raw.get("commission", 0.0)),
+            slippage=float(raw.get("slippage", 0.0)),
+            tax=float(raw.get("tax", 0.0)),
+            executed_at=_to_utc(raw.get("executed_at")),
+        )
+
+
+@dataclass
+class LiveRuntimeState:
+    """One restartable strategy deployment checkpoint."""
+
+    state_key: str
+    run_id: str
+    config_hash: str
+    mode: Literal["sim", "live"]
+    cash: float
+    positions: dict[str, PositionState] = field(default_factory=dict)
+    last_prices: dict[str, float] = field(default_factory=dict)
+    last_cycle_ts: datetime | None = None
+    pending_intent: StrategyIntent = field(default_factory=list)
+    active_orders: list[TrackedOrder] = field(default_factory=list)
+    equity_peak: float = 0.0
+    prev_equity: float = 0.0
+    trade_count: int = 0
+    event_sequence: int = 0
+    period_index: int = 0
+    status_period_count: int = 0
+    halted: bool = False
+
+    def to_dict(self) -> dict:
+        positions: dict[str, dict] = {}
+        for symbol, position in self.positions.items():
+            item = asdict(position)
+            item["entry_at"] = position.entry_at.isoformat()
+            positions[symbol] = item
+        return {
+            "schema_version": 1,
+            "state_key": self.state_key,
+            "run_id": self.run_id,
+            "config_hash": self.config_hash,
+            "mode": self.mode,
+            "cash": self.cash,
+            "positions": positions,
+            "last_prices": self.last_prices,
+            "last_cycle_ts": self.last_cycle_ts.isoformat() if self.last_cycle_ts else None,
+            "pending_intent": _intent_to_dict(self.pending_intent),
+            "active_orders": [order.to_dict() for order in self.active_orders],
+            "equity_peak": self.equity_peak,
+            "prev_equity": self.prev_equity,
+            "trade_count": self.trade_count,
+            "event_sequence": self.event_sequence,
+            "period_index": self.period_index,
+            "status_period_count": self.status_period_count,
+            "halted": self.halted,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> LiveRuntimeState:
+        if raw.get("schema_version") != 1:
+            raise ValueError("unsupported live runtime-state schema")
+        positions = {}
+        for symbol, item in raw.get("positions", {}).items():
+            position_raw = dict(item)
+            position_raw["entry_at"] = _to_utc(position_raw["entry_at"])
+            positions[symbol] = PositionState(**position_raw)
+        return cls(
+            state_key=str(raw["state_key"]),
+            run_id=str(raw["run_id"]),
+            config_hash=str(raw["config_hash"]),
+            mode=raw["mode"],
+            cash=float(raw["cash"]),
+            positions=positions,
+            last_prices={
+                str(symbol): float(price) for symbol, price in raw.get("last_prices", {}).items()
+            },
+            last_cycle_ts=_to_utc(raw.get("last_cycle_ts")),
+            pending_intent=_intent_from_dict(
+                raw.get("pending_intent", {"kind": "actions", "value": []})
+            ),
+            active_orders=[TrackedOrder.from_dict(item) for item in raw.get("active_orders", [])],
+            equity_peak=float(raw["equity_peak"]),
+            prev_equity=float(raw["prev_equity"]),
+            trade_count=int(raw.get("trade_count", 0)),
+            event_sequence=int(raw.get("event_sequence", 0)),
+            period_index=int(raw.get("period_index", 0)),
+            status_period_count=int(raw.get("status_period_count", 0)),
+            halted=bool(raw.get("halted", False)),
+        )
+
+
+class LiveStateStore(Protocol):
+    """Minimal persistence boundary used by ``LiveTrader``."""
+
+    def load(self, state_key: str) -> LiveRuntimeState | None: ...
+
+    def save(
+        self,
+        state: LiveRuntimeState,
+        orders: Sequence[TrackedOrder] = (),
+    ) -> None: ...
+
+
+class MemoryLiveStateStore:
+    """Process-local store for deterministic tests; not restart durability."""
+
+    def __init__(self) -> None:
+        self._states: dict[str, LiveRuntimeState] = {}
+        self.orders: dict[str, TrackedOrder] = {}
+
+    def load(self, state_key: str) -> LiveRuntimeState | None:
+        state = self._states.get(state_key)
+        return deepcopy(state) if state else None
+
+    def save(
+        self,
+        state: LiveRuntimeState,
+        orders: Sequence[TrackedOrder] = (),
+    ) -> None:
+        self._states[state.state_key] = deepcopy(state)
+        for order in orders:
+            self.orders[order.request.client_order_id] = deepcopy(order)

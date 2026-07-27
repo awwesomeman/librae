@@ -20,6 +20,10 @@ def test_ccxt_contract() -> None:
     assert exchange.id == "binance"
     assert callable(exchange.fetch_ohlcv)
     assert callable(exchange.create_order)
+    assert callable(exchange.fetch_orders)
+    assert callable(exchange.fetch_order)
+    assert callable(exchange.fetch_open_orders)
+    assert callable(exchange.cancel_order)
 
 
 def test_shioaji_contract() -> None:
@@ -33,11 +37,23 @@ def test_shioaji_contract() -> None:
         "order_type": sj.OrderType.IOC,
     }
 
-    stock_order = sj.StockOrder(price_type=sj.StockPriceType.MKT, **common)
-    futures_order = sj.FuturesOrder(price_type=sj.FuturesPriceType.MKT, **common)
+    stock_order = sj.StockOrder(
+        price_type=sj.StockPriceType.MKT,
+        custom_field="ABC123",
+        **common,
+    )
+    futures_order = sj.FuturesOrder(
+        price_type=sj.FuturesPriceType.MKT,
+        custom_field="ABC123",
+        **common,
+    )
 
     assert stock_order.quantity == 1
     assert futures_order.quantity == 1
+    assert stock_order.custom_field == "ABC123"
+    assert callable(sj.Shioaji.update_status)
+    assert callable(sj.Shioaji.list_trades)
+    assert callable(sj.Shioaji.cancel_order)
 
 
 def test_ib_async_contract() -> None:
@@ -53,3 +69,8 @@ def test_ib_async_contract() -> None:
     assert limit_order.orderType == "LMT"
     assert stock.symbol == "MU"
     assert future.exchange == "CME"
+    assert callable(ib_async.IB.trades)
+    assert callable(ib_async.IB.openTrades)
+    assert callable(ib_async.IB.reqCompletedOrders)
+    assert callable(ib_async.IB.reqExecutions)
+    assert callable(ib_async.IB.cancelOrder)

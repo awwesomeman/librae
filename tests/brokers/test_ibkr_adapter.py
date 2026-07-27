@@ -6,6 +6,8 @@ The optional SDK contract is covered separately without opening a socket.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -189,7 +191,12 @@ class TestPlaceOrder:
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         mock_trade = MagicMock()
         mock_trade.order.orderId = 123
+        mock_trade.order.totalQuantity = 100
+        mock_trade.order.orderRef = ""
         mock_trade.orderStatus.status = "PendingSubmit"
+        mock_trade.orderStatus.filled = 0
+        mock_trade.orderStatus.avgFillPrice = 0
+        mock_trade.fills = []
         adapter._ib.placeOrder.return_value = mock_trade
 
         with patch(
@@ -201,14 +208,22 @@ class TestPlaceOrder:
             "mock_contract",
             {"action": "BUY", "qty": 100, "type": "MKT"},
         )
-        assert result == {"id": "123", "status": "PendingSubmit"}
+        assert result["id"] == "123"
+        assert result["status"] == "PendingSubmit"
+        assert result["amount"] == 100
+        assert result["filled"] == 0
 
     def test_limit_order_uses_limit_order_class(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         mock_trade = MagicMock()
         mock_trade.order.orderId = 456
+        mock_trade.order.totalQuantity = 50
+        mock_trade.order.orderRef = ""
         mock_trade.orderStatus.status = "Submitted"
+        mock_trade.orderStatus.filled = 0
+        mock_trade.orderStatus.avgFillPrice = 0
+        mock_trade.fills = []
         adapter._ib.placeOrder.return_value = mock_trade
 
         with patch(
@@ -228,7 +243,10 @@ class TestPlaceOrder:
             "mock_contract",
             {"action": "SELL", "qty": 50, "price": 900.0, "type": "LMT"},
         )
-        assert result == {"id": "456", "status": "Submitted"}
+        assert result["id"] == "456"
+        assert result["status"] == "Submitted"
+        assert result["amount"] == 50
+        assert result["filled"] == 0
 
     def test_client_order_id_sets_order_ref(self):
         adapter = _make_adapter(trading_enabled=True)
@@ -251,6 +269,94 @@ class TestPlaceOrder:
 
         placed_order = adapter._ib.placeOrder.call_args.args[1]
         assert placed_order.orderRef == "strat-MU-open-20260101T000000"
+
+
+def test_trade_normalization_uses_ibkr_cumulative_fill_and_commission():
+    from brokers.ibkr_adapter import IBKRAdapter
+
+    trade = SimpleNamespace(
+        order=SimpleNamespace(
+            orderId=123,
+            orderRef="strategy-1",
+            action="BUY",
+            totalQuantity=2,
+        ),
+        orderStatus=SimpleNamespace(
+            status="PartiallyFilled",
+            filled=1,
+            avgFillPrice=101.0,
+        ),
+        contract=SimpleNamespace(symbol="MU"),
+        fills=[
+            SimpleNamespace(
+                time=datetime(2025, 1, 1, tzinfo=UTC),
+                commissionReport=SimpleNamespace(commission=0.5),
+            )
+        ],
+    )
+
+    result = IBKRAdapter._trade_to_order(trade)
+
+    assert result["clientOrderId"] == "strategy-1"
+    assert result["filled"] == 1.0
+    assert result["average"] == 101.0
+    assert result["commission"] == 0.5
+    assert result["executed_at"] == datetime(2025, 1, 1, tzinfo=UTC)
+
+
+def test_find_order_recovers_completed_order_from_prior_session():
+    adapter = _make_adapter(trading_enabled=True)
+    completed = SimpleNamespace(
+        order=SimpleNamespace(
+            orderId=123,
+            permId=456,
+            orderRef="strategy-1",
+            action="BUY",
+            totalQuantity=2,
+        ),
+        orderStatus=SimpleNamespace(status="Filled", filled=0, avgFillPrice=0),
+        contract=SimpleNamespace(symbol="MU"),
+        fills=[],
+    )
+    fill = SimpleNamespace(
+        time=datetime(2025, 1, 1, tzinfo=UTC),
+        execution=SimpleNamespace(orderId=123, permId=456, shares=2, price=101.0),
+        commissionReport=SimpleNamespace(commission=0.5),
+    )
+    adapter._ib.trades.return_value = []
+    adapter._ib.reqCompletedOrders.return_value = [completed]
+    adapter._ib.reqExecutions.return_value = [fill]
+
+    result = adapter.find_order("strategy-1", "MU")
+
+    assert result is not None
+    assert result["status"] == "Filled"
+    assert result["filled"] == 2.0
+    assert result["average"] == 101.0
+    assert result["commission"] == 0.5
+    adapter._ib.reqCompletedOrders.assert_called_once_with(apiOnly=True)
+
+
+def test_find_order_does_not_query_history_when_session_trade_exists():
+    adapter = _make_adapter(trading_enabled=True)
+    trade = SimpleNamespace(
+        order=SimpleNamespace(
+            orderId=123,
+            orderRef="strategy-1",
+            action="BUY",
+            totalQuantity=2,
+        ),
+        orderStatus=SimpleNamespace(status="Submitted", filled=0, avgFillPrice=0),
+        contract=SimpleNamespace(symbol="MU"),
+        fills=[],
+    )
+    adapter._ib.trades.return_value = [trade]
+
+    result = adapter.find_order("strategy-1", "MU")
+
+    assert result is not None
+    adapter._ib.reqCompletedOrders.assert_not_called()
+    adapter._ib.reqExecutions.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

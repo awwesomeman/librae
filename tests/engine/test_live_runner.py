@@ -24,6 +24,7 @@ from librae.core.strategy import (
 )
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest
+from librae.live.state import MemoryLiveStateStore
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,8 @@ def _mock_order_adapter() -> MagicMock:
         "unrealized_pnl": 0,
     }
     adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
+    adapter.find_order.return_value = None
+    adapter.list_open_orders.return_value = []
     return adapter
 
 
@@ -345,6 +348,7 @@ class TestLiveTrader:
         **kwargs,
     ) -> LiveTrader:
         test_cfg = cfg or _test_cfg()
+        kwargs.setdefault("state_store", MemoryLiveStateStore())
         runner = LiveTrader(
             strategy or _HoldStrategy(),
             feature_fn or _simple_feature_fn,
@@ -367,6 +371,17 @@ class TestLiveTrader:
         runner.run(max_iterations=2)
         # Should not hang — reaching here means it stopped
 
+    def test_live_without_default_db_requires_explicit_state_store(self):
+        with pytest.raises(ValueError, match="requires durable state"):
+            LiveTrader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                cfg=_test_cfg(mode="live"),
+                adapter=lambda *args, **kwargs: _make_ohlcv_df(),
+                order_adapter=_mock_order_adapter(),
+                cost_model=_zero_cost_model(),
+            )
+
     def test_same_bar_not_processed_twice(self):
         """Strategy should only be called once for the same bar timestamp."""
         strategy = MagicMock(spec=BaseStrategy)
@@ -377,6 +392,48 @@ class TestLiveTrader:
 
         # First iteration detects the bar, subsequent ones see same ts → skip
         assert strategy.on_bar.call_count == 1
+
+    def test_sim_pending_intent_resumes_on_next_bar_after_restart(self):
+        store = MemoryLiveStateStore()
+
+        class BuyOnce(BaseStrategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        first = self._make_runner(
+            strategy=BuyOnce(),
+            fetcher=lambda *args, **kwargs: _make_ohlcv_df(start_hour=0),
+            state_store=store,
+        )
+        first.run(max_iterations=1)
+        assert first._positions == {}
+
+        second = self._make_runner(
+            strategy=BuyOnce(),
+            fetcher=lambda *args, **kwargs: _make_ohlcv_df(start_hour=1),
+            state_store=store,
+        )
+        second.run(max_iterations=1)
+
+        assert second._positions["BTCUSDT"].quantity == 1.0
+        assert second._period_index == 2
+
+    def test_failed_sim_cycle_is_not_checkpointed_as_processed(self):
+        store = MemoryLiveStateStore()
+        failing = self._make_runner(
+            feature_fn=MagicMock(side_effect=RuntimeError("bad feature")),
+            state_store=store,
+        )
+        failing.run(max_iterations=1)
+
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy.on_bar.return_value = []
+        recovered = self._make_runner(strategy=strategy, state_store=store)
+        recovered.run(max_iterations=1)
+
+        strategy.on_bar.assert_called_once()
 
     def test_new_bar_triggers_strategy(self):
         """When fetcher returns a new timestamp, strategy is called again."""
@@ -773,14 +830,13 @@ class TestLiveTrader:
 
         runner.run(max_iterations=1)
 
-        submitted_alerts = [
-            kwargs
-            for method, kwargs in alerts
-            if method == "send_alert" and "Order Accepted" in kwargs["title"]
-        ]
-        assert len(submitted_alerts) == 1
-        assert runner._halted is True
+        assert not any(
+            method == "send_alert" and "Order" in kwargs["title"] for method, kwargs in alerts
+        )
+        assert runner._halted is False
         assert runner._positions == {}
+        assert len(runner._active_orders) == 1
+        assert runner._active_orders[0].status == "accepted"
         assert runner._cash == 100_000.0
 
     def test_basket_failure_keeps_only_confirmed_broker_fill(self):
@@ -1149,7 +1205,9 @@ class TestLiveTrader:
         runner.run(max_iterations=2)  # must not raise / not be swallowed as a poll error
 
         order_failed = [
-            kw for m, kw in alerts if m == "send_alert" and "Order Report Failure" in kw["title"]
+            kw
+            for m, kw in alerts
+            if m == "send_alert" and "Ambiguous Order Placement" in kw["title"]
         ]
         assert order_failed
         assert "qty=1.0000" in order_failed[0]["message"]
@@ -1247,7 +1305,13 @@ def _make_fill_event() -> OrderEvent:
 
 
 class TestLiveExecutionLifecycle:
-    def _make_trader(self, strategy: BaseStrategy, adapter: MagicMock) -> LiveTrader:
+    def _make_trader(
+        self,
+        strategy: BaseStrategy,
+        adapter: MagicMock,
+        *,
+        state_store: MemoryLiveStateStore | None = None,
+    ) -> LiveTrader:
         return LiveTrader(
             strategy,
             _simple_feature_fn,
@@ -1260,9 +1324,10 @@ class TestLiveExecutionLifecycle:
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
+            state_store=state_store or MemoryLiveStateStore(),
         )
 
-    def test_partial_fill_commits_only_confirmed_quantity_then_halts(self):
+    def test_partial_fill_commits_only_confirmed_quantity_and_stays_open(self):
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report(
             status="filling",
@@ -1279,10 +1344,182 @@ class TestLiveExecutionLifecycle:
         runner = self._make_trader(BuyTwo(), adapter)
         runner.run(max_iterations=1)
 
-        assert runner._halted is True
+        assert runner._halted is False
         assert runner._positions["BTCUSDT"].quantity == 0.75
         assert runner._positions["BTCUSDT"].entry_price == 105.0
         assert runner._positions["BTCUSDT"].entry_commission == 0.25
+        assert len(runner._active_orders) == 1
+        assert runner._active_orders[0].status == "partial"
+
+    def test_repeated_partial_report_is_idempotent(self):
+        adapter = _mock_order_adapter()
+        partial = _broker_report(
+            status="filling",
+            quantity=2.0,
+            filled=0.75,
+            average=105.0,
+            fee=0.25,
+        )
+        adapter.place_order.return_value = partial
+        adapter.get_order.return_value = partial
+
+        class BuyTwo(BaseStrategy):
+            def on_bar(self, ctx):
+                return [Action(type="long", symbol=ctx.symbol, quantity=2.0)]
+
+        runner = self._make_trader(BuyTwo(), adapter)
+        runner.run(max_iterations=2)
+
+        assert runner._positions["BTCUSDT"].quantity == 0.75
+        assert runner._positions["BTCUSDT"].entry_commission == 0.25
+        assert runner._cash == pytest.approx(100_000.0 - 0.75 * 105.0 - 0.25)
+
+    def test_open_order_resumes_after_restart_without_resubmission(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "open-1",
+            "status": "submitted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+
+        first = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        first.run(max_iterations=1)
+
+        adapter.get_order.return_value = _broker_report(
+            order_id="open-1",
+            quantity=1.0,
+            average=101.0,
+            fee=0.2,
+        )
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 1.0,
+            "avg_price": 101.0,
+            "unrealized_pnl": 0.0,
+        }
+        second = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        second.run(max_iterations=1)
+
+        assert adapter.place_order.call_count == 1
+        assert second._active_orders == []
+        assert second._positions["BTCUSDT"].quantity == 1.0
+        assert second._positions["BTCUSDT"].entry_commission == 0.2
+
+    def test_restored_cycle_does_not_repeat_decision(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report()
+
+        class CountingBuy(BaseStrategy):
+            def __init__(self):
+                self.calls = 0
+
+            def on_bar(self, ctx):
+                self.calls += 1
+                return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+
+        first_strategy = CountingBuy()
+        first = self._make_trader(first_strategy, adapter, state_store=store)
+        first.run(max_iterations=1)
+
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 1.0,
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        second_strategy = CountingBuy()
+        second = self._make_trader(second_strategy, adapter, state_store=store)
+        second.run(max_iterations=1)
+
+        assert first_strategy.calls == 1
+        assert second_strategy.calls == 0
+        assert adapter.place_order.call_count == 1
+        assert second._run_id == first._run_id
+
+    @pytest.mark.parametrize("status", ["cancelled", "rejected"])
+    def test_final_failed_order_is_persisted_and_halts(self, status):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "final-1" if status == "cancelled" else "",
+            "status": status,
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._positions == {}
+        tracked = next(iter(store.orders.values()))
+        assert tracked.status == status
+
+    def test_halt_cancels_open_order(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.get_order.return_value = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.cancel_order.return_value = {
+            "id": "open-1",
+            "status": "cancelled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner.run(max_iterations=1)
+
+        runner._halt_live(title="Operator Halt", message="test")
+
+        adapter.cancel_order.assert_called_once_with("open-1", "BTCUSDT")
+        assert runner._active_orders == []
+        assert runner._halted is True
+
+    def test_halt_survives_restart_until_operator_reset(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "",
+            "status": "rejected",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        first = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        first.run(max_iterations=1)
+
+        second = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        assert second._halted is True
+
+        second.reset_halt()
+
+        assert second._halted is False
+        restored = store.load(second._state_key)
+        assert restored is not None
+        assert restored.halted is False
+
+    def test_orphan_order_halts_before_strategy_decision(self):
+        adapter = _mock_order_adapter()
+        adapter.list_open_orders.return_value = [{"id": "manual-1", "clientOrderId": "external"}]
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_trader(strategy, adapter)
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        strategy.on_bar.assert_not_called()
 
     def test_exit_uses_broker_price_fees_and_timestamp(self):
         first_fill_at = datetime(2025, 1, 1, tzinfo=UTC)
@@ -1305,8 +1542,13 @@ class TestLiveExecutionLifecycle:
             ),
         ]
         events: list[OrderEvent] = []
+        store = MemoryLiveStateStore()
 
-        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            state_store=store,
+        )
         runner._on_order_event = events.append
         first_frame = _make_ohlcv_df(start_hour=0)
         second_frame = _make_ohlcv_df(start_hour=1)
@@ -1327,6 +1569,9 @@ class TestLiveExecutionLifecycle:
         assert events[-1].price == 110.0
         assert events[-1].commission == 3.0
         assert events[-1].pnl == 7.0
+        checkpoint = store.load(runner._state_key)
+        assert checkpoint is not None
+        assert checkpoint.trade_count == 1
 
     def test_numeric_fill_price_submits_real_limit_order(self):
         adapter = _mock_order_adapter()
@@ -1409,6 +1654,7 @@ class TestCryptoLiveAutoWiring:
                 on_ohlcv=None,
                 on_heartbeat=None,
                 on_signal_outcome=None,
+                state_store=MemoryLiveStateStore(),
                 **kwargs,
             )
         return trader, mock_cls.return_value
@@ -1448,6 +1694,7 @@ class TestShioajiLiveAutoWiring:
                 on_ohlcv=None,
                 on_heartbeat=None,
                 on_signal_outcome=None,
+                state_store=MemoryLiveStateStore(),
             )
 
         # Same authenticated session used for fetching and for order placement.
@@ -1482,6 +1729,7 @@ class TestShioajiLiveAutoWiring:
                 on_ohlcv=None,
                 on_heartbeat=None,
                 on_signal_outcome=None,
+                state_store=MemoryLiveStateStore(),
             )
             trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
