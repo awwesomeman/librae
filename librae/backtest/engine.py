@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 import pandas as pd
 
 from librae.core import EPSILON
@@ -370,6 +371,11 @@ class Backtest:
             trades.extend(close_result.trades)
             all_events.extend(close_result.events)
             cash += close_result.cash_delta
+            # WHY: forced liquidation happens after the bar snapshot. Replace
+            # that point so the curve, metrics, and final account cash reconcile
+            # without creating a duplicate timestamp.
+            if equity_curve:
+                equity_curve[-1] = EquitySnapshot(ts=last_ts, equity=cash)
 
         self._result = BacktestResult(
             trades=trades,
@@ -582,13 +588,29 @@ class Backtest:
         return equity_points
 
     def _compute_benchmark(self) -> list[float] | None:
-        """Compute benchmark buy-and-hold equity curve from benchmark prices."""
+        """Compute a timestamp-aligned benchmark buy-and-hold equity curve."""
         if self._benchmark_prices is None:
             return None
         prices = self._benchmark_prices
-        if len(prices) == 0 or prices.iloc[0] <= 0:
+        if prices.empty:
             return None
-        return [self._initial_balance * (p / prices.iloc[0]) for p in prices]
+        if not isinstance(prices.index, pd.DatetimeIndex):
+            raise ValueError("benchmark prices must have a DatetimeIndex")
+        if not prices.index.is_unique:
+            raise ValueError("benchmark prices must have a unique DatetimeIndex")
+
+        timeline = pd.DatetimeIndex(self._timeline)
+        if prices.index.tz != timeline.tz:
+            raise ValueError("benchmark timezone must match the backtest timeline")
+
+        aligned = prices.astype("float64").sort_index().reindex(timeline, method="ffill")
+        if aligned.isna().any():
+            raise ValueError("benchmark must contain a price at or before backtest start")
+        if not np.isfinite(aligned.to_numpy()).all() or (aligned <= 0).any():
+            raise ValueError("benchmark prices must be finite and positive")
+
+        initial_price = float(aligned.iloc[0])
+        return (self._initial_balance * aligned / initial_price).tolist()
 
     def _precompute_bars(self) -> dict[pd.Timestamp, dict[str, dict[str, float]]]:
         """Pre-convert all cross-sections to dicts once.

@@ -117,7 +117,12 @@ bt.run()
 output = bt.build_output()                      # BacktestOutput
 ```
 
-**Data format**: a MultiIndex DataFrame `(symbol, datetime)` + OHLCV + your own feature columns.
+**Data format**: a MultiIndex DataFrame `(symbol, datetime)` + raw, unshifted
+OHLCV + point-in-time feature columns. A strategy observes completed bar T and
+the engine owns the execution delay, so an intent is first eligible on T+1.
+Callers must not pre-shift prices or signals to model that delay; doing so
+delays execution twice. Feature construction remains the caller's
+responsibility and must not use information unavailable at T.
 
 #### Multi-asset / stock-picking strategies
 
@@ -137,12 +142,15 @@ return RebalanceTargets(
 
 The strategy timestamps the target implicitly by returning it for `ctx.ts`
 (bar T). The engine resolves it on T+1 using each symbol's actual fill price and
-portfolio equity at those same execution prices; using the T+1 close here would
-introduce look-ahead. Positive weights are long, negative weights are short,
-and a held symbol omitted from `weights` targets zero. Reductions and closes
-execute first in symbol order, then additions. If entry costs exceed available
-cash, all addition quantities receive one common scale factor so symbol
-ordering does not starve later assets.
+portfolio equity at those same execution prices. The default `open` is the
+earliest next-bar execution assumption. An explicit `close` means an order
+eligible for the next bar's close; it is valid only when that order type and
+timing are intentional, and it is not interchangeable with an open fill.
+Positive weights are long, negative weights are short, and a held symbol
+omitted from `weights` targets zero. Reductions and closes execute first in
+symbol order, then additions. If entry costs exceed available cash, all
+addition quantities receive one common scale factor so symbol ordering does not
+starve later assets.
 
 Weights need not sum to one; any remainder stays in cash. When
 `Backtest(..., record_position_snapshots=True)` is enabled,

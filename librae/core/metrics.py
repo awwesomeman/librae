@@ -122,12 +122,13 @@ def compute_all(
         # timeframe — H1, D1, ...); annual_periods is only the fallback for
         # when density can't be inferred.
         periods = _infer_annual_periods(ts_index, fallback=annual_periods)
-        # Convert annual risk_free_rate to per-bar rate for QuantStats
-        rf_per_bar = risk_free_rate / periods if periods > 0 else 0.0
 
-        sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=rf_per_bar)
-        sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=rf_per_bar)
-        calmar = _safe_qs(qs.stats.calmar, returns)
+        # QuantStats accepts an annual risk-free rate and deannualizes it
+        # internally using periods. Passing a per-bar rate would apply that
+        # conversion twice.
+        sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=risk_free_rate)
+        sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=risk_free_rate)
+        calmar = _safe_qs(qs.stats.calmar, returns, periods=periods)
         ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods)
 
     # Trade-level metrics from TradePnL

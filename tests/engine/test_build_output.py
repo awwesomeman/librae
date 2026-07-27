@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import BacktestOutput, StrategyMetrics
+from librae.core.cost_model import CostModel
 from librae.core.strategy import Action, BaseStrategy
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,13 @@ class BuyBar5CloseBar15(BaseStrategy):
 
 class HoldStrategy(BaseStrategy):
     def on_bar(self, ctx):
+        return []
+
+
+class BuyBar5AndHold(BaseStrategy):
+    def on_bar(self, ctx):
+        if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
+            return [Action(type="long", symbol=ctx.symbol)]
         return []
 
 
@@ -110,6 +118,33 @@ class TestBuildOutputValid:
         assert isinstance(output.metrics, StrategyMetrics)
         assert isinstance(bt.metrics, StrategyMetrics)
 
+    def test_terminal_liquidation_costs_are_in_equity_and_metrics(self) -> None:
+        df = _make_df()
+        cost = CostModel(
+            multiplier=1.0,
+            commission_rate=0.001,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+        )
+        bt = Backtest(
+            df,
+            BuyBar5AndHold(),
+            initial_balance=10_000.0,
+            cost_model=cost,
+            data_source="test",
+        )
+
+        result = bt.run()
+        output = bt.build_output()
+
+        assert result.equity_curve[-1].equity == pytest.approx(result.final_equity)
+        assert output.equity_curve[-1].equity == pytest.approx(result.final_equity)
+        assert output.metrics.total_return == pytest.approx(
+            result.final_equity / result.initial_balance - 1.0
+        )
+
 
 class TestBuildOutputBeforeRun:
     """build_output() before run() raises RuntimeError."""
@@ -152,6 +187,34 @@ class TestBenchmark:
         # At least some equity curve points should have benchmark values
         bm_points = [p for p in output.equity_curve if p.benchmark_equity is not None]
         assert len(bm_points) > 0
+
+    def test_benchmark_is_timestamp_aligned_without_future_backfill(self) -> None:
+        df = _make_df(n=5)
+        timeline = df.index.get_level_values("datetime").unique()
+        benchmark_prices = pd.Series(
+            [110.0, 100.0],
+            index=pd.DatetimeIndex([timeline[2], timeline[0]]),
+        )
+        bt = Backtest(df, HoldStrategy(), initial_balance=1_000.0, data_source="test")
+        bt.add_benchmark(benchmark_prices)
+
+        bt.run()
+        output = bt.build_output()
+
+        assert [point.benchmark_equity for point in output.equity_curve] == pytest.approx(
+            [1_000.0, 1_000.0, 1_100.0, 1_100.0, 1_100.0]
+        )
+
+    def test_benchmark_must_cover_backtest_start(self) -> None:
+        df = _make_df(n=5)
+        timeline = df.index.get_level_values("datetime").unique()
+        benchmark_prices = pd.Series([100.0], index=pd.DatetimeIndex([timeline[1]]))
+        bt = Backtest(df, HoldStrategy(), data_source="test")
+        bt.add_benchmark(benchmark_prices)
+        bt.run()
+
+        with pytest.raises(ValueError, match="at or before backtest start"):
+            bt.build_output()
 
     def test_annualize_false_by_default(self) -> None:
         df = _make_df()

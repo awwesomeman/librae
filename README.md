@@ -71,6 +71,12 @@ bt.run()
 output = bt.build_output()                      # BacktestOutput
 ```
 
+Pass raw, unshifted OHLCV and point-in-time feature columns. A strategy observes
+completed bar T, and the engine owns the execution delay: its intent is first
+eligible on T+1. Do not pre-shift prices or signals to simulate that delay, or
+the strategy will be delayed twice. The default fill is the next eligible
+bar's open.
+
 Allocation strategies can submit a complete target portfolio without calculating quantities:
 
 ```python
