@@ -85,6 +85,22 @@ class TestGetConn:
 
 
 class TestGetPool:
+    def test_missing_default_dsn_raises_when_pool_is_requested(self, monkeypatch):
+        monkeypatch.delenv("TIMESCALE_DSN", raising=False)
+
+        with pytest.raises(RuntimeError, match="TIMESCALE_DSN"):
+            db.get_pool()
+
+    def test_default_dsn_is_resolved_when_pool_is_requested(self, monkeypatch):
+        monkeypatch.setenv("TIMESCALE_DSN", "postgresql://test")
+        pool = MagicMock()
+        pool.closed = False
+
+        with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool) as ctor:
+            assert db.get_pool() is pool
+
+        ctor.assert_called_once_with(1, 5, "postgresql://test")
+
     def test_reuses_existing_open_pool(self):
         pool = MagicMock()
         pool.closed = False

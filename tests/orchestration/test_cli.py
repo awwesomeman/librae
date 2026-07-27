@@ -184,8 +184,6 @@ class TestCheckExistingRun:
     Postgres shouldn't crash a backtest that only wanted a dedup check."""
 
     def test_timescale_dsn_unset_returns_none(self, monkeypatch):
-        # Reproduces the real code path: db/__init__.py raises RuntimeError
-        # (not ImportError) at import time when TIMESCALE_DSN isn't set.
         monkeypatch.delenv("TIMESCALE_DSN", raising=False)
         monkeypatch.delitem(sys.modules, "db", raising=False)
         monkeypatch.delitem(sys.modules, "db.timescale_reader", raising=False)
