@@ -86,9 +86,9 @@ version_file = "librae/_version.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = ["--strict-markers"]
 markers = [
-  "tw_live: tests requiring shioaji (deselect with: -m 'not tw_live')",
-  "us_live: tests requiring ib_async (deselect with: -m 'not us_live')",
+  "sdk_contract: offline compatibility checks requiring optional broker SDKs",
 ]
 
 [tool.ruff]

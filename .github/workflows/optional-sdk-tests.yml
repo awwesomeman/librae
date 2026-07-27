@@ -1,0 +1,48 @@
+name: optional-sdk-tests
+
+on:
+  push:
+    paths:
+      - "brokers/**"
+      - "tests/sdk_contracts/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/optional-sdk-tests.yml"
+  pull_request:
+    paths:
+      - "brokers/**"
+      - "tests/sdk_contracts/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/optional-sdk-tests.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-contracts:
+    name: sdk contracts (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install optional SDKs
+        run: >-
+          uv sync --frozen --python ${{ matrix.python }}
+          --extra test --extra crypto-live --extra tw-live --extra us-live
+
+      - name: Run offline SDK contract tests
+        run: >-
+          uv run --python ${{ matrix.python }}
+          pytest -q tests/sdk_contracts/

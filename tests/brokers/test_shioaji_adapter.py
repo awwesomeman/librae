@@ -1,7 +1,7 @@
 """Tests for ShioajiAdapter.
 
 All tests use mocks — no real Shioaji API calls.
-Marked tw_live so they are skipped when shioaji is not installed.
+The optional SDK contract is covered separately without a broker login.
 """
 
 from __future__ import annotations
@@ -10,9 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-
-pytestmark = pytest.mark.tw_live
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -1,7 +1,7 @@
 """Tests for IBKRAdapter.
 
 All tests use mocks — no real IB Gateway/TWS connection.
-Marked us_live so they are skipped when ib_async is not installed.
+The optional SDK contract is covered separately without opening a socket.
 """
 
 from __future__ import annotations
@@ -10,9 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-
-pytestmark = pytest.mark.us_live
-
 
 # ---------------------------------------------------------------------------
 # Helpers

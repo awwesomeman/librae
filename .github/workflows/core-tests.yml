@@ -52,7 +52,7 @@ jobs:
           enable-cache: true
 
       - name: Install core + test dependencies
-        run: uv sync --frozen --python ${{ matrix.python }} --extra test --extra db --extra crypto-live
+        run: uv sync --frozen --python ${{ matrix.python }} --extra test --extra db
 
-      - name: Run core tests (skip tw-live/us-live)
-        run: uv run --python ${{ matrix.python }} pytest -q -m "not tw_live and not us_live" tests/
+      - name: Run offline tests
+        run: uv run --python ${{ matrix.python }} pytest -q -m "not sdk_contract" tests/
