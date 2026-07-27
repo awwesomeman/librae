@@ -74,6 +74,9 @@ class RunConfig:
     data_source: str
     initial_balance: float
     mode: Literal["backtest", "sim", "live"]
+    # Explicit live execution route. It is never inferred from market,
+    # data_source, or symbol; instrument_overrides[symbol]["broker"] wins.
+    broker: str | None = None
     start: str | None = None
     end: str | None = None
     params: dict[str, Any] | None = None
@@ -134,7 +137,7 @@ class RunConfig:
     def config_hash(self) -> str:
         """Deterministic hash of all result-affecting config.
 
-        Includes: strategy_name, symbols, timeframe, market, data_source,
+        Includes: strategy_name, symbols, timeframe, market, data_source, broker,
         initial_balance, start, end, params, cost_overrides, symbol_overrides,
         instrument_overrides.
         Excludes: perf params, behavior params.
@@ -147,6 +150,7 @@ class RunConfig:
                     "timeframe": self.timeframe,
                     "market": self.market,
                     "data_source": self.data_source,
+                    "broker": self.broker,
                     "initial_balance": self.initial_balance,
                     "start": self.start,
                     "end": self.end,
@@ -180,6 +184,7 @@ class RunConfig:
             f"  timeframe:   {self.timeframe}",
             f"  mode:        {self.mode}",
             f"  data_source: {self.data_source}",
+            f"  broker:      {self.broker}",
             f"  start:       {self.start}",
             f"  end:         {self.end}",
             f"  config_hash: {self.config_hash}",

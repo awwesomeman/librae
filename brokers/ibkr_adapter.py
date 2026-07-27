@@ -35,7 +35,14 @@ from math import isfinite
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, drop_incomplete_ohlcv, find_position
+from .base import (
+    AdapterInfo,
+    CredentialConfig,
+    drop_incomplete_ohlcv,
+    find_position,
+    floor_to_step,
+    passive_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +143,7 @@ class IBKRAdapter:
         self._ib = ib_async.IB()
         self._read_only = not trading_enabled
         self._contract_cache: dict[str, object] = {}
+        self._contract_details_cache: dict[tuple, object] = {}
         self._ib.connect(
             creds.host,
             int(creds.port),
@@ -257,6 +265,37 @@ class IBKRAdapter:
                 "IBKRAdapter connected read-only — pass trading_enabled=True "
                 "to enable order placement."
             )
+
+    def prepare_order(self, signal: dict) -> dict:
+        """Apply IBKR ContractDetails size and tick constraints."""
+        details = self._contract_details(
+            signal["symbol"],
+            security_type=signal.get("security_type", "STK"),
+            exchange=signal.get("exchange"),
+            currency=signal.get("currency", "USD"),
+        )
+        step = (
+            self._positive_float(getattr(details, "sizeIncrement", None))
+            or self._positive_float(getattr(details, "suggestedSizeIncrement", None))
+            or 1.0
+        )
+        minimum = self._positive_float(getattr(details, "minSize", None)) or step
+        quantity = floor_to_step(float(signal["quantity"]), step)
+        if quantity < minimum:
+            raise ValueError(f"{signal['symbol']} quantity {quantity} is below minimum {minimum}")
+
+        prepared = dict(signal)
+        prepared["quantity"] = quantity
+        if signal.get("order_type") == "limit":
+            tick_size = self._positive_float(getattr(details, "minTick", None))
+            if tick_size is None:
+                raise ValueError(f"{signal['symbol']} has no positive IBKR minTick")
+            prepared["price"] = passive_price(
+                float(signal["price"]),
+                tick_size,
+                signal["side"],
+            )
+        return prepared
 
     def place_order(self, signal: dict) -> dict:
         """Place an order.
@@ -524,10 +563,56 @@ class IBKRAdapter:
                 raise ValueError(f"Unknown future: {symbol} on {exchange}")
             # Front month = nearest non-expired contract by expiry date.
             details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
-            resolved = details[0].contract
+            selected = details[0]
+            resolved = selected.contract
+            detail_cache = getattr(self, "_contract_details_cache", None)
+            if detail_cache is None:
+                detail_cache = self._contract_details_cache = {}
+            detail_cache[cache_key] = selected
 
         self._contract_cache[cache_key] = resolved
         return resolved
+
+    def _contract_details(
+        self,
+        symbol: str,
+        *,
+        security_type: str,
+        exchange: str | None,
+        currency: str,
+    ):
+        cache_key = (symbol, security_type, exchange, currency)
+        cache = getattr(self, "_contract_details_cache", None)
+        if cache is None:
+            cache = self._contract_details_cache = {}
+        if cache_key in cache:
+            return cache[cache_key]
+
+        contract = self._resolve_contract(
+            symbol,
+            security_type=security_type,
+            exchange=exchange,
+            currency=currency,
+        )
+        details = list(self._ib.reqContractDetails(contract))
+        if not details:
+            raise ValueError(f"IBKR contract details unavailable for {symbol}")
+        contract_id = getattr(contract, "conId", None)
+        selected = next(
+            (
+                item
+                for item in details
+                if contract_id is not None and getattr(item.contract, "conId", None) == contract_id
+            ),
+            details[0],
+        )
+        cache[cache_key] = selected
+        return selected
+
+    @staticmethod
+    def _positive_float(value: object) -> float | None:
+        number = IBKRAdapter._optional_float(value)
+        return number if number is not None and number > 0 else None
 
 
 def _parse_dt(dt: datetime | str) -> datetime:

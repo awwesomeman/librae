@@ -20,6 +20,8 @@ import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from math import isfinite
 from typing import Any, Self
 
 import pandas as pd
@@ -65,6 +67,23 @@ def drop_incomplete_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     if last_ts > datetime.now(UTC) - interval_to_timedelta(timeframe):
         return df.iloc[:-1]
     return df
+
+
+def floor_to_step(value: float, step: float) -> float:
+    """Round a positive quantity down to an exchange-supported step."""
+    if not isfinite(value) or value <= 0 or not isfinite(step) or step <= 0:
+        raise ValueError("value and step must be positive and finite")
+    units = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_FLOOR)
+    return float(units * Decimal(str(step)))
+
+
+def passive_price(price: float, tick_size: float, side: str) -> float:
+    """Round a limit price without making it more aggressive."""
+    if not isfinite(price) or price <= 0:
+        raise ValueError("price must be positive and finite")
+    rounding = ROUND_FLOOR if side == "buy" else ROUND_CEILING
+    units = (Decimal(str(price)) / Decimal(str(tick_size))).to_integral_value(rounding=rounding)
+    return float(units * Decimal(str(tick_size)))
 
 
 # ---------------------------------------------------------------------------

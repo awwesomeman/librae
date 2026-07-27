@@ -25,7 +25,9 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 
 ## Broker Adapter Design (`brokers/`)
 
-- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Market/account signatures include `fetch_ohlcv`, `get_position`, and `info`; live order lifecycle signatures are `place_order`, `find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
+- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Market/account signatures include `fetch_ohlcv`, `get_position`, and `info`; live order lifecycle signatures are `prepare_order`, `place_order`, `find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
+- `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, a per-symbol `instrument_overrides[symbol]["broker"]`, or an injected `order_adapter`; an unresolved route fails at startup. An explicitly selected broker may reuse the same adapter session as market data.
+- `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `brokers/base.py` only provides the two pieces that are genuinely shared and byte-for-byte identical: `AdapterInfo` (static metadata) and `CredentialConfig.from_env(prefix)` (the env-var convention `{PREFIX}_{FIELD}`, with `prefix` supplied by the caller — e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are themselves exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
@@ -76,7 +78,7 @@ backtest/ ──→ core/
 live/     ──→ core/
 ```
 
-`backtest/` and `live/` have no direct dependency on each other — shared execution logic lives in `core/`. Broker, persistence, and notification implementations remain constructor-injected and lazy-imported. Simulation can run standalone with `cfg.no_db=True`; live additionally requires an order adapter and a durable state store, either injected or backed by the default `brokers.*` and `db.timescale_state` implementations (see `docs/plans/refactor_librae_decouple.md`).
+`backtest/` and `live/` have no direct dependency on each other — shared execution logic lives in `core/`. Broker, persistence, and notification implementations remain constructor-injected and lazy-imported. Simulation can run standalone with `cfg.no_db=True`; live additionally requires an explicit broker route or injected order adapter plus a durable state store (see `docs/plans/refactor_librae_decouple.md`).
 
 ### Execution flow (strategy → engine → output)
 
@@ -296,7 +298,12 @@ is a no-op in sim mode:
   restored checkpoint keeps its entry time and accumulated costs, while broker
   side/quantity is a reconciliation assertion. A mismatch or unreadable
   configured-symbol snapshot halts. Only a first run with no checkpoint adopts
-  broker exposure as a safety baseline.
+  broker exposure as a safety baseline. Crypto spot uses base-asset balance
+  inventory, not the derivatives-only positions endpoint. Since a spot balance
+  has no broker average cost, it can validate quantity against a restored
+  checkpoint but cannot seed a first-run cost basis; that case halts for
+  operator action. Ordinary spot also rejects opening/adding a short, while a
+  sell that reduces or closes owned inventory remains valid.
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
@@ -362,7 +369,7 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Type | Description |
 |------|------|
 | `Fill` | fill report: price, quantity, commission, slippage, tax |
-| `OrderRequest` | live broker request: client id, symbol/side/quantity, market or limit, submission time |
+| `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time |
 | `ExecutionReport` | normalized live state: submitted/accepted/partial/filled/cancelled/rejected plus confirmed execution facts |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
@@ -440,6 +447,27 @@ cfg = RunConfig(
 
 This is the mechanism for registering a symbol librae doesn't know about (`pip install`ed with nothing to edit, or a one-off backtest) — `symbol_overrides={"MYSYM": {"multiplier": 1.0}}` needs no file, no path parameter, nothing beyond the `RunConfig` you're already passing to `Backtest`/`LiveTrader`.
 
+Routing metadata is intentionally separate from accounting overrides:
+
+```yaml
+strategy:
+  symbols: [MU]
+  market: us_equity
+  data_source: ibkr
+  broker: ibkr              # explicit execution choice; no symbol fallback
+  instrument_overrides:
+    MU:
+      data_adapter: ibkr
+      venue_symbol: MU
+      currency: USD
+      security_type: STK
+```
+
+For a multi-broker run, omit the run-wide `broker` and set
+`instrument_overrides.<symbol>.broker` for every symbol. Registered symbol
+metadata may supply market/data identifiers and contract economics, but never
+selects an execution broker.
+
 #### TelegramAdapter (notifications)
 
 Source: behavior is configured from the caller's `config.yaml` `telegram:` block (passed in via `RunConfig.telegram_config`), secrets come from env vars. `librae` itself has no dependency on this package — `LiveTrader` only lazy-imports it to build a default implementation when nothing was explicitly overridden and `cfg.no_db=False`.
@@ -474,7 +502,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
-| `order_adapter` | `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`; all order results follow the cumulative execution-report contract above |
+| `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`; all order results follow the cumulative execution-report contract above |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 

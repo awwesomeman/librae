@@ -190,12 +190,13 @@ class TestBuildConfig:
                   timeframe: 1d
                   market: us_equity
                   data_source: ibkr
+                  broker: ibkr
                   symbol_overrides:
                     AAPL:
                       multiplier: 1.0
                   instrument_overrides:
                     AAPL:
-                      adapter: ibkr
+                      data_adapter: ibkr
                       currency: USD
                       security_type: STK
                 """
@@ -205,9 +206,10 @@ class TestBuildConfig:
         cfg = build_config("test_strat", str(tmp_path / "run.py"))
 
         assert cfg.symbol_overrides == {"AAPL": {"multiplier": 1.0}}
+        assert cfg.broker == "ibkr"
         assert cfg.instrument_overrides == {
             "AAPL": {
-                "adapter": "ibkr",
+                "data_adapter": "ibkr",
                 "currency": "USD",
                 "security_type": "STK",
             }

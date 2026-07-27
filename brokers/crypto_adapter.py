@@ -262,6 +262,60 @@ class CryptoAdapter:
                 "Provide api_key/api_secret to enable trading."
             )
 
+    def prepare_order(self, signal: dict) -> dict:
+        """Apply CCXT precision/limit rules and reject spot short opens."""
+        self._exchange.load_markets()
+        symbol = signal["symbol"]
+        market = self._exchange.market(symbol)
+        prepared = dict(signal)
+
+        quantity = float(self._exchange.amount_to_precision(symbol, signal["quantity"]))
+        if quantity <= 0:
+            raise ValueError(f"{symbol} quantity rounds to zero")
+        prepared["quantity"] = quantity
+
+        price = signal.get("price")
+        if price is not None:
+            price = float(self._exchange.price_to_precision(symbol, price))
+            if price <= 0:
+                raise ValueError(f"{symbol} price rounds to zero")
+            prepared["price"] = price
+
+        is_spot = bool(market.get("spot") or market.get("type") == "spot")
+        if (
+            is_spot
+            and signal["side"] == "sell"
+            and signal.get("position_effect") in ("open", "add")
+        ):
+            raise ValueError(f"{symbol} spot inventory cannot open a short position")
+
+        limits = market.get("limits") or {}
+        self._validate_limit(quantity, limits.get("amount"), "quantity", symbol)
+        if price is not None:
+            self._validate_limit(price, limits.get("price"), "price", symbol)
+        reference_price = price or signal.get("reference_price")
+        if reference_price is not None:
+            contract_size = float(market.get("contractSize") or 1.0)
+            notional = quantity * float(reference_price) * contract_size
+            self._validate_limit(notional, limits.get("cost"), "notional", symbol)
+        return prepared
+
+    @staticmethod
+    def _validate_limit(
+        value: float,
+        limits: dict | None,
+        name: str,
+        symbol: str,
+    ) -> None:
+        if not limits:
+            return
+        minimum = limits.get("min")
+        maximum = limits.get("max")
+        if minimum is not None and value < float(minimum):
+            raise ValueError(f"{symbol} {name} {value} is below minimum {minimum}")
+        if maximum is not None and value > float(maximum):
+            raise ValueError(f"{symbol} {name} {value} exceeds maximum {maximum}")
+
     def place_order(self, signal: dict) -> dict:
         """Place an order.
 
@@ -347,12 +401,30 @@ class CryptoAdapter:
         Returns ``{symbol, size, avg_price, unrealized_pnl}``.
         """
         self._require_auth()
+        self._exchange.load_markets()
+        market = self._exchange.market(symbol)
+        if market.get("spot") or market.get("type") == "spot":
+            balance = self._exchange.fetch_balance()
+            base = market["base"]
+            entry = balance.get(base) or {}
+            total = entry.get("total")
+            if total is None and isinstance(balance.get("total"), dict):
+                total = balance["total"].get(base)
+            return {
+                "symbol": symbol,
+                "size": float(total or 0.0),
+                "avg_price": None,
+                "unrealized_pnl": 0.0,
+            }
+
         positions = self._exchange.fetch_positions([symbol])
         return find_position(
             positions,
             symbol,
             matches=lambda p: p.get("symbol") == symbol,
-            size=lambda p: float(p.get("contracts", 0)),
+            size=lambda p: (
+                float(p.get("contracts", 0)) * (-1.0 if p.get("side") == "short" else 1.0)
+            ),
             avg_price=lambda p: float(p.get("entryPrice", 0) or 0),
             pnl=lambda p: float(p.get("unrealizedPnl", 0) or 0),
         )

@@ -25,7 +25,14 @@ from numbers import Real
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, drop_incomplete_ohlcv, find_position
+from .base import (
+    AdapterInfo,
+    CredentialConfig,
+    drop_incomplete_ohlcv,
+    find_position,
+    floor_to_step,
+    passive_price,
+)
 from .taipei_time import resample_taifex_ohlcv, shioaji_ts_ns_to_epoch
 
 logger = logging.getLogger(__name__)
@@ -206,6 +213,29 @@ class ShioajiAdapter:
                 "Provide ca_path to enable trading."
             )
 
+    def prepare_order(self, signal: dict) -> dict:
+        """Round quantity/limit price to Shioaji contract rules."""
+        contract = self._resolve_contract(signal["symbol"])
+        prepared = dict(signal)
+        quantity = floor_to_step(float(signal["quantity"]), 1.0)
+        if quantity < 1:
+            raise ValueError(f"{signal['symbol']} quantity rounds below one lot")
+        prepared["quantity"] = quantity
+
+        if signal.get("order_type") == "limit":
+            tick_size = float(signal.get("tick_size") or 0.0)
+            if tick_size <= 0:
+                raise ValueError("Shioaji limit orders require a positive tick_size")
+            price = passive_price(float(signal["price"]), tick_size, signal["side"])
+            lower = float(getattr(contract, "limit_down", 0) or 0)
+            upper = float(getattr(contract, "limit_up", 0) or 0)
+            if lower and price < lower:
+                raise ValueError(f"{signal['symbol']} price is below limit_down {lower}")
+            if upper and price > upper:
+                raise ValueError(f"{signal['symbol']} price exceeds limit_up {upper}")
+            prepared["price"] = price
+        return prepared
+
     def place_order(self, signal: dict) -> dict:
         """Place an order.
 
@@ -245,9 +275,12 @@ class ShioajiAdapter:
         # Union[StockOrder, FuturesOrder]) — confirmed via DeprecationWarning
         # running against a real sandbox session 2026-07-26.
         order_cls = sj.FuturesOrder if is_futures else sj.StockOrder
+        quantity = float(signal["quantity"])
+        if not quantity.is_integer() or quantity < 1:
+            raise ValueError("Shioaji quantity must be a positive whole lot; call prepare_order")
         order_kwargs = dict(
             price=signal.get("price", 0),
-            quantity=int(signal["quantity"]),
+            quantity=int(quantity),
             action=action,
             price_type=price_type,
             order_type=order_type,

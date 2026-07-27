@@ -153,6 +153,26 @@ class TestPlaceOrder:
         mock_sj.StockOrder = MagicMock(return_value="mock_order")
         return mock_sj
 
+    def test_prepare_order_rounds_lot_and_limit_price(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(limit_down=19_000, limit_up=21_000)
+        )
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "TXFR1",
+                "side": "buy",
+                "quantity": 2.9,
+                "order_type": "limit",
+                "price": 20_000.8,
+                "tick_size": 1.0,
+            }
+        )
+
+        assert prepared["quantity"] == 2.0
+        assert prepared["price"] == 20_000.0
+
     def test_futures_limit_order_uses_futures_price_type(self):
         adapter = _make_adapter(ca_activated=True)
         adapter._resolve_contract = MagicMock(return_value="mock_contract")

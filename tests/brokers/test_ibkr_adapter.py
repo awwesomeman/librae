@@ -206,6 +206,32 @@ class TestPlaceOrder:
         }
         return mock
 
+    def test_prepare_order_uses_contract_size_and_tick_rules(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                minSize=0.1,
+                sizeIncrement=0.1,
+                suggestedSizeIncrement=0.1,
+                minTick=0.01,
+            )
+        )
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "MU",
+                "side": "sell",
+                "quantity": 1.29,
+                "order_type": "limit",
+                "price": 100.001,
+                "security_type": "STK",
+                "currency": "USD",
+            }
+        )
+
+        assert prepared["quantity"] == 1.2
+        assert prepared["price"] == 100.01
+
     def test_market_order_uses_market_order_class(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._resolve_contract = MagicMock(return_value="mock_contract")

@@ -285,6 +285,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         data_source=data_source,
         initial_balance=initial_balance,
         mode=args.mode,
+        broker=scfg.get("broker"),
         start=start,
         end=end,
         params=params or None,

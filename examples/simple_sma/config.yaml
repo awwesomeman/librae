@@ -3,3 +3,4 @@ strategy:
   symbol: BTCUSDT  # registered in librae/config/symbols.py (spot, multiplier=1.0 auto)
   timeframe: H1
   initial_balance: 100000
+  # broker: crypto  # required only for live; never inferred from symbol/data_source

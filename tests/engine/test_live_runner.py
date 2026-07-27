@@ -51,6 +51,7 @@ def _mock_order_adapter() -> MagicMock:
     adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
     adapter.find_order.return_value = None
     adapter.list_open_orders.return_value = []
+    adapter.prepare_order.side_effect = lambda signal: signal
     return adapter
 
 
@@ -879,7 +880,7 @@ class TestLiveTrader:
 
     def test_live_mode_without_order_adapter_raises(self):
         cfg = _test_cfg(mode="live")
-        with pytest.raises(ValueError, match="order adapters"):
+        with pytest.raises(ValueError, match="broker is not configured"):
             self._make_runner(cfg=cfg)
 
     def test_reconciles_open_broker_position_at_startup(self):
@@ -928,6 +929,24 @@ class TestLiveTrader:
         pos = runner._positions["BTCUSDT"]
         assert pos.side == "short"
         assert pos.quantity == 3.0
+
+    def test_first_run_cannot_adopt_spot_inventory_without_cost_basis(self):
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.return_value = {
+            "symbol": "BTC/USDT",
+            "size": 1.0,
+            "avg_price": None,
+            "unrealized_pnl": 0.0,
+        }
+
+        runner = self._make_runner(
+            cfg=_test_cfg(mode="live"),
+            order_adapter=mock_order_adapter,
+        )
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._positions == {}
 
     def test_reconciliation_failure_halts_startup(self):
         """An unreadable broker book must fail closed without crashing."""
@@ -1449,6 +1468,27 @@ class TestLiveExecutionLifecycle:
         assert adapter.place_order.call_count == 1
         assert second._run_id == first._run_id
 
+    def test_restored_spot_inventory_matches_without_broker_cost_basis(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report()
+
+        first = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        first.run(max_iterations=1)
+
+        adapter.get_position.return_value = {
+            "symbol": "BTC/USDT",
+            "size": 1.0,
+            "avg_price": None,
+            "unrealized_pnl": 0.0,
+        }
+        second = self._make_trader(_HoldStrategy(), adapter, state_store=store)
+        second.run(max_iterations=1)
+
+        assert second._halted is False
+        assert second._positions["BTCUSDT"].quantity == 1.0
+        assert second._positions["BTCUSDT"].entry_price == 100.0
+
     @pytest.mark.parametrize("status", ["cancelled", "rejected"])
     def test_final_failed_order_is_persisted_and_halts(self, status):
         store = MemoryLiveStateStore()
@@ -1611,6 +1651,53 @@ class TestLiveExecutionLifecycle:
         assert signal["price"] == 99.5
         assert runner._positions == {}
 
+    def test_order_is_normalized_before_checkpoint_and_submission(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {
+            **signal,
+            "quantity": 1.0,
+            "price": 99.5,
+        }
+        adapter.place_order.return_value = {
+            "id": "limit-1",
+            "status": "submitted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+
+        class LimitBuy(BaseStrategy):
+            def on_bar(self, ctx):
+                return [
+                    Action(
+                        type="long",
+                        symbol=ctx.symbol,
+                        quantity=1.9,
+                        fill_price=99.57,
+                    )
+                ]
+
+        runner = self._make_trader(LimitBuy(), adapter, state_store=store)
+        runner.run(max_iterations=1)
+
+        signal = adapter.place_order.call_args.args[0]
+        tracked = next(iter(store.orders.values()))
+        assert signal["quantity"] == 1.0
+        assert signal["price"] == 99.5
+        assert tracked.request.quantity == 1.0
+        assert tracked.request.limit_price == 99.5
+
+    def test_order_preflight_failure_halts_before_submission(self):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = ValueError("below minimum notional")
+
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
+
     @pytest.mark.parametrize(
         "action,match",
         [
@@ -1657,7 +1744,7 @@ class TestCryptoLiveAutoWiring:
             trader = LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                cfg=_test_cfg(mode="live"),
+                cfg=_test_cfg(mode="live", broker="crypto"),
                 cost_model=_zero_cost_model(),
                 on_bar=None,
                 on_order_event=None,
@@ -1735,6 +1822,7 @@ class TestIBKRLiveAutoWiring:
                     symbols=["MU"],
                     market="us_equity",
                     data_source="ibkr",
+                    broker="ibkr",
                 ),
                 cost_model=_zero_cost_model(),
                 on_bar=None,
@@ -1759,6 +1847,7 @@ class TestShioajiLiveAutoWiring:
         overrides.setdefault("symbols", ["TXFR1"])
         overrides.setdefault("market", "tw_futures")
         overrides.setdefault("data_source", "shioaji")
+        overrides.setdefault("broker", "shioaji")
         return _test_cfg(**overrides)
 
     def test_auto_builds_order_adapter_from_shioaji(self):

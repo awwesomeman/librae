@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -121,6 +121,8 @@ class ExecutionReport:
 class OrderAdapter(Protocol):
     """Duck-typed gateway implemented by the built-in broker adapters."""
 
+    def prepare_order(self, signal: dict) -> dict: ...
+
     def place_order(self, signal: dict) -> dict: ...
 
     def find_order(self, client_order_id: str, symbol: str) -> dict | None: ...
@@ -157,6 +159,7 @@ class LiveExecutor:
         )
         if not simulation:
             required = (
+                "prepare_order",
                 "place_order",
                 "find_order",
                 "get_order",
@@ -239,6 +242,35 @@ class LiveExecutor:
             security_type=instrument.security_type if instrument else None,
             exchange=instrument.exchange if instrument else None,
             currency=instrument.currency if instrument else None,
+        )
+
+    def prepare_order(
+        self,
+        request: OrderRequest,
+        *,
+        reference_price: float,
+    ) -> OrderRequest:
+        """Apply venue quantity/price rules before durable checkpointing."""
+        adapter = self.get_order_adapter(request.symbol)
+        signal = request.to_signal()
+        signal["reference_price"] = reference_price
+        signal["tick_size"] = self.get_cost_model(request.symbol).tick_size
+        try:
+            prepared = adapter.prepare_order(signal)
+        except Exception as exc:
+            raise ValueError(f"{request.symbol} order preparation failed: {exc}") from exc
+        if not isinstance(prepared, dict):
+            raise ValueError("prepared order must be a mapping")
+        if prepared.get("symbol") != signal["symbol"]:
+            raise ValueError("order preparation cannot change venue symbol")
+
+        quantity = float(prepared.get("quantity", 0.0))
+        price_raw = prepared.get("price")
+        limit_price = float(price_raw) if price_raw is not None else None
+        return replace(
+            request,
+            quantity=quantity,
+            limit_price=limit_price,
         )
 
     def submit_order(self, request: OrderRequest) -> ExecutionReport | None:

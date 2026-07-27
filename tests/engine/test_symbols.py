@@ -29,7 +29,7 @@ class TestLoadSymbolRegistry:
         assert btc.market == "crypto"
         assert btc.data_source == "binance_spot"
         assert btc.instrument_type == "spot"
-        assert btc.adapter == "crypto"
+        assert btc.data_adapter == "crypto"
         assert btc.venue_symbol == "BTC/USDT"
         assert btc.currency == "USDT"
         assert btc.continuous_alias is False
@@ -59,7 +59,7 @@ class TestInstrumentTypeValidation:
                 data_source="binance_spot",
                 instrument_type="bogus",
                 multiplier=1.0,
-                adapter="crypto",
+                data_adapter="crypto",
                 venue_symbol="X/USDT",
                 currency="USDT",
                 tick_size=0.01,
@@ -73,7 +73,7 @@ class TestInstrumentTypeValidation:
                 data_source="binance_spot",
                 instrument_type=t,
                 multiplier=1.0,
-                adapter="crypto",
+                data_adapter="crypto",
                 venue_symbol="X/USDT",
                 currency="USDT",
                 tick_size=0.01,
@@ -87,7 +87,7 @@ class TestInstrumentTypeValidation:
                         "market": "crypto",
                         "data_source": "binance_spot",
                         "multiplier": 1.0,
-                        "adapter": "crypto",
+                        "data_adapter": "crypto",
                         "currency": "USDT",
                     }
                 }
@@ -103,7 +103,7 @@ class TestMultiplierTickSizeValidation:
                         "market": "tw_futures",
                         "data_source": "shioaji",
                         "instrument_type": "contract_monthly",
-                        "adapter": "shioaji",
+                        "data_adapter": "shioaji",
                         "currency": "TWD",
                         "tick_size": 1.0,
                     }
@@ -117,7 +117,7 @@ class TestMultiplierTickSizeValidation:
                     "market": "crypto",
                     "data_source": "binance_spot",
                     "instrument_type": "spot",
-                    "adapter": "crypto",
+                    "data_adapter": "crypto",
                     "currency": "USDT",
                 }
             }
@@ -132,7 +132,7 @@ class TestMultiplierTickSizeValidation:
                     "data_source": "binance_spot",
                     "instrument_type": "spot",
                     "multiplier": 1.0,
-                    "adapter": "crypto",
+                    "data_adapter": "crypto",
                     "currency": "USDT",
                 }
             }
@@ -176,7 +176,7 @@ class TestResolveSymbol:
             "BTCUSDT",
         )
 
-        assert info.adapter == "crypto"
+        assert info.data_adapter == "crypto"
         assert info.venue_symbol == "BTC/USDT"
         assert info.currency == "USDT"
 
@@ -185,7 +185,7 @@ class TestResolveSymbol:
             self._cfg(
                 instrument_overrides={
                     "AAPL": {
-                        "adapter": "ibkr",
+                        "data_adapter": "ibkr",
                         "currency": "USD",
                         "security_type": "STK",
                         "exchange": "SMART",
@@ -198,12 +198,12 @@ class TestResolveSymbol:
 
         assert info.market == "us_equity"
         assert info.data_source == "ibkr"
-        assert info.adapter == "ibkr"
+        assert info.data_adapter == "ibkr"
         assert info.security_type == "STK"
         assert info.exchange == "SMART"
 
     def test_unknown_data_source_requires_adapter_route(self):
-        with pytest.raises(ValueError, match="No adapter route"):
+        with pytest.raises(ValueError, match="No data adapter route"):
             resolve_symbol(
                 self._cfg(
                     data_source="local",

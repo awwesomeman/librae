@@ -20,11 +20,10 @@ raised FileNotFoundError the moment get_symbol() ran for any built-in
 symbol. A handful of hardcoded entries needs no parser, no packaging
 config, and can't go missing from the wheel.
 
-Registering your own symbol doesn't require editing this file at all —
-RunConfig.symbol_overrides (see CostModel.from_config) covers a one-off or
-per-run override with no file/path needed; only reach for editing this
-registry if you're maintaining a recurring symbol reused across many runs
-in a clone of this repo.
+Registering your own symbol doesn't require editing this file. Cost fields
+belong in RunConfig.symbol_overrides; venue/data fields belong in
+RunConfig.instrument_overrides. Execution brokerage is deliberately absent
+from the registry and must be selected by the caller.
 """
 
 from __future__ import annotations
@@ -83,7 +82,7 @@ class SymbolInfo:
     data_source: str
     instrument_type: str
     multiplier: float
-    adapter: AdapterName
+    data_adapter: AdapterName
     venue_symbol: str
     currency: str
     continuous_alias: bool = False
@@ -97,8 +96,8 @@ class SymbolInfo:
                 f"{self.symbol!r} has instrument_type="
                 f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
             )
-        if self.adapter not in _ADAPTER_BY_DATA_SOURCE.values():
-            raise ValueError(f"{self.symbol!r} has unsupported adapter={self.adapter!r}")
+        if self.data_adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+            raise ValueError(f"{self.symbol!r} has unsupported data_adapter={self.data_adapter!r}")
         if self.multiplier <= 0:
             raise ValueError(f"{self.symbol!r} multiplier must be positive")
         if not self.venue_symbol:
@@ -138,7 +137,7 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             data_source=str(data.get("data_source", "")),
             instrument_type=instrument_type,
             multiplier=multiplier,
-            adapter=str(data["adapter"]),
+            data_adapter=str(data["data_adapter"]),
             venue_symbol=str(data.get("venue_symbol", symbol)),
             currency=str(data["currency"]),
             continuous_alias=bool(data.get("continuous_alias", False)),
@@ -159,7 +158,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "crypto",
             "data_source": "binance_spot",
             "instrument_type": "spot",
-            "adapter": "crypto",
+            "data_adapter": "crypto",
             "venue_symbol": "BTC/USDT",
             "currency": "USDT",
             # multiplier/tick_size omitted on purpose — spot auto-defaults
@@ -170,7 +169,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "crypto",
             "data_source": "binance_futures_continuous",
             "instrument_type": "contract_quarterly",
-            "adapter": "crypto",
+            "data_adapter": "crypto",
             "venue_symbol": "BTC/USDT:USDT",
             "currency": "USDT",
             "continuous_alias": True,
@@ -183,7 +182,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
-            "adapter": "shioaji",
+            "data_adapter": "shioaji",
             "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
@@ -193,7 +192,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
-            "adapter": "shioaji",
+            "data_adapter": "shioaji",
             "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 50.0,  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
@@ -203,7 +202,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
-            "adapter": "shioaji",
+            "data_adapter": "shioaji",
             "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 10.0,  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
@@ -213,7 +212,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "us_equity",
             "data_source": "ibkr",
             "instrument_type": "spot",
-            "adapter": "ibkr",
+            "data_adapter": "ibkr",
             "currency": "USD",
             "security_type": "STK",
             # multiplier/tick_size omitted — spot auto-defaults to
@@ -274,13 +273,13 @@ def resolve_symbol(
     data_source = route.get("data_source") or (
         registered.data_source if registered else cfg.data_source
     )
-    adapter = route.get("adapter") or (
-        registered.adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)
+    data_adapter = route.get("data_adapter") or (
+        registered.data_adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)
     )
-    if adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+    if data_adapter not in _ADAPTER_BY_DATA_SOURCE.values():
         raise ValueError(
-            f"No adapter route for symbol={symbol!r}, data_source={data_source!r}; "
-            "set instrument_overrides[symbol]['adapter']"
+            f"No data adapter route for symbol={symbol!r}, data_source={data_source!r}; "
+            "set instrument_overrides[symbol]['data_adapter']"
         )
 
     multiplier = (
@@ -305,7 +304,7 @@ def resolve_symbol(
         data_source=data_source,
         instrument_type=instrument_type,
         multiplier=float(multiplier),
-        adapter=adapter,
+        data_adapter=data_adapter,
         venue_symbol=route.get("venue_symbol")
         or (registered.venue_symbol if registered else symbol),
         currency=currency,
