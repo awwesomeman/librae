@@ -1,11 +1,35 @@
 # Examples
 
-`simple_sma/` is a minimal, runnable strategy showing how a strategy repo
-wires itself to librae. Try it:
+Each example uses the same minimal layout: `strategy.py`, `run.py`, and
+`config.yaml`.
+
+| Example | Strategy responsibility | Intent | Modes |
+|---|---|---|---|
+| [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[Action]` | backtest, sim, live |
+| [`target_weights/`](target_weights/) | Look up an externally prepared allocation schedule | `RebalanceTargets` | backtest |
+| [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select the Top K | `RebalanceTargets` | backtest |
+
+Run each backtest with deterministic synthetic data:
 
 ```bash
 uv run python -m examples.simple_sma.run --mode backtest --no-db
-uv run python -m examples.simple_sma.run --mode sim --poll-seconds 5 --no-db   # Ctrl+C to stop
+uv run python -m examples.target_weights.run --mode backtest --no-db
+uv run python -m examples.topk_selection.run --mode backtest --no-db
+```
+
+These examples demonstrate engine integration, not validated alpha or
+production-ready portfolio research.
+
+The target-weight example rotates through a precomputed allocation schedule.
+The Top-K example computes trailing-return scores, ranks all symbols at the
+same timestamp, selects the highest-scoring names, and omits dropped names so
+the engine closes them. Both decide on bar T and fill on T+1.
+
+Only the quantity-based SMA example currently supports real-time modes because
+the polling live runner does not yet build synchronized cross-sectional bars:
+
+```bash
+uv run python -m examples.simple_sma.run --mode sim --poll-seconds 5 --no-db
 ```
 
 librae's engine and reference implementations (`db/`, `brokers/`,
@@ -18,8 +42,9 @@ README section (deployment only). This file is that gap, consolidated.
 
 `Backtest(data=...)` requires a `MultiIndex(symbol, datetime)` DataFrame with
 OHLCV columns, **already featured** (your strategy's signal columns computed
-in advance — the engine doesn't compute features itself). See
-`examples/simple_sma/run.py::run_backtest` for the exact construction:
+in advance — the engine doesn't compute features itself). The single-asset SMA
+constructs this index explicitly; the portfolio examples use `pd.concat()` to
+construct the same shape:
 
 ```python
 df.index = pd.MultiIndex.from_arrays(

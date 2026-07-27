@@ -21,12 +21,13 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Literal
 
 from librae.core import EPSILON
 
 from .cost_model import CostModel
-from .strategy import Action, Fill, Position, PositionState
+from .strategy import Action, Fill, Position, PositionState, RebalanceTargets, StrategyIntent
 
 logger = logging.getLogger(__name__)
 
@@ -935,6 +936,218 @@ def process_actions(
     return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
 
 
+def _scale_additions_to_cash(
+    actions: list[Action],
+    available_cash: float,
+    *,
+    prices: dict[str, float],
+    get_cost_model: Callable[[str], CostModel],
+) -> list[Action]:
+    """Scale all rebalance additions by one factor when cash is insufficient.
+
+    A common factor preserves the intended cross-sectional allocation better
+    than accepting actions in symbol order until cash runs out. The binary
+    search accounts for nonlinear minimum commissions.
+    """
+    if not actions or available_cash <= EPSILON:
+        return []
+
+    def total_outlay(scale: float) -> float:
+        total = 0.0
+        for action in actions:
+            quantity = (action.quantity or 0.0) * scale
+            if quantity <= EPSILON:
+                continue
+            price = prices[action.symbol]
+            cost_model = get_cost_model(action.symbol)
+            side: Literal["long", "short"] = "short" if action.type == "short" else "long"
+            total += cost_model.estimate_entry_outlay(price, quantity, side)
+        return total
+
+    if total_outlay(1.0) <= available_cash + EPSILON:
+        return actions
+
+    low, high = 0.0, 1.0
+    for _ in range(60):
+        middle = (low + high) / 2.0
+        if total_outlay(middle) <= available_cash:
+            low = middle
+        else:
+            high = middle
+
+    if low <= EPSILON:
+        logger.warning("Rebalance additions skipped: insufficient cash after reductions")
+        return []
+
+    logger.info("Rebalance additions scaled to %.6f of requested quantities", low)
+    return [
+        Action(
+            type=action.type,
+            symbol=action.symbol,
+            quantity=(action.quantity or 0.0) * low,
+            reason=action.reason,
+            fill_price=action.fill_price,
+        )
+        for action in actions
+    ]
+
+
+def process_rebalance_targets(
+    targets: RebalanceTargets,
+    positions: dict[str, PositionState],
+    cash: float,
+    ts: datetime,
+    *,
+    get_price: Callable[[str, Action], float | None],
+    get_cost_model: Callable[[str], CostModel],
+    primary_symbol: str,
+    max_position_notional: float | None = None,
+    max_volume_participation_pct: float | None = None,
+    get_volume: Callable[[str], float | None] | None = None,
+) -> ActionResults:
+    """Resolve and execute a portfolio rebalance as one deterministic batch.
+
+    All relevant execution prices are resolved before mutating the portfolio.
+    Existing exposure is reduced first, then additions are submitted in symbol
+    order. If transaction costs make the additions unaffordable, every addition
+    is scaled by the same factor instead of starving later symbols.
+    """
+    target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
+    relevant_symbols = sorted(set(positions) | target_symbols)
+    if not relevant_symbols:
+        return ActionResults(trades=[], events=[], cash_delta=0.0)
+
+    prices: dict[str, float] = {}
+    for symbol in relevant_symbols:
+        target_weight = targets.weights.get(symbol, 0.0)
+        action_type: Literal["long", "short", "close"]
+        if target_weight > EPSILON:
+            action_type = "long"
+        elif target_weight < -EPSILON:
+            action_type = "short"
+        else:
+            action_type = "close"
+        price_action = Action(
+            type=action_type,
+            symbol=symbol,
+            reason=targets.reason,
+            fill_price=targets.fill_price,
+        )
+        raw_price = get_price(symbol, price_action)
+        if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
+            logger.warning(
+                "Rebalance rejected: no valid execution price for %s; portfolio unchanged",
+                symbol,
+            )
+            return ActionResults(trades=[], events=[], cash_delta=0.0)
+        prices[symbol] = float(raw_price)
+
+    equity, _ = eval_equity(
+        cash,
+        positions,
+        get_price=lambda symbol, _position: prices[symbol],
+        get_cost_model=get_cost_model,
+    )
+    if equity <= EPSILON:
+        logger.warning("Rebalance rejected: execution-time equity is not positive")
+        return ActionResults(trades=[], events=[], cash_delta=0.0)
+
+    reductions: list[Action] = []
+    additions: list[Action] = []
+    for symbol in relevant_symbols:
+        position = positions.get(symbol)
+        current_signed_quantity = 0.0
+        if position is not None:
+            current_signed_quantity = position.quantity * direction(position.side)
+
+        cost_model = get_cost_model(symbol)
+        target_weight = targets.weights.get(symbol, 0.0)
+        target_signed_quantity = target_weight * equity / (prices[symbol] * cost_model.multiplier)
+
+        current_is_flat = abs(current_signed_quantity) <= EPSILON
+        target_is_flat = abs(target_signed_quantity) <= EPSILON
+        same_direction = (
+            current_is_flat
+            or target_is_flat
+            or (current_signed_quantity > 0) == (target_signed_quantity > 0)
+        )
+        if same_direction:
+            quantity_delta = abs(target_signed_quantity) - abs(current_signed_quantity)
+            if quantity_delta < -EPSILON:
+                reductions.append(
+                    Action(
+                        type="close",
+                        symbol=symbol,
+                        quantity=-quantity_delta,
+                        reason=targets.reason,
+                        fill_price=targets.fill_price,
+                    )
+                )
+            elif quantity_delta > EPSILON:
+                additions.append(
+                    Action(
+                        type="long" if target_signed_quantity > 0 else "short",
+                        symbol=symbol,
+                        quantity=quantity_delta,
+                        reason=targets.reason,
+                        fill_price=targets.fill_price,
+                    )
+                )
+            continue
+
+        reductions.append(
+            Action(
+                type="close",
+                symbol=symbol,
+                reason=targets.reason,
+                fill_price=targets.fill_price,
+            )
+        )
+        additions.append(
+            Action(
+                type="long" if target_signed_quantity > 0 else "short",
+                symbol=symbol,
+                quantity=abs(target_signed_quantity),
+                reason=targets.reason,
+                fill_price=targets.fill_price,
+            )
+        )
+
+    reduction_result = process_actions(
+        reductions,
+        positions,
+        cash,
+        ts,
+        get_price=get_price,
+        get_cost_model=get_cost_model,
+        primary_symbol=primary_symbol,
+    )
+    cash_after_reductions = cash + reduction_result.cash_delta
+    scaled_additions = _scale_additions_to_cash(
+        additions,
+        cash_after_reductions,
+        prices=prices,
+        get_cost_model=get_cost_model,
+    )
+    addition_result = process_actions(
+        scaled_additions,
+        positions,
+        cash_after_reductions,
+        ts,
+        get_price=get_price,
+        get_cost_model=get_cost_model,
+        primary_symbol=primary_symbol,
+        max_position_notional=max_position_notional,
+        max_volume_participation_pct=max_volume_participation_pct,
+        get_volume=get_volume,
+    )
+    return ActionResults(
+        trades=[*reduction_result.trades, *addition_result.trades],
+        events=[*reduction_result.events, *addition_result.events],
+        cash_delta=reduction_result.cash_delta + addition_result.cash_delta,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Combined pending-fill + stop-check step (shared by backtest + live engines)
 # ---------------------------------------------------------------------------
@@ -944,7 +1157,7 @@ def run_pending_and_stops(
     ts: datetime,
     positions: dict[str, PositionState],
     cash: float,
-    pending_actions: list[Action],
+    pending_intent: StrategyIntent,
     bars: dict[str, dict[str, float]],
     *,
     get_cost_model: Callable[[str], CostModel],
@@ -967,9 +1180,14 @@ def run_pending_and_stops(
     events: list[OrderEvent] = []
     cash_delta_total = 0.0
 
-    if pending_actions:
-        fill_result = process_actions(
-            pending_actions,
+    if pending_intent:
+        process_intent = (
+            process_rebalance_targets
+            if isinstance(pending_intent, RebalanceTargets)
+            else process_actions
+        )
+        fill_result = process_intent(
+            pending_intent,
             positions,
             cash,
             ts,

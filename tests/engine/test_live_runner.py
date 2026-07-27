@@ -16,7 +16,13 @@ import pytest
 from librae.core.cost_model import CostModel
 from librae.core.executor import OrderEvent
 from librae.core.run_config import RunConfig
-from librae.core.strategy import Action, BaseStrategy, Context, PositionState
+from librae.core.strategy import (
+    Action,
+    BaseStrategy,
+    Context,
+    PositionState,
+    RebalanceTargets,
+)
 from librae.live.engine import LiveTrader
 from librae.live.executor import LiveExecutor
 from tests.conftest import make_test_cfg
@@ -301,6 +307,31 @@ class TestLiveTrader:
         runner.run(max_iterations=2)
 
         assert strategy.on_bar.call_count == 2
+
+    def test_context_exposes_engine_equity(self):
+        seen_equity: list[float] = []
+
+        class EquitySpy(BaseStrategy):
+            def on_bar(self, ctx: Context) -> list[Action]:
+                seen_equity.append(ctx.equity)
+                return []
+
+        runner = self._make_runner(strategy=EquitySpy())
+        frame = _make_ohlcv_df()
+        runner._process_bar("BTCUSDT", frame, frame["ts"].iloc[-1].to_pydatetime())
+
+        assert seen_equity == [runner._cash]
+
+    def test_rebalance_targets_rejected_until_live_bars_are_synchronized(self):
+        class AllocationStrategy(BaseStrategy):
+            def on_bar(self, ctx: Context):
+                return RebalanceTargets(weights={ctx.symbol: 1.0})
+
+        runner = self._make_runner(strategy=AllocationStrategy())
+        frame = _make_ohlcv_df()
+
+        with pytest.raises(NotImplementedError, match="synchronized cross-sectional bar"):
+            runner._process_bar("BTCUSDT", frame, frame["ts"].iloc[-1].to_pydatetime())
 
     def test_ohlcv_cache_incremental_fetch(self):
         """After first full fetch, subsequent fetches use limit=2."""

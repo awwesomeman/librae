@@ -14,18 +14,27 @@ except ImportError:
 from .backtest.schema import (
     BacktestOutput,
     EquityCurvePoint,
+    PositionSnapshotPoint,
     RunMetadata,
     StrategyMetrics,
     RUN_ID_PATTERN,
 )
-from .backtest.engine import Backtest, BacktestResult, EquitySnapshot
+from .backtest.engine import Backtest, BacktestResult, EquitySnapshot, PositionSnapshot
 from .core.cost_model import (
     CostModel,
     SymbolDescription,
     describe_symbols,
     margin_rate_from_absolute,
 )
-from .core.strategy import Action, BaseStrategy, Context, Fill, Position
+from .core.strategy import (
+    Action,
+    BaseStrategy,
+    Context,
+    Fill,
+    Position,
+    RebalanceTargets,
+    StrategyIntent,
+)
 from .core.executor import TradePnL, TradeResult, calc_trade_pnl, direction, make_fill
 from .core.metrics import compute_all
 from .core.run_config import RunConfig
@@ -36,6 +45,7 @@ __all__ = [
     "__version__",
     "BacktestOutput",
     "EquityCurvePoint",
+    "PositionSnapshotPoint",
     "RunMetadata",
     "StrategyMetrics",
     "RUN_ID_PATTERN",
@@ -46,6 +56,8 @@ __all__ = [
     "MarketConfig",
     "get_market",
     "Action",
+    "RebalanceTargets",
+    "StrategyIntent",
     "BaseStrategy",
     "Context",
     "Fill",
@@ -57,6 +69,7 @@ __all__ = [
     "Backtest",
     "BacktestResult",
     "EquitySnapshot",
+    "PositionSnapshot",
     "TradeResult",
     "compute_all",
     "RunConfig",
