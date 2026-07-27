@@ -472,7 +472,58 @@ class TestLiveTrader:
 
         assert strategy.on_bar.call_count == 2
 
-    def test_portfolio_cycle_waits_for_delayed_symbol(self):
+    def test_naive_live_bar_timestamp_fails_explicitly(self):
+        frame = _make_ohlcv_df()
+        frame["ts"] = frame["ts"].dt.tz_localize(None)
+        runner = self._make_runner(fetcher=lambda *_args, **_kwargs: frame)
+
+        with pytest.raises(ValueError, match="timestamp must be timezone-aware"):
+            runner._poll_cycle()
+
+    @pytest.mark.parametrize("mode", ["sim", "live"])
+    def test_missing_symbol_action_waits_for_its_next_real_bar(self, mode):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        responses = {
+            "AAA": iter([_make_ohlcv_at([t1]), _make_ohlcv_at([t1])]),
+            "BBB": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1])]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        class BuyBbbOnce(BaseStrategy):
+            def __init__(self):
+                self.emitted = False
+
+            def on_bar(self, ctx):
+                if not self.emitted:
+                    self.emitted = True
+                    return [Action(type="long", symbol="BBB", quantity=1.0)]
+                return []
+
+        order_adapter = _mock_order_adapter()
+        order_adapter.place_order.return_value = _broker_report(
+            quantity=1.0,
+            executed_at=t1,
+        )
+        runner = self._make_runner(
+            strategy=BuyBbbOnce(),
+            fetcher=fetcher,
+            cfg=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
+            order_adapter=order_adapter,
+        )
+
+        runner._poll_cycle()
+        assert runner._positions == {}
+        assert runner._pending_intent == [Action(type="long", symbol="BBB", quantity=1.0)]
+
+        runner._poll_cycle()
+
+        assert runner._positions["BBB"].quantity == pytest.approx(1.0)
+        assert runner._pending_intent == []
+
+    def test_delayed_symbol_does_not_block_available_symbol(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
         t1 = t0 + timedelta(hours=1)
         responses = {
@@ -500,10 +551,10 @@ class TestLiveTrader:
         runner._poll_cycle()
 
         contexts = [call.args[0] for call in strategy.on_bar.call_args_list]
-        assert [ctx.ts for ctx in contexts] == [t1]
-        assert all(set(ctx.bars) == {"AAA", "BBB"} for ctx in contexts)
+        assert [ctx.ts for ctx in contexts] == [t1, t1]
+        assert [set(ctx.bars) for ctx in contexts] == [{"AAA"}, {"BBB"}]
 
-    def test_portfolio_cycle_skips_missing_timestamp_after_realignment(self):
+    def test_missing_symbol_bar_does_not_skip_available_event(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
         t1 = t0 + timedelta(hours=1)
         t2 = t1 + timedelta(hours=1)
@@ -538,7 +589,13 @@ class TestLiveTrader:
         for _ in range(3):
             runner._poll_cycle()
 
-        assert [call.args[0].ts for call in strategy.on_bar.call_args_list] == [t0, t2]
+        contexts = [call.args[0] for call in strategy.on_bar.call_args_list]
+        assert [ctx.ts for ctx in contexts] == [t0, t1, t2]
+        assert [set(ctx.bars) for ctx in contexts] == [
+            {"AAA", "BBB"},
+            {"AAA"},
+            {"AAA", "BBB"},
+        ]
 
     def test_duplicate_broker_bars_do_not_repeat_cycle(self):
         ts = datetime(2025, 1, 1, tzinfo=UTC)
@@ -593,7 +650,13 @@ class TestLiveTrader:
         for _ in range(3):
             runner._poll_cycle()
 
-        assert [call.args[0].ts for call in strategy.on_bar.call_args_list] == [t1, t2]
+        contexts = [call.args[0] for call in strategy.on_bar.call_args_list]
+        assert [ctx.ts for ctx in contexts] == [t1, t2, t2]
+        assert [set(ctx.bars) for ctx in contexts] == [
+            {"AAA", "BBB"},
+            {"BBB"},
+            {"AAA"},
+        ]
 
     def test_context_exposes_engine_equity(self):
         seen_equity: list[float] = []

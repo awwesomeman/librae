@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from librae.core.strategy import Action, PositionState, RebalanceTargets
 from librae.live.executor import OrderRequest
 from librae.live.state import LiveRuntimeState, MemoryLiveStateStore, TrackedOrder
@@ -55,6 +56,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         positions={"BTC/USDT": _position()},
         last_prices={"BTC/USDT": 101.0},
         last_cycle_ts=datetime(2025, 1, 2, tzinfo=UTC),
+        last_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
         pending_intent=[Action(type="close", symbol="BTC/USDT")],
         active_orders=[_order()],
         equity_peak=1_050.0,
@@ -93,3 +95,19 @@ def test_rebalance_intent_round_trip_and_memory_store_isolation():
     assert second is not None
     assert second.cash == 1_000.0
     assert second.pending_intent == state.pending_intent
+
+
+def test_runtime_state_rejects_pre_watermark_schema():
+    raw = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        cash=1_000.0,
+        equity_peak=1_000.0,
+        prev_equity=1_000.0,
+    ).to_dict()
+    raw["schema_version"] = 1
+
+    with pytest.raises(ValueError, match="unsupported live runtime-state schema"):
+        LiveRuntimeState.from_dict(raw)
