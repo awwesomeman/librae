@@ -114,6 +114,12 @@ consume its pending intent. Valuation uses each symbol's latest point-in-time
 close without backfilling from the future. The intent expires after its next
 complete eligible cycle, whether or not it fills.
 
+Live mode stages portfolio changes without mutating the local book, submits
+broker orders, and commits only after acknowledgement and position
+reconciliation. A rejection, unreadable broker state, or persistent mismatch
+halts strategy execution and adopts the complete broker position snapshot when
+available. Multi-order baskets are submitted sequentially, not atomically.
+
 Runnable versions cover both externally scheduled allocations and dynamic
 Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)
 and [`examples/topk_selection/`](examples/topk_selection/).

@@ -1,13 +1,9 @@
 """LiveExecutor — executor for sim and live modes.
 
 simulation=True (sim): logs signal, sends Telegram. No real orders.
-simulation=False (live): mirrors each local fill as a real order via
-order_adapter.place_order(). Local position/PnL bookkeeping (process_actions
-in core/executor.py) remains authoritative for signal generation — the real
-order is best-effort: a broker rejection/error is logged and alerted, not
-raised, so the poll loop keeps running. LiveTrader._reconcile_fill polls the
-broker's position after each fill and alerts on mismatch (never overwrites
-local state — see librae/live/engine.py).
+simulation=False (live): submits each staged fill via
+order_adapter.place_order(). LiveTrader commits local position/PnL state only
+after broker acknowledgement and position reconciliation.
 """
 
 from __future__ import annotations
@@ -89,12 +85,12 @@ class LiveExecutor:
         return self._order_adapter
 
     def submit_order(self, event: OrderEvent) -> dict | None:
-        """Mirror a local fill as a real order at the broker.
+        """Submit a staged fill to the broker.
 
         No-op (returns None) in simulation mode. In live mode, maps the
         position-lifecycle event to a buy/sell order and places it via
-        order_adapter. Returns the adapter's result dict, or None if the
-        order was rejected/errored (caller should alert — see LiveTrader).
+        order_adapter. Returns an acknowledged adapter result, or None if
+        the order was rejected, malformed, or errored.
         """
         if self._simulation:
             return None
@@ -122,8 +118,18 @@ class LiveExecutor:
         }
         try:
             result = self._order_adapter.place_order(signal)
+            if not self._is_acknowledged(result):
+                logger.error(
+                    "Order rejected or not acknowledged: %s %s (%s) qty=%.4f -> %s",
+                    side,
+                    event.symbol,
+                    event.event_type,
+                    event.fill_quantity,
+                    result,
+                )
+                return None
             logger.info(
-                "Order placed: %s %s (%s) qty=%.4f -> %s",
+                "Order acknowledged: %s %s (%s) qty=%.4f -> %s",
                 side,
                 event.symbol,
                 event.event_type,
@@ -133,14 +139,22 @@ class LiveExecutor:
             return result
         except Exception:
             logger.exception(
-                "Order placement FAILED: %s %s (%s) qty=%.4f — "
-                "local state may now diverge from broker, reconcile manually",
+                "Order placement FAILED: %s %s (%s) qty=%.4f; local state unchanged",
                 side,
                 event.symbol,
                 event.event_type,
                 event.fill_quantity,
             )
             return None
+
+    @staticmethod
+    def _is_acknowledged(result: object) -> bool:
+        """Accept broker/exchange acknowledgements and reject terminal failures."""
+        if not isinstance(result, dict) or not result.get("id"):
+            return False
+        status = str(result.get("status") or "").lower()
+        rejected = ("reject", "cancel", "fail", "error", "inactive")
+        return not any(token in status for token in rejected)
 
     def notify_exit(self, symbol: str, price: float) -> None:
         """Send exit notification (called by LiveTrader on close action)."""

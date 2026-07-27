@@ -200,10 +200,16 @@ For a delayed cycle, each symbol's feature input is sliced at the cycle
 timestamp even if its cache already contains newer bars. This is the
 cross-sectional look-ahead boundary. Alignment makes the local rebalance
 decision coherent; broker submissions remain sequential reductions-then-
-additions rather than an exchange-level atomic basket. Incremental cache
-retention is capped by `warmup_periods` (an injected warmup fetcher may provide
-more initial history); this first implementation favors daily/session
-correctness and recovery semantics over high-frequency throughput.
+additions rather than an exchange-level atomic basket. Live portfolio changes
+are staged separately: all orders must be acknowledged and the resulting
+broker positions must reconcile before the local book, callbacks, and trade
+counts are committed. A rejection or persistent mismatch halts trading and
+atomically adopts a complete broker position snapshot when available. This
+also makes partial basket execution explicit instead of committing phantom
+local fills. Incremental cache retention is capped by `warmup_periods` (an
+injected warmup fetcher may provide more initial history); this implementation
+favors daily/session correctness and recovery semantics over high-frequency
+throughput.
 
 #### Local trade-chart viewer
 
@@ -247,10 +253,11 @@ The formula is a simplified isolated-margin approximation (ignoring fees/funding
 
 #### Reconciliation (live only)
 
-Runs automatically when `LiveTrader.run()` starts; a no-op in `sim` mode (no `order_adapter`):
+Runs automatically when `LiveTrader.run()` starts and after staged live orders;
+it is a no-op in `sim` mode:
 
-- **Positions** (`_reconcile_positions`): the broker's `get_position()` is taken as ground truth and overwrites the local `self._positions` — position direction/quantity is unambiguous, and a wrong local position is a real risk to signal decisions.
-- **Cash** (`_reconcile_cash`, currently only supported by `CryptoAdapter`/CCXT — other broker adapters without a `get_balance()` are duck-type skipped): warns only, never overwrites. A Telegram alert fires only once the discrepancy exceeds `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%, an engine constant, not `cfg.params`); `self._cash` always stays authoritative from the local ledger — a broker's free/total balance semantics vary by account mode (spot/margin/cross-margin), and blindly overwriting could let a correct local state get corrupted by a misread number.
+- **Positions**: the broker's complete `get_position()` snapshot is ground truth and atomically replaces local positions. An unreadable startup snapshot halts trading. After an order acknowledgement, the engine polls until the broker matches the staged final position; a persistent mismatch or read failure halts trading and re-adopts the broker snapshot.
+- **Cash** (`_reconcile_cash`, currently only supported by `CryptoAdapter`/CCXT — other broker adapters without a `get_balance()` are duck-type skipped): warns only, never overwrites. A Telegram alert fires only once the discrepancy exceeds `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%, an engine constant, not `cfg.params`). `self._cash` is the last confirmed local ledger value; after an execution halt it must not be treated as reconciled broker cash. Broker free/total semantics vary by account mode (spot/margin/cross-margin), so blindly overwriting could corrupt a valid ledger.
 
 #### Data staleness detection (live only)
 
@@ -277,7 +284,7 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 |---|---|---|---|
 | Data source | historical OHLCV | real-time OHLCV (polling) | real-time OHLCV |
 | Executor | `core.make_fill()` | `LiveExecutor(simulation=True)` | `LiveExecutor(simulation=False)` |
-| Order placement | simulated fill | simulated fill + Telegram notification | real order placement |
+| Order placement | simulated fill | simulated fill + Telegram notification | staged order → broker ack/reconcile → local commit; failure halts |
 
 ### Core types
 
