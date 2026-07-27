@@ -354,9 +354,9 @@ class Backtest:
             intent_to_execute: StrategyIntent = pending_intent if cycle_ready else []
 
             # ── Steps 1+1.5: fill previous bar's pending actions at current
-            # bar's price, then check stop-loss/take-profit — shared with the
-            # live engine (librae.core.executor.run_pending_and_stops) so the
-            # two can't silently drift out of sync on this sequence ──
+            # bar's price, then check stop-loss/take-profit — shared with
+            # LiveTrader's simulation mode so deterministic runtimes cannot
+            # drift on this sequence ──
             max_position_notional = (
                 self._max_position_pct * last_equity if self._max_position_pct else None
             )

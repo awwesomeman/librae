@@ -7,7 +7,7 @@ Contains:
 - scale_into_position(): add to existing position (weighted avg)
 - reduce_position(): shrink position after partial close
 - close_position(): full or partial close with correct proceeds
-- process_actions(): shared action loop for backtest + live engines
+- process_actions(): deterministic simulated action loop and live request planner
 - TradePnL: PnL breakdown dataclass
 
 Position sizing is the strategy's responsibility (set Action.quantity).
@@ -338,6 +338,156 @@ def build_close_event(
     return trade, event, proceeds, fully_closed
 
 
+def apply_execution_fill(
+    positions: dict[str, PositionState],
+    cash: float,
+    fill: Fill,
+    ts: datetime,
+    *,
+    order_side: Literal["buy", "sell"],
+    cost_model: CostModel,
+    reason: str = "",
+) -> tuple[float, ActionResults]:
+    """Apply one externally confirmed execution to portfolio state.
+
+    Unlike :func:`process_actions`, this function does not simulate price,
+    quantity, or costs. ``fill`` must already contain the execution venue's
+    confirmed average price, filled quantity, and cash-denominated costs.
+    The order side plus current position determines whether the fill opens,
+    adds, reduces, or closes exposure.
+
+    Crossing through an existing position is rejected. Strategies must close
+    first and open the opposite side with a separate order, which keeps every
+    fill's lifecycle and PnL attribution unambiguous.
+    """
+    numeric_values = (
+        fill.price,
+        fill.quantity,
+        fill.commission,
+        fill.slippage,
+        fill.tax,
+    )
+    if (
+        not all(isfinite(value) for value in numeric_values)
+        or fill.price <= 0
+        or fill.quantity <= 0
+        or min(fill.slippage, fill.tax) < 0
+    ):
+        raise ValueError(
+            "execution fill must contain positive price/quantity and non-negative slippage/tax"
+        )
+
+    symbol = fill.symbol
+    position = positions.get(symbol)
+    entry_side: Literal["long", "short"] = "long" if order_side == "buy" else "short"
+    costs = fill.commission + fill.slippage + fill.tax
+    notional = fill.price * fill.quantity * cost_model.multiplier
+
+    if position is None or position.side == entry_side:
+        outlay = notional * cost_model.margin_rate(entry_side) + costs
+        event_type: Literal["open", "add"] = "open" if position is None else "add"
+        if position is None:
+            position = PositionState(
+                symbol=symbol,
+                side=entry_side,
+                entry_price=fill.price,
+                quantity=fill.quantity,
+                entry_at=ts,
+                periods_held=0,
+                entry_commission=fill.commission,
+                entry_slippage=fill.slippage,
+                entry_tax=fill.tax,
+                total_entry_cost=notional,
+            )
+            positions[symbol] = position
+        else:
+            scale_into_position(position, fill, cost_model)
+
+        event = OrderEvent(
+            ts=ts,
+            symbol=symbol,
+            side=entry_side,
+            event_type=event_type,
+            fill_quantity=fill.quantity,
+            price=fill.price,
+            entry_price=position.entry_price,
+            remaining_quantity=position.quantity,
+            notional=notional,
+            commission=fill.commission,
+            slippage=fill.slippage,
+            tax=fill.tax,
+            reason=reason,
+        )
+        result = ActionResults(trades=[], events=[event], cash_delta=-outlay)
+        return cash - outlay, result
+
+    if fill.quantity > position.quantity + EPSILON:
+        raise ValueError(
+            f"execution fill would cross {symbol} from {position.side}: "
+            f"filled={fill.quantity}, open={position.quantity}"
+        )
+
+    close_quantity = min(fill.quantity, position.quantity)
+    fully_closed = close_quantity >= position.quantity - EPSILON
+    fraction = close_quantity / position.quantity
+    entry_commission = position.entry_commission * fraction
+    entry_slippage = position.entry_slippage * fraction
+    entry_tax = position.entry_tax * fraction
+    gross_pnl = cost_model.calc_pnl(position.entry_price, fill.price, close_quantity) * direction(
+        position.side
+    )
+    total_commission = entry_commission + fill.commission
+    total_slippage = entry_slippage + fill.slippage
+    total_tax = entry_tax + fill.tax
+    net_pnl = gross_pnl - total_commission - total_slippage - total_tax
+    entry_notional = position.entry_price * close_quantity * cost_model.multiplier
+    gross_return = gross_pnl / entry_notional * 100 if entry_notional > EPSILON else 0.0
+    net_return = net_pnl / entry_notional * 100 if entry_notional > EPSILON else 0.0
+    pnl = TradePnL(
+        gross_pnl=gross_pnl,
+        net_pnl=net_pnl,
+        commission=total_commission,
+        slippage=total_slippage,
+        tax=total_tax,
+        exit_commission=fill.commission,
+        exit_slippage=fill.slippage,
+        exit_tax=fill.tax,
+        gross_return=gross_return,
+        net_return=net_return,
+    )
+    trade = build_trade_result(position, ts, fill.price, close_quantity, pnl)
+    remaining_quantity = 0.0 if fully_closed else position.quantity - close_quantity
+    event = OrderEvent(
+        ts=ts,
+        symbol=symbol,
+        side=position.side,
+        event_type="close" if fully_closed else "reduce",
+        fill_quantity=close_quantity,
+        price=fill.price,
+        entry_price=position.entry_price,
+        remaining_quantity=remaining_quantity,
+        notional=notional,
+        commission=total_commission,
+        slippage=total_slippage,
+        tax=total_tax,
+        pnl=net_pnl,
+        net_return=net_return,
+        entry_at=position.entry_at,
+        periods_held=position.periods_held,
+        reason=reason,
+    )
+
+    margin_locked = entry_notional * cost_model.margin_rate(position.side)
+    proceeds = margin_locked + gross_pnl - costs
+    if fully_closed:
+        del positions[symbol]
+    else:
+        reduce_position(position, close_quantity)
+
+    result = ActionResults(trades=[trade], events=[event], cash_delta=proceeds)
+    return cash + proceeds, result
+
+
 # ---------------------------------------------------------------------------
 # Stop-loss / take-profit
 # ---------------------------------------------------------------------------
@@ -404,7 +554,7 @@ def check_stop_targets(
 ) -> ActionResults:
     """Force-close any position whose stop-loss/take-profit is hit this bar.
 
-    Shared by backtest and live engines — called once per bar, before the
+    Used by backtest/sim — called once per bar, before the
     strategy sees this bar's Context, so a triggered stop is filled and
     reflected in the same bar's equity (real stop orders don't wait a bar).
     Mutates *positions* in place.
@@ -496,7 +646,7 @@ def liquidate_all(
 
 
 # ---------------------------------------------------------------------------
-# Fill price resolution (shared by backtest + live engines)
+# Simulated fill price resolution (backtest/sim)
 # ---------------------------------------------------------------------------
 
 
@@ -754,7 +904,7 @@ def build_trade_result(
 
 
 # ---------------------------------------------------------------------------
-# Shared action processing (used by backtest + live engines)
+# Deterministic action processing (fills backtest/sim; plans live requests on a copy)
 # ---------------------------------------------------------------------------
 
 
@@ -804,8 +954,8 @@ def process_actions(
 ) -> ActionResults:
     """Process a bar's actions: open, scale, partial/full close.
 
-    Shared by backtest and live engines to avoid logic duplication.
-    Mutates *positions* dict in place. Returns trades, events, and cash delta.
+    Mutates *positions* dict in place. Backtest/sim uses the resulting fills;
+    live may use it only on a copied portfolio to size order requests.
 
     max_position_notional, when set, caps every symbol's post-fill notional
     (existing + added) to this value — applied identically to new entries
@@ -1186,7 +1336,7 @@ def process_rebalance_targets(
 
 
 # ---------------------------------------------------------------------------
-# Combined pending-fill + stop-check step (shared by backtest + live engines)
+# Combined pending-fill + stop-check step (backtest/sim)
 # ---------------------------------------------------------------------------
 
 
@@ -1205,11 +1355,9 @@ def run_pending_and_stops(
 ) -> tuple[float, ActionResults]:
     """Fill this bar's pending actions, then check stop-loss/take-profit —
     the two steps that must always run together, in this order, before a
-    strategy sees the bar. Combined into one function (previously hand-copied
-    separately by the backtest and live engines) specifically because that
-    duplication once let live's copy silently drop the stop-loss/take-profit
-    step while backtest's kept it — a real bug, not hypothetical. Sharing
-    this makes that class of drift structurally impossible.
+    strategy sees the bar. Backtest and real-time simulation call this same
+    implementation so their deterministic bar-fill ordering cannot drift.
+    Live broker execution intentionally does not call it.
 
     Returns (updated cash, combined ActionResults for both steps).
     """

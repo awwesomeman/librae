@@ -2,7 +2,7 @@
 
 Backtest and live-trading engine, multi-asset support.
 
-- **One strategy, three modes** — `Action` and portfolio-level `RebalanceTargets` strategies run in backtest, sim, and live trading unmodified.
+- **One strategy interface, explicit execution semantics** — `Action` and portfolio-level `RebalanceTargets` share one decision API; backtest/sim model next-bar fills, while live submits causal broker orders and books only execution reports.
 - **Portfolio-level by design** — multi-asset/stock-picking needs no engine changes; `positions`/`equity_curve`/`metrics` are portfolio-level from the start.
 - **Engine has no required I/O dependencies** — pure computation on a DataFrame you hand it; `db`/`brokers`/`notifications` are optional, lazy-imported, swappable via constructor injection.
 - **Risk built in** — position/drawdown/volume caps, margin & liquidation simulation, volume-aware slippage — enforced at the engine level, off by default.
@@ -114,19 +114,41 @@ unaffordable. Target weights need not sum to one; the remainder stays in cash.
 With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
 and realized weight after every bar, so target drift includes costs, price
-movement, and execution constraints. Multi-asset
-`Action` and `RebalanceTargets` strategies use synchronized cross-sectional
-cycles in every mode. A partial multi-asset timestamp can update valuation and
-trigger stops for symbols that have a bar, but it cannot invoke the strategy or
-consume its pending intent. Valuation uses each symbol's latest point-in-time
-close without backfilling from the future. The intent expires after its next
-complete eligible cycle, whether or not it fills.
+movement, and execution constraints. Multi-asset `Action` and
+`RebalanceTargets` strategies use synchronized cross-sectional decision cycles
+in every mode. A partial multi-asset timestamp can update backtest valuation
+and stops, but cannot invoke the strategy or consume its pending intent.
+Valuation uses each symbol's latest point-in-time close without backfilling
+from the future.
 
-Live mode stages portfolio changes without mutating the local book, submits
-broker orders, and commits only after acknowledgement and position
-reconciliation. A rejection, unreadable broker state, or persistent mismatch
-halts strategy execution and adopts the complete broker position snapshot when
-available. Multi-order baskets are submitted sequentially, not atomically.
+Execution timing intentionally differs in live mode. After all symbols have a
+completed bar T, the strategy is called once and its order is submitted
+immediately—before any T+1 bar exists. The T close is only a sizing/reference
+price; local quantity, entry/exit price, costs, and timestamps are committed
+from the broker execution report. An acknowledgement with no fill never opens
+a local position. Partial fills commit only their confirmed quantity, then
+halt until durable open-order continuation is implemented.
+
+Live `Action(fill_price=None)` submits a market order and a numeric
+`fill_price` submits a real broker limit order. Bar-field fills such as
+`"open"`/`"close"`, `RebalanceTargets.fill_price`, and local
+`stop_price`/`take_profit_price` are simulation-only: live rejects them rather
+than converting a historical range touch into a late market order. Protective
+orders require broker-native support. Multi-order baskets remain sequential,
+not atomic.
+
+An injected `order_adapter.place_order()` returns an order mapping. Filled
+responses must include order id/status, requested and filled quantity, average
+price, broker execution timestamp, and an explicit fee/commission amount
+(zero is valid); CCXT's
+`id/status/amount/filled/average/lastTradeTimestamp/fee` shape is accepted
+directly (base fees are converted at average price; unrelated fee currencies
+fail closed). Submitted/accepted/cancelled/rejected states are kept distinct.
+The current engine fails closed on any non-final state; durable polling,
+restart recovery, and cancellation are tracked separately. In particular,
+Shioaji/IBKR commonly return only an initial acknowledgement from
+`place_order`, so no local fill is booked until their adapter supplies the
+complete execution report.
 
 Runnable versions cover both externally scheduled allocations and dynamic
 Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)

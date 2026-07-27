@@ -20,11 +20,10 @@ from librae.core.strategy import (
     Action,
     BaseStrategy,
     Context,
-    PositionState,
     RebalanceTargets,
 )
 from librae.live.engine import LiveTrader
-from librae.live.executor import LiveExecutor
+from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -50,6 +49,29 @@ def _mock_order_adapter() -> MagicMock:
     }
     adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
     return adapter
+
+
+def _broker_report(
+    *,
+    order_id: str = "1",
+    status: str = "filled",
+    quantity: float = 1.0,
+    filled: float | None = None,
+    average: float = 100.0,
+    fee: float = 0.0,
+    executed_at: datetime | None = None,
+) -> dict:
+    return {
+        "id": order_id,
+        "status": status,
+        "amount": quantity,
+        "filled": quantity if filled is None else filled,
+        "average": average,
+        "fee": {"cost": fee, "currency": "USD"},
+        "lastTradeTimestamp": int(
+            (executed_at or datetime(2025, 1, 1, tzinfo=UTC)).timestamp() * 1000
+        ),
+    }
 
 
 def _make_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
@@ -175,21 +197,15 @@ class TestLiveExecutor:
     def test_submit_order_noop_in_simulation(self):
         mock_adapter = MagicMock()
         ex = LiveExecutor(_zero_cost_model(), simulation=True)
-        event = OrderEvent(
-            ts=datetime(2025, 1, 1, tzinfo=UTC),
+        request = OrderRequest(
+            client_order_id="test-1",
             symbol="BTCUSDT",
-            side="long",
-            event_type="open",
-            fill_quantity=1.0,
-            price=100.0,
-            entry_price=100.0,
-            remaining_quantity=1.0,
-            notional=100.0,
-            commission=0.0,
-            slippage=0.0,
-            tax=0.0,
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
-        assert ex.submit_order(event) is None
+        assert ex.submit_order(request) is None
         mock_adapter.place_order.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -207,7 +223,12 @@ class TestLiveExecutor:
     )
     def test_submit_order_side_mapping(self, side, event_type, expected_order_side):
         mock_adapter = MagicMock()
-        mock_adapter.place_order.return_value = {"id": "123", "status": "filled"}
+        mock_adapter.place_order.return_value = _broker_report(
+            order_id="123",
+            quantity=2.0,
+            average=101.25,
+            fee=0.4,
+        )
         ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
         event = OrderEvent(
             ts=datetime(2025, 1, 1, tzinfo=UTC),
@@ -223,9 +244,13 @@ class TestLiveExecutor:
             slippage=0.0,
             tax=0.0,
         )
-        result = ex.submit_order(event)
+        request = ex.request_from_event(event)
+        result = ex.submit_order(request)
 
-        assert result == {"id": "123", "status": "filled"}
+        assert isinstance(result, ExecutionReport)
+        assert result.status == "filled"
+        assert result.average_price == 101.25
+        assert result.commission == 0.4
         sent_signal = mock_adapter.place_order.call_args.args[0]
         assert sent_signal["symbol"] == "BTCUSDT"
         assert sent_signal["side"] == expected_order_side
@@ -237,28 +262,71 @@ class TestLiveExecutor:
         mock_adapter = MagicMock()
         mock_adapter.place_order.side_effect = RuntimeError("connection refused")
         ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
-        event = OrderEvent(
-            ts=datetime(2025, 1, 1, tzinfo=UTC),
+        request = OrderRequest(
+            client_order_id="test-1",
             symbol="BTCUSDT",
-            side="long",
-            event_type="open",
-            fill_quantity=1.0,
-            price=100.0,
-            entry_price=100.0,
-            remaining_quantity=1.0,
-            notional=100.0,
-            commission=0.0,
-            slippage=0.0,
-            tax=0.0,
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
-        assert ex.submit_order(event) is None
+        assert ex.submit_order(request) is None
 
-    def test_submit_order_rejects_negative_acknowledgement(self):
+    def test_submit_order_preserves_rejected_state(self):
         mock_adapter = MagicMock()
         mock_adapter.place_order.return_value = {"id": "123", "status": "rejected"}
         ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+        request = ex.request_from_event(_make_fill_event())
 
-        assert ex.submit_order(_make_fill_event()) is None
+        report = ex.submit_order(request)
+
+        assert report is not None
+        assert report.status == "rejected"
+        assert report.has_fill is False
+
+    def test_ccxt_base_fee_is_converted_to_cash_and_rebate_is_preserved(self):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.return_value = {
+            **_broker_report(quantity=1.0, average=20_000.0),
+            "fee": {"cost": -0.001, "currency": "BTC"},
+        }
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+        request = OrderRequest(
+            client_order_id="test-1",
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        report = ex.submit_order(request)
+
+        assert report is not None
+        assert report.commission == -20.0
+
+    def test_order_creation_timestamp_is_not_execution_timestamp(self):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.return_value = {
+            "id": "1",
+            "status": "filled",
+            "amount": 1.0,
+            "filled": 1.0,
+            "average": 100.0,
+            "fee": {"cost": 0.0, "currency": "USD"},
+            "timestamp": 1_735_689_600_000,
+        }
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+        request = OrderRequest(
+            client_order_id="test-1",
+            symbol="BTCUSDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        assert ex.submit_order(request) is None
 
 
 # ---------------------------------------------------------------------------
@@ -486,15 +554,12 @@ class TestLiveTrader:
             return next(responses[symbol])
 
         order_adapter = _mock_order_adapter()
-        order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
-
-        def get_position(symbol):
-            if order_adapter.place_order.call_count == 0:
-                return {"symbol": symbol, "size": 0, "avg_price": 0}
-            quantity = 600.0 if symbol == "AAA" else 400.0
-            return {"symbol": symbol, "size": quantity, "avg_price": 100.0}
-
-        order_adapter.get_position.side_effect = get_position
+        order_adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=f"{signal['symbol']}-1",
+            quantity=signal["quantity"],
+            average=100.0,
+            executed_at=t0,
+        )
         runner = self._make_runner(
             strategy=AllocationStrategy(),
             fetcher=fetcher,
@@ -612,9 +677,13 @@ class TestLiveTrader:
         assert cash_values[1] < 100_000.0
 
     def test_live_mode_places_real_orders(self):
-        """End-to-end: live mode should call order_adapter.place_order on fills."""
+        """Live intent is submitted in the decision cycle, not one bar later."""
         mock_order_adapter = _mock_order_adapter()
-        mock_order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
+        mock_order_adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=str(mock_order_adapter.place_order.call_count),
+            quantity=signal["quantity"],
+            average=104.25,
+        )
 
         call_num = 0
 
@@ -632,13 +701,13 @@ class TestLiveTrader:
         )
         runner.run(max_iterations=2)
 
-        # Iteration 1: buy queued. Iteration 2: buy fills (open) + close queued/fills.
+        # The first completed-bar decision submits immediately.
         assert mock_order_adapter.place_order.call_count >= 1
         first_call_signal = mock_order_adapter.place_order.call_args_list[0].args[0]
         assert first_call_signal["side"] == "buy"
         assert first_call_signal["symbol"] == "BTCUSDT"
 
-    def test_live_state_commits_only_after_broker_position_matches(self):
+    def test_live_state_uses_broker_execution_truth(self):
         mock_order_adapter = _mock_order_adapter()
         call_num = 0
 
@@ -654,27 +723,37 @@ class TestLiveTrader:
             order_adapter=mock_order_adapter,
         )
 
-        def place_order(_signal):
+        executed_at = datetime(2025, 1, 2, 3, tzinfo=UTC)
+
+        def place_order(signal):
             assert runner._positions == {}
             assert runner._cash == 100_000.0
-            return {"id": "1", "status": "filled"}
+            return _broker_report(
+                quantity=signal["quantity"],
+                average=107.25,
+                fee=1.5,
+                executed_at=executed_at,
+            )
 
         mock_order_adapter.place_order.side_effect = place_order
-        mock_order_adapter.get_position.side_effect = lambda _symbol: (
-            {"symbol": "", "size": 0, "avg_price": 0}
-            if mock_order_adapter.place_order.call_count == 0
-            else {"symbol": "BTCUSDT", "size": 1.0, "avg_price": 103.5}
-        )
 
-        runner.run(max_iterations=2)
+        runner.run(max_iterations=1)
 
         assert runner._halted is False
         assert runner._positions["BTCUSDT"].quantity == 1.0
-        assert runner._cash < 100_000.0
+        assert runner._positions["BTCUSDT"].entry_price == 107.25
+        assert runner._positions["BTCUSDT"].entry_at == executed_at
+        assert runner._positions["BTCUSDT"].entry_commission == 1.5
+        assert runner._cash == pytest.approx(100_000.0 - 107.25 - 1.5)
 
-    def test_fill_mismatch_halts_without_committing_phantom_position(self):
+    def test_acknowledgement_is_not_treated_as_fill(self):
         mock_order_adapter = _mock_order_adapter()
-        mock_order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
+        mock_order_adapter.place_order.return_value = {
+            "id": "1",
+            "status": "submitted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
 
         call_num = 0
 
@@ -689,23 +768,22 @@ class TestLiveTrader:
             cfg=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
-        runner._sleep = lambda _seconds: None
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
-        runner.run(max_iterations=2)
+        runner.run(max_iterations=1)
 
-        mismatch_alerts = [
+        submitted_alerts = [
             kwargs
             for method, kwargs in alerts
-            if method == "send_alert" and "Fill Mismatch" in kwargs["title"]
+            if method == "send_alert" and "Order Accepted" in kwargs["title"]
         ]
-        assert len(mismatch_alerts) == 1
+        assert len(submitted_alerts) == 1
         assert runner._halted is True
         assert runner._positions == {}
         assert runner._cash == 100_000.0
 
-    def test_partial_basket_failure_halts_and_adopts_broker_state(self):
+    def test_basket_failure_keeps_only_confirmed_broker_fill(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
         t1 = t0 + timedelta(hours=1)
         responses = {
@@ -724,18 +802,9 @@ class TestLiveTrader:
 
         adapter = _mock_order_adapter()
         adapter.place_order.side_effect = [
-            {"id": "aaa", "status": "filled"},
+            _broker_report(order_id="aaa", quantity=600.0, average=100.0, executed_at=t0),
             {"id": "", "status": "rejected"},
         ]
-
-        def get_position(symbol):
-            if adapter.place_order.call_count < 2:
-                return {"symbol": symbol, "size": 0, "avg_price": 0}
-            if symbol == "AAA":
-                return {"symbol": symbol, "size": 600.0, "avg_price": 100.0}
-            return {"symbol": symbol, "size": 0, "avg_price": 0}
-
-        adapter.get_position.side_effect = get_position
         runner = self._make_runner(
             strategy=AllocateOnce(),
             fetcher=fetcher,
@@ -743,7 +812,7 @@ class TestLiveTrader:
             order_adapter=adapter,
         )
 
-        runner.run(max_iterations=2)
+        runner.run(max_iterations=1)
 
         assert runner._halted is True
         assert set(runner._positions) == {"AAA"}
@@ -1080,7 +1149,7 @@ class TestLiveTrader:
         runner.run(max_iterations=2)  # must not raise / not be swallowed as a poll error
 
         order_failed = [
-            kw for m, kw in alerts if m == "send_alert" and "Order Failed" in kw["title"]
+            kw for m, kw in alerts if m == "send_alert" and "Order Report Failure" in kw["title"]
         ]
         assert order_failed
         assert "qty=1.0000" in order_failed[0]["message"]
@@ -1160,21 +1229,6 @@ class TestLiveTrader:
         assert len(breach_alerts) == 1
 
 
-def _make_position_state(quantity: float, entry_price: float, side="long") -> PositionState:
-    return PositionState(
-        symbol="BTCUSDT",
-        side=side,
-        entry_price=entry_price,
-        quantity=quantity,
-        entry_at=datetime(2025, 1, 1, tzinfo=UTC),
-        periods_held=0,
-        entry_commission=0.0,
-        entry_slippage=0.0,
-        entry_tax=0.0,
-        total_entry_cost=entry_price * quantity,
-    )
-
-
 def _make_fill_event() -> OrderEvent:
     return OrderEvent(
         ts=datetime(2025, 1, 1, tzinfo=UTC),
@@ -1192,108 +1246,144 @@ def _make_fill_event() -> OrderEvent:
     )
 
 
-class TestPositionReconciliation:
-    """Broker polling compares against staged state without mutating it."""
-
-    def _make_trader(self, order_adapter=None):
-        runner = LiveTrader(
-            _HoldStrategy(),
+class TestLiveExecutionLifecycle:
+    def _make_trader(self, strategy: BaseStrategy, adapter: MagicMock) -> LiveTrader:
+        return LiveTrader(
+            strategy,
             _simple_feature_fn,
             cfg=_test_cfg(mode="live"),
             adapter=lambda *a, **kw: _make_ohlcv_df(),
             cost_model=_zero_cost_model(),
-            order_adapter=order_adapter or _mock_order_adapter(),
+            order_adapter=adapter,
             on_bar=None,
             on_order_event=None,
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
         )
-        runner._sleep = lambda _seconds: None
-        return runner
 
-    def test_matches_within_tolerance(self):
+    def test_partial_fill_commits_only_confirmed_quantity_then_halts(self):
         adapter = _mock_order_adapter()
-        adapter.get_position.return_value = {
-            "symbol": "BTCUSDT",
-            "size": 2.0,
-            "avg_price": 100.0,
-            "unrealized_pnl": 0.0,
-        }
-        runner = self._make_trader(order_adapter=adapter)
-        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
+        adapter.place_order.return_value = _broker_report(
+            status="filling",
+            quantity=2.0,
+            filled=0.75,
+            average=105.0,
+            fee=0.25,
+        )
 
-        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
+        class BuyTwo(BaseStrategy):
+            def on_bar(self, ctx):
+                return [Action(type="long", symbol=ctx.symbol, quantity=2.0)]
 
-        assert matched is True
-        assert detail == ""
-        adapter.get_position.assert_called_once()  # matched on first poll, no retries
+        runner = self._make_trader(BuyTwo(), adapter)
+        runner.run(max_iterations=1)
 
-    def test_persistent_mismatch_is_reported(self):
+        assert runner._halted is True
+        assert runner._positions["BTCUSDT"].quantity == 0.75
+        assert runner._positions["BTCUSDT"].entry_price == 105.0
+        assert runner._positions["BTCUSDT"].entry_commission == 0.25
+
+    def test_exit_uses_broker_price_fees_and_timestamp(self):
+        first_fill_at = datetime(2025, 1, 1, tzinfo=UTC)
+        second_fill_at = first_fill_at + timedelta(hours=1)
         adapter = _mock_order_adapter()
-        adapter.get_position.return_value = {
-            "symbol": "BTCUSDT",
-            "size": 1.0,  # broker only shows 1, local expects 2 -> mismatch
-            "avg_price": 100.0,
-            "unrealized_pnl": 0.0,
-        }
-        runner = self._make_trader(order_adapter=adapter)
-        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-
-        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
-
-        assert matched is False
-        assert adapter.get_position.call_count == len(runner.RECONCILE_POLL_BACKOFF_SECONDS)
-        assert "expected size=2.0000" in detail
-        assert "broker size=1.0000" in detail
-        assert runner._positions["BTCUSDT"].quantity == 2.0
-
-    def test_matches_after_retry(self):
-        """Broker position lags the fill by a couple of polls, then catches up."""
-        adapter = _mock_order_adapter()
-        responses = [
-            {"symbol": "BTCUSDT", "size": 0.0, "avg_price": 0.0, "unrealized_pnl": 0.0},
-            {"symbol": "BTCUSDT", "size": 0.0, "avg_price": 0.0, "unrealized_pnl": 0.0},
-            {"symbol": "BTCUSDT", "size": 2.0, "avg_price": 100.0, "unrealized_pnl": 0.0},
+        adapter.place_order.side_effect = [
+            _broker_report(
+                order_id="buy-1",
+                quantity=1.0,
+                average=100.0,
+                fee=1.0,
+                executed_at=first_fill_at,
+            ),
+            _broker_report(
+                order_id="sell-1",
+                quantity=1.0,
+                average=110.0,
+                fee=2.0,
+                executed_at=second_fill_at,
+            ),
         ]
-        adapter.get_position.side_effect = responses
-        runner = self._make_trader(order_adapter=adapter)
-        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
+        events: list[OrderEvent] = []
 
-        assert matched is True
-        assert detail == ""
-        assert adapter.get_position.call_count == 3
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner._on_order_event = events.append
+        first_frame = _make_ohlcv_df(start_hour=0)
+        second_frame = _make_ohlcv_df(start_hour=1)
+        runner._process_bar(
+            "BTCUSDT",
+            first_frame,
+            first_frame["ts"].iloc[-1].to_pydatetime(),
+        )
+        runner._process_bar(
+            "BTCUSDT",
+            second_frame,
+            second_frame["ts"].iloc[-1].to_pydatetime(),
+        )
 
-    def test_broker_exception_is_reported_without_crashing(self):
+        assert runner._positions == {}
+        assert runner._cash == pytest.approx(100_007.0)
+        assert [event.ts for event in events] == [first_fill_at, second_fill_at]
+        assert events[-1].price == 110.0
+        assert events[-1].commission == 3.0
+        assert events[-1].pnl == 7.0
+
+    def test_numeric_fill_price_submits_real_limit_order(self):
         adapter = _mock_order_adapter()
-        adapter.get_position.side_effect = RuntimeError("broker down")
-        runner = self._make_trader(order_adapter=adapter)
-        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
+        adapter.place_order.return_value = {
+            "id": "limit-1",
+            "status": "submitted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
 
-        assert matched is False
-        assert "broker position unavailable" in detail
+        class LimitBuy(BaseStrategy):
+            def on_bar(self, ctx):
+                return [
+                    Action(
+                        type="long",
+                        symbol=ctx.symbol,
+                        quantity=1.0,
+                        fill_price=99.5,
+                    )
+                ]
 
-    def test_noop_when_order_adapter_absent(self):
-        """Sim mode (order_adapter=None internally) has nothing to reconcile against."""
-        runner = self._make_trader()
-        runner._executor._order_adapter = None
-        runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
+        runner = self._make_trader(LimitBuy(), adapter)
+        runner.run(max_iterations=1)
 
-        assert matched is True
-        assert detail == ""
+        signal = adapter.place_order.call_args.args[0]
+        assert signal["order_type"] == "limit"
+        assert signal["price"] == 99.5
+        assert runner._positions == {}
 
-    def test_missing_expected_position_means_flat(self):
-        """After a close, self._positions no longer has the symbol — expected
-        qty/price must default to 0, matching a broker that's gone flat too."""
-        adapter = _mock_order_adapter()  # default flat get_position()
-        runner = self._make_trader(order_adapter=adapter)
-        matched, detail = runner._reconcile_position("BTCUSDT", {})
+    @pytest.mark.parametrize(
+        "action,match",
+        [
+            (
+                Action(type="long", symbol="BTCUSDT", quantity=1.0, fill_price="close"),
+                "historical bar field",
+            ),
+            (
+                Action(type="long", symbol="BTCUSDT", quantity=1.0, stop_price=95.0),
+                "broker-native protective orders",
+            ),
+        ],
+    )
+    def test_noncausal_live_intent_fails_closed(self, action, match):
+        adapter = _mock_order_adapter()
 
-        assert matched is True
-        assert detail == ""
+        class InvalidIntent(BaseStrategy):
+            def on_bar(self, ctx):
+                return [action]
+
+        runner = self._make_trader(InvalidIntent(), adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert adapter.place_order.call_count == 0
+        assert any(match in kwargs.get("message", "") for _, kwargs in alerts)
 
 
 class TestCryptoLiveAutoWiring:
@@ -1375,7 +1465,10 @@ class TestShioajiLiveAutoWiring:
 
         with patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls:
             mock_shioaji = _mock_order_adapter()
-            mock_shioaji.place_order.return_value = {"id": "1", "status": "filled"}
+            mock_shioaji.place_order.side_effect = lambda signal: _broker_report(
+                quantity=signal["quantity"],
+                average=104.25,
+            )
             mock_shioaji.fetch_ohlcv.side_effect = lambda symbol, tf, limit: fetcher()
             mock_cls.return_value = mock_shioaji
 
@@ -1393,7 +1486,7 @@ class TestShioajiLiveAutoWiring:
             trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
 
-        # Iteration 1: buy queued. Iteration 2: buy fills — mirrored to Shioaji.
+        # The completed-bar decision is submitted to Shioaji immediately.
         assert mock_shioaji.place_order.call_count >= 1
         first_call_signal = mock_shioaji.place_order.call_args_list[0].args[0]
         assert first_call_signal["side"] == "buy"
