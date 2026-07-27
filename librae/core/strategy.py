@@ -70,7 +70,8 @@ class Action:
             rest — set explicit per-symbol quantity (e.g. equal-weight sizing).
         fill_price: How to resolve the execution price on the *next* bar.
             str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
-            float — limit price; fills only if next bar's low <= price <= high.
+            float — one-bar limit order. Buys fill when low reaches the limit;
+                sells fill when high reaches it. Gap-through fills at open.
             None  — use engine default (RunConfig.params["fill_price"], typically "open").
         stop_price: Absolute price that force-closes the position (stop-market
             order — fills at the worse of stop_price/bar-open on gap-through).
@@ -103,10 +104,15 @@ class RebalanceTargets:
     """
 
     weights: dict[str, float]
-    fill_price: str | float | None = None
+    fill_price: str | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
+        if self.fill_price is not None and not isinstance(self.fill_price, str):
+            raise ValueError(
+                "RebalanceTargets.fill_price must be a bar field name; "
+                "use per-symbol Actions for limit orders"
+            )
         for symbol, raw_weight in self.weights.items():
             if not symbol:
                 raise ValueError("target weight symbols must be non-empty")

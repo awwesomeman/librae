@@ -124,6 +124,13 @@ Callers must not pre-shift prices or signals to model that delay; doing so
 delays execution twice. Feature construction remains the caller's
 responsibility and must not use information unavailable at T.
 
+For an `Action`, a numeric `fill_price` is a one-eligible-bar limit order. A
+buy fills when the bar's low reaches the limit and a sell fills when its high
+does; a gap through receives the opening price. An unreached limit expires
+after that bar and is logged. `RebalanceTargets.fill_price` accepts only a bar
+field name because one numeric price cannot describe a multi-symbol basket;
+use per-symbol `Action`s for limits.
+
 #### Multi-asset / stock-picking strategies
 
 The engine is portfolio-level by design (`positions` is a `dict[symbol]`, and `equity_curve`/`metrics` are both portfolio-level); `on_bar()` can return `Action`s for multiple different symbols within the same bar, with no changes needed to the engine/executor/schema. One thing to watch: `Action.quantity=None` defaults to spending all available cash (a single-asset convenience default) — when opening multiple positions in the same bar you must size each `quantity` yourself (see the `Action.quantity` docstring in `strategy.py`), otherwise the first Action will consume all the cash.

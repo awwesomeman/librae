@@ -77,6 +77,11 @@ eligible on T+1. Do not pre-shift prices or signals to simulate that delay, or
 the strategy will be delayed twice. The default fill is the next eligible
 bar's open.
 
+`Action(fill_price=<number>)` is a one-bar limit order: buys require the next
+eligible bar's low to reach the limit, sells require its high, and a gap through
+the limit fills at the better opening price. If that bar does not reach the
+limit, the intent expires and is logged; it is not silently carried forward.
+
 Allocation strategies can submit a complete target portfolio without calculating quantities:
 
 ```python
@@ -96,6 +101,8 @@ The target is decided from bar T and filled on T+1. At execution, the engine
 uses T+1 fill prices and execution-time equity, reduces positions before adding
 exposure, and scales additions proportionally if costs make the batch
 unaffordable. Target weights need not sum to one; the remainder stays in cash.
+`RebalanceTargets.fill_price` is a bar field such as `"open"`; use per-symbol
+`Action`s when different numeric limit prices are required.
 With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
 and realized weight after every bar, so target drift includes costs, price
