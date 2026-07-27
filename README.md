@@ -98,9 +98,13 @@ movement, and execution constraints. Multi-asset
 still processes symbols independently and rejects this intent until it has a
 synchronized cross-sectional bar.
 
+Runnable versions cover both externally scheduled allocations and dynamic
+Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)
+and [`examples/topk_selection/`](examples/topk_selection/).
+
 Directory layout, dependency direction, risk/margin/reconciliation/staleness details, core types, and the full Config API: [`architecture.md`'s "Backtest Engine Design"](architecture.md#backtest-engine-design-librae).
 
-A runnable `run.py` wiring this through backtest + sim/live, plus what you need to know to also turn on `db/`/Grafana: [`examples/`](examples/).
+Runnable examples and what you need to know to turn on `db`/Grafana: [`examples/`](examples/).
 
 ---
 

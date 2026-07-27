@@ -1,0 +1,11 @@
+strategy:
+  name: target_weights_example
+  symbols: [ALPHA, BETA, GAMMA]
+  timeframe: D1
+  market: us_equity
+  data_source: synthetic
+  initial_balance: 100000
+  cost_overrides:
+    multiplier: 1.0
+  perf:
+    annual_periods: 252
