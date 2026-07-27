@@ -31,7 +31,14 @@ from librae.core.executor import (
     run_pending_and_stops,
     validate_risk_params,
 )
-from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
+from librae.core.strategy import (
+    Action,
+    BaseStrategy,
+    Context,
+    Position,
+    PositionState,
+    RebalanceTargets,
+)
 
 from .executor import LiveExecutor
 
@@ -884,29 +891,32 @@ class LiveTrader:
 
         # ── Step 2: strategy decision (produces next bar's pending actions) ──
         period_index = self._period_indices.get(symbol, 0)
+        equity, position_snapshot = self._eval_equity_snapshot()
         ctx = Context(
             ts=ts,
             symbol=symbol,
             symbols=self._symbols,
             bar=bar,
             bars={symbol: bar},
-            positions=self._build_position_snapshot(),
+            positions=position_snapshot,
             cash=self._cash,
+            equity=equity,
             period_index=period_index,
         )
 
         actions = self._strategy.on_bar(ctx)
+        if isinstance(actions, RebalanceTargets):
+            raise NotImplementedError(
+                "LiveTrader cannot execute RebalanceTargets until its multi-symbol "
+                "runner builds one synchronized cross-sectional bar. Use Action in "
+                "sim/live mode for now; backtests support portfolio rebalances."
+            )
         self._period_indices[symbol] = period_index + 1
         self._pending_actions[symbol] = actions
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
             self._on_ohlcv(symbol, self._timeframe, bar, ts)
-
-    def _build_position_snapshot(self) -> dict[str, Position]:
-        """Convert mutable PositionState to frozen Position for Context."""
-        _, snapshot = self._eval_equity_snapshot()
-        return snapshot
 
     def _eval_equity(self) -> float:
         """Total equity = cash + market value of all positions."""

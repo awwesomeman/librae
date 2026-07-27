@@ -1,9 +1,9 @@
 """Strategy protocol and data types for the backtest engine.
 
 Defines the contract between strategies and the engine:
-- Strategy implements on_bar(ctx) → list[Action]
+- Strategy implements on_bar(ctx) → list[Action] | RebalanceTargets
 - Engine provides Context with market data + portfolio state
-- Engine executes Actions via Executor
+- Engine executes Actions or portfolio targets via Executor
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Literal
 
 
@@ -41,6 +42,7 @@ class Context:
         bars: Current bar data per symbol. Multi-asset.
         positions: Open positions keyed by symbol.
         cash: Available cash.
+        equity: Engine-calculated mark-to-market portfolio equity.
         period_index: 0-based index into the timeline.
     """
 
@@ -51,6 +53,7 @@ class Context:
     bars: dict[str, dict[str, float]]
     positions: dict[str, Position]
     cash: float
+    equity: float
     period_index: int
 
 
@@ -85,6 +88,33 @@ class Action:
     fill_price: str | float | None = None
     stop_price: float | None = None
     take_profit_price: float | None = None
+
+
+@dataclass(frozen=True)
+class RebalanceTargets:
+    """Portfolio-level target weights resolved by the engine on the next bar.
+
+    Positive weights target long exposure and negative weights target short
+    exposure. Symbols currently held but absent from ``weights`` target zero
+    and are closed. Target quantities are calculated together at execution
+    time from portfolio equity and each symbol's resolved fill price.
+
+    Target weights need not sum to one; any remainder stays in cash.
+    """
+
+    weights: dict[str, float]
+    fill_price: str | float | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        for symbol, raw_weight in self.weights.items():
+            if not symbol:
+                raise ValueError("target weight symbols must be non-empty")
+            if not isfinite(raw_weight):
+                raise ValueError(f"target weight for {symbol!r} must be finite")
+
+
+StrategyIntent = list[Action] | RebalanceTargets
 
 
 @dataclass(frozen=True)
@@ -128,11 +158,11 @@ class PositionState:
 class BaseStrategy(ABC):
     """Abstract base for all strategies.
 
-    Strategies only do one thing: look at Context, return Actions.
+    Strategies only do one thing: look at Context, return an execution intent.
     Data preparation (ETL, signals) is done externally before the backtest.
     """
 
     @abstractmethod
-    def on_bar(self, ctx: Context) -> list[Action]:
-        """Called once per bar. Return list of Actions (empty = hold)."""
+    def on_bar(self, ctx: Context) -> StrategyIntent:
+        """Called once per bar. Return Actions, targets, or an empty list to hold."""
         ...

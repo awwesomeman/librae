@@ -23,15 +23,18 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
+
+from librae.core import EPSILON
 
 if TYPE_CHECKING:
     from librae.backtest.schema import (
         BacktestOutput,
         EquityCurvePoint,
         OrderEventRecord,
+        PositionSnapshotPoint,
         StrategyMetrics,
     )
     from librae.core.run_config import RunConfig
@@ -49,7 +52,7 @@ from librae.core.executor import (
     run_pending_and_stops,
     validate_risk_params,
 )
-from librae.core.strategy import Action, BaseStrategy, Context, Position, PositionState
+from librae.core.strategy import BaseStrategy, Context, Position, PositionState, StrategyIntent
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
 logger = logging.getLogger(__name__)
@@ -64,12 +67,26 @@ class EquitySnapshot:
 
 
 @dataclass(frozen=True)
+class PositionSnapshot:
+    """One open position's end-of-bar portfolio snapshot."""
+
+    ts: datetime
+    symbol: str
+    side: Literal["long", "short"]
+    quantity: float
+    price: float
+    market_value: float
+    realized_weight: float
+
+
+@dataclass(frozen=True)
 class BacktestResult:
     """Raw output from engine — no metrics, just facts."""
 
     trades: Sequence[TradeResult]
     order_events: Sequence[OrderEvent]
     equity_curve: Sequence[EquitySnapshot]
+    position_snapshots: Sequence[PositionSnapshot]
     initial_balance: float
     final_equity: float
     exposed_periods: int = 0
@@ -105,6 +122,9 @@ class Backtest:
         strategy_name: Override strategy name (default: from cfg or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
         data_source: Data source identifier — direct-args style.
+        record_position_snapshots: Record per-symbol end-of-bar positions and
+            realized weights. Off by default to avoid O(bars × positions)
+            memory growth when the caller only needs aggregate results.
     """
 
     def __init__(
@@ -118,6 +138,7 @@ class Backtest:
         strategy_name: str | None = None,
         cost_model: CostModel | None = None,
         data_source: str = "",
+        record_position_snapshots: bool = False,
     ) -> None:
         self._data = data
         self._strategy = strategy
@@ -127,6 +148,7 @@ class Backtest:
         self._timeframe: str | None = None
         self._result: BacktestResult | None = None
         self._metrics: StrategyMetrics | None = None
+        self._record_position_snapshots = record_position_snapshots
 
         if not isinstance(data.index, pd.MultiIndex):
             raise ValueError(
@@ -238,7 +260,8 @@ class Backtest:
         equity_curve: list[EquitySnapshot] = []
         exposed_periods = 0
         primary_symbol = self._symbols[0]
-        pending_actions: list[Action] = []
+        pending_intent: StrategyIntent = []
+        position_snapshots: list[PositionSnapshot] = []
         equity_peak = self._initial_balance
         last_equity = self._initial_balance
         halted = False
@@ -257,7 +280,7 @@ class Backtest:
                 ts,
                 positions,
                 cash,
-                pending_actions,
+                pending_intent,
                 bars,
                 get_cost_model=self._get_cost_model,
                 default_fill=self._fill_price,
@@ -267,11 +290,13 @@ class Backtest:
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
-            pending_actions = []
+            pending_intent = []
 
             # ── Step 2: equity snapshot (reflects just-executed trades) ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, bars)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
+            if self._record_position_snapshots:
+                position_snapshots.extend(self._snapshot_positions(ts, positions, bars, mtm))
 
             if positions:
                 exposed_periods += 1
@@ -312,7 +337,7 @@ class Backtest:
 
             # ── Step 3: strategy decision (produces next bar's pending actions) ──
             if halted:
-                pending_actions = []
+                pending_intent = []
             else:
                 ctx = Context(
                     ts=ts,
@@ -322,13 +347,14 @@ class Backtest:
                     bars=bars,
                     positions=pos_snapshot,
                     cash=cash,
+                    equity=mtm,
                     period_index=step,
                 )
-                pending_actions = self._strategy.on_bar(ctx)
+                pending_intent = self._strategy.on_bar(ctx)
 
             self._increment_periods_held(positions)
 
-        # WHY: pending_actions from last on_bar() are discarded — no T+1 bar to fill them.
+        # WHY: the final intent is discarded because there is no T+1 bar to fill it.
         # Force-close all open positions at last bar
         if self._timeline:
             last_ts = self._timeline[-1]
@@ -352,6 +378,7 @@ class Backtest:
             initial_balance=self._initial_balance,
             final_equity=cash,
             exposed_periods=exposed_periods,
+            position_snapshots=position_snapshots,
         )
         return self._result
 
@@ -450,12 +477,14 @@ class Backtest:
 
         event_records = self._build_event_records(result, run_id)
         equity_points = self._enrich_equity_curve(result, benchmark_curve)
+        position_snapshot_points = self._build_position_snapshot_records(result)
 
         return BacktestOutput(
             run_metadata=run_metadata,
             equity_curve=tuple(equity_points),
             order_events=tuple(event_records),
             metrics=self._metrics,
+            position_snapshots=tuple(position_snapshot_points),
         )
 
     @property
@@ -492,6 +521,26 @@ class Backtest:
                 reason=e.reason,
             )
             for i, e in enumerate(result.order_events)
+        ]
+
+    @staticmethod
+    def _build_position_snapshot_records(
+        result: BacktestResult,
+    ) -> list[PositionSnapshotPoint]:
+        """Map raw engine position snapshots to the canonical output schema."""
+        from librae.backtest.schema import PositionSnapshotPoint
+
+        return [
+            PositionSnapshotPoint(
+                ts=snapshot.ts,
+                symbol=snapshot.symbol,
+                side=snapshot.side,
+                quantity=float(snapshot.quantity),
+                price=float(snapshot.price),
+                market_value=float(snapshot.market_value),
+                realized_weight=float(snapshot.realized_weight),
+            )
+            for snapshot in result.position_snapshots
         ]
 
     @staticmethod
@@ -584,3 +633,35 @@ class Backtest:
             get_price=_price,
             get_cost_model=self._get_cost_model,
         )
+
+    def _snapshot_positions(
+        self,
+        ts: datetime,
+        positions: dict[str, PositionState],
+        bars: dict[str, dict[str, float]],
+        equity: float,
+    ) -> list[PositionSnapshot]:
+        """Build deterministic end-of-bar position and realized-weight facts."""
+        snapshots: list[PositionSnapshot] = []
+        for symbol in sorted(positions):
+            position = positions[symbol]
+            price = float(bars.get(symbol, {}).get("close", position.entry_price))
+            signed_market_value = (
+                price
+                * position.quantity
+                * self._get_cost_model(symbol).multiplier
+                * (-1.0 if position.side == "short" else 1.0)
+            )
+            realized_weight = signed_market_value / equity if abs(equity) > EPSILON else 0.0
+            snapshots.append(
+                PositionSnapshot(
+                    ts=ts,
+                    symbol=symbol,
+                    side=position.side,
+                    quantity=position.quantity,
+                    price=price,
+                    market_value=signed_market_value,
+                    realized_weight=realized_weight,
+                )
+            )
+        return snapshots

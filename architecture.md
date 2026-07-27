@@ -34,23 +34,23 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 
 ## Backtest Engine Design (`librae/`)
 
-Backtest and live-trading engine. Provides a full framework for strategy execution, position management, cost simulation, and performance metrics. **Backtest, sim, and live trading share the exact same strategy code, unmodified.**
+Backtest and live-trading engine. Provides a full framework for strategy execution, position management, cost simulation, and performance metrics. Quantity-based `Action` strategies share the exact same code across backtest, sim, and live modes.
 
 ### Layout
 
 ```
 librae/
 ├── core/                     shared domain model (pure computation, no I/O)
-│   ├── strategy.py           BaseStrategy, Action, Context, Position, PositionState, Fill
-│   ├── executor.py           make_fill, process_actions, calc_trade_pnl, close_position, scale_into_position, reduce_position, liquidate_all
+│   ├── strategy.py           BaseStrategy, Action, RebalanceTargets, Context, Position, PositionState, Fill
+│   ├── executor.py           make_fill, process_actions, process_rebalance_targets, calc_trade_pnl, close_position, scale_into_position, reduce_position, liquidate_all
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
 │   ├── metrics.py            compute_all (QuantStats adapter)
 │   ├── run_config.py         RunConfig — unified run parameters (frozen dataclass)
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── backtest/                 backtest runtime
-│   ├── engine.py             Backtest — bar-by-bar execution + build_output()
-│   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord
+│   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()
+│   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord, PositionSnapshotPoint
 │   └── charts.py             plot_trades — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
 │
 ├── live/                     real-time / sim runtime
@@ -82,11 +82,11 @@ This is a different thing from the "Data flow" section below: that one is about 
 ```
 Strategy ETL (utils.py)  →  DataFrame (MultiIndex + signal columns)
                               ↓
-Strategy logic (strategy.py)  →  on_bar(ctx) → list[Action]
+Strategy logic (strategy.py)  →  on_bar(ctx) → list[Action] | RebalanceTargets
                               ↓
-Engine (engine.py)     →  make_fill / close_position → Fill / TradeResult
+Engine (engine.py)     →  process_actions / process_rebalance_targets
                               ↓
-Output (build_output)  →  BacktestOutput (metrics + equity_curve + trades)
+Output (build_output)  →  BacktestOutput (metrics + equity/position snapshots + events)
 ```
 
 ### Usage
@@ -122,6 +122,42 @@ output = bt.build_output()                      # BacktestOutput
 #### Multi-asset / stock-picking strategies
 
 The engine is portfolio-level by design (`positions` is a `dict[symbol]`, and `equity_curve`/`metrics` are both portfolio-level); `on_bar()` can return `Action`s for multiple different symbols within the same bar, with no changes needed to the engine/executor/schema. One thing to watch: `Action.quantity=None` defaults to spending all available cash (a single-asset convenience default) — when opening multiple positions in the same bar you must size each `quantity` yourself (see the `Action.quantity` docstring in `strategy.py`), otherwise the first Action will consume all the cash.
+
+For allocation strategies, return one `RebalanceTargets` instead:
+
+```python
+from librae import RebalanceTargets
+
+return RebalanceTargets(
+    weights={"AAA": 0.50, "BBB": 0.45},
+    fill_price="open",
+    reason="monthly allocation",
+)
+```
+
+The strategy timestamps the target implicitly by returning it for `ctx.ts`
+(bar T). The engine resolves it on T+1 using each symbol's actual fill price and
+portfolio equity at those same execution prices; using the T+1 close here would
+introduce look-ahead. Positive weights are long, negative weights are short,
+and a held symbol omitted from `weights` targets zero. Reductions and closes
+execute first in symbol order, then additions. If entry costs exceed available
+cash, all addition quantities receive one common scale factor so symbol
+ordering does not starve later assets.
+
+Weights need not sum to one; any remainder stays in cash. When
+`Backtest(..., record_position_snapshots=True)` is enabled,
+`BacktestOutput.position_snapshots` contains quantity, signed market value, and
+signed realized weight (`market_value / equity`) for every open position on
+every bar. It is opt-in because retaining O(bars × positions) facts can be
+expensive for a large universe. Compare those facts with the strategy's target
+schedule to measure tracking drift.
+
+The current `LiveTrader` polling loop processes one symbol at a time and cannot
+construct an atomic cross-sectional bar. It therefore rejects
+`RebalanceTargets` explicitly; quantity-based `Action` strategies retain
+backtest/sim/live parity. Supporting live portfolio batches requires the
+synchronized multi-symbol watermark design described in
+`docs/plans/enhance_librae_multi_symbol_support.md`.
 
 #### Local trade-chart viewer
 
@@ -203,9 +239,10 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 
 | Type | Description |
 |------|------|
-| `BaseStrategy` | abstract base class, implements `on_bar(ctx) -> list[Action]` |
-| `Context` | immutable snapshot: ts, symbol, symbols, bar, bars, positions, cash, period_index |
+| `BaseStrategy` | abstract base class, implements `on_bar(ctx) -> list[Action] \| RebalanceTargets` |
+| `Context` | immutable snapshot: ts, symbol, symbols, bar, bars, positions, cash, equity, period_index |
 | `Action` | strategy intent: `type` = long / short / close / hold |
+| `RebalanceTargets` | timestamped portfolio weights resolved into quantities at next-bar execution |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
@@ -222,11 +259,12 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 
 | Type | Description |
 |------|------|
-| `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + trades + metrics |
+| `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + order_events + metrics + position_snapshots |
 | `RunMetadata` | run_id, strategy, symbol, timeframe, start/end/run timestamps |
 | `StrategyMetrics` | performance metrics: total_return, sharpe, sortino, calmar, max_drawdown, win_rate... |
 | `OrderEventRecord` | position lifecycle event (open/add/reduce/close) |
 | `EquityCurvePoint` | a single point: ts, equity, period_return, drawdown, benchmark_equity |
+| `PositionSnapshotPoint` | per-bar position quantity, signed market value, and realized weight |
 
 #### Shared functions
 
@@ -234,6 +272,7 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 |------|------|
 | `make_fill(action, price, cash, cost_model)` | simulate a fill (used directly by backtest) |
 | `process_actions(actions, ...)` | shared action loop (used by both backtest and live) |
+| `process_rebalance_targets(targets, ...)` | execution-time weight sizing and deterministic reduce-then-add batch |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
 | `liquidate_all(positions, bars, ts, ...)` | close everything (shared by end-of-run and max-drawdown circuit breaker) |
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |

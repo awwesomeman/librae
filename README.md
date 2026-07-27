@@ -2,7 +2,7 @@
 
 Backtest and live-trading engine, multi-asset support.
 
-- **One strategy, three modes** — backtest, sim, and live trading run the exact same `BaseStrategy` code, unmodified.
+- **One strategy, three modes** — quantity-based `Action` strategies run in backtest, sim, and live trading unmodified.
 - **Portfolio-level by design** — multi-asset/stock-picking needs no engine changes; `positions`/`equity_curve`/`metrics` are portfolio-level from the start.
 - **Engine has no required I/O dependencies** — pure computation on a DataFrame you hand it; `db`/`brokers`/`notifications` are optional, lazy-imported, swappable via constructor injection.
 - **Risk built in** — position/drawdown/volume caps, margin & liquidation simulation, volume-aware slippage — enforced at the engine level, off by default.
@@ -70,6 +70,33 @@ bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
 bt.run()
 output = bt.build_output()                      # BacktestOutput
 ```
+
+Allocation strategies can submit a complete target portfolio without calculating quantities:
+
+```python
+from librae import RebalanceTargets
+
+class AllocationStrategy(BaseStrategy):
+    def on_bar(self, ctx: Context):
+        if ctx.period_index % 24:
+            return []
+        return RebalanceTargets(
+            weights={"BTCUSDT": 0.6, "ETHUSDT": 0.35},
+            fill_price="open",
+        )
+```
+
+The target is decided from bar T and filled on T+1. At execution, the engine
+uses T+1 fill prices and execution-time equity, reduces positions before adding
+exposure, and scales additions proportionally if costs make the batch
+unaffordable. Target weights need not sum to one; the remainder stays in cash.
+With `record_position_snapshots=True`,
+`output.position_snapshots` records each open position's signed market value
+and realized weight after every bar, so target drift includes costs, price
+movement, and execution constraints. Multi-asset
+`RebalanceTargets` currently run in backtests only; the polling live runner
+still processes symbols independently and rejects this intent until it has a
+synchronized cross-sectional bar.
 
 Directory layout, dependency direction, risk/margin/reconciliation/staleness details, core types, and the full Config API: [`architecture.md`'s "Backtest Engine Design"](architecture.md#backtest-engine-design-librae).
 

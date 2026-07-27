@@ -132,6 +132,23 @@ class OrderEventRecord:
 
 
 @dataclass(frozen=True)
+class PositionSnapshotPoint:
+    """One open position's end-of-bar realized portfolio weight.
+
+    ``market_value`` and ``realized_weight`` are signed: long exposure is
+    positive and short exposure is negative.
+    """
+
+    ts: datetime
+    symbol: str
+    side: Literal["long", "short"]
+    quantity: float
+    price: float
+    market_value: float
+    realized_weight: float
+
+
+@dataclass(frozen=True)
 class StrategyMetrics:
     """Aggregate performance metrics for a backtest run.
 
@@ -183,6 +200,7 @@ class BacktestOutput:
     equity_curve: Sequence[EquityCurvePoint]
     order_events: Sequence[OrderEventRecord]
     metrics: StrategyMetrics
+    position_snapshots: Sequence[PositionSnapshotPoint]
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict with ISO datetime strings."""
