@@ -299,6 +299,50 @@ class CryptoAdapter:
         )
         return result
 
+    def find_order(self, client_order_id: str, symbol: str) -> dict | None:
+        """Find an open or final order after an ambiguous create response."""
+        self._require_auth()
+        if self._exchange.has.get("fetchOrders"):
+            orders = self._exchange.fetch_orders(symbol)
+        elif self._exchange.has.get("fetchOpenOrders") and self._exchange.has.get(
+            "fetchClosedOrders"
+        ):
+            orders = self._exchange.fetch_open_orders(symbol)
+            orders.extend(self._exchange.fetch_closed_orders(symbol))
+        else:
+            raise NotImplementedError(
+                f"{self._exchange_id} cannot look up both open and final orders; "
+                "durable live execution is unsupported"
+            )
+        matches = [
+            order for order in orders if str(order.get("clientOrderId") or "") == client_order_id
+        ]
+        if len(matches) > 1:
+            raise ValueError(f"duplicate broker clientOrderId: {client_order_id}")
+        return matches[0] if matches else None
+
+    def get_order(self, order_id: str, symbol: str) -> dict:
+        """Return the latest cumulative CCXT order state."""
+        self._require_auth()
+        if not self._exchange.has.get("fetchOrder"):
+            raise NotImplementedError(f"{self._exchange_id} does not support fetchOrder")
+        return self._exchange.fetch_order(order_id, symbol)
+
+    def list_open_orders(self, symbol: str) -> list[dict]:
+        """Return currently resting orders for orphan detection."""
+        self._require_auth()
+        if not self._exchange.has.get("fetchOpenOrders"):
+            raise NotImplementedError(f"{self._exchange_id} does not support fetchOpenOrders")
+        return self._exchange.fetch_open_orders(symbol)
+
+    def cancel_order(self, order_id: str, symbol: str) -> dict:
+        """Cancel an order, then fetch its cumulative terminal state."""
+        self._require_auth()
+        if not self._exchange.has.get("cancelOrder"):
+            raise NotImplementedError(f"{self._exchange_id} does not support cancelOrder")
+        self._exchange.cancel_order(order_id, symbol)
+        return self.get_order(order_id, symbol)
+
     def get_balance(self, currency: str) -> dict[str, float]:
         """Return real free/used/total balance for *currency* from the exchange."""
         self._require_auth()

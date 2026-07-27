@@ -1,8 +1,8 @@
 """Shared adapter metadata and credential loading.
 
 Concrete adapters (CryptoAdapter, ShioajiAdapter, etc.) are sync and
-duck-typed — they implement ``fetch_ohlcv``/``place_order``/``get_position``
-directly, matched by shape rather than an ABC. This module only holds the
+duck-typed — their capabilities are matched by shape rather than an ABC.
+This module only holds the
 two pieces every adapter actually shares: static metadata and env-var
 credential loading.
 

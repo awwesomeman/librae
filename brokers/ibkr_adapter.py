@@ -1,8 +1,8 @@
 """IBKRAdapter — Interactive Brokers adapter for US equities and futures.
 
 Wraps ``ib_async`` (community-maintained continuation of the archived
-``ib_insync``) to provide the same duck-typed interface as
-ShioajiAdapter/CryptoAdapter: ``fetch_ohlcv``, ``place_order``, ``get_position``.
+``ib_insync``) using the same flat, duck-typed adapter style as
+ShioajiAdapter/CryptoAdapter.
 
 Stocks are SMART-routed by symbol alone (IBKR resolves the exchange).
 Futures aren't — pass ``security_type="FUT"`` plus the contract's listing
@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 
 import pandas as pd
 
@@ -284,10 +285,132 @@ class IBKRAdapter:
 
         trade = self._ib.placeOrder(contract, order)
         self._ib.sleep(0)  # pump the event loop so orderStatus reflects the ack
-        return {
+        return self._trade_to_order(trade)
+
+    def find_order(self, client_order_id: str, symbol: str) -> dict | None:
+        """Find a current or completed order by IBKR ``orderRef``."""
+        self._require_auth()
+        matches = [
+            trade
+            for trade in self._ib.trades()
+            if trade.contract.symbol == symbol and trade.order.orderRef == client_order_id
+        ]
+        if not matches:
+            matches = [
+                trade
+                for trade in self._load_completed_trades()
+                if trade.contract.symbol == symbol and trade.order.orderRef == client_order_id
+            ]
+        if len(matches) > 1:
+            raise ValueError(f"duplicate IBKR orderRef: {client_order_id}")
+        return self._trade_to_order(matches[0]) if matches else None
+
+    def get_order(self, order_id: str, symbol: str) -> dict:
+        """Return the latest cumulative state, including a prior session."""
+        self._require_auth()
+        for trade in self._ib.trades():
+            if str(trade.order.orderId) == order_id and trade.contract.symbol == symbol:
+                return self._trade_to_order(trade)
+        for trade in self._load_completed_trades():
+            if str(trade.order.orderId) == order_id and trade.contract.symbol == symbol:
+                return self._trade_to_order(trade)
+        raise LookupError(f"IBKR order not found: {order_id}")
+
+    def list_open_orders(self, symbol: str) -> list[dict]:
+        """Return open trades maintained by the connected IBKR client."""
+        self._require_auth()
+        return [
+            self._trade_to_order(trade)
+            for trade in self._ib.openTrades()
+            if trade.contract.symbol == symbol
+        ]
+
+    def cancel_order(self, order_id: str, symbol: str) -> dict:
+        """Cancel an open IBKR trade and return its refreshed state."""
+        self._require_auth()
+        for trade in self._ib.openTrades():
+            if str(trade.order.orderId) == order_id and trade.contract.symbol == symbol:
+                self._ib.cancelOrder(trade.order)
+                self._ib.sleep(0)
+                return self._trade_to_order(trade)
+        return self.get_order(order_id, symbol)
+
+    def _load_completed_trades(self) -> list:
+        """Load completed orders and enrich them with execution details.
+
+        ib_async's completed-order response has status but no fills. Executions
+        supply the quantity, average price, time, and commission required by
+        the engine's cumulative report contract.
+        """
+        trades = list(self._ib.reqCompletedOrders(apiOnly=True))
+        fills = list(self._ib.reqExecutions())
+        for trade in trades:
+            order_id = trade.order.orderId
+            perm_id = getattr(trade.order, "permId", 0)
+            trade.fills = [
+                fill
+                for fill in fills
+                if fill.execution.orderId == order_id
+                or (perm_id and fill.execution.permId == perm_id)
+            ]
+            quantities = [self._optional_float(fill.execution.shares) for fill in trade.fills]
+            if trade.fills and all(quantity is not None for quantity in quantities):
+                filled = sum(quantity for quantity in quantities if quantity is not None)
+                if filled > 0:
+                    notional = sum(
+                        float(quantity) * float(fill.execution.price)
+                        for fill, quantity in zip(trade.fills, quantities, strict=True)
+                    )
+                    trade.orderStatus.filled = filled
+                    trade.orderStatus.avgFillPrice = notional / filled
+        return trades
+
+    @staticmethod
+    def _trade_to_order(trade) -> dict:
+        """Translate an ib_async Trade to the engine's cumulative contract."""
+        fills = list(trade.fills)
+        filled = IBKRAdapter._optional_float(trade.orderStatus.filled)
+        average = IBKRAdapter._optional_float(trade.orderStatus.avgFillPrice)
+        commissions = []
+        for fill in fills:
+            report = getattr(fill, "commissionReport", None)
+            commission = IBKRAdapter._optional_float(getattr(report, "commission", None))
+            if commission is not None:
+                commissions.append(commission)
+        result = {
             "id": str(trade.order.orderId),
             "status": trade.orderStatus.status,
         }
+        client_order_id = trade.order.orderRef
+        symbol = trade.contract.symbol
+        side = trade.order.action
+        requested = IBKRAdapter._optional_float(trade.order.totalQuantity)
+        if isinstance(client_order_id, str) and client_order_id:
+            result["clientOrderId"] = client_order_id
+        if isinstance(symbol, str):
+            result["symbol"] = symbol
+        if isinstance(side, str):
+            result["side"] = side.lower()
+        if requested is not None:
+            result["amount"] = requested
+        if filled is not None:
+            result["filled"] = filled
+        if average is not None and average > 0:
+            result["average"] = average
+        if filled is not None and filled > 0:
+            if len(commissions) == len(fills):
+                result["commission"] = sum(commissions)
+            if fills:
+                result["executed_at"] = max(fill.time for fill in fills)
+        return result
+
+    @staticmethod
+    def _optional_float(value: object) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if isfinite(number) and abs(number) < 1e307 else None
 
     def get_position(self, symbol: str) -> dict:
         """Return current position for *symbol*.

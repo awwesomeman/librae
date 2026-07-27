@@ -15,22 +15,22 @@
 brokers (broker/exchange adapters)  →  librae (core → backtest / live)  →  db (timescale_writer / timescale_reader)
 ```
 
-- `brokers/`: one adapter per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), exposing `fetch_ohlcv` / `place_order` / `get_position` / `info` for the live engine to fetch data and place orders. Design details in "Broker Adapter Design" below.
+- `brokers/`: one flat adapter per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), exposing market/account methods plus the live order lifecycle described below.
 - `librae/core/`: shared strategy/portfolio types and pure execution functions. Deterministic bar matching serves backtest/sim; `apply_execution_fill` serves confirmed live fills.
 - `librae/backtest/engine.py`: bar-by-bar backtest engine, produces `BacktestOutput` (the DB-persistence dataclasses defined in `librae/backtest/schema.py`: RunMetadata/EquityCurvePoint/OrderEventRecord/StrategyMetrics).
 - `librae/live/engine.py`: the real-time polling engine for sim/live mode — sim uses deterministic bar fills; live submits through a broker adapter and applies normalized execution reports.
-- `db/timescale_writer.py` / `db/timescale_reader.py`: the sole DB access layer — upper layers always read/write through here, never issuing raw SQL directly; schema defined in `db/timescale_init.sql`.
+- `db/timescale_writer.py` / `db/timescale_reader.py` / `db/timescale_state.py`: the sole DB access layer — upper layers use analytics helpers or the runtime store, never raw SQL; schema is defined in `db/timescale_init.sql`.
 
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a historical decision doc — the current state has since replaced the old execution layer it describes with librae).
 
 ## Broker Adapter Design (`brokers/`)
 
-- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Shared method signatures: `fetch_ohlcv(symbol, timeframe, ...) -> pd.DataFrame`, `place_order(signal: dict) -> dict`, `get_position(symbol) -> dict`, `info() -> AdapterInfo`.
+- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Market/account signatures include `fetch_ohlcv`, `get_position`, and `info`; live order lifecycle signatures are `place_order`, `find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
-- CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR commonly return only the initial acknowledgement from `place_order`; until their adapter returns a complete execution report, the current runtime halts without booking a fill. It does not substitute the order price or local `CostModel`.
+- CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `brokers/base.py` only provides the two pieces that are genuinely shared and byte-for-byte identical: `AdapterInfo` (static metadata) and `CredentialConfig.from_env(prefix)` (the env-var convention `{PREFIX}_{FIELD}`, with `prefix` supplied by the caller — e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are themselves exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as a UTC-aware datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
-- Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a single interface covering every capability — e.g. `librae/live/executor.py`'s `OrderAdapter` Protocol only declares `place_order`, because that's the only method the executor actually uses.
+- Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the five lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
 - `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias.
 
@@ -57,7 +57,8 @@ librae/
 │
 ├── live/                     real-time / sim runtime
 │   ├── engine.py             LiveTrader — synchronized portfolio polling cycles
-│   └── executor.py           OrderRequest/ExecutionReport + LiveExecutor normalization
+│   ├── executor.py           OrderRequest/ExecutionReport + LiveExecutor normalization
+│   └── state.py              restart checkpoint types + LiveStateStore protocol
 │
 └── config/                   configuration management
     ├── market_config.py      MarketConfig dataclass + built-in market registry (cost model, tick_size, multiplier, margin rate)
@@ -75,7 +76,7 @@ backtest/ ──→ core/
 live/     ──→ core/
 ```
 
-`backtest/` and `live/` have no direct dependency on each other — all shared logic lives in `core/`. `db`/`brokers`/`notifications` are never required dependencies of `librae` — `LiveTrader` controls whether it needs them via the `adapter`/`order_adapter`/`cost_model`/`notifier` constructor params plus `cfg.no_db`, falling back to a lazy-imported default implementation (`brokers.*`/`db.timescale_writer`/`notifications.telegram`) only when nothing was injected; pass them explicitly, or set `cfg.no_db=True`, and none of these packages get imported at all (see `docs/plans/refactor_librae_decouple.md`).
+`backtest/` and `live/` have no direct dependency on each other — shared execution logic lives in `core/`. Broker, persistence, and notification implementations remain constructor-injected and lazy-imported. Simulation can run standalone with `cfg.no_db=True`; live additionally requires an order adapter and a durable state store, either injected or backed by the default `brokers.*` and `db.timescale_state` implementations (see `docs/plans/refactor_librae_decouple.md`).
 
 ### Execution flow (strategy → engine → output)
 
@@ -225,9 +226,11 @@ additions rather than an exchange-level atomic basket.
 
 Acknowledgement is not execution. Submitted/accepted/cancelled/rejected
 reports never mutate positions. A partial report commits only its confirmed
-portion. The current polling runtime then fails closed on every non-final
-state, including a still-resting limit or a partial fill, because durable
-open-order continuation/cancellation is a separate recovery concern. It also
+fill delta. Submitted, accepted, and partial orders remain in a durable,
+serial queue and are polled before another strategy decision. Repeated
+cumulative reports are idempotent; filled quantity, notional, commission,
+slippage, and tax can only advance. Cancelled/rejected orders halt dependent
+work, and entering a halt cancels every tracked open order. The runtime also
 rejects live bar-field fills (`"open"`/`"close"`),
 `RebalanceTargets.fill_price`, and local stop/take-profit parameters; those
 cannot be inferred later from a completed range. Protective orders require a
@@ -267,7 +270,7 @@ cfg = RunConfig(..., params={
 ```
 
 - `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
-- `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()`; live submits immediate market closes and books only confirmed broker fills. Both halt strategy decisions permanently until restart.
+- `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()`; live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
 - `max_volume_participation_pct`: caps a single fill (new entry/add) only — it's not cumulative against position size; like `max_position_pct` it caps rather than rejects. Only applies to entries — exits (strategy-driven close, stop-loss/take-profit, force close, drawdown-triggered liquidation) are unaffected.
 - Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
@@ -284,13 +287,16 @@ The formula is a simplified isolated-margin approximation (ignoring fees/funding
 Startup reconciliation runs automatically when `LiveTrader.run()` starts and
 is a no-op in sim mode:
 
-- **Positions**: the broker's complete `get_position()` snapshot is ground
-  truth and atomically replaces local positions. An unreadable startup snapshot
-  halts trading. Post-order position polling is intentionally not fill
-  evidence: an aggregate position cannot recover per-execution time, fee, or
-  allocation. The current startup snapshot therefore restores exposure for
-  safety but cannot make restarted trade attribution complete; durable ledger
-  recovery is required for that.
+- **Orders**: restore the checkpoint first, recover placement-attempted orders
+  by deterministic client id, poll tracked orders, then compare the broker's
+  open orders on configured symbols. An untracked order is treated as an
+  orphan: do not guess ownership or invent a fill; halt for operator review.
+- **Positions**: `get_position(symbol)` is called only for this strategy's
+  configured symbols; it is not described as a complete account snapshot. A
+  restored checkpoint keeps its entry time and accumulated costs, while broker
+  side/quantity is a reconciliation assertion. A mismatch or unreadable
+  configured-symbol snapshot halts. Only a first run with no checkpoint adopts
+  broker exposure as a safety baseline.
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
@@ -298,8 +304,15 @@ is a no-op in sim mode:
   ledger.
 
 During a run, `ExecutionReport` is the only source that changes the local
-position ledger. Durable restart recovery, open/partial order resumption,
-orphan detection, and cancellation remain a separate production boundary.
+position ledger. `execution_runtime_state` atomically checkpoints the cycle
+watermark, simulated pending intent, cash, positions, last prices, equity peak,
+halt/risk counters, and active order queue. `broker_orders` keeps completed
+and active order facts for audit/idempotency without growing the checkpoint.
+Placement-attempted is saved before network I/O, so an ambiguous timeout is
+looked up rather than blindly retried. Analytics callbacks remain projections;
+they are not broker fill truth. The state key is `mode:config_hash`; run only
+one active process for a key. Multi-process leader election is deliberately
+outside this small polling engine rather than hidden behind an in-process lock.
 
 #### Data staleness detection (live only)
 
@@ -318,7 +331,7 @@ trader = LiveTrader(
 trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the engine
 ```
 
-`sink` (DB writes), `notifier` (Telegram), and `order_adapter` (order placement) can each be explicitly overridden with your own implementation in the constructor, or passed as `None` to disable entirely; when `cfg.no_db=True` all three default to off and none of `db`/`brokers`/`notifications` get imported — this is the key design that lets librae be used standalone as a library, without needing TimescaleDB or an exchange SDK installed.
+Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independently injectable. `cfg.no_db=True` disables default DB callbacks/state and notifications; simulation can remain standalone, while live must receive a durable `state_store` explicitly. The order adapter is still required for live regardless of DB settings.
 
 #### Mode comparison
 
@@ -328,7 +341,8 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 | Decision timing | completed T | completed T | completed T |
 | Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit immediately after T decision |
 | Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | broker `ExecutionReport` only |
-| Non-final order | one-bar intent expires | one-bar intent expires | no local fill; fail closed pending durable continuation |
+| Non-final order | one-bar intent expires | one-bar intent expires | persist and poll; apply cumulative fill deltas; block later decisions |
+| Restart | new run | restore pending intent/cycle/accounting when state is enabled | restore same run/order queue; reconcile broker before decisions |
 
 ### Core types
 
@@ -450,7 +464,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 #### LiveTrader callback signatures (writing your own db sink or notifier)
 
-`LiveTrader`'s constructor injection points ("Reference implementations" in the root README) are duck-typed, not formal `Protocol`s (only `order_adapter` has one, in `librae/live/executor.py`) — this table is the actual call signature for each, so you don't have to reverse-engineer them from `librae/live/engine.py` or the `db`/`notifications` reference implementations.
+`LiveTrader`'s constructor injection points ("Reference implementations" in the root README) are duck-typed. Only the two stateful boundaries have minimal call-site `Protocol`s: `OrderAdapter` in `librae/live/executor.py` and `LiveStateStore` in `librae/live/state.py`. This table is the actual call signature for each.
 
 | Param | Called as |
 |---|---|
@@ -460,7 +474,8 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
-| `order_adapter` | `place_order({symbol, side, quantity, order_type, client_order_id, price?}) -> dict`; final fills follow the execution-report contract above |
+| `order_adapter` | `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`; all order results follow the cumulative execution-report contract above |
+| `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 
 `notifier`'s 5 methods, with their exact kwargs:
@@ -473,7 +488,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `send_alert` | `title, message` |
 | `send_status` | `strategy, symbol, equity, drawdown, daily_pnl, position` |
 
-All seven params (`on_*`, `warmup_fetcher`, `notifier`) follow the same `_UNSET` sentinel resolution: pass a value explicitly → use it; leave unset and `cfg.no_db=True` → `None` (there's no separate `no_notify` flag — `notifier` is gated by the same `cfg.no_db`); otherwise lazy-import the default (`db.timescale_writer`/`notifications.telegram`).
+Callbacks, `warmup_fetcher`, `notifier`, and `state_store` use `_UNSET` to distinguish a caller override from default wiring. Under `cfg.no_db=True`, DB callbacks/state and notifications default to `None`; live then rejects construction unless a store is explicitly injected. Otherwise callbacks come from `db.timescale_writer`, state from `db.timescale_state`, and notifications from `notifications.telegram`.
 
 #### parse_with_config (CLI + YAML merging)
 
@@ -526,6 +541,8 @@ flowchart TD
         callbacks -- on_signal_outcome --> l_signal_events[("signal_events")]
         callbacks -- on_bar --> l_equity_curve[("equity_curve")]
         callbacks -- on_ohlcv --> l_ohlcv[("ohlcv")]
+        checkpoint["LiveStateStore.save"] --> l_runtime[("execution_runtime_state")]
+        checkpoint --> l_orders[("broker_orders")]
     end
 ```
 
@@ -537,6 +554,7 @@ flowchart TD
 |---|---|---|
 | Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `trade_events`, `signal_events`, `ohlcv_coverage_ranges` |
 | Domain term for a continuous time series as a whole (each row is one point in the series, but the table name refers to the series itself) | keep the domain's conventional singular term | `equity_curve`, `ohlcv` |
+| Singleton state table (one current snapshot per key) | singular | `execution_runtime_state` |
 
 ### Timestamp naming rules
 
@@ -554,7 +572,7 @@ flowchart TD
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
-### Current 10 tables
+### Current 12 tables
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
@@ -568,6 +586,8 @@ flowchart TD
 | `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically | no FK (unique index: ts+symbol+factor_name+source+instrument_type) | yes (`ts`) |
 | `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
 | `factor_registry` | one row per `factor_name` — its update frequency + source, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
+| `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
+| `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
 
 ### Handling quantity ambiguity
 

@@ -6,6 +6,8 @@ The optional SDK contract is covered separately without a broker login.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -188,6 +190,30 @@ class TestPlaceOrder:
             order_type="IOC",
         )
 
+    def test_client_order_id_uses_deterministic_six_character_custom_field(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._is_futures = MagicMock(return_value=True)
+        mock_trade = MagicMock()
+        mock_trade.status.id = "order123"
+        mock_trade.status.status = "PendingSubmit"
+        adapter._api.place_order.return_value = mock_trade
+        mock_sj = self._mock_shioaji_module()
+
+        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+            adapter.place_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "client_order_id": "strategy-TXFR1-open-20260101T000000",
+                }
+            )
+
+        custom_field = mock_sj.FuturesOrder.call_args.kwargs["custom_field"]
+        assert custom_field == adapter._client_tag("strategy-TXFR1-open-20260101T000000")
+        assert len(custom_field) == 6
+
     def test_futures_market_order_uses_ioc(self):
         """TAIFEX rejects market orders with ROD time-in-force (op_code 9938:
         "市價單不允許當日有效委託(ROD)") -- caught live 2026-07-20. Market orders
@@ -211,6 +237,73 @@ class TestPlaceOrder:
             price_type="FUT_MKT",
             order_type="IOC",
         )
+
+
+def test_trade_normalization_uses_cumulative_deals():
+    from brokers.shioaji_adapter import ShioajiAdapter
+
+    trade = SimpleNamespace(
+        order=SimpleNamespace(id="ord-1", quantity=2, custom_field="ABC123"),
+        status=SimpleNamespace(
+            id="ord-1",
+            status="PartFilled",
+            order_quantity=2,
+            deal_quantity=1,
+            deals=[
+                SimpleNamespace(
+                    price=100.0,
+                    quantity=1,
+                    datetime=datetime(2025, 1, 1, tzinfo=UTC),
+                    commission=0.2,
+                )
+            ],
+        ),
+    )
+
+    result = ShioajiAdapter._trade_to_order(trade)
+
+    assert result["status"] == "PartFilled"
+    assert result["filled"] == 1.0
+    assert result["average"] == 100.0
+    assert result["commission"] == 0.2
+    assert result["executed_at"] == datetime(2025, 1, 1, tzinfo=UTC)
+
+
+def test_trade_lookup_resolves_continuous_symbol_to_contract_code():
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="TXF202608"))
+    matching = SimpleNamespace(contract=SimpleNamespace(code="TXF202608"))
+    adapter._api.list_trades.return_value = [
+        SimpleNamespace(contract=SimpleNamespace(code="TXF202607")),
+        matching,
+    ]
+
+    result = adapter._trades("TXFR1")
+
+    assert result == [matching]
+    adapter._api.update_status.assert_called_once_with()
+
+
+def test_position_lookup_resolves_continuous_symbol_to_contract_code():
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="TXF202608"))
+    adapter._api.list_positions.return_value = [
+        SimpleNamespace(
+            code="TXF202608",
+            quantity=2,
+            price=22000,
+            pnl=100,
+        )
+    ]
+
+    result = adapter.get_position("TXFR1")
+
+    assert result == {
+        "symbol": "TXFR1",
+        "size": 2.0,
+        "avg_price": 22000.0,
+        "unrealized_pnl": 100.0,
+    }
 
 
 class TestResolveContract:

@@ -26,6 +26,51 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
 
 -- ============================================================
+-- execution_runtime_state -- atomic sim/live restart checkpoint
+-- ============================================================
+CREATE TABLE IF NOT EXISTS execution_runtime_state (
+    state_key       TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    config_hash     VARCHAR(32) NOT NULL,
+    mode            TEXT NOT NULL,
+    state           JSONB NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_runtime_mode CHECK (mode IN ('sim', 'live'))
+);
+CREATE INDEX IF NOT EXISTS idx_execution_runtime_run_id
+    ON execution_runtime_state(run_id);
+
+-- Completed orders remain here for audit/idempotency while only unfinished
+-- orders stay in the compact runtime checkpoint.
+CREATE TABLE IF NOT EXISTS broker_orders (
+    state_key       TEXT NOT NULL REFERENCES execution_runtime_state(state_key) ON DELETE CASCADE,
+    client_order_id TEXT NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    broker_order_id TEXT,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    placement_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+    requested_quantity DOUBLE PRECISION NOT NULL,
+    filled_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+    filled_notional DOUBLE PRECISION NOT NULL DEFAULT 0,
+    commission      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    slippage        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    tax             DOUBLE PRECISION NOT NULL DEFAULT 0,
+    submitted_at    TIMESTAMPTZ NOT NULL,
+    executed_at     TIMESTAMPTZ,
+    request         JSONB NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (state_key, client_order_id),
+    CONSTRAINT chk_broker_order_side CHECK (side IN ('buy', 'sell')),
+    CONSTRAINT chk_broker_order_status CHECK (
+        status IN ('submitted', 'accepted', 'partial', 'filled', 'cancelled', 'rejected')
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_broker_orders_active
+    ON broker_orders(state_key, status, updated_at DESC);
+
+-- ============================================================
 -- equity_curve — 每 bar 淨值 (hypertable, FK CASCADE)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS equity_curve (

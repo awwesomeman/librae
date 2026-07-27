@@ -190,6 +190,34 @@ def test_place_order_without_client_order_id_omits_param(authed_adapter, mock_cc
     assert "clientOrderId" not in mock_ccxt_exchange.create_order.call_args.kwargs["params"]
 
 
+def test_find_order_uses_client_id_across_order_history(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.has = {"fetchOrders": True}
+    mock_ccxt_exchange.fetch_orders.return_value = [
+        {"id": "other", "clientOrderId": "other"},
+        {"id": "ord_1", "clientOrderId": "strategy-1"},
+    ]
+
+    result = authed_adapter.find_order("strategy-1", "BTC/USDT")
+
+    assert result == {"id": "ord_1", "clientOrderId": "strategy-1"}
+    mock_ccxt_exchange.fetch_orders.assert_called_once_with("BTC/USDT")
+
+
+def test_cancel_order_returns_refreshed_cumulative_state(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.has = {"cancelOrder": True, "fetchOrder": True}
+    mock_ccxt_exchange.fetch_order.return_value = {
+        "id": "ord_1",
+        "status": "canceled",
+        "filled": 0.5,
+    }
+
+    result = authed_adapter.cancel_order("ord_1", "BTC/USDT")
+
+    mock_ccxt_exchange.cancel_order.assert_called_once_with("ord_1", "BTC/USDT")
+    mock_ccxt_exchange.fetch_order.assert_called_once_with("ord_1", "BTC/USDT")
+    assert result["filled"] == 0.5
+
+
 # ---------------------------------------------------------------------------
 # Test 5: sandbox mode — CryptoAdapter.__init__ itself (not the bypassed
 # __new__ fixtures above), since that's the only place set_sandbox_mode /
