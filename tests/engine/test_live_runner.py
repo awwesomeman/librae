@@ -88,6 +88,20 @@ def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     )
 
 
+def _make_ohlcv_at(timestamps: list[datetime], price: float = 100.0) -> pd.DataFrame:
+    """Create constant-price bars at explicit timestamps."""
+    return pd.DataFrame(
+        {
+            "ts": pd.DatetimeIndex(timestamps),
+            "open": price,
+            "high": price + 1.0,
+            "low": price - 1.0,
+            "close": price,
+            "volume": 1000.0,
+        }
+    )
+
+
 def _simple_feature_fn(h1_base: pd.DataFrame) -> pd.DataFrame:
     """Add entry_signal and exit_signal columns (all False by default)."""
     h1 = h1_base.copy()
@@ -308,6 +322,129 @@ class TestLiveTrader:
 
         assert strategy.on_bar.call_count == 2
 
+    def test_portfolio_cycle_waits_for_delayed_symbol(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        responses = {
+            "AAA": iter(
+                [
+                    _make_ohlcv_at([t0, t1]),
+                    _make_ohlcv_at([t1]),
+                ]
+            ),
+            "BBB": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1])]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+        )
+
+        runner._poll_cycle()
+        runner._poll_cycle()
+
+        contexts = [call.args[0] for call in strategy.on_bar.call_args_list]
+        assert [ctx.ts for ctx in contexts] == [t1]
+        assert all(set(ctx.bars) == {"AAA", "BBB"} for ctx in contexts)
+
+    def test_portfolio_cycle_skips_missing_timestamp_after_realignment(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        t2 = t1 + timedelta(hours=1)
+        responses = {
+            "AAA": iter(
+                [
+                    _make_ohlcv_at([t0]),
+                    _make_ohlcv_at([t1]),
+                    _make_ohlcv_at([t2]),
+                ]
+            ),
+            "BBB": iter(
+                [
+                    _make_ohlcv_at([t0]),
+                    _make_ohlcv_at([t0]),
+                    _make_ohlcv_at([t2]),
+                ]
+            ),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+        )
+
+        for _ in range(3):
+            runner._poll_cycle()
+
+        assert [call.args[0].ts for call in strategy.on_bar.call_args_list] == [t0, t2]
+
+    def test_duplicate_broker_bars_do_not_repeat_cycle(self):
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
+        duplicated = _make_ohlcv_at([ts, ts])
+
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=lambda *_args, **_kwargs: duplicated,
+            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+        )
+
+        runner._poll_cycle()
+        runner._poll_cycle()
+
+        assert strategy.on_bar.call_count == 1
+        assert all(len(frame) == 1 for frame in runner._ohlcv_cache.values())
+
+    def test_out_of_order_bar_before_watermark_is_not_replayed(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        t2 = t1 + timedelta(hours=1)
+        responses = {
+            "AAA": iter(
+                [
+                    _make_ohlcv_at([t1]),
+                    _make_ohlcv_at([t0]),
+                    _make_ohlcv_at([t2]),
+                ]
+            ),
+            "BBB": iter(
+                [
+                    _make_ohlcv_at([t1]),
+                    _make_ohlcv_at([t2]),
+                    _make_ohlcv_at([t2]),
+                ]
+            ),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+        )
+
+        for _ in range(3):
+            runner._poll_cycle()
+
+        assert [call.args[0].ts for call in strategy.on_bar.call_args_list] == [t1, t2]
+
     def test_context_exposes_engine_equity(self):
         seen_equity: list[float] = []
 
@@ -322,16 +459,49 @@ class TestLiveTrader:
 
         assert seen_equity == [runner._cash]
 
-    def test_rebalance_targets_rejected_until_live_bars_are_synchronized(self):
+    @pytest.mark.parametrize("mode", ["sim", "live"])
+    def test_rebalance_targets_execute_from_synchronized_realtime_context(self, mode):
+        contexts: list[Context] = []
+
         class AllocationStrategy(BaseStrategy):
             def on_bar(self, ctx: Context):
-                return RebalanceTargets(weights={ctx.symbol: 1.0})
+                contexts.append(ctx)
+                return RebalanceTargets(weights={"AAA": 0.6, "BBB": 0.4})
 
-        runner = self._make_runner(strategy=AllocationStrategy())
-        frame = _make_ohlcv_df()
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        responses = {
+            "AAA": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1])]),
+            "BBB": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1])]),
+        }
 
-        with pytest.raises(NotImplementedError, match="synchronized cross-sectional bar"):
-            runner._process_bar("BTCUSDT", frame, frame["ts"].iloc[-1].to_pydatetime())
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        order_adapter = _mock_order_adapter()
+        order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
+
+        def get_position(symbol):
+            if order_adapter.place_order.call_count == 0:
+                return {"symbol": symbol, "size": 0, "avg_price": 0}
+            quantity = 600.0 if symbol == "AAA" else 400.0
+            return {"symbol": symbol, "size": quantity, "avg_price": 100.0}
+
+        order_adapter.get_position.side_effect = get_position
+        runner = self._make_runner(
+            strategy=AllocationStrategy(),
+            fetcher=fetcher,
+            cfg=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
+            order_adapter=order_adapter,
+        )
+
+        runner.run(max_iterations=2)
+
+        assert [ctx.ts for ctx in contexts] == [t0, t1]
+        assert all(set(ctx.bars) == {"AAA", "BBB"} for ctx in contexts)
+        assert runner._positions["AAA"].quantity == pytest.approx(600.0)
+        assert runner._positions["BBB"].quantity == pytest.approx(400.0)
+        assert order_adapter.place_order.call_count == (2 if mode == "live" else 0)
 
     def test_ohlcv_cache_incremental_fetch(self):
         """After first full fetch, subsequent fetches use limit=2."""

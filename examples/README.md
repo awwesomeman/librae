@@ -25,8 +25,11 @@ The Top-K example computes trailing-return scores, ranks all symbols at the
 same timestamp, selects the highest-scoring names, and omits dropped names so
 the engine closes them. Both decide on bar T and fill on T+1.
 
-Only the quantity-based SMA example currently supports real-time modes because
-the polling live runner does not yet build synchronized cross-sectional bars:
+The bundled portfolio examples stay backtest-only because their inputs are
+deterministic synthetic data (and the target-weight schedule is fixed to
+historical dates), not because of an engine limitation. `LiveTrader` supports
+both intents in sim/live and synchronizes multi-symbol strategy decisions. The
+SMA example has a real broker-data path and can be run directly:
 
 ```bash
 uv run python -m examples.simple_sma.run --mode sim --poll-seconds 5 --no-db
@@ -52,9 +55,10 @@ df.index = pd.MultiIndex.from_arrays(
 )
 ```
 
-Live mode is different: `LiveTrader` calls your `prepare_signals(df)` itself,
-once per new bar, on a plain (non-MultiIndex) OHLCV DataFrame — which is why
-`simple_sma/strategy.py` writes `prepare_signals` to accept either shape.
+Live mode is different: `LiveTrader` calls your `prepare_signals(df)` itself
+for each symbol in a synchronized portfolio cycle, on a plain (non-MultiIndex)
+OHLCV DataFrame — which is why `simple_sma/strategy.py` writes
+`prepare_signals` to accept either shape.
 Reusing the same function for both modes isn't a suggestion — it's how you
 avoid backtest/live computing the signal differently.
 
