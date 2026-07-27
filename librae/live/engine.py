@@ -657,14 +657,6 @@ class LiveTrader:
             message=f"{message}; trading halted, {recovery}.",
         )
 
-    def _reconcile_fill(self, event: OrderEvent) -> bool:
-        """Reconcile one event against the local book; halt and recover on drift."""
-        matched, detail = self._reconcile_position(event.symbol, self._positions)
-        if matched:
-            return True
-        self._halt_and_recover(title=f"Fill Mismatch: {event.symbol}", message=detail)
-        return False
-
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._running = True

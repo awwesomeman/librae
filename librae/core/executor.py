@@ -1218,13 +1218,6 @@ def run_pending_and_stops(
     cash_delta_total = 0.0
 
     if pending_intent:
-        if isinstance(pending_intent, RebalanceTargets) and isinstance(
-            pending_intent.fill_price, (int, float)
-        ):
-            raise ValueError(
-                "RebalanceTargets.fill_price must be a bar field name; "
-                "use per-symbol Actions for limit orders"
-            )
         process_intent = (
             process_rebalance_targets
             if isinstance(pending_intent, RebalanceTargets)
