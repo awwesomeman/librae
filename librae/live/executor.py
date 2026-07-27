@@ -254,7 +254,8 @@ class LiveExecutor:
         adapter = self.get_order_adapter(request.symbol)
         signal = request.to_signal()
         signal["reference_price"] = reference_price
-        signal["tick_size"] = self.get_cost_model(request.symbol).tick_size
+        instrument = self._instruments.get(request.symbol)
+        signal["tick_size"] = instrument.tick_size if instrument else None
         try:
             prepared = adapter.prepare_order(signal)
         except Exception as exc:

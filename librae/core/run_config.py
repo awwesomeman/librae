@@ -116,6 +116,8 @@ class RunConfig:
             raise ValueError("symbols must not contain duplicates")
         if not self.market or not self.data_source:
             raise ValueError("market and data_source must be non-empty")
+        if self.annual_periods <= 0:
+            raise ValueError("annual_periods must be positive")
         if self.dry_run and not self.no_db:
             raise ValueError("dry_run=True requires no_db=True; use build_config()")
 

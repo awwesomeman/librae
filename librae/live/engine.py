@@ -60,6 +60,11 @@ logger = logging.getLogger(__name__)
 OHLCVFetcher = Callable[..., pd.DataFrame]
 
 _UNSET = object()  # sentinel: distinguish "not passed" from "explicitly passed None"
+_DATA_ADAPTER_BY_BROKER = {
+    "binance": "crypto",
+    "ibkr": "ibkr",
+    "shioaji": "shioaji",
+}
 
 
 @dataclass(frozen=True)
@@ -79,10 +84,12 @@ def _build_builtin_adapter(name: str, *, trading: bool) -> object:
         from brokers.ibkr_adapter import IBKRAdapter
 
         return IBKRAdapter(trading_enabled=trading)
-    if name == "crypto":
+    if name in ("crypto", "binance"):
         from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
 
-        credentials = CryptoCredentials.from_env("BINANCE") if trading else None
+        credentials = (
+            CryptoCredentials.from_env("BINANCE", exchange_id="binance") if trading else None
+        )
         return CryptoAdapter(credentials=credentials)
     raise ValueError(f"Unsupported adapter: {name!r}")
 
@@ -165,6 +172,12 @@ class LiveTrader:
             )
             for symbol in self._symbols
         }
+        currencies = {instrument.currency for instrument in self._instruments.values()}
+        if len(currencies) != 1:
+            raise ValueError(
+                "LiveTrader requires one accounting currency; configure an FX/base-currency "
+                f"model before mixing {sorted(currencies)}"
+            )
 
         # --- Build per-symbol market-data adapters ---
         data_adapters: dict[str, object] = {}
@@ -189,15 +202,14 @@ class LiveTrader:
                             "orderable; inject a market-data adapter and configure a concrete "
                             "venue_symbol before using sim/live"
                         )
+                    route = (cfg.instrument_overrides or {}).get(symbol, {})
+                    broker = route.get("broker") or cfg.broker
                     instance = _build_builtin_adapter(
                         instrument.data_adapter,
                         trading=(
                             cfg.mode == "live"
-                            and (
-                                (cfg.instrument_overrides or {}).get(symbol, {}).get("broker")
-                                or cfg.broker
-                            )
-                            == instrument.data_adapter
+                            and order_adapter is None
+                            and _DATA_ADAPTER_BY_BROKER.get(broker) == instrument.data_adapter
                         ),
                     )
                 adapter_instances[key] = instance
@@ -210,7 +222,7 @@ class LiveTrader:
                                 _instrument.venue_symbol,
                                 tf,
                                 limit=limit,
-                                security_type=_instrument.security_type or "STK",
+                                security_type=_instrument.security_type,
                                 exchange=_instrument.exchange,
                                 currency=_instrument.currency,
                                 drop_incomplete=drop_incomplete,
@@ -245,12 +257,16 @@ class LiveTrader:
                             f"Live execution broker is not configured for {symbol!r}; "
                             "set strategy.broker/instrument_overrides or inject order_adapter"
                         )
+                    broker_data_adapter = _DATA_ADAPTER_BY_BROKER.get(broker)
+                    if broker_data_adapter is None:
+                        raise ValueError(f"Unsupported execution broker: {broker!r}")
                     instance = broker_instances.get(broker)
                     if instance is None:
                         data_instance = data_adapters.get(symbol)
                         instance = (
                             data_instance
-                            if broker == instrument.data_adapter and data_instance is not None
+                            if broker_data_adapter == instrument.data_adapter
+                            and data_instance is not None
                             else _build_builtin_adapter(broker, trading=True)
                         )
                         broker_instances[broker] = instance

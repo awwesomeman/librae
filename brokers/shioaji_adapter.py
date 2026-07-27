@@ -32,6 +32,7 @@ from .base import (
     find_position,
     floor_to_step,
     passive_price,
+    validate_order_signal,
 )
 from .taipei_time import resample_taifex_ohlcv, shioaji_ts_ns_to_epoch
 
@@ -215,6 +216,7 @@ class ShioajiAdapter:
 
     def prepare_order(self, signal: dict) -> dict:
         """Round quantity/limit price to Shioaji contract rules."""
+        validate_order_signal(signal)
         contract = self._resolve_contract(signal["symbol"])
         prepared = dict(signal)
         quantity = floor_to_step(float(signal["quantity"]), 1.0)
@@ -248,6 +250,7 @@ class ShioajiAdapter:
         Duplicate digest matches fail closed instead of guessing ownership.
         """
         self._require_auth()
+        validate_order_signal(signal)
 
         sj = _require_shioaji()
         contract = self._resolve_contract(signal["symbol"])
@@ -257,7 +260,7 @@ class ShioajiAdapter:
         # shioaji.* (member names unchanged) — sj.order.Action etc. raises
         # AttributeError on current versions.
         action = sj.Action.Buy if signal["side"] == "buy" else sj.Action.Sell
-        is_limit = signal.get("order_type") == "limit"
+        is_limit = signal["order_type"] == "limit"
         if is_futures:
             price_type = sj.FuturesPriceType.LMT if is_limit else sj.FuturesPriceType.MKT
         else:

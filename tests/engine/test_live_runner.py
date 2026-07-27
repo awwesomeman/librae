@@ -153,6 +153,21 @@ class _HoldStrategy(BaseStrategy):
 
 def _test_cfg(**overrides) -> RunConfig:
     overrides.setdefault("params", {"warmup_periods": 5})
+    from librae.config.symbols import load_symbol_registry
+
+    registry = load_symbol_registry()
+    symbols = overrides.get("symbols", ["BTCUSDT"])
+    routes = {
+        symbol: dict(values)
+        for symbol, values in (overrides.get("instrument_overrides") or {}).items()
+    }
+    for symbol in symbols:
+        if symbol not in registry:
+            route = routes.setdefault(symbol, {})
+            route.setdefault("instrument_type", "spot")
+            route.setdefault("currency", "USDT")
+    if routes:
+        overrides["instrument_overrides"] = routes
     return make_test_cfg(**overrides)
 
 
@@ -1037,7 +1052,7 @@ class TestLiveTrader:
         ]
         assert len(drift_alerts) == 1
 
-    def test_multi_currency_cash_reconciliation_is_skipped(self):
+    def test_multi_currency_runtime_fails_before_accounting(self):
         mock_order_adapter = _mock_order_adapter()
 
         cfg = _test_cfg(
@@ -1048,11 +1063,8 @@ class TestLiveTrader:
                 "BBB": {"currency": "USDT"},
             },
         )
-        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
-
-        runner.run(max_iterations=1)  # must not raise
-
-        mock_order_adapter.get_balance.assert_not_called()
+        with pytest.raises(ValueError, match="one accounting currency"):
+            self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
 
     def test_adapter_without_get_balance_is_skipped(self):
         """A duck-typed adapter with no get_balance() at all must be silently
@@ -1744,7 +1756,7 @@ class TestCryptoLiveAutoWiring:
             trader = LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                cfg=_test_cfg(mode="live", broker="crypto"),
+                cfg=_test_cfg(mode="live", broker="binance"),
                 cost_model=_zero_cost_model(),
                 on_bar=None,
                 on_order_event=None,
@@ -1754,15 +1766,18 @@ class TestCryptoLiveAutoWiring:
                 state_store=MemoryLiveStateStore(),
                 **kwargs,
             )
-        return trader, mock_cls.return_value
+        return trader, mock_cls
 
     def test_auto_builds_order_adapter_from_env(self, monkeypatch):
-        trader, adapter_instance = self._build(monkeypatch)
-        assert trader._executor.get_order_adapter("BTCUSDT") is adapter_instance
+        trader, adapter_cls = self._build(monkeypatch)
+        adapter_cls.assert_called_once()
+        assert adapter_cls.call_args.kwargs["credentials"].exchange_id == "binance"
+        assert trader._executor.get_order_adapter("BTCUSDT") is adapter_cls.return_value
 
     def test_explicit_order_adapter_not_overridden(self, monkeypatch):
         explicit = MagicMock()
-        trader, _ = self._build(monkeypatch, order_adapter=explicit)
+        trader, adapter_cls = self._build(monkeypatch, order_adapter=explicit)
+        adapter_cls.assert_called_once_with(credentials=None)
         assert trader._executor.get_order_adapter("BTCUSDT") is explicit
 
 
@@ -1785,6 +1800,7 @@ class TestMultiAdapterRouting:
             symbols=["BTCUSDT", "MU"],
             market="multi",
             data_source="multi",
+            instrument_overrides={"MU": {"currency": "USDT"}},
         )
         fetchers = {
             "BTCUSDT": lambda *args, **kwargs: _make_ohlcv_df(),

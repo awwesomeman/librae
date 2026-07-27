@@ -187,6 +187,7 @@ class TestResolveSymbol:
                     "AAPL": {
                         "data_adapter": "ibkr",
                         "currency": "USD",
+                        "instrument_type": "spot",
                         "security_type": "STK",
                         "exchange": "SMART",
                     }
@@ -208,6 +209,42 @@ class TestResolveSymbol:
                 self._cfg(
                     data_source="local",
                     symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                ),
+                "AAPL",
+            )
+
+    def test_unregistered_symbol_does_not_infer_product_type(self):
+        with pytest.raises(ValueError, match="instrument_type"):
+            resolve_symbol(
+                self._cfg(
+                    data_source="binance_spot",
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                ),
+                "AAPL",
+            )
+
+    def test_unregistered_symbol_does_not_infer_currency_from_market(self):
+        with pytest.raises(ValueError, match="currency"):
+            resolve_symbol(
+                self._cfg(
+                    data_source="binance_spot",
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    instrument_overrides={"AAPL": {"instrument_type": "spot"}},
+                ),
+                "AAPL",
+            )
+
+    def test_ibkr_route_requires_security_type(self):
+        with pytest.raises(ValueError, match="security_type"):
+            resolve_symbol(
+                self._cfg(
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    instrument_overrides={
+                        "AAPL": {
+                            "instrument_type": "spot",
+                            "currency": "USD",
+                        }
+                    },
                 ),
                 "AAPL",
             )

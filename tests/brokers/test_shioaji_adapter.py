@@ -214,7 +214,14 @@ class TestPlaceOrder:
 
         mock_sj = self._mock_shioaji_module()
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
-            adapter.place_order({"symbol": "2330", "side": "sell", "quantity": 1000})
+            adapter.place_order(
+                {
+                    "symbol": "2330",
+                    "side": "sell",
+                    "quantity": 1000,
+                    "order_type": "market",
+                }
+            )
 
         mock_sj.StockOrder.assert_called_once_with(
             price=0,
@@ -240,6 +247,7 @@ class TestPlaceOrder:
                     "symbol": "TXFR1",
                     "side": "buy",
                     "quantity": 1,
+                    "order_type": "market",
                     "client_order_id": "strategy-TXFR1-open-20260101T000000",
                 }
             )
@@ -262,7 +270,14 @@ class TestPlaceOrder:
 
         mock_sj = self._mock_shioaji_module()
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
-            adapter.place_order({"symbol": "TMFR1", "side": "buy", "quantity": 1})
+            adapter.place_order(
+                {
+                    "symbol": "TMFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "market",
+                }
+            )
 
         mock_sj.FuturesOrder.assert_called_once_with(
             price=0,

@@ -266,6 +266,32 @@ def test_prepare_order_rejects_min_notional(authed_adapter, mock_ccxt_exchange):
         )
 
 
+def test_prepare_order_requires_derivative_contract_size(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT:USDT",
+        "type": "swap",
+        "contract": True,
+        "spot": False,
+        "limits": {},
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "1"
+
+    with pytest.raises(ValueError, match="contractSize"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "sell",
+                "quantity": 1.0,
+                "order_type": "market",
+                "position_effect": "open",
+                "reference_price": 50_000.0,
+            }
+        )
+
+
 def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
     signal = {

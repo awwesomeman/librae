@@ -248,7 +248,16 @@ class TestPlaceOrder:
         with patch(
             "brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()
         ):
-            result = adapter.place_order({"symbol": "MU", "side": "buy", "quantity": 100})
+            result = adapter.place_order(
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "quantity": 100,
+                    "order_type": "market",
+                    "security_type": "STK",
+                    "currency": "USD",
+                }
+            )
 
         adapter._ib.placeOrder.assert_called_once_with(
             "mock_contract",
@@ -282,6 +291,8 @@ class TestPlaceOrder:
                     "quantity": 50,
                     "order_type": "limit",
                     "price": 900.0,
+                    "security_type": "STK",
+                    "currency": "USD",
                 }
             )
 
@@ -309,6 +320,9 @@ class TestPlaceOrder:
                     "symbol": "MU",
                     "side": "buy",
                     "quantity": 100,
+                    "order_type": "market",
+                    "security_type": "STK",
+                    "currency": "USD",
                     "client_order_id": "strat-MU-open-20260101T000000",
                 }
             )

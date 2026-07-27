@@ -19,7 +19,13 @@ from typing import Any
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, drop_incomplete_ohlcv, find_position
+from .base import (
+    AdapterInfo,
+    CredentialConfig,
+    drop_incomplete_ohlcv,
+    find_position,
+    validate_order_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +270,7 @@ class CryptoAdapter:
 
     def prepare_order(self, signal: dict) -> dict:
         """Apply CCXT precision/limit rules and reject spot short opens."""
+        validate_order_signal(signal)
         self._exchange.load_markets()
         symbol = signal["symbol"]
         market = self._exchange.market(symbol)
@@ -295,7 +302,15 @@ class CryptoAdapter:
             self._validate_limit(price, limits.get("price"), "price", symbol)
         reference_price = price or signal.get("reference_price")
         if reference_price is not None:
-            contract_size = float(market.get("contractSize") or 1.0)
+            raw_contract_size = market.get("contractSize")
+            is_contract = bool(
+                market.get("contract") or market.get("type") in ("future", "swap", "option")
+            )
+            if is_contract and raw_contract_size is None:
+                raise ValueError(f"{symbol} derivative is missing contractSize")
+            contract_size = float(raw_contract_size or 1.0)
+            if contract_size <= 0:
+                raise ValueError(f"{symbol} contractSize must be positive")
             notional = quantity * float(reference_price) * contract_size
             self._validate_limit(notional, limits.get("cost"), "notional", symbol)
         return prepared
@@ -325,7 +340,8 @@ class CryptoAdapter:
         ccxt's unified ``clientOrderId`` param, exchange-side dedup/audit).
         """
         self._require_auth()
-        order_type = signal.get("order_type", "market")
+        validate_order_signal(signal)
+        order_type = signal["order_type"]
         price = signal.get("price")
         params = {}
         if signal.get("client_order_id"):

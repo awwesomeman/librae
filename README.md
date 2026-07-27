@@ -160,6 +160,9 @@ either an injected `order_adapter` or an explicit `strategy.broker` (overridden
 per symbol by `instrument_overrides.<symbol>.broker`). Missing execution
 routing fails at startup. This prevents a symbol such as `MU` from silently
 selecting IBKR merely because IBKR supplied its bars.
+The current live/sim cash ledger is single-currency, so a resolved
+mixed-currency universe also fails at construction until an explicit FX/base
+currency model is supplied.
 
 TimescaleDB is the default durable state store (`execution_runtime_state` plus
 the `broker_orders` ledger). `cfg.no_db=True` remains valid for simulation,

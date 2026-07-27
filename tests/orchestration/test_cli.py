@@ -207,6 +207,7 @@ class TestBuildConfig:
 
         assert cfg.symbol_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
+        assert cfg.annual_periods == 252
         assert cfg.instrument_overrides == {
             "AAPL": {
                 "data_adapter": "ibkr",
@@ -214,6 +215,74 @@ class TestBuildConfig:
                 "security_type": "STK",
             }
         }
+
+    def test_mixed_data_sources_require_explicit_annual_periods(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbols: [MU, BTCUSDT]
+                  timeframe: 1d
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="annual_periods"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_unknown_data_source_requires_explicit_annual_periods(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: TEST
+                  timeframe: 1d
+                  market: test
+                  data_source: custom
+                  symbol_overrides:
+                    TEST:
+                      multiplier: 1.0
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="annual_periods"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_unknown_data_source_without_annualization_needs_no_calendar(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: TEST
+                  timeframe: 1d
+                  market: test
+                  data_source: custom
+                  perf:
+                    annualize: false
+                """
+            )
+        )
+
+        cfg = build_config("test_strat", str(tmp_path / "run.py"))
+
+        assert cfg.annualize is False
+
+    def test_annual_periods_must_be_positive(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  perf:
+                    annual_periods: 0
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="annual_periods must be positive"):
+            build_config("test_strat", str(tmp_path / "run.py"))
 
 
 def _make_cfg(**overrides) -> RunConfig:

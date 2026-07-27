@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _DATA_SOURCE_ANNUAL_PERIODS: dict[str, int] = {
     "binance_spot": 365,
-    "binance_futures": 365,
-    "tw_futures": 252,
-    "tw_equity": 252,
+    "binance_futures_continuous": 365,
+    "ibkr": 252,
+    "shioaji": 252,
 }
 
 
@@ -268,14 +268,25 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         )
     poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
 
-    # 4. Perf params (with data_source defaults)
-    default_annual = _DATA_SOURCE_ANNUAL_PERIODS.get(data_source, 365)
+    # 4. Perf params (with known exchange-calendar defaults)
+    configured_annual_periods = perf.get("annual_periods")
     if args.no_annualize:
         annualize = False
     elif perf.get("annualize") is not None:
         annualize = perf["annualize"]
     else:
         annualize = True
+    default_annual_periods = _DATA_SOURCE_ANNUAL_PERIODS.get(data_source)
+    if annualize and configured_annual_periods is None and default_annual_periods is None:
+        raise ValueError(
+            "strategy.perf.annual_periods is required when annualizing "
+            f"data_source={data_source!r}; there is no safe calendar default"
+        )
+    annual_periods = (
+        configured_annual_periods
+        if configured_annual_periods is not None
+        else default_annual_periods or 365
+    )
 
     return RunConfig(
         strategy_name=strategy_name,
@@ -294,7 +305,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         instrument_overrides=instrument_overrides,
         annualize=annualize,
         risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
-        annual_periods=int(perf.get("annual_periods", default_annual)),
+        annual_periods=int(annual_periods),
         poll_seconds=poll_seconds,
         no_db=no_db,
         dry_run=dry_run,

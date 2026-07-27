@@ -41,12 +41,6 @@ _ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
     "ibkr": "ibkr",
     "shioaji": "shioaji",
 }
-_CURRENCY_BY_MARKET = {
-    "crypto": "USDT",
-    "tw_futures": "TWD",
-    "us_equity": "USD",
-}
-
 # Contract expiry structure — orthogonal to continuous_alias (see the
 # per-symbol entries below). 'spot' is the bare case (direct ownership, not
 # an exchange-traded derivative); everything else is prefixed contract_* so
@@ -292,12 +286,30 @@ def resolve_symbol(
             f"No multiplier for symbol={symbol!r}; set symbol_overrides[symbol]['multiplier']"
         )
     instrument_type = route.get("instrument_type") or (
-        registered.instrument_type if registered else ("spot" if float(multiplier) == 1.0 else "")
+        registered.instrument_type if registered else ""
     )
+    if not instrument_type:
+        raise ValueError(
+            f"No instrument_type for symbol={symbol!r}; set "
+            "instrument_overrides[symbol]['instrument_type']"
+        )
     tick_size = costs.get("tick_size", registered.tick_size if registered else None)
-    currency = route.get("currency") or (
-        registered.currency if registered else _CURRENCY_BY_MARKET.get(market, "")
-    )
+    currency = route.get("currency") or (registered.currency if registered else "")
+    if not currency:
+        raise ValueError(
+            f"No currency for symbol={symbol!r}; set instrument_overrides[symbol]['currency']"
+        )
+    security_type = route.get("security_type") or (registered.security_type if registered else None)
+    exchange = route.get("exchange") or (registered.exchange if registered else None)
+    if data_adapter == "ibkr" and not security_type:
+        raise ValueError(
+            f"No security_type for IBKR symbol={symbol!r}; set "
+            "instrument_overrides[symbol]['security_type']"
+        )
+    if security_type == "FUT" and not exchange:
+        raise ValueError(
+            f"No exchange for IBKR future={symbol!r}; set instrument_overrides[symbol]['exchange']"
+        )
     return SymbolInfo(
         symbol=symbol,
         market=market,
@@ -310,7 +322,6 @@ def resolve_symbol(
         currency=currency,
         continuous_alias=registered.continuous_alias if registered else False,
         tick_size=float(tick_size) if tick_size is not None else None,
-        security_type=route.get("security_type")
-        or (registered.security_type if registered else None),
-        exchange=route.get("exchange") or (registered.exchange if registered else None),
+        security_type=security_type,
+        exchange=exchange,
     )

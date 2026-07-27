@@ -30,9 +30,9 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
-- `brokers/base.py` only provides the two pieces that are genuinely shared and byte-for-byte identical: `AdapterInfo` (static metadata) and `CredentialConfig.from_env(prefix)` (the env-var convention `{PREFIX}_{FIELD}`, with `prefix` supplied by the caller — e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are themselves exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
+- `brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as a UTC-aware datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
-- Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the five lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
+- Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the six lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
 - `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias.
 
@@ -466,7 +466,15 @@ strategy:
 For a multi-broker run, omit the run-wide `broker` and set
 `instrument_overrides.<symbol>.broker` for every symbol. Registered symbol
 metadata may supply market/data identifiers and contract economics, but never
-selects an execution broker.
+selects an execution broker. An unregistered live symbol must explicitly
+declare `instrument_type` and `currency`; an IBKR route must also declare
+`security_type` and a futures `exchange`. These are execution/accounting facts,
+so they are not guessed from multiplier, market name, or ticker shape.
+
+`LiveTrader` currently has one cash ledger and therefore requires all resolved
+instruments to share one accounting currency. A mixed-currency run fails at
+construction rather than summing unlike currencies; FX/base-currency
+conversion remains a separate explicit model in PR 5 / Issue #18.
 
 #### TelegramAdapter (notifications)
 

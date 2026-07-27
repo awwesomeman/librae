@@ -42,6 +42,7 @@ from .base import (
     find_position,
     floor_to_step,
     passive_price,
+    validate_order_signal,
 )
 
 logger = logging.getLogger(__name__)
@@ -268,11 +269,12 @@ class IBKRAdapter:
 
     def prepare_order(self, signal: dict) -> dict:
         """Apply IBKR ContractDetails size and tick constraints."""
+        validate_order_signal(signal)
         details = self._contract_details(
             signal["symbol"],
-            security_type=signal.get("security_type", "STK"),
+            security_type=signal["security_type"],
             exchange=signal.get("exchange"),
-            currency=signal.get("currency", "USD"),
+            currency=signal["currency"],
         )
         step = (
             self._positive_float(getattr(details, "sizeIncrement", None))
@@ -302,24 +304,25 @@ class IBKRAdapter:
 
         Expected *signal* keys: ``symbol``, ``side`` (``"buy"``/``"sell"``),
         ``quantity``, ``order_type`` (``"market"``/``"limit"``),
-        optionally ``price`` for limit orders, optionally ``security_type``
-        (``"STK"`` default, or ``"FUT"``) + ``exchange`` (required for
-        ``"FUT"``) + ``currency`` (default ``"USD"``), and optionally
+        optionally ``price`` for limit orders, plus explicit ``security_type``
+        (``"STK"`` or ``"FUT"``), ``exchange`` (required for ``"FUT"``),
+        and ``currency``. It also accepts an optional
         ``client_order_id`` (set as IBKR's ``orderRef`` — an audit-trail tag,
         not an enforced dedup key; check ``self._ib.openTrades()`` for a
         matching ``orderRef`` before resubmitting if that matters to the caller).
         """
         self._require_auth()
+        validate_order_signal(signal)
         ib_async = _require_ib_async()
 
         contract = self._resolve_contract(
             signal["symbol"],
-            security_type=signal.get("security_type", "STK"),
+            security_type=signal["security_type"],
             exchange=signal.get("exchange"),
-            currency=signal.get("currency", "USD"),
+            currency=signal["currency"],
         )
         action = "BUY" if signal["side"] == "buy" else "SELL"
-        if signal.get("order_type") == "limit":
+        if signal["order_type"] == "limit":
             order = ib_async.LimitOrder(action, signal["quantity"], signal["price"])
         else:
             order = ib_async.MarketOrder(action, signal["quantity"])
