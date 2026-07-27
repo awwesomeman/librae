@@ -331,10 +331,6 @@ def check_existing_run(cfg: RunConfig) -> str | None:
         from db.timescale_reader import get_run_by_config_hash
     except ImportError:
         return None
-    except RuntimeError:
-        # db/__init__.py raises RuntimeError at import time if TIMESCALE_DSN
-        # isn't set — same "no DB available" case as ImportError above.
-        return None
 
     try:
         existing = get_run_by_config_hash(cfg.config_hash)

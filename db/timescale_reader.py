@@ -15,12 +15,12 @@ from typing import Any
 
 import pandas as pd
 
-from db import TIMESCALE_DSN, get_conn
+from db import get_conn
 
 
 def get_run_by_config_hash(
     config_hash: str,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> dict[str, Any] | None:
     """Find the most recent run with the given config_hash.
 
@@ -45,7 +45,7 @@ def get_run_by_config_hash(
     }
 
 
-def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> str | None:
+def get_latest_run_id(strategy: str | None = None, dsn: str | None = None) -> str | None:
     """Return the most recent run_id, optionally filtered by strategy."""
     sql = "SELECT run_id FROM backtest_runs"
     params: list = []
@@ -61,7 +61,7 @@ def get_latest_run_id(strategy: str | None = None, dsn: str = TIMESCALE_DSN) -> 
     return row[0] if row else None
 
 
-def load_runs(limit: int = 20, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
+def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
     """List recent backtest runs."""
     sql = """
         SELECT run_id, strategy, symbol, timeframe,
@@ -75,7 +75,7 @@ def load_runs(limit: int = 20, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     return df
 
 
-def load_equity_curve(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
+def load_equity_curve(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     sql = """
         SELECT ts AS _time, equity, benchmark_equity, drawdown,
                period_return, benchmark_period_return
@@ -94,7 +94,7 @@ def load_trade_events(
     run_id: str,
     *,
     event_types: list[str] | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> pd.DataFrame:
     """Load trade_events for a run, ordered by timestamp.
 
@@ -121,7 +121,7 @@ def load_trade_events(
     return df
 
 
-def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
+def load_performance(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     """Load strategy_performance joined with backtest_runs.
 
     Returns a column-based DataFrame with one row containing all metrics.
@@ -141,7 +141,7 @@ def load_performance(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
     return df
 
 
-def derive_trade_signals(run_id: str, dsn: str = TIMESCALE_DSN) -> pd.DataFrame:
+def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     """Derive a synthetic entry/exit signal series from trade_events (open=entry,
     close/reduce=exit) — i.e. the strategy's actual executed fills, NOT a read of
     the separate signal_events table (which stores raw pre-execution signals for
@@ -172,7 +172,7 @@ def get_ohlcv_coverage_ranges(
     timeframe: str,
     data_source: str,
     instrument_type: str = "spot",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> list[tuple[datetime, datetime]]:
     """Return this key's cached (range_started_at, range_ended_at) pairs, sorted.
 
@@ -198,7 +198,7 @@ def get_external_factor_coverage_ranges(
     factor_name: str,
     source: str,
     instrument_type: str = "spot",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> list[tuple[datetime, datetime]]:
     """Return this factor key's cached (range_started_at, range_ended_at) pairs,
     sorted. Same shape/semantics as get_ohlcv_coverage_ranges()."""
@@ -223,7 +223,7 @@ def load_external_factor(
     instrument_type: str = "spot",
     started_at: str | None = None,
     ended_at: str | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> pd.DataFrame:
     """Load cached factor values for (symbol, factor_name, source, instrument_type).
 
@@ -258,7 +258,7 @@ def load_ohlcv(
     instrument_type: str | None = None,
     started_at: str | None = None,
     ended_at: str | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> pd.DataFrame:
     """Load OHLCV data by symbol+timeframe+range, or by run_id.
 

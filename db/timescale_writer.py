@@ -35,7 +35,7 @@ import pandas as pd
 from librae.backtest.schema import BacktestOutput
 from librae.core.utils import to_canonical
 
-from db import TIMESCALE_DSN, get_conn
+from db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ def write_run_metadata(
     perf_params: dict | None = None,
     config_hash: str | None = None,
     cur: PgCursor | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Write a single run record to backtest_runs (upsert).
 
@@ -155,7 +155,7 @@ def write_run_metadata(
 def _update_perf_params(
     run_id: str,
     perf_params: dict[str, Any],
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Update perf_params for an existing run (lightweight recompute path)."""
     with get_conn(dsn) as conn:
@@ -167,7 +167,7 @@ def _update_perf_params(
         cur.close()
 
 
-def update_heartbeat(run_id: str, dsn: str = TIMESCALE_DSN) -> None:
+def update_heartbeat(run_id: str, dsn: str | None = None) -> None:
     """Update last_heartbeat_at timestamp for a running sim/live process."""
     with get_conn(dsn) as conn:
         cur = conn.cursor()
@@ -186,7 +186,7 @@ def save_backtest_output(
     params: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
 
@@ -385,7 +385,7 @@ def write_ohlcv(
     timeframe: str,
     data_source: str,
     instrument_type: str = "spot",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> int:
     """Write OHLCV DataFrame to TimescaleDB ohlcv table.
 
@@ -502,7 +502,7 @@ def merge_ohlcv_coverage_ranges(
     range_started_at: datetime,
     range_ended_at: datetime,
     instrument_type: str = "spot",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Record [range_started_at, range_ended_at] as cached for this key.
 
@@ -529,7 +529,7 @@ def write_external_factor(
     factor_name: str,
     source: str,
     instrument_type: str = "spot",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> int:
     """Write a factor DataFrame to TimescaleDB external_factors table.
 
@@ -575,7 +575,7 @@ def write_external_factor(
     return len(rows)
 
 
-def write_factor_registry(entries: list[dict], dsn: str = TIMESCALE_DSN) -> int:
+def write_factor_registry(entries: list[dict], dsn: str | None = None) -> int:
     """Upsert (factor_name, source, frequency) rows into factor_registry.
 
     One row per factor_name — not a per-cached-row write like
@@ -609,7 +609,7 @@ def merge_external_factor_coverage_ranges(
     range_started_at: datetime,
     range_ended_at: datetime,
     instrument_type: str = "spot",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Record [range_started_at, range_ended_at] as cached for this factor key.
 
@@ -643,7 +643,7 @@ def write_signal_event(
     signal_type: str = "entry",
     *,
     cur: PgCursor | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Write a single signal event row (upsert, idempotent).
 
@@ -684,7 +684,7 @@ def write_equity_curve_point(
     benchmark_equity: float | None = None,
     benchmark_period_return: float | None = None,
     strategy: str | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Write a single equity curve point (upsert by ts + run_id)."""
     with get_conn(dsn) as conn:
@@ -736,7 +736,7 @@ def write_trade_event(
     entry_at: datetime | None = None,
     periods_held: int | None = None,
     reason: str = "",
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Write a single trade event (upsert by event_id + ts)."""
     with get_conn(dsn) as conn:
@@ -786,7 +786,7 @@ def write_strategy_performance(
     metrics: Any,
     *,
     cur: PgCursor | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Write/update strategy_performance for a run_id.
 
@@ -847,7 +847,7 @@ def write_strategy_performance(
 def refresh_performance(
     run_id: str,
     cfg: RunConfig | None = None,
-    dsn: str = TIMESCALE_DSN,
+    dsn: str | None = None,
 ) -> None:
     """Recompute KPI metrics from DB equity_curve + trade_events and upsert.
 
