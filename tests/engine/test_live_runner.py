@@ -253,6 +253,13 @@ class TestLiveExecutor:
         )
         assert ex.submit_order(event) is None
 
+    def test_submit_order_rejects_negative_acknowledgement(self):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.return_value = {"id": "123", "status": "rejected"}
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+
+        assert ex.submit_order(_make_fill_event()) is None
+
 
 # ---------------------------------------------------------------------------
 # LiveTrader tests
@@ -631,6 +638,117 @@ class TestLiveTrader:
         assert first_call_signal["side"] == "buy"
         assert first_call_signal["symbol"] == "BTCUSDT"
 
+    def test_live_state_commits_only_after_broker_position_matches(self):
+        mock_order_adapter = _mock_order_adapter()
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        runner = self._make_runner(
+            strategy=_AlwaysBuyStrategy(),
+            fetcher=fetcher,
+            cfg=_test_cfg(mode="live"),
+            order_adapter=mock_order_adapter,
+        )
+
+        def place_order(_signal):
+            assert runner._positions == {}
+            assert runner._cash == 100_000.0
+            return {"id": "1", "status": "filled"}
+
+        mock_order_adapter.place_order.side_effect = place_order
+        mock_order_adapter.get_position.side_effect = lambda _symbol: (
+            {"symbol": "", "size": 0, "avg_price": 0}
+            if mock_order_adapter.place_order.call_count == 0
+            else {"symbol": "BTCUSDT", "size": 1.0, "avg_price": 103.5}
+        )
+
+        runner.run(max_iterations=2)
+
+        assert runner._halted is False
+        assert runner._positions["BTCUSDT"].quantity == 1.0
+        assert runner._cash < 100_000.0
+
+    def test_fill_mismatch_halts_without_committing_phantom_position(self):
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.place_order.return_value = {"id": "1", "status": "filled"}
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        runner = self._make_runner(
+            strategy=_AlwaysBuyStrategy(),
+            fetcher=fetcher,
+            cfg=_test_cfg(mode="live"),
+            order_adapter=mock_order_adapter,
+        )
+        runner._sleep = lambda _seconds: None
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=2)
+
+        mismatch_alerts = [
+            kwargs
+            for method, kwargs in alerts
+            if method == "send_alert" and "Fill Mismatch" in kwargs["title"]
+        ]
+        assert len(mismatch_alerts) == 1
+        assert runner._halted is True
+        assert runner._positions == {}
+        assert runner._cash == 100_000.0
+
+    def test_partial_basket_failure_halts_and_adopts_broker_state(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        responses = {
+            "AAA": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1])]),
+            "BBB": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1])]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        class AllocateOnce(BaseStrategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return RebalanceTargets(weights={"AAA": 0.6, "BBB": 0.4})
+                return []
+
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = [
+            {"id": "aaa", "status": "filled"},
+            {"id": "", "status": "rejected"},
+        ]
+
+        def get_position(symbol):
+            if adapter.place_order.call_count < 2:
+                return {"symbol": symbol, "size": 0, "avg_price": 0}
+            if symbol == "AAA":
+                return {"symbol": symbol, "size": 600.0, "avg_price": 100.0}
+            return {"symbol": symbol, "size": 0, "avg_price": 0}
+
+        adapter.get_position.side_effect = get_position
+        runner = self._make_runner(
+            strategy=AllocateOnce(),
+            fetcher=fetcher,
+            cfg=_test_cfg(mode="live", symbols=["AAA", "BBB"]),
+            order_adapter=adapter,
+        )
+
+        runner.run(max_iterations=2)
+
+        assert runner._halted is True
+        assert set(runner._positions) == {"AAA"}
+        assert runner._positions["AAA"].quantity == pytest.approx(600.0)
+
     def test_live_mode_without_order_adapter_raises(self):
         cfg = _test_cfg(mode="live")
         with pytest.raises(ValueError, match="order_adapter"):
@@ -683,16 +801,19 @@ class TestLiveTrader:
         assert pos.side == "short"
         assert pos.quantity == 3.0
 
-    def test_reconciliation_failure_does_not_crash_startup(self):
-        """A broken get_position() call must not crash the whole run —
-        reconciliation is best-effort, trading must still proceed flat."""
+    def test_reconciliation_failure_halts_startup(self):
+        """An unreadable broker book must fail closed without crashing."""
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.get_position.side_effect = RuntimeError("broker down")
 
         runner = self._make_runner(cfg=_test_cfg(mode="live"), order_adapter=mock_order_adapter)
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
         runner.run(max_iterations=1)  # must not raise
 
         assert runner._positions == {}
+        assert runner._halted is True
+        assert any("Position Reconciliation Failed" in item[1]["title"] for item in alerts)
 
     def test_cash_drift_beyond_tolerance_alerts_without_adjusting_cash(self):
         """Drift past CASH_RECONCILE_TOLERANCE_PCT must alert with both
@@ -935,11 +1056,7 @@ class TestLiveTrader:
         # (open=199.5) -- not silently deferred to bar3's price (299.5).
         assert fill_prices == [199.5]
 
-    def test_order_failure_alert_uses_fill_quantity_and_does_not_crash(self):
-        """Regression test: the order-failed alert message referenced
-        event.quantity, but OrderEvent only has fill_quantity -- building
-        that message raised AttributeError, so a failed live order crashed
-        the poll cycle (counted as a generic error) instead of alerting."""
+    def test_order_failure_halts_without_committing_phantom_position(self):
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.place_order.side_effect = RuntimeError("connection refused")
 
@@ -967,6 +1084,9 @@ class TestLiveTrader:
         ]
         assert order_failed
         assert "qty=1.0000" in order_failed[0]["message"]
+        assert runner._halted is True
+        assert runner._positions == {}
+        assert runner._cash == 100_000.0
 
     def test_db_write_alerts_after_consecutive_failures(self):
         """Regression test: DB write failures were silently swallowed
@@ -1055,12 +1175,12 @@ def _make_position_state(quantity: float, entry_price: float, side="long") -> Po
     )
 
 
-def _make_fill_event(event_type="open") -> OrderEvent:
+def _make_fill_event() -> OrderEvent:
     return OrderEvent(
         ts=datetime(2025, 1, 1, tzinfo=UTC),
         symbol="BTCUSDT",
         side="long",
-        event_type=event_type,
+        event_type="open",
         fill_quantity=2.0,
         price=100.0,
         entry_price=100.0,
@@ -1072,10 +1192,8 @@ def _make_fill_event(event_type="open") -> OrderEvent:
     )
 
 
-class TestReconcileFill:
-    """LiveTrader._reconcile_fill: alert-only fill reconciliation against the
-    broker's reported position. Must never mutate self._positions/self._cash
-    — only _reconcile_positions (startup) adopts broker state."""
+class TestPositionReconciliation:
+    """Broker polling compares against staged state without mutating it."""
 
     def _make_trader(self, order_adapter=None):
         runner = LiveTrader(
@@ -1094,7 +1212,7 @@ class TestReconcileFill:
         runner._sleep = lambda _seconds: None
         return runner
 
-    def test_matches_within_tolerance_does_not_alert(self):
+    def test_matches_within_tolerance(self):
         adapter = _mock_order_adapter()
         adapter.get_position.return_value = {
             "symbol": "BTCUSDT",
@@ -1104,15 +1222,14 @@ class TestReconcileFill:
         }
         runner = self._make_trader(order_adapter=adapter)
         runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        alerts: list[tuple[str, dict]] = []
-        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
-        runner._reconcile_fill(_make_fill_event())
+        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
 
-        assert not alerts
+        assert matched is True
+        assert detail == ""
         adapter.get_position.assert_called_once()  # matched on first poll, no retries
 
-    def test_persistent_mismatch_alerts_without_correcting_state(self):
+    def test_persistent_mismatch_is_reported(self):
         adapter = _mock_order_adapter()
         adapter.get_position.return_value = {
             "symbol": "BTCUSDT",
@@ -1122,19 +1239,13 @@ class TestReconcileFill:
         }
         runner = self._make_trader(order_adapter=adapter)
         runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        alerts: list[tuple[str, dict]] = []
-        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
-        runner._reconcile_fill(_make_fill_event())
+        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
 
+        assert matched is False
         assert adapter.get_position.call_count == len(runner.RECONCILE_POLL_BACKOFF_SECONDS)
-        mismatch_alerts = [
-            kw for m, kw in alerts if m == "send_alert" and "Fill Mismatch" in kw["title"]
-        ]
-        assert len(mismatch_alerts) == 1
-        assert "local qty=2.0000" in mismatch_alerts[0]["message"]
-        assert "broker qty=1.0000" in mismatch_alerts[0]["message"]
-        # Never auto-corrected.
+        assert "expected size=2.0000" in detail
+        assert "broker size=1.0000" in detail
         assert runner._positions["BTCUSDT"].quantity == 2.0
 
     def test_matches_after_retry(self):
@@ -1148,46 +1259,41 @@ class TestReconcileFill:
         adapter.get_position.side_effect = responses
         runner = self._make_trader(order_adapter=adapter)
         runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        alerts: list[tuple[str, dict]] = []
-        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
 
-        runner._reconcile_fill(_make_fill_event())
-
-        assert not alerts
+        assert matched is True
+        assert detail == ""
         assert adapter.get_position.call_count == 3
 
-    def test_broker_exception_during_poll_does_not_alert_or_crash(self):
+    def test_broker_exception_is_reported_without_crashing(self):
         adapter = _mock_order_adapter()
         adapter.get_position.side_effect = RuntimeError("broker down")
         runner = self._make_trader(order_adapter=adapter)
         runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        alerts: list[tuple[str, dict]] = []
-        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
 
-        runner._reconcile_fill(_make_fill_event())  # must not raise
-
-        assert not alerts
+        assert matched is False
+        assert "broker position unavailable" in detail
 
     def test_noop_when_order_adapter_absent(self):
         """Sim mode (order_adapter=None internally) has nothing to reconcile against."""
         runner = self._make_trader()
         runner._executor._order_adapter = None
         runner._positions["BTCUSDT"] = _make_position_state(2.0, 100.0)
-        adapter_get_position = MagicMock()
-        runner._reconcile_fill(_make_fill_event())  # must not raise
-        adapter_get_position.assert_not_called()
+        matched, detail = runner._reconcile_position("BTCUSDT", runner._positions)
 
-    def test_close_event_expects_flat_position(self):
+        assert matched is True
+        assert detail == ""
+
+    def test_missing_expected_position_means_flat(self):
         """After a close, self._positions no longer has the symbol — expected
         qty/price must default to 0, matching a broker that's gone flat too."""
         adapter = _mock_order_adapter()  # default flat get_position()
         runner = self._make_trader(order_adapter=adapter)
-        alerts: list[tuple[str, dict]] = []
-        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        matched, detail = runner._reconcile_position("BTCUSDT", {})
 
-        runner._reconcile_fill(_make_fill_event(event_type="close"))
-
-        assert not alerts
+        assert matched is True
+        assert detail == ""
 
 
 class TestCryptoLiveAutoWiring:

@@ -129,6 +129,37 @@ class TestComputeAllMetrics:
         m = _call_compute_all([10_000.0, 10_500.0, 9_800.0, 10_200.0], [pnl])
         assert m.max_drawdown <= 0
 
+    def test_annual_metrics_share_temporal_parameters(self, monkeypatch) -> None:
+        import quantstats as qs
+
+        calls: dict[str, dict[str, float | int]] = {}
+
+        def recorder(name: str):
+            def metric(_returns, **kwargs):
+                calls[name] = kwargs
+                return 1.0
+
+            return metric
+
+        for name in ("sharpe", "sortino", "calmar", "cagr"):
+            monkeypatch.setattr(qs.stats, name, recorder(name))
+
+        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
+        compute_all(
+            equity_values=[10_000.0, 10_100.0, 10_050.0, 10_200.0],
+            timestamps=timestamps,
+            trade_pnls=[_make_trade_pnl(net_pnl=200.0)],
+            total_periods=4,
+            annualize=True,
+            risk_free_rate=0.03,
+        )
+
+        periods = calls["sharpe"]["periods"]
+        assert calls["sharpe"] == {"periods": periods, "rf": 0.03}
+        assert calls["sortino"] == {"periods": periods, "rf": 0.03}
+        assert calls["calmar"] == {"periods": periods}
+        assert calls["cagr"] == {"periods": periods}
+
 
 class TestComputeAllWithEngine:
     """Integration: engine.run() → build_output() uses compute_all internally."""

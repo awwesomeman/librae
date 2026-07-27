@@ -227,6 +227,95 @@ class TestMultiAsset:
         symbols_traded = {t.symbol for t in result.trades}
         assert symbols_traded == {"AAA", "BBB"}
 
+    def test_partial_bars_do_not_run_strategy_or_consume_pending_intent(self) -> None:
+        timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
+        rows = []
+        for i, ts in enumerate(timeline):
+            for symbol in ["AAA"] if i == 1 else ["AAA", "BBB"]:
+                price = 100.0 + i if symbol == "AAA" else 200.0 + 10 * i
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 100.0,
+                    }
+                )
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+
+        seen_cycles: list[tuple[pd.Timestamp, int, set[str]]] = []
+
+        class BuyBbbOnFirstCycle(BaseStrategy):
+            def on_bar(self, ctx):
+                seen_cycles.append((ctx.ts, ctx.period_index, set(ctx.bars)))
+                if ctx.period_index == 0:
+                    return [Action(type="long", symbol="BBB", quantity=1.0)]
+                return []
+
+        result = Backtest(
+            df,
+            BuyBbbOnFirstCycle(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        open_event = next(event for event in result.order_events if event.event_type == "open")
+        assert open_event.ts == timeline[2]
+        assert open_event.price == pytest.approx(220.0)
+        assert [cycle[0] for cycle in seen_cycles] == [
+            timeline[0],
+            timeline[2],
+            timeline[3],
+            timeline[4],
+        ]
+        assert [cycle[1] for cycle in seen_cycles] == [0, 1, 2, 3]
+        assert all(cycle[2] == {"AAA", "BBB"} for cycle in seen_cycles)
+
+    def test_missing_bar_uses_last_mark_and_does_not_age_position(self) -> None:
+        timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
+        aaa_prices = {0: 100.0, 1: 120.0, 3: 130.0}
+        rows = []
+        for i, ts in enumerate(timeline):
+            for symbol in ("AAA", "BBB"):
+                if symbol == "AAA" and i not in aaa_prices:
+                    continue
+                price = aaa_prices[i] if symbol == "AAA" else 200.0
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": 100.0 if symbol == "AAA" and i == 1 else price,
+                        "high": price,
+                        "low": min(price, 100.0) if symbol == "AAA" else price,
+                        "close": price,
+                        "volume": 100.0,
+                    }
+                )
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+
+        class BuyAaaOnFirstCycle(BaseStrategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [Action(type="long", symbol="AAA", quantity=1.0)]
+                return []
+
+        result = Backtest(
+            df,
+            BuyAaaOnFirstCycle(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        assert result.equity_curve[2].equity == pytest.approx(1_020.0)
+        assert result.equity_curve[4].equity == pytest.approx(1_030.0)
+        assert result.trades[0].exit_price == pytest.approx(130.0)
+        assert result.trades[0].periods_held == 2
+
     def test_per_symbol_multiplier_resolved_independently_via_cfg(self) -> None:
         """Regression: a multi-asset cfg= run used to build exactly one
         CostModel from cfg.symbol (symbols[0]) and apply it to every symbol

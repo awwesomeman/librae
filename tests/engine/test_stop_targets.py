@@ -90,6 +90,11 @@ class TestResolveStopExit:
         bar = {"open": 105.0, "high": 112.0, "low": 104.0, "close": 108.0}
         assert resolve_stop_exit(pos, bar, _zero_cost()) == (110.0, REASON_TAKE_PROFIT)
 
+    def test_long_take_profit_gap_up_fills_at_open(self):
+        pos = _make_pos(side="long", tp=110.0)
+        bar = {"open": 115.0, "high": 118.0, "low": 114.0, "close": 116.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (115.0, REASON_TAKE_PROFIT)
+
     def test_short_stop_hit_on_high(self):
         pos = _make_pos(side="short", stop=105.0)
         bar = {"open": 102.0, "high": 106.0, "low": 101.0, "close": 104.0}
@@ -99,6 +104,11 @@ class TestResolveStopExit:
         pos = _make_pos(side="short", tp=90.0)
         bar = {"open": 95.0, "high": 96.0, "low": 88.0, "close": 91.0}
         assert resolve_stop_exit(pos, bar, _zero_cost()) == (90.0, REASON_TAKE_PROFIT)
+
+    def test_short_take_profit_gap_down_fills_at_open(self):
+        pos = _make_pos(side="short", tp=90.0)
+        bar = {"open": 85.0, "high": 86.0, "low": 82.0, "close": 84.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (85.0, REASON_TAKE_PROFIT)
 
     def test_stop_loss_wins_when_both_hit_same_bar(self):
         pos = _make_pos(side="long", stop=95.0, tp=110.0)

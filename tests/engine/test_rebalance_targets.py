@@ -80,6 +80,10 @@ class OneRebalance(BaseStrategy):
 
 
 class TestRebalanceTargetsValidation:
+    def test_numeric_fill_price_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="per-symbol Actions"):
+            RebalanceTargets(weights={"A": 1.0}, fill_price=100.0)
+
     def test_rejects_non_finite_weight(self) -> None:
         with pytest.raises(ValueError, match="finite"):
             RebalanceTargets(weights={"A": float("nan")})

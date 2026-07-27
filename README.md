@@ -71,6 +71,17 @@ bt.run()
 output = bt.build_output()                      # BacktestOutput
 ```
 
+Pass raw, unshifted OHLCV and point-in-time feature columns. A strategy observes
+completed bar T, and the engine owns the execution delay: its intent is first
+eligible on T+1. Do not pre-shift prices or signals to simulate that delay, or
+the strategy will be delayed twice. The default fill is the next eligible
+bar's open.
+
+`Action(fill_price=<number>)` is a one-bar limit order: buys require the next
+eligible bar's low to reach the limit, sells require its high, and a gap through
+the limit fills at the better opening price. If that bar does not reach the
+limit, the intent expires and is logged; it is not silently carried forward.
+
 Allocation strategies can submit a complete target portfolio without calculating quantities:
 
 ```python
@@ -90,15 +101,24 @@ The target is decided from bar T and filled on T+1. At execution, the engine
 uses T+1 fill prices and execution-time equity, reduces positions before adding
 exposure, and scales additions proportionally if costs make the batch
 unaffordable. Target weights need not sum to one; the remainder stays in cash.
+`RebalanceTargets.fill_price` is a bar field such as `"open"`; use per-symbol
+`Action`s when different numeric limit prices are required.
 With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
 and realized weight after every bar, so target drift includes costs, price
 movement, and execution constraints. Multi-asset
-`RebalanceTargets` use synchronized cross-sectional cycles in sim/live:
-`LiveTrader` waits until every configured symbol's latest completed bar has the
-same timestamp, calls the strategy once, and fills the resulting intent on the
-next aligned timestamp. It never mixes a faster symbol's new bar with another
-symbol's older bar.
+`Action` and `RebalanceTargets` strategies use synchronized cross-sectional
+cycles in every mode. A partial multi-asset timestamp can update valuation and
+trigger stops for symbols that have a bar, but it cannot invoke the strategy or
+consume its pending intent. Valuation uses each symbol's latest point-in-time
+close without backfilling from the future. The intent expires after its next
+complete eligible cycle, whether or not it fills.
+
+Live mode stages portfolio changes without mutating the local book, submits
+broker orders, and commits only after acknowledgement and position
+reconciliation. A rejection, unreadable broker state, or persistent mismatch
+halts strategy execution and adopts the complete broker position snapshot when
+available. Multi-order baskets are submitted sequentially, not atomically.
 
 Runnable versions cover both externally scheduled allocations and dynamic
 Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)

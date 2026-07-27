@@ -16,6 +16,7 @@ import time
 import types
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Literal
@@ -460,50 +461,73 @@ class LiveTrader:
         (double-open on the broker, or reject a legitimate opposite-side
         signal while the broker is actually flat).
 
-        No-op in sim mode (order_adapter is None there — nothing to
-        reconcile against). Only reconciles *positions* — cash drift is
-        checked separately by _reconcile_cash() (alert-only, doesn't
-        adopt the broker's number the way this method does for positions;
-        see that method's docstring for why).
+        No-op in sim mode. Live mode fails closed: if broker positions cannot
+        be read, strategy execution is halted rather than starting from an
+        assumed-flat local book.
         """
         adapter = self._executor.order_adapter
         if adapter is None:
             return
-        for symbol in self._symbols:
-            try:
-                broker_pos = adapter.get_position(symbol)
-                size = float(broker_pos.get("size") or 0)
-                if not size:
-                    continue
+        if self._adopt_broker_positions():
+            return
 
-                side: Literal["long", "short"] = "long" if size > 0 else "short"
-                avg_price = float(broker_pos.get("avg_price") or 0.0)
-                quantity = abs(size)
-                self._positions[symbol] = PositionState(
-                    symbol=symbol,
-                    side=side,
-                    entry_price=avg_price,
-                    quantity=quantity,
-                    entry_at=datetime.now(tz=UTC),
-                    periods_held=0,
-                    entry_commission=0.0,
-                    entry_slippage=0.0,
-                    entry_tax=0.0,
-                    total_entry_cost=avg_price * quantity * self._executor.cost_model.multiplier,
-                )
-                logger.warning(
-                    "Reconciled %s position from broker at startup: %s %.4f @ %.2f",
-                    symbol,
-                    side,
-                    quantity,
-                    avg_price,
-                )
-            except Exception:
-                logger.exception(
-                    "Position reconciliation failed for %s — starting flat "
-                    "for this symbol, verify manually",
-                    symbol,
-                )
+        self._halted = True
+        self._pending_intent = []
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Position Reconciliation Failed",
+            message="Broker positions are unavailable; trading is halted.",
+        )
+
+    def _read_broker_positions(self) -> dict[str, PositionState]:
+        """Read a complete broker position snapshot or raise."""
+        adapter = self._executor.order_adapter
+        if adapter is None:
+            return {}
+
+        positions: dict[str, PositionState] = {}
+        for symbol in self._symbols:
+            broker_pos = adapter.get_position(symbol)
+            size = float(broker_pos.get("size") or 0)
+            if not size:
+                continue
+            avg_price = float(broker_pos.get("avg_price") or 0.0)
+            if avg_price <= 0:
+                raise ValueError(f"broker returned invalid average price for {symbol}")
+            side: Literal["long", "short"] = "long" if size > 0 else "short"
+            quantity = abs(size)
+            positions[symbol] = PositionState(
+                symbol=symbol,
+                side=side,
+                entry_price=avg_price,
+                quantity=quantity,
+                entry_at=datetime.now(tz=UTC),
+                periods_held=0,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=avg_price * quantity * self._executor.cost_model.multiplier,
+            )
+        return positions
+
+    def _adopt_broker_positions(self) -> bool:
+        """Replace the local book atomically from a complete broker snapshot."""
+        try:
+            positions = self._read_broker_positions()
+        except Exception:
+            logger.exception("Broker position snapshot failed; keeping last confirmed local book")
+            return False
+
+        self._positions = positions
+        for symbol, position in positions.items():
+            logger.warning(
+                "Adopted broker position: %s %s %.4f @ %.2f",
+                symbol,
+                position.side,
+                position.quantity,
+                position.entry_price,
+            )
+        return True
 
     # 1% — same style as CONSECUTIVE_ERROR_THRESHOLD: an engine constant,
     # not a cfg.params knob (nothing in this run should reasonably need a
@@ -575,66 +599,62 @@ class LiveTrader:
     POSITION_RECONCILE_QTY_TOLERANCE_PCT = 0.01
     POSITION_RECONCILE_PRICE_TOLERANCE_PCT = 0.01
 
-    def _reconcile_fill(self, event: OrderEvent) -> None:
-        """Poll the broker's position after a real fill and alert (never
-        auto-correct) if it doesn't match local state beyond tolerance.
-
-        submit_order's ack tells us the order was placed, not that it filled
-        at the price/quantity local bookkeeping assumed — the broker's own
-        position needs a moment to catch up, hence the retry/backoff instead
-        of a single immediate read. No-op in sim mode (order_adapter is None
-        there) and after a failed submit_order (nothing to reconcile against
-        yet — that path already alerts via 'Order Failed').
-        """
+    def _reconcile_position(
+        self,
+        symbol: str,
+        expected_positions: dict[str, PositionState],
+    ) -> tuple[bool, str]:
+        """Poll until broker state matches a staged final position."""
         adapter = self._executor.order_adapter
         if adapter is None:
-            return
+            return True, ""
 
-        position = self._positions.get(event.symbol)
-        expected_qty = position.quantity if position else 0.0
+        position = expected_positions.get(symbol)
+        expected_size = (
+            position.quantity * (1.0 if position.side == "long" else -1.0) if position else 0.0
+        )
+        expected_qty = abs(expected_size)
         expected_price = position.entry_price if position else 0.0
 
-        broker_qty = broker_price = 0.0
+        broker_size = broker_price = 0.0
         backoffs = self.RECONCILE_POLL_BACKOFF_SECONDS
         for attempt, delay in enumerate(backoffs):
             try:
-                broker_pos = adapter.get_position(event.symbol)
-            except Exception:
-                logger.exception("Fill reconciliation poll failed for %s", event.symbol)
-                return
+                broker_pos = adapter.get_position(symbol)
+            except Exception as exc:
+                return False, f"broker position unavailable for {symbol}: {exc}"
 
-            broker_qty = abs(float(broker_pos.get("size") or 0))
+            broker_size = float(broker_pos.get("size") or 0)
             broker_price = float(broker_pos.get("avg_price") or 0.0)
-            qty_ok = abs(
-                broker_qty - expected_qty
+            size_ok = abs(
+                broker_size - expected_size
             ) <= self.POSITION_RECONCILE_QTY_TOLERANCE_PCT * max(expected_qty, EPSILON)
-            price_ok = abs(
+            price_ok = expected_qty <= EPSILON or abs(
                 broker_price - expected_price
             ) <= self.POSITION_RECONCILE_PRICE_TOLERANCE_PCT * max(expected_price, EPSILON)
-            if qty_ok and price_ok:
-                return
+            if size_ok and price_ok:
+                return True, ""
 
             if attempt < len(backoffs) - 1:
                 self._sleep(delay)
 
-        logger.error(
-            "Fill mismatch %s (%s): local qty=%.4f price=%.2f vs broker qty=%.4f "
-            "price=%.2f — not auto-corrected",
-            event.symbol,
-            event.event_type,
-            expected_qty,
-            expected_price,
-            broker_qty,
-            broker_price,
+        return (
+            False,
+            f"{symbol}: expected size={expected_size:.4f} price={expected_price:.2f}, "
+            f"broker size={broker_size:.4f} price={broker_price:.2f}",
         )
+
+    def _halt_and_recover(self, *, title: str, message: str) -> None:
+        """Fail closed and make broker positions authoritative when readable."""
+        self._halted = True
+        self._pending_intent = []
+        recovered = self._adopt_broker_positions()
+        recovery = "broker positions adopted" if recovered else "broker snapshot unavailable"
+        logger.error("%s: %s; %s", title, message, recovery)
         self._notify(
             "send_alert",
-            title=f"[{self._executor.strategy_name}] Fill Mismatch: {event.symbol}",
-            message=(
-                f"local qty={expected_qty:.4f} price={expected_price:.2f} vs "
-                f"broker qty={broker_qty:.4f} price={broker_price:.2f} "
-                f"({event.event_type}) — verify manually"
-            ),
+            title=f"[{self._executor.strategy_name}] {title}",
+            message=f"{message}; trading halted, {recovery}.",
         )
 
     def run(self, max_iterations: int | None = None) -> None:
@@ -793,12 +813,7 @@ class LiveTrader:
             return self._ohlcv_cache.get(symbol)
 
     def _apply_action_results(self, result: ActionResults) -> None:
-        """Apply event/trade side effects (DB recording, live order
-        submission, Telegram alerts) from a combined run_pending_and_stops()
-        result — cash is already applied by the caller via that function's
-        returned value, not here, so a stop-loss/take-profit fill goes
-        through the exact same recording/submission/alerting path as a
-        strategy-issued close, not a separate hand-rolled copy."""
+        """Publish side effects after portfolio state has been committed."""
         for event in result.events:
             logger.info(
                 "Order event: %s %s %s %.4f @ %.2f",
@@ -814,24 +829,48 @@ class LiveTrader:
             if event.event_type in ("open", "add"):
                 self._executor.notify_entry(event.symbol, event.side, event.price, event.event_type)
 
-            if not self._executor.simulation:
-                order_result = self._executor.submit_order(event)
-                if order_result is None:
-                    self._notify(
-                        "send_alert",
-                        title=f"[{self._executor.strategy_name}] Order Failed",
-                        message=(
-                            f"{event.event_type} {event.symbol} "
-                            f"qty={event.fill_quantity:.4f} — check broker manually"
-                        ),
-                    )
-                else:
-                    self._reconcile_fill(event)
-
         for trade in result.trades:
             self._trade_count += 1
             self._executor.notify_exit(trade.symbol, trade.exit_price)
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
+
+    def _commit_staged_results(
+        self,
+        *,
+        cash: float,
+        positions: dict[str, PositionState],
+        result: ActionResults,
+    ) -> bool:
+        """Submit/reconcile live orders, then atomically commit staged state."""
+        if not self._executor.simulation:
+            for event in result.events:
+                if self._executor.submit_order(event) is None:
+                    self._halt_and_recover(
+                        title="Order Failed — Trading Halted",
+                        message=(
+                            f"{event.event_type} {event.symbol} "
+                            f"qty={event.fill_quantity:.4f} was not acknowledged"
+                        ),
+                    )
+                    return False
+
+            checked_symbols: set[str] = set()
+            for event in result.events:
+                if event.symbol in checked_symbols:
+                    continue
+                checked_symbols.add(event.symbol)
+                matched, detail = self._reconcile_position(event.symbol, positions)
+                if not matched:
+                    self._halt_and_recover(
+                        title=f"Fill Mismatch: {event.symbol}",
+                        message=detail,
+                    )
+                    return False
+
+        self._cash = cash
+        self._positions = positions
+        self._apply_action_results(result)
+        return True
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Process one symbol through the portfolio-cycle path."""
@@ -877,9 +916,12 @@ class LiveTrader:
         max_position_notional = (
             self._max_position_pct * self._prev_equity if self._max_position_pct else None
         )
-        self._cash, step_result = run_pending_and_stops(
+        staged_positions = (
+            self._positions if self._executor.simulation else deepcopy(self._positions)
+        )
+        staged_cash, step_result = run_pending_and_stops(
             ts,
-            self._positions,
+            staged_positions,
             self._cash,
             pending_intent,
             raw_bars,
@@ -889,7 +931,11 @@ class LiveTrader:
             max_position_notional=max_position_notional,
             max_volume_participation_pct=self._max_volume_participation_pct,
         )
-        self._apply_action_results(step_result)
+        self._commit_staged_results(
+            cash=staged_cash,
+            positions=staged_positions,
+            result=step_result,
+        )
 
         # ── Step 1.5: equity/drawdown check — right after this bar's fills
         # and stops are applied, before the strategy sees the bar. Mirrors
@@ -1010,33 +1056,36 @@ class LiveTrader:
                 )
 
     def _flatten_and_halt(self, ts: datetime, drawdown: float) -> None:
-        """Force-close every open position and permanently halt new entries
-        for the rest of this run — the max-drawdown circuit breaker. Reuses
-        _apply_action_results so live mode submits a real closing order to
-        the broker through the exact same path as any other close."""
+        """Force-close every open position and permanently halt new entries."""
+        staged_positions = (
+            self._positions if self._executor.simulation else deepcopy(self._positions)
+        )
         result = liquidate_all(
-            self._positions,
+            staged_positions,
             {},
             ts,
             get_cost_model=self._get_cost_model,
             reason=REASON_DRAWDOWN_BREACH,
             fallback_price=self._get_last_price,
         )
-        self._cash += result.cash_delta
-        self._apply_action_results(result)
+        flattened = self._commit_staged_results(
+            cash=self._cash + result.cash_delta,
+            positions=staged_positions,
+            result=result,
+        )
         self._halted = True
+        outcome = "flattened all positions" if flattened else "flatten attempt failed"
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
             message=(
-                f"drawdown={drawdown:.2%} <= -{self._max_drawdown_pct:.2%} "
-                "— flattened all positions and halted"
+                f"drawdown={drawdown:.2%} <= -{self._max_drawdown_pct:.2%} — {outcome} and halted"
             ),
         )
         logger.warning(
-            "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
-            "— all positions force-closed",
+            "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% — %s",
             ts,
             drawdown * 100,
             self._max_drawdown_pct * 100,
+            outcome,
         )

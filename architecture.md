@@ -117,7 +117,19 @@ bt.run()
 output = bt.build_output()                      # BacktestOutput
 ```
 
-**Data format**: a MultiIndex DataFrame `(symbol, datetime)` + OHLCV + your own feature columns.
+**Data format**: a MultiIndex DataFrame `(symbol, datetime)` + raw, unshifted
+OHLCV + point-in-time feature columns. A strategy observes completed bar T and
+the engine owns the execution delay, so an intent is first eligible on T+1.
+Callers must not pre-shift prices or signals to model that delay; doing so
+delays execution twice. Feature construction remains the caller's
+responsibility and must not use information unavailable at T.
+
+For an `Action`, a numeric `fill_price` is a one-eligible-bar limit order. A
+buy fills when the bar's low reaches the limit and a sell fills when its high
+does; a gap through receives the opening price. An unreached limit expires
+after that bar and is logged. `RebalanceTargets.fill_price` accepts only a bar
+field name because one numeric price cannot describe a multi-symbol basket;
+use per-symbol `Action`s for limits.
 
 #### Multi-asset / stock-picking strategies
 
@@ -137,12 +149,15 @@ return RebalanceTargets(
 
 The strategy timestamps the target implicitly by returning it for `ctx.ts`
 (bar T). The engine resolves it on T+1 using each symbol's actual fill price and
-portfolio equity at those same execution prices; using the T+1 close here would
-introduce look-ahead. Positive weights are long, negative weights are short,
-and a held symbol omitted from `weights` targets zero. Reductions and closes
-execute first in symbol order, then additions. If entry costs exceed available
-cash, all addition quantities receive one common scale factor so symbol
-ordering does not starve later assets.
+portfolio equity at those same execution prices. The default `open` is the
+earliest next-bar execution assumption. An explicit `close` means an order
+eligible for the next bar's close; it is valid only when that order type and
+timing are intentional, and it is not interchangeable with an open fill.
+Positive weights are long, negative weights are short, and a held symbol
+omitted from `weights` targets zero. Reductions and closes execute first in
+symbol order, then additions. If entry costs exceed available cash, all
+addition quantities receive one common scale factor so symbol ordering does not
+starve later assets.
 
 Weights need not sum to one; any remainder stays in cash. When
 `Backtest(..., record_position_snapshots=True)` is enabled,
@@ -158,8 +173,16 @@ modes. It fetches each configured symbol independently, but invokes
 same timestamp. Both `Action` and `RebalanceTargets` then follow the same T/T+1
 contract as backtests.
 
-That shared latest timestamp is the portfolio cycle identity and is processed
-at most once. OHLCV caches are sorted and deduplicated before alignment. The
+Backtests preserve the union of input timestamps for point-in-time valuation
+and per-symbol stop checks, but invoke the strategy and consume its pending
+intent only at timestamps containing every configured symbol. Missing symbols
+are valued at their latest observed close; future values and entry-price
+fallbacks are never used. Holding age advances only when that symbol has a bar.
+End-of-run forced liquidation uses each symbol's last observed close.
+
+The shared timestamp is the portfolio cycle identity and is processed at most
+once. An intent is good for its next complete eligible cycle and expires after
+that attempt. OHLCV caches are sorted and deduplicated before alignment. The
 policy is deliberately strict and deterministic:
 
 - **Delayed or stale symbol:** wait; do not mix its old bar with another
@@ -177,10 +200,16 @@ For a delayed cycle, each symbol's feature input is sliced at the cycle
 timestamp even if its cache already contains newer bars. This is the
 cross-sectional look-ahead boundary. Alignment makes the local rebalance
 decision coherent; broker submissions remain sequential reductions-then-
-additions rather than an exchange-level atomic basket. Incremental cache
-retention is capped by `warmup_periods` (an injected warmup fetcher may provide
-more initial history); this first implementation favors daily/session
-correctness and recovery semantics over high-frequency throughput.
+additions rather than an exchange-level atomic basket. Live portfolio changes
+are staged separately: all orders must be acknowledged and the resulting
+broker positions must reconcile before the local book, callbacks, and trade
+counts are committed. A rejection or persistent mismatch halts trading and
+atomically adopts a complete broker position snapshot when available. This
+also makes partial basket execution explicit instead of committing phantom
+local fills. Incremental cache retention is capped by `warmup_periods` (an
+injected warmup fetcher may provide more initial history); this implementation
+favors daily/session correctness and recovery semantics over high-frequency
+throughput.
 
 #### Local trade-chart viewer
 
@@ -224,10 +253,11 @@ The formula is a simplified isolated-margin approximation (ignoring fees/funding
 
 #### Reconciliation (live only)
 
-Runs automatically when `LiveTrader.run()` starts; a no-op in `sim` mode (no `order_adapter`):
+Runs automatically when `LiveTrader.run()` starts and after staged live orders;
+it is a no-op in `sim` mode:
 
-- **Positions** (`_reconcile_positions`): the broker's `get_position()` is taken as ground truth and overwrites the local `self._positions` — position direction/quantity is unambiguous, and a wrong local position is a real risk to signal decisions.
-- **Cash** (`_reconcile_cash`, currently only supported by `CryptoAdapter`/CCXT — other broker adapters without a `get_balance()` are duck-type skipped): warns only, never overwrites. A Telegram alert fires only once the discrepancy exceeds `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%, an engine constant, not `cfg.params`); `self._cash` always stays authoritative from the local ledger — a broker's free/total balance semantics vary by account mode (spot/margin/cross-margin), and blindly overwriting could let a correct local state get corrupted by a misread number.
+- **Positions**: the broker's complete `get_position()` snapshot is ground truth and atomically replaces local positions. An unreadable startup snapshot halts trading. After an order acknowledgement, the engine polls until the broker matches the staged final position; a persistent mismatch or read failure halts trading and re-adopts the broker snapshot.
+- **Cash** (`_reconcile_cash`, currently only supported by `CryptoAdapter`/CCXT — other broker adapters without a `get_balance()` are duck-type skipped): warns only, never overwrites. A Telegram alert fires only once the discrepancy exceeds `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%, an engine constant, not `cfg.params`). `self._cash` is the last confirmed local ledger value; after an execution halt it must not be treated as reconciled broker cash. Broker free/total semantics vary by account mode (spot/margin/cross-margin), so blindly overwriting could corrupt a valid ledger.
 
 #### Data staleness detection (live only)
 
@@ -254,7 +284,7 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 |---|---|---|---|
 | Data source | historical OHLCV | real-time OHLCV (polling) | real-time OHLCV |
 | Executor | `core.make_fill()` | `LiveExecutor(simulation=True)` | `LiveExecutor(simulation=False)` |
-| Order placement | simulated fill | simulated fill + Telegram notification | real order placement |
+| Order placement | simulated fill | simulated fill + Telegram notification | staged order → broker ack/reconcile → local commit; failure halts |
 
 ### Core types
 

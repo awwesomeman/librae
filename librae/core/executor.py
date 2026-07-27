@@ -387,7 +387,10 @@ def resolve_stop_exit(
     if pos.take_profit_price is not None:
         triggered = high >= pos.take_profit_price if is_long else low <= pos.take_profit_price
         if triggered:
-            return pos.take_profit_price, REASON_TAKE_PROFIT
+            fill = (
+                max(pos.take_profit_price, open_) if is_long else min(pos.take_profit_price, open_)
+            )
+            return fill, REASON_TAKE_PROFIT
 
     return None
 
@@ -501,6 +504,8 @@ def resolve_fill_price(
     bar: dict[str, float],
     action: Action,
     default_fill: str,
+    *,
+    position_side: Literal["long", "short"] | None = None,
 ) -> float | None:
     """Resolve actual fill price from action.fill_price or engine default.
 
@@ -508,28 +513,60 @@ def resolve_fill_price(
         bar: Next bar's OHLCV dict (the bar where the fill happens).
         action: The action whose fill_price spec to use.
         default_fill: Engine-level default field name (e.g. "open").
+        position_side: Required to infer the order direction for a close.
 
     Returns:
         Resolved price, or None if the order should be rejected
         (limit not reachable, field missing/zero).
 
-    Numeric fill_spec (limit order) assumes full liquidity across the
-    entire [low, high] bar range — if the limit price is anywhere inside
-    that range, the whole requested quantity fills at exactly that price.
-    Real order books don't guarantee that; this is a known simplification,
-    fine for liquid instruments but optimistic for thin/illiquid markets
-    (see docs/plans/enhance_librae_real_trade.md).
+    Numeric fill_spec models a resting limit order with full bar liquidity.
+    A buy fills when low reaches the limit; a sell fills when high reaches it.
+    A gap through the limit receives the opening price, otherwise the limit.
+    The intent is good for this eligible bar only.
     """
     fill_spec = action.fill_price if action.fill_price is not None else default_fill
 
     if isinstance(fill_spec, (int, float)):
         limit = float(fill_spec)
-        if limit <= 0:
+        if not isfinite(limit) or limit <= 0:
             return None
-        low, high = bar.get("low", 0), bar.get("high", 0)
-        if low <= limit <= high:
-            return limit
-        return None
+
+        low_raw, high_raw = bar.get("low"), bar.get("high")
+        if low_raw is None or high_raw is None:
+            logger.warning("Limit order rejected: bar is missing low/high")
+            return None
+        low, high = float(low_raw), float(high_raw)
+        if not isfinite(low) or not isfinite(high) or low <= 0 or high <= 0 or low > high:
+            logger.warning("Limit order rejected: bar has invalid low/high")
+            return None
+
+        if action.type == "long":
+            order_side: Literal["buy", "sell"] | None = "buy"
+        elif action.type == "short":
+            order_side = "sell"
+        elif action.type == "close" and position_side is not None:
+            order_side = "sell" if position_side == "long" else "buy"
+        else:
+            order_side = None
+        if order_side is None:
+            logger.warning("Limit order rejected: cannot infer order side for %s", action.type)
+            return None
+
+        open_raw = bar.get("open")
+        open_price = float(open_raw) if open_raw is not None else limit
+        if not isfinite(open_price) or open_price <= 0:
+            open_price = limit
+
+        reached = low <= limit if order_side == "buy" else high >= limit
+        if not reached:
+            logger.info(
+                "Limit intent expired unfilled: %s %s at %.6f",
+                order_side,
+                action.symbol,
+                limit,
+            )
+            return None
+        return min(open_price, limit) if order_side == "buy" else max(open_price, limit)
 
     if isinstance(fill_spec, str):
         val = bar.get(fill_spec)
@@ -1192,7 +1229,10 @@ def run_pending_and_stops(
             cash,
             ts,
             get_price=lambda sym, action: resolve_fill_price(
-                bars.get(sym, {}), action, default_fill=default_fill
+                bars.get(sym, {}),
+                action,
+                default_fill=default_fill,
+                position_side=positions[sym].side if sym in positions else None,
             ),
             get_cost_model=get_cost_model,
             primary_symbol=primary_symbol,
