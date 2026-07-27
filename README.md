@@ -100,11 +100,12 @@ With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
 and realized weight after every bar, so target drift includes costs, price
 movement, and execution constraints. Multi-asset
-`RebalanceTargets` use synchronized cross-sectional cycles in sim/live:
-`LiveTrader` waits until every configured symbol's latest completed bar has the
-same timestamp, calls the strategy once, and fills the resulting intent on the
-next aligned timestamp. It never mixes a faster symbol's new bar with another
-symbol's older bar.
+`Action` and `RebalanceTargets` strategies use synchronized cross-sectional
+cycles in every mode. A partial multi-asset timestamp can update valuation and
+trigger stops for symbols that have a bar, but it cannot invoke the strategy or
+consume its pending intent. Valuation uses each symbol's latest point-in-time
+close without backfilling from the future. The intent expires after its next
+complete eligible cycle, whether or not it fills.
 
 Runnable versions cover both externally scheduled allocations and dynamic
 Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)

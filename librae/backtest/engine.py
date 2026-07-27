@@ -261,14 +261,27 @@ class Backtest:
         equity_curve: list[EquitySnapshot] = []
         exposed_periods = 0
         primary_symbol = self._symbols[0]
+        required_symbols = set(self._symbols)
         pending_intent: StrategyIntent = []
         position_snapshots: list[PositionSnapshot] = []
+        last_prices: dict[str, float] = {}
+        decision_index = 0
         equity_peak = self._initial_balance
         last_equity = self._initial_balance
         halted = False
 
-        for step, ts in enumerate(self._timeline):
+        for ts in self._timeline:
             bars = all_bars[ts]
+            for symbol, bar in bars.items():
+                close = bar.get("close")
+                if close is not None and np.isfinite(close) and close > 0:
+                    last_prices[symbol] = float(close)
+
+            # A portfolio intent and a new cross-sectional decision both require
+            # a complete cycle. Partial union-timeline bars still update marks
+            # and enforce stops, but do not consume the pending intent.
+            cycle_ready = required_symbols.issubset(bars)
+            intent_to_execute: StrategyIntent = pending_intent if cycle_ready else []
 
             # ── Steps 1+1.5: fill previous bar's pending actions at current
             # bar's price, then check stop-loss/take-profit — shared with the
@@ -281,7 +294,7 @@ class Backtest:
                 ts,
                 positions,
                 cash,
-                pending_intent,
+                intent_to_execute,
                 bars,
                 get_cost_model=self._get_cost_model,
                 default_fill=self._fill_price,
@@ -291,13 +304,14 @@ class Backtest:
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
-            pending_intent = []
+            if cycle_ready:
+                pending_intent = []
 
             # ── Step 2: equity snapshot (reflects just-executed trades) ──
-            mtm, pos_snapshot = self._eval_equity(cash, positions, bars)
+            mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
             if self._record_position_snapshots:
-                position_snapshots.extend(self._snapshot_positions(ts, positions, bars, mtm))
+                position_snapshots.extend(self._snapshot_positions(ts, positions, last_prices, mtm))
 
             if positions:
                 exposed_periods += 1
@@ -339,7 +353,7 @@ class Backtest:
             # ── Step 3: strategy decision (produces next bar's pending actions) ──
             if halted:
                 pending_intent = []
-            else:
+            elif cycle_ready:
                 ctx = Context(
                     ts=ts,
                     symbol=primary_symbol,
@@ -349,11 +363,12 @@ class Backtest:
                     positions=pos_snapshot,
                     cash=cash,
                     equity=mtm,
-                    period_index=step,
+                    period_index=decision_index,
                 )
                 pending_intent = self._strategy.on_bar(ctx)
+                decision_index += 1
 
-            self._increment_periods_held(positions)
+            self._increment_periods_held(positions, bars)
 
         # WHY: the final intent is discarded because there is no T+1 bar to fill it.
         # Force-close all open positions at last bar
@@ -366,7 +381,7 @@ class Backtest:
                 last_ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
-                fallback_price=lambda sym, pos: pos.entry_price,
+                fallback_price=lambda sym, _pos: last_prices[sym],
             )
             trades.extend(close_result.trades)
             all_events.extend(close_result.events)
@@ -633,21 +648,30 @@ class Backtest:
         return result
 
     @staticmethod
-    def _increment_periods_held(positions: dict[str, PositionState]) -> None:
-        for ps in positions.values():
-            ps.periods_held += 1
+    def _increment_periods_held(
+        positions: dict[str, PositionState],
+        bars: dict[str, dict[str, float]],
+    ) -> None:
+        """Advance holding age only when that position has a market bar."""
+        for symbol, position in positions.items():
+            if symbol in bars:
+                position.periods_held += 1
 
     def _eval_equity(
         self,
         cash: float,
         positions: dict[str, PositionState],
-        bars: dict[str, dict[str, float]],
+        last_prices: dict[str, float],
     ) -> tuple[float, dict[str, Position]]:
-        """Compute portfolio MTM value and position snapshot in a single pass."""
+        """Compute portfolio MTM from the latest point-in-time marks."""
 
-        def _price(sym: str, ps: PositionState) -> float:
-            bar = bars.get(sym)
-            return bar["close"] if bar is not None else ps.entry_price
+        def _price(sym: str, _position: PositionState) -> float:
+            try:
+                return last_prices[sym]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"no point-in-time mark available for open position {sym}"
+                ) from exc
 
         return eval_equity(
             cash,
@@ -660,14 +684,14 @@ class Backtest:
         self,
         ts: datetime,
         positions: dict[str, PositionState],
-        bars: dict[str, dict[str, float]],
+        last_prices: dict[str, float],
         equity: float,
     ) -> list[PositionSnapshot]:
         """Build deterministic end-of-bar position and realized-weight facts."""
         snapshots: list[PositionSnapshot] = []
         for symbol in sorted(positions):
             position = positions[symbol]
-            price = float(bars.get(symbol, {}).get("close", position.entry_price))
+            price = last_prices[symbol]
             signed_market_value = (
                 price
                 * position.quantity

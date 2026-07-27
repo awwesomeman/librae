@@ -166,8 +166,16 @@ modes. It fetches each configured symbol independently, but invokes
 same timestamp. Both `Action` and `RebalanceTargets` then follow the same T/T+1
 contract as backtests.
 
-That shared latest timestamp is the portfolio cycle identity and is processed
-at most once. OHLCV caches are sorted and deduplicated before alignment. The
+Backtests preserve the union of input timestamps for point-in-time valuation
+and per-symbol stop checks, but invoke the strategy and consume its pending
+intent only at timestamps containing every configured symbol. Missing symbols
+are valued at their latest observed close; future values and entry-price
+fallbacks are never used. Holding age advances only when that symbol has a bar.
+End-of-run forced liquidation uses each symbol's last observed close.
+
+The shared timestamp is the portfolio cycle identity and is processed at most
+once. An intent is good for its next complete eligible cycle and expires after
+that attempt. OHLCV caches are sorted and deduplicated before alignment. The
 policy is deliberately strict and deterministic:
 
 - **Delayed or stale symbol:** wait; do not mix its old bar with another
