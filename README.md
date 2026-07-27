@@ -3,9 +3,9 @@
 Backtest and live-trading engine, multi-asset support.
 
 - **One strategy interface, explicit execution semantics** — `Action` and portfolio-level `RebalanceTargets` share one decision API; backtest/sim model next-bar fills, while live submits causal broker orders and books only execution reports.
-- **Portfolio-level by design** — multi-asset/stock-picking needs no engine changes; `positions`/`equity_curve`/`metrics` are portfolio-level from the start.
+- **Portfolio-aware core** — static multi-asset strategies share portfolio positions, equity, target-weight execution, and diagnostics; optimizer/alpha logic stays in strategy code.
 - **Engine has no required I/O dependencies** — pure computation on a DataFrame you hand it; `db`/`brokers`/`notifications` are optional, lazy-imported, swappable via constructor injection.
-- **Risk built in** — position/drawdown/volume caps, margin & liquidation simulation, volume-aware slippage — enforced at the engine level, off by default.
+- **Risk built in** — concentration, gross/net target, drawdown, and bar-volume limits plus simplified margin/liquidation and impact models — explicit and off by default.
 - **No config files required** — market/symbol cost registries are plain Python with sensible built-ins; override per run via `RunConfig`, no YAML to maintain.
 
 `db/`, `brokers/`, `notifications/`, `orchestration/` are optional reference implementations for DB persistence, broker order routing, notifications, and CLI wiring — see [Reference implementations](#reference-implementations) below.
@@ -121,8 +121,35 @@ unaffordable. Target weights need not sum to one; the remainder stays in cash.
 `Action`s when different numeric limit prices are required.
 With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
-and realized weight after every bar, so target drift includes costs, price
-movement, and execution constraints.
+and realized weight after every event. `output.allocation_snapshots` records
+every configured symbol's target weight, achieved weight, and drift. The
+equity curve always includes gross exposure, net exposure, concentration, and
+one-way turnover; aggregate metrics include total turnover, average/maximum
+gross exposure, maximum absolute net exposure, maximum concentration, and
+tracking error/information ratio when a benchmark is present.
+
+Portfolio limits fail explicitly rather than silently normalizing the target:
+
+```python
+cfg = RunConfig(..., params={
+    "max_position_pct": 0.30,
+    "max_gross_exposure_pct": 1.20,
+    "max_net_exposure_pct": 1.00,
+    "max_drawdown_pct": 0.20,
+    "max_volume_participation_pct": 0.10,
+})
+```
+
+Gross exposure is `sum(abs(signed market value / equity))`, so it is also the
+engine's gross-leverage diagnostic; net exposure is the signed sum and
+concentration is the largest absolute symbol weight. Gross/net limits validate
+`RebalanceTargets` before execution. The volume limit is cumulative per symbol
+within a data event and applies to simulated
+entries, additions, reductions, stops, and forced exits. Missing volume rejects
+a constrained fill, and an exit may remain partially open for a later real
+bar. If the final backtest bar cannot complete liquidation, the run fails
+instead of fabricating liquidity. Live emergency exits submit the full
+remaining quantity and use broker reports as partial-fill truth.
 
 The configured symbol set is static, but availability is point-in-time.
 `ctx.symbols` contains the configured universe while `ctx.available_symbols`
@@ -199,6 +226,32 @@ and [`examples/topk_selection/`](examples/topk_selection/).
 Directory layout, dependency direction, risk/margin/reconciliation/staleness details, core types, and the full Config API: [`architecture.md`'s "Backtest Engine Design"](architecture.md#backtest-engine-design-librae).
 
 Runnable examples and what you need to know to turn on `db`/Grafana: [`examples/`](examples/).
+
+---
+
+## Capability boundaries
+
+Labels describe what Librae itself guarantees, not whether a strategy has
+validated alpha or completed broker-specific operational review.
+
+| Primary use case | Backtest | Shadow sim (`mode=sim`) | Paper broker (`mode=live`) | Live broker |
+|---|---|---|---|---|
+| Single-asset directional | Supported research with next-observed-bar fills | Simplified bar-fill monitoring | Broker-confirmed lifecycle; adapter-dependent | Operational core supported; production readiness remains adapter/account-specific |
+| Bar-based arbitrage | Research-only OHLCV approximation | Research-only | Unsupported as atomic multi-leg execution | Unsupported as atomic multi-leg execution |
+| Portfolio optimization | Strategy owns optimizer; target execution/diagnostics supported for a static configured universe | Simplified sequential basket | Broker-confirmed but sequential and non-atomic | Adapter-dependent; no cross-venue atomicity |
+| Asset allocation | Supported research under single-currency, data-driven event assumptions | Simplified | Sequential broker execution | Adapter-dependent; FX, income, corporate actions, and settlement are outside the ledger |
+
+`mode=sim` is shadow bar simulation, not broker paper trading. Paper trading
+uses `mode=live` against a broker's paper endpoint so acknowledgements,
+partials, rejections, and fees follow the same execution-report contract as
+live. Lower-frequency or daily rebalancing reduces throughput pressure but
+does not remove data/order synchronization requirements.
+
+The engine intentionally uses actual observed data timestamps as its event
+clock instead of embedding an exchange-calendar framework. This is compact and
+appropriate for the current daily/session-oriented scope, provided ETL owns
+calendar-sensitive labeling. Missing bars are not automatically classified as
+holidays, suspensions, or outages.
 
 ---
 
