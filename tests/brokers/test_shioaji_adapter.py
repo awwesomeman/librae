@@ -102,6 +102,20 @@ class TestFetchOhlcv:
 
         assert len(df) == 2
 
+    def test_drop_incomplete_applies_completed_bar_filter(self):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+
+        with patch(
+            "brokers.shioaji_adapter.drop_incomplete_ohlcv",
+            side_effect=lambda df, _timeframe: df.iloc[:-1],
+        ) as drop_incomplete:
+            df = adapter.fetch_ohlcv("TXFR1", "1m", drop_incomplete=True)
+
+        assert len(df) == 2
+        drop_incomplete.assert_called_once()
+
 
 class TestReadOnlyGuard:
     def test_place_order_raises_without_ca(self):
@@ -138,6 +152,26 @@ class TestPlaceOrder:
         mock_sj.FuturesOrder = MagicMock(return_value="mock_order")
         mock_sj.StockOrder = MagicMock(return_value="mock_order")
         return mock_sj
+
+    def test_prepare_order_rounds_lot_and_limit_price(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(limit_down=19_000, limit_up=21_000)
+        )
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "TXFR1",
+                "side": "buy",
+                "quantity": 2.9,
+                "order_type": "limit",
+                "price": 20_000.8,
+                "tick_size": 1.0,
+            }
+        )
+
+        assert prepared["quantity"] == 2.0
+        assert prepared["price"] == 20_000.0
 
     def test_futures_limit_order_uses_futures_price_type(self):
         adapter = _make_adapter(ca_activated=True)
@@ -180,7 +214,14 @@ class TestPlaceOrder:
 
         mock_sj = self._mock_shioaji_module()
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
-            adapter.place_order({"symbol": "2330", "side": "sell", "quantity": 1000})
+            adapter.place_order(
+                {
+                    "symbol": "2330",
+                    "side": "sell",
+                    "quantity": 1000,
+                    "order_type": "market",
+                }
+            )
 
         mock_sj.StockOrder.assert_called_once_with(
             price=0,
@@ -206,6 +247,7 @@ class TestPlaceOrder:
                     "symbol": "TXFR1",
                     "side": "buy",
                     "quantity": 1,
+                    "order_type": "market",
                     "client_order_id": "strategy-TXFR1-open-20260101T000000",
                 }
             )
@@ -228,7 +270,14 @@ class TestPlaceOrder:
 
         mock_sj = self._mock_shioaji_module()
         with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
-            adapter.place_order({"symbol": "TMFR1", "side": "buy", "quantity": 1})
+            adapter.place_order(
+                {
+                    "symbol": "TMFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "market",
+                }
+            )
 
         mock_sj.FuturesOrder.assert_called_once_with(
             price=0,

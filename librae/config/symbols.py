@@ -20,17 +20,27 @@ raised FileNotFoundError the moment get_symbol() ran for any built-in
 symbol. A handful of hardcoded entries needs no parser, no packaging
 config, and can't go missing from the wheel.
 
-Registering your own symbol doesn't require editing this file at all —
-RunConfig.symbol_overrides (see CostModel.from_config) covers a one-off or
-per-run override with no file/path needed; only reach for editing this
-registry if you're maintaining a recurring symbol reused across many runs
-in a clone of this repo.
+Registering your own symbol doesn't require editing this file. Cost fields
+belong in RunConfig.symbol_overrides; venue/data fields belong in
+RunConfig.instrument_overrides. Execution brokerage is deliberately absent
+from the registry and must be selected by the caller.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
+if TYPE_CHECKING:
+    from librae.core.run_config import RunConfig
+
+AdapterName = Literal["crypto", "ibkr", "shioaji"]
+_ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
+    "binance_spot": "crypto",
+    "binance_futures_continuous": "crypto",
+    "ibkr": "ibkr",
+    "shioaji": "shioaji",
+}
 # Contract expiry structure — orthogonal to continuous_alias (see the
 # per-symbol entries below). 'spot' is the bare case (direct ownership, not
 # an exchange-traded derivative); everything else is prefixed contract_* so
@@ -66,8 +76,13 @@ class SymbolInfo:
     data_source: str
     instrument_type: str
     multiplier: float
+    data_adapter: AdapterName
+    venue_symbol: str
+    currency: str
     continuous_alias: bool = False
     tick_size: float | None = None
+    security_type: str | None = None
+    exchange: str | None = None
 
     def __post_init__(self) -> None:
         if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
@@ -75,6 +90,14 @@ class SymbolInfo:
                 f"{self.symbol!r} has instrument_type="
                 f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
             )
+        if self.data_adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+            raise ValueError(f"{self.symbol!r} has unsupported data_adapter={self.data_adapter!r}")
+        if self.multiplier <= 0:
+            raise ValueError(f"{self.symbol!r} multiplier must be positive")
+        if not self.venue_symbol:
+            raise ValueError(f"{self.symbol!r} venue_symbol must be non-empty")
+        if not self.currency:
+            raise ValueError(f"{self.symbol!r} currency must be non-empty")
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
@@ -108,8 +131,15 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             data_source=str(data.get("data_source", "")),
             instrument_type=instrument_type,
             multiplier=multiplier,
+            data_adapter=str(data["data_adapter"]),
+            venue_symbol=str(data.get("venue_symbol", symbol)),
+            currency=str(data["currency"]),
             continuous_alias=bool(data.get("continuous_alias", False)),
             tick_size=float(raw_tick_size) if raw_tick_size is not None else None,
+            security_type=(
+                str(data["security_type"]) if data.get("security_type") is not None else None
+            ),
+            exchange=str(data["exchange"]) if data.get("exchange") is not None else None,
         )
     return registry
 
@@ -122,6 +152,9 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "crypto",
             "data_source": "binance_spot",
             "instrument_type": "spot",
+            "data_adapter": "crypto",
+            "venue_symbol": "BTC/USDT",
+            "currency": "USDT",
             # multiplier/tick_size omitted on purpose — spot auto-defaults
             # to multiplier=1.0, tick_size falls back to market_config.py's
             # crypto default (0.01).
@@ -130,6 +163,9 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "crypto",
             "data_source": "binance_futures_continuous",
             "instrument_type": "contract_quarterly",
+            "data_adapter": "crypto",
+            "venue_symbol": "BTC/USDT:USDT",
+            "currency": "USDT",
             "continuous_alias": True,
             # Binance USDT-M linear contract, contractSize=1 BTC per
             # contract (verified via ccxt binanceusdm market info) — 1
@@ -140,6 +176,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
+            "data_adapter": "shioaji",
+            "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
             "tick_size": 1.0,  # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
@@ -148,6 +186,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
+            "data_adapter": "shioaji",
+            "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 50.0,  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
             "tick_size": 1.0,
@@ -156,6 +196,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
+            "data_adapter": "shioaji",
+            "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 10.0,  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
             "tick_size": 1.0,
@@ -164,6 +206,9 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "us_equity",
             "data_source": "ibkr",
             "instrument_type": "spot",
+            "data_adapter": "ibkr",
+            "currency": "USD",
+            "security_type": "STK",
             # multiplier/tick_size omitted — spot auto-defaults to
             # multiplier=1.0, tick_size falls back to market_config.py's
             # us_equity default (0.01).
@@ -199,3 +244,84 @@ def get_symbol(symbol: str) -> SymbolInfo:
         available = list(_BUILTIN_SYMBOLS.keys())
         raise KeyError(f"Symbol '{symbol}' not found. Available: {available}")
     return _BUILTIN_SYMBOLS[symbol]
+
+
+def resolve_symbol(
+    cfg: RunConfig,
+    symbol: str,
+    *,
+    multiplier: float | None = None,
+) -> SymbolInfo:
+    """Resolve accounting and broker metadata for one configured symbol.
+
+    Registry values are authoritative for registered symbols. Run-wide
+    market/data_source values are fallbacks for homogeneous, unregistered
+    universes; ``instrument_overrides`` supplies per-symbol routing metadata.
+    """
+    registered = _BUILTIN_SYMBOLS.get(symbol)
+    route = (cfg.instrument_overrides or {}).get(symbol, {})
+    costs = dict(cfg.cost_overrides or {})
+    costs.update((cfg.symbol_overrides or {}).get(symbol, {}))
+
+    market = route.get("market") or (registered.market if registered else cfg.market)
+    data_source = route.get("data_source") or (
+        registered.data_source if registered else cfg.data_source
+    )
+    data_adapter = route.get("data_adapter") or (
+        registered.data_adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)
+    )
+    if data_adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+        raise ValueError(
+            f"No data adapter route for symbol={symbol!r}, data_source={data_source!r}; "
+            "set instrument_overrides[symbol]['data_adapter']"
+        )
+
+    multiplier = (
+        multiplier
+        if multiplier is not None
+        else costs.get("multiplier", registered.multiplier if registered else None)
+    )
+    if multiplier is None:
+        raise ValueError(
+            f"No multiplier for symbol={symbol!r}; set symbol_overrides[symbol]['multiplier']"
+        )
+    instrument_type = route.get("instrument_type") or (
+        registered.instrument_type if registered else ""
+    )
+    if not instrument_type:
+        raise ValueError(
+            f"No instrument_type for symbol={symbol!r}; set "
+            "instrument_overrides[symbol]['instrument_type']"
+        )
+    tick_size = costs.get("tick_size", registered.tick_size if registered else None)
+    currency = route.get("currency") or (registered.currency if registered else "")
+    if not currency:
+        raise ValueError(
+            f"No currency for symbol={symbol!r}; set instrument_overrides[symbol]['currency']"
+        )
+    security_type = route.get("security_type") or (registered.security_type if registered else None)
+    exchange = route.get("exchange") or (registered.exchange if registered else None)
+    if data_adapter == "ibkr" and not security_type:
+        raise ValueError(
+            f"No security_type for IBKR symbol={symbol!r}; set "
+            "instrument_overrides[symbol]['security_type']"
+        )
+    if security_type == "FUT" and not exchange:
+        raise ValueError(
+            f"No exchange for IBKR future={symbol!r}; set instrument_overrides[symbol]['exchange']"
+        )
+    return SymbolInfo(
+        symbol=symbol,
+        market=market,
+        data_source=data_source,
+        instrument_type=instrument_type,
+        multiplier=float(multiplier),
+        data_adapter=data_adapter,
+        venue_symbol=route.get("venue_symbol")
+        or (registered.venue_symbol if registered else symbol),
+        currency=currency,
+        continuous_alias=registered.continuous_alias if registered else False,
+        tick_size=float(tick_size) if tick_size is not None else None,
+        security_type=security_type,
+        exchange=exchange,
+    )

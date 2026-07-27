@@ -344,6 +344,30 @@ class TestFromConfig:
         cm = CostModel.from_config(cfg, symbol="MXFR1")
         assert cm.multiplier == 50.0
 
+    def test_symbol_param_resolves_its_own_market_costs(self) -> None:
+        """A mixed-market run must not apply cfg.market or the first
+        symbol's commission/margin schedule to every asset."""
+        from librae.core.run_config import RunConfig
+
+        cfg = RunConfig(
+            strategy_name="x",
+            symbols=["TXFR1", "MU"],
+            timeframe="1d",
+            market="multi",
+            data_source="multi",
+            initial_balance=100_000.0,
+            mode="backtest",
+        )
+
+        futures = CostModel.from_config(cfg, symbol="TXFR1")
+        equity = CostModel.from_config(cfg, symbol="MU")
+
+        assert futures.min_commission == 100.0
+        assert futures.long_margin_rate == 0.075
+        assert equity.min_commission == 0.0
+        assert equity.long_margin_rate == 1.0
+        assert equity.short_margin_rate == 0.5
+
     def test_symbol_overrides_unregistered_symbol_without_touching_symbols_yaml(self) -> None:
         cm = CostModel.from_config(
             self._cfg(

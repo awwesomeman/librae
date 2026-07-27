@@ -144,9 +144,152 @@ def test_get_balance_missing_currency_returns_zeros(authed_adapter, mock_ccxt_ex
     assert balance == {"free": 0.0, "used": 0.0, "total": 0.0}
 
 
+def test_spot_position_uses_inventory_balance(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "base": "BTC",
+    }
+    mock_ccxt_exchange.fetch_balance.return_value = {
+        "BTC": {"free": 0.7, "used": 0.3, "total": 1.0}
+    }
+
+    position = authed_adapter.get_position("BTC/USDT")
+
+    assert position == {
+        "symbol": "BTC/USDT",
+        "size": 1.0,
+        "avg_price": None,
+        "unrealized_pnl": 0.0,
+    }
+    mock_ccxt_exchange.fetch_positions.assert_not_called()
+
+
+def test_derivative_short_position_has_negative_size(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT:USDT",
+        "type": "swap",
+        "spot": False,
+    }
+    mock_ccxt_exchange.fetch_positions.return_value = [
+        {
+            "symbol": "BTC/USDT:USDT",
+            "contracts": 2.0,
+            "side": "short",
+            "entryPrice": 50_000.0,
+        }
+    ]
+
+    position = authed_adapter.get_position("BTC/USDT:USDT")
+
+    assert position["size"] == -2.0
+    assert position["avg_price"] == 50_000.0
+
+
 # ---------------------------------------------------------------------------
 # Test 4: authed adapter can call place_order
 # ---------------------------------------------------------------------------
+
+
+def test_prepare_order_applies_precision_and_limits(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "contractSize": 1.0,
+        "limits": {
+            "amount": {"min": 0.001, "max": 10.0},
+            "price": {"min": 1.0, "max": None},
+            "cost": {"min": 10.0, "max": None},
+        },
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "0.123"
+    mock_ccxt_exchange.price_to_precision.return_value = "100.12"
+
+    prepared = authed_adapter.prepare_order(
+        {
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "quantity": 0.12345,
+            "order_type": "limit",
+            "price": 100.123,
+            "position_effect": "open",
+        }
+    )
+
+    assert prepared["quantity"] == 0.123
+    assert prepared["price"] == 100.12
+
+
+def test_prepare_order_rejects_spot_short_open(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "limits": {},
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "0.1"
+
+    with pytest.raises(ValueError, match="cannot open a short"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "quantity": 0.1,
+                "order_type": "market",
+                "position_effect": "open",
+                "reference_price": 50_000.0,
+            }
+        )
+
+
+def test_prepare_order_rejects_min_notional(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "limits": {"cost": {"min": 10.0, "max": None}},
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "0.0001"
+
+    with pytest.raises(ValueError, match="below minimum"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "quantity": 0.0001,
+                "order_type": "market",
+                "position_effect": "open",
+                "reference_price": 50_000.0,
+            }
+        )
+
+
+def test_prepare_order_requires_derivative_contract_size(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT:USDT",
+        "type": "swap",
+        "contract": True,
+        "spot": False,
+        "limits": {},
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "1"
+
+    with pytest.raises(ValueError, match="contractSize"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "sell",
+                "quantity": 1.0,
+                "order_type": "market",
+                "position_effect": "open",
+                "reference_price": 50_000.0,
+            }
+        )
 
 
 def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):

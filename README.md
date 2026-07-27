@@ -138,8 +138,10 @@ than converting a historical range touch into a late market order. Protective
 orders require broker-native support. Multi-order baskets remain sequential,
 not atomic.
 
-An injected `order_adapter` implements `place_order`, `find_order`,
-`get_order`, `list_open_orders`, and `cancel_order`. Filled responses must
+An injected `order_adapter` implements `prepare_order`, `place_order`,
+`find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
+`prepare_order` applies venue amount/lot/step/tick/min-notional constraints
+before the request is checkpointed or submitted. Filled responses must
 include order id/status, requested and cumulative filled quantity, cumulative
 average price/costs, broker execution timestamp, and an explicit
 fee/commission amount (zero is valid); CCXT's
@@ -151,6 +153,16 @@ by deterministic client id instead of blindly resubmitting. Resting orders
 block later decisions, rejected/cancelled orders halt dependent work,
 halt-on-risk cancels tracked orders, and untracked open orders on configured
 symbols halt for operator review.
+
+Market-data and execution routes are separate. `data_source` selects the
+default market-data adapter; it never chooses a broker. Live execution requires
+either an injected `order_adapter` or an explicit `strategy.broker` (overridden
+per symbol by `instrument_overrides.<symbol>.broker`). Missing execution
+routing fails at startup. This prevents a symbol such as `MU` from silently
+selecting IBKR merely because IBKR supplied its bars.
+The current live/sim cash ledger is single-currency, so a resolved
+mixed-currency universe also fails at construction until an explicit FX/base
+currency model is supplied.
 
 TimescaleDB is the default durable state store (`execution_runtime_state` plus
 the `broker_orders` ledger). `cfg.no_db=True` remains valid for simulation,
@@ -173,7 +185,7 @@ Runnable examples and what you need to know to turn on `db`/Grafana: [`examples/
 
 ## Reference implementations
 
-`LiveTrader` injects these via constructor params (`adapter`/`order_adapter`/`cost_model`/`notifier`/`state_store`) and only lazy-imports defaults when needed. `cfg.no_db=True` skips DB callbacks and the default state store; live mode must then receive a durable store explicitly.
+`LiveTrader` injects these via constructor params (`adapter`/`order_adapter`/`cost_model`/`notifier`/`state_store`) and only lazy-imports explicitly selected built-ins when needed. `cfg.no_db=True` skips DB callbacks and the default state store; live mode must then receive a durable store explicitly.
 
 | Directory | Injection point | Description |
 |---|---|---|

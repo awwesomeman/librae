@@ -14,12 +14,13 @@ import logging
 import signal
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, ClassVar, Literal
+from math import isfinite
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
@@ -59,6 +60,38 @@ logger = logging.getLogger(__name__)
 OHLCVFetcher = Callable[..., pd.DataFrame]
 
 _UNSET = object()  # sentinel: distinguish "not passed" from "explicitly passed None"
+_DATA_ADAPTER_BY_BROKER = {
+    "binance": "crypto",
+    "ibkr": "ibkr",
+    "shioaji": "shioaji",
+}
+
+
+@dataclass(frozen=True)
+class _BrokerPosition:
+    side: Literal["long", "short"]
+    quantity: float
+    average_price: float | None
+
+
+def _build_builtin_adapter(name: str, *, trading: bool) -> object:
+    """Construct one explicitly selected built-in adapter."""
+    if name == "shioaji":
+        from brokers.shioaji_adapter import ShioajiAdapter
+
+        return ShioajiAdapter()
+    if name == "ibkr":
+        from brokers.ibkr_adapter import IBKRAdapter
+
+        return IBKRAdapter(trading_enabled=trading)
+    if name in ("crypto", "binance"):
+        from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
+
+        credentials = (
+            CryptoCredentials.from_env("BINANCE", exchange_id="binance") if trading else None
+        )
+        return CryptoAdapter(credentials=credentials)
+    raise ValueError(f"Unsupported adapter: {name!r}")
 
 
 class LiveTrader:
@@ -68,12 +101,12 @@ class LiveTrader:
         strategy: Strategy instance (same as backtest).
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         cfg: RunConfig — the sole configuration source.
-        adapter: OHLCVFetcher override. None -> build from cfg.market.
-        order_adapter: Override for order placement. None -> auto-built from
-            cfg.market + env credentials when cfg.mode == "live" (SHIOAJI_*
-            for tw_futures, CRYPTO_* otherwise — same adapter instance used
-            for fetching, reused for orders). Ignored in sim mode.
-        cost_model: CostModel override. None -> build from cfg.market.
+        adapter: Market-data fetcher override. None builds the data adapter
+            from each symbol's explicit data_source route.
+        order_adapter: Order gateway override. In live mode, omitting it
+            requires an explicit cfg.broker or per-symbol broker route;
+            execution is never inferred from the symbol or market.
+        cost_model: CostModel override. None resolves one model per symbol.
         on_bar: _UNSET -> build DB callback from cfg; None -> no callback; callable -> use it.
         on_order_event: Same pattern as on_bar.
         on_ohlcv: Same pattern as on_bar.
@@ -95,9 +128,9 @@ class LiveTrader:
         feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
         *,
         cfg: RunConfig,
-        adapter: OHLCVFetcher | None = None,
-        order_adapter: object | None = None,
-        cost_model: CostModel | None = None,
+        adapter: OHLCVFetcher | Mapping[str, OHLCVFetcher] | None = None,
+        order_adapter: object | Mapping[str, object] | None = None,
+        cost_model: CostModel | Mapping[str, CostModel] | None = None,
         notifier: object | None = _UNSET,
         on_bar: Callable[..., None] | object | None = _UNSET,
         on_order_event: Callable[..., None] | object | None = _UNSET,
@@ -107,6 +140,7 @@ class LiveTrader:
         warmup_fetcher: Callable[..., pd.DataFrame] | object | None = _UNSET,
         state_store: LiveStateStore | object | None = _UNSET,
     ) -> None:
+        from librae.config.symbols import resolve_symbol
         from librae.core.cost_model import CostModel
         from librae.core.utils import generate_run_id, interval_to_timedelta, to_ccxt
 
@@ -118,47 +152,130 @@ class LiveTrader:
         self._interval_delta = interval_to_timedelta(self._timeframe)
         self._poll_seconds = cfg.poll_seconds
 
-        # --- Build adapter ---
-        if adapter is not None:
-            self._fetcher = adapter
-        elif cfg.market == "tw_futures":
-            from brokers.shioaji_adapter import ShioajiAdapter
-
-            # simulation is resolved from ShioajiCredentials.sandbox (SHIOAJI_SANDBOX
-            # env var) — deliberately orthogonal to cfg.mode, same as CryptoAdapter's
-            # sandbox: mode decides whether fills are mirrored as real orders at all,
-            # sandbox decides which venue this session talks to. This lets "live" mode
-            # (order submission enabled) be drilled end-to-end against Shioaji's paper
-            # environment by setting SHIOAJI_SANDBOX=true, without touching real money.
-            _shioaji = ShioajiAdapter()
-            self._fetcher = lambda symbol, tf, limit, *, drop_incomplete=False: (
-                _shioaji.fetch_ohlcv(symbol, tf, limit=limit)
-            )
-            # Shioaji also places orders — reuse the same authenticated
-            # session for live mode unless the caller passed one explicitly.
-            if order_adapter is None and cfg.mode == "live":
-                order_adapter = _shioaji
+        # --- Build per-symbol cost models and instrument routes ---
+        if isinstance(cost_model, Mapping):
+            missing = set(self._symbols) - set(cost_model)
+            if missing:
+                raise ValueError(f"Missing cost models for symbols: {sorted(missing)}")
+            resolved_cost_models = dict(cost_model)
+        elif cost_model is not None:
+            resolved_cost_models = {symbol: cost_model for symbol in self._symbols}
         else:
-            from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
-
-            if cfg.mode == "live":
-                # BINANCE_API_KEY/BINANCE_API_SECRET required for live — read-only
-                # CryptoAdapter() (no creds) would fail place_order at trade time.
-                # Prefix is Binance-specific by convention (see crypto_adapter.py
-                # module docstring) — a second exchange would need its own prefix.
-                _adapter = CryptoAdapter(credentials=CryptoCredentials.from_env("BINANCE"))
-                # Reuse the same authenticated adapter for order placement — same
-                # pattern as Shioaji above — unless the caller passed one explicitly.
-                if order_adapter is None:
-                    order_adapter = _adapter
-            else:
-                _adapter = CryptoAdapter()
-            self._fetcher = lambda symbol, tf, limit, *, drop_incomplete=False: (
-                _adapter.fetch_ohlcv(symbol, tf, limit, drop_incomplete=drop_incomplete)
+            resolved_cost_models = {
+                symbol: CostModel.from_config(cfg, symbol=symbol) for symbol in self._symbols
+            }
+        self._instruments = {
+            symbol: resolve_symbol(
+                cfg,
+                symbol,
+                multiplier=resolved_cost_models[symbol].multiplier,
+            )
+            for symbol in self._symbols
+        }
+        currencies = {instrument.currency for instrument in self._instruments.values()}
+        if len(currencies) != 1:
+            raise ValueError(
+                "LiveTrader requires one accounting currency; configure an FX/base-currency "
+                f"model before mixing {sorted(currencies)}"
             )
 
-        # --- Build cost_model ---
-        resolved_cm = CostModel.from_config(cfg, override=cost_model)
+        # --- Build per-symbol market-data adapters ---
+        data_adapters: dict[str, object] = {}
+        if adapter is not None:
+            if isinstance(adapter, Mapping):
+                missing = set(self._symbols) - set(adapter)
+                if missing:
+                    raise ValueError(f"Missing market-data adapters for symbols: {sorted(missing)}")
+                self._fetchers = dict(adapter)
+            else:
+                self._fetchers = {symbol: adapter for symbol in self._symbols}
+        else:
+            adapter_instances: dict[tuple[str, str], object] = {}
+            self._fetchers: dict[str, OHLCVFetcher] = {}
+            for symbol, instrument in self._instruments.items():
+                key = (instrument.data_adapter, instrument.data_source)
+                instance = adapter_instances.get(key)
+                if instance is None:
+                    if instrument.data_adapter == "crypto" and instrument.continuous_alias:
+                        raise ValueError(
+                            f"{symbol!r} is a continuous crypto alias and is not directly "
+                            "orderable; inject a market-data adapter and configure a concrete "
+                            "venue_symbol before using sim/live"
+                        )
+                    route = (cfg.instrument_overrides or {}).get(symbol, {})
+                    broker = route.get("broker") or cfg.broker
+                    instance = _build_builtin_adapter(
+                        instrument.data_adapter,
+                        trading=(
+                            cfg.mode == "live"
+                            and order_adapter is None
+                            and _DATA_ADAPTER_BY_BROKER.get(broker) == instrument.data_adapter
+                        ),
+                    )
+                adapter_instances[key] = instance
+                data_adapters[symbol] = instance
+
+                if instrument.data_adapter == "ibkr":
+                    self._fetchers[symbol] = (
+                        lambda _symbol, tf, limit, *, drop_incomplete=False, _adapter=instance, _instrument=instrument: (
+                            _adapter.fetch_ohlcv(
+                                _instrument.venue_symbol,
+                                tf,
+                                limit=limit,
+                                security_type=_instrument.security_type,
+                                exchange=_instrument.exchange,
+                                currency=_instrument.currency,
+                                drop_incomplete=drop_incomplete,
+                            )
+                        )
+                    )
+                else:
+                    self._fetchers[symbol] = (
+                        lambda _symbol, tf, limit, *, drop_incomplete=False, _adapter=instance, _instrument=instrument: (
+                            _adapter.fetch_ohlcv(
+                                _instrument.venue_symbol,
+                                tf,
+                                limit=limit,
+                                drop_incomplete=drop_incomplete,
+                            )
+                        )
+                    )
+
+        if cfg.mode == "live":
+            if isinstance(order_adapter, Mapping):
+                order_adapters = dict(order_adapter)
+            elif order_adapter is not None:
+                order_adapters = {symbol: order_adapter for symbol in self._symbols}
+            else:
+                broker_instances: dict[str, object] = {}
+                order_adapters = {}
+                for symbol, instrument in self._instruments.items():
+                    route = (cfg.instrument_overrides or {}).get(symbol, {})
+                    broker = route.get("broker") or cfg.broker
+                    if not broker:
+                        raise ValueError(
+                            f"Live execution broker is not configured for {symbol!r}; "
+                            "set strategy.broker/instrument_overrides or inject order_adapter"
+                        )
+                    broker_data_adapter = _DATA_ADAPTER_BY_BROKER.get(broker)
+                    if broker_data_adapter is None:
+                        raise ValueError(f"Unsupported execution broker: {broker!r}")
+                    instance = broker_instances.get(broker)
+                    if instance is None:
+                        data_instance = data_adapters.get(symbol)
+                        instance = (
+                            data_instance
+                            if broker_data_adapter == instrument.data_adapter
+                            and data_instance is not None
+                            else _build_builtin_adapter(broker, trading=True)
+                        )
+                        broker_instances[broker] = instance
+                    order_adapters[symbol] = instance
+            missing = set(self._symbols) - set(order_adapters)
+            if missing:
+                raise ValueError(f"Missing order adapters for symbols: {sorted(missing)}")
+        else:
+            order_adapters = {}
 
         # --- Resolve notifier (Telegram by default; injectable) ---
         # cfg.no_db gates this the same way it gates the db callbacks below
@@ -182,11 +299,12 @@ class LiveTrader:
         # --- Build executor ---
         is_live = cfg.mode == "live"
         self._executor = LiveExecutor(
-            resolved_cm,
+            resolved_cost_models,
             simulation=not is_live,
             telegram=resolved_notifier,
             strategy_name=strategy_name,
-            order_adapter=order_adapter if is_live else None,
+            order_adapter=order_adapters if is_live else None,
+            instruments=self._instruments,
         )
 
         # --- Restore restart-critical state before callbacks capture run_id ---
@@ -434,7 +552,13 @@ class LiveTrader:
                     }
                 ]
             ).set_index("ts")
-            self._db_write(write_ohlcv, row, symbol, timeframe_, data_source=self._cfg.data_source)
+            self._db_write(
+                write_ohlcv,
+                row,
+                symbol,
+                timeframe_,
+                data_source=self._instruments[symbol].data_source,
+            )
 
         return on_ohlcv
 
@@ -488,13 +612,18 @@ class LiveTrader:
         return TelegramAdapter(config=tg_config, credentials=tg_creds)
 
     def _build_warmup_fetcher(self) -> Callable:
-        """Default warmup: plain API fetch via self._fetcher — librae has no
+        """Default warmup: plain API fetch via the symbol's adapter — librae has no
         data-access layer of its own to warm up from. A DB-first fetcher
         (read cached history, gap-fill from API) needs a data-access layer
         that lives outside librae; pass warmup_fetcher= explicitly for that."""
 
         def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
-            return self._fetcher(symbol, tf_ccxt, limit, drop_incomplete=True)
+            return self._fetchers[symbol](
+                symbol,
+                tf_ccxt,
+                limit,
+                drop_incomplete=True,
+            )
 
         return warmup_fetcher
 
@@ -557,8 +686,7 @@ class LiveTrader:
         be read, strategy execution is halted rather than starting from an
         assumed-flat local book.
         """
-        adapter = self._executor.order_adapter
-        if adapter is None:
+        if self._executor.simulation:
             return
         if self._restored_state:
             try:
@@ -585,41 +713,35 @@ class LiveTrader:
             message="Configured broker positions are unavailable",
         )
 
-    def _read_broker_positions(self) -> dict[str, PositionState]:
+    def _read_broker_positions(self) -> dict[str, _BrokerPosition]:
         """Read positions for configured symbols, not the whole account."""
-        adapter = self._executor.order_adapter
-        if adapter is None:
+        if self._executor.simulation:
             return {}
 
-        positions: dict[str, PositionState] = {}
+        positions: dict[str, _BrokerPosition] = {}
         for symbol in self._symbols:
-            broker_pos = adapter.get_position(symbol)
+            adapter = self._executor.get_order_adapter(symbol)
+            instrument = self._instruments[symbol]
+            broker_pos = adapter.get_position(instrument.venue_symbol)
             size = float(broker_pos.get("size") or 0)
             if not size:
                 continue
-            avg_price = float(broker_pos.get("avg_price") or 0.0)
-            if avg_price <= 0:
+            raw_average = broker_pos.get("avg_price")
+            avg_price = float(raw_average) if raw_average is not None else None
+            if avg_price is not None and avg_price <= 0:
                 raise ValueError(f"broker returned invalid average price for {symbol}")
             side: Literal["long", "short"] = "long" if size > 0 else "short"
-            quantity = abs(size)
-            positions[symbol] = PositionState(
-                symbol=symbol,
+            positions[symbol] = _BrokerPosition(
                 side=side,
-                entry_price=avg_price,
-                quantity=quantity,
-                entry_at=datetime.now(tz=UTC),
-                periods_held=0,
-                entry_commission=0.0,
-                entry_slippage=0.0,
-                entry_tax=0.0,
-                total_entry_cost=avg_price * quantity * self._executor.cost_model.multiplier,
+                quantity=abs(size),
+                average_price=avg_price,
             )
         return positions
 
     @staticmethod
     def _position_books_match(
         local: dict[str, PositionState],
-        broker: dict[str, PositionState],
+        broker: dict[str, _BrokerPosition],
     ) -> bool:
         if set(local) != set(broker):
             return False
@@ -652,11 +774,34 @@ class LiveTrader:
     def _adopt_broker_positions(self) -> bool:
         """Adopt configured-symbol exposure on a first run."""
         try:
-            positions = self._read_broker_positions()
+            snapshot = self._read_broker_positions()
         except Exception:
             logger.exception("Broker position snapshot failed; keeping last confirmed local book")
             return False
 
+        positions: dict[str, PositionState] = {}
+        for symbol, broker_position in snapshot.items():
+            if broker_position.average_price is None:
+                logger.error(
+                    "Cannot adopt %s inventory without broker average cost; "
+                    "restore a prior checkpoint or flatten the account",
+                    symbol,
+                )
+                return False
+            positions[symbol] = PositionState(
+                symbol=symbol,
+                side=broker_position.side,
+                entry_price=broker_position.average_price,
+                quantity=broker_position.quantity,
+                entry_at=datetime.now(tz=UTC),
+                periods_held=0,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=broker_position.average_price
+                * broker_position.quantity
+                * self._executor.get_cost_model(symbol).multiplier,
+            )
         self._positions = positions
         for symbol, position in positions.items():
             logger.warning(
@@ -673,11 +818,6 @@ class LiveTrader:
     # different tolerance).
     CASH_RECONCILE_TOLERANCE_PCT = 0.01
 
-    # Settlement currency per market, for symbols that aren't a CCXT
-    # "BASE/QUOTE" pair (tw_futures/us_equity don't encode currency in the
-    # symbol itself the way crypto pairs do).
-    _MARKET_CURRENCY: ClassVar[dict[str, str]] = {"tw_futures": "TWD", "us_equity": "USD"}
-
     def _reconcile_cash(self) -> None:
         """Best-effort: alert on cash/broker drift at startup, never
         auto-adjusts self._cash.
@@ -693,25 +833,36 @@ class LiveTrader:
         are silently skipped, as is a market this engine has no settlement
         currency mapping for — nothing to compare against either way.
         """
-        adapter = self._executor.order_adapter
-        get_balance = getattr(adapter, "get_balance", None) if adapter else None
-        if get_balance is None:
+        if self._executor.simulation:
             return
 
-        if "/" in self._symbols[0]:
-            currency = self._symbols[0].split("/")[-1]
-        else:
-            currency = self._MARKET_CURRENCY.get(self._cfg.market)
-            if currency is None:
-                return
+        currencies = {instrument.currency for instrument in self._instruments.values()}
+        if len(currencies) != 1:
+            logger.warning(
+                "Cash reconciliation skipped for multi-currency run: %s",
+                sorted(currencies),
+            )
+            return
+        currency = next(iter(currencies))
+        adapters: dict[int, object] = {}
+        for symbol in self._symbols:
+            adapter = self._executor.get_order_adapter(symbol)
+            if callable(getattr(adapter, "get_balance", None)):
+                adapters[id(adapter)] = adapter
+        if not adapters:
+            return
 
         try:
-            balance = get_balance(currency)
+            broker_total = sum(
+                float(adapter.get_balance(currency)["total"]) for adapter in adapters.values()
+            )
         except Exception:
             logger.exception("Cash reconciliation failed for %s — skipping", currency)
             return
 
-        broker_total = balance["total"]
+        if not isfinite(broker_total):
+            logger.warning("Cash reconciliation returned a non-finite total — skipping")
+            return
         drift_pct = abs(broker_total - self._cash) / max(self._cash, EPSILON)
         if drift_pct <= self.CASH_RECONCILE_TOLERANCE_PCT:
             return
@@ -902,7 +1053,7 @@ class LiveTrader:
                 if self._warmup_fetcher:
                     new_df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
                 else:
-                    new_df = self._fetcher(
+                    new_df = self._fetchers[symbol](
                         symbol,
                         self._timeframe,
                         self._warmup_periods,
@@ -911,7 +1062,12 @@ class LiveTrader:
                 cached = None
             else:
                 cached = self._ohlcv_cache[symbol]
-                new_df = self._fetcher(symbol, self._timeframe, 2, drop_incomplete=True)
+                new_df = self._fetchers[symbol](
+                    symbol,
+                    self._timeframe,
+                    2,
+                    drop_incomplete=True,
+                )
 
             if new_df.empty:
                 return cached if cached is not None else new_df
@@ -1005,10 +1161,16 @@ class LiveTrader:
                 max_volume_participation_pct=self._max_volume_participation_pct,
                 get_volume=get_volume,
             )
-            return [
-                self._executor.request_from_event(event, sequence=index)
-                for index, event in enumerate(result.events)
-            ]
+            requests = []
+            for index, event in enumerate(result.events):
+                request = self._executor.request_from_event(event, sequence=index)
+                requests.append(
+                    self._executor.prepare_order(
+                        request,
+                        reference_price=prices[event.symbol],
+                    )
+                )
+            return requests
 
         requests: list[OrderRequest] = []
         planning_cash = self._cash
@@ -1043,15 +1205,19 @@ class LiveTrader:
             )
             planning_cash += result.cash_delta
             sequence_offset = len(requests)
-            requests.extend(
-                self._executor.request_from_event(
+            for index, event in enumerate(result.events):
+                request = self._executor.request_from_event(
                     event,
                     order_type=order_type,
                     limit_price=limit_price,
                     sequence=sequence_offset + index,
                 )
-                for index, event in enumerate(result.events)
-            )
+                requests.append(
+                    self._executor.prepare_order(
+                        request,
+                        reference_price=prices[event.symbol],
+                    )
+                )
         return requests
 
     def _execute_live_intent(
@@ -1357,8 +1523,8 @@ class LiveTrader:
     def _get_last_price(self, sym: str, ps: PositionState) -> float:
         return self._last_prices.get(sym, ps.entry_price)
 
-    def _get_cost_model(self, _sym: str) -> CostModel:
-        return self._executor.cost_model
+    def _get_cost_model(self, sym: str) -> CostModel:
+        return self._executor.get_cost_model(sym)
 
     def _eval_equity_snapshot(self) -> tuple[float, dict[str, Position]]:
         """Shared MTM + snapshot computation."""

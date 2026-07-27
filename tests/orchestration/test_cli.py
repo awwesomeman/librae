@@ -13,6 +13,7 @@ from librae.core.run_config import RunConfig
 from orchestration.cli import (
     _resolve_market_and_data_source,
     base_parser,
+    build_config,
     check_existing_run,
     parse_with_config,
 )
@@ -152,16 +153,136 @@ class TestResolveMarketAndDataSource:
         assert (market, data_source) == ("us_equity", "ibkr")
 
     def test_unregistered_symbols_without_explicit_market_raises(self):
-        with pytest.raises(ValueError, match="market/data_source must be set"):
+        with pytest.raises(ValueError, match="cannot be resolved"):
             _resolve_market_and_data_source(["AAPL", "MSFT"], None, None)
 
     def test_unregistered_symbols_with_explicit_market_is_used(self):
         market, data_source = _resolve_market_and_data_source(["AAPL", "MSFT"], "us_equity", "ibkr")
         assert (market, data_source) == ("us_equity", "ibkr")
 
-    def test_mixed_registered_and_unregistered_infers_from_registered(self):
-        market, data_source = _resolve_market_and_data_source(["MU", "AAPL"], None, None)
-        assert (market, data_source) == ("us_equity", "ibkr")
+    def test_mixed_registered_and_unregistered_requires_explicit_route(self):
+        with pytest.raises(ValueError, match="AAPL"):
+            _resolve_market_and_data_source(["MU", "AAPL"], None, None)
+
+    def test_mixed_registered_symbols_resolve_to_multi(self):
+        market, data_source = _resolve_market_and_data_source(["MU", "BTCUSDT"], None, None)
+        assert (market, data_source) == ("multi", "multi")
+
+    def test_per_symbol_route_resolves_mixed_unregistered_symbols(self):
+        routes = {
+            "AAPL": {"market": "us_equity", "data_source": "ibkr"},
+            "BTC-USD": {"market": "crypto", "data_source": "binance_spot"},
+        }
+        market, data_source = _resolve_market_and_data_source(
+            ["AAPL", "BTC-USD"], None, None, routes
+        )
+        assert (market, data_source) == ("multi", "multi")
+
+
+@pytest.mark.usefixtures("_clear_argv")
+class TestBuildConfig:
+    def test_preserves_per_symbol_cost_and_route_overrides(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbols: [AAPL]
+                  timeframe: 1d
+                  market: us_equity
+                  data_source: ibkr
+                  broker: ibkr
+                  symbol_overrides:
+                    AAPL:
+                      multiplier: 1.0
+                  instrument_overrides:
+                    AAPL:
+                      data_adapter: ibkr
+                      currency: USD
+                      security_type: STK
+                """
+            )
+        )
+
+        cfg = build_config("test_strat", str(tmp_path / "run.py"))
+
+        assert cfg.symbol_overrides == {"AAPL": {"multiplier": 1.0}}
+        assert cfg.broker == "ibkr"
+        assert cfg.annual_periods == 252
+        assert cfg.instrument_overrides == {
+            "AAPL": {
+                "data_adapter": "ibkr",
+                "currency": "USD",
+                "security_type": "STK",
+            }
+        }
+
+    def test_mixed_data_sources_require_explicit_annual_periods(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbols: [MU, BTCUSDT]
+                  timeframe: 1d
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="annual_periods"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_unknown_data_source_requires_explicit_annual_periods(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: TEST
+                  timeframe: 1d
+                  market: test
+                  data_source: custom
+                  symbol_overrides:
+                    TEST:
+                      multiplier: 1.0
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="annual_periods"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_unknown_data_source_without_annualization_needs_no_calendar(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: TEST
+                  timeframe: 1d
+                  market: test
+                  data_source: custom
+                  perf:
+                    annualize: false
+                """
+            )
+        )
+
+        cfg = build_config("test_strat", str(tmp_path / "run.py"))
+
+        assert cfg.annualize is False
+
+    def test_annual_periods_must_be_positive(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  perf:
+                    annual_periods: 0
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="annual_periods must be positive"):
+            build_config("test_strat", str(tmp_path / "run.py"))
 
 
 def _make_cfg(**overrides) -> RunConfig:

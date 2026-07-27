@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _DATA_SOURCE_ANNUAL_PERIODS: dict[str, int] = {
     "binance_spot": 365,
-    "binance_futures": 365,
-    "tw_futures": 252,
-    "tw_equity": 252,
+    "binance_futures_continuous": 365,
+    "ibkr": 252,
+    "shioaji": 252,
 }
 
 
@@ -151,50 +151,47 @@ def _resolve_market_and_data_source(
     symbols: list[str],
     market: str | None,
     data_source: str | None,
+    instrument_overrides: dict[str, dict[str, str]] | None = None,
 ) -> tuple[str, str]:
-    """Resolve market/data_source: the built-in symbol registry is the default source, config.yaml
-    values (if given) are an explicit override — but must agree with the
-    registry for any symbol that's actually registered there, so the two
-    can't silently drift apart.
+    """Resolve routing metadata for every symbol.
 
-    Symbols not in the registry (e.g. one-off experiment tickers, or an
-    unregistered stock-picking universe) require config.yaml's market/
-    data_source to be set explicitly — there is no safe universal default
-    to fall back to (see the ValueError below for why).
+    Registry values are authoritative; run-wide values are fallbacks for
+    unregistered homogeneous universes, and instrument_overrides handles
+    mixed universes. A heterogeneous result is represented as
+    ``("multi", "multi")`` instead of borrowing the first symbol's route.
     """
     from librae.config.symbols import load_symbol_registry
 
     registry = load_symbol_registry()
+    overrides = instrument_overrides or {}
+    resolved_markets: set[str] = set()
+    resolved_sources: set[str] = set()
     for sym in symbols:
         entry = registry.get(sym)
-        if entry is None:
-            continue
-        if market is not None and market != entry.market:
+        route = overrides.get(sym, {})
+        symbol_market = route.get("market") or (entry.market if entry else market)
+        symbol_source = route.get("data_source") or (entry.data_source if entry else data_source)
+        if symbol_market is None or symbol_source is None:
+            raise ValueError(
+                f"market/data_source cannot be resolved for {sym!r}; set run-wide "
+                "values or instrument_overrides for that symbol"
+            )
+        if market not in (None, "multi") and market != symbol_market:
             raise ValueError(
                 f"config.yaml market={market!r} for {sym!r} disagrees with "
-                f"the registry ({entry.market!r}) — fix one of them."
+                f"its resolved market ({symbol_market!r})"
             )
-        if data_source is not None and data_source != entry.data_source:
+        if data_source not in (None, "multi") and data_source != symbol_source:
             raise ValueError(
                 f"config.yaml data_source={data_source!r} for {sym!r} disagrees "
-                f"with the registry ({entry.data_source!r}) — fix one of them."
+                f"with its resolved data source ({symbol_source!r})"
             )
-        market = market or entry.market
-        data_source = data_source or entry.data_source
+        resolved_markets.add(symbol_market)
+        resolved_sources.add(symbol_source)
 
-    if market is None or data_source is None:
-        # WHY no fallback: a silent default here (this used to be
-        # "crypto"/"binance_spot") means an unregistered stock universe that
-        # forgets to set market/data_source in config.yaml gets crypto's
-        # commission/tax/margin_rate applied instead — the backtest still
-        # runs and produces numbers, just silently wrong ones. Loud failure
-        # beats a plausible-looking wrong answer.
-        raise ValueError(
-            "market/data_source must be set in config.yaml — none of "
-            f"{symbols} are in the built-in registry "
-            "(librae/config/symbols.py) to infer them from."
-        )
-    return market, data_source
+    resolved_market = next(iter(resolved_markets)) if len(resolved_markets) == 1 else "multi"
+    resolved_source = next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
+    return resolved_market, resolved_source
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +204,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
 
     This is the sole factory for RunConfig. Handles:
     1. Parse start/end from params (or convert periods -> start/end)
-    2. Extract cost_overrides from strategy section
+    2. Extract per-run and per-symbol overrides
     3. Derive dry_run -> no_db
     4. Derive annual_periods from data_source if not specified in perf
     """
@@ -225,10 +222,12 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         symbols = [s.strip() for s in str(symbols_raw).split(",")]
 
     timeframe = scfg.get("timeframe", "H1")
+    instrument_overrides = scfg.get("instrument_overrides")
     market, data_source = _resolve_market_and_data_source(
         symbols,
         scfg.get("market"),
         scfg.get("data_source"),
+        instrument_overrides,
     )
     initial_balance = float(scfg.get("initial_balance", 100_000))
 
@@ -249,8 +248,9 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         # Pop it even when start/end are provided, to keep params clean.
         params.pop("periods", None)
 
-    # 2. Extract cost_overrides
+    # 2. Extract per-run and per-symbol configuration
     cost_overrides = scfg.get("cost_overrides")
+    symbol_overrides = scfg.get("symbol_overrides")
 
     # 3. dry_run -> no_db
     dry_run = args.dry_run
@@ -268,14 +268,25 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         )
     poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
 
-    # 4. Perf params (with data_source defaults)
-    default_annual = _DATA_SOURCE_ANNUAL_PERIODS.get(data_source, 365)
+    # 4. Perf params (with known exchange-calendar defaults)
+    configured_annual_periods = perf.get("annual_periods")
     if args.no_annualize:
         annualize = False
     elif perf.get("annualize") is not None:
         annualize = perf["annualize"]
     else:
         annualize = True
+    default_annual_periods = _DATA_SOURCE_ANNUAL_PERIODS.get(data_source)
+    if annualize and configured_annual_periods is None and default_annual_periods is None:
+        raise ValueError(
+            "strategy.perf.annual_periods is required when annualizing "
+            f"data_source={data_source!r}; there is no safe calendar default"
+        )
+    annual_periods = (
+        configured_annual_periods
+        if configured_annual_periods is not None
+        else default_annual_periods or 365
+    )
 
     return RunConfig(
         strategy_name=strategy_name,
@@ -285,13 +296,16 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         data_source=data_source,
         initial_balance=initial_balance,
         mode=args.mode,
+        broker=scfg.get("broker"),
         start=start,
         end=end,
         params=params or None,
         cost_overrides=cost_overrides,
+        symbol_overrides=symbol_overrides,
+        instrument_overrides=instrument_overrides,
         annualize=annualize,
         risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
-        annual_periods=int(perf.get("annual_periods", default_annual)),
+        annual_periods=int(annual_periods),
         poll_seconds=poll_seconds,
         no_db=no_db,
         dry_run=dry_run,

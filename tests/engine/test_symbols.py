@@ -9,7 +9,9 @@ from librae.config.symbols import (
     _build_registry,
     get_symbol,
     load_symbol_registry,
+    resolve_symbol,
 )
+from librae.core.run_config import RunConfig
 
 
 @pytest.fixture
@@ -27,6 +29,9 @@ class TestLoadSymbolRegistry:
         assert btc.market == "crypto"
         assert btc.data_source == "binance_spot"
         assert btc.instrument_type == "spot"
+        assert btc.data_adapter == "crypto"
+        assert btc.venue_symbol == "BTC/USDT"
+        assert btc.currency == "USDT"
         assert btc.continuous_alias is False
         assert btc.multiplier == 1.0  # auto-defaulted — not declared in the registry
         assert btc.tick_size is None  # not overridden — CostModel falls back to market_config.py
@@ -54,6 +59,9 @@ class TestInstrumentTypeValidation:
                 data_source="binance_spot",
                 instrument_type="bogus",
                 multiplier=1.0,
+                data_adapter="crypto",
+                venue_symbol="X/USDT",
+                currency="USDT",
                 tick_size=0.01,
             )
 
@@ -65,13 +73,24 @@ class TestInstrumentTypeValidation:
                 data_source="binance_spot",
                 instrument_type=t,
                 multiplier=1.0,
+                data_adapter="crypto",
+                venue_symbol="X/USDT",
+                currency="USDT",
                 tick_size=0.01,
             )
 
     def test_missing_instrument_type_raises(self):
         with pytest.raises(ValueError, match="instrument_type"):
             _build_registry(
-                {"BADSYM": {"market": "crypto", "data_source": "binance_spot", "multiplier": 1.0}}
+                {
+                    "BADSYM": {
+                        "market": "crypto",
+                        "data_source": "binance_spot",
+                        "multiplier": 1.0,
+                        "data_adapter": "crypto",
+                        "currency": "USDT",
+                    }
+                }
             )
 
 
@@ -84,6 +103,8 @@ class TestMultiplierTickSizeValidation:
                         "market": "tw_futures",
                         "data_source": "shioaji",
                         "instrument_type": "contract_monthly",
+                        "data_adapter": "shioaji",
+                        "currency": "TWD",
                         "tick_size": 1.0,
                     }
                 }
@@ -96,6 +117,8 @@ class TestMultiplierTickSizeValidation:
                     "market": "crypto",
                     "data_source": "binance_spot",
                     "instrument_type": "spot",
+                    "data_adapter": "crypto",
+                    "currency": "USDT",
                 }
             }
         )
@@ -109,6 +132,8 @@ class TestMultiplierTickSizeValidation:
                     "data_source": "binance_spot",
                     "instrument_type": "spot",
                     "multiplier": 1.0,
+                    "data_adapter": "crypto",
+                    "currency": "USDT",
                 }
             }
         )
@@ -124,3 +149,102 @@ class TestGetSymbol:
     def test_get_missing_raises(self):
         with pytest.raises(KeyError, match="NONEXISTENT"):
             get_symbol("NONEXISTENT")
+
+
+class TestResolveSymbol:
+    @staticmethod
+    def _cfg(**overrides) -> RunConfig:
+        values = {
+            "strategy_name": "x",
+            "symbols": ["AAPL"],
+            "timeframe": "1d",
+            "market": "us_equity",
+            "data_source": "ibkr",
+            "initial_balance": 100_000.0,
+            "mode": "backtest",
+        }
+        values.update(overrides)
+        return RunConfig(**values)
+
+    def test_registered_symbol_uses_venue_metadata(self):
+        info = resolve_symbol(
+            self._cfg(
+                symbols=["BTCUSDT"],
+                market="crypto",
+                data_source="binance_spot",
+            ),
+            "BTCUSDT",
+        )
+
+        assert info.data_adapter == "crypto"
+        assert info.venue_symbol == "BTC/USDT"
+        assert info.currency == "USDT"
+
+    def test_unregistered_symbol_uses_explicit_route(self):
+        info = resolve_symbol(
+            self._cfg(
+                instrument_overrides={
+                    "AAPL": {
+                        "data_adapter": "ibkr",
+                        "currency": "USD",
+                        "instrument_type": "spot",
+                        "security_type": "STK",
+                        "exchange": "SMART",
+                    }
+                },
+                symbol_overrides={"AAPL": {"multiplier": 1.0}},
+            ),
+            "AAPL",
+        )
+
+        assert info.market == "us_equity"
+        assert info.data_source == "ibkr"
+        assert info.data_adapter == "ibkr"
+        assert info.security_type == "STK"
+        assert info.exchange == "SMART"
+
+    def test_unknown_data_source_requires_adapter_route(self):
+        with pytest.raises(ValueError, match="No data adapter route"):
+            resolve_symbol(
+                self._cfg(
+                    data_source="local",
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                ),
+                "AAPL",
+            )
+
+    def test_unregistered_symbol_does_not_infer_product_type(self):
+        with pytest.raises(ValueError, match="instrument_type"):
+            resolve_symbol(
+                self._cfg(
+                    data_source="binance_spot",
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                ),
+                "AAPL",
+            )
+
+    def test_unregistered_symbol_does_not_infer_currency_from_market(self):
+        with pytest.raises(ValueError, match="currency"):
+            resolve_symbol(
+                self._cfg(
+                    data_source="binance_spot",
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    instrument_overrides={"AAPL": {"instrument_type": "spot"}},
+                ),
+                "AAPL",
+            )
+
+    def test_ibkr_route_requires_security_type(self):
+        with pytest.raises(ValueError, match="security_type"):
+            resolve_symbol(
+                self._cfg(
+                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    instrument_overrides={
+                        "AAPL": {
+                            "instrument_type": "spot",
+                            "currency": "USD",
+                        }
+                    },
+                ),
+                "AAPL",
+            )

@@ -2,9 +2,8 @@
 
 Concrete adapters (CryptoAdapter, ShioajiAdapter, etc.) are sync and
 duck-typed — their capabilities are matched by shape rather than an ABC.
-This module only holds the
-two pieces every adapter actually shares: static metadata and env-var
-credential loading.
+This module only holds metadata, credential loading, and the small validation
+or rounding helpers that are identical across adapters.
 
 (An async ABC layer — MarketDataAdapter/OrderAdapter/AccountAdapter plus
 canonical L1Quote/TradeTick/Bar/Order/Fill/Position types — used to live
@@ -17,9 +16,14 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from math import isfinite
 from typing import Any, Self
+
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # get_position() shared shape
@@ -50,6 +54,63 @@ def find_position(
                 "unrealized_pnl": pnl(pos),
             }
     return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+
+
+def drop_incomplete_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Drop a final candle whose interval has not closed yet."""
+    if df.empty:
+        return df
+    from librae.core.utils import interval_to_timedelta
+
+    last_ts = pd.Timestamp(df["ts"].iloc[-1]).to_pydatetime()
+    if last_ts > datetime.now(UTC) - interval_to_timedelta(timeframe):
+        return df.iloc[:-1]
+    return df
+
+
+def floor_to_step(value: float, step: float) -> float:
+    """Round a positive quantity down to an exchange-supported step."""
+    if not isfinite(value) or value <= 0 or not isfinite(step) or step <= 0:
+        raise ValueError("value and step must be positive and finite")
+    units = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_FLOOR)
+    return float(units * Decimal(str(step)))
+
+
+def validate_order_signal(signal: Mapping[str, Any]) -> None:
+    """Reject ambiguous canonical order fields before venue conversion."""
+    symbol = signal.get("symbol")
+    if not isinstance(symbol, str) or not symbol:
+        raise ValueError("symbol must be a non-empty string")
+    side = signal.get("side")
+    if side not in ("buy", "sell"):
+        raise ValueError("side must be 'buy' or 'sell'")
+    order_type = signal.get("order_type")
+    if order_type not in ("market", "limit"):
+        raise ValueError("order_type must be 'market' or 'limit'")
+    try:
+        quantity = float(signal["quantity"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("quantity must be positive and finite") from exc
+    if not isfinite(quantity) or quantity <= 0:
+        raise ValueError("quantity must be positive and finite")
+    if order_type == "limit":
+        try:
+            price = float(signal["price"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("limit price must be positive and finite") from exc
+        if not isfinite(price) or price <= 0:
+            raise ValueError("limit price must be positive and finite")
+
+
+def passive_price(price: float, tick_size: float, side: str) -> float:
+    """Round a limit price without making it more aggressive."""
+    if not isfinite(price) or price <= 0:
+        raise ValueError("price must be positive and finite")
+    if side not in ("buy", "sell"):
+        raise ValueError("side must be 'buy' or 'sell'")
+    rounding = ROUND_FLOOR if side == "buy" else ROUND_CEILING
+    units = (Decimal(str(price)) / Decimal(str(tick_size))).to_integral_value(rounding=rounding)
+    return float(units * Decimal(str(tick_size)))
 
 
 # ---------------------------------------------------------------------------

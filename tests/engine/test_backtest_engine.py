@@ -412,6 +412,31 @@ class TestMultiAsset:
         assert bt._get_cost_model("TXFR1").multiplier == 200.0
         assert bt._get_cost_model("MXFR1").multiplier == 50.0
 
+    def test_per_symbol_market_costs_resolved_independently_via_cfg(self) -> None:
+        from librae.core.run_config import RunConfig
+
+        df = pd.concat(
+            [
+                _make_multiindex_df([100.0] * 5, symbol="TXFR1"),
+                _make_multiindex_df([100.0] * 5, symbol="MU"),
+            ]
+        )
+        cfg = RunConfig(
+            strategy_name="t",
+            symbols=["TXFR1", "MU"],
+            timeframe="1d",
+            market="multi",
+            data_source="multi",
+            initial_balance=100_000.0,
+            mode="backtest",
+        )
+
+        bt = Backtest(data=df, strategy=HoldStrategy(), cfg=cfg)
+
+        assert bt._get_cost_model("TXFR1").min_commission == 100.0
+        assert bt._get_cost_model("MU").min_commission == 0.0
+        assert bt._get_cost_model("MU").short_margin_rate == 0.5
+
     def test_per_symbol_multiplier_via_symbol_overrides_no_yaml_edit_needed(self) -> None:
         """An unregistered symbol works via cfg.symbol_overrides alone —
         no symbols.py registry entry required."""

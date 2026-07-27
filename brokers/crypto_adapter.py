@@ -15,12 +15,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, find_position
+from .base import (
+    AdapterInfo,
+    CredentialConfig,
+    drop_incomplete_ohlcv,
+    find_position,
+    validate_order_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +40,6 @@ def _require_ccxt() -> object:
         raise ImportError(
             "ccxt is required for CryptoAdapter. Install it with: pip install ccxt"
         ) from e
-
-
-def _timeframe_to_delta(timeframe: str) -> pd.Timedelta:
-    """Convert CCXT timeframe string to a pandas Timedelta."""
-    from librae.core.utils import interval_to_timedelta
-
-    return interval_to_timedelta(timeframe)
 
 
 def _patch_binance_sandbox_urls(exchange) -> None:
@@ -180,12 +178,7 @@ class CryptoAdapter:
             )
 
         if drop_incomplete and len(df) > 0:
-            now = datetime.now(tz=UTC)
-            last_ts = df["ts"].iloc[-1]
-            # WHY: if the last bar's timestamp is within the current candle
-            # interval, it's still forming and should be dropped
-            if last_ts.to_pydatetime() > now - _timeframe_to_delta(timeframe):
-                df = df.iloc[:-1]
+            df = drop_incomplete_ohlcv(df, timeframe)
 
         return df
 
@@ -275,6 +268,69 @@ class CryptoAdapter:
                 "Provide api_key/api_secret to enable trading."
             )
 
+    def prepare_order(self, signal: dict) -> dict:
+        """Apply CCXT precision/limit rules and reject spot short opens."""
+        validate_order_signal(signal)
+        self._exchange.load_markets()
+        symbol = signal["symbol"]
+        market = self._exchange.market(symbol)
+        prepared = dict(signal)
+
+        quantity = float(self._exchange.amount_to_precision(symbol, signal["quantity"]))
+        if quantity <= 0:
+            raise ValueError(f"{symbol} quantity rounds to zero")
+        prepared["quantity"] = quantity
+
+        price = signal.get("price")
+        if price is not None:
+            price = float(self._exchange.price_to_precision(symbol, price))
+            if price <= 0:
+                raise ValueError(f"{symbol} price rounds to zero")
+            prepared["price"] = price
+
+        is_spot = bool(market.get("spot") or market.get("type") == "spot")
+        if (
+            is_spot
+            and signal["side"] == "sell"
+            and signal.get("position_effect") in ("open", "add")
+        ):
+            raise ValueError(f"{symbol} spot inventory cannot open a short position")
+
+        limits = market.get("limits") or {}
+        self._validate_limit(quantity, limits.get("amount"), "quantity", symbol)
+        if price is not None:
+            self._validate_limit(price, limits.get("price"), "price", symbol)
+        reference_price = price or signal.get("reference_price")
+        if reference_price is not None:
+            raw_contract_size = market.get("contractSize")
+            is_contract = bool(
+                market.get("contract") or market.get("type") in ("future", "swap", "option")
+            )
+            if is_contract and raw_contract_size is None:
+                raise ValueError(f"{symbol} derivative is missing contractSize")
+            contract_size = float(raw_contract_size or 1.0)
+            if contract_size <= 0:
+                raise ValueError(f"{symbol} contractSize must be positive")
+            notional = quantity * float(reference_price) * contract_size
+            self._validate_limit(notional, limits.get("cost"), "notional", symbol)
+        return prepared
+
+    @staticmethod
+    def _validate_limit(
+        value: float,
+        limits: dict | None,
+        name: str,
+        symbol: str,
+    ) -> None:
+        if not limits:
+            return
+        minimum = limits.get("min")
+        maximum = limits.get("max")
+        if minimum is not None and value < float(minimum):
+            raise ValueError(f"{symbol} {name} {value} is below minimum {minimum}")
+        if maximum is not None and value > float(maximum):
+            raise ValueError(f"{symbol} {name} {value} exceeds maximum {maximum}")
+
     def place_order(self, signal: dict) -> dict:
         """Place an order.
 
@@ -284,7 +340,8 @@ class CryptoAdapter:
         ccxt's unified ``clientOrderId`` param, exchange-side dedup/audit).
         """
         self._require_auth()
-        order_type = signal.get("order_type", "market")
+        validate_order_signal(signal)
+        order_type = signal["order_type"]
         price = signal.get("price")
         params = {}
         if signal.get("client_order_id"):
@@ -360,12 +417,30 @@ class CryptoAdapter:
         Returns ``{symbol, size, avg_price, unrealized_pnl}``.
         """
         self._require_auth()
+        self._exchange.load_markets()
+        market = self._exchange.market(symbol)
+        if market.get("spot") or market.get("type") == "spot":
+            balance = self._exchange.fetch_balance()
+            base = market["base"]
+            entry = balance.get(base) or {}
+            total = entry.get("total")
+            if total is None and isinstance(balance.get("total"), dict):
+                total = balance["total"].get(base)
+            return {
+                "symbol": symbol,
+                "size": float(total or 0.0),
+                "avg_price": None,
+                "unrealized_pnl": 0.0,
+            }
+
         positions = self._exchange.fetch_positions([symbol])
         return find_position(
             positions,
             symbol,
             matches=lambda p: p.get("symbol") == symbol,
-            size=lambda p: float(p.get("contracts", 0)),
+            size=lambda p: (
+                float(p.get("contracts", 0)) * (-1.0 if p.get("side") == "short" else 1.0)
+            ),
             avg_price=lambda p: float(p.get("entryPrice", 0) or 0),
             pnl=lambda p: float(p.get("unrealizedPnl", 0) or 0),
         )

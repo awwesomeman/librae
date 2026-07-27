@@ -121,6 +121,26 @@ class TestFetchOhlcv:
 
         assert len(df) == 2
 
+    def test_drop_incomplete_applies_completed_bar_filter(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
+
+        with (
+            patch(
+                "brokers.ibkr_adapter._require_ib_async",
+                return_value=_mock_ib_async_module(_make_bars_df()),
+            ),
+            patch(
+                "brokers.ibkr_adapter.drop_incomplete_ohlcv",
+                side_effect=lambda df, _timeframe: df.iloc[:-1],
+            ) as drop_incomplete,
+        ):
+            df = adapter.fetch_ohlcv("MU", "1m", drop_incomplete=True)
+
+        assert len(df) == 2
+        drop_incomplete.assert_called_once()
+
     def test_unsupported_timeframe_raises(self):
         adapter = _make_adapter()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
@@ -186,6 +206,32 @@ class TestPlaceOrder:
         }
         return mock
 
+    def test_prepare_order_uses_contract_size_and_tick_rules(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                minSize=0.1,
+                sizeIncrement=0.1,
+                suggestedSizeIncrement=0.1,
+                minTick=0.01,
+            )
+        )
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "MU",
+                "side": "sell",
+                "quantity": 1.29,
+                "order_type": "limit",
+                "price": 100.001,
+                "security_type": "STK",
+                "currency": "USD",
+            }
+        )
+
+        assert prepared["quantity"] == 1.2
+        assert prepared["price"] == 100.01
+
     def test_market_order_uses_market_order_class(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
@@ -202,7 +248,16 @@ class TestPlaceOrder:
         with patch(
             "brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()
         ):
-            result = adapter.place_order({"symbol": "MU", "side": "buy", "quantity": 100})
+            result = adapter.place_order(
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "quantity": 100,
+                    "order_type": "market",
+                    "security_type": "STK",
+                    "currency": "USD",
+                }
+            )
 
         adapter._ib.placeOrder.assert_called_once_with(
             "mock_contract",
@@ -236,6 +291,8 @@ class TestPlaceOrder:
                     "quantity": 50,
                     "order_type": "limit",
                     "price": 900.0,
+                    "security_type": "STK",
+                    "currency": "USD",
                 }
             )
 
@@ -263,6 +320,9 @@ class TestPlaceOrder:
                     "symbol": "MU",
                     "side": "buy",
                     "quantity": 100,
+                    "order_type": "market",
+                    "security_type": "STK",
+                    "currency": "USD",
                     "client_order_id": "strat-MU-open-20260101T000000",
                 }
             )

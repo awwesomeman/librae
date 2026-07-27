@@ -74,6 +74,9 @@ class RunConfig:
     data_source: str
     initial_balance: float
     mode: Literal["backtest", "sim", "live"]
+    # Explicit live execution route. It is never inferred from market,
+    # data_source, or symbol; instrument_overrides[symbol]["broker"] wins.
+    broker: str | None = None
     start: str | None = None
     end: str | None = None
     params: dict[str, Any] | None = None
@@ -88,6 +91,10 @@ class RunConfig:
     # same tw_futures run).
     cost_overrides: dict[str, float] | None = None
     symbol_overrides: dict[str, dict[str, float]] | None = None
+    # Broker/data routing metadata for one symbol. Cost fields remain in
+    # symbol_overrides so accounting inputs and venue identifiers cannot be
+    # accidentally mixed into CostModel construction.
+    instrument_overrides: dict[str, dict[str, str]] | None = None
 
     # === Perf params (stored in DB backtest_runs.perf_params, display only) ===
     annualize: bool = True
@@ -103,6 +110,14 @@ class RunConfig:
 
     def __post_init__(self) -> None:
         """Validate invariants. Raise, never mutate (frozen purity)."""
+        if not self.symbols or any(not symbol for symbol in self.symbols):
+            raise ValueError("symbols must contain non-empty identifiers")
+        if len(self.symbols) != len(set(self.symbols)):
+            raise ValueError("symbols must not contain duplicates")
+        if not self.market or not self.data_source:
+            raise ValueError("market and data_source must be non-empty")
+        if self.annual_periods <= 0:
+            raise ValueError("annual_periods must be positive")
         if self.dry_run and not self.no_db:
             raise ValueError("dry_run=True requires no_db=True; use build_config()")
 
@@ -124,8 +139,9 @@ class RunConfig:
     def config_hash(self) -> str:
         """Deterministic hash of all result-affecting config.
 
-        Includes: strategy_name, symbols, timeframe, market, data_source,
-        initial_balance, start, end, params, cost_overrides, symbol_overrides.
+        Includes: strategy_name, symbols, timeframe, market, data_source, broker,
+        initial_balance, start, end, params, cost_overrides, symbol_overrides,
+        instrument_overrides.
         Excludes: perf params, behavior params.
         """
         blob = json.dumps(
@@ -136,12 +152,14 @@ class RunConfig:
                     "timeframe": self.timeframe,
                     "market": self.market,
                     "data_source": self.data_source,
+                    "broker": self.broker,
                     "initial_balance": self.initial_balance,
                     "start": self.start,
                     "end": self.end,
                     "params": self.params,
                     "cost_overrides": self.cost_overrides,
                     "symbol_overrides": self.symbol_overrides,
+                    "instrument_overrides": self.instrument_overrides,
                 }
             ),
             sort_keys=True,
@@ -168,6 +186,7 @@ class RunConfig:
             f"  timeframe:   {self.timeframe}",
             f"  mode:        {self.mode}",
             f"  data_source: {self.data_source}",
+            f"  broker:      {self.broker}",
             f"  start:       {self.start}",
             f"  end:         {self.end}",
             f"  config_hash: {self.config_hash}",
@@ -176,6 +195,7 @@ class RunConfig:
             f"  params:      {self.params}",
             f"  cost_overrides: {self.cost_overrides}",
             f"  symbol_overrides: {self.symbol_overrides}",
+            f"  instrument_overrides: {self.instrument_overrides}",
             "  --- perf params (stored in DB, display only) ---",
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",
