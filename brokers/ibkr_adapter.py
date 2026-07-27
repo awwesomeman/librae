@@ -35,7 +35,7 @@ from math import isfinite
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, find_position
+from .base import AdapterInfo, CredentialConfig, drop_incomplete_ohlcv, find_position
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,7 @@ class IBKRAdapter:
         exchange: str | None = None,
         currency: str = "USD",
         use_rth: bool = False,
+        drop_incomplete: bool = False,
     ) -> pd.DataFrame:
         """Fetch OHLCV via IBKR's reqHistoricalData.
 
@@ -197,6 +198,7 @@ class IBKRAdapter:
                 can't detect that mismatch itself since it doesn't know
                 where the backtest data came from; the caller is
                 responsible for passing the same value both places.
+            drop_incomplete: Drop the current still-forming candle.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is a UTC-aware datetime.
@@ -241,6 +243,8 @@ class IBKRAdapter:
             df = df[(df["ts"] >= start_dt) & (df["ts"] <= end_dt)]
         elif len(df) > limit:
             df = df.tail(limit)
+        if drop_incomplete:
+            df = drop_incomplete_ohlcv(df, timeframe)
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------

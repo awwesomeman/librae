@@ -25,7 +25,7 @@ from numbers import Real
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, find_position
+from .base import AdapterInfo, CredentialConfig, drop_incomplete_ohlcv, find_position
 from .taipei_time import resample_taifex_ohlcv, shioaji_ts_ns_to_epoch
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,7 @@ class ShioajiAdapter:
         start: datetime | str | None = None,
         end: datetime | str | None = None,
         limit: int = 200,
+        drop_incomplete: bool = False,
     ) -> pd.DataFrame:
         """Fetch OHLCV via Shioaji kbars API.
 
@@ -154,6 +155,7 @@ class ShioajiAdapter:
             start/end: Date range as datetime or ``"YYYY-MM-DD"`` string.
                 If omitted, fetches the most recent *limit* bars.
             limit: Max bars (used only when start/end are omitted).
+            drop_incomplete: Drop the current still-forming candle.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is a true UTC-aware datetime.
@@ -186,6 +188,8 @@ class ShioajiAdapter:
             target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
             df = resample_taifex_ohlcv(df.set_index("ts"), target_seconds).reset_index()
 
+        if drop_incomplete:
+            df = drop_incomplete_ohlcv(df, timeframe)
         if not start and not end and len(df) > limit:
             df = df.tail(limit).reset_index(drop=True)
 

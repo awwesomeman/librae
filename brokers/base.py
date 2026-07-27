@@ -19,7 +19,10 @@ import dataclasses
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Self
+
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # get_position() shared shape
@@ -50,6 +53,18 @@ def find_position(
                 "unrealized_pnl": pnl(pos),
             }
     return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+
+
+def drop_incomplete_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Drop a final candle whose interval has not closed yet."""
+    if df.empty:
+        return df
+    from librae.core.utils import interval_to_timedelta
+
+    last_ts = pd.Timestamp(df["ts"].iloc[-1]).to_pydatetime()
+    if last_ts > datetime.now(UTC) - interval_to_timedelta(timeframe):
+        return df.iloc[:-1]
+    return df
 
 
 # ---------------------------------------------------------------------------

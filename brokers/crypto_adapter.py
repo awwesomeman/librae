@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 
-from .base import AdapterInfo, CredentialConfig, find_position
+from .base import AdapterInfo, CredentialConfig, drop_incomplete_ohlcv, find_position
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +34,6 @@ def _require_ccxt() -> object:
         raise ImportError(
             "ccxt is required for CryptoAdapter. Install it with: pip install ccxt"
         ) from e
-
-
-def _timeframe_to_delta(timeframe: str) -> pd.Timedelta:
-    """Convert CCXT timeframe string to a pandas Timedelta."""
-    from librae.core.utils import interval_to_timedelta
-
-    return interval_to_timedelta(timeframe)
 
 
 def _patch_binance_sandbox_urls(exchange) -> None:
@@ -180,12 +172,7 @@ class CryptoAdapter:
             )
 
         if drop_incomplete and len(df) > 0:
-            now = datetime.now(tz=UTC)
-            last_ts = df["ts"].iloc[-1]
-            # WHY: if the last bar's timestamp is within the current candle
-            # interval, it's still forming and should be dropped
-            if last_ts.to_pydatetime() > now - _timeframe_to_delta(timeframe):
-                df = df.iloc[:-1]
+            df = drop_incomplete_ohlcv(df, timeframe)
 
         return df
 

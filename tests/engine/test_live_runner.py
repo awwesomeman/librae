@@ -70,7 +70,7 @@ def _broker_report(
         "amount": quantity,
         "filled": quantity if filled is None else filled,
         "average": average,
-        "fee": {"cost": fee, "currency": "USD"},
+        "fee": {"cost": fee, "currency": ""},
         "lastTradeTimestamp": int(
             (executed_at or datetime(2025, 1, 1, tzinfo=UTC)).timestamp() * 1000
         ),
@@ -354,7 +354,9 @@ class TestLiveTrader:
             feature_fn or _simple_feature_fn,
             cfg=test_cfg,
             adapter=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
-            cost_model=(executor or LiveExecutor(_zero_cost_model(), simulation=True)).cost_model,
+            cost_model=(
+                executor.get_cost_model(test_cfg.symbol) if executor else _zero_cost_model()
+            ),
             on_bar=None,
             on_order_event=None,
             on_ohlcv=None,
@@ -762,7 +764,8 @@ class TestLiveTrader:
         assert mock_order_adapter.place_order.call_count >= 1
         first_call_signal = mock_order_adapter.place_order.call_args_list[0].args[0]
         assert first_call_signal["side"] == "buy"
-        assert first_call_signal["symbol"] == "BTCUSDT"
+        assert first_call_signal["symbol"] == "BTC/USDT"
+        assert first_call_signal["canonical_symbol"] == "BTCUSDT"
 
     def test_live_state_uses_broker_execution_truth(self):
         mock_order_adapter = _mock_order_adapter()
@@ -876,7 +879,7 @@ class TestLiveTrader:
 
     def test_live_mode_without_order_adapter_raises(self):
         cfg = _test_cfg(mode="live")
-        with pytest.raises(ValueError, match="order_adapter"):
+        with pytest.raises(ValueError, match="order adapters"):
             self._make_runner(cfg=cfg)
 
     def test_reconciles_open_broker_position_at_startup(self):
@@ -1015,10 +1018,17 @@ class TestLiveTrader:
         ]
         assert len(drift_alerts) == 1
 
-    def test_market_without_currency_mapping_is_skipped(self):
+    def test_multi_currency_cash_reconciliation_is_skipped(self):
         mock_order_adapter = _mock_order_adapter()
 
-        cfg = _test_cfg(mode="live", symbols=["BTCUSDT"], market="crypto")
+        cfg = _test_cfg(
+            mode="live",
+            symbols=["AAA", "BBB"],
+            instrument_overrides={
+                "AAA": {"currency": "USD"},
+                "BBB": {"currency": "USDT"},
+            },
+        )
         runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
 
         runner.run(max_iterations=1)  # must not raise
@@ -1483,7 +1493,7 @@ class TestLiveExecutionLifecycle:
 
         runner._halt_live(title="Operator Halt", message="test")
 
-        adapter.cancel_order.assert_called_once_with("open-1", "BTCUSDT")
+        adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
         assert runner._active_orders == []
         assert runner._halted is True
 
@@ -1661,12 +1671,82 @@ class TestCryptoLiveAutoWiring:
 
     def test_auto_builds_order_adapter_from_env(self, monkeypatch):
         trader, adapter_instance = self._build(monkeypatch)
-        assert trader._executor._order_adapter is adapter_instance
+        assert trader._executor.get_order_adapter("BTCUSDT") is adapter_instance
 
     def test_explicit_order_adapter_not_overridden(self, monkeypatch):
         explicit = MagicMock()
         trader, _ = self._build(monkeypatch, order_adapter=explicit)
-        assert trader._executor._order_adapter is explicit
+        assert trader._executor.get_order_adapter("BTCUSDT") is explicit
+
+
+class TestMultiAdapterRouting:
+    def test_executor_routes_orders_by_canonical_symbol(self):
+        crypto = _mock_order_adapter()
+        ibkr = _mock_order_adapter()
+        executor = LiveExecutor(
+            {"BTCUSDT": _zero_cost_model(), "MU": _zero_cost_model()},
+            simulation=False,
+            order_adapter={"BTCUSDT": crypto, "MU": ibkr},
+            strategy_name="test",
+        )
+
+        assert executor.get_order_adapter("BTCUSDT") is crypto
+        assert executor.get_order_adapter("MU") is ibkr
+
+    def test_live_trader_resolves_costs_per_symbol(self):
+        cfg = _test_cfg(
+            symbols=["BTCUSDT", "MU"],
+            market="multi",
+            data_source="multi",
+        )
+        fetchers = {
+            "BTCUSDT": lambda *args, **kwargs: _make_ohlcv_df(),
+            "MU": lambda *args, **kwargs: _make_ohlcv_df(),
+        }
+
+        trader = LiveTrader(
+            _HoldStrategy(),
+            _simple_feature_fn,
+            cfg=cfg,
+            adapter=fetchers,
+            on_bar=None,
+            on_order_event=None,
+            on_ohlcv=None,
+            on_heartbeat=None,
+            on_signal_outcome=None,
+            warmup_fetcher=None,
+            state_store=MemoryLiveStateStore(),
+        )
+
+        assert trader._get_cost_model("BTCUSDT").commission_rate == 0.001
+        assert trader._get_cost_model("MU").long_margin_rate == 1.0
+        assert trader._get_cost_model("MU").short_margin_rate == 0.5
+
+
+class TestIBKRLiveAutoWiring:
+    def test_us_equity_builds_ibkr_instead_of_crypto(self):
+        with patch("brokers.ibkr_adapter.IBKRAdapter") as mock_cls:
+            mock_cls.return_value = _mock_order_adapter()
+            trader = LiveTrader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                cfg=_test_cfg(
+                    mode="live",
+                    symbols=["MU"],
+                    market="us_equity",
+                    data_source="ibkr",
+                ),
+                cost_model=_zero_cost_model(),
+                on_bar=None,
+                on_order_event=None,
+                on_ohlcv=None,
+                on_heartbeat=None,
+                on_signal_outcome=None,
+                state_store=MemoryLiveStateStore(),
+            )
+
+        mock_cls.assert_called_once_with(trading_enabled=True)
+        assert trader._executor.get_order_adapter("MU") is mock_cls.return_value
 
 
 class TestShioajiLiveAutoWiring:
@@ -1698,7 +1778,7 @@ class TestShioajiLiveAutoWiring:
             )
 
         # Same authenticated session used for fetching and for order placement.
-        assert trader._executor._order_adapter is mock_cls.return_value
+        assert trader._executor.get_order_adapter("TXFR1") is mock_cls.return_value
 
     def test_strategy_signal_triggers_shioaji_place_order(self):
         """End-to-end: strategy emits a buy, next bar's fill is mirrored to
@@ -1716,7 +1796,9 @@ class TestShioajiLiveAutoWiring:
                 quantity=signal["quantity"],
                 average=104.25,
             )
-            mock_shioaji.fetch_ohlcv.side_effect = lambda symbol, tf, limit: fetcher()
+            mock_shioaji.fetch_ohlcv.side_effect = lambda symbol, tf, limit, drop_incomplete=False: (
+                fetcher()
+            )
             mock_cls.return_value = mock_shioaji
 
             trader = LiveTrader(

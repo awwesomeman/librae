@@ -253,7 +253,12 @@ def get_symbol(symbol: str) -> SymbolInfo:
     return _BUILTIN_SYMBOLS[symbol]
 
 
-def resolve_symbol(cfg: RunConfig, symbol: str) -> SymbolInfo:
+def resolve_symbol(
+    cfg: RunConfig,
+    symbol: str,
+    *,
+    multiplier: float | None = None,
+) -> SymbolInfo:
     """Resolve accounting and broker metadata for one configured symbol.
 
     Registry values are authoritative for registered symbols. Run-wide
@@ -278,7 +283,11 @@ def resolve_symbol(cfg: RunConfig, symbol: str) -> SymbolInfo:
             "set instrument_overrides[symbol]['adapter']"
         )
 
-    multiplier = costs.get("multiplier", registered.multiplier if registered else None)
+    multiplier = (
+        multiplier
+        if multiplier is not None
+        else costs.get("multiplier", registered.multiplier if registered else None)
+    )
     if multiplier is None:
         raise ValueError(
             f"No multiplier for symbol={symbol!r}; set symbol_overrides[symbol]['multiplier']"

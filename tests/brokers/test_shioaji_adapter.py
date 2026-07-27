@@ -102,6 +102,20 @@ class TestFetchOhlcv:
 
         assert len(df) == 2
 
+    def test_drop_incomplete_applies_completed_bar_filter(self):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+
+        with patch(
+            "brokers.shioaji_adapter.drop_incomplete_ohlcv",
+            side_effect=lambda df, _timeframe: df.iloc[:-1],
+        ) as drop_incomplete:
+            df = adapter.fetch_ohlcv("TXFR1", "1m", drop_incomplete=True)
+
+        assert len(df) == 2
+        drop_incomplete.assert_called_once()
+
 
 class TestReadOnlyGuard:
     def test_place_order_raises_without_ca(self):

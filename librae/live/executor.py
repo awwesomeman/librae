@@ -8,6 +8,7 @@ Portfolio state is updated by ``LiveTrader`` only from confirmed fills.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
@@ -19,12 +20,14 @@ from librae.core.cost_model import CostModel
 if TYPE_CHECKING:
     from notifications.telegram import TelegramAdapter
 
+    from librae.config.symbols import SymbolInfo
     from librae.core.executor import OrderEvent
 
 logger = logging.getLogger(__name__)
 
 OrderSide = Literal["buy", "sell"]
 OrderType = Literal["market", "limit"]
+PositionEffect = Literal["open", "add", "reduce", "close"]
 OrderStatus = Literal[
     "submitted",
     "accepted",
@@ -47,10 +50,17 @@ class OrderRequest:
     submitted_at: datetime
     reason: str = ""
     limit_price: float | None = None
+    venue_symbol: str | None = None
+    position_effect: PositionEffect = "open"
+    security_type: str | None = None
+    exchange: str | None = None
+    currency: str | None = None
 
     def __post_init__(self) -> None:
         if not self.client_order_id or not self.symbol:
             raise ValueError("client_order_id and symbol must be non-empty")
+        if self.venue_symbol is not None and not self.venue_symbol:
+            raise ValueError("venue_symbol must be non-empty when supplied")
         if not isfinite(self.quantity) or self.quantity <= 0:
             raise ValueError("order quantity must be positive and finite")
         if self.submitted_at.tzinfo is None:
@@ -63,12 +73,18 @@ class OrderRequest:
 
     def to_signal(self) -> dict:
         signal = {
-            "symbol": self.symbol,
+            "symbol": self.venue_symbol or self.symbol,
+            "canonical_symbol": self.symbol,
             "side": self.side,
             "quantity": self.quantity,
             "order_type": self.order_type,
             "client_order_id": self.client_order_id,
+            "position_effect": self.position_effect,
         }
+        for key in ("security_type", "exchange", "currency"):
+            value = getattr(self, key)
+            if value is not None:
+                signal[key] = value
         if self.limit_price is not None:
             signal["price"] = self.limit_price
         return signal
@@ -121,18 +137,24 @@ class LiveExecutor:
 
     def __init__(
         self,
-        cost_model: CostModel,
+        cost_model: CostModel | Mapping[str, CostModel],
         *,
         simulation: bool = True,
         telegram: TelegramAdapter | None = None,
         strategy_name: str = "",
-        order_adapter: OrderAdapter | None = None,
+        order_adapter: OrderAdapter | Mapping[str, OrderAdapter] | None = None,
+        instruments: Mapping[str, SymbolInfo] | None = None,
     ) -> None:
         if not simulation and order_adapter is None:
             raise ValueError(
                 "Live mode (simulation=False) requires an order_adapter capable "
                 "of placing real orders."
             )
+        order_adapters = (
+            dict(order_adapter)
+            if isinstance(order_adapter, Mapping)
+            else ({"__default__": order_adapter} if order_adapter is not None else {})
+        )
         if not simulation:
             required = (
                 "place_order",
@@ -141,22 +163,27 @@ class LiveExecutor:
                 "list_open_orders",
                 "cancel_order",
             )
-            missing = [
-                name for name in required if not callable(getattr(order_adapter, name, None))
-            ]
-            if missing:
-                raise ValueError(
-                    "Live order_adapter is missing lifecycle methods: " + ", ".join(missing)
-                )
-        self._cost_model = cost_model
+            for symbol, adapter in order_adapters.items():
+                missing = [name for name in required if not callable(getattr(adapter, name, None))]
+                if missing:
+                    raise ValueError(
+                        f"Live order_adapter for {symbol!r} is missing lifecycle methods: "
+                        + ", ".join(missing)
+                    )
+        self._cost_models = (
+            dict(cost_model) if isinstance(cost_model, Mapping) else {"__default__": cost_model}
+        )
         self._simulation = simulation
         self._telegram = telegram
         self._strategy_name = strategy_name
-        self._order_adapter = order_adapter
+        self._order_adapters = order_adapters
+        self._instruments = dict(instruments or {})
 
-    @property
-    def cost_model(self) -> CostModel:
-        return self._cost_model
+    def get_cost_model(self, symbol: str) -> CostModel:
+        try:
+            return self._cost_models.get(symbol) or self._cost_models["__default__"]
+        except KeyError as exc:
+            raise ValueError(f"No cost model configured for {symbol!r}") from exc
 
     @property
     def simulation(self) -> bool:
@@ -170,9 +197,13 @@ class LiveExecutor:
     def strategy_name(self) -> str:
         return self._strategy_name
 
-    @property
-    def order_adapter(self) -> OrderAdapter | None:
-        return self._order_adapter
+    def get_order_adapter(self, symbol: str) -> OrderAdapter | None:
+        if self._simulation:
+            return None
+        try:
+            return self._order_adapters.get(symbol) or self._order_adapters["__default__"]
+        except KeyError as exc:
+            raise ValueError(f"No order adapter configured for {symbol!r}") from exc
 
     def request_from_event(
         self,
@@ -193,6 +224,7 @@ class LiveExecutor:
             f"{self._strategy_name}-{event.symbol}-{event.event_type}-"
             f"{event.ts:%Y%m%dT%H%M%S%f}-{sequence}"
         )
+        instrument = self._instruments.get(event.symbol)
         return OrderRequest(
             client_order_id=client_order_id,
             symbol=event.symbol,
@@ -202,6 +234,11 @@ class LiveExecutor:
             submitted_at=event.ts,
             reason=event.reason,
             limit_price=limit_price,
+            venue_symbol=instrument.venue_symbol if instrument else event.symbol,
+            position_effect=event.event_type,
+            security_type=instrument.security_type if instrument else None,
+            exchange=instrument.exchange if instrument else None,
+            currency=instrument.currency if instrument else None,
         )
 
     def submit_order(self, request: OrderRequest) -> ExecutionReport | None:
@@ -215,7 +252,8 @@ class LiveExecutor:
             return None
 
         try:
-            raw = self._order_adapter.place_order(request.to_signal())
+            adapter = self.get_order_adapter(request.symbol)
+            raw = adapter.place_order(request.to_signal())
             report = self._normalize_report(request, raw)
         except Exception:
             logger.exception(
@@ -239,24 +277,33 @@ class LiveExecutor:
 
     def find_order(self, request: OrderRequest) -> ExecutionReport | None:
         """Find a prior placement by deterministic client id."""
-        raw = self._order_adapter.find_order(request.client_order_id, request.symbol)
+        adapter = self.get_order_adapter(request.symbol)
+        raw = adapter.find_order(
+            request.client_order_id,
+            request.venue_symbol or request.symbol,
+        )
         return self._normalize_report(request, raw) if raw is not None else None
 
     def get_order(self, request: OrderRequest, order_id: str) -> ExecutionReport:
         """Fetch the latest cumulative state for one broker order."""
-        raw = self._order_adapter.get_order(order_id, request.symbol)
+        adapter = self.get_order_adapter(request.symbol)
+        raw = adapter.get_order(order_id, request.venue_symbol or request.symbol)
         return self._normalize_report(request, raw)
 
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return raw open orders for startup orphan detection."""
-        raw = self._order_adapter.list_open_orders(symbol)
+        adapter = self.get_order_adapter(symbol)
+        instrument = self._instruments.get(symbol)
+        venue_symbol = instrument.venue_symbol if instrument else symbol
+        raw = adapter.list_open_orders(venue_symbol)
         if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
             raise ValueError("broker open orders must be a list of mappings")
         return raw
 
     def cancel_order(self, request: OrderRequest, order_id: str) -> ExecutionReport:
         """Cancel and return the broker's latest cumulative order state."""
-        raw = self._order_adapter.cancel_order(order_id, request.symbol)
+        adapter = self.get_order_adapter(request.symbol)
+        raw = adapter.cancel_order(order_id, request.venue_symbol or request.symbol)
         return self._normalize_report(request, raw)
 
     @classmethod
@@ -278,7 +325,7 @@ class LiveExecutor:
         average_price = float(average_raw) if average_raw is not None else None
         commission_raw = cls._extract_commission(
             raw,
-            symbol=request.symbol,
+            symbol=request.venue_symbol or request.symbol,
             average_price=average_price,
         )
         commission = float(commission_raw or 0.0)
