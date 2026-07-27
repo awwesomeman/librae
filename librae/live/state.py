@@ -27,6 +27,16 @@ def _to_utc(value: str | datetime | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
+    timestamps: dict[str, datetime] = {}
+    for symbol, value in raw.items():
+        timestamp = _to_utc(value)
+        if timestamp is None:
+            raise ValueError(f"last_bar_ts[{symbol!r}] must contain a timestamp")
+        timestamps[str(symbol)] = timestamp
+    return timestamps
+
+
 def _intent_to_dict(intent: StrategyIntent) -> dict:
     if isinstance(intent, RebalanceTargets):
         return {"kind": "rebalance_targets", "value": asdict(intent)}
@@ -104,6 +114,7 @@ class LiveRuntimeState:
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
+    last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     pending_intent: StrategyIntent = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     equity_peak: float = 0.0
@@ -121,7 +132,7 @@ class LiveRuntimeState:
             item["entry_at"] = position.entry_at.isoformat()
             positions[symbol] = item
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "state_key": self.state_key,
             "run_id": self.run_id,
             "config_hash": self.config_hash,
@@ -130,6 +141,9 @@ class LiveRuntimeState:
             "positions": positions,
             "last_prices": self.last_prices,
             "last_cycle_ts": self.last_cycle_ts.isoformat() if self.last_cycle_ts else None,
+            "last_bar_ts": {
+                symbol: timestamp.isoformat() for symbol, timestamp in self.last_bar_ts.items()
+            },
             "pending_intent": _intent_to_dict(self.pending_intent),
             "active_orders": [order.to_dict() for order in self.active_orders],
             "equity_peak": self.equity_peak,
@@ -143,7 +157,7 @@ class LiveRuntimeState:
 
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
-        if raw.get("schema_version") != 1:
+        if raw.get("schema_version") != 2:
             raise ValueError("unsupported live runtime-state schema")
         positions = {}
         for symbol, item in raw.get("positions", {}).items():
@@ -161,6 +175,7 @@ class LiveRuntimeState:
                 str(symbol): float(price) for symbol, price in raw.get("last_prices", {}).items()
             },
             last_cycle_ts=_to_utc(raw.get("last_cycle_ts")),
+            last_bar_ts=_bar_timestamps_from_dict(raw.get("last_bar_ts", {})),
             pending_intent=_intent_from_dict(
                 raw.get("pending_intent", {"kind": "actions", "value": []})
             ),

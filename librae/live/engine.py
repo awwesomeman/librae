@@ -1,7 +1,7 @@
 """LiveTrader — polling loop for sim and live modes.
 
-Aligns completed bars into portfolio cycles, runs strategy once per timestamp,
-and routes intents to LiveExecutor. Caches OHLCV to avoid redundant fetches.
+Processes newly completed bars as data-driven events and routes intents to
+LiveExecutor. Caches OHLCV to avoid redundant fetches.
 
 Wiring is internalized: pass cfg=RunConfig to __init__,
 the engine builds adapter, cost_model, callbacks, telegram internally.
@@ -31,9 +31,12 @@ from librae.core.executor import (
     apply_execution_fill,
     eval_equity,
     liquidate_all,
+    merge_pending_intents,
+    partition_pending_intent,
     process_actions,
     process_rebalance_targets,
     run_pending_and_stops,
+    validate_intent_symbols,
     validate_risk_params,
 )
 from librae.core.strategy import (
@@ -326,6 +329,7 @@ class LiveTrader:
         self._consecutive_errors: int = 0
         self._db_write_failures: int = 0
         self._last_cycle_ts: datetime | None = None
+        self._last_bar_ts: dict[str, datetime] = {}
         self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -395,6 +399,7 @@ class LiveTrader:
             positions=deepcopy(self._positions),
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
+            last_bar_ts=dict(self._last_bar_ts),
             pending_intent=deepcopy(self._pending_intent),
             active_orders=deepcopy(self._active_orders),
             equity_peak=self._equity_peak,
@@ -416,6 +421,7 @@ class LiveTrader:
         self._positions = state.positions
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
+        self._last_bar_ts = state.last_bar_ts
         self._pending_intent = state.pending_intent
         self._active_orders = state.active_orders
         self._equity_peak = state.equity_peak
@@ -997,7 +1003,7 @@ class LiveTrader:
         signal.signal(signal.SIGINT, _handler)
 
     def _poll_cycle(self) -> None:
-        """Fetch all symbols and process the latest aligned portfolio cycle."""
+        """Process the newest completed bars without waiting for the full universe."""
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
             if self._active_orders or self._halted:
@@ -1006,45 +1012,50 @@ class LiveTrader:
             self._on_heartbeat(self._run_id)
 
         frames: dict[str, pd.DataFrame] = {}
+        latest_by_symbol: dict[str, datetime] = {}
         for symbol in self._symbols:
             df = self._fetch_with_cache(symbol)
             if df is None or df.empty:
                 continue
 
-            latest_ts = df["ts"].iloc[-1].to_pydatetime()
+            latest = pd.Timestamp(df["ts"].iloc[-1])
+            if latest.tzinfo is None:
+                raise ValueError(f"{symbol} latest completed bar timestamp must be timezone-aware")
+            latest_ts = latest.to_pydatetime().astimezone(UTC)
             self._check_staleness(symbol, latest_ts)
             frames[symbol] = df
+            latest_by_symbol[symbol] = latest_ts
 
-        cycle_ts = self._latest_aligned_timestamp(frames)
-        if cycle_ts is None:
+        new_bars = {
+            symbol: timestamp
+            for symbol, timestamp in latest_by_symbol.items()
+            if timestamp > self._last_bar_ts.get(symbol, datetime.min.replace(tzinfo=UTC))
+        }
+        if not new_bars:
             return
 
-        # Mark the cycle before strategy execution. A callback/strategy failure
-        # must not replay the same portfolio decision on the next poll.
-        self._last_cycle_ts = cycle_ts
-        logger.info("New portfolio cycle: %s", cycle_ts)
+        cycle_ts = max(new_bars.values())
+        for symbol, timestamp in new_bars.items():
+            self._last_bar_ts[symbol] = timestamp
 
-        for position in self._positions.values():
-            position.periods_held += 1
+        if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
+            self._persist_state()
+            return
 
-        self._process_cycle(frames, cycle_ts)
-
-    def _latest_aligned_timestamp(
-        self,
-        frames: dict[str, pd.DataFrame],
-    ) -> datetime | None:
-        """Return the common latest timestamp once every symbol reaches it."""
-        if any(symbol not in frames for symbol in self._symbols):
-            return None
-
-        latest = [pd.Timestamp(frames[symbol]["ts"].iloc[-1]) for symbol in self._symbols]
-        if len(set(latest)) != 1:
-            return None
-
-        cycle_ts = latest[0].to_pydatetime()
-        if self._last_cycle_ts is not None and cycle_ts <= self._last_cycle_ts:
-            return None
-        return cycle_ts
+        event_frames = {
+            symbol: frames[symbol]
+            for symbol, timestamp in new_bars.items()
+            if timestamp == cycle_ts
+        }
+        self._last_cycle_ts = (
+            cycle_ts if self._last_cycle_ts is None else max(self._last_cycle_ts, cycle_ts)
+        )
+        logger.info(
+            "New market-data event: ts=%s symbols=%s",
+            cycle_ts,
+            sorted(event_frames),
+        )
+        self._process_cycle(event_frames, cycle_ts)
 
     def _fetch_with_cache(self, symbol: str) -> pd.DataFrame | None:
         """Fetch OHLCV and keep a sorted, deduplicated rolling cache."""
@@ -1403,7 +1414,7 @@ class LiveTrader:
         raw_frames: dict[str, pd.DataFrame],
         ts: datetime,
     ) -> None:
-        """Execute and evaluate one synchronized portfolio timestamp.
+        """Execute and evaluate one data-driven market event.
 
         Simulation fills previous-cycle intent on this completed raw bar.
         Live mode never books that historical range: it evaluates the
@@ -1416,15 +1427,24 @@ class LiveTrader:
         for symbol, raw_df in raw_frames.items():
             history = raw_df[raw_df["ts"] <= ts].set_index("ts")
             history.index.name = "ts"
-            if history.empty:
+            if history.empty or pd.Timestamp(history.index[-1]).to_pydatetime() != ts:
                 continue
             histories[symbol] = history
             raw_bar = history.iloc[-1].to_dict()
+            close = float(raw_bar.get("close", float("nan")))
+            if not isfinite(close) or close <= 0:
+                raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
             raw_bars[symbol] = raw_bar
-            self._last_prices[symbol] = float(raw_bar.get("close", 0.0))
+            self._last_prices[symbol] = close
 
+        ready_intent, waiting_intent = partition_pending_intent(
+            self._pending_intent,
+            raw_bars,
+            self._positions,
+            primary_symbol=primary_symbol,
+        )
+        self._pending_intent = waiting_intent
         if self._executor.simulation:
-            pending_intent = self._pending_intent
             max_position_notional = (
                 self._max_position_pct * self._prev_equity if self._max_position_pct else None
             )
@@ -1432,7 +1452,7 @@ class LiveTrader:
                 ts,
                 self._positions,
                 self._cash,
-                pending_intent,
+                ready_intent,
                 raw_bars,
                 get_cost_model=self._get_cost_model,
                 default_fill=self._fill_price,
@@ -1440,26 +1460,44 @@ class LiveTrader:
                 max_position_notional=max_position_notional,
                 max_volume_participation_pct=self._max_volume_participation_pct,
             )
-            self._pending_intent = []
             self._commit_simulated_results(
                 cash=staged_cash,
                 positions=self._positions,
                 result=step_result,
             )
+            if self._halted and self._positions:
+                liquidation = liquidate_all(
+                    self._positions,
+                    raw_bars,
+                    ts,
+                    get_cost_model=self._get_cost_model,
+                    reason=REASON_DRAWDOWN_BREACH,
+                )
+                self._commit_simulated_results(
+                    cash=self._cash + liquidation.cash_delta,
+                    positions=self._positions,
+                    result=liquidation,
+                )
+        elif ready_intent and not self._execute_live_intent(ready_intent, raw_bars, ts):
+            self._persist_state()
+            return
 
         # ── Step 1.5: equity/drawdown check — right after this bar's fills
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
         # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(ts)
+        self._record_equity(ts, raw_bars)
         if self._halted:
+            for symbol, position in self._positions.items():
+                if symbol in raw_bars:
+                    position.periods_held += 1
             self._persist_state()
             return
 
         bars: dict[str, dict[str, float]] = {}
-        for symbol in self._symbols:
+        for symbol, history in histories.items():
             try:
-                featured = self._feature_fn(histories[symbol])
+                featured = self._feature_fn(history)
             except Exception:
                 logger.exception(
                     "Feature computation failed for %s; skipping strategy decision for cycle %s",
@@ -1470,7 +1508,9 @@ class LiveTrader:
 
             bar = featured.iloc[-1].to_dict()
             bars[symbol] = bar
-            price = float(bar.get("close", self._last_prices[symbol]))
+            price = float(bar.get("close", float("nan")))
+            if not isfinite(price) or price <= 0:
+                raise ValueError(f"{symbol} feature output has invalid close at {ts}: {price}")
             self._last_prices[symbol] = price
 
             if self._on_signal_outcome:
@@ -1487,27 +1527,52 @@ class LiveTrader:
                         signal_type="exit",
                     )
 
-        # Strategy sees only completed data. Simulation defers its intent to
-        # the next bar; live submits now, before any future bar exists.
-        equity, position_snapshot = self._eval_equity_snapshot()
-        ctx = Context(
-            ts=ts,
-            symbol=primary_symbol,
-            symbols=self._symbols,
-            bar=bars[primary_symbol],
-            bars=bars,
-            positions=position_snapshot,
-            cash=self._cash,
-            equity=equity,
-            period_index=self._period_index,
-        )
+        # A waiting target-weight basket is atomic; per-symbol Actions do not
+        # prevent decisions for other symbols.
+        if not isinstance(self._pending_intent, RebalanceTargets):
+            equity, position_snapshot = self._eval_equity_snapshot()
+            ctx = Context(
+                ts=ts,
+                symbol=primary_symbol,
+                symbols=self._symbols,
+                bar=bars.get(primary_symbol, {}),
+                bars=bars,
+                positions=position_snapshot,
+                cash=self._cash,
+                equity=equity,
+                period_index=self._period_index,
+            )
+            intent = self._strategy.on_bar(ctx)
+            validate_intent_symbols(
+                intent,
+                set(self._symbols),
+                primary_symbol=primary_symbol,
+            )
+            self._period_index += 1
+            if self._executor.simulation:
+                self._pending_intent = merge_pending_intents(
+                    self._pending_intent,
+                    intent,
+                    primary_symbol=primary_symbol,
+                )
+            else:
+                ready_intent, waiting_intent = partition_pending_intent(
+                    intent,
+                    raw_bars,
+                    self._positions,
+                    primary_symbol=primary_symbol,
+                )
+                self._pending_intent = merge_pending_intents(
+                    self._pending_intent,
+                    waiting_intent,
+                    primary_symbol=primary_symbol,
+                )
+                if ready_intent:
+                    self._execute_live_intent(ready_intent, raw_bars, ts)
 
-        intent = self._strategy.on_bar(ctx)
-        self._period_index += 1
-        if self._executor.simulation:
-            self._pending_intent = intent
-        else:
-            self._execute_live_intent(intent, raw_bars, ts)
+        for symbol, position in self._positions.items():
+            if symbol in raw_bars:
+                position.periods_held += 1
         self._persist_state()
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
@@ -1535,7 +1600,11 @@ class LiveTrader:
             get_cost_model=self._get_cost_model,
         )
 
-    def _record_equity(self, ts: datetime) -> None:
+    def _record_equity(
+        self,
+        ts: datetime,
+        bars: dict[str, dict[str, float]],
+    ) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
         equity = self._eval_equity()
@@ -1547,7 +1616,7 @@ class LiveTrader:
         self._prev_equity = equity
 
         if self._max_drawdown_pct and not self._halted and drawdown <= -self._max_drawdown_pct:
-            self._flatten_and_halt(ts, drawdown)
+            self._flatten_and_halt(ts, drawdown, bars)
 
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, period_return)
@@ -1571,33 +1640,37 @@ class LiveTrader:
                     position=pos_str,
                 )
 
-    def _flatten_and_halt(self, ts: datetime, drawdown: float) -> None:
+    def _flatten_and_halt(
+        self,
+        ts: datetime,
+        drawdown: float,
+        bars: dict[str, dict[str, float]],
+    ) -> None:
         """Force-close every open position and permanently halt new entries."""
         if self._executor.simulation:
             result = liquidate_all(
                 self._positions,
-                {},
+                bars,
                 ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_DRAWDOWN_BREACH,
-                fallback_price=self._get_last_price,
             )
             self._commit_simulated_results(
                 cash=self._cash + result.cash_delta,
                 positions=self._positions,
                 result=result,
             )
-            flattened = True
+            flattened = not self._positions
         else:
             actions = [
                 Action(type="close", symbol=symbol, reason=REASON_DRAWDOWN_BREACH)
                 for symbol in self._positions
             ]
-            bars = {
+            reference_bars = {
                 symbol: {"close": self._get_last_price(symbol, position)}
                 for symbol, position in self._positions.items()
             }
-            flattened = self._execute_live_intent(actions, bars, ts)
+            flattened = self._execute_live_intent(actions, reference_bars, ts)
         self._halted = True
         if not self._executor.simulation:
             self._cancel_active_orders()

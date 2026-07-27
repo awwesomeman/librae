@@ -1340,6 +1340,84 @@ def process_rebalance_targets(
 # ---------------------------------------------------------------------------
 
 
+def validate_intent_symbols(
+    intent: StrategyIntent,
+    universe: set[str],
+    *,
+    primary_symbol: str,
+) -> None:
+    """Reject strategy intents that reference an unconfigured symbol."""
+    if isinstance(intent, RebalanceTargets):
+        symbols = set(intent.weights)
+    else:
+        symbols = {action.symbol or primary_symbol for action in intent if action.type != "hold"}
+    unknown = symbols - universe
+    if unknown:
+        raise ValueError(f"strategy intent contains unknown symbols: {sorted(unknown)}")
+
+
+def partition_pending_intent(
+    intent: StrategyIntent,
+    bars: dict[str, dict[str, float]],
+    positions: dict[str, PositionState],
+    *,
+    primary_symbol: str,
+) -> tuple[StrategyIntent, StrategyIntent]:
+    """Split an intent into executable-now and waiting-for-symbol-data parts.
+
+    Per-symbol Actions become eligible on that symbol's next observed bar.
+    RebalanceTargets remain one synchronous basket and wait until every
+    non-zero target and currently held symbol has a bar.
+    """
+    if isinstance(intent, RebalanceTargets):
+        target_symbols = {
+            symbol for symbol, weight in intent.weights.items() if abs(weight) > EPSILON
+        }
+        required_symbols = set(positions) | target_symbols
+        if required_symbols.issubset(bars):
+            return intent, []
+        return [], intent
+
+    ready: list[Action] = []
+    waiting: list[Action] = []
+    for action in intent:
+        symbol = action.symbol or primary_symbol
+        if action.type == "hold" or symbol in bars:
+            ready.append(action)
+        else:
+            waiting.append(action)
+    return ready, waiting
+
+
+def merge_pending_intents(
+    pending: StrategyIntent,
+    new_intent: StrategyIntent,
+    *,
+    primary_symbol: str,
+) -> StrategyIntent:
+    """Merge independent per-symbol Actions without replacing open intents."""
+    if not pending:
+        return new_intent
+    if not new_intent:
+        return pending
+    if isinstance(pending, RebalanceTargets) or isinstance(new_intent, RebalanceTargets):
+        raise ValueError("cannot replace a pending intent with RebalanceTargets")
+
+    pending_actions = [action for action in pending if action.type != "hold"]
+    new_actions = [action for action in new_intent if action.type != "hold"]
+    if not pending_actions:
+        return new_actions
+    if not new_actions:
+        return pending_actions
+
+    pending_symbols = {action.symbol or primary_symbol for action in pending_actions}
+    new_symbols = {action.symbol or primary_symbol for action in new_actions}
+    overlap = pending_symbols & new_symbols
+    if overlap:
+        raise ValueError(f"strategy emitted duplicate pending intents for {sorted(overlap)}")
+    return [*pending_actions, *new_actions]
+
+
 def run_pending_and_stops(
     ts: datetime,
     positions: dict[str, PositionState],
