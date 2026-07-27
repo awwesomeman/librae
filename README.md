@@ -77,6 +77,14 @@ eligible on T+1. Do not pre-shift prices or signals to simulate that delay, or
 the strategy will be delayed twice. The default fill is the next eligible
 bar's open.
 
+Here, **unshifted** describes timing; it does not mean adjusted or unadjusted
+prices. Librae cannot infer that distinction. Execution-oriented backtests
+should normally use the prices actually observable and tradable at the time
+(unadjusted OHLCV). The engine does not currently book splits, dividends,
+coupons, futures rolls, FX conversion, cash yield, or settlement lag. Adjusted
+series may be useful for research features, but treating them as executable
+OHLCV does not produce a complete cash-and-position simulation.
+
 Backtest input is validated rather than repaired. The index must be exactly
 `(symbol, datetime)`, with unique rows, timezone-aware timestamps increasing
 within each symbol, and the configured symbols must exactly match the data.
@@ -114,21 +122,30 @@ unaffordable. Target weights need not sum to one; the remainder stays in cash.
 With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
 and realized weight after every bar, so target drift includes costs, price
-movement, and execution constraints. Multi-asset `Action` and
-`RebalanceTargets` strategies use synchronized cross-sectional decision cycles
-in every mode. A partial multi-asset timestamp can update backtest valuation
-and stops, but cannot invoke the strategy or consume its pending intent.
-Valuation uses each symbol's latest point-in-time close without backfilling
-from the future.
+movement, and execution constraints.
 
-Execution timing intentionally differs in live mode. After all symbols have a
-completed bar T, the strategy is called once and its order is submitted
-immediately—before any T+1 bar exists. The T close is only a sizing/reference
-price; local quantity, entry/exit price, costs, and timestamps are committed
-from the broker execution report. An acknowledgement with no fill never opens
-a local position. Open and partial orders remain durable and are polled before
-another strategy decision; cumulative reports apply only their newly confirmed
-fill delta.
+The configured symbol set is static, but availability is point-in-time.
+`ctx.symbols` contains the configured universe while `ctx.available_symbols`
+and `ctx.bars` contain only symbols with a real bar at `ctx.ts`. A symbol can
+therefore start late, stop early, or miss a timestamp without stalling the
+portfolio. The latest known close may value an existing position, but is never
+inserted into `ctx.bars` and cannot trigger fills, stops, or holding-age
+increments.
+
+Per-symbol `Action`s become eligible independently on that symbol's next
+observed bar. `RebalanceTargets` remains an atomic decision basket and waits
+until every non-zero target and currently held symbol has a current bar; a
+waiting basket blocks another target decision instead of being silently
+replaced. Use per-symbol `Action`s when asynchronous execution is intentional.
+
+Execution timing intentionally differs in live mode. Each batch of newly
+completed bars invokes the strategy immediately; a delayed symbol may produce
+a second event with the same timestamp. The current close is only a
+sizing/reference price. Local quantity, entry/exit price, costs, and timestamps
+are committed from the broker execution report. An acknowledgement with no
+fill never opens a local position. Open and partial orders remain durable and
+are polled before another strategy decision; per-symbol data watermarks prevent
+completed events from being replayed after restart.
 
 Live `Action(fill_price=None)` submits a market order and a numeric
 `fill_price` submits a real broker limit order. Bar-field fills such as
@@ -167,9 +184,11 @@ currency model is supplied.
 TimescaleDB is the default durable state store (`execution_runtime_state` plus
 the `broker_orders` ledger). `cfg.no_db=True` remains valid for simulation,
 but live mode then requires an explicitly injected durable `state_store`;
-`MemoryLiveStateStore` is only for deterministic tests. The processed-cycle
-watermark, pending simulated intent, cash/positions, fills, equity peak, halt
-state, and active order queue restore under the same run id. A persisted halt
+`MemoryLiveStateStore` is only for deterministic tests. Per-symbol processed
+bar watermarks, pending intent, cash/positions, fills, equity peak, halt state,
+and the active order queue restore under the same run id. Runtime-state schema
+v2 is intentionally breaking: an older checkpoint is rejected and must be
+explicitly migrated or removed before restart. A persisted halt
 does not disappear on restart; after resolving the cause, call
 `trader.reset_halt()` explicitly.
 

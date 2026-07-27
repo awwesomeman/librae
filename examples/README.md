@@ -28,8 +28,10 @@ the engine closes them. Both decide on bar T and fill on T+1.
 The bundled portfolio examples stay backtest-only because their inputs are
 deterministic synthetic data (and the target-weight schedule is fixed to
 historical dates), not because of an engine limitation. `LiveTrader` supports
-both intents in sim/live and synchronizes multi-symbol strategy decisions. The
-SMA example has a real broker-data path and can be run directly:
+both intents in sim/live. Multi-symbol callbacks expose only symbols with a new
+completed bar; `RebalanceTargets` waits for a complete required basket, while
+per-symbol `Action`s can execute asynchronously. The SMA example has a real
+broker-data path and can be run directly:
 
 ```bash
 uv run python -m examples.simple_sma.run --mode sim --poll-seconds 5 --no-db
@@ -56,8 +58,8 @@ df.index = pd.MultiIndex.from_arrays(
 ```
 
 Live mode is different: `LiveTrader` calls your `prepare_signals(df)` itself
-for each symbol in a synchronized portfolio cycle, on a plain (non-MultiIndex)
-OHLCV DataFrame — which is why `simple_sma/strategy.py` writes
+for each symbol available in the current data event, on a plain
+(non-MultiIndex) OHLCV DataFrame — which is why `simple_sma/strategy.py` writes
 `prepare_signals` to accept either shape.
 Reusing the same function for both modes isn't a suggestion — it's how you
 avoid backtest/live computing the signal differently.

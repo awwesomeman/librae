@@ -58,7 +58,7 @@ librae/
 │   └── charts.py             plot_trades — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
 │
 ├── live/                     real-time / sim runtime
-│   ├── engine.py             LiveTrader — synchronized portfolio polling cycles
+│   ├── engine.py             LiveTrader — data-driven multi-symbol polling events
 │   ├── executor.py           OrderRequest/ExecutionReport + LiveExecutor normalization
 │   └── state.py              restart checkpoint types + LiveStateStore protocol
 │
@@ -129,6 +129,14 @@ Callers must not pre-shift prices or signals to model that delay; doing so
 delays execution twice. Feature construction remains the caller's
 responsibility and must not use information unavailable at T.
 
+**Unshifted is a timing contract, not a price-adjustment flag.** The engine
+cannot infer whether OHLCV is adjusted. Execution-oriented tests should
+normally supply historically observable, unadjusted prices. Librae currently
+has no ledger model for splits, dividends/coupons, futures rolls, FX/base
+currency conversion, cash yield, or settlement lag. Adjusted/continuous
+series can be research inputs, but using them as fill prices makes the
+cash-and-position simulation economically incomplete.
+
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
 are timezone-aware and increasing within each symbol; and `cfg.symbols`, when
@@ -182,49 +190,44 @@ every bar. It is opt-in because retaining O(bars × positions) facts can be
 expensive for a large universe. Compare those facts with the strategy's target
 schedule to measure tracking drift.
 
-`LiveTrader` uses the same portfolio-level decision boundary in sim and live
-modes. It fetches each configured symbol independently, but invokes
-`strategy.on_bar()` once only after every symbol's latest completed bar has the
-same timestamp. Execution then deliberately diverges:
+The configured symbol set is static; point-in-time availability is dynamic.
+The engine advances over the union of actually observed completed bars.
+`ctx.symbols` is the configured universe, while `ctx.available_symbols` and
+`ctx.bars` contain only real current bars. This supports late starts, early
+ends, suspensions, and missing observations without guessing why data is
+absent. A last-known close is a valuation mark only: it cannot trigger an
+execution, stop, signal, or holding-age increment.
 
-- **Backtest/sim:** intent decided at T is eligible on the next complete T+1
-  raw bar. Bar fields, one-bar numeric limits, stops, take-profit, liquidation,
-  and estimated costs belong to this deterministic simulation model.
-- **Live:** intent decided after completed T is submitted in that same polling
-  cycle, before T+1 exists. T close may size the request but is never booked as
-  its fill. Market and numeric limit orders go to the broker; local state is
-  updated from confirmed execution quantity, average price, fee, and execution
-  timestamp.
+Per-symbol `Action`s become eligible on that symbol's next observed bar.
+`RebalanceTargets` is intentionally synchronous: the basket waits for current
+bars from every non-zero target and currently held symbol, and is never
+silently replaced. Use Actions for asynchronous cross-market execution.
 
-Backtests preserve the union of input timestamps for point-in-time valuation
-and per-symbol stop checks, but invoke the strategy and consume its pending
-intent only at timestamps containing every configured symbol. Missing symbols
-are valued at their latest observed close; future values and entry-price
-fallbacks are never used. Holding age advances only when that symbol has a bar.
-End-of-run forced liquidation uses each symbol's last observed close.
+Execution then deliberately diverges:
 
-The shared timestamp is the portfolio cycle identity and is processed at most
-once. A simulated intent is good for its next complete eligible cycle and
-expires after that attempt; a live intent is submitted immediately. OHLCV
-caches are sorted and deduplicated before alignment. The policy is deliberately
-strict and deterministic:
+- **Backtest/sim:** an Action decided at T is eligible on that symbol's next
+  observed raw bar. Bar fields, one-bar numeric limits, stops, take-profit,
+  liquidation, and estimated costs belong to this deterministic simulation
+  model.
+- **Live:** each batch of newly completed bars is an event and its ready intent
+  is submitted immediately. A delayed symbol may create a second event with
+  the same timestamp. Current prices may size requests but local execution
+  facts come only from broker reports.
 
-- **Delayed or stale symbol:** wait; do not mix its old bar with another
-  symbol's newer bar. Existing wall-clock staleness monitoring continues to
-  alert independently.
-- **Missing timestamp:** if all symbols later share a newer timestamp, skip the
-  missing cycle and process only the newest shared timestamp. Live mode never
-  replays historical decisions or orders to catch up.
-- **Duplicate bar:** keep the last copy in cache; a timestamp at or below the
-  processed watermark cannot invoke the strategy again.
-- **Late or out-of-order bar:** retain it only as feature history when it fits
-  in the rolling cache; never rewind the watermark.
+OHLCV caches are sorted and deduplicated. A durable per-symbol watermark
+prevents duplicate or restarted bars from replaying decisions. Older
+out-of-order bars may remain as feature history but never rewind the global
+event clock. If a backtest still holds a symbol without a real bar at the final
+timestamp, forced liquidation fails explicitly rather than fabricating a fill
+from its last mark.
 
-For a delayed cycle, each symbol's feature input is sliced at the cycle
-timestamp even if its cache already contains newer bars. This is the
-cross-sectional look-ahead boundary. Alignment makes the local rebalance
-decision coherent; broker submissions remain sequential reductions-then-
-additions rather than an exchange-level atomic basket.
+This is a **data-driven event clock**, not an exchange-calendar framework.
+Input timestamps must be timezone-aware and ETL should normalize them to one
+shared convention, normally UTC bar-end timestamps. The engine does not infer
+holidays, suspensions, vendor outages, early closes, or settlement days.
+Calendar-sensitive strategies must provide calendar-aware upstream data.
+Cross-market baskets must provide coherent event labels; broker submissions
+remain sequential reductions-then-additions, not exchange-level atomic.
 
 Acknowledgement is not execution. Submitted/accepted/cancelled/rejected
 reports never mutate positions. A partial report commits only its confirmed
@@ -312,8 +315,10 @@ is a no-op in sim mode:
 
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
-watermark, simulated pending intent, cash, positions, last prices, equity peak,
-halt/risk counters, and active order queue. `broker_orders` keeps completed
+timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
+prices, equity peak, halt/risk counters, and active order queue. Runtime-state
+schema v2 is intentionally breaking: v1 checkpoints are rejected and require
+an explicit migration or removal. `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted is saved before network I/O, so an ambiguous timeout is
 looked up rather than blindly retried. Analytics callbacks remain projections;
@@ -358,7 +363,7 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Type | Description |
 |------|------|
 | `BaseStrategy` | abstract base class, implements `on_bar(ctx) -> list[Action] \| RebalanceTargets` |
-| `Context` | immutable snapshot: ts, symbol, symbols, bar, bars, positions, cash, equity, period_index |
+| `Context` | immutable event snapshot: ts, configured symbols, current bar/bars, available_symbols, positions, cash, equity, callback period_index |
 | `Action` | strategy intent: `type` = long / short / close / hold |
 | `RebalanceTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
@@ -504,7 +509,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 | Param | Called as |
 |---|---|
-| `on_bar` | `on_bar(run_id, ts, equity, drawdown, period_return)` — once per synchronized portfolio cycle |
+| `on_bar` | `on_bar(run_id, ts, equity, drawdown, period_return)` — once per processed market-data event |
 | `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
