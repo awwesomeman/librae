@@ -50,10 +50,20 @@ from librae.core.executor import (
     TradeResult,
     eval_equity,
     liquidate_all,
+    merge_pending_intents,
+    partition_pending_intent,
     run_pending_and_stops,
+    validate_intent_symbols,
     validate_risk_params,
 )
-from librae.core.strategy import BaseStrategy, Context, Position, PositionState, StrategyIntent
+from librae.core.strategy import (
+    BaseStrategy,
+    Context,
+    Position,
+    PositionState,
+    RebalanceTargets,
+    StrategyIntent,
+)
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
 logger = logging.getLogger(__name__)
@@ -331,7 +341,7 @@ class Backtest:
         equity_curve: list[EquitySnapshot] = []
         exposed_periods = 0
         primary_symbol = self._symbols[0]
-        required_symbols = set(self._symbols)
+        universe = set(self._symbols)
         pending_intent: StrategyIntent = []
         position_snapshots: list[PositionSnapshot] = []
         last_prices: dict[str, float] = {}
@@ -347,11 +357,12 @@ class Backtest:
                 if close is not None and np.isfinite(close) and close > 0:
                     last_prices[symbol] = float(close)
 
-            # A portfolio intent and a new cross-sectional decision both require
-            # a complete cycle. Partial union-timeline bars still update marks
-            # and enforce stops, but do not consume the pending intent.
-            cycle_ready = required_symbols.issubset(bars)
-            intent_to_execute: StrategyIntent = pending_intent if cycle_ready else []
+            intent_to_execute, pending_intent = partition_pending_intent(
+                pending_intent,
+                bars,
+                positions,
+                primary_symbol=primary_symbol,
+            )
 
             # ── Steps 1+1.5: fill previous bar's pending actions at current
             # bar's price, then check stop-loss/take-profit — shared with
@@ -374,8 +385,6 @@ class Backtest:
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
-            if cycle_ready:
-                pending_intent = []
 
             # ── Step 2: equity and drawdown check ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
@@ -401,6 +410,11 @@ class Backtest:
                 trades.extend(dd_result.trades)
                 all_events.extend(dd_result.events)
                 cash += dd_result.cash_delta
+                if positions:
+                    raise RuntimeError(
+                        "max_drawdown_pct cannot liquidate positions without current bars: "
+                        f"{sorted(positions)}"
+                    )
                 halted = True
                 # The liquidation is an event at this timestamp, so its costs
                 # and resulting flat position must be reflected in the same
@@ -423,7 +437,7 @@ class Backtest:
             # ── Step 3: strategy decision (produces next bar's pending actions) ──
             if halted:
                 pending_intent = []
-            elif cycle_ready:
+            elif not isinstance(pending_intent, RebalanceTargets):
                 ctx = Context(
                     ts=ts,
                     symbol=primary_symbol,
@@ -435,12 +449,24 @@ class Backtest:
                     equity=mtm,
                     period_index=decision_index,
                 )
-                pending_intent = self._strategy.on_bar(ctx)
+                new_intent = self._strategy.on_bar(ctx)
+                validate_intent_symbols(
+                    new_intent,
+                    universe,
+                    primary_symbol=primary_symbol,
+                )
+                pending_intent = merge_pending_intents(
+                    pending_intent,
+                    new_intent,
+                    primary_symbol=primary_symbol,
+                )
                 decision_index += 1
 
             self._increment_periods_held(positions, bars)
 
         # WHY: the final intent is discarded because there is no T+1 bar to fill it.
+        if pending_intent:
+            logger.warning("Discarding unresolved end-of-run strategy intent: %r", pending_intent)
         # Force-close all open positions at last bar
         if self._timeline:
             last_ts = self._timeline[-1]
@@ -451,8 +477,12 @@ class Backtest:
                 last_ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
-                fallback_price=lambda sym, _pos: last_prices[sym],
             )
+            if positions:
+                raise ValueError(
+                    "cannot force-close positions without a bar at the backtest end: "
+                    f"{sorted(positions)}"
+                )
             trades.extend(close_result.trades)
             all_events.extend(close_result.events)
             cash += close_result.cash_delta

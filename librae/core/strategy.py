@@ -37,13 +37,16 @@ class Context:
     Attributes:
         ts: Current bar timestamp.
         symbol: Primary symbol (single-asset convenience).
-        symbols: All symbols in the dataset.
-        bar: Current bar data as dict (OHLCV + features). Single-asset.
-        bars: Current bar data per symbol. Multi-asset.
+        symbols: All configured symbols.
+        bar: Current data for the primary symbol, or an empty dict when that
+            symbol has no bar at this timestamp.
+        bars: Current data keyed only by symbols with an observed bar at
+            this timestamp. Last-known marks are not inserted here.
         positions: Open positions keyed by symbol.
         cash: Available cash.
         equity: Engine-calculated mark-to-market portfolio equity.
-        period_index: 0-based index into the timeline.
+        period_index: 0-based strategy-callback count. Live arrival events can
+            share a timestamp, so this is not a business-day index.
     """
 
     ts: datetime
@@ -55,6 +58,11 @@ class Context:
     cash: float
     equity: float
     period_index: int
+
+    @property
+    def available_symbols(self) -> tuple[str, ...]:
+        """Symbols with a real, current bar in this event."""
+        return tuple(self.bars)
 
 
 @dataclass(frozen=True)

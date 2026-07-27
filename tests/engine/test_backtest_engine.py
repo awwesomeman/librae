@@ -297,7 +297,49 @@ class TestMultiAsset:
         symbols_traded = {t.symbol for t in result.trades}
         assert symbols_traded == {"AAA", "BBB"}
 
-    def test_partial_bars_do_not_run_strategy_or_consume_pending_intent(self) -> None:
+    def test_symbol_start_date_does_not_delay_available_universe(self) -> None:
+        timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
+        rows = []
+        for i, ts in enumerate(timeline):
+            symbols = ("AAA",) if i < 2 else ("AAA", "BBB")
+            for symbol in symbols:
+                price = 100.0 if symbol == "AAA" else 200.0
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 100.0,
+                    }
+                )
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+        available: list[tuple[str, ...]] = []
+
+        class ObserveUniverse(BaseStrategy):
+            def on_bar(self, ctx):
+                available.append(ctx.available_symbols)
+                return []
+
+        Backtest(
+            df,
+            ObserveUniverse(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        assert available == [
+            ("AAA",),
+            ("AAA",),
+            ("AAA", "BBB"),
+            ("AAA", "BBB"),
+            ("AAA", "BBB"),
+        ]
+
+    def test_partial_bars_run_strategy_without_consuming_other_symbol_intent(self) -> None:
         timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
         rows = []
         for i, ts in enumerate(timeline):
@@ -338,16 +380,23 @@ class TestMultiAsset:
         assert open_event.price == pytest.approx(220.0)
         assert [cycle[0] for cycle in seen_cycles] == [
             timeline[0],
+            timeline[1],
             timeline[2],
             timeline[3],
             timeline[4],
         ]
-        assert [cycle[1] for cycle in seen_cycles] == [0, 1, 2, 3]
-        assert all(cycle[2] == {"AAA", "BBB"} for cycle in seen_cycles)
+        assert [cycle[1] for cycle in seen_cycles] == [0, 1, 2, 3, 4]
+        assert [cycle[2] for cycle in seen_cycles] == [
+            {"AAA", "BBB"},
+            {"AAA"},
+            {"AAA", "BBB"},
+            {"AAA", "BBB"},
+            {"AAA", "BBB"},
+        ]
 
     def test_missing_bar_uses_last_mark_and_does_not_age_position(self) -> None:
         timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
-        aaa_prices = {0: 100.0, 1: 120.0, 3: 130.0}
+        aaa_prices = {0: 100.0, 1: 120.0, 3: 130.0, 4: 140.0}
         rows = []
         for i, ts in enumerate(timeline):
             for symbol in ("AAA", "BBB"):
@@ -382,9 +431,45 @@ class TestMultiAsset:
         ).run()
 
         assert result.equity_curve[2].equity == pytest.approx(1_020.0)
-        assert result.equity_curve[4].equity == pytest.approx(1_030.0)
-        assert result.trades[0].exit_price == pytest.approx(130.0)
-        assert result.trades[0].periods_held == 2
+        assert result.equity_curve[4].equity == pytest.approx(1_040.0)
+        assert result.trades[0].exit_price == pytest.approx(140.0)
+        assert result.trades[0].periods_held == 3
+
+    def test_end_of_run_does_not_invent_liquidation_for_missing_symbol(self) -> None:
+        timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
+        rows = []
+        for i, ts in enumerate(timeline):
+            for symbol in ("AAA", "BBB"):
+                if symbol == "AAA" and i == 4:
+                    continue
+                price = 100.0 if symbol == "AAA" else 200.0
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 100.0,
+                    }
+                )
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+
+        class BuyAaa(BaseStrategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [Action(type="long", symbol="AAA", quantity=1.0)]
+                return []
+
+        with pytest.raises(ValueError, match=r"cannot force-close.*AAA"):
+            Backtest(
+                df,
+                BuyAaa(),
+                initial_balance=1_000.0,
+                cost_model=_zero_cost(),
+                data_source="test",
+            ).run()
 
     def test_per_symbol_multiplier_resolved_independently_via_cfg(self) -> None:
         """Regression: a multi-asset cfg= run used to build exactly one
