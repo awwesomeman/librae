@@ -16,9 +16,9 @@ brokers (broker/exchange adapters)  →  librae (core → backtest / live)  → 
 ```
 
 - `brokers/`: one adapter per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), exposing `fetch_ohlcv` / `place_order` / `get_position` / `info` for the live engine to fetch data and place orders. Design details in "Broker Adapter Design" below.
-- `librae/core/`: shared strategy-execution logic (`strategy.py` defines Position/Action/Fill, `executor.py` defines TradeResult/OrderEvent and matching logic), shared by backtest and live.
+- `librae/core/`: shared strategy/portfolio types and pure execution functions. Deterministic bar matching serves backtest/sim; `apply_execution_fill` serves confirmed live fills.
 - `librae/backtest/engine.py`: bar-by-bar backtest engine, produces `BacktestOutput` (the DB-persistence dataclasses defined in `librae/backtest/schema.py`: RunMetadata/EquityCurvePoint/OrderEventRecord/StrategyMetrics).
-- `librae/live/engine.py`: the real-time polling engine for sim/live mode — the same executor logic, writing to the DB in real time, with data/orders going through a `brokers/` adapter.
+- `librae/live/engine.py`: the real-time polling engine for sim/live mode — sim uses deterministic bar fills; live submits through a broker adapter and applies normalized execution reports.
 - `db/timescale_writer.py` / `db/timescale_reader.py`: the sole DB access layer — upper layers always read/write through here, never issuing raw SQL directly; schema defined in `db/timescale_init.sql`.
 
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a historical decision doc — the current state has since replaced the old execution layer it describes with librae).
@@ -26,6 +26,8 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 ## Broker Adapter Design (`brokers/`)
 
 - One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Shared method signatures: `fetch_ohlcv(symbol, timeframe, ...) -> pd.DataFrame`, `place_order(signal: dict) -> dict`, `get_position(symbol) -> dict`, `info() -> AdapterInfo`.
+- `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
+- CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR commonly return only the initial acknowledgement from `place_order`; until their adapter returns a complete execution report, the current runtime halts without booking a fill. It does not substitute the order price or local `CostModel`.
 - `brokers/base.py` only provides the two pieces that are genuinely shared and byte-for-byte identical: `AdapterInfo` (static metadata) and `CredentialConfig.from_env(prefix)` (the env-var convention `{PREFIX}_{FIELD}`, with `prefix` supplied by the caller — e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are themselves exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as a UTC-aware datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
 - Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a single interface covering every capability — e.g. `librae/live/executor.py`'s `OrderAdapter` Protocol only declares `place_order`, because that's the only method the executor actually uses.
@@ -34,7 +36,7 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 
 ## Backtest Engine Design (`librae/`)
 
-Backtest and live-trading engine. Provides a full framework for strategy execution, position management, cost simulation, and performance metrics. Quantity-based `Action` strategies share the exact same code across backtest, sim, and live modes.
+Backtest and live-trading engine. Provides one strategy decision interface, position management, cost simulation, and performance metrics. Backtest/sim share deterministic bar-fill logic; live shares sizing and portfolio state types but applies only confirmed external execution fills.
 
 ### Layout
 
@@ -42,7 +44,7 @@ Backtest and live-trading engine. Provides a full framework for strategy executi
 librae/
 ├── core/                     shared domain model (pure computation, no I/O)
 │   ├── strategy.py           BaseStrategy, Action, RebalanceTargets, Context, Position, PositionState, Fill
-│   ├── executor.py           make_fill, process_actions, process_rebalance_targets, calc_trade_pnl, close_position, scale_into_position, reduce_position, liquidate_all
+│   ├── executor.py           simulated matching plus apply_execution_fill for externally confirmed fills
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
 │   ├── metrics.py            compute_all (QuantStats adapter)
 │   ├── run_config.py         RunConfig — unified run parameters (frozen dataclass)
@@ -55,7 +57,7 @@ librae/
 │
 ├── live/                     real-time / sim runtime
 │   ├── engine.py             LiveTrader — synchronized portfolio polling cycles
-│   └── executor.py           LiveExecutor (sim notifications / live order placement)
+│   └── executor.py           OrderRequest/ExecutionReport + LiveExecutor normalization
 │
 └── config/                   configuration management
     ├── market_config.py      MarketConfig dataclass + built-in market registry (cost model, tick_size, multiplier, margin rate)
@@ -180,8 +182,16 @@ schedule to measure tracking drift.
 `LiveTrader` uses the same portfolio-level decision boundary in sim and live
 modes. It fetches each configured symbol independently, but invokes
 `strategy.on_bar()` once only after every symbol's latest completed bar has the
-same timestamp. Both `Action` and `RebalanceTargets` then follow the same T/T+1
-contract as backtests.
+same timestamp. Execution then deliberately diverges:
+
+- **Backtest/sim:** intent decided at T is eligible on the next complete T+1
+  raw bar. Bar fields, one-bar numeric limits, stops, take-profit, liquidation,
+  and estimated costs belong to this deterministic simulation model.
+- **Live:** intent decided after completed T is submitted in that same polling
+  cycle, before T+1 exists. T close may size the request but is never booked as
+  its fill. Market and numeric limit orders go to the broker; local state is
+  updated from confirmed execution quantity, average price, fee, and execution
+  timestamp.
 
 Backtests preserve the union of input timestamps for point-in-time valuation
 and per-symbol stop checks, but invoke the strategy and consume its pending
@@ -191,9 +201,10 @@ fallbacks are never used. Holding age advances only when that symbol has a bar.
 End-of-run forced liquidation uses each symbol's last observed close.
 
 The shared timestamp is the portfolio cycle identity and is processed at most
-once. An intent is good for its next complete eligible cycle and expires after
-that attempt. OHLCV caches are sorted and deduplicated before alignment. The
-policy is deliberately strict and deterministic:
+once. A simulated intent is good for its next complete eligible cycle and
+expires after that attempt; a live intent is submitted immediately. OHLCV
+caches are sorted and deduplicated before alignment. The policy is deliberately
+strict and deterministic:
 
 - **Delayed or stale symbol:** wait; do not mix its old bar with another
   symbol's newer bar. Existing wall-clock staleness monitoring continues to
@@ -210,16 +221,23 @@ For a delayed cycle, each symbol's feature input is sliced at the cycle
 timestamp even if its cache already contains newer bars. This is the
 cross-sectional look-ahead boundary. Alignment makes the local rebalance
 decision coherent; broker submissions remain sequential reductions-then-
-additions rather than an exchange-level atomic basket. Live portfolio changes
-are staged separately: all orders must be acknowledged and the resulting
-broker positions must reconcile before the local book, callbacks, and trade
-counts are committed. A rejection or persistent mismatch halts trading and
-atomically adopts a complete broker position snapshot when available. This
-also makes partial basket execution explicit instead of committing phantom
-local fills. Incremental cache retention is capped by `warmup_periods` (an
-injected warmup fetcher may provide more initial history); this implementation
-favors daily/session correctness and recovery semantics over high-frequency
-throughput.
+additions rather than an exchange-level atomic basket.
+
+Acknowledgement is not execution. Submitted/accepted/cancelled/rejected
+reports never mutate positions. A partial report commits only its confirmed
+portion. The current polling runtime then fails closed on every non-final
+state, including a still-resting limit or a partial fill, because durable
+open-order continuation/cancellation is a separate recovery concern. It also
+rejects live bar-field fills (`"open"`/`"close"`),
+`RebalanceTargets.fill_price`, and local stop/take-profit parameters; those
+cannot be inferred later from a completed range. Protective orders require a
+broker-native implementation.
+
+Incremental cache retention is capped by `warmup_periods` (an injected warmup
+fetcher may provide more initial history). This implementation favors
+daily/session correctness over high-frequency throughput; lower strategy
+frequency reduces load but does not remove clock/order-state synchronization
+requirements.
 
 #### Local trade-chart viewer
 
@@ -238,7 +256,7 @@ plot_trades_by_run_id(run_id)                    # or: skip rerunning the backte
 
 #### Risk controls
 
-Enforced at the engine level — strategies cannot bypass them; all three default to off (`None`). Backtest and live share the same `core.executor.liquidate_all`/`_cap_fill_to_notional`/`_cap_fill_to_volume`.
+Enforced at the engine level — strategies cannot bypass them; all three default to off (`None`). Backtest/sim enforce them in the fill model. Live uses the latest completed bar for request sizing, then lets broker execution determine the actual fill.
 
 ```python
 cfg = RunConfig(..., params={
@@ -249,13 +267,13 @@ cfg = RunConfig(..., params={
 ```
 
 - `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
-- `max_drawdown_pct`: once triggered, calls `liquidate_all()` to close everything, and stops calling the strategy's `on_bar()` (live keeps polling/monitoring, it just stops entering); triggers once and stays in effect permanently — the run needs to be restarted.
+- `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()`; live submits immediate market closes and books only confirmed broker fills. Both halt strategy decisions permanently until restart.
 - `max_volume_participation_pct`: caps a single fill (new entry/add) only — it's not cumulative against position size; like `max_position_pct` it caps rather than rejects. Only applies to entries — exits (strategy-driven close, stop-loss/take-profit, force close, drawdown-triggered liquidation) are unaffected.
 - Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 #### Margin / liquidation simulation
 
-`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `cfg.params`" convention as `impact_coef`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). Once set, `resolve_stop_exit` (shared by backtest/live) checks every bar whether a position has hit the liquidation price computed by `CostModel.liquidation_price(entry_price, side)`; if so it force-closes with `REASON_LIQUIDATION`, using the same gap-through logic as `stop_price` (on a gap, take the worse of (liquidation price, bar open)). The liquidation check takes priority over stop-loss/take-profit — if both trigger on the same bar, liquidation (the most conservative outcome an exchange would actually enforce) wins.
+`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `cfg.params`" convention as `impact_coef`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). In backtest/sim, `resolve_stop_exit` checks every bar whether a position has hit the modeled liquidation price; if so it force-closes with `REASON_LIQUIDATION`, using conservative gap-through logic. The liquidation check takes priority over stop-loss/take-profit. Live does not replay this completed-bar touch as a market order: venue margin/liquidation and broker-native protective orders are authoritative.
 
 The formula is a simplified isolated-margin approximation (ignoring fees/funding rates, matching the existing simplification level of this engine's margin model): long `entry*(1 + maintenance_margin_rate - margin_rate)`, short `entry*(1 - maintenance_margin_rate + margin_rate)`. Spot (`margin_rate=1.0`) never triggers unless `maintenance_margin_rate` is set.
 
@@ -263,11 +281,25 @@ The formula is a simplified isolated-margin approximation (ignoring fees/funding
 
 #### Reconciliation (live only)
 
-Runs automatically when `LiveTrader.run()` starts and after staged live orders;
-it is a no-op in `sim` mode:
+Startup reconciliation runs automatically when `LiveTrader.run()` starts and
+is a no-op in sim mode:
 
-- **Positions**: the broker's complete `get_position()` snapshot is ground truth and atomically replaces local positions. An unreadable startup snapshot halts trading. After an order acknowledgement, the engine polls until the broker matches the staged final position; a persistent mismatch or read failure halts trading and re-adopts the broker snapshot.
-- **Cash** (`_reconcile_cash`, currently only supported by `CryptoAdapter`/CCXT — other broker adapters without a `get_balance()` are duck-type skipped): warns only, never overwrites. A Telegram alert fires only once the discrepancy exceeds `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%, an engine constant, not `cfg.params`). `self._cash` is the last confirmed local ledger value; after an execution halt it must not be treated as reconciled broker cash. Broker free/total semantics vary by account mode (spot/margin/cross-margin), so blindly overwriting could corrupt a valid ledger.
+- **Positions**: the broker's complete `get_position()` snapshot is ground
+  truth and atomically replaces local positions. An unreadable startup snapshot
+  halts trading. Post-order position polling is intentionally not fill
+  evidence: an aggregate position cannot recover per-execution time, fee, or
+  allocation. The current startup snapshot therefore restores exposure for
+  safety but cannot make restarted trade attribution complete; durable ledger
+  recovery is required for that.
+- **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
+  only, never overwrites. A Telegram alert fires once discrepancy exceeds
+  `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
+  semantics vary by account mode, so blindly overwriting can corrupt a valid
+  ledger.
+
+During a run, `ExecutionReport` is the only source that changes the local
+position ledger. Durable restart recovery, open/partial order resumption,
+orphan detection, and cancellation remain a separate production boundary.
 
 #### Data staleness detection (live only)
 
@@ -293,8 +325,10 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 | | Backtest | Sim | Live |
 |---|---|---|---|
 | Data source | historical OHLCV | real-time OHLCV (polling) | real-time OHLCV |
-| Executor | `core.make_fill()` | `LiveExecutor(simulation=True)` | `LiveExecutor(simulation=False)` |
-| Order placement | simulated fill | simulated fill + Telegram notification | staged order → broker ack/reconcile → local commit; failure halts |
+| Decision timing | completed T | completed T | completed T |
+| Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit immediately after T decision |
+| Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | broker `ExecutionReport` only |
+| Non-final order | one-bar intent expires | one-bar intent expires | no local fill; fail closed pending durable continuation |
 
 ### Core types
 
@@ -305,7 +339,7 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 | `BaseStrategy` | abstract base class, implements `on_bar(ctx) -> list[Action] \| RebalanceTargets` |
 | `Context` | immutable snapshot: ts, symbol, symbols, bar, bars, positions, cash, equity, period_index |
 | `Action` | strategy intent: `type` = long / short / close / hold |
-| `RebalanceTargets` | timestamped portfolio weights resolved into quantities at next-bar execution |
+| `RebalanceTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
@@ -314,6 +348,8 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 | Type | Description |
 |------|------|
 | `Fill` | fill report: price, quantity, commission, slippage, tax |
+| `OrderRequest` | live broker request: client id, symbol/side/quantity, market or limit, submission time |
+| `ExecutionReport` | normalized live state: submitted/accepted/partial/filled/cancelled/rejected plus confirmed execution facts |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, impact_coef (volume-impact coefficient, default 0 = off), maintenance_margin_rate (maintenance margin rate, default 0 = liquidation simulation off) |
@@ -334,8 +370,9 @@ trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the e
 | Function | Description |
 |------|------|
 | `make_fill(action, price, cash, cost_model)` | simulate a fill (used directly by backtest) |
-| `process_actions(actions, ...)` | shared action loop (used by both backtest and live) |
-| `process_rebalance_targets(targets, ...)` | execution-time weight sizing and deterministic reduce-then-add batch |
+| `process_actions(actions, ...)` | deterministic simulated action matching; also reused on a copy for live request sizing |
+| `process_rebalance_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
+| `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
 | `liquidate_all(positions, bars, ts, ...)` | close everything (shared by end-of-run and max-drawdown circuit breaker) |
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
@@ -423,6 +460,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
+| `order_adapter` | `place_order({symbol, side, quantity, order_type, client_order_id, price?}) -> dict`; final fills follow the execution-report contract above |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 
 `notifier`'s 5 methods, with their exact kwargs:

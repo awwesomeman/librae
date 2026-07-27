@@ -68,18 +68,21 @@ class Action:
             symbols at once), leaving quantity=None on more than one of them
             lets the first-processed Action consume all cash and starves the
             rest — set explicit per-symbol quantity (e.g. equal-weight sizing).
-        fill_price: How to resolve the execution price on the *next* bar.
+        fill_price: In backtest/sim, how to resolve execution on the next bar.
             str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
             float — one-bar limit order. Buys fill when low reaches the limit;
                 sells fill when high reaches it. Gap-through fills at open.
             None  — use engine default (RunConfig.params["fill_price"], typically "open").
+            In live, None submits a market order and a float submits a broker
+            limit order; bar-field strings are rejected as non-causal.
         stop_price: Absolute price that force-closes the position (stop-market
             order — fills at the worse of stop_price/bar-open on gap-through).
             Only applied on open/scale of a "long"/"short" action; the engine
             checks it every bar after this one until the position closes.
+            Simulation-only; live requires broker-native protective orders.
         take_profit_price: Absolute price that force-closes the position
             (limit order — fills exactly at this price when the bar's range
-            touches it). Same lifecycle as stop_price.
+            touches it). Same lifecycle as stop_price and simulation-only.
     """
 
     type: Literal["long", "short", "close", "hold"]
@@ -93,12 +96,13 @@ class Action:
 
 @dataclass(frozen=True)
 class RebalanceTargets:
-    """Portfolio-level target weights resolved by the engine on the next bar.
+    """Portfolio-level target weights.
 
     Positive weights target long exposure and negative weights target short
     exposure. Symbols currently held but absent from ``weights`` target zero
-    and are closed. Target quantities are calculated together at execution
-    time from portfolio equity and each symbol's resolved fill price.
+    and are closed. Backtest/sim resolves quantities on the next bar. Live
+    sizes at the latest completed close and immediately submits market orders;
+    live ``fill_price`` is therefore unsupported.
 
     Target weights need not sum to one; any remainder stays in cash.
     """

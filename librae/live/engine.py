@@ -17,7 +17,7 @@ import types
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Literal
 
@@ -27,20 +27,26 @@ from librae.core import EPSILON
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     ActionResults,
+    apply_execution_fill,
     eval_equity,
     liquidate_all,
+    process_actions,
+    process_rebalance_targets,
     run_pending_and_stops,
     validate_risk_params,
 )
 from librae.core.strategy import (
+    Action,
     BaseStrategy,
     Context,
+    Fill,
     Position,
     PositionState,
+    RebalanceTargets,
     StrategyIntent,
 )
 
-from .executor import LiveExecutor
+from .executor import LiveExecutor, OrderRequest
 
 if TYPE_CHECKING:
     from librae.core.cost_model import CostModel
@@ -592,69 +598,15 @@ class LiveTrader:
             ),
         )
 
-    # Same style as CASH_RECONCILE_TOLERANCE_PCT: engine constants, not
-    # cfg.params knobs — a fill-mismatch alert is a monitoring threshold,
-    # not a per-strategy tuning parameter.
-    RECONCILE_POLL_BACKOFF_SECONDS: tuple[float, ...] = (1, 1, 2, 2, 3)
-    POSITION_RECONCILE_QTY_TOLERANCE_PCT = 0.01
-    POSITION_RECONCILE_PRICE_TOLERANCE_PCT = 0.01
-
-    def _reconcile_position(
-        self,
-        symbol: str,
-        expected_positions: dict[str, PositionState],
-    ) -> tuple[bool, str]:
-        """Poll until broker state matches a staged final position."""
-        adapter = self._executor.order_adapter
-        if adapter is None:
-            return True, ""
-
-        position = expected_positions.get(symbol)
-        expected_size = (
-            position.quantity * (1.0 if position.side == "long" else -1.0) if position else 0.0
-        )
-        expected_qty = abs(expected_size)
-        expected_price = position.entry_price if position else 0.0
-
-        broker_size = broker_price = 0.0
-        backoffs = self.RECONCILE_POLL_BACKOFF_SECONDS
-        for attempt, delay in enumerate(backoffs):
-            try:
-                broker_pos = adapter.get_position(symbol)
-            except Exception as exc:
-                return False, f"broker position unavailable for {symbol}: {exc}"
-
-            broker_size = float(broker_pos.get("size") or 0)
-            broker_price = float(broker_pos.get("avg_price") or 0.0)
-            size_ok = abs(
-                broker_size - expected_size
-            ) <= self.POSITION_RECONCILE_QTY_TOLERANCE_PCT * max(expected_qty, EPSILON)
-            price_ok = expected_qty <= EPSILON or abs(
-                broker_price - expected_price
-            ) <= self.POSITION_RECONCILE_PRICE_TOLERANCE_PCT * max(expected_price, EPSILON)
-            if size_ok and price_ok:
-                return True, ""
-
-            if attempt < len(backoffs) - 1:
-                self._sleep(delay)
-
-        return (
-            False,
-            f"{symbol}: expected size={expected_size:.4f} price={expected_price:.2f}, "
-            f"broker size={broker_size:.4f} price={broker_price:.2f}",
-        )
-
-    def _halt_and_recover(self, *, title: str, message: str) -> None:
-        """Fail closed and make broker positions authoritative when readable."""
+    def _halt_live(self, *, title: str, message: str) -> None:
+        """Fail closed without inferring fills from a position snapshot."""
         self._halted = True
         self._pending_intent = []
-        recovered = self._adopt_broker_positions()
-        recovery = "broker positions adopted" if recovered else "broker snapshot unavailable"
-        logger.error("%s: %s; %s", title, message, recovery)
+        logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"{message}; trading halted, {recovery}.",
+            message=f"{message}; trading halted.",
         )
 
     def run(self, max_iterations: int | None = None) -> None:
@@ -834,42 +786,177 @@ class LiveTrader:
             self._executor.notify_exit(trade.symbol, trade.exit_price)
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
 
-    def _commit_staged_results(
+    def _commit_simulated_results(
         self,
         *,
         cash: float,
         positions: dict[str, PositionState],
         result: ActionResults,
-    ) -> bool:
-        """Submit/reconcile live orders, then atomically commit staged state."""
-        if not self._executor.simulation:
-            for event in result.events:
-                if self._executor.submit_order(event) is None:
-                    self._halt_and_recover(
-                        title="Order Failed — Trading Halted",
-                        message=(
-                            f"{event.event_type} {event.symbol} "
-                            f"qty={event.fill_quantity:.4f} was not acknowledged"
-                        ),
-                    )
-                    return False
-
-            checked_symbols: set[str] = set()
-            for event in result.events:
-                if event.symbol in checked_symbols:
-                    continue
-                checked_symbols.add(event.symbol)
-                matched, detail = self._reconcile_position(event.symbol, positions)
-                if not matched:
-                    self._halt_and_recover(
-                        title=f"Fill Mismatch: {event.symbol}",
-                        message=detail,
-                    )
-                    return False
-
+    ) -> None:
+        """Commit a deterministic simulated fill batch."""
         self._cash = cash
         self._positions = positions
         self._apply_action_results(result)
+
+    def _plan_live_orders(
+        self,
+        intent: StrategyIntent,
+        bars: dict[str, dict[str, float]],
+        ts: datetime,
+    ) -> list[OrderRequest]:
+        """Size intent at the latest completed close without inventing fills."""
+        primary_symbol = self._symbols[0]
+        prices = {
+            symbol: float(bar["close"])
+            for symbol, bar in bars.items()
+            if bar.get("close") is not None and float(bar["close"]) > 0
+        }
+
+        def get_price(symbol: str, _action: Action) -> float | None:
+            return prices.get(symbol)
+
+        def get_volume(symbol: str) -> float | None:
+            volume = bars.get(symbol, {}).get("volume")
+            return float(volume) if volume is not None else None
+
+        max_position_notional = (
+            self._max_position_pct * self._prev_equity if self._max_position_pct else None
+        )
+        staged_positions = deepcopy(self._positions)
+
+        if isinstance(intent, RebalanceTargets):
+            if intent.fill_price is not None:
+                raise ValueError(
+                    "Live RebalanceTargets.fill_price is unsupported; "
+                    "target rebalances submit market orders after the completed-bar decision"
+                )
+            result = process_rebalance_targets(
+                intent,
+                staged_positions,
+                self._cash,
+                ts,
+                get_price=get_price,
+                get_cost_model=self._get_cost_model,
+                primary_symbol=primary_symbol,
+                max_position_notional=max_position_notional,
+                max_volume_participation_pct=self._max_volume_participation_pct,
+                get_volume=get_volume,
+            )
+            return [
+                self._executor.request_from_event(event, sequence=index)
+                for index, event in enumerate(result.events)
+            ]
+
+        requests: list[OrderRequest] = []
+        planning_cash = self._cash
+        for action in intent:
+            if action.type == "hold":
+                continue
+            if action.stop_price is not None or action.take_profit_price is not None:
+                raise ValueError(
+                    "Live stop-loss/take-profit requires broker-native protective orders; "
+                    "completed-bar range checks are simulation-only"
+                )
+            if isinstance(action.fill_price, str):
+                raise ValueError(
+                    "Live Action.fill_price cannot name a historical bar field; "
+                    "use None for market or a numeric price for a broker limit order"
+                )
+
+            order_type = "limit" if isinstance(action.fill_price, (int, float)) else "market"
+            limit_price = float(action.fill_price) if order_type == "limit" else None
+            planning_action = replace(action, fill_price="close")
+            result = process_actions(
+                [planning_action],
+                staged_positions,
+                planning_cash,
+                ts,
+                get_price=get_price,
+                get_cost_model=self._get_cost_model,
+                primary_symbol=primary_symbol,
+                max_position_notional=max_position_notional,
+                max_volume_participation_pct=self._max_volume_participation_pct,
+                get_volume=get_volume,
+            )
+            planning_cash += result.cash_delta
+            sequence_offset = len(requests)
+            requests.extend(
+                self._executor.request_from_event(
+                    event,
+                    order_type=order_type,
+                    limit_price=limit_price,
+                    sequence=sequence_offset + index,
+                )
+                for index, event in enumerate(result.events)
+            )
+        return requests
+
+    def _execute_live_intent(
+        self,
+        intent: StrategyIntent,
+        bars: dict[str, dict[str, float]],
+        ts: datetime,
+    ) -> bool:
+        """Submit current-cycle intent and commit only confirmed executions."""
+        try:
+            requests = self._plan_live_orders(intent, bars, ts)
+        except ValueError as exc:
+            self._halt_live(title="Unsupported Live Intent", message=str(exc))
+            return False
+
+        for request in requests:
+            report = self._executor.submit_order(request)
+            if report is None:
+                self._halt_live(
+                    title="Order Report Failure",
+                    message=(
+                        f"{request.side} {request.symbol} qty={request.quantity:.4f} "
+                        "did not return a valid broker execution report"
+                    ),
+                )
+                return False
+
+            if report.has_fill:
+                if report.average_price is None or report.executed_at is None:
+                    self._halt_live(
+                        title="Execution Report Incomplete",
+                        message=f"{request.symbol} fill is missing price or execution time",
+                    )
+                    return False
+                fill = Fill(
+                    symbol=report.symbol,
+                    side="long" if report.side == "buy" else "short",
+                    price=report.average_price,
+                    quantity=report.filled_quantity,
+                    commission=report.commission,
+                    slippage=report.slippage,
+                    tax=report.tax,
+                )
+                try:
+                    self._cash, result = apply_execution_fill(
+                        self._positions,
+                        self._cash,
+                        fill,
+                        report.executed_at,
+                        order_side=report.side,
+                        cost_model=self._get_cost_model(report.symbol),
+                        reason=request.reason,
+                    )
+                except ValueError as exc:
+                    self._halt_live(title="Execution Fill Conflict", message=str(exc))
+                    return False
+                self._apply_action_results(result)
+
+            if report.status != "filled":
+                self._halt_live(
+                    title=f"Order {report.status.replace('_', ' ').title()}",
+                    message=(
+                        f"{request.symbol} order_id={report.order_id or 'unassigned'} "
+                        f"filled={report.filled_quantity:.4f}/{report.requested_quantity:.4f}; "
+                        "open-order continuation is not yet supported"
+                    ),
+                )
+                return False
         return True
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
@@ -883,16 +970,10 @@ class LiveTrader:
     ) -> None:
         """Execute and evaluate one synchronized portfolio timestamp.
 
-        Previous-cycle intent fills against raw bars at ``ts`` before every
-        symbol's feature pipeline is evaluated using data no later than
-        ``ts``. The strategy is then called exactly once with the aligned
-        cross-section and produces the next cycle's pending intent.
-
-        Order execution (pending-action fills, stop-loss/take-profit) runs
-        on raw OHLCV and does not depend on feature computation succeeding
-        — a feature-pipeline failure must not leave a real pending fill
-        silently deferred to a later, unrelated cycle's price, and must not
-        block stop-loss/take-profit enforcement.
+        Simulation fills previous-cycle intent on this completed raw bar.
+        Live mode never books that historical range: it evaluates the
+        completed bar, submits the current decision immediately, and commits
+        only broker-confirmed execution reports.
         """
         primary_symbol = self._symbols[0]
         histories: dict[str, pd.DataFrame] = {}
@@ -907,35 +988,29 @@ class LiveTrader:
             raw_bars[symbol] = raw_bar
             self._last_prices[symbol] = float(raw_bar.get("close", 0.0))
 
-        # ── Steps 1+1.5: fill previous bar's pending actions at current
-        # bar's price, then check stop-loss/take-profit — shared with the
-        # backtest engine (librae.core.executor.run_pending_and_stops) so
-        # the two can't silently drift out of sync on this sequence ──
-        pending_intent = self._pending_intent
-        self._pending_intent = []
-        max_position_notional = (
-            self._max_position_pct * self._prev_equity if self._max_position_pct else None
-        )
-        staged_positions = (
-            self._positions if self._executor.simulation else deepcopy(self._positions)
-        )
-        staged_cash, step_result = run_pending_and_stops(
-            ts,
-            staged_positions,
-            self._cash,
-            pending_intent,
-            raw_bars,
-            get_cost_model=self._get_cost_model,
-            default_fill=self._fill_price,
-            primary_symbol=primary_symbol,
-            max_position_notional=max_position_notional,
-            max_volume_participation_pct=self._max_volume_participation_pct,
-        )
-        self._commit_staged_results(
-            cash=staged_cash,
-            positions=staged_positions,
-            result=step_result,
-        )
+        if self._executor.simulation:
+            pending_intent = self._pending_intent
+            self._pending_intent = []
+            max_position_notional = (
+                self._max_position_pct * self._prev_equity if self._max_position_pct else None
+            )
+            staged_cash, step_result = run_pending_and_stops(
+                ts,
+                self._positions,
+                self._cash,
+                pending_intent,
+                raw_bars,
+                get_cost_model=self._get_cost_model,
+                default_fill=self._fill_price,
+                primary_symbol=primary_symbol,
+                max_position_notional=max_position_notional,
+                max_volume_participation_pct=self._max_volume_participation_pct,
+            )
+            self._commit_simulated_results(
+                cash=staged_cash,
+                positions=self._positions,
+                result=step_result,
+            )
 
         # ── Step 1.5: equity/drawdown check — right after this bar's fills
         # and stops are applied, before the strategy sees the bar. Mirrors
@@ -951,8 +1026,7 @@ class LiveTrader:
                 featured = self._feature_fn(histories[symbol])
             except Exception:
                 logger.exception(
-                    "Feature computation failed for %s — pending fills/stops above "
-                    "still applied, skipping strategy decision for cycle %s",
+                    "Feature computation failed for %s; skipping strategy decision for cycle %s",
                     symbol,
                     ts,
                 )
@@ -977,7 +1051,8 @@ class LiveTrader:
                         signal_type="exit",
                     )
 
-        # ── Step 2: strategy decision (produces next bar's pending actions) ──
+        # Strategy sees only completed data. Simulation defers its intent to
+        # the next bar; live submits now, before any future bar exists.
         equity, position_snapshot = self._eval_equity_snapshot()
         ctx = Context(
             ts=ts,
@@ -991,7 +1066,11 @@ class LiveTrader:
             period_index=self._period_index,
         )
 
-        self._pending_intent = self._strategy.on_bar(ctx)
+        intent = self._strategy.on_bar(ctx)
+        if self._executor.simulation:
+            self._pending_intent = intent
+        else:
+            self._execute_live_intent(intent, raw_bars, ts)
         self._period_index += 1
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
@@ -1057,22 +1136,31 @@ class LiveTrader:
 
     def _flatten_and_halt(self, ts: datetime, drawdown: float) -> None:
         """Force-close every open position and permanently halt new entries."""
-        staged_positions = (
-            self._positions if self._executor.simulation else deepcopy(self._positions)
-        )
-        result = liquidate_all(
-            staged_positions,
-            {},
-            ts,
-            get_cost_model=self._get_cost_model,
-            reason=REASON_DRAWDOWN_BREACH,
-            fallback_price=self._get_last_price,
-        )
-        flattened = self._commit_staged_results(
-            cash=self._cash + result.cash_delta,
-            positions=staged_positions,
-            result=result,
-        )
+        if self._executor.simulation:
+            result = liquidate_all(
+                self._positions,
+                {},
+                ts,
+                get_cost_model=self._get_cost_model,
+                reason=REASON_DRAWDOWN_BREACH,
+                fallback_price=self._get_last_price,
+            )
+            self._commit_simulated_results(
+                cash=self._cash + result.cash_delta,
+                positions=self._positions,
+                result=result,
+            )
+            flattened = True
+        else:
+            actions = [
+                Action(type="close", symbol=symbol, reason=REASON_DRAWDOWN_BREACH)
+                for symbol in self._positions
+            ]
+            bars = {
+                symbol: {"close": self._get_last_price(symbol, position)}
+                for symbol, position in self._positions.items()
+            }
+            flattened = self._execute_live_intent(actions, bars, ts)
         self._halted = True
         outcome = "flattened all positions" if flattened else "flatten attempt failed"
         self._notify(
