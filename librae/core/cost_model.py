@@ -117,17 +117,22 @@ class CostModel:
             return override
         symbol = symbol if symbol is not None else cfg.symbol
 
-        from librae.config.market_config import get_market
-
-        mc = get_market(cfg.market, markets=markets)
-
         from librae.config.symbols import get_symbol
 
         try:
             sym = get_symbol(symbol)
             multiplier, tick_size = sym.multiplier, sym.tick_size
+            symbol_market = sym.market
         except KeyError:
             multiplier, tick_size = None, None
+            symbol_market = cfg.market
+
+        route = (cfg.instrument_overrides or {}).get(symbol, {})
+        symbol_market = route.get("market", symbol_market)
+
+        from librae.config.market_config import get_market
+
+        mc = get_market(symbol_market, markets=markets)
 
         # symbol_overrides[symbol] wins over the run-wide cost_overrides
         # fallback for anything both specify.
@@ -291,15 +296,20 @@ def describe_symbols(cfg: RunConfig, symbols: list[str] | None = None) -> list[S
             info = get_symbol(sym)
         except KeyError:
             info = None
+        route = (cfg.instrument_overrides or {}).get(sym, {})
+        resolved_market = route.get("market") or (info.market if info else cfg.market)
+        resolved_source = route.get("data_source") or (
+            info.data_source if info else cfg.data_source
+        )
 
         try:
             cm = CostModel.from_config(cfg, symbol=sym)
-        except ValueError as e:
+        except (KeyError, ValueError) as e:
             results.append(
                 SymbolDescription(
                     symbol=sym,
-                    market=cfg.market,
-                    data_source=cfg.data_source,
+                    market=resolved_market,
+                    data_source=resolved_source,
                     multiplier=None,
                     multiplier_source="unresolved",
                     tick_size=None,
@@ -332,8 +342,8 @@ def describe_symbols(cfg: RunConfig, symbols: list[str] | None = None) -> list[S
         results.append(
             SymbolDescription(
                 symbol=sym,
-                market=cfg.market,
-                data_source=cfg.data_source,
+                market=resolved_market,
+                data_source=resolved_source,
                 multiplier=cm.multiplier,
                 multiplier_source=multiplier_source,
                 tick_size=cm.tick_size,

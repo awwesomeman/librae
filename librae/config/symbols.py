@@ -30,6 +30,23 @@ in a clone of this repo.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from librae.core.run_config import RunConfig
+
+AdapterName = Literal["crypto", "ibkr", "shioaji"]
+_ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
+    "binance_spot": "crypto",
+    "binance_futures_continuous": "crypto",
+    "ibkr": "ibkr",
+    "shioaji": "shioaji",
+}
+_CURRENCY_BY_MARKET = {
+    "crypto": "USDT",
+    "tw_futures": "TWD",
+    "us_equity": "USD",
+}
 
 # Contract expiry structure — orthogonal to continuous_alias (see the
 # per-symbol entries below). 'spot' is the bare case (direct ownership, not
@@ -66,8 +83,13 @@ class SymbolInfo:
     data_source: str
     instrument_type: str
     multiplier: float
+    adapter: AdapterName
+    venue_symbol: str
+    currency: str
     continuous_alias: bool = False
     tick_size: float | None = None
+    security_type: str | None = None
+    exchange: str | None = None
 
     def __post_init__(self) -> None:
         if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
@@ -75,6 +97,14 @@ class SymbolInfo:
                 f"{self.symbol!r} has instrument_type="
                 f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
             )
+        if self.adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+            raise ValueError(f"{self.symbol!r} has unsupported adapter={self.adapter!r}")
+        if self.multiplier <= 0:
+            raise ValueError(f"{self.symbol!r} multiplier must be positive")
+        if not self.venue_symbol:
+            raise ValueError(f"{self.symbol!r} venue_symbol must be non-empty")
+        if not self.currency:
+            raise ValueError(f"{self.symbol!r} currency must be non-empty")
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
@@ -108,8 +138,15 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             data_source=str(data.get("data_source", "")),
             instrument_type=instrument_type,
             multiplier=multiplier,
+            adapter=str(data["adapter"]),
+            venue_symbol=str(data.get("venue_symbol", symbol)),
+            currency=str(data["currency"]),
             continuous_alias=bool(data.get("continuous_alias", False)),
             tick_size=float(raw_tick_size) if raw_tick_size is not None else None,
+            security_type=(
+                str(data["security_type"]) if data.get("security_type") is not None else None
+            ),
+            exchange=str(data["exchange"]) if data.get("exchange") is not None else None,
         )
     return registry
 
@@ -122,6 +159,9 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "crypto",
             "data_source": "binance_spot",
             "instrument_type": "spot",
+            "adapter": "crypto",
+            "venue_symbol": "BTC/USDT",
+            "currency": "USDT",
             # multiplier/tick_size omitted on purpose — spot auto-defaults
             # to multiplier=1.0, tick_size falls back to market_config.py's
             # crypto default (0.01).
@@ -130,6 +170,9 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "crypto",
             "data_source": "binance_futures_continuous",
             "instrument_type": "contract_quarterly",
+            "adapter": "crypto",
+            "venue_symbol": "BTC/USDT:USDT",
+            "currency": "USDT",
             "continuous_alias": True,
             # Binance USDT-M linear contract, contractSize=1 BTC per
             # contract (verified via ccxt binanceusdm market info) — 1
@@ -140,6 +183,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
+            "adapter": "shioaji",
+            "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
             "tick_size": 1.0,  # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
@@ -148,6 +193,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
+            "adapter": "shioaji",
+            "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 50.0,  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
             "tick_size": 1.0,
@@ -156,6 +203,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "tw_futures",
             "data_source": "shioaji",
             "instrument_type": "contract_monthly",
+            "adapter": "shioaji",
+            "currency": "TWD",
             "continuous_alias": True,
             "multiplier": 10.0,  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
             "tick_size": 1.0,
@@ -164,6 +213,9 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "market": "us_equity",
             "data_source": "ibkr",
             "instrument_type": "spot",
+            "adapter": "ibkr",
+            "currency": "USD",
+            "security_type": "STK",
             # multiplier/tick_size omitted — spot auto-defaults to
             # multiplier=1.0, tick_size falls back to market_config.py's
             # us_equity default (0.01).
@@ -199,3 +251,58 @@ def get_symbol(symbol: str) -> SymbolInfo:
         available = list(_BUILTIN_SYMBOLS.keys())
         raise KeyError(f"Symbol '{symbol}' not found. Available: {available}")
     return _BUILTIN_SYMBOLS[symbol]
+
+
+def resolve_symbol(cfg: RunConfig, symbol: str) -> SymbolInfo:
+    """Resolve accounting and broker metadata for one configured symbol.
+
+    Registry values are authoritative for registered symbols. Run-wide
+    market/data_source values are fallbacks for homogeneous, unregistered
+    universes; ``instrument_overrides`` supplies per-symbol routing metadata.
+    """
+    registered = _BUILTIN_SYMBOLS.get(symbol)
+    route = (cfg.instrument_overrides or {}).get(symbol, {})
+    costs = dict(cfg.cost_overrides or {})
+    costs.update((cfg.symbol_overrides or {}).get(symbol, {}))
+
+    market = route.get("market") or (registered.market if registered else cfg.market)
+    data_source = route.get("data_source") or (
+        registered.data_source if registered else cfg.data_source
+    )
+    adapter = route.get("adapter") or (
+        registered.adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)
+    )
+    if adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+        raise ValueError(
+            f"No adapter route for symbol={symbol!r}, data_source={data_source!r}; "
+            "set instrument_overrides[symbol]['adapter']"
+        )
+
+    multiplier = costs.get("multiplier", registered.multiplier if registered else None)
+    if multiplier is None:
+        raise ValueError(
+            f"No multiplier for symbol={symbol!r}; set symbol_overrides[symbol]['multiplier']"
+        )
+    instrument_type = route.get("instrument_type") or (
+        registered.instrument_type if registered else ("spot" if float(multiplier) == 1.0 else "")
+    )
+    tick_size = costs.get("tick_size", registered.tick_size if registered else None)
+    currency = route.get("currency") or (
+        registered.currency if registered else _CURRENCY_BY_MARKET.get(market, "")
+    )
+    return SymbolInfo(
+        symbol=symbol,
+        market=market,
+        data_source=data_source,
+        instrument_type=instrument_type,
+        multiplier=float(multiplier),
+        adapter=adapter,
+        venue_symbol=route.get("venue_symbol")
+        or (registered.venue_symbol if registered else symbol),
+        currency=currency,
+        continuous_alias=registered.continuous_alias if registered else False,
+        tick_size=float(tick_size) if tick_size is not None else None,
+        security_type=route.get("security_type")
+        or (registered.security_type if registered else None),
+        exchange=route.get("exchange") or (registered.exchange if registered else None),
+    )
