@@ -13,6 +13,7 @@ from librae.core.executor import (
     REASON_LIQUIDATION,
     REASON_STOP_LOSS,
     REASON_TAKE_PROFIT,
+    check_stop_targets,
     resolve_stop_exit,
 )
 from librae.core.strategy import Action, BaseStrategy, Context, PositionState
@@ -124,6 +125,31 @@ class TestResolveStopExit:
         pos = _make_pos(side="long")
         bar = {"open": 50.0, "high": 200.0, "low": 1.0, "close": 100.0}
         assert resolve_stop_exit(pos, bar, _zero_cost()) is None
+
+    def test_volume_constrained_stop_exit_is_partial(self):
+        pos = _make_pos(side="long", stop=95.0)
+        pos.quantity = 10.0
+        positions = {"TEST": pos}
+
+        result = check_stop_targets(
+            positions,
+            {
+                "TEST": {
+                    "open": 98.0,
+                    "high": 99.0,
+                    "low": 94.0,
+                    "close": 96.0,
+                    "volume": 20.0,
+                }
+            },
+            datetime(2026, 1, 2, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+            max_volume_participation_pct=0.25,
+        )
+
+        assert result.events[0].event_type == "reduce"
+        assert result.events[0].fill_quantity == pytest.approx(5.0)
+        assert positions["TEST"].quantity == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------

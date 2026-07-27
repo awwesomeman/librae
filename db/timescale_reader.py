@@ -78,7 +78,8 @@ def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
 def load_equity_curve(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     sql = """
         SELECT ts AS _time, equity, benchmark_equity, drawdown,
-               period_return, benchmark_period_return
+               period_return, benchmark_period_return, gross_exposure,
+               net_exposure, concentration, turnover
         FROM equity_curve
         WHERE run_id = %s
         ORDER BY ts
@@ -130,6 +131,9 @@ def load_performance(run_id: str, dsn: str | None = None) -> pd.DataFrame:
         SELECT sp.run_id, sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
                sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.payoff_ratio,
                sp.trades, sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
+               sp.tracking_error, sp.information_ratio, sp.total_turnover,
+               sp.average_gross_exposure, sp.max_gross_exposure,
+               sp.max_abs_net_exposure, sp.max_concentration,
                sp.total_commission, sp.total_slippage, sp.total_tax,
                br.strategy, br.symbol, br.timeframe
         FROM strategy_performance sp

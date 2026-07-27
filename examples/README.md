@@ -5,7 +5,7 @@ Each example uses the same minimal layout: `strategy.py`, `run.py`, and
 
 | Example | Strategy responsibility | Intent | Modes |
 |---|---|---|---|
-| [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[Action]` | backtest, sim, live |
+| [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[Action]` | backtest, sim; live with explicit broker setup |
 | [`target_weights/`](target_weights/) | Look up an externally prepared allocation schedule | `RebalanceTargets` | backtest |
 | [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select the Top K | `RebalanceTargets` | backtest |
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -32,6 +32,7 @@ from librae.core import EPSILON
 
 if TYPE_CHECKING:
     from librae.backtest.schema import (
+        AllocationSnapshotPoint,
         BacktestOutput,
         EquityCurvePoint,
         OrderEventRecord,
@@ -45,6 +46,7 @@ from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     REASON_FORCE_CLOSE,
+    ActionResults,
     OrderEvent,
     TradePnL,
     TradeResult,
@@ -165,6 +167,28 @@ class PositionSnapshot:
 
 
 @dataclass(frozen=True)
+class AllocationSnapshot:
+    """One symbol's target-versus-achieved end-of-event allocation."""
+
+    ts: datetime
+    symbol: str
+    target_weight: float | None
+    realized_weight: float
+    weight_drift: float | None
+
+
+@dataclass(frozen=True)
+class PortfolioSnapshot:
+    """Portfolio exposure and trading diagnostics for one event."""
+
+    ts: datetime
+    gross_exposure: float
+    net_exposure: float
+    concentration: float
+    turnover: float
+
+
+@dataclass(frozen=True)
 class BacktestResult:
     """Raw output from engine — no metrics, just facts."""
 
@@ -172,6 +196,8 @@ class BacktestResult:
     order_events: Sequence[OrderEvent]
     equity_curve: Sequence[EquitySnapshot]
     position_snapshots: Sequence[PositionSnapshot]
+    allocation_snapshots: Sequence[AllocationSnapshot]
+    portfolio_snapshots: Sequence[PortfolioSnapshot]
     initial_balance: float
     final_equity: float
     exposed_periods: int = 0
@@ -207,9 +233,9 @@ class Backtest:
         strategy_name: Override strategy name (default: from cfg or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
         data_source: Data source identifier — direct-args style.
-        record_position_snapshots: Record per-symbol end-of-bar positions and
-            realized weights. Off by default to avoid O(bars × positions)
-            memory growth when the caller only needs aggregate results.
+        record_position_snapshots: Record per-symbol end-of-event positions,
+            realized weights, and target-versus-achieved allocations. Off by
+            default to avoid O(events × configured symbols) memory growth.
     """
 
     def __init__(
@@ -273,9 +299,7 @@ class Backtest:
                 if sym != cfg.symbol:
                     self._cost_models[sym] = CostModel.from_config(cfg, symbol=sym)
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open") if cfg else "open"
-        self._max_position_pct, self._max_drawdown_pct, self._max_volume_participation_pct = (
-            validate_risk_params(cfg.params if cfg else None)
-        )
+        self._risk_limits = validate_risk_params(cfg.params if cfg else None)
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
@@ -319,10 +343,8 @@ class Backtest:
     # --- Private helpers ---
 
     def _get_cost_model(self, symbol: str) -> CostModel:
-        """Get cost model for a symbol, falling back to __default__."""
-        return self._cost_models.get(symbol) or self._cost_models.get(
-            "__default__", CostModel.zero()
-        )
+        """Get a symbol override or the constructor-created default model."""
+        return self._cost_models.get(symbol, self._cost_models["__default__"])
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
@@ -344,6 +366,9 @@ class Backtest:
         universe = set(self._symbols)
         pending_intent: StrategyIntent = []
         position_snapshots: list[PositionSnapshot] = []
+        allocation_snapshots: list[AllocationSnapshot] = []
+        portfolio_snapshots: list[PortfolioSnapshot] = []
+        active_target_weights: dict[str, float] | None = None
         last_prices: dict[str, float] = {}
         decision_index = 0
         equity_peak = self._initial_balance
@@ -351,6 +376,7 @@ class Backtest:
         halted = False
 
         for ts in self._timeline:
+            event_start_index = len(all_events)
             bars = all_bars[ts]
             for symbol, bar in bars.items():
                 close = bar.get("close")
@@ -363,28 +389,49 @@ class Backtest:
                 positions,
                 primary_symbol=primary_symbol,
             )
+            if isinstance(intent_to_execute, RebalanceTargets):
+                active_target_weights = dict(intent_to_execute.weights)
 
             # ── Steps 1+1.5: fill previous bar's pending actions at current
             # bar's price, then check stop-loss/take-profit — shared with
             # LiveTrader's simulation mode so deterministic runtimes cannot
             # drift on this sequence ──
             max_position_notional = (
-                self._max_position_pct * last_equity if self._max_position_pct else None
+                self._risk_limits.max_position_pct * last_equity
+                if self._risk_limits.max_position_pct
+                else None
             )
-            cash, step_result = run_pending_and_stops(
-                ts,
-                positions,
-                cash,
-                intent_to_execute,
-                bars,
-                get_cost_model=self._get_cost_model,
-                default_fill=self._fill_price,
-                primary_symbol=primary_symbol,
-                max_position_notional=max_position_notional,
-                max_volume_participation_pct=self._max_volume_participation_pct,
-            )
+            if halted:
+                step_result = ActionResults(trades=[], events=[], cash_delta=0.0)
+            else:
+                cash, step_result = run_pending_and_stops(
+                    ts,
+                    positions,
+                    cash,
+                    intent_to_execute,
+                    bars,
+                    get_cost_model=self._get_cost_model,
+                    default_fill=self._fill_price,
+                    primary_symbol=primary_symbol,
+                    max_position_notional=max_position_notional,
+                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                    max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
+                    max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
+                )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
+            if halted and positions:
+                liquidation_result = liquidate_all(
+                    positions,
+                    bars,
+                    ts,
+                    get_cost_model=self._get_cost_model,
+                    reason=REASON_DRAWDOWN_BREACH,
+                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                )
+                trades.extend(liquidation_result.trades)
+                all_events.extend(liquidation_result.events)
+                cash += liquidation_result.cash_delta
 
             # ── Step 2: equity and drawdown check ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
@@ -395,10 +442,10 @@ class Backtest:
             equity_peak = max(equity_peak, mtm)
             drawdown = (mtm - equity_peak) / equity_peak if equity_peak > 0 else 0.0
             if (
-                self._max_drawdown_pct
+                self._risk_limits.max_drawdown_pct
                 and not halted
                 and equity_peak > 0
-                and drawdown <= -self._max_drawdown_pct
+                and drawdown <= -self._risk_limits.max_drawdown_pct
             ):
                 dd_result = liquidate_all(
                     positions,
@@ -406,15 +453,12 @@ class Backtest:
                     ts,
                     get_cost_model=self._get_cost_model,
                     reason=REASON_DRAWDOWN_BREACH,
+                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                    used_volume=self._filled_quantities(all_events[event_start_index:]),
                 )
                 trades.extend(dd_result.trades)
                 all_events.extend(dd_result.events)
                 cash += dd_result.cash_delta
-                if positions:
-                    raise RuntimeError(
-                        "max_drawdown_pct cannot liquidate positions without current bars: "
-                        f"{sorted(positions)}"
-                    )
                 halted = True
                 # The liquidation is an event at this timestamp, so its costs
                 # and resulting flat position must be reflected in the same
@@ -422,15 +466,38 @@ class Backtest:
                 mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
                 logger.warning(
                     "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
-                    "— all positions force-closed",
+                    "— liquidation started",
                     ts,
                     drawdown * 100,
-                    self._max_drawdown_pct * 100,
+                    self._risk_limits.max_drawdown_pct * 100,
                 )
 
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
+            event_turnover = (
+                sum(event.notional for event in all_events[event_start_index:]) / mtm
+                if mtm > EPSILON
+                else 0.0
+            )
+            portfolio_snapshots.append(
+                self._snapshot_portfolio(
+                    ts,
+                    positions,
+                    last_prices,
+                    mtm,
+                    event_turnover,
+                )
+            )
             if self._record_position_snapshots:
                 position_snapshots.extend(self._snapshot_positions(ts, positions, last_prices, mtm))
+                allocation_snapshots.extend(
+                    self._snapshot_allocations(
+                        ts,
+                        positions,
+                        last_prices,
+                        mtm,
+                        active_target_weights,
+                    )
+                )
 
             last_equity = mtm
 
@@ -477,10 +544,15 @@ class Backtest:
                 last_ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
+                max_volume_participation_pct=self._risk_limits.max_volume_participation_pct,
+                used_volume=self._filled_quantities(
+                    event for event in all_events if event.ts == last_ts
+                ),
             )
             if positions:
                 raise ValueError(
-                    "cannot force-close positions without a bar at the backtest end: "
+                    "cannot force-close all positions at the backtest end under "
+                    "available price/volume constraints: "
                     f"{sorted(positions)}"
                 )
             trades.extend(close_result.trades)
@@ -495,6 +567,27 @@ class Backtest:
                 position_snapshots = [
                     snapshot for snapshot in position_snapshots if snapshot.ts != last_ts
                 ]
+                allocation_snapshots = [
+                    snapshot for snapshot in allocation_snapshots if snapshot.ts != last_ts
+                ]
+                allocation_snapshots.extend(
+                    self._snapshot_allocations(
+                        last_ts,
+                        positions,
+                        last_prices,
+                        cash,
+                        active_target_weights,
+                    )
+                )
+            portfolio_snapshots[-1] = self._snapshot_portfolio(
+                last_ts,
+                positions,
+                last_prices,
+                cash,
+                sum(event.notional for event in all_events if event.ts == last_ts) / cash
+                if cash > EPSILON
+                else 0.0,
+            )
 
         self._result = BacktestResult(
             trades=trades,
@@ -504,6 +597,8 @@ class Backtest:
             final_equity=cash,
             exposed_periods=exposed_periods,
             position_snapshots=position_snapshots,
+            allocation_snapshots=allocation_snapshots,
+            portfolio_snapshots=portfolio_snapshots,
         )
         return self._result
 
@@ -586,6 +681,14 @@ class Backtest:
             benchmark_values=benchmark_curve,
             exposed_periods=result.exposed_periods,
             trade_quantities=trade_quantities,
+            turnover_values=[snapshot.turnover for snapshot in result.portfolio_snapshots],
+            gross_exposure_values=[
+                snapshot.gross_exposure for snapshot in result.portfolio_snapshots
+            ],
+            net_exposure_values=[snapshot.net_exposure for snapshot in result.portfolio_snapshots],
+            concentration_values=[
+                snapshot.concentration for snapshot in result.portfolio_snapshots
+            ],
             **perf_kwargs,
         )
 
@@ -603,6 +706,7 @@ class Backtest:
         event_records = self._build_event_records(result, run_id)
         equity_points = self._enrich_equity_curve(result, benchmark_curve)
         position_snapshot_points = self._build_position_snapshot_records(result)
+        allocation_snapshot_points = self._build_allocation_snapshot_records(result)
 
         return BacktestOutput(
             run_metadata=run_metadata,
@@ -610,6 +714,7 @@ class Backtest:
             order_events=tuple(event_records),
             metrics=self._metrics,
             position_snapshots=tuple(position_snapshot_points),
+            allocation_snapshots=tuple(allocation_snapshot_points),
         )
 
     @property
@@ -669,6 +774,24 @@ class Backtest:
         ]
 
     @staticmethod
+    def _build_allocation_snapshot_records(
+        result: BacktestResult,
+    ) -> list[AllocationSnapshotPoint]:
+        """Map target-versus-achieved allocation facts to output schema."""
+        from librae.backtest.schema import AllocationSnapshotPoint
+
+        return [
+            AllocationSnapshotPoint(
+                ts=snapshot.ts,
+                symbol=snapshot.symbol,
+                target_weight=snapshot.target_weight,
+                realized_weight=float(snapshot.realized_weight),
+                weight_drift=snapshot.weight_drift,
+            )
+            for snapshot in result.allocation_snapshots
+        ]
+
+    @staticmethod
     def _enrich_equity_curve(
         result: BacktestResult,
         benchmark_curve: list[float] | None,
@@ -682,6 +805,7 @@ class Backtest:
         prev_eq = result.equity_curve[0].equity if result.equity_curve else 1.0
         prev_bm = float(benchmark_curve[0]) if has_bm else 1.0
         for i, snap in enumerate(result.equity_curve):
+            portfolio = result.portfolio_snapshots[i]
             eq = snap.equity
             peak = max(peak, eq)
             drawdown = (eq - peak) / peak if peak > 0 else 0.0
@@ -702,6 +826,10 @@ class Backtest:
                     drawdown=float(drawdown),
                     benchmark_equity=bm_eq,
                     benchmark_period_return=bm_ret,
+                    gross_exposure=float(portfolio.gross_exposure),
+                    net_exposure=float(portfolio.net_exposure),
+                    concentration=float(portfolio.concentration),
+                    turnover=float(portfolio.turnover),
                 )
             )
         return equity_points
@@ -815,3 +943,75 @@ class Backtest:
                 )
             )
         return snapshots
+
+    def _realized_weights(
+        self,
+        positions: dict[str, PositionState],
+        last_prices: dict[str, float],
+        equity: float,
+    ) -> dict[str, float]:
+        if equity <= EPSILON:
+            return {symbol: 0.0 for symbol in positions}
+        return {
+            symbol: (
+                last_prices[symbol]
+                * position.quantity
+                * self._get_cost_model(symbol).multiplier
+                * (-1.0 if position.side == "short" else 1.0)
+                / equity
+            )
+            for symbol, position in positions.items()
+        }
+
+    def _snapshot_allocations(
+        self,
+        ts: datetime,
+        positions: dict[str, PositionState],
+        last_prices: dict[str, float],
+        equity: float,
+        target_weights: dict[str, float] | None,
+    ) -> list[AllocationSnapshot]:
+        """Record every configured symbol, including unfilled target names."""
+        realized_weights = self._realized_weights(positions, last_prices, equity)
+        snapshots = []
+        for symbol in sorted(self._symbols):
+            target_weight = target_weights.get(symbol, 0.0) if target_weights is not None else None
+            realized_weight = realized_weights.get(symbol, 0.0)
+            snapshots.append(
+                AllocationSnapshot(
+                    ts=ts,
+                    symbol=symbol,
+                    target_weight=target_weight,
+                    realized_weight=realized_weight,
+                    weight_drift=(
+                        realized_weight - target_weight if target_weight is not None else None
+                    ),
+                )
+            )
+        return snapshots
+
+    def _snapshot_portfolio(
+        self,
+        ts: datetime,
+        positions: dict[str, PositionState],
+        last_prices: dict[str, float],
+        equity: float,
+        turnover: float,
+    ) -> PortfolioSnapshot:
+        """Compute end-of-event exposure ratios from signed market values."""
+        realized_weights = self._realized_weights(positions, last_prices, equity)
+        return PortfolioSnapshot(
+            ts=ts,
+            gross_exposure=sum(abs(weight) for weight in realized_weights.values()),
+            net_exposure=sum(realized_weights.values()),
+            concentration=max((abs(weight) for weight in realized_weights.values()), default=0.0),
+            turnover=turnover,
+        )
+
+    @staticmethod
+    def _filled_quantities(events: Iterable[OrderEvent]) -> dict[str, float]:
+        """Aggregate quantity already matched per symbol in one data event."""
+        quantities: dict[str, float] = {}
+        for event in events:
+            quantities[event.symbol] = quantities.get(event.symbol, 0.0) + event.fill_quantity
+        return quantities

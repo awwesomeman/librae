@@ -90,15 +90,15 @@ class TrackedOrder:
         request_raw["submitted_at"] = _to_utc(request_raw["submitted_at"])
         return cls(
             request=OrderRequest(**request_raw),
-            placement_attempted=bool(raw.get("placement_attempted", False)),
-            order_id=str(raw.get("order_id") or ""),
-            status=raw.get("status", "submitted"),
-            filled_quantity=float(raw.get("filled_quantity", 0.0)),
-            filled_notional=float(raw.get("filled_notional", 0.0)),
-            commission=float(raw.get("commission", 0.0)),
-            slippage=float(raw.get("slippage", 0.0)),
-            tax=float(raw.get("tax", 0.0)),
-            executed_at=_to_utc(raw.get("executed_at")),
+            placement_attempted=bool(raw["placement_attempted"]),
+            order_id=str(raw["order_id"] or ""),
+            status=raw["status"],
+            filled_quantity=float(raw["filled_quantity"]),
+            filled_notional=float(raw["filled_notional"]),
+            commission=float(raw["commission"]),
+            slippage=float(raw["slippage"]),
+            tax=float(raw["tax"]),
+            executed_at=_to_utc(raw["executed_at"]),
         )
 
 
@@ -160,7 +160,7 @@ class LiveRuntimeState:
         if raw.get("schema_version") != 2:
             raise ValueError("unsupported live runtime-state schema")
         positions = {}
-        for symbol, item in raw.get("positions", {}).items():
+        for symbol, item in raw["positions"].items():
             position_raw = dict(item)
             position_raw["entry_at"] = _to_utc(position_raw["entry_at"])
             positions[symbol] = PositionState(**position_raw)
@@ -171,22 +171,18 @@ class LiveRuntimeState:
             mode=raw["mode"],
             cash=float(raw["cash"]),
             positions=positions,
-            last_prices={
-                str(symbol): float(price) for symbol, price in raw.get("last_prices", {}).items()
-            },
-            last_cycle_ts=_to_utc(raw.get("last_cycle_ts")),
-            last_bar_ts=_bar_timestamps_from_dict(raw.get("last_bar_ts", {})),
-            pending_intent=_intent_from_dict(
-                raw.get("pending_intent", {"kind": "actions", "value": []})
-            ),
-            active_orders=[TrackedOrder.from_dict(item) for item in raw.get("active_orders", [])],
+            last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},
+            last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
+            last_bar_ts=_bar_timestamps_from_dict(raw["last_bar_ts"]),
+            pending_intent=_intent_from_dict(raw["pending_intent"]),
+            active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
             equity_peak=float(raw["equity_peak"]),
             prev_equity=float(raw["prev_equity"]),
-            trade_count=int(raw.get("trade_count", 0)),
-            event_sequence=int(raw.get("event_sequence", 0)),
-            period_index=int(raw.get("period_index", 0)),
-            status_period_count=int(raw.get("status_period_count", 0)),
-            halted=bool(raw.get("halted", False)),
+            trade_count=int(raw["trade_count"]),
+            event_sequence=int(raw["event_sequence"]),
+            period_index=int(raw["period_index"]),
+            status_period_count=int(raw["status_period_count"]),
+            halted=bool(raw["halted"]),
         )
 
 

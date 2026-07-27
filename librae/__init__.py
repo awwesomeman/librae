@@ -12,6 +12,7 @@ except ImportError:
     __version__ = "0.0.0.dev0+unknown"
 
 from .backtest.schema import (
+    AllocationSnapshotPoint,
     BacktestOutput,
     EquityCurvePoint,
     PositionSnapshotPoint,
@@ -19,7 +20,14 @@ from .backtest.schema import (
     StrategyMetrics,
     RUN_ID_PATTERN,
 )
-from .backtest.engine import Backtest, BacktestResult, EquitySnapshot, PositionSnapshot
+from .backtest.engine import (
+    AllocationSnapshot,
+    Backtest,
+    BacktestResult,
+    EquitySnapshot,
+    PortfolioSnapshot,
+    PositionSnapshot,
+)
 from .core.cost_model import (
     CostModel,
     SymbolDescription,
@@ -44,6 +52,7 @@ from .config.market_config import MarketConfig, get_market
 __all__ = [
     "__version__",
     "BacktestOutput",
+    "AllocationSnapshotPoint",
     "EquityCurvePoint",
     "PositionSnapshotPoint",
     "RunMetadata",
@@ -69,6 +78,8 @@ __all__ = [
     "Backtest",
     "BacktestResult",
     "EquitySnapshot",
+    "AllocationSnapshot",
+    "PortfolioSnapshot",
     "PositionSnapshot",
     "TradeResult",
     "compute_all",

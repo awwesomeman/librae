@@ -38,7 +38,7 @@ SECONDS_PER_YEAR = 365.25 * 86400
 def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
     """Infer how many bars fit in one year from actual data density.
 
-    Uses ``n_bars / span_years`` — the true observed bar rate — so it
+    Uses ``(n_bars - 1) / span_years`` — the observed interval rate — so it
     correctly handles markets with limited trading hours (e.g. 5h/day
     futures) and any bar frequency (H1, D1, W1, etc.). Falls back to
     ``fallback`` (the configured trading-days/year) when there isn't
@@ -50,7 +50,7 @@ def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
     if span_seconds <= 0:
         return fallback
     span_years = span_seconds / SECONDS_PER_YEAR
-    return max(1, round(len(index) / span_years))
+    return max(1, round((len(index) - 1) / span_years))
 
 
 def compute_all(
@@ -62,6 +62,10 @@ def compute_all(
     benchmark_values: Sequence[float] | None = None,
     exposed_periods: int | None = None,
     trade_quantities: Sequence[float] | None = None,
+    turnover_values: Sequence[float] | None = None,
+    gross_exposure_values: Sequence[float] | None = None,
+    net_exposure_values: Sequence[float] | None = None,
+    concentration_values: Sequence[float] | None = None,
     risk_free_rate: float = 0.0,
     annual_periods: int = 365,
 ) -> StrategyMetrics:
@@ -76,6 +80,10 @@ def compute_all(
         benchmark_values: Buy-and-hold equity values for benchmark comparison.
         exposed_periods: Number of bars with at least one open position.
         trade_quantities: Per-trade closed quantity (for quantity-weighted avg return).
+        turnover_values: Per-event absolute traded notional divided by equity.
+        gross_exposure_values: Per-event sum of absolute realized weights.
+        net_exposure_values: Per-event sum of signed realized weights.
+        concentration_values: Per-event largest absolute realized weight.
         risk_free_rate: Annual risk-free rate (crypto=0, TW=0.015).
         annual_periods: Trading days per year (crypto=365, TW=252). Used only
             as a fallback when bar density can't be inferred from timestamps
@@ -168,8 +176,29 @@ def compute_all(
         exposure_ratio = float(exposed_periods / total_periods)
 
     benchmark_return: float | None = None
+    tracking_error: float | None = None
+    information_ratio: float | None = None
     if benchmark_values is not None and len(benchmark_values) >= 2:
         benchmark_return = float(benchmark_values[-1] / (benchmark_values[0] + EPSILON) - 1.0)
+        if len(benchmark_values) != len(equity_values):
+            raise ValueError("benchmark_values length must match equity_values")
+        benchmark_array = np.asarray(benchmark_values, dtype=np.float64)
+        benchmark_returns = np.diff(benchmark_array) / (benchmark_array[:-1] + EPSILON)
+        active_returns = returns.to_numpy() - benchmark_returns
+        if len(active_returns) >= 2:
+            periods = _infer_annual_periods(ts_index, fallback=annual_periods)
+            active_std = float(np.std(active_returns, ddof=1))
+            tracking_error = active_std * np.sqrt(periods)
+            if active_std > EPSILON:
+                information_ratio = float(np.mean(active_returns)) / active_std * np.sqrt(periods)
+
+    total_turnover = _sum_optional(turnover_values)
+    average_gross_exposure = _mean_optional(gross_exposure_values)
+    max_gross_exposure = _max_optional(gross_exposure_values)
+    max_abs_net_exposure = _max_optional(
+        [abs(value) for value in net_exposure_values] if net_exposure_values is not None else None
+    )
+    max_concentration = _max_optional(concentration_values)
 
     return StrategyMetrics(
         total_return=total_ret,
@@ -185,10 +214,29 @@ def compute_all(
         avg_trade_return=avg_trade_return,
         exposure_ratio=exposure_ratio,
         benchmark_return=benchmark_return,
+        tracking_error=tracking_error,
+        information_ratio=information_ratio,
+        total_turnover=total_turnover,
+        average_gross_exposure=average_gross_exposure,
+        max_gross_exposure=max_gross_exposure,
+        max_abs_net_exposure=max_abs_net_exposure,
+        max_concentration=max_concentration,
         total_commission=float(commissions.sum()),
         total_slippage=float(slippages.sum()),
         total_tax=float(taxes.sum()),
     )
+
+
+def _sum_optional(values: Sequence[float] | None) -> float | None:
+    return float(np.sum(values)) if values is not None else None
+
+
+def _mean_optional(values: Sequence[float] | None) -> float | None:
+    return float(np.mean(values)) if values is not None and len(values) > 0 else None
+
+
+def _max_optional(values: Sequence[float] | None) -> float | None:
+    return float(np.max(values)) if values is not None and len(values) > 0 else None
 
 
 def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: int | float) -> float | None:

@@ -91,7 +91,7 @@ Strategy logic (strategy.py)  →  on_bar(ctx) → list[Action] | RebalanceTarge
                               ↓
 Engine (engine.py)     →  process_actions / process_rebalance_targets
                               ↓
-Output (build_output)  →  BacktestOutput (metrics + equity/position snapshots + events)
+Output (build_output)  →  BacktestOutput (metrics + equity/position/allocation facts + events)
 ```
 
 ### Usage
@@ -186,9 +186,10 @@ Weights need not sum to one; any remainder stays in cash. When
 `Backtest(..., record_position_snapshots=True)` is enabled,
 `BacktestOutput.position_snapshots` contains quantity, signed market value, and
 signed realized weight (`market_value / equity`) for every open position on
-every bar. It is opt-in because retaining O(bars × positions) facts can be
-expensive for a large universe. Compare those facts with the strategy's target
-schedule to measure tracking drift.
+every event. `BacktestOutput.allocation_snapshots` adds target weight, achieved
+weight, and drift for every configured symbol. Both are opt-in because
+retaining O(events × configured symbols) facts can be expensive for a large
+universe.
 
 The configured symbol set is static; point-in-time availability is dynamic.
 The engine advances over the union of actually observed completed bars.
@@ -262,22 +263,38 @@ plot_trades_by_run_id(run_id)                    # or: skip rerunning the backte
 
 `plot_trades_by_run_id` reads via `db.timescale_reader.load_trade_events`/`load_ohlcv` — the same source as any other downstream tool querying the `trade_events`/`ohlcv` tables, so it can never drift.
 
-#### Risk controls
+#### Risk controls and portfolio diagnostics
 
-Enforced at the engine level — strategies cannot bypass them; all three default to off (`None`). Backtest/sim enforce them in the fill model. Live uses the latest completed bar for request sizing, then lets broker execution determine the actual fill.
+All five controls default to off (`None`). Backtest/sim enforce them in the
+fill model. Live uses the latest completed bar for request sizing, then lets
+broker execution reports determine the actual fill.
 
 ```python
 cfg = RunConfig(..., params={
     "max_position_pct": 0.3,             # single-position notional cap = 30% of latest known equity
+    "max_gross_exposure_pct": 1.2,       # reject target baskets above 120% gross
+    "max_net_exposure_pct": 1.0,         # reject target baskets above 100% absolute net
     "max_drawdown_pct": 0.2,             # equity down 20% from its peak -> liquidate everything and stop entering permanently
-    "max_volume_participation_pct": 0.1, # per-fill cap = 10% of that bar's volume
+    "max_volume_participation_pct": 0.1, # fill cap = 10% of that bar's volume
 })
 ```
 
 - `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
+- `max_gross_exposure_pct` / `max_net_exposure_pct`: validate `RebalanceTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
 - `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()`; live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
-- `max_volume_participation_pct`: caps a single fill (new entry/add) only — it's not cumulative against position size; like `max_position_pct` it caps rather than rejects. Only applies to entries — exits (strategy-driven close, stop-loss/take-profit, force close, drawdown-triggered liquidation) are unaffected.
+- `max_volume_participation_pct`: provides one cumulative per-symbol volume budget per simulated data event across entries, additions, reductions, ordinary closes, stops, modeled liquidation, drawdown exits, and terminal exits. Missing volume rejects the fill. Constrained exits are explicit partial fills and retain the remaining position for a later observed bar; a terminal backtest that cannot finish exits raises. Live risk exits submit the full remaining request and broker reports own partial-fill truth.
 - Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
+
+Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
+and one-way turnover (`sum(abs(traded notional)) / ending equity`) for its
+event. Gross exposure is the engine's gross-leverage measure. `StrategyMetrics`
+aggregates total turnover, average/maximum gross exposure, maximum absolute net
+exposure, and maximum concentration. With a benchmark, tracking error is the
+annualized sample standard deviation of active period returns and information
+ratio is annualized mean active return divided by that standard deviation.
+`AllocationSnapshotPoint` provides attribution-ready target/achieved facts;
+return attribution by factor, sector, or decision remains strategy/research
+code because the engine has no classification model.
 
 #### Margin / liquidation simulation
 
@@ -347,14 +364,46 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 
 #### Mode comparison
 
-| | Backtest | Sim | Live |
+| | Backtest | Shadow sim (`mode=sim`) | Paper broker (`mode=live`) | Live broker |
+|---|---|---|---|---|
+| Data source | historical OHLCV | polled OHLCV | broker/vendor OHLCV | broker/vendor OHLCV |
+| Decision timing | completed T | completed T | completed T | completed T |
+| Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit after T decision | submit after T decision |
+| Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | paper `ExecutionReport` only | broker `ExecutionReport` only |
+| Non-final order | one-bar intent expires | one-bar intent expires | durable cumulative order lifecycle | durable cumulative order lifecycle |
+| Restart | new run | restore when state is enabled | restore and reconcile | restore and reconcile |
+
+#### Use-case capability matrix
+
+| Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
-| Data source | historical OHLCV | real-time OHLCV (polling) | real-time OHLCV |
-| Decision timing | completed T | completed T | completed T |
-| Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit immediately after T decision |
-| Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | broker `ExecutionReport` only |
-| Non-final order | one-bar intent expires | one-bar intent expires | persist and poll; apply cumulative fill deltas; block later decisions |
-| Restart | new run | restore pending intent/cycle/accounting when state is enabled | restore same run/order queue; reconcile broker before decisions |
+| Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
+| Arbitrage | Research-only OHLCV approximation | Research-only | No atomic multi-leg/legging model; unsupported as production arbitrage |
+| Portfolio optimization | Strategy-owned optimizer; static-universe target execution and diagnostics | Simplified sequential basket | Sequential, non-atomic, adapter-dependent |
+| Asset allocation | Supported under single-currency/data-event assumptions | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
+
+Daily strategy frequency reduces throughput requirements but not timestamp,
+data, order, and restart synchronization requirements. The observed-data event
+clock is the deliberate current boundary; exchange calendars remain upstream.
+
+#### Intentional defaults and resiliency fallbacks
+
+The repository-wide fallback rule is: defaults may express an explicit
+research convention or preserve transport availability, but may not invent a
+financial/execution fact.
+
+- Direct `Backtest(...)` construction without a config or cost model uses
+  `CostModel.zero()` and next-open fills as a documented research default.
+  Production-like research should pass an explicit cost model.
+- A registered spot instrument may derive multiplier `1.0`; contract
+  multipliers, broker routes, currencies, and unresolved execution prices are
+  never guessed.
+- The live OHLCV cache may serve the last successfully fetched history after a
+  transient fetch error. It does not create a new bar or fill, and staleness
+  monitoring remains active.
+- Optional/not-computable analytics are `None`. Missing OHLCV volume, prepared
+  order quantity/limit price, broker fill price/time/fee, or persisted runtime
+  facts fail explicitly instead of becoming zero or an entry-price proxy.
 
 ### Core types
 
@@ -384,12 +433,13 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 
 | Type | Description |
 |------|------|
-| `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + order_events + metrics + position_snapshots |
+| `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + order_events + metrics + position_snapshots + allocation_snapshots |
 | `RunMetadata` | run_id, strategy, symbol, timeframe, start/end/run timestamps |
-| `StrategyMetrics` | performance metrics: total_return, sharpe, sortino, calmar, max_drawdown, win_rate... |
+| `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
 | `OrderEventRecord` | position lifecycle event (open/add/reduce/close) |
-| `EquityCurvePoint` | a single point: ts, equity, period_return, drawdown, benchmark_equity |
+| `EquityCurvePoint` | per-event equity/return/drawdown/benchmark plus gross/net exposure, concentration, and turnover |
 | `PositionSnapshotPoint` | per-bar position quantity, signed market value, and realized weight |
+| `AllocationSnapshotPoint` | per-event target weight, achieved weight, and drift for one symbol |
 
 #### Shared functions
 
@@ -400,7 +450,7 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | `process_rebalance_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
 | `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
-| `liquidate_all(positions, bars, ts, ...)` | close everything (shared by end-of-run and max-drawdown circuit breaker) |
+| `liquidate_all(positions, bars, ts, ...)` | liquidity-aware partial/full exits shared by terminal and drawdown liquidation |
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
 | `reduce_position(pos, quantity, exit_price, cost_model)` | partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
@@ -618,9 +668,9 @@ flowchart TD
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
 | `backtest_runs` | run hub, 1 row / run | PK `run_id` | no |
-| `equity_curve` | per-bar equity | FK `run_id` → `backtest_runs` CASCADE | yes (`ts`) |
+| `equity_curve` | per-event equity, return, drawdown, exposure, concentration, and turnover | FK `run_id` → `backtest_runs` CASCADE | yes (`ts`) |
 | `trade_events` | position lifecycle events (open/add/reduce/close) | FK `run_id` (nullable) | yes (`ts`) |
-| `strategy_performance` | aggregated KPIs, 1 row / run | PK+FK `run_id` → `backtest_runs` CASCADE | no |
+| `strategy_performance` | aggregated performance, cost, benchmark, and portfolio diagnostics, 1 row / run | PK+FK `run_id` → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |

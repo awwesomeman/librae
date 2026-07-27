@@ -111,3 +111,19 @@ def test_runtime_state_rejects_pre_watermark_schema():
 
     with pytest.raises(ValueError, match="unsupported live runtime-state schema"):
         LiveRuntimeState.from_dict(raw)
+
+
+def test_runtime_state_rejects_missing_v2_fact_instead_of_defaulting():
+    raw = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        cash=1_000.0,
+        equity_peak=1_000.0,
+        prev_equity=1_000.0,
+    ).to_dict()
+    del raw["last_prices"]
+
+    with pytest.raises(KeyError, match="last_prices"):
+        LiveRuntimeState.from_dict(raw)
