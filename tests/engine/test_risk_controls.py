@@ -289,6 +289,45 @@ class TestMaxDrawdownBreaker:
         assert len(result.equity_curve) == len(bars)  # curve continues to the end, flat
         assert result.equity_curve[-1].equity == pytest.approx(result.equity_curve[3].equity)
 
+    def test_breach_snapshot_includes_liquidation_costs_and_flat_position(self) -> None:
+        bars = [
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 60, "high": 65, "low": 55, "close": 60},
+            {"open": 60, "high": 61, "low": 59, "close": 60},
+        ]
+        cfg = make_test_cfg(
+            mode="backtest",
+            initial_balance=10_000.0,
+            params={"max_drawdown_pct": 0.2},
+        )
+        cost = CostModel(
+            multiplier=1.0,
+            commission_rate=0.01,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+        )
+        bt = Backtest(
+            _make_multiindex_df(bars),
+            OpenOnceStrategy(),
+            cfg=cfg,
+            cost_model=cost,
+            record_position_snapshots=True,
+        )
+
+        result = bt.run()
+
+        close_event = next(event for event in result.order_events if event.event_type == "close")
+        breach_ts = result.equity_curve[3].ts
+        assert close_event.reason == REASON_DRAWDOWN_BREACH
+        assert close_event.commission > 0
+        assert result.equity_curve[3].equity == pytest.approx(result.final_equity)
+        assert result.equity_curve[4].equity == pytest.approx(result.final_equity)
+        assert all(snapshot.ts != breach_ts for snapshot in result.position_snapshots)
+
     def test_no_breach_when_disabled(self):
         """Same crash, no max_drawdown_pct set -> position rides it out (baseline sanity check)."""
         bars = [

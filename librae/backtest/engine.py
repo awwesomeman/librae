@@ -58,6 +58,80 @@ from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
 logger = logging.getLogger(__name__)
 
+_INDEX_NAMES = ["symbol", "datetime"]
+_PRICE_COLUMNS = ("open", "high", "low", "close")
+_REQUIRED_COLUMNS = (*_PRICE_COLUMNS, "volume")
+
+
+def _validate_backtest_data(
+    data: pd.DataFrame,
+    configured_symbols: Sequence[str] | None,
+) -> None:
+    """Validate the point-in-time OHLCV contract at the engine boundary."""
+    if not isinstance(data.index, pd.MultiIndex):
+        raise ValueError(
+            "data must have MultiIndex (symbol, datetime). "
+            "For single-asset: df.index = "
+            "pd.MultiIndex.from_arrays([['SYM']*len(df), df.index])"
+        )
+    if data.index.nlevels != 2 or list(data.index.names) != _INDEX_NAMES:
+        raise ValueError("data index levels must be exactly ('symbol', 'datetime')")
+
+    missing = sorted(set(_REQUIRED_COLUMNS) - set(data.columns))
+    if missing:
+        raise ValueError(f"data missing required OHLCV columns: {', '.join(missing)}")
+    if data.empty:
+        raise ValueError("data must contain at least one OHLCV bar")
+    if not data.index.is_unique:
+        raise ValueError("data index must contain unique (symbol, datetime) pairs")
+
+    symbols = data.index.get_level_values("symbol").unique().tolist()
+    if any(not isinstance(symbol, str) or not symbol for symbol in symbols):
+        raise ValueError("data symbols must be non-empty strings")
+    if configured_symbols is not None:
+        if len(configured_symbols) != len(set(configured_symbols)):
+            raise ValueError("cfg.symbols must not contain duplicates")
+        actual = set(symbols)
+        expected = set(configured_symbols)
+        if actual != expected:
+            raise ValueError(
+                "cfg.symbols must exactly match data symbols; "
+                f"configured={sorted(expected)}, data={sorted(actual)}"
+            )
+
+    timestamps = data.index.get_level_values("datetime")
+    if not isinstance(timestamps, pd.DatetimeIndex):
+        raise ValueError("data datetime index level must contain pandas timestamps")
+    if timestamps.tz is None:
+        raise ValueError("data datetime index level must be timezone-aware")
+    for symbol, symbol_data in data.groupby(level="symbol", sort=False):
+        symbol_timestamps = symbol_data.index.get_level_values("datetime")
+        if not symbol_timestamps.is_monotonic_increasing:
+            raise ValueError(f"data timestamps must be increasing within symbol {symbol!r}")
+
+    non_numeric = [
+        column for column in _REQUIRED_COLUMNS if not pd.api.types.is_numeric_dtype(data[column])
+    ]
+    if non_numeric:
+        raise ValueError(f"data OHLCV columns must be numeric: {', '.join(non_numeric)}")
+
+    values = data.loc[:, list(_REQUIRED_COLUMNS)].to_numpy(
+        dtype=np.float64,
+        na_value=np.nan,
+    )
+    if not np.isfinite(values).all():
+        raise ValueError("data OHLCV values must be finite")
+
+    open_price, high, low, close, volume = values.T
+    if np.any(open_price <= 0) or np.any(high <= 0) or np.any(low <= 0) or np.any(close <= 0):
+        raise ValueError("data OHLC prices must be positive")
+    if np.any(high < np.maximum.reduce([open_price, low, close])) or np.any(
+        low > np.minimum.reduce([open_price, high, close])
+    ):
+        raise ValueError("data OHLC values are inconsistent: low <= open/close <= high is required")
+    if np.any(volume < 0):
+        raise ValueError("data volume must be non-negative")
+
 
 @dataclass(frozen=True)
 class EquitySnapshot:
@@ -141,6 +215,8 @@ class Backtest:
         data_source: str = "",
         record_position_snapshots: bool = False,
     ) -> None:
+        _validate_backtest_data(data, cfg.symbols if cfg is not None else None)
+
         self._data = data
         self._strategy = strategy
         self._cfg = cfg
@@ -150,12 +226,6 @@ class Backtest:
         self._result: BacktestResult | None = None
         self._metrics: StrategyMetrics | None = None
         self._record_position_snapshots = record_position_snapshots
-
-        if not isinstance(data.index, pd.MultiIndex):
-            raise ValueError(
-                "data must have MultiIndex (symbol, datetime). "
-                "For single-asset: df.index = pd.MultiIndex.from_arrays([['SYM']*len(df), df.index])"
-            )
 
         self._symbols = data.index.get_level_values(0).unique().tolist()
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
@@ -307,27 +377,19 @@ class Backtest:
             if cycle_ready:
                 pending_intent = []
 
-            # ── Step 2: equity snapshot (reflects just-executed trades) ──
+            # ── Step 2: equity and drawdown check ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
-            equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
-            if self._record_position_snapshots:
-                position_snapshots.extend(self._snapshot_positions(ts, positions, last_prices, mtm))
-
-            if positions:
+            had_exposure = bool(positions)
+            if had_exposure:
                 exposed_periods += 1
 
-            # ── Step 2.5: max-drawdown circuit breaker — flatten everything
-            # and stop trading for the rest of the run. Exit costs from this
-            # liquidation land in cash and only show up in the *next* bar's
-            # equity snapshot (one bar after the recorded breach point) —
-            # same approximation already implicit in how stop-loss exits
-            # relate to the equity curve; not worth a mid-loop re-append ──
             equity_peak = max(equity_peak, mtm)
+            drawdown = (mtm - equity_peak) / equity_peak if equity_peak > 0 else 0.0
             if (
                 self._max_drawdown_pct
                 and not halted
                 and equity_peak > 0
-                and (mtm - equity_peak) / equity_peak <= -self._max_drawdown_pct
+                and drawdown <= -self._max_drawdown_pct
             ):
                 dd_result = liquidate_all(
                     positions,
@@ -340,13 +402,21 @@ class Backtest:
                 all_events.extend(dd_result.events)
                 cash += dd_result.cash_delta
                 halted = True
+                # The liquidation is an event at this timestamp, so its costs
+                # and resulting flat position must be reflected in the same
+                # end-of-bar snapshot.
+                mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
                 logger.warning(
                     "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
                     "— all positions force-closed",
                     ts,
-                    (mtm - equity_peak) / equity_peak * 100,
+                    drawdown * 100,
                     self._max_drawdown_pct * 100,
                 )
+
+            equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
+            if self._record_position_snapshots:
+                position_snapshots.extend(self._snapshot_positions(ts, positions, last_prices, mtm))
 
             last_equity = mtm
 
@@ -391,6 +461,10 @@ class Backtest:
             # without creating a duplicate timestamp.
             if equity_curve:
                 equity_curve[-1] = EquitySnapshot(ts=last_ts, equity=cash)
+            if self._record_position_snapshots:
+                position_snapshots = [
+                    snapshot for snapshot in position_snapshots if snapshot.ts != last_ts
+                ]
 
         self._result = BacktestResult(
             trades=trades,

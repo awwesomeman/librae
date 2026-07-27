@@ -77,6 +77,14 @@ eligible on T+1. Do not pre-shift prices or signals to simulate that delay, or
 the strategy will be delayed twice. The default fill is the next eligible
 bar's open.
 
+Backtest input is validated rather than repaired. The index must be exactly
+`(symbol, datetime)`, with unique rows, timezone-aware timestamps increasing
+within each symbol, and the configured symbols must exactly match the data.
+`open`, `high`, `low`, `close`, and `volume` must be numeric and finite; prices
+must be positive, each bar must satisfy `low <= open/close <= high`, and volume
+must be non-negative. Sort, clean, and align data explicitly in ETL—the engine
+does not silently reorder, fill, clip, or discard invalid observations.
+
 `Action(fill_price=<number>)` is a one-bar limit order: buys require the next
 eligible bar's low to reach the limit, sells require its high, and a gap through
 the limit fills at the better opening price. If that bar does not reach the

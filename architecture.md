@@ -124,6 +124,16 @@ Callers must not pre-shift prices or signals to model that delay; doing so
 delays execution twice. Feature construction remains the caller's
 responsibility and must not use information unavailable at T.
 
+The backtest boundary fails fast on malformed input. Index levels must be
+exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
+are timezone-aware and increasing within each symbol; and `cfg.symbols`, when
+provided, exactly matches the symbols in the frame. Required OHLCV values are
+numeric and finite, prices are positive, every bar satisfies
+`low <= open/close <= high`, and volume is non-negative. Validation never
+sorts, forward/backward-fills, clips, or otherwise repairs data because those
+operations can change the point-in-time research sample and must remain
+explicit ETL decisions.
+
 For an `Action`, a numeric `fill_price` is a one-eligible-bar limit order. A
 buy fills when the bar's low reaches the limit and a sell fills when its high
 does; a gap through receives the opening price. An unreached limit expires

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import StrategyMetrics
 from librae.core.cost_model import CostModel
@@ -71,6 +72,22 @@ class TestComputeAllEmpty:
     def test_no_trades(self) -> None:
         m = _call_compute_all([10_000.0] * 10)
         assert m.trades == 0
+
+    def test_no_trades_keeps_time_series_and_benchmark_metrics(self) -> None:
+        equity = np.array([10_000.0, 10_500.0, 9_500.0, 10_000.0])
+        timestamps = pd.date_range(START, periods=len(equity), freq="h", tz="UTC").tolist()
+
+        m = compute_all(
+            equity_values=equity,
+            timestamps=timestamps,
+            trade_pnls=[],
+            total_periods=len(equity),
+            benchmark_values=np.array([10_000.0, 10_100.0, 10_200.0, 10_300.0]),
+        )
+
+        assert m.trades == 0
+        assert m.max_drawdown < 0
+        assert m.benchmark_return == pytest.approx(0.03)
 
 
 class TestComputeAllMetrics:
