@@ -252,6 +252,10 @@ def save_backtest_output(
                     eq.drawdown,
                     eq.period_return,
                     eq.benchmark_period_return,
+                    eq.gross_exposure,
+                    eq.net_exposure,
+                    eq.concentration,
+                    eq.turnover,
                     meta.strategy,
                 )
                 for eq in output.equity_curve
@@ -260,7 +264,8 @@ def save_backtest_output(
                 cur,
                 """INSERT INTO equity_curve
                    (ts, run_id, equity, benchmark_equity, drawdown, period_return,
-                    benchmark_period_return, strategy)
+                    benchmark_period_return, gross_exposure, net_exposure,
+                    concentration, turnover, strategy)
                    VALUES %s""",
                 eq_rows,
                 page_size=1000,
@@ -400,6 +405,10 @@ def write_ohlcv(
         return 0
 
     timeframe = to_canonical(timeframe)
+    required_columns = {"open", "high", "low", "close", "volume"}
+    missing_columns = sorted(required_columns - set(df.columns))
+    if missing_columns:
+        raise ValueError("OHLCV write missing required columns: " + ", ".join(missing_columns))
 
     # Normalise index -> ts column (reset_index returns a new DataFrame)
     if "ts" not in df.columns and "timestamp" not in df.columns:
@@ -427,7 +436,7 @@ def write_ohlcv(
             df["high"].astype(float),
             df["low"].astype(float),
             df["close"].astype(float),
-            df.get("volume", pd.Series([0.0] * len(df))).astype(float),
+            df["volume"].astype(float),
             strict=True,
         )
     )
@@ -683,6 +692,10 @@ def write_equity_curve_point(
     period_return: float = 0.0,
     benchmark_equity: float | None = None,
     benchmark_period_return: float | None = None,
+    gross_exposure: float | None = None,
+    net_exposure: float | None = None,
+    concentration: float | None = None,
+    turnover: float | None = None,
     strategy: str | None = None,
     dsn: str | None = None,
 ) -> None:
@@ -692,12 +705,17 @@ def write_equity_curve_point(
         cur.execute(
             """INSERT INTO equity_curve
                (ts, run_id, equity, benchmark_equity, drawdown, period_return,
-                benchmark_period_return, strategy)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                benchmark_period_return, gross_exposure, net_exposure,
+                concentration, turnover, strategy)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, ts) DO UPDATE SET
                  equity=EXCLUDED.equity, benchmark_equity=EXCLUDED.benchmark_equity,
                  drawdown=EXCLUDED.drawdown, period_return=EXCLUDED.period_return,
                  benchmark_period_return=EXCLUDED.benchmark_period_return,
+                 gross_exposure=EXCLUDED.gross_exposure,
+                 net_exposure=EXCLUDED.net_exposure,
+                 concentration=EXCLUDED.concentration,
+                 turnover=EXCLUDED.turnover,
                  strategy=EXCLUDED.strategy""",
             (
                 _to_dt(ts),
@@ -707,6 +725,10 @@ def write_equity_curve_point(
                 drawdown,
                 period_return,
                 benchmark_period_return,
+                gross_exposure,
+                net_exposure,
+                concentration,
+                turnover,
                 strategy,
             ),
         )
@@ -797,8 +819,12 @@ def write_strategy_performance(
                (run_id, total_return, annual_return, sharpe, sortino, calmar,
                 max_drawdown, win_rate, profit_factor, payoff_ratio, trades,
                 avg_trade_return, exposure_ratio, benchmark_return,
+                tracking_error, information_ratio, total_turnover,
+                average_gross_exposure, max_gross_exposure,
+                max_abs_net_exposure, max_concentration,
                 total_commission, total_slippage, total_tax)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  total_return=EXCLUDED.total_return,
                  annual_return=EXCLUDED.annual_return,
@@ -813,6 +839,13 @@ def write_strategy_performance(
                  avg_trade_return=EXCLUDED.avg_trade_return,
                  exposure_ratio=EXCLUDED.exposure_ratio,
                  benchmark_return=EXCLUDED.benchmark_return,
+                 tracking_error=EXCLUDED.tracking_error,
+                 information_ratio=EXCLUDED.information_ratio,
+                 total_turnover=EXCLUDED.total_turnover,
+                 average_gross_exposure=EXCLUDED.average_gross_exposure,
+                 max_gross_exposure=EXCLUDED.max_gross_exposure,
+                 max_abs_net_exposure=EXCLUDED.max_abs_net_exposure,
+                 max_concentration=EXCLUDED.max_concentration,
                  total_commission=EXCLUDED.total_commission,
                  total_slippage=EXCLUDED.total_slippage,
                  total_tax=EXCLUDED.total_tax"""
@@ -831,6 +864,13 @@ def write_strategy_performance(
         metrics.avg_trade_return,
         metrics.exposure_ratio,
         metrics.benchmark_return,
+        metrics.tracking_error,
+        metrics.information_ratio,
+        metrics.total_turnover,
+        metrics.average_gross_exposure,
+        metrics.max_gross_exposure,
+        metrics.max_abs_net_exposure,
+        metrics.max_concentration,
         metrics.total_commission,
         metrics.total_slippage,
         metrics.total_tax,
@@ -867,6 +907,22 @@ def refresh_performance(
 
     closed_df = load_trade_events(run_id, event_types=_CLOSE_TYPES)
     trade_rows = closed_df.to_dict("records") if not closed_df.empty else []
+    required_trade_fields = (
+        "pnl",
+        "commission",
+        "slippage",
+        "tax",
+        "net_return",
+        "fill_quantity",
+    )
+    for row in trade_rows:
+        missing = [
+            field for field in required_trade_fields if field not in row or pd.isna(row[field])
+        ]
+        if missing:
+            raise ValueError(
+                "closed trade event missing required performance fields: " + ", ".join(missing)
+            )
 
     # WHY: compute_all accepts primitive sequences — build them from DB rows
     eq_records = eq_df.to_dict("records")
@@ -874,23 +930,24 @@ def refresh_performance(
     timestamps = [r["_time"] for r in eq_records]
     trade_pnls = [
         _NS(
-            gross_pnl=(r.get("pnl", 0) or 0)
-            + (r.get("commission", 0) or 0)
-            + (r.get("slippage", 0) or 0)
-            + (r.get("tax", 0) or 0),
-            net_pnl=r.get("pnl", 0) or 0,
-            commission=r.get("commission", 0) or 0,
-            slippage=r.get("slippage", 0) or 0,
-            tax=r.get("tax", 0) or 0,
+            gross_pnl=float(r["pnl"] + r["commission"] + r["slippage"] + r["tax"]),
+            net_pnl=float(r["pnl"]),
+            commission=float(r["commission"]),
+            slippage=float(r["slippage"]),
+            tax=float(r["tax"]),
             gross_return=0.0,
-            net_return=r.get("net_return", 0.0) or 0.0,
+            net_return=float(r["net_return"]),
             exit_commission=0.0,
             exit_slippage=0.0,
             exit_tax=0.0,
         )
         for r in trade_rows
     ]
-    trade_quantities = [float(r.get("fill_quantity", 1.0)) for r in trade_rows]
+    trade_quantities = [float(r["fill_quantity"]) for r in trade_rows]
+
+    def optional_series(field: str) -> list[float] | None:
+        values = [float(row[field]) for row in eq_records if pd.notna(row.get(field))]
+        return values or None
 
     perf_kwargs: dict[str, Any] = {}
     if cfg is not None:
@@ -902,6 +959,10 @@ def refresh_performance(
         trade_pnls=trade_pnls,
         total_periods=len(equity_values),
         trade_quantities=trade_quantities,
+        turnover_values=optional_series("turnover"),
+        gross_exposure_values=optional_series("gross_exposure"),
+        net_exposure_values=optional_series("net_exposure"),
+        concentration_values=optional_series("concentration"),
         **perf_kwargs,
     )
     write_strategy_performance(run_id, metrics, dsn=dsn)

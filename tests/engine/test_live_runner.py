@@ -1773,6 +1773,19 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
         adapter.place_order.assert_not_called()
 
+    def test_prepared_order_missing_quantity_halts_before_submission(self):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {
+            key: value for key, value in signal.items() if key != "quantity"
+        }
+
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
+
     @pytest.mark.parametrize(
         "action,match",
         [

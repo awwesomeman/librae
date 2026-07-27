@@ -372,9 +372,7 @@ class LiveTrader:
             self._register_run()
 
         self._fill_price: str = (cfg.params or {}).get("fill_price", "open")
-        self._max_position_pct, self._max_drawdown_pct, self._max_volume_participation_pct = (
-            validate_risk_params(cfg.params)
-        )
+        self._risk_limits = validate_risk_params(cfg.params)
         self._running: bool = False
 
         # Cache status config
@@ -550,11 +548,11 @@ class LiveTrader:
                 [
                     {
                         "ts": ts,
-                        "open": bar.get("open", 0),
-                        "high": bar.get("high", 0),
-                        "low": bar.get("low", 0),
-                        "close": bar.get("close", 0),
-                        "volume": bar.get("volume", 0),
+                        "open": bar["open"],
+                        "high": bar["high"],
+                        "low": bar["low"],
+                        "close": bar["close"],
+                        "volume": bar["volume"],
                     }
                 ]
             ).set_index("ts")
@@ -1133,6 +1131,8 @@ class LiveTrader:
         intent: StrategyIntent,
         bars: dict[str, dict[str, float]],
         ts: datetime,
+        *,
+        apply_volume_limit: bool = True,
     ) -> list[OrderRequest]:
         """Size intent at the latest completed close without inventing fills."""
         primary_symbol = self._symbols[0]
@@ -1150,7 +1150,12 @@ class LiveTrader:
             return float(volume) if volume is not None else None
 
         max_position_notional = (
-            self._max_position_pct * self._prev_equity if self._max_position_pct else None
+            self._risk_limits.max_position_pct * self._prev_equity
+            if self._risk_limits.max_position_pct
+            else None
+        )
+        volume_limit = (
+            self._risk_limits.max_volume_participation_pct if apply_volume_limit else None
         )
         staged_positions = deepcopy(self._positions)
 
@@ -1169,7 +1174,9 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_volume_participation_pct=self._max_volume_participation_pct,
+                max_volume_participation_pct=volume_limit,
+                max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
+                max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
                 get_volume=get_volume,
             )
             requests = []
@@ -1211,7 +1218,7 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_volume_participation_pct=self._max_volume_participation_pct,
+                max_volume_participation_pct=volume_limit,
                 get_volume=get_volume,
             )
             planning_cash += result.cash_delta
@@ -1236,10 +1243,17 @@ class LiveTrader:
         intent: StrategyIntent,
         bars: dict[str, dict[str, float]],
         ts: datetime,
+        *,
+        apply_volume_limit: bool = True,
     ) -> bool:
         """Persist a deterministic order queue, then advance it serially."""
         try:
-            requests = self._plan_live_orders(intent, bars, ts)
+            requests = self._plan_live_orders(
+                intent,
+                bars,
+                ts,
+                apply_volume_limit=apply_volume_limit,
+            )
         except ValueError as exc:
             self._halt_live(title="Unsupported Live Intent", message=str(exc))
             return False
@@ -1444,27 +1458,40 @@ class LiveTrader:
             primary_symbol=primary_symbol,
         )
         self._pending_intent = waiting_intent
+        cycle_used_volume: dict[str, float] = {}
         if self._executor.simulation:
             max_position_notional = (
-                self._max_position_pct * self._prev_equity if self._max_position_pct else None
+                self._risk_limits.max_position_pct * self._prev_equity
+                if self._risk_limits.max_position_pct
+                else None
             )
-            staged_cash, step_result = run_pending_and_stops(
-                ts,
-                self._positions,
-                self._cash,
-                ready_intent,
-                raw_bars,
-                get_cost_model=self._get_cost_model,
-                default_fill=self._fill_price,
-                primary_symbol=primary_symbol,
-                max_position_notional=max_position_notional,
-                max_volume_participation_pct=self._max_volume_participation_pct,
-            )
+            if self._halted:
+                staged_cash = self._cash
+                step_result = ActionResults(trades=[], events=[], cash_delta=0.0)
+            else:
+                staged_cash, step_result = run_pending_and_stops(
+                    ts,
+                    self._positions,
+                    self._cash,
+                    ready_intent,
+                    raw_bars,
+                    get_cost_model=self._get_cost_model,
+                    default_fill=self._fill_price,
+                    primary_symbol=primary_symbol,
+                    max_position_notional=max_position_notional,
+                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                    max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
+                    max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
+                )
             self._commit_simulated_results(
                 cash=staged_cash,
                 positions=self._positions,
                 result=step_result,
             )
+            for event in step_result.events:
+                cycle_used_volume[event.symbol] = (
+                    cycle_used_volume.get(event.symbol, 0.0) + event.fill_quantity
+                )
             if self._halted and self._positions:
                 liquidation = liquidate_all(
                     self._positions,
@@ -1472,6 +1499,7 @@ class LiveTrader:
                     ts,
                     get_cost_model=self._get_cost_model,
                     reason=REASON_DRAWDOWN_BREACH,
+                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
                 )
                 self._commit_simulated_results(
                     cash=self._cash + liquidation.cash_delta,
@@ -1486,7 +1514,7 @@ class LiveTrader:
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
         # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(ts, raw_bars)
+        self._record_equity(ts, raw_bars, used_volume=cycle_used_volume)
         if self._halted:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
@@ -1577,7 +1605,7 @@ class LiveTrader:
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
-            for symbol, bar in bars.items():
+            for symbol, bar in raw_bars.items():
                 self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
     def _eval_equity(self) -> float:
@@ -1586,7 +1614,10 @@ class LiveTrader:
         return mtm
 
     def _get_last_price(self, sym: str, ps: PositionState) -> float:
-        return self._last_prices.get(sym, ps.entry_price)
+        try:
+            return self._last_prices[sym]
+        except KeyError as exc:
+            raise ValueError(f"no current valuation mark for open position {sym}") from exc
 
     def _get_cost_model(self, sym: str) -> CostModel:
         return self._executor.get_cost_model(sym)
@@ -1604,6 +1635,8 @@ class LiveTrader:
         self,
         ts: datetime,
         bars: dict[str, dict[str, float]],
+        *,
+        used_volume: dict[str, float] | None = None,
     ) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
@@ -1615,8 +1648,12 @@ class LiveTrader:
         period_return = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
         self._prev_equity = equity
 
-        if self._max_drawdown_pct and not self._halted and drawdown <= -self._max_drawdown_pct:
-            self._flatten_and_halt(ts, drawdown, bars)
+        if (
+            self._risk_limits.max_drawdown_pct
+            and not self._halted
+            and drawdown <= -self._risk_limits.max_drawdown_pct
+        ):
+            self._flatten_and_halt(ts, drawdown, bars, used_volume=used_volume)
 
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, period_return)
@@ -1645,6 +1682,8 @@ class LiveTrader:
         ts: datetime,
         drawdown: float,
         bars: dict[str, dict[str, float]],
+        *,
+        used_volume: dict[str, float] | None = None,
     ) -> None:
         """Force-close every open position and permanently halt new entries."""
         if self._executor.simulation:
@@ -1654,6 +1693,8 @@ class LiveTrader:
                 ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_DRAWDOWN_BREACH,
+                max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                used_volume=used_volume,
             )
             self._commit_simulated_results(
                 cash=self._cash + result.cash_delta,
@@ -1670,7 +1711,14 @@ class LiveTrader:
                 symbol: {"close": self._get_last_price(symbol, position)}
                 for symbol, position in self._positions.items()
             }
-            flattened = self._execute_live_intent(actions, reference_bars, ts)
+            # Live emergency exits submit the full remaining quantity. Broker
+            # execution reports remain authoritative for partial fills.
+            flattened = self._execute_live_intent(
+                actions,
+                reference_bars,
+                ts,
+                apply_volume_limit=False,
+            )
         self._halted = True
         if not self._executor.simulation:
             self._cancel_active_orders()
@@ -1680,13 +1728,14 @@ class LiveTrader:
             "send_alert",
             title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
             message=(
-                f"drawdown={drawdown:.2%} <= -{self._max_drawdown_pct:.2%} — {outcome} and halted"
+                f"drawdown={drawdown:.2%} <= "
+                f"-{self._risk_limits.max_drawdown_pct:.2%} — {outcome} and halted"
             ),
         )
         logger.warning(
             "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% — %s",
             ts,
             drawdown * 100,
-            self._max_drawdown_pct * 100,
+            self._risk_limits.max_drawdown_pct * 100,
             outcome,
         )

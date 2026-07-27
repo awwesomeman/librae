@@ -85,6 +85,7 @@ def test_backtest_output_validate_passes() -> None:
         order_events=(),
         metrics=_make_metrics(),
         position_snapshots=(),
+        allocation_snapshots=(),
     )
     output.validate()  # should not raise
 
@@ -97,6 +98,7 @@ def test_backtest_output_validate_empty_run_id_raises() -> None:
         order_events=(),
         metrics=_make_metrics(),
         position_snapshots=(),
+        allocation_snapshots=(),
     )
     with pytest.raises(ValueError, match="run_id"):
         output.validate()
@@ -110,6 +112,7 @@ def test_backtest_output_validate_empty_strategy_raises() -> None:
         order_events=(),
         metrics=_make_metrics(),
         position_snapshots=(),
+        allocation_snapshots=(),
     )
     with pytest.raises(ValueError, match="strategy"):
         output.validate()

@@ -183,8 +183,10 @@ class LiveExecutor:
         self._instruments = dict(instruments or {})
 
     def get_cost_model(self, symbol: str) -> CostModel:
+        if symbol in self._cost_models:
+            return self._cost_models[symbol]
         try:
-            return self._cost_models.get(symbol) or self._cost_models["__default__"]
+            return self._cost_models["__default__"]
         except KeyError as exc:
             raise ValueError(f"No cost model configured for {symbol!r}") from exc
 
@@ -203,8 +205,10 @@ class LiveExecutor:
     def get_order_adapter(self, symbol: str) -> OrderAdapter | None:
         if self._simulation:
             return None
+        if symbol in self._order_adapters:
+            return self._order_adapters[symbol]
         try:
-            return self._order_adapters.get(symbol) or self._order_adapters["__default__"]
+            return self._order_adapters["__default__"]
         except KeyError as exc:
             raise ValueError(f"No order adapter configured for {symbol!r}") from exc
 
@@ -265,9 +269,17 @@ class LiveExecutor:
         if prepared.get("symbol") != signal["symbol"]:
             raise ValueError("order preparation cannot change venue symbol")
 
-        quantity = float(prepared.get("quantity", 0.0))
+        if prepared.get("quantity") is None:
+            raise ValueError("prepared order is missing quantity")
+        quantity = float(prepared["quantity"])
+        if not isfinite(quantity) or quantity <= 0:
+            raise ValueError("prepared order quantity must be finite and positive")
         price_raw = prepared.get("price")
         limit_price = float(price_raw) if price_raw is not None else None
+        if request.order_type == "limit" and (
+            limit_price is None or not isfinite(limit_price) or limit_price <= 0
+        ):
+            raise ValueError("prepared limit order requires a finite positive price")
         return replace(
             request,
             quantity=quantity,

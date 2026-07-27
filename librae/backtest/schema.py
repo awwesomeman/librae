@@ -104,6 +104,10 @@ class EquityCurvePoint:
     drawdown: float
     benchmark_equity: float | None = None
     benchmark_period_return: float | None = None
+    gross_exposure: float = 0.0
+    net_exposure: float = 0.0
+    concentration: float = 0.0
+    turnover: float = 0.0
     strategy: str | None = None
 
 
@@ -149,6 +153,17 @@ class PositionSnapshotPoint:
 
 
 @dataclass(frozen=True)
+class AllocationSnapshotPoint:
+    """One symbol's target-versus-achieved portfolio weight."""
+
+    ts: datetime
+    symbol: str
+    target_weight: float | None
+    realized_weight: float
+    weight_drift: float | None
+
+
+@dataclass(frozen=True)
 class StrategyMetrics:
     """Aggregate performance metrics for a backtest run.
 
@@ -181,6 +196,15 @@ class StrategyMetrics:
 
     # Benchmark
     benchmark_return: float | None = None
+    tracking_error: float | None = None
+    information_ratio: float | None = None
+
+    # Portfolio diagnostics
+    total_turnover: float | None = None
+    average_gross_exposure: float | None = None
+    max_gross_exposure: float | None = None
+    max_abs_net_exposure: float | None = None
+    max_concentration: float | None = None
 
     # Cost breakdown
     total_commission: float | None = None
@@ -201,6 +225,7 @@ class BacktestOutput:
     order_events: Sequence[OrderEventRecord]
     metrics: StrategyMetrics
     position_snapshots: Sequence[PositionSnapshotPoint]
+    allocation_snapshots: Sequence[AllocationSnapshotPoint]
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict with ISO datetime strings."""

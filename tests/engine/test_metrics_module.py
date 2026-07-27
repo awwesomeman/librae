@@ -132,6 +132,47 @@ class TestComputeAllMetrics:
         assert np.isclose(m.total_commission, 2.0)
         assert np.isclose(m.total_slippage, 1.0)
 
+    def test_portfolio_diagnostics(self) -> None:
+        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
+        m = compute_all(
+            equity_values=[100.0, 101.0, 102.0],
+            timestamps=timestamps,
+            trade_pnls=[],
+            total_periods=3,
+            turnover_values=[0.2, 0.1, 0.3],
+            gross_exposure_values=[0.5, 1.2, 0.8],
+            net_exposure_values=[0.5, -0.4, 0.2],
+            concentration_values=[0.5, 0.7, 0.4],
+        )
+
+        assert m.total_turnover == pytest.approx(0.6)
+        assert m.average_gross_exposure == pytest.approx(2.5 / 3)
+        assert m.max_gross_exposure == pytest.approx(1.2)
+        assert m.max_abs_net_exposure == pytest.approx(0.5)
+        assert m.max_concentration == pytest.approx(0.7)
+
+    def test_tracking_error_and_information_ratio_use_active_returns(self) -> None:
+        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
+        equity = [100.0, 102.0, 101.0, 104.0]
+        benchmark = [100.0, 101.0, 102.0, 103.0]
+
+        m = compute_all(
+            equity_values=equity,
+            timestamps=timestamps,
+            trade_pnls=[],
+            total_periods=4,
+            benchmark_values=benchmark,
+        )
+
+        strategy_returns = np.diff(equity) / np.asarray(equity[:-1])
+        benchmark_returns = np.diff(benchmark) / np.asarray(benchmark[:-1])
+        active_returns = strategy_returns - benchmark_returns
+        active_std = np.std(active_returns, ddof=1)
+        assert m.tracking_error == pytest.approx(active_std * np.sqrt(365))
+        assert m.information_ratio == pytest.approx(
+            np.mean(active_returns) / active_std * np.sqrt(365)
+        )
+
     def test_sharpe_is_float(self) -> None:
         pnls = [
             _make_trade_pnl(net_pnl=100, net_return=1.0),

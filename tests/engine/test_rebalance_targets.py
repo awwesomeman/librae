@@ -193,16 +193,41 @@ class TestRebalanceExecution:
 
     def test_missing_price_rejects_batch_without_mutation(self) -> None:
         positions: dict[str, PositionState] = {}
-        result = _process(
-            RebalanceTargets(weights={"A": 0.5, "B": 0.5}),
-            positions,
-            1_000.0,
-            prices={"A": 100.0},
-        )
+        with pytest.raises(ValueError, match="execution price for B"):
+            _process(
+                RebalanceTargets(weights={"A": 0.5, "B": 0.5}),
+                positions,
+                1_000.0,
+                prices={"A": 100.0},
+            )
 
         assert positions == {}
-        assert result.events == []
-        assert result.cash_delta == 0.0
+
+    @pytest.mark.parametrize(
+        ("limit_name", "limit", "weights"),
+        [
+            ("max_gross_exposure_pct", 1.0, {"A": 0.75, "B": -0.75}),
+            ("max_net_exposure_pct", 0.5, {"A": 0.75}),
+        ],
+    )
+    def test_portfolio_target_limits_fail_instead_of_scaling(
+        self,
+        limit_name: str,
+        limit: float,
+        weights: dict[str, float],
+    ) -> None:
+        kwargs = {limit_name: limit}
+        with pytest.raises(ValueError, match=r"target .* exposure"):
+            process_rebalance_targets(
+                RebalanceTargets(weights=weights),
+                {},
+                1_000.0,
+                TS,
+                get_price=lambda symbol, _action: {"A": 100.0, "B": 50.0}[symbol],
+                get_cost_model=lambda _symbol: CostModel.zero(),
+                primary_symbol="A",
+                **kwargs,
+            )
 
 
 class TestBacktestRebalance:
@@ -259,3 +284,19 @@ class TestBacktestRebalance:
         assert [snapshot.symbol for snapshot in snapshots] == ["A", "B"]
         assert all(np.isclose(snapshot.realized_weight, 0.5) for snapshot in snapshots)
         assert all(snapshot.market_value > 0 for snapshot in snapshots)
+
+        allocations = [
+            snapshot for snapshot in output.allocation_snapshots if snapshot.ts == first_snapshot_ts
+        ]
+        assert [snapshot.symbol for snapshot in allocations] == ["A", "B"]
+        assert all(np.isclose(snapshot.target_weight, 0.5) for snapshot in allocations)
+        assert all(np.isclose(snapshot.realized_weight, 0.5) for snapshot in allocations)
+        assert all(np.isclose(snapshot.weight_drift, 0.0) for snapshot in allocations)
+
+        point = next(point for point in output.equity_curve if point.ts == first_snapshot_ts)
+        assert point.gross_exposure == pytest.approx(1.0)
+        assert point.net_exposure == pytest.approx(1.0)
+        assert point.concentration == pytest.approx(0.5)
+        assert point.turnover == pytest.approx(1.0)
+        assert output.metrics.total_turnover is not None
+        assert output.metrics.max_gross_exposure == pytest.approx(1.0)

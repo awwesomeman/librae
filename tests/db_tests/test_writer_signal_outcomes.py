@@ -6,10 +6,12 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 from db.timescale_writer import (
     save_signal_results,
     save_strategy_results,
     write_equity_curve_point,
+    write_ohlcv,
     write_signal_event,
 )
 from librae.core.run_config import RunConfig
@@ -57,9 +59,28 @@ class TestWriteEquityCurvePoint:
             "drawdown",
             "period_return",
             "benchmark_period_return",
+            "gross_exposure",
+            "net_exposure",
+            "concentration",
+            "turnover",
             "strategy",
         ):
             assert f"{col}=EXCLUDED.{col}" in sql
+
+
+def test_write_ohlcv_requires_real_volume() -> None:
+    frame = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+        },
+        index=pd.DatetimeIndex([datetime(2024, 6, 1, tzinfo=UTC)], name="ts"),
+    )
+
+    with pytest.raises(ValueError, match="volume"):
+        write_ohlcv(frame, "BTCUSDT", "H1", "test")
 
 
 class TestWriteSignalEvent:

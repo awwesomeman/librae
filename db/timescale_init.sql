@@ -81,11 +81,19 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     drawdown            DOUBLE PRECISION,
     period_return       DOUBLE PRECISION,
     benchmark_period_return DOUBLE PRECISION,
+    gross_exposure      DOUBLE PRECISION,
+    net_exposure        DOUBLE PRECISION,
+    concentration       DOUBLE PRECISION,
+    turnover            DOUBLE PRECISION,
     strategy            TEXT
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique ON equity_curve(run_id, ts);
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS gross_exposure DOUBLE PRECISION;
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS net_exposure DOUBLE PRECISION;
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS concentration DOUBLE PRECISION;
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS turnover DOUBLE PRECISION;
 
 -- ============================================================
 -- trade_events — 部位生命週期事件 (hypertable, 獨立)
@@ -140,6 +148,13 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     avg_trade_return DOUBLE PRECISION,
     exposure_ratio  DOUBLE PRECISION,
     benchmark_return DOUBLE PRECISION,
+    tracking_error  DOUBLE PRECISION,
+    information_ratio DOUBLE PRECISION,
+    total_turnover  DOUBLE PRECISION,
+    average_gross_exposure DOUBLE PRECISION,
+    max_gross_exposure DOUBLE PRECISION,
+    max_abs_net_exposure DOUBLE PRECISION,
+    max_concentration DOUBLE PRECISION,
     total_commission DOUBLE PRECISION DEFAULT 0,
     total_slippage  DOUBLE PRECISION DEFAULT 0,
     total_tax       DOUBLE PRECISION DEFAULT 0
@@ -147,6 +162,13 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
 -- WHY: existing deployments already ran CREATE TABLE before payoff_ratio existed;
 -- IF NOT EXISTS keeps this script idempotent for both fresh and existing DBs.
 ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS payoff_ratio DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS tracking_error DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS information_ratio DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS total_turnover DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS average_gross_exposure DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_gross_exposure DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_abs_net_exposure DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_concentration DOUBLE PRECISION;
 
 -- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)

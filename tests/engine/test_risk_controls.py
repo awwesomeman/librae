@@ -156,7 +156,7 @@ class TestLiquidateAll:
         # long +10 gain, short +10 gain (price moved against short's loss side... both favorable here)
         assert result.cash_delta == pytest.approx(220.0)
 
-    def test_missing_bar_uses_fallback_price(self):
+    def test_missing_bar_does_not_invent_a_liquidation_price(self):
         positions = {"A": _make_pos(symbol="A", entry_price=100.0, quantity=1.0)}
         result = liquidate_all(
             positions,
@@ -164,10 +164,25 @@ class TestLiquidateAll:
             TS,
             get_cost_model=lambda s: _zero_cost(),
             reason=REASON_FORCE_CLOSE,
-            fallback_price=lambda sym, pos: pos.entry_price,
         )
-        assert positions == {}
-        assert result.trades[0].exit_price == pytest.approx(100.0)
+        assert set(positions) == {"A"}
+        assert result.trades == []
+        assert result.events == []
+
+    def test_volume_constrained_liquidation_is_partial(self):
+        positions = {"A": _make_pos(symbol="A", entry_price=100.0, quantity=10.0)}
+        result = liquidate_all(
+            positions,
+            {"A": {"close": 110.0, "volume": 20.0}},
+            TS,
+            get_cost_model=lambda s: _zero_cost(),
+            reason=REASON_FORCE_CLOSE,
+            max_volume_participation_pct=0.25,
+        )
+
+        assert result.events[0].event_type == "reduce"
+        assert result.events[0].fill_quantity == pytest.approx(5.0)
+        assert positions["A"].quantity == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +243,7 @@ class TestProcessActionsVolumeCap:
         )
         assert result.events == []
 
-    def test_missing_volume_data_skips_cap(self):
+    def test_missing_volume_data_rejects_when_cap_is_enabled(self):
         """No volume data (get_volume returns None) is a different case
         from a real zero-volume bar — the cap can't be computed, so it's
         skipped rather than treated as a hard reject."""
@@ -244,8 +259,55 @@ class TestProcessActionsVolumeCap:
             max_volume_participation_pct=0.1,
             get_volume=lambda s: None,
         )
-        assert len(result.events) == 1
-        assert result.events[0].fill_quantity == pytest.approx(100.0)  # full cash sizing, uncapped
+        assert result.events == []
+
+    def test_reduction_is_capped_and_uses_exit_volume_for_impact(self):
+        positions = {"TEST": _make_pos(quantity=10.0)}
+        cost_model = CostModel(
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=1.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            impact_coef=10.0,
+        )
+
+        result = process_actions(
+            [Action(type="close", symbol="TEST")],
+            positions,
+            0.0,
+            TS,
+            get_price=lambda s, a: 110.0,
+            get_cost_model=lambda s: cost_model,
+            primary_symbol="TEST",
+            max_volume_participation_pct=0.25,
+            get_volume=lambda s: 20.0,
+        )
+
+        assert result.events[0].event_type == "reduce"
+        assert result.events[0].fill_quantity == pytest.approx(5.0)
+        assert result.events[0].slippage == pytest.approx(0.175)
+        assert positions["TEST"].quantity == pytest.approx(5.0)
+
+    def test_multiple_fills_share_one_symbol_volume_budget(self):
+        result = process_actions(
+            [
+                Action(type="long", symbol="TEST", quantity=3.0),
+                Action(type="long", symbol="TEST", quantity=3.0),
+            ],
+            {},
+            10_000.0,
+            TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_volume_participation_pct=0.25,
+            get_volume=lambda s: 20.0,
+        )
+
+        assert [event.fill_quantity for event in result.events] == pytest.approx([3.0, 2.0])
+        assert sum(event.fill_quantity for event in result.events) == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------
