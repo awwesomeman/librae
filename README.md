@@ -2,7 +2,7 @@
 
 Backtest and live-trading engine, multi-asset support.
 
-- **One strategy, three modes** — quantity-based `Action` strategies run in backtest, sim, and live trading unmodified.
+- **One strategy, three modes** — `Action` and portfolio-level `RebalanceTargets` strategies run in backtest, sim, and live trading unmodified.
 - **Portfolio-level by design** — multi-asset/stock-picking needs no engine changes; `positions`/`equity_curve`/`metrics` are portfolio-level from the start.
 - **Engine has no required I/O dependencies** — pure computation on a DataFrame you hand it; `db`/`brokers`/`notifications` are optional, lazy-imported, swappable via constructor injection.
 - **Risk built in** — position/drawdown/volume caps, margin & liquidation simulation, volume-aware slippage — enforced at the engine level, off by default.
@@ -94,9 +94,11 @@ With `record_position_snapshots=True`,
 `output.position_snapshots` records each open position's signed market value
 and realized weight after every bar, so target drift includes costs, price
 movement, and execution constraints. Multi-asset
-`RebalanceTargets` currently run in backtests only; the polling live runner
-still processes symbols independently and rejects this intent until it has a
-synchronized cross-sectional bar.
+`RebalanceTargets` use synchronized cross-sectional cycles in sim/live:
+`LiveTrader` waits until every configured symbol's latest completed bar has the
+same timestamp, calls the strategy once, and fills the resulting intent on the
+next aligned timestamp. It never mixes a faster symbol's new bar with another
+symbol's older bar.
 
 Runnable versions cover both externally scheduled allocations and dynamic
 Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)

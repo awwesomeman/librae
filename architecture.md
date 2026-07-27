@@ -54,7 +54,7 @@ librae/
 │   └── charts.py             plot_trades — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
 │
 ├── live/                     real-time / sim runtime
-│   ├── engine.py             LiveTrader — polling loop + signal detection
+│   ├── engine.py             LiveTrader — synchronized portfolio polling cycles
 │   └── executor.py           LiveExecutor (sim notifications / live order placement)
 │
 └── config/                   configuration management
@@ -152,12 +152,35 @@ every bar. It is opt-in because retaining O(bars × positions) facts can be
 expensive for a large universe. Compare those facts with the strategy's target
 schedule to measure tracking drift.
 
-The current `LiveTrader` polling loop processes one symbol at a time and cannot
-construct an atomic cross-sectional bar. It therefore rejects
-`RebalanceTargets` explicitly; quantity-based `Action` strategies retain
-backtest/sim/live parity. Supporting live portfolio batches requires the
-synchronized multi-symbol watermark design described in
-`docs/plans/enhance_librae_multi_symbol_support.md`.
+`LiveTrader` uses the same portfolio-level decision boundary in sim and live
+modes. It fetches each configured symbol independently, but invokes
+`strategy.on_bar()` once only after every symbol's latest completed bar has the
+same timestamp. Both `Action` and `RebalanceTargets` then follow the same T/T+1
+contract as backtests.
+
+That shared latest timestamp is the portfolio cycle identity and is processed
+at most once. OHLCV caches are sorted and deduplicated before alignment. The
+policy is deliberately strict and deterministic:
+
+- **Delayed or stale symbol:** wait; do not mix its old bar with another
+  symbol's newer bar. Existing wall-clock staleness monitoring continues to
+  alert independently.
+- **Missing timestamp:** if all symbols later share a newer timestamp, skip the
+  missing cycle and process only the newest shared timestamp. Live mode never
+  replays historical decisions or orders to catch up.
+- **Duplicate bar:** keep the last copy in cache; a timestamp at or below the
+  processed watermark cannot invoke the strategy again.
+- **Late or out-of-order bar:** retain it only as feature history when it fits
+  in the rolling cache; never rewind the watermark.
+
+For a delayed cycle, each symbol's feature input is sliced at the cycle
+timestamp even if its cache already contains newer bars. This is the
+cross-sectional look-ahead boundary. Alignment makes the local rebalance
+decision coherent; broker submissions remain sequential reductions-then-
+additions rather than an exchange-level atomic basket. Incremental cache
+retention is capped by `warmup_periods` (an injected warmup fetcher may provide
+more initial history); this first implementation favors daily/session
+correctness and recovery semantics over high-frequency throughput.
 
 #### Local trade-chart viewer
 
@@ -354,7 +377,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 | Param | Called as |
 |---|---|
-| `on_bar` | `on_bar(run_id, ts, equity, drawdown, period_return)` — once per bar |
+| `on_bar` | `on_bar(run_id, ts, equity, drawdown, period_return)` — once per synchronized portfolio cycle |
 | `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |

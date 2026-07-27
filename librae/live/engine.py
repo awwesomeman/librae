@@ -1,7 +1,7 @@
 """LiveTrader — polling loop for sim and live modes.
 
-Detects completed bars, runs strategy, and routes actions to LiveExecutor.
-Supports multiple symbols. Caches OHLCV to avoid redundant fetches.
+Aligns completed bars into portfolio cycles, runs strategy once per timestamp,
+and routes intents to LiveExecutor. Caches OHLCV to avoid redundant fetches.
 
 Wiring is internalized: pass cfg=RunConfig to __init__,
 the engine builds adapter, cost_model, callbacks, telegram internally.
@@ -32,12 +32,11 @@ from librae.core.executor import (
     validate_risk_params,
 )
 from librae.core.strategy import (
-    Action,
     BaseStrategy,
     Context,
     Position,
     PositionState,
-    RebalanceTargets,
+    StrategyIntent,
 )
 
 from .executor import LiveExecutor
@@ -203,7 +202,7 @@ class LiveTrader:
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
         self._db_write_failures: int = 0
-        self._last_bar_ts: dict[str, datetime] = {}
+        self._last_cycle_ts: datetime | None = None
         self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -213,11 +212,11 @@ class LiveTrader:
             validate_risk_params(cfg.params)
         )
         self._halted: bool = False
-        self._pending_actions: dict[str, list[Action]] = {}
+        self._pending_intent: StrategyIntent = []
         self._equity_peak: float = cfg.initial_balance
         self._prev_equity: float = cfg.initial_balance
         self._trade_count: int = 0
-        self._period_indices: dict[str, int] = {}
+        self._period_index: int = 0
         self._status_period_count: int = 0
         self._running: bool = False
 
@@ -716,10 +715,11 @@ class LiveTrader:
         signal.signal(signal.SIGINT, _handler)
 
     def _poll_cycle(self) -> None:
-        """Single poll cycle: fetch data for each symbol, detect new bars, run strategy."""
+        """Fetch all symbols and process the latest aligned portfolio cycle."""
         if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
 
+        frames: dict[str, pd.DataFrame] = {}
         for symbol in self._symbols:
             df = self._fetch_with_cache(symbol)
             if df is None or df.empty:
@@ -727,51 +727,67 @@ class LiveTrader:
 
             latest_ts = df["ts"].iloc[-1].to_pydatetime()
             self._check_staleness(symbol, latest_ts)
-            prev_ts = self._last_bar_ts.get(symbol)
+            frames[symbol] = df
 
-            if prev_ts is not None and latest_ts <= prev_ts:
-                continue  # No new completed bar
+        cycle_ts = self._latest_aligned_timestamp(frames)
+        if cycle_ts is None:
+            return
 
-            self._last_bar_ts[symbol] = latest_ts
-            logger.info("New bar detected: %s @ %s", symbol, latest_ts)
+        # Mark the cycle before strategy execution. A callback/strategy failure
+        # must not replay the same portfolio decision on the next poll.
+        self._last_cycle_ts = cycle_ts
+        logger.info("New portfolio cycle: %s", cycle_ts)
 
-            # Increment periods_held on PositionState directly
-            if symbol in self._positions:
-                self._positions[symbol].periods_held += 1
+        for position in self._positions.values():
+            position.periods_held += 1
 
-            self._process_bar(symbol, df, latest_ts)
+        self._process_cycle(frames, cycle_ts)
+
+    def _latest_aligned_timestamp(
+        self,
+        frames: dict[str, pd.DataFrame],
+    ) -> datetime | None:
+        """Return the common latest timestamp once every symbol reaches it."""
+        if any(symbol not in frames for symbol in self._symbols):
+            return None
+
+        latest = [pd.Timestamp(frames[symbol]["ts"].iloc[-1]) for symbol in self._symbols]
+        if len(set(latest)) != 1:
+            return None
+
+        cycle_ts = latest[0].to_pydatetime()
+        if self._last_cycle_ts is not None and cycle_ts <= self._last_cycle_ts:
+            return None
+        return cycle_ts
 
     def _fetch_with_cache(self, symbol: str) -> pd.DataFrame | None:
-        """Fetch OHLCV with caching. Full fetch on first call, incremental after."""
+        """Fetch OHLCV and keep a sorted, deduplicated rolling cache."""
         try:
             if symbol not in self._ohlcv_cache:
                 if self._warmup_fetcher:
-                    df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
+                    new_df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
                 else:
-                    df = self._fetcher(
+                    new_df = self._fetcher(
                         symbol,
                         self._timeframe,
                         self._warmup_periods,
                         drop_incomplete=True,
                     )
-                self._ohlcv_cache[symbol] = df
-                return df
+                cached = None
+            else:
+                cached = self._ohlcv_cache[symbol]
+                new_df = self._fetcher(symbol, self._timeframe, 2, drop_incomplete=True)
 
-            new_df = self._fetcher(symbol, self._timeframe, 2, drop_incomplete=True)
             if new_df.empty:
-                return self._ohlcv_cache[symbol]
+                return cached if cached is not None else new_df
 
-            cached = self._ohlcv_cache[symbol]
-            last_cached_ts = cached["ts"].iloc[-1]
-            new_bars = new_df[new_df["ts"] > last_cached_ts]
-
-            if not new_bars.empty:
-                cached = pd.concat([cached, new_bars], ignore_index=True)
-                if len(cached) > self._warmup_periods:
-                    cached = cached.iloc[-self._warmup_periods :]
-                self._ohlcv_cache[symbol] = cached
-
-            return cached
+            merged = new_df if cached is None else pd.concat([cached, new_df], ignore_index=True)
+            merged = merged.drop_duplicates(subset="ts", keep="last").sort_values("ts")
+            if cached is not None:
+                merged = merged.iloc[-self._warmup_periods :]
+            merged = merged.reset_index(drop=True)
+            self._ohlcv_cache[symbol] = merged
+            return merged
         except Exception:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
@@ -818,29 +834,46 @@ class LiveTrader:
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
-        """Run feature pipeline + strategy on a completed bar.
+        """Process one symbol through the portfolio-cycle path."""
+        self._process_cycle({symbol: raw_df}, ts)
 
-        Uses pending-then-execute pattern to eliminate look-ahead bias:
-        previous bar's actions are filled at *this* bar's price, then the
-        strategy sees this bar and produces the *next* bar's pending actions.
+    def _process_cycle(
+        self,
+        raw_frames: dict[str, pd.DataFrame],
+        ts: datetime,
+    ) -> None:
+        """Execute and evaluate one synchronized portfolio timestamp.
+
+        Previous-cycle intent fills against raw bars at ``ts`` before every
+        symbol's feature pipeline is evaluated using data no later than
+        ``ts``. The strategy is then called exactly once with the aligned
+        cross-section and produces the next cycle's pending intent.
 
         Order execution (pending-action fills, stop-loss/take-profit) runs
         on raw OHLCV and does not depend on feature computation succeeding
         — a feature-pipeline failure must not leave a real pending fill
-        silently deferred to a later, unrelated bar's price, and must not
+        silently deferred to a later, unrelated cycle's price, and must not
         block stop-loss/take-profit enforcement.
         """
-        h1 = raw_df.set_index("ts")
-        h1.index.name = "ts"
-        raw_bar = h1.iloc[-1].to_dict()
-        price = float(raw_bar.get("close", 0.0))
-        self._last_prices[symbol] = price
+        primary_symbol = self._symbols[0]
+        histories: dict[str, pd.DataFrame] = {}
+        raw_bars: dict[str, dict[str, float]] = {}
+        for symbol, raw_df in raw_frames.items():
+            history = raw_df[raw_df["ts"] <= ts].set_index("ts")
+            history.index.name = "ts"
+            if history.empty:
+                continue
+            histories[symbol] = history
+            raw_bar = history.iloc[-1].to_dict()
+            raw_bars[symbol] = raw_bar
+            self._last_prices[symbol] = float(raw_bar.get("close", 0.0))
 
         # ── Steps 1+1.5: fill previous bar's pending actions at current
         # bar's price, then check stop-loss/take-profit — shared with the
         # backtest engine (librae.core.executor.run_pending_and_stops) so
         # the two can't silently drift out of sync on this sequence ──
-        prev_actions = self._pending_actions.pop(symbol, [])
+        pending_intent = self._pending_intent
+        self._pending_intent = []
         max_position_notional = (
             self._max_position_pct * self._prev_equity if self._max_position_pct else None
         )
@@ -848,11 +881,11 @@ class LiveTrader:
             ts,
             self._positions,
             self._cash,
-            prev_actions,
-            {symbol: raw_bar},
+            pending_intent,
+            raw_bars,
             get_cost_model=self._get_cost_model,
             default_fill=self._fill_price,
-            primary_symbol=symbol,
+            primary_symbol=primary_symbol,
             max_position_notional=max_position_notional,
             max_volume_participation_pct=self._max_volume_participation_pct,
         )
@@ -866,57 +899,59 @@ class LiveTrader:
         if self._halted:
             return
 
-        try:
-            featured = self._feature_fn(h1)
-        except Exception:
-            logger.exception(
-                "Feature computation failed for %s — pending fills/stops above "
-                "still applied, skipping strategy decision for this bar",
-                symbol,
-            )
-            return
+        bars: dict[str, dict[str, float]] = {}
+        for symbol in self._symbols:
+            try:
+                featured = self._feature_fn(histories[symbol])
+            except Exception:
+                logger.exception(
+                    "Feature computation failed for %s — pending fills/stops above "
+                    "still applied, skipping strategy decision for cycle %s",
+                    symbol,
+                    ts,
+                )
+                return
 
-        last_row = featured.iloc[-1]
-        bar = last_row.to_dict()
-        price = float(bar.get("close", price))
-        self._last_prices[symbol] = price
+            bar = featured.iloc[-1].to_dict()
+            bars[symbol] = bar
+            price = float(bar.get("close", self._last_prices[symbol]))
+            self._last_prices[symbol] = price
 
-        if self._on_signal_outcome:
-            sig = bar.get("entry_signal")
-            if sig is not None and not pd.isna(sig) and float(sig) != 0:
-                self._on_signal_outcome(symbol, ts, float(sig), price)
-            exit_sig = bar.get("exit_signal")
-            if exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0:
-                self._on_signal_outcome(symbol, ts, float(exit_sig), price, signal_type="exit")
+            if self._on_signal_outcome:
+                sig = bar.get("entry_signal")
+                if sig is not None and not pd.isna(sig) and float(sig) != 0:
+                    self._on_signal_outcome(symbol, ts, float(sig), price)
+                exit_sig = bar.get("exit_signal")
+                if exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0:
+                    self._on_signal_outcome(
+                        symbol,
+                        ts,
+                        float(exit_sig),
+                        price,
+                        signal_type="exit",
+                    )
 
         # ── Step 2: strategy decision (produces next bar's pending actions) ──
-        period_index = self._period_indices.get(symbol, 0)
         equity, position_snapshot = self._eval_equity_snapshot()
         ctx = Context(
             ts=ts,
-            symbol=symbol,
+            symbol=primary_symbol,
             symbols=self._symbols,
-            bar=bar,
-            bars={symbol: bar},
+            bar=bars[primary_symbol],
+            bars=bars,
             positions=position_snapshot,
             cash=self._cash,
             equity=equity,
-            period_index=period_index,
+            period_index=self._period_index,
         )
 
-        actions = self._strategy.on_bar(ctx)
-        if isinstance(actions, RebalanceTargets):
-            raise NotImplementedError(
-                "LiveTrader cannot execute RebalanceTargets until its multi-symbol "
-                "runner builds one synchronized cross-sectional bar. Use Action in "
-                "sim/live mode for now; backtests support portfolio rebalances."
-            )
-        self._period_indices[symbol] = period_index + 1
-        self._pending_actions[symbol] = actions
+        self._pending_intent = self._strategy.on_bar(ctx)
+        self._period_index += 1
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
-            self._on_ohlcv(symbol, self._timeframe, bar, ts)
+            for symbol, bar in bars.items():
+                self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
     def _eval_equity(self) -> float:
         """Total equity = cash + market value of all positions."""
