@@ -246,6 +246,8 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         "max_drawdown_rate",
         "max_gross_exposure",
         "max_net_exposure",
+        "max_order_notional",
+        "max_limit_price_deviation_rate",
     }
     if unknown_risk_keys:
         raise ValueError(f"unknown strategy.risk settings: {sorted(unknown_risk_keys)}")

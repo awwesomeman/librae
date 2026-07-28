@@ -85,7 +85,8 @@ class ExecutionPolicy:
 class RiskPolicy:
     """Optional engine-level portfolio risk limits.
 
-    All limits are ratios, not percentages. ``None`` disables a limit.
+    Rate/weight limits are ratios, not percentages. ``max_order_notional`` is
+    denominated in the account currency. ``None`` disables a limit.
     Strategy-specific parameters remain in ``RunConfig.params``.
     """
 
@@ -93,6 +94,8 @@ class RiskPolicy:
     max_drawdown_rate: float | None = None
     max_gross_exposure: float | None = None
     max_net_exposure: float | None = None
+    max_order_notional: float | None = None
+    max_limit_price_deviation_rate: float | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -100,6 +103,8 @@ class RiskPolicy:
             "max_drawdown_rate",
             "max_gross_exposure",
             "max_net_exposure",
+            "max_order_notional",
+            "max_limit_price_deviation_rate",
         ):
             value = getattr(self, field_name)
             if value is not None and (
@@ -109,6 +114,11 @@ class RiskPolicy:
                 or value <= 0
             ):
                 raise ValueError(f"{field_name} must be finite and positive or None, got {value}")
+        limit_price_rate = self.max_limit_price_deviation_rate
+        if limit_price_rate is not None and limit_price_rate > 1:
+            raise ValueError(
+                f"max_limit_price_deviation_rate must be at most 1.0, got {limit_price_rate}"
+            )
 
 
 class FrozenDict(dict):
@@ -312,6 +322,8 @@ class RunConfig:
             "max_drawdown_rate",
             "max_gross_exposure",
             "max_net_exposure",
+            "max_order_notional",
+            "max_limit_price_deviation_rate",
         }
         invalid_keys = sorted(legacy_risk_keys & set(self.params or {}))
         if invalid_keys:

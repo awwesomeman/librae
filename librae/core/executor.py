@@ -1119,6 +1119,23 @@ def _try_fill(
     return fill, outlay
 
 
+def _validate_entry_order_notional(
+    symbol: str,
+    fill: Fill,
+    cost_model: CostModel,
+    max_order_notional: float | None,
+) -> None:
+    """Reject an exposure-increasing fill above the configured order-size limit."""
+    if max_order_notional is None:
+        return
+    notional = fill.price * fill.quantity * cost_model.multiplier
+    if notional > max_order_notional + EPSILON:
+        raise ValueError(
+            f"{symbol} entry order notional {notional:.6f} exceeds "
+            f"max_order_notional={max_order_notional:.6f}"
+        )
+
+
 def execute_order_intents(
     intents: list[OrderIntent],
     positions: dict[str, PositionState],
@@ -1129,6 +1146,7 @@ def execute_order_intents(
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
+    max_order_notional: float | None = None,
     max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
@@ -1194,6 +1212,12 @@ def execute_order_intents(
                     bar_volume=bar_volume,
                 )
                 if fill:
+                    _validate_entry_order_notional(
+                        sym,
+                        fill,
+                        cost_model,
+                        max_order_notional,
+                    )
                     cash_delta -= outlay
                     positions[sym] = PositionState(
                         symbol=sym,
@@ -1247,6 +1271,12 @@ def execute_order_intents(
                     bar_volume=bar_volume,
                 )
                 if fill:
+                    _validate_entry_order_notional(
+                        sym,
+                        fill,
+                        cost_model,
+                        max_order_notional,
+                    )
                     cash_delta -= outlay
                     scale_into_position(positions[sym], fill, cost_model)
                     pos = positions[sym]
@@ -1403,6 +1433,7 @@ def execute_portfolio_targets(
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
+    max_order_notional: float | None = None,
     max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     max_gross_exposure: float | None = None,
@@ -1562,6 +1593,7 @@ def execute_portfolio_targets(
         get_cost_model=get_cost_model,
         primary_symbol=primary_symbol,
         max_position_notional=max_position_notional,
+        max_order_notional=max_order_notional,
         max_bar_volume_participation_rate=max_bar_volume_participation_rate,
         max_adv_participation_rate=max_adv_participation_rate,
         get_volume=get_volume,
@@ -1698,6 +1730,7 @@ def execute_pending_decision_and_stops(
     default_fill: str,
     primary_symbol: str,
     max_position_notional: float | None = None,
+    max_order_notional: float | None = None,
     max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
@@ -1750,6 +1783,7 @@ def execute_pending_decision_and_stops(
             "get_cost_model": get_cost_model,
             "primary_symbol": primary_symbol,
             "max_position_notional": max_position_notional,
+            "max_order_notional": max_order_notional,
             "max_bar_volume_participation_rate": max_bar_volume_participation_rate,
             "max_adv_participation_rate": max_adv_participation_rate,
             "get_volume": lambda sym: bars.get(sym, {}).get("volume"),

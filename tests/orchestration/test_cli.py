@@ -292,6 +292,8 @@ class TestBuildConfig:
                   risk:
                     max_position_weight: 0.25
                     max_drawdown_rate: 0.20
+                    max_order_notional: 25000
+                    max_limit_price_deviation_rate: 0.10
                 """
             )
         )
@@ -299,6 +301,8 @@ class TestBuildConfig:
         config = build_config("test_strat", str(tmp_path / "run.py"))
         assert config.risk.max_position_weight == 0.25
         assert config.risk.max_drawdown_rate == 0.20
+        assert config.risk.max_order_notional == 25_000
+        assert config.risk.max_limit_price_deviation_rate == 0.10
 
         config_path.write_text(
             textwrap.dedent(

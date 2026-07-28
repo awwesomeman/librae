@@ -14,10 +14,18 @@ from librae.core.executor import (
     _cap_fill_to_notional,
     _cap_fill_to_volume,
     execute_order_intents,
+    execute_portfolio_targets,
     liquidate_all,
 )
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
-from librae.core.strategy import Context, Fill, OrderIntent, PositionState, Strategy
+from librae.core.strategy import (
+    Context,
+    Fill,
+    OrderIntent,
+    PortfolioTargets,
+    PositionState,
+    Strategy,
+)
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -206,6 +214,59 @@ class TestProcessActionsPositionCap:
         )
         assert len(result.events) == 1
         assert result.events[0].fill_quantity == pytest.approx(3.0)
+
+
+class TestMaxOrderNotional:
+    def test_oversized_entry_is_rejected_before_mutation(self):
+        positions: dict[str, PositionState] = {}
+
+        with pytest.raises(ValueError, match="max_order_notional"):
+            execute_order_intents(
+                [OrderIntent(action="long", symbol="TEST", quantity=4.0)],
+                positions,
+                10_000.0,
+                TS,
+                get_price=lambda s, a: 100.0,
+                get_cost_model=lambda s: _zero_cost(),
+                primary_symbol="TEST",
+                max_order_notional=300.0,
+            )
+
+        assert positions == {}
+
+    def test_risk_reducing_close_is_not_blocked(self):
+        positions = {"TEST": _make_pos(quantity=10.0)}
+
+        result = execute_order_intents(
+            [OrderIntent(action="close", symbol="TEST")],
+            positions,
+            0.0,
+            TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_order_notional=300.0,
+        )
+
+        assert len(result.events) == 1
+        assert positions == {}
+
+    def test_portfolio_target_addition_uses_same_limit(self):
+        positions: dict[str, PositionState] = {}
+
+        with pytest.raises(ValueError, match="max_order_notional"):
+            execute_portfolio_targets(
+                PortfolioTargets(weights={"TEST": 0.5}),
+                positions,
+                1_000.0,
+                TS,
+                get_price=lambda s, a: 100.0,
+                get_cost_model=lambda s: _zero_cost(),
+                primary_symbol="TEST",
+                max_order_notional=300.0,
+            )
+
+        assert positions == {}
 
 
 class TestProcessActionsVolumeCap:

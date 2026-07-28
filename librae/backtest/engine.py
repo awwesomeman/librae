@@ -452,6 +452,7 @@ class Backtest:
                     default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
+                    max_order_notional=self._risk_policy.max_order_notional,
                     max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=get_lagged_adv,

@@ -79,6 +79,10 @@ execution:
 risk:
   max_position_weight: 0.30
   max_drawdown_rate: 0.20
+  max_gross_exposure: 1.00
+  max_net_exposure: 1.00
+  max_order_notional: 50000
+  max_limit_price_deviation_rate: 0.10
 perf:
   periods_per_year: 8760  # H1 24/7 returns
 params:

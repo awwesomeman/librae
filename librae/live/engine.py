@@ -145,6 +145,7 @@ class LiveTrader:
         on_signal_outcome: Callable[..., None] | object | None = _UNSET,
         warmup_fetcher: Callable[..., pd.DataFrame] | object | None = _UNSET,
         state_store: LiveStateStore | object | None = _UNSET,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         from librae.config.symbols import resolve_symbol
         from librae.core.cost_model import CostModel
@@ -157,6 +158,7 @@ class LiveTrader:
         self._timeframe = to_ccxt(config.timeframe)
         self._interval_delta = interval_to_timedelta(self._timeframe)
         self._poll_seconds = config.poll_seconds
+        self._clock = clock or (lambda: datetime.now(UTC))
 
         # --- Build per-symbol cost models and instrument routes ---
         if isinstance(cost_model, Mapping):
@@ -692,9 +694,8 @@ class LiveTrader:
     # WHY: a completed bar's own timestamp is always ~1 interval behind wall
     # clock even when the feed is perfectly healthy (see _check_staleness) —
     # this is how many *additional* full intervals of no progress are
-    # tolerated on top of that before alerting. Pure monitoring, no effect
-    # on trading, so it's an engine constant like CONSECUTIVE_ERROR_THRESHOLD
-    # rather than a config.params opt-in.
+    # tolerated on top of that before alerting. Live skips stale frames rather
+    # than submitting decisions from obsolete market snapshots.
     STALE_DATA_TOLERANCE_BARS = 2
 
     def _notify(self, method: str, **kwargs: object) -> None:
@@ -705,14 +706,18 @@ class LiveTrader:
         fn = getattr(telegram, method)
         self._notify_pool.submit(fn, **kwargs)
 
-    def _check_staleness(self, symbol: str, latest_ts: datetime) -> None:
+    def _check_staleness(self, symbol: str, latest_ts: datetime) -> bool:
         """Alert if the latest fetched bar hasn't advanced in wall-clock
         time — catches a feed that stops updating without ever raising an
         exception (CONSECUTIVE_ERROR_THRESHOLD only covers raised errors).
         Edge-triggered: alerts once when crossing into stale, not every
-        poll cycle, and re-arms once fresh data resumes.
+        poll cycle, and re-arms once fresh data resumes. Returns whether the
+        frame is stale so live execution can fail closed.
         """
-        age = datetime.now(UTC) - latest_ts
+        now = self._clock()
+        if now.tzinfo is None:
+            raise ValueError("clock must return a timezone-aware datetime")
+        age = now.astimezone(UTC) - latest_ts
         threshold = (self.STALE_DATA_TOLERANCE_BARS + 1) * self._interval_delta
         is_stale = age > threshold
         was_stale = self._stale_alerted.get(symbol, False)
@@ -730,6 +735,7 @@ class LiveTrader:
         elif not is_stale and was_stale:
             self._stale_alerted[symbol] = False
             logger.info("Stale data recovered: %s", symbol)
+        return is_stale
 
     def _reconcile_positions(self) -> None:
         """Adopt real broker positions into local state at startup.
@@ -1042,6 +1048,12 @@ class LiveTrader:
         """Signal the runner to stop after the current cycle."""
         self._running = False
 
+    def halt(self, reason: str = "operator requested halt") -> None:
+        """Fail closed immediately until an operator calls ``reset_halt``."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("halt reason must be a non-empty string")
+        self._halt_live(title="Manual Halt", message=reason.strip())
+
     def reset_halt(self) -> None:
         """Start a new risk epoch after explicit operator review."""
         if self._active_orders:
@@ -1063,7 +1075,7 @@ class LiveTrader:
         signal.signal(signal.SIGINT, _handler)
 
     def _poll_cycle(self) -> None:
-        """Process every completed, uncommitted market-data event in order."""
+        """Process completed market-data events without live catch-up orders."""
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
             if self._active_orders or self._halted:
@@ -1081,20 +1093,38 @@ class LiveTrader:
             if latest.tzinfo is None:
                 raise ValueError(f"{symbol} latest completed bar timestamp must be timezone-aware")
             latest_ts = latest.to_pydatetime().astimezone(UTC)
-            self._check_staleness(symbol, latest_ts)
+            is_stale = self._check_staleness(symbol, latest_ts)
+            if is_stale and not self._executor.simulation:
+                logger.warning("Skipping stale live frame for %s at %s", symbol, latest_ts)
+                continue
             frames[symbol] = df
 
         pending_timestamps: set[datetime] = set()
+        skipped_by_symbol: dict[str, int] = {}
         for symbol, frame in frames.items():
             watermark = self._last_bar_ts.get(symbol)
             candidate_rows = (
                 frame.iloc[[-1]] if watermark is None else frame.loc[frame["ts"] > watermark]
             )
+            if not self._executor.simulation and len(candidate_rows) > 1:
+                skipped_by_symbol[symbol] = len(candidate_rows) - 1
+                candidate_rows = candidate_rows.iloc[[-1]]
             for raw_ts in candidate_rows["ts"]:
                 timestamp = pd.Timestamp(raw_ts)
                 if timestamp.tzinfo is None:
                     raise ValueError(f"{symbol} completed bar timestamp must be timezone-aware")
                 pending_timestamps.add(timestamp.to_pydatetime().astimezone(UTC))
+
+        if skipped_by_symbol:
+            summary = ", ".join(
+                f"{symbol}={count}" for symbol, count in sorted(skipped_by_symbol.items())
+            )
+            logger.warning("Skipped superseded live bars: %s", summary)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Live Catch-up Bars Skipped",
+                message=f"Skipped older uncommitted bars ({summary}); only latest bars are tradable.",
+            )
 
         for cycle_ts in sorted(pending_timestamps):
             if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
@@ -1204,6 +1234,29 @@ class LiveTrader:
         self._trade_count += len(result.trades)
         self._publish_action_results(result)
 
+    def _prepare_live_order(
+        self,
+        request: OrderRequest,
+        *,
+        reference_price: float,
+    ) -> OrderRequest:
+        """Apply venue normalization, then enforce the live limit-price collar."""
+        prepared = self._executor.prepare_order(
+            request,
+            reference_price=reference_price,
+        )
+        max_deviation = self._risk_policy.max_limit_price_deviation_rate
+        if prepared.limit_price is None or max_deviation is None:
+            return prepared
+        deviation = abs(prepared.limit_price - reference_price) / reference_price
+        if deviation > max_deviation + EPSILON:
+            raise ValueError(
+                f"{prepared.symbol} limit price {prepared.limit_price:.6f} is "
+                f"{deviation:.2%} from reference {reference_price:.6f}, exceeding "
+                f"max_limit_price_deviation_rate={max_deviation:.2%}"
+            )
+        return prepared
+
     def _plan_live_orders(
         self,
         intent: StrategyDecision,
@@ -1255,6 +1308,7 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
+                max_order_notional=self._risk_policy.max_order_notional,
                 max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
                 max_gross_exposure=self._risk_policy.max_gross_exposure,
@@ -1268,7 +1322,7 @@ class LiveTrader:
             for index, event in enumerate(result.events):
                 request = self._executor.request_from_event(event, sequence=index)
                 requests.append(
-                    self._executor.prepare_order(
+                    self._prepare_live_order(
                         request,
                         reference_price=prices[event.symbol],
                     )
@@ -1301,6 +1355,7 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
+                max_order_notional=self._risk_policy.max_order_notional,
                 max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
                 get_volume=get_volume,
@@ -1318,7 +1373,7 @@ class LiveTrader:
                     sequence=sequence_offset + index,
                 )
                 requests.append(
-                    self._executor.prepare_order(
+                    self._prepare_live_order(
                         request,
                         reference_price=prices[event.symbol],
                     )
@@ -1344,7 +1399,7 @@ class LiveTrader:
                 lagged_adv_by_symbol=lagged_adv_by_symbol,
             )
         except ValueError as exc:
-            self._halt_live(title="Unsupported Live Intent", message=str(exc))
+            self._halt_live(title="Live Order Preflight Rejected", message=str(exc))
             return False
 
         if not requests:
@@ -1623,6 +1678,7 @@ class LiveTrader:
                     default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
+                    max_order_notional=self._risk_policy.max_order_notional,
                     max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),

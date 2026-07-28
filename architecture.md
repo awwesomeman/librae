@@ -380,6 +380,8 @@ config = RunConfig(
         max_gross_exposure=1.2,  # reject targets above 120% gross
         max_net_exposure=1.0,  # reject targets above 100% absolute net
         max_drawdown_rate=0.2,  # liquidate and halt after a 20% drawdown
+        max_order_notional=25_000,  # reject larger entry/add orders
+        max_limit_price_deviation_rate=0.1,  # live limit-price collar
     ),
     params={"lookback": 20},  # strategy logic only
 )
@@ -410,8 +412,18 @@ free-form strategy dictionary for portfolio controls.
   local liquidity constraint. Sim/live `warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
 - `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
+- `max_order_notional`: hard-rejects an individual exposure-increasing open or
+  add above this account-currency notional after normal position/liquidity
+  sizing. Reductions, closes, and emergency exits remain available.
+- `max_limit_price_deviation_rate`: in live mode, rejects a broker-normalized
+  limit price whose absolute distance from the latest completed close exceeds
+  this ratio. Market orders are unaffected because their execution price is
+  not known before submission.
 - `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
 - `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
+- `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
+  clears pending strategy decisions, and cancels tracked live broker orders.
+  `reset_halt()` is required after review before new entries resume.
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 Performance annualization has a separate explicit SSOT:
@@ -481,7 +493,19 @@ outside this small polling engine rather than hidden behind an in-process lock.
 
 #### Data staleness detection (live only)
 
-Checked on every poll cycle — unlike reconciliation above, not just once at startup. `_check_staleness` compares the latest bar's timestamp against the current time; an alert only fires once the gap exceeds `(LiveTrader.STALE_DATA_TOLERANCE_BARS + 1) * timeframe` (default tolerance=2, i.e. 3 timeframes with no new data) — the `+1` accounts for the fact that even with a perfectly healthy feed, a closed bar's timestamp is naturally about one timeframe behind the current time, which is expected and shouldn't count as stale. Purely a monitoring feature — it never halts trading or blocks new entries, so it's an always-on engine constant, following the same design rationale as `CONSECUTIVE_ERROR_THRESHOLD`; the difference is that `CONSECUTIVE_ERROR_THRESHOLD` only catches fetches that raise exceptions, while this one catches fetches that succeed but return data that's stopped updating (the exchange API silently stuck). Edge-triggered: fires once on the fresh→stale transition, not every cycle; once data recovers it re-arms, and the next stale period will alert again.
+Checked on every poll cycle, not just at startup. `_check_staleness`
+compares the latest completed bar timestamp with the UTC clock. A frame is
+stale after `(STALE_DATA_TOLERANCE_BARS + 1) * timeframe` (three intervals by
+default); the extra interval accounts for the normal age of a completed bar.
+The alert is edge-triggered and re-arms after recovery. Sim keeps processing
+for deterministic shadow/replay workflows, while live fails closed for that
+poll: the stale frame never reaches the strategy or broker.
+
+Live also does not replay an outage backlog into the market. If a fetch returns
+multiple bars newer than the durable watermark, only the latest completed bar
+is evaluated and the skipped count is alerted. Sim continues to replay every
+uncommitted bar. The optional `clock` constructor dependency exists to make
+time-based integrations deterministic; production defaults to UTC now.
 
 #### Sim monitoring
 
@@ -594,7 +618,7 @@ financial/execution fact.
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
 | `ExecutionPolicy` | run-wide default fill field, current-bar participation cap, and optional session-level lagged-ADV capacity cap |
-| `RiskPolicy` | optional engine-level position, exposure, and drawdown limits; every value is a ratio |
+| `RiskPolicy` | optional engine-level position, exposure, drawdown, order-notional, and live limit-price controls |
 
 #### Output layer
 

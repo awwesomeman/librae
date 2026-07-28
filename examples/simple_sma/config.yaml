@@ -16,9 +16,15 @@ strategy:
     # adv_lookback_sessions: 20
     # max_adv_participation_rate: 0.01
   risk:
-    # Ratios, not percentages. Omit/null a setting to disable that limit.
+    # Rate/weight values are ratios, not percentages. Omit/null to disable.
     max_position_weight: 0.30
     max_drawdown_rate: 0.20
+    # Absolute account-currency cap for one exposure-increasing open/add.
+    # Reductions and exits are never blocked by this guard.
+    max_order_notional: 50000
+    # Live numeric limit orders must remain within 10% of the latest completed
+    # close after broker tick-size normalization. Market orders are unaffected.
+    max_limit_price_deviation_rate: 0.10
   perf:
     # H1 24/7 data has 24 * 365 return observations per year.
     periods_per_year: 8760

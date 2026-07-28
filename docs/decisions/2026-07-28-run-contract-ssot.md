@@ -7,8 +7,8 @@ Status: accepted
 
 - `RunConfig.execution: ExecutionPolicy` owns simulated fill and liquidity
   assumptions.
-- `RunConfig.risk: RiskPolicy` owns engine-level position, exposure, and
-  drawdown limits.
+- `RunConfig.risk: RiskPolicy` owns engine-level position, exposure, drawdown,
+  order-notional, and live limit-price controls.
 - `RunConfig.params` contains strategy logic parameters only. Execution and
   risk keys in this mapping are rejected.
 - Public configuration parameters are named `config`, not `cfg`.

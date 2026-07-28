@@ -87,6 +87,8 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
     assert disabled.config_hash != limited.config_hash
     with pytest.raises(ValueError, match="max_position_weight"):
         RiskPolicy(max_position_weight=0)
+    with pytest.raises(ValueError, match="max_limit_price_deviation_rate"):
+        RiskPolicy(max_limit_price_deviation_rate=1.01)
     with pytest.raises(TypeError, match="RiskPolicy"):
         _config(risk={"max_drawdown_rate": 0.2})
 
@@ -136,6 +138,8 @@ def test_execution_settings_are_rejected_from_strategy_params(
         "max_drawdown_rate",
         "max_gross_exposure",
         "max_net_exposure",
+        "max_order_notional",
+        "max_limit_price_deviation_rate",
     ],
 )
 def test_risk_settings_are_rejected_from_strategy_params(legacy_key: str) -> None:

@@ -115,6 +115,9 @@ def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     )
 
 
+TEST_CLOCK_NOW = datetime(2025, 1, 1, 2, tzinfo=UTC)
+
+
 def _make_ohlcv_at(timestamps: list[datetime], price: float = 100.0) -> pd.DataFrame:
     """Create constant-price bars at explicit timestamps."""
     return pd.DataFrame(
@@ -366,6 +369,7 @@ class TestLiveTrader:
     ) -> LiveTrader:
         test_config = config or _test_cfg()
         kwargs.setdefault("state_store", MemoryLiveStateStore())
+        kwargs.setdefault("clock", lambda: TEST_CLOCK_NOW)
         runner = LiveTrader(
             strategy or _HoldStrategy(),
             feature_fn or _simple_feature_fn,
@@ -664,6 +668,28 @@ class TestLiveTrader:
             {"BBB"},
             {"AAA", "BBB"},
         ]
+
+    @pytest.mark.parametrize(("mode", "expected_events"), [("sim", 3), ("live", 1)])
+    def test_only_sim_replays_all_uncommitted_bars(self, mode, expected_events):
+        now = datetime.now(UTC)
+        timestamps = [now - timedelta(hours=2), now - timedelta(hours=1), now]
+        frame = _make_ohlcv_at(timestamps)
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(mode=mode),
+            order_adapter=_mock_order_adapter() if mode == "live" else None,
+        )
+        runner._last_bar_ts["BTCUSDT"] = now - timedelta(hours=3)
+        runner._last_cycle_ts = now - timedelta(hours=3)
+
+        runner._poll_cycle()
+
+        assert strategy.on_bar.call_count == expected_events
+        if mode == "live":
+            assert strategy.on_bar.call_args.args[0].ts == now
 
     def test_context_exposes_engine_equity(self):
         seen_equity: list[float] = []
@@ -1176,7 +1202,10 @@ class TestLiveTrader:
         every poll cycle — CONSECUTIVE_ERROR_THRESHOLD only covers raised
         exceptions, this covers a fetch that succeeds but never advances."""
         stale_ts = datetime.now(UTC) - timedelta(hours=10)
-        runner = self._make_runner(fetcher=lambda *a, **kw: _make_ohlcv_df_at(stale_ts))
+        runner = self._make_runner(
+            fetcher=lambda *a, **kw: _make_ohlcv_df_at(stale_ts),
+            clock=lambda: datetime.now(UTC),
+        )
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1185,9 +1214,30 @@ class TestLiveTrader:
         stale_alerts = [kw for m, kw in alerts if m == "send_alert" and "Stale Data" in kw["title"]]
         assert len(stale_alerts) == 1
 
+    def test_stale_live_data_never_reaches_strategy_or_broker(self):
+        stale_ts = datetime.now(UTC) - timedelta(hours=10)
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+        order_adapter = _mock_order_adapter()
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=lambda *args, **kwargs: _make_ohlcv_df_at(stale_ts),
+            config=_test_cfg(mode="live"),
+            order_adapter=order_adapter,
+            clock=lambda: datetime.now(UTC),
+        )
+
+        runner._poll_cycle()
+
+        strategy.on_bar.assert_not_called()
+        order_adapter.place_order.assert_not_called()
+
     def test_fresh_data_does_not_alert(self):
         fresh_ts = datetime.now(UTC)
-        runner = self._make_runner(fetcher=lambda *a, **kw: _make_ohlcv_df_at(fresh_ts))
+        runner = self._make_runner(
+            fetcher=lambda *a, **kw: _make_ohlcv_df_at(fresh_ts),
+            clock=lambda: datetime.now(UTC),
+        )
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1205,7 +1255,7 @@ class TestLiveTrader:
         cache legitimately having nothing new to return, not a timestamp
         regression, and a fast unit test can't just wait out the clock to
         make an already-cached bar age past the threshold for real."""
-        runner = self._make_runner()
+        runner = self._make_runner(clock=lambda: datetime.now(UTC))
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1502,6 +1552,7 @@ class TestLiveExecutionLifecycle:
             on_heartbeat=None,
             on_signal_outcome=None,
             state_store=state_store or MemoryLiveStateStore(),
+            clock=lambda: TEST_CLOCK_NOW,
         )
 
     def test_partial_fill_commits_only_confirmed_quantity_and_stays_open(self):
@@ -1782,11 +1833,17 @@ class TestLiveExecutionLifecycle:
         runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
         runner.run(max_iterations=1)
 
-        runner._halt_live(title="Operator Halt", message="test")
+        runner.halt("test")
 
         adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
         assert runner._active_orders == []
         assert runner._halted is True
+
+    def test_manual_halt_rejects_blank_reason(self):
+        runner = self._make_trader(_AlwaysBuyStrategy(), _mock_order_adapter())
+
+        with pytest.raises(ValueError, match="non-empty"):
+            runner.halt(" ")
 
     def test_halt_survives_restart_until_operator_reset(self):
         store = MemoryLiveStateStore()
@@ -1901,6 +1958,39 @@ class TestLiveExecutionLifecycle:
         assert signal["order_type"] == "limit"
         assert signal["price"] == 99.5
         assert runner._positions == {}
+
+    def test_limit_price_collar_halts_before_submission(self):
+        adapter = _mock_order_adapter()
+
+        class FatFingerLimitBuy(Strategy):
+            def on_bar(self, ctx):
+                return [
+                    OrderIntent(
+                        action="long",
+                        symbol=ctx.symbol,
+                        quantity=1.0,
+                        fill_price=50.0,
+                    )
+                ]
+
+        runner = self._make_trader(FatFingerLimitBuy(), adapter)
+        runner._risk_policy = RiskPolicy(max_limit_price_deviation_rate=0.1)
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
+
+    def test_order_notional_guard_halts_before_submission(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner._risk_policy = RiskPolicy(max_order_notional=50.0)
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
 
     def test_order_is_normalized_before_checkpoint_and_submission(self):
         store = MemoryLiveStateStore()
@@ -2099,6 +2189,7 @@ class TestIBKRLiveAutoWiring:
                 on_heartbeat=None,
                 on_signal_outcome=None,
                 state_store=MemoryLiveStateStore(),
+                clock=lambda: TEST_CLOCK_NOW,
             )
 
         mock_cls.assert_called_once_with(trading_enabled=True)
@@ -2169,6 +2260,7 @@ class TestShioajiLiveAutoWiring:
                 on_heartbeat=None,
                 on_signal_outcome=None,
                 state_store=MemoryLiveStateStore(),
+                clock=lambda: TEST_CLOCK_NOW,
             )
             trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
