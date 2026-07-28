@@ -47,8 +47,13 @@ from .core.executor import TradePnL, TradeResult, calc_trade_pnl, direction, mak
 from .core.metrics import (
     compute_all,
     compute_signal_outcomes,
+    compute_trade_entry_outcomes,
+    compute_trade_lifecycle_outcomes,
     generate_signal_mae_mfe_report,
+    generate_trade_tearsheet,
     summarize_signal_mae_mfe,
+    summarize_trade_entry_outcomes,
+    summarize_trade_lifecycle_outcomes,
 )
 from .core.run_config import RunConfig
 from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
@@ -91,6 +96,11 @@ __all__ = [
     "compute_signal_outcomes",
     "summarize_signal_mae_mfe",
     "generate_signal_mae_mfe_report",
+    "compute_trade_lifecycle_outcomes",
+    "summarize_trade_lifecycle_outcomes",
+    "compute_trade_entry_outcomes",
+    "summarize_trade_entry_outcomes",
+    "generate_trade_tearsheet",
     "RunConfig",
     "generate_run_id",
     "infer_timeframe",

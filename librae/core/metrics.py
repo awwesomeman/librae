@@ -16,7 +16,8 @@ fallback for when density can't be inferred (<2 bars).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -38,6 +39,31 @@ PERCENTAGE_POINTS_PER_FRACTION = 100.0
 
 SignalDirection = Literal["long", "short"]
 SignalPriceColumn = Literal["open", "high", "low", "close"]
+LifecycleStatus = Literal["complete", "incomplete"]
+
+
+@dataclass(frozen=True)
+class _PositionLifecycle:
+    """One symbol's ordered position events from flat to flat or end-of-sample."""
+
+    symbol: str
+    ordinal: int
+    start_sequence: int
+    side: SignalDirection
+    events: tuple[OrderEventRecord, ...]
+    status: LifecycleStatus
+
+
+@dataclass
+class _LifecycleState:
+    """Mutable reconstruction state; converted to a frozen lifecycle on completion."""
+
+    ordinal: int
+    start_sequence: int
+    side: SignalDirection
+    quantity: float
+    entry_price: float
+    events: list[OrderEventRecord]
 
 
 def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
@@ -291,19 +317,148 @@ def generate_tearsheet(
     return output_path
 
 
-def _pair_trades(
+def _lifecycle_error(event: OrderEventRecord, message: str) -> ValueError:
+    return ValueError(f"{event.symbol} event {event.event_id}: {message}")
+
+
+def _validate_event_values(event: OrderEventRecord) -> pd.Timestamp:
+    if not event.event_id:
+        raise ValueError("order event IDs must be non-empty")
+    if not event.symbol:
+        raise ValueError(f"event {event.event_id}: symbol must be non-empty")
+    if event.event_type not in {"open", "add", "reduce", "close"}:
+        raise _lifecycle_error(event, f"unsupported event_type {event.event_type!r}")
+    _validate_direction(event.side)
+
+    positive = {
+        "fill_quantity": event.fill_quantity,
+        "price": event.price,
+        "entry_price": event.entry_price,
+        "notional": event.notional,
+    }
+    for name, value in positive.items():
+        if not np.isfinite(value) or value <= 0:
+            raise _lifecycle_error(event, f"{name} must be finite and positive")
+    if not np.isfinite(event.remaining_quantity) or event.remaining_quantity < 0:
+        raise _lifecycle_error(event, "remaining_quantity must be finite and non-negative")
+    if event.event_type in {"reduce", "close"} and (
+        event.pnl is None or not np.isfinite(event.pnl)
+    ):
+        raise _lifecycle_error(event, "realized exit events require finite pnl")
+
+    timestamp = pd.Timestamp(event.ts)
+    if pd.isna(timestamp):
+        raise _lifecycle_error(event, "timestamp must not be NaT")
+    if timestamp.tzinfo is None:
+        raise _lifecycle_error(event, "timestamp must be timezone-aware")
+    return timestamp.tz_convert("UTC")
+
+
+def _quantities_match(left: float, right: float) -> bool:
+    return bool(np.isclose(left, right, rtol=1e-9, atol=EPSILON))
+
+
+def _reconstruct_position_lifecycles(
     order_events: Sequence[OrderEventRecord],
-) -> list[tuple[OrderEventRecord, OrderEventRecord]]:
-    """Pair each 'open' event with its following 'close' event."""
-    pairs: list[tuple[OrderEventRecord, OrderEventRecord]] = []
-    open_ev: OrderEventRecord | None = None
-    for ev in order_events:
-        if ev.event_type == "open":
-            open_ev = ev
-        elif ev.event_type == "close" and open_ev is not None:
-            pairs.append((open_ev, ev))
-            open_ev = None
-    return pairs
+) -> list[_PositionLifecycle]:
+    """Validate events and reconstruct independent per-symbol 0 -> N -> 0 lifecycles."""
+    active: dict[str, _LifecycleState] = {}
+    ordinals: dict[str, int] = {}
+    last_timestamp: dict[str, pd.Timestamp] = {}
+    seen_event_ids: set[str] = set()
+    lifecycles: list[_PositionLifecycle] = []
+
+    for sequence, event in enumerate(order_events):
+        timestamp = _validate_event_values(event)
+        if event.event_id in seen_event_ids:
+            raise _lifecycle_error(event, "event_id must be unique")
+        seen_event_ids.add(event.event_id)
+
+        previous_timestamp = last_timestamp.get(event.symbol)
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            raise _lifecycle_error(event, "timestamps must not move backwards within a symbol")
+        last_timestamp[event.symbol] = timestamp
+
+        state = active.get(event.symbol)
+        if event.event_type == "open":
+            if state is not None:
+                raise _lifecycle_error(event, "open requires a flat position")
+            if not _quantities_match(event.remaining_quantity, event.fill_quantity):
+                raise _lifecycle_error(event, "open remaining_quantity must equal fill_quantity")
+            if not _quantities_match(event.entry_price, event.price):
+                raise _lifecycle_error(event, "open entry_price must equal fill price")
+            ordinal = ordinals.get(event.symbol, 0) + 1
+            ordinals[event.symbol] = ordinal
+            active[event.symbol] = _LifecycleState(
+                ordinal=ordinal,
+                start_sequence=sequence,
+                side=event.side,
+                quantity=event.remaining_quantity,
+                entry_price=event.entry_price,
+                events=[event],
+            )
+            continue
+
+        if state is None:
+            raise _lifecycle_error(event, f"{event.event_type} requires an active position")
+        if event.side != state.side:
+            raise _lifecycle_error(event, "side cannot change within a lifecycle")
+
+        if event.event_type == "add":
+            expected_quantity = state.quantity + event.fill_quantity
+            expected_basis = (
+                state.entry_price * state.quantity + event.price * event.fill_quantity
+            ) / expected_quantity
+            if not _quantities_match(event.remaining_quantity, expected_quantity):
+                raise _lifecycle_error(event, "add remaining_quantity is inconsistent")
+            if not _quantities_match(event.entry_price, expected_basis):
+                raise _lifecycle_error(event, "add entry_price is not the weighted-average basis")
+            state.quantity = event.remaining_quantity
+            state.entry_price = event.entry_price
+            state.events.append(event)
+            continue
+
+        expected_quantity = state.quantity - event.fill_quantity
+        if not _quantities_match(event.entry_price, state.entry_price):
+            raise _lifecycle_error(event, f"{event.event_type} must preserve entry_price")
+        if event.event_type == "reduce":
+            if expected_quantity <= EPSILON:
+                raise _lifecycle_error(event, "reduce must leave a positive position")
+            if not _quantities_match(event.remaining_quantity, expected_quantity):
+                raise _lifecycle_error(event, "reduce remaining_quantity is inconsistent")
+            state.quantity = event.remaining_quantity
+            state.events.append(event)
+            continue
+
+        if not _quantities_match(expected_quantity, 0.0) or not _quantities_match(
+            event.remaining_quantity, 0.0
+        ):
+            raise _lifecycle_error(event, "close must fully flatten the position")
+        state.events.append(event)
+        lifecycles.append(
+            _PositionLifecycle(
+                symbol=event.symbol,
+                ordinal=state.ordinal,
+                start_sequence=state.start_sequence,
+                side=state.side,
+                events=tuple(state.events),
+                status="complete",
+            )
+        )
+        del active[event.symbol]
+
+    for symbol, state in active.items():
+        lifecycles.append(
+            _PositionLifecycle(
+                symbol=symbol,
+                ordinal=state.ordinal,
+                start_sequence=state.start_sequence,
+                side=state.side,
+                events=tuple(state.events),
+                status="incomplete",
+            )
+        )
+    return sorted(lifecycles, key=lambda lifecycle: lifecycle.start_sequence)
 
 
 def _validate_direction(direction: str) -> SignalDirection:
@@ -391,12 +546,12 @@ def _walk_forward_matrices(
     (worst adverse excursion up to and including bar T) — all
     direction-adjusted so a positive value is favorable.
 
-    This is the walk-forward math shared by realized-trade envelope decay
-    (``compute_trade_mae_mfe``, entries = trade opens, ``ts`` is the fill
-    bar itself) and signal-outcome curves (``compute_signal_outcomes``,
-    entries = the bar *after* each raw signal, since a signal has no fill
-    of its own) — the only difference between the two is what supplies the
-    entry points, not the math.
+    This is the walk-forward math shared by trade-entry envelope decay
+    (``compute_trade_entry_outcomes``, entries = post-open/add bases,
+    ``ts`` is the fill bar itself) and signal-outcome curves
+    (``compute_signal_outcomes``, entries = the bar *after* each raw signal,
+    since a signal has no fill of its own) — the only difference is what
+    supplies the entry points, not the math.
 
     Excursions are non-negative magnitudes with a zero floor. Entries with
     no bars after them are dropped entirely. Entries with
@@ -603,148 +758,299 @@ def summarize_signal_mae_mfe(
     return pd.DataFrame(rows, columns=columns)
 
 
-def compute_trade_mae_mfe(
+def _normalize_trade_ohlcv(
+    symbols: set[str],
+    ohlcv_by_symbol: Mapping[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    if isinstance(ohlcv_by_symbol, pd.DataFrame) or not isinstance(ohlcv_by_symbol, Mapping):
+        raise TypeError("ohlcv_by_symbol must be a mapping of symbol to OHLCV DataFrame")
+    missing = symbols - set(ohlcv_by_symbol)
+    if missing:
+        raise ValueError(f"missing OHLCV for event symbols: {sorted(missing)}")
+
+    normalized: dict[str, pd.DataFrame] = {}
+    for symbol in sorted(symbols):
+        frame = ohlcv_by_symbol[symbol]
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError(f"OHLCV for {symbol} must be a pandas DataFrame")
+        symbol_frame, index_is_aware = _normalize_ohlcv(frame)
+        if not index_is_aware:
+            raise ValueError(f"OHLCV index for {symbol} must be timezone-aware")
+        if symbol_frame.empty:
+            raise ValueError(f"OHLCV for {symbol} must not be empty")
+        normalized[symbol] = symbol_frame
+    return normalized
+
+
+def _directional_return(mark: float, basis: float, side: SignalDirection) -> float:
+    sign = -1.0 if side == "short" else 1.0
+    return sign * (mark - basis) / basis * PERCENTAGE_POINTS_PER_FRACTION
+
+
+def _update_point_excursion(
+    mfe: float,
+    mae: float,
+    *,
+    mark: float,
+    basis: float,
+    side: SignalDirection,
+) -> tuple[float, float]:
+    outcome = _directional_return(mark, basis, side)
+    return max(mfe, outcome, 0.0), max(mae, -outcome, 0.0)
+
+
+def _update_bar_excursion(
+    mfe: float,
+    mae: float,
+    *,
+    bars: pd.DataFrame,
+    basis: float,
+    side: SignalDirection,
+) -> tuple[float, float]:
+    if bars.empty:
+        return mfe, mae
+    max_high = float(bars["high"].max())
+    min_low = float(bars["low"].min())
+    if side == "short":
+        favorable = (basis - min_low) / basis * PERCENTAGE_POINTS_PER_FRACTION
+        adverse = (max_high - basis) / basis * PERCENTAGE_POINTS_PER_FRACTION
+    else:
+        favorable = (max_high - basis) / basis * PERCENTAGE_POINTS_PER_FRACTION
+        adverse = (basis - min_low) / basis * PERCENTAGE_POINTS_PER_FRACTION
+    return max(mfe, favorable, 0.0), max(mae, adverse, 0.0)
+
+
+def compute_trade_lifecycle_outcomes(
     order_events: Sequence[OrderEventRecord],
-    ohlcv: pd.DataFrame,
-    max_periods: int | None = None,
-) -> dict[str, float | list[float]]:
-    """Compute MAE/MFE across executed trades.
+    ohlcv_by_symbol: Mapping[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Return one actual-excursion fact row per complete or incomplete position lifecycle.
 
-    MFE and MAE are non-negative percentage-point excursion magnitudes.
-
-    Args:
-        order_events: Sequence of OrderEventRecord from BacktestOutput.
-        ohlcv: Single-symbol OHLCV DataFrame with DatetimeIndex and 'high', 'low'.
-        max_periods: If None (default), returns a single MAE/MFE percentile
-            point per trade, measured over its actual open-to-close window
-            (original behavior). If set, instead returns an MAE/MFE *envelope
-            decay curve*: percentiles at each bar offset T=1..max_periods after
-            entry, using OHLCV bars forward from entry regardless of when the
-            trade actually closed — this answers "how far would price have
-            moved by bar T" for stop-loss/take-profit sizing, independent of
-            the strategy's own exit logic.
-
-    Returns:
-        max_periods=None: dict with n, median_mae, p75_abs_mae, median_mfe, p75_mfe (floats).
-        max_periods=N: dict with n, offsets (list[int] 1..N), median_mae_curve,
-            p75_mae_curve, median_mfe_curve, p75_mfe_curve (each list[float] of length N).
+    Entry basis changes apply prospectively. Full OHLC ranges are used only for
+    bars strictly between lifecycle events; event bars contribute their explicit
+    fill-price state observations because intrabar ordering is otherwise unknown.
     """
-    empty_point: dict[str, float | list[float]] = {
-        "n": 0,
-        "median_mae": 0.0,
-        "p75_abs_mae": 0.0,
-        "median_mfe": 0.0,
-        "p75_mfe": 0.0,
-    }
-    if max_periods is not None:
-        _validate_positive_integer(max_periods, "max_periods")
-        empty_point = {
-            "n": 0,
-            "offsets": [],
-            "median_mae_curve": [],
-            "p75_mae_curve": [],
-            "median_mfe_curve": [],
-            "p75_mfe_curve": [],
-        }
-
-    pairs = _pair_trades(order_events)
-    if not pairs:
-        return empty_point
-
-    normalized, index_is_aware = _normalize_ohlcv(ohlcv)
-
-    if max_periods is None:
-        maes: list[float] = []
-        mfes: list[float] = []
-        for entry_ev, exit_ev in pairs:
-            direction = _validate_direction(entry_ev.side)
-            if not np.isfinite(entry_ev.price) or entry_ev.price <= 0:
-                raise ValueError("entry prices must be finite and positive")
-            t_entry = _normalize_timestamp(
-                entry_ev.ts, index_is_aware=index_is_aware, name="entry timestamp"
-            )
-            t_exit = _normalize_timestamp(
-                exit_ev.ts, index_is_aware=index_is_aware, name="exit timestamp"
-            )
-            w = normalized.loc[(normalized.index >= t_entry) & (normalized.index <= t_exit)]
-            if not w.empty:
-                max_h = float(w["high"].max())
-                min_l = float(w["low"].min())
-                if direction == "short":
-                    mfe = (entry_ev.price - min_l) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
-                    mae = (max_h - entry_ev.price) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
-                else:
-                    mfe = (max_h - entry_ev.price) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
-                    mae = (entry_ev.price - min_l) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
-                mfes.append(max(0.0, mfe))
-                maes.append(max(0.0, mae))
-
-        if not mfes:
-            return empty_point
-        arr_mae, arr_mfe = np.array(maes), np.array(mfes)
-        return {
-            "n": len(arr_mae),
-            "median_mae": float(np.median(arr_mae)),
-            "p75_abs_mae": float(np.percentile(arr_mae, 75)),
-            "median_mfe": float(np.median(arr_mfe)),
-            "p75_mfe": float(np.percentile(arr_mfe, 75)),
-        }
-
-    # Envelope decay curve: shared kernel, then aggregate column-wise with
-    # nan-aware percentiles so short-lived trades don't skew later offsets.
-    entries = [
-        (entry_ev.ts, entry_ev.price, _validate_direction(entry_ev.side))
-        for entry_ev, _exit_ev in pairs
+    columns = [
+        "symbol",
+        "lifecycle_ordinal",
+        "status",
+        "side",
+        "opened_at",
+        "closed_at",
+        "realized_exits",
+        "periods_held",
+        "net_pnl",
+        "mfe",
+        "mae",
     ]
-    _kept_indices, _return_mat, mfe_mat, mae_mat = _walk_forward_matrices(
-        entries, normalized, max_periods
+    lifecycles = _reconstruct_position_lifecycles(order_events)
+    if not lifecycles:
+        return pd.DataFrame(columns=columns)
+    normalized = _normalize_trade_ohlcv(
+        {lifecycle.symbol for lifecycle in lifecycles}, ohlcv_by_symbol
     )
 
-    if mfe_mat.shape[0] == 0:
-        return empty_point
+    rows: list[dict[str, Any]] = []
+    for lifecycle in lifecycles:
+        frame = normalized[lifecycle.symbol]
+        basis = lifecycle.events[0].entry_price
+        mfe = 0.0
+        mae = 0.0
+        previous_ts = _normalize_timestamp(
+            lifecycle.events[0].ts, index_is_aware=True, name="event timestamp"
+        )
 
-    with np.errstate(all="ignore"):
-        median_mfe_curve = np.nanmedian(mfe_mat, axis=0)
-        p75_mfe_curve = np.nanpercentile(mfe_mat, 75, axis=0)
-        median_mae_curve = np.nanmedian(mae_mat, axis=0)
-        p75_mae_curve = np.nanpercentile(mae_mat, 75, axis=0)
+        for event in lifecycle.events[1:]:
+            event_ts = _normalize_timestamp(event.ts, index_is_aware=True, name="event timestamp")
+            between = frame.loc[(frame.index > previous_ts) & (frame.index < event_ts)]
+            mfe, mae = _update_bar_excursion(
+                mfe, mae, bars=between, basis=basis, side=lifecycle.side
+            )
+            mfe, mae = _update_point_excursion(
+                mfe, mae, mark=event.price, basis=basis, side=lifecycle.side
+            )
+            if event.event_type == "add":
+                basis = event.entry_price
+                mfe, mae = _update_point_excursion(
+                    mfe, mae, mark=event.price, basis=basis, side=lifecycle.side
+                )
+            previous_ts = event_ts
 
-    return {
-        "n": mfe_mat.shape[0],
-        "offsets": list(range(1, max_periods + 1)),
-        "median_mae_curve": [float(v) for v in median_mae_curve],
-        "p75_mae_curve": [float(v) for v in p75_mae_curve],
-        "median_mfe_curve": [float(v) for v in median_mfe_curve],
-        "p75_mfe_curve": [float(v) for v in p75_mfe_curve],
-    }
+        if lifecycle.status == "incomplete":
+            after_last_event = frame.loc[frame.index > previous_ts]
+            mfe, mae = _update_bar_excursion(
+                mfe,
+                mae,
+                bars=after_last_event,
+                basis=basis,
+                side=lifecycle.side,
+            )
+
+        exit_events = [
+            event for event in lifecycle.events if event.event_type in {"reduce", "close"}
+        ]
+        close_event = lifecycle.events[-1] if lifecycle.status == "complete" else None
+        rows.append(
+            {
+                "symbol": lifecycle.symbol,
+                "lifecycle_ordinal": lifecycle.ordinal,
+                "status": lifecycle.status,
+                "side": lifecycle.side,
+                "opened_at": lifecycle.events[0].ts,
+                "closed_at": close_event.ts if close_event is not None else pd.NaT,
+                "realized_exits": len(exit_events),
+                "periods_held": (close_event.periods_held if close_event is not None else None),
+                "net_pnl": float(sum(event.pnl for event in exit_events)),
+                "mfe": float(mfe),
+                "mae": float(mae),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
-def compute_trade_durations(order_events: Sequence[OrderEventRecord]) -> list[int]:
-    """Extract holding-period durations (in bars) for each closed trade.
-
-    Reads the already-computed ``periods_held`` field on 'close' events —
-    no recomputation, just aggregation for a duration-distribution chart.
-    """
-    return [
-        ev.periods_held
-        for ev in order_events
-        if ev.event_type == "close" and ev.periods_held is not None
+def _summary_groups(
+    outcomes: pd.DataFrame,
+) -> list[tuple[Literal["pooled", "symbol"], str | None, pd.DataFrame]]:
+    groups: list[tuple[Literal["pooled", "symbol"], str | None, pd.DataFrame]] = [
+        ("pooled", None, outcomes)
     ]
-
-
-def compute_pnl_by_trade(order_events: Sequence[OrderEventRecord]) -> list[float]:
-    """Cumulative PnL ordered by trade sequence (not calendar time).
-
-    Useful for event-driven strategies where a calendar-time equity curve
-    is mostly flat between infrequent trades — this compresses it to one
-    point per closed trade.
-    """
-    closes = sorted(
-        (ev for ev in order_events if ev.event_type == "close"),
-        key=lambda ev: ev.ts,
+    groups.extend(
+        ("symbol", str(symbol), group) for symbol, group in outcomes.groupby("symbol", sort=True)
     )
-    cumulative = np.cumsum([ev.pnl or 0.0 for ev in closes])
-    return [float(v) for v in cumulative]
+    return groups
+
+
+def summarize_trade_lifecycle_outcomes(outcomes: pd.DataFrame) -> pd.DataFrame:
+    """Summarize completed lifecycle MAE/MFE with equal weight per lifecycle."""
+    columns = [
+        "scope",
+        "symbol",
+        "n",
+        "median_mfe",
+        "p75_mfe",
+        "median_mae",
+        "p75_mae",
+    ]
+    required = {"symbol", "status", "mfe", "mae"}
+    missing = required - set(outcomes.columns)
+    if missing:
+        raise ValueError(f"lifecycle outcomes are missing columns: {sorted(missing)}")
+    completed = outcomes[outcomes["status"] == "complete"]
+    if completed.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, Any]] = []
+    for scope, symbol, group in _summary_groups(completed):
+        rows.append(
+            {
+                "scope": scope,
+                "symbol": symbol,
+                "n": len(group),
+                "median_mfe": float(group["mfe"].median()),
+                "p75_mfe": float(group["mfe"].quantile(0.75)),
+                "median_mae": float(group["mae"].median()),
+                "p75_mae": float(group["mae"].quantile(0.75)),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def compute_trade_entry_outcomes(
+    order_events: Sequence[OrderEventRecord],
+    ohlcv_by_symbol: Mapping[str, pd.DataFrame],
+    max_periods: int,
+) -> pd.DataFrame:
+    """Return hypothetical fixed-horizon outcomes for each post-open/add entry basis."""
+    columns = [
+        "symbol",
+        "lifecycle_ordinal",
+        "anchor_event_id",
+        "anchor_type",
+        "anchor_ts",
+        "bar_offset",
+        "forward_return",
+        "mfe",
+        "mae",
+    ]
+    _validate_positive_integer(max_periods, "max_periods")
+    lifecycles = _reconstruct_position_lifecycles(order_events)
+    if not lifecycles:
+        return pd.DataFrame(columns=columns)
+    normalized = _normalize_trade_ohlcv(
+        {lifecycle.symbol for lifecycle in lifecycles}, ohlcv_by_symbol
+    )
+
+    anchors_by_symbol: dict[str, list[tuple[_PositionLifecycle, OrderEventRecord]]] = {}
+    for lifecycle in lifecycles:
+        anchors_by_symbol.setdefault(lifecycle.symbol, []).extend(
+            (lifecycle, event) for event in lifecycle.events if event.event_type in {"open", "add"}
+        )
+
+    rows: list[tuple[Any, ...]] = []
+    for symbol, anchors in anchors_by_symbol.items():
+        entries = [(event.ts, event.entry_price, lifecycle.side) for lifecycle, event in anchors]
+        kept_indices, return_mat, mfe_mat, mae_mat = _walk_forward_matrices(
+            entries, normalized[symbol], max_periods
+        )
+        for row_index, anchor_index in enumerate(kept_indices):
+            lifecycle, event = anchors[anchor_index]
+            for offset_index in range(max_periods):
+                forward_return = return_mat[row_index, offset_index]
+                if np.isnan(forward_return):
+                    break
+                rows.append(
+                    (
+                        symbol,
+                        lifecycle.ordinal,
+                        event.event_id,
+                        event.event_type,
+                        event.ts,
+                        offset_index + 1,
+                        float(forward_return),
+                        float(mfe_mat[row_index, offset_index]),
+                        float(mae_mat[row_index, offset_index]),
+                    )
+                )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def summarize_trade_entry_outcomes(outcomes: pd.DataFrame) -> pd.DataFrame:
+    """Summarize entry-anchor curves with equal weight and per-horizon valid counts."""
+    columns = [
+        "scope",
+        "symbol",
+        "horizon",
+        "n",
+        "median_forward_return",
+        "median_mfe",
+        "p75_mfe",
+        "median_mae",
+        "p75_mae",
+    ]
+    required = {"symbol", "bar_offset", "forward_return", "mfe", "mae"}
+    missing = required - set(outcomes.columns)
+    if missing:
+        raise ValueError(f"entry outcomes are missing columns: {sorted(missing)}")
+    if outcomes.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, Any]] = []
+    for scope, symbol, scoped in _summary_groups(outcomes):
+        for horizon, group in scoped.groupby("bar_offset", sort=True):
+            rows.append(
+                {
+                    "scope": scope,
+                    "symbol": symbol,
+                    "horizon": int(horizon),
+                    "n": len(group),
+                    "median_forward_return": float(group["forward_return"].median()),
+                    "median_mfe": float(group["mfe"].median()),
+                    "p75_mfe": float(group["mfe"].quantile(0.75)),
+                    "median_mae": float(group["mae"].median()),
+                    "p75_mae": float(group["mae"].quantile(0.75)),
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
 
 
 # WHY these two colors specifically: matches the green=favorable/red=adverse
@@ -787,12 +1093,12 @@ def _plot_trade_durations(ax: Axes, durations: list[int]) -> None:
             linewidth=0.5,
         )
     _style_axes(ax)
-    ax.set_title("Trade Duration Distribution")
+    ax.set_title("Position Lifecycle Duration")
     ax.set_xlabel("Periods held (bars)")
-    ax.set_ylabel("Trade count")
+    ax.set_ylabel("Completed lifecycle count")
 
 
-def _plot_pnl_by_trade(ax: Axes, pnl_curve: list[float]) -> None:
+def _plot_pnl_by_lifecycle(ax: Axes, pnl_curve: list[float]) -> None:
     x = list(range(1, len(pnl_curve) + 1))
     if pnl_curve:
         arr = np.array(pnl_curve)
@@ -801,35 +1107,39 @@ def _plot_pnl_by_trade(ax: Axes, pnl_curve: list[float]) -> None:
         ax.plot(x, arr, color=_NEUTRAL, linewidth=1.6, zorder=3)
     ax.axhline(0, color=_MUTED, linewidth=0.7)
     _style_axes(ax)
-    ax.set_title("PnL by Trade (sequential, not calendar time)")
-    ax.set_xlabel("Trade #")
+    ax.set_title("Net PnL by Position Lifecycle")
+    ax.set_xlabel("Completed lifecycle #")
     ax.set_ylabel("Cumulative PnL")
 
 
-def _plot_mae_mfe_envelope(ax: Axes, envelope: dict[str, float | list[float]]) -> None:
-    offsets = envelope.get("offsets", [])
-    if offsets:
+def _plot_trade_entry_envelope(ax: Axes, summary: pd.DataFrame) -> None:
+    if not summary.empty:
+        offsets = summary["horizon"]
         ax.plot(
             offsets,
-            envelope["median_mfe_curve"],
+            summary["median_mfe"],
             color=_FAVORABLE,
             linewidth=1.8,
             label="median MFE",
         )
         ax.plot(
             offsets,
-            envelope["p75_mfe_curve"],
+            summary["p75_mfe"],
             color=_FAVORABLE,
             linewidth=1.1,
             linestyle="--",
             label="p75 MFE",
         )
         ax.plot(
-            offsets, envelope["median_mae_curve"], color=_ADVERSE, linewidth=1.8, label="median MAE"
+            offsets,
+            summary["median_mae"],
+            color=_ADVERSE,
+            linewidth=1.8,
+            label="median MAE",
         )
         ax.plot(
             offsets,
-            envelope["p75_mae_curve"],
+            summary["p75_mae"],
             color=_ADVERSE,
             linewidth=1.1,
             linestyle="--",
@@ -837,9 +1147,14 @@ def _plot_mae_mfe_envelope(ax: Axes, envelope: dict[str, float | list[float]]) -
         )
         ax.legend(frameon=False, fontsize=8.5, labelcolor=_MUTED)
     _style_axes(ax)
-    ax.set_title(f"MAE/MFE Envelope Decay (n={envelope.get('n', 0)} trades)")
-    ax.set_xlabel("Bars after entry")
-    ax.set_ylabel("% move from entry price")
+    coverage = (
+        f"n={int(summary['n'].iloc[0])}->{int(summary['n'].iloc[-1])}"
+        if not summary.empty
+        else "no data"
+    )
+    ax.set_title(f"Post-Entry MAE/MFE Envelope ({coverage})")
+    ax.set_xlabel("Observed bars after open/add anchor")
+    ax.set_ylabel("Percentage-point move from active entry basis")
 
 
 def _plot_signal_mae_mfe_by_horizon(ax: Axes, summary: pd.DataFrame) -> None:
@@ -980,48 +1295,50 @@ def _render_tearsheet_html(
 
 def generate_trade_tearsheet(
     output: BacktestOutput,
-    ohlcv: pd.DataFrame,
+    ohlcv_by_symbol: Mapping[str, pd.DataFrame],
     output_path: str = "trade_tearsheet.html",
     max_periods: int = 48,
 ) -> str:
-    """Generate an HTML trade-level tearsheet for event-driven/high-frequency strategies.
+    """Generate a lifecycle-consistent HTML trade tearsheet.
 
     Complements ``generate_tearsheet()`` (equity-based, QuantStats, industry
-    standard for calendar-rebalanced strategies) with trade-based views —
-    duration distribution, PnL-by-trade, and MAE/MFE envelope decay — for
-    strategies that trade infrequently or hold for hours rather than months,
-    where a monthly calendar heatmap carries no information. See the
-    trade-based vs equity-based split in
-    docs/decisions/2026-03-26-performance-metrics-standard.md.
-
-    Adding a new trade-metric dimension (e.g. R-multiple distribution, win/
-    loss streaks): write one ``_plot_*(ax, data)`` function above and append
-    one entry to the ``chart_builders`` list below — no other assembly code
-    changes.
+    standard for calendar-rebalanced strategies) with completed position
+    lifecycle duration/PnL and hypothetical post-open/add entry envelopes.
+    Realized exits and completed lifecycles are labeled separately.
     """
     order_events = output.order_events
-    durations = compute_trade_durations(order_events)
-    pnl_curve = compute_pnl_by_trade(order_events)
-    envelope = compute_trade_mae_mfe(order_events, ohlcv, max_periods=max_periods)
+    lifecycle_outcomes = compute_trade_lifecycle_outcomes(order_events, ohlcv_by_symbol)
+    completed = lifecycle_outcomes[lifecycle_outcomes["status"] == "complete"].sort_values(
+        ["closed_at", "symbol", "lifecycle_ordinal"]
+    )
+    durations = [int(value) for value in completed["periods_held"].dropna()]
+    pnl_curve = [float(value) for value in completed["net_pnl"].cumsum().to_numpy(dtype=np.float64)]
+    entry_outcomes = compute_trade_entry_outcomes(
+        order_events, ohlcv_by_symbol, max_periods=max_periods
+    )
+    entry_summary = summarize_trade_entry_outcomes(entry_outcomes)
+    pooled_entry_summary = entry_summary[entry_summary["scope"] == "pooled"]
+    entry_anchors = (
+        int(entry_outcomes["anchor_event_id"].nunique()) if not entry_outcomes.empty else 0
+    )
+    symbols = ", ".join(sorted({event.symbol for event in order_events})) or "no symbols"
     m = output.metrics
 
     html = _render_tearsheet_html(
         page_title=f"Trade Tearsheet — {output.run_metadata.run_id}",
         heading="Trade Tearsheet",
-        subtitle=(
-            f"{output.run_metadata.strategy} · {output.run_metadata.symbol} "
-            f"· {output.run_metadata.timeframe}"
-        ),
+        subtitle=(f"{output.run_metadata.strategy} · {symbols} · {output.run_metadata.timeframe}"),
         tiles=[
-            ("Trades", m.trades),
-            ("Win rate", m.win_rate),
-            ("Profit factor", m.profit_factor),
-            ("Payoff ratio", m.payoff_ratio),
+            ("Realized exits", m.trades),
+            ("Completed lifecycles", len(completed)),
+            ("Entry anchors", entry_anchors),
+            ("Exit win rate", m.win_rate),
+            ("Exit profit factor", m.profit_factor),
         ],
         chart_builders=[
             lambda ax: _plot_trade_durations(ax, durations),
-            lambda ax: _plot_pnl_by_trade(ax, pnl_curve),
-            lambda ax: _plot_mae_mfe_envelope(ax, envelope),
+            lambda ax: _plot_pnl_by_lifecycle(ax, pnl_curve),
+            lambda ax: _plot_trade_entry_envelope(ax, pooled_entry_summary),
         ],
     )
     with open(output_path, "w", encoding="utf-8") as f:

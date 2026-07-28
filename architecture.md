@@ -266,6 +266,33 @@ plot_trades_by_run_id(run_id)                    # or: skip rerunning the backte
 
 `plot_trades_by_run_id` reads via `db.timescale_reader.load_trade_events`/`load_ohlcv` — the same source as any other downstream tool querying the `trade_events`/`ohlcv` tables, so it can never drift.
 
+#### Trade outcome analysis
+
+`librae/core/metrics.py` is the SSOT for reconstructing analytics lifecycles
+from canonical `open`/`add`/`reduce`/`close` events. A position lifecycle is
+one per-symbol `0 → N → 0` interval; a realized exit is each `reduce` or
+`close`. These are deliberately different populations. Incomplete
+end-of-sample lifecycles are reported but excluded from completed-lifecycle
+summaries.
+
+Trade analytics require `Mapping[str, pd.DataFrame]`, with one sorted, unique,
+timezone-aware OHLCV frame per event symbol. Horizons advance by subsequent
+observed bars of that symbol, never by a portfolio-wide row shift. The public
+fact/summary split is:
+
+| Analysis | Facts | Summary weight |
+|---|---|---|
+| Actual lifecycle excursion | `compute_trade_lifecycle_outcomes` | equal completed lifecycles, pooled and per symbol |
+| Hypothetical post-entry envelope | `compute_trade_entry_outcomes` | equal `open`/`add` anchors at each valid horizon, pooled and per symbol |
+
+MFE/MAE are gross, direction-adjusted percentage-point price excursions;
+costs and notional-weighted portfolio risk remain separate metrics. Adds
+change the weighted-average basis prospectively, while reductions preserve
+it. Full high/low ranges count only between events. On an event bar, analytics
+use explicit fill-price state observations because OHLCV cannot establish
+whether the bar extrema occurred before or after the fill. Exact intrabar
+excursion therefore requires finer-grained data.
+
 #### Risk controls and portfolio diagnostics
 
 All five controls default to off (`None`). Backtest/sim enforce them in the
