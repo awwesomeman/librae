@@ -785,10 +785,7 @@ def render_unified_dashboard() -> dict:
 # All filtering uses run_id — symbol/timeframe/source derived from backtest_runs.
 # _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
 # so symbol/timeframe/data_source are resolved once instead of once per column.
-_SIG_WHERE = (
-    "s.run_id = '${run_id}'"
-    " AND s.signal_type = CASE WHEN ${expected_direction} = 1 THEN 'entry' ELSE 'exit' END"
-)
+_SIG_WHERE = "s.run_id = '${run_id}' AND s.signal_type = '${signal_type}'"
 _META_INNER = " SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
 _OHLCV_WHERE = (
     "ohlcv.symbol = meta.symbol"
@@ -809,7 +806,8 @@ _FWD_CTE = (
     f"WITH meta AS ({_META_INNER}),\n"
     f"fwd AS (\n"
     f"  SELECT s.ts,\n"
-    f"    (exit_bar.close - entry_bar.entry_price) / NULLIF(entry_bar.entry_price, 0) AS ret\n"
+    f"    $expected_direction * (exit_bar.close - entry_bar.entry_price)"
+    f" / NULLIF(entry_bar.entry_price, 0) AS ret\n"
     f"  FROM signal_events s, meta\n"
     f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
     f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
@@ -830,14 +828,14 @@ _EXC_CTE = (
     f"  ) entry_bar ON true\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT\n"
-    f"      MAX(CASE WHEN $expected_direction = 1"
+    f"      MAX(GREATEST(0.0, CASE WHEN $expected_direction = 1"
     f" THEN (b.high - entry_bar.entry_price)"
     f" ELSE (entry_bar.entry_price - b.low)"
-    f" END / NULLIF(entry_bar.entry_price, 0)) AS mfe,\n"
-    f"      MAX(CASE WHEN $expected_direction = 1"
+    f" END / NULLIF(entry_bar.entry_price, 0))) AS mfe,\n"
+    f"      MAX(GREATEST(0.0, CASE WHEN $expected_direction = 1"
     f" THEN (entry_bar.entry_price - b.low)"
     f" ELSE (b.high - entry_bar.entry_price)"
-    f" END / NULLIF(entry_bar.entry_price, 0)) AS mae\n"
+    f" END / NULLIF(entry_bar.entry_price, 0))) AS mae\n"
     f"    FROM (\n"
     f"      SELECT high, low FROM ohlcv\n"
     f"      WHERE {_OHLCV_WHERE} AND ts > entry_bar.entry_at\n"
@@ -892,16 +890,16 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         w=4,
         decimals=3,
         no_value="N/A",
-        description="Latest signal's unrealized return: expected_direction x (current_close - entry_price) / entry_price. Entry = T+1 $fill_price_field (next-bar execution).",
+        description="Latest signal's gross hypothetical return: expected_direction x (current_close - reference_price) / reference_price. Reference = next observed $fill_price_field; no costs or execution constraints.",
     ),
     _stat_panel(
         "Mean Fwd Return (T+$n)",
-        _FWD_CTE + 'SELECT $expected_direction * AVG(ret) AS "Mean Ret" FROM fwd',
+        _FWD_CTE + 'SELECT AVG(ret) AS "Mean Ret" FROM fwd',
         "percentunit",
         _TH_RED_YELLOW_GREEN,
         w=4,
         decimals=3,
-        description="expected_direction x AVG(forward return over n bars). Entry @ T+1 $fill_price_field, exit @ T+1+n close.",
+        description="Gross direction-adjusted mean return. Reference = next observed $fill_price_field; T+1 is the following observed bar. No costs or execution constraints.",
     ),
     _stat_panel(
         "Edge Ratio (T+$n)",
@@ -910,7 +908,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         _TH_EDGE,
         w=4,
         decimals=2,
-        description="AVG(MFE) / AVG(MAE) over n bars. >2 = healthy, <1 = adverse exceeds favorable.",
+        description="AVG(non-negative MFE) / AVG(non-negative MAE) over n observed bars. >2 = healthy, <1 = adverse exceeds favorable.",
     ),
     _stat_panel(
         "Last Signal Age",
@@ -991,14 +989,14 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Cumulative Signal Return (T+$n)",
-        "description": "Arithmetic sum of per-signal forward returns (not compounded). Entry @ T+1 $fill_price_field, exit @ T+1+n close.",
+        "description": "Arithmetic sum of gross per-signal forward returns (not compounded). Reference = next observed $fill_price_field; outcome = n observed bars after the reference.",
         "type": "timeseries",
         "h": 8,
         "w": 12,
         "targets": [
             _target(
                 _FWD_CTE + "SELECT ts AS time,\n"
-                '  SUM($expected_direction * ret) OVER (ORDER BY ts) AS "Cumulative Return"\n'
+                '  SUM(ret) OVER (ORDER BY ts) AS "Cumulative Return"\n'
                 "FROM fwd ORDER BY ts"
             )
         ],
@@ -1009,7 +1007,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Rolling $k Mean Return (T+$n)",
-        "description": "Rolling k-signal average of adjusted forward return. Entry @ T+1 $fill_price_field. Declining = edge weakening.",
+        "description": "Rolling k-signal average of gross direction-adjusted return. Reference = next observed $fill_price_field; outcome = n observed bars later.",
         "type": "timeseries",
         "h": 8,
         "w": 12,
@@ -1043,7 +1041,7 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Rolling $k Edge Ratio (T+$n)",
-        "description": "Rolling k-signal AVG(MFE)/AVG(MAE) from T+2 onward (entry bar excluded). >2 = healthy, <1 = adverse exceeds favorable.",
+        "description": "Rolling k-signal AVG(MFE)/AVG(MAE) over observed bars after the reference bar. >2 = healthy, <1 = adverse exceeds favorable.",
         "type": "timeseries",
         "h": 8,
         "w": 12,
@@ -1101,12 +1099,17 @@ def render_signal_monitor() -> dict:
         _make_custom_variable(
             "fill_price_field",
             [("Close", "close"), ("Open", "open"), ("High", "high"), ("Low", "low")],
-            label="Fill Price Field",
+            label="Reference Price Field",
+        ),
+        _make_custom_variable(
+            "signal_type",
+            [("Entry", "entry"), ("Exit", "exit")],
+            label="Signal Event",
         ),
         _make_custom_variable(
             "expected_direction",
             [("Long", "1"), ("Short", "-1")],
-            label="Signal Type",
+            label="Expected Direction",
         ),
     ]
 

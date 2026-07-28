@@ -232,6 +232,40 @@ Directory layout, dependency direction, risk/margin/reconciliation/staleness det
 
 Runnable examples and what you need to know to turn on `db`/Grafana: [`examples/`](examples/).
 
+### Signal outcome analysis
+
+Raw signal quality can be evaluated locally without a database:
+
+```python
+from librae import (
+    compute_signal_outcomes,
+    generate_signal_mae_mfe_report,
+    summarize_signal_mae_mfe,
+)
+
+symbol_ohlcv = df.xs(symbol, level="symbol")
+signal_ts = symbol_ohlcv.index[symbol_ohlcv["entry_signal"].astype(bool)]
+
+outcomes = compute_signal_outcomes(
+    signal_ts,
+    symbol_ohlcv,
+    max_periods=60,
+    direction="long",
+    price_col="open",
+)
+summary = summarize_signal_mae_mfe(signal_ts, symbol_ohlcv)
+generate_signal_mae_mfe_report(signal_ts, symbol_ohlcv)
+```
+
+The API is intentionally single-symbol; evaluate each symbol independently.
+A signal on observed bar T uses the next observed bar's selected price field as
+its reference, and offset 1 starts on the following observed bar. Returns,
+MFE, and MAE are gross hypothetical percentage-point outcomes with no costs or
+execution constraints. Direction is explicit and independent of whether the
+source event is labeled entry or exit. MFE and MAE are non-negative excursion
+magnitudes, and the summary/report shows the valid sample count separately at
+each horizon because recent signals have incomplete forward windows.
+
 ---
 
 ## Capability boundaries

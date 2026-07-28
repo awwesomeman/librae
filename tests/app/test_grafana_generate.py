@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import numpy as np
+from tests.signal_outcome_contract import (
+    SIGNAL_OUTCOME_LONG_FRACTIONS,
+    make_signal_outcome_contract_ohlcv,
+)
+
 from app.grafana.generate_dashboards import (
     render_signal_monitor,
     render_unified_dashboard,
@@ -52,6 +58,7 @@ class TestRenderSignalMonitor:
         assert "run_id" in var_names
         assert "n" in var_names
         assert "k" in var_names
+        assert "signal_type" in var_names
         assert "expected_direction" in var_names
 
     def test_stat_panels_have_targets(self):
@@ -90,3 +97,40 @@ class TestRenderSignalMonitor:
         d = render_signal_monitor()
         price_panel = next(p for p in d["panels"] if p["title"] == "Price & Signals")
         assert len(price_panel["targets"]) == 2
+
+    def test_signal_event_and_expected_direction_are_independent(self):
+        import json
+
+        raw = json.dumps(render_signal_monitor())
+        assert "s.signal_type = '${signal_type}'" in raw
+        assert "CASE WHEN ${expected_direction}" not in raw
+
+    def test_forward_return_is_direction_adjusted_once(self):
+        dashboard = render_signal_monitor()
+        mean_panel = next(p for p in dashboard["panels"] if p["title"] == "Mean Fwd Return (T+$n)")
+        sql = mean_panel["targets"][0]["rawSql"]
+        assert "$expected_direction * (exit_bar.close - entry_bar.entry_price)" in sql
+        assert 'SELECT AVG(ret) AS "Mean Ret"' in sql
+
+    def test_excursion_sql_uses_non_negative_magnitudes(self):
+        dashboard = render_signal_monitor()
+        edge_panel = next(p for p in dashboard["panels"] if p["title"] == "Edge Ratio (T+$n)")
+        sql = edge_panel["targets"][0]["rawSql"]
+        assert sql.count("MAX(GREATEST(0.0") == 2
+
+    def test_golden_fixture_matches_grafana_fraction_contract(self):
+        ohlcv = make_signal_outcome_contract_ohlcv()
+        reference_price = float(ohlcv.iloc[1]["open"])
+        forward = ohlcv.iloc[2:5]
+
+        returns = (forward["close"].to_numpy() - reference_price) / reference_price
+        mfe = np.maximum.accumulate(
+            np.maximum(0.0, (forward["high"].to_numpy() - reference_price) / reference_price)
+        )
+        mae = np.maximum.accumulate(
+            np.maximum(0.0, (reference_price - forward["low"].to_numpy()) / reference_price)
+        )
+
+        assert np.allclose(returns, SIGNAL_OUTCOME_LONG_FRACTIONS["forward_return"])
+        assert np.allclose(mfe, SIGNAL_OUTCOME_LONG_FRACTIONS["mfe"])
+        assert np.allclose(mae, SIGNAL_OUTCOME_LONG_FRACTIONS["mae"])

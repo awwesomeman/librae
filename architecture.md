@@ -48,7 +48,7 @@ librae/
 │   ├── strategy.py           BaseStrategy, Action, RebalanceTargets, Context, Position, PositionState, Fill
 │   ├── executor.py           simulated matching plus apply_execution_fill for externally confirmed fills
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
-│   ├── metrics.py            compute_all (QuantStats adapter)
+│   ├── metrics.py            performance metrics + on-demand trade/signal outcome analysis
 │   ├── run_config.py         RunConfig — unified run parameters (frozen dataclass)
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
@@ -682,6 +682,13 @@ flowchart TD
 | `factor_registry` | one row per `factor_name` — its update frequency + source, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
+
+`signal_events` and `ohlcv` are the source facts for signal-quality analysis.
+Forward return, MFE, and MAE are derived on demand: local callers use
+`compute_signal_outcomes()` on one symbol at a time, while the optional Grafana
+dashboard uses its PostgreSQL query path. Both follow the same observed-bar,
+direction, zero-floor excursion, and unit-conversion contract; no derived
+outcome table is maintained.
 
 ### Handling quantity ambiguity
 

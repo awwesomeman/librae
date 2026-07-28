@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -15,11 +16,31 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import StrategyMetrics
 from librae.core.cost_model import CostModel
-from librae.core.metrics import compute_all
+from librae.core.metrics import (
+    PERCENTAGE_POINTS_PER_FRACTION,
+    compute_all,
+    compute_signal_outcomes,
+    compute_trade_mae_mfe,
+    generate_signal_mae_mfe_report,
+    summarize_signal_mae_mfe,
+)
 from librae.core.strategy import Action, BaseStrategy
+from tests.signal_outcome_contract import (
+    SIGNAL_OUTCOME_LONG_FRACTIONS,
+    SIGNAL_OUTCOME_LONG_PERCENTAGE_POINTS,
+    make_signal_outcome_contract_ohlcv,
+)
 
 START = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
 END = datetime(2024, 2, 1, 0, 0, 0, tzinfo=UTC)
+
+
+def test_signal_outcome_functions_are_public() -> None:
+    import librae
+
+    assert librae.compute_signal_outcomes is compute_signal_outcomes
+    assert librae.summarize_signal_mae_mfe is summarize_signal_mae_mfe
+    assert librae.generate_signal_mae_mfe_report is generate_signal_mae_mfe_report
 
 
 def _make_trade_pnl(
@@ -525,3 +546,231 @@ def test_compute_payoff_ratio_value():
     ]
     m = _call_compute_all([10_000.0, 10_200.0, 10_100.0], pnls)
     assert np.isclose(m.payoff_ratio, 2.0)
+
+
+def _signal_fixture_ohlcv() -> pd.DataFrame:
+    """Return the shared six-bar signal-outcome contract fixture."""
+    return make_signal_outcome_contract_ohlcv()
+
+
+class TestComputeSignalOutcomes:
+    def test_empty_signals(self):
+        df = compute_signal_outcomes([], _signal_fixture_ohlcv(), max_periods=3)
+        assert df.empty
+        assert list(df.columns) == ["ts", "bar_offset", "forward_return", "mfe", "mae"]
+
+    def test_long_signal_walks_next_bar_fill(self):
+        """Signal fires at idx[0]; fill is idx[1] (next bar's open), and the
+        curve walks idx[2..4] — matches the next-observed-bar reference contract."""
+        ohlcv = _signal_fixture_ohlcv()
+        df = compute_signal_outcomes([ohlcv.index[0]], ohlcv, max_periods=3)
+
+        assert len(df) == 3
+        assert list(df["bar_offset"]) == [1, 2, 3]
+        for column, expected in SIGNAL_OUTCOME_LONG_PERCENTAGE_POINTS.items():
+            assert np.allclose(df[column], expected)
+            assert np.allclose(
+                df[column] / PERCENTAGE_POINTS_PER_FRACTION,
+                SIGNAL_OUTCOME_LONG_FRACTIONS[column],
+            )
+
+    def test_short_signal_flips_direction(self):
+        ohlcv = _signal_fixture_ohlcv()
+        df = compute_signal_outcomes([ohlcv.index[0]], ohlcv, max_periods=1, direction="short")
+
+        assert np.allclose(df["forward_return"], [-5.0])
+        assert np.allclose(df["mfe"], [5.0])
+        assert np.allclose(df["mae"], [10.0])
+
+    def test_signal_near_end_of_data_yields_fewer_rows_not_nan(self):
+        ohlcv = _signal_fixture_ohlcv()
+        # Signal at idx[3]: fill is idx[4], only idx[5] remains forward -> 1 row.
+        df = compute_signal_outcomes([ohlcv.index[3]], ohlcv, max_periods=5)
+        assert len(df) == 1
+        assert df["bar_offset"].iloc[0] == 1
+        assert not df.isna().any().any()
+
+    def test_signal_with_reference_on_last_bar_returns_empty(self):
+        ohlcv = _signal_fixture_ohlcv()
+        df = compute_signal_outcomes([ohlcv.index[-2]], ohlcv, max_periods=3)
+        assert df.empty
+
+    def test_price_col_respected(self):
+        ohlcv = _signal_fixture_ohlcv()
+        df_open = compute_signal_outcomes([ohlcv.index[0]], ohlcv, max_periods=1, price_col="open")
+        df_close = compute_signal_outcomes(
+            [ohlcv.index[0]], ohlcv, max_periods=1, price_col="close"
+        )
+        assert not np.allclose(df_open["forward_return"], df_close["forward_return"])
+        assert np.allclose(df_close["forward_return"], [(105.0 - 101.0) / 101.0 * 100.0])
+
+    @pytest.mark.parametrize(
+        ("direction", "expected_mfe", "expected_mae"),
+        [("long", 0.0, 2.0), ("short", 2.0, 0.0)],
+    )
+    def test_excursions_have_zero_floor(self, direction, expected_mfe, expected_mae):
+        index = pd.date_range("2026-03-01", periods=3, freq="1h", tz="UTC")
+        ohlcv = pd.DataFrame(
+            {
+                "open": [100.0, 100.0, 98.0],
+                "high": [100.0, 100.0, 99.0],
+                "low": [100.0, 100.0, 98.0],
+                "close": [100.0, 100.0, 98.0],
+            },
+            index=index,
+        )
+        outcome = compute_signal_outcomes(
+            [index[0]], ohlcv, max_periods=1, direction=direction
+        ).iloc[0]
+        assert np.isclose(outcome["mfe"], expected_mfe)
+        assert np.isclose(outcome["mae"], expected_mae)
+
+    def test_timezone_aware_signal_is_compared_as_same_instant(self):
+        ohlcv = _signal_fixture_ohlcv()
+        taipei_signal = ohlcv.index[0].tz_convert(ZoneInfo("Asia/Taipei"))
+        utc = compute_signal_outcomes([ohlcv.index[0]], ohlcv, max_periods=1)
+        taipei = compute_signal_outcomes([taipei_signal], ohlcv, max_periods=1)
+        assert np.allclose(
+            utc[["forward_return", "mfe", "mae"]],
+            taipei[["forward_return", "mfe", "mae"]],
+        )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"direction": "flat"}, "direction"),
+            ({"max_periods": 0}, "max_periods"),
+            ({"price_col": "vwap"}, "price_col"),
+        ],
+    )
+    def test_invalid_contract_parameters_fail(self, kwargs, message):
+        params = {"max_periods": 1, **kwargs}
+        with pytest.raises(ValueError, match=message):
+            compute_signal_outcomes(
+                [_signal_fixture_ohlcv().index[0]],
+                _signal_fixture_ohlcv(),
+                **params,
+            )
+
+    def test_unsorted_or_duplicate_ohlcv_fails(self):
+        ohlcv = _signal_fixture_ohlcv()
+        with pytest.raises(ValueError, match="sorted"):
+            compute_signal_outcomes([ohlcv.index[0]], ohlcv.iloc[::-1], max_periods=1)
+        duplicated = pd.concat([ohlcv, ohlcv.iloc[[-1]]])
+        with pytest.raises(ValueError, match="unique"):
+            compute_signal_outcomes([ohlcv.index[0]], duplicated, max_periods=1)
+
+    def test_timezone_awareness_must_match(self):
+        ohlcv = _signal_fixture_ohlcv()
+        with pytest.raises(ValueError, match="timezone-aware"):
+            compute_signal_outcomes([ohlcv.index[0].tz_localize(None)], ohlcv, max_periods=1)
+
+    def test_nat_signal_fails(self):
+        with pytest.raises(ValueError, match="must not be NaT"):
+            compute_signal_outcomes([pd.NaT], _signal_fixture_ohlcv(), max_periods=1)
+
+
+class TestSummarizeSignalMaeMfe:
+    def test_empty_horizons(self):
+        df = summarize_signal_mae_mfe(
+            [datetime(2026, 3, 1, tzinfo=UTC)], _signal_fixture_ohlcv(), horizons=()
+        )
+        assert df.empty
+
+    def test_single_signal_matches_hand_computed_curve(self):
+        ohlcv = _signal_fixture_ohlcv()
+        summary = summarize_signal_mae_mfe(
+            [ohlcv.index[0]], ohlcv, horizons=(1, 2, 3), direction="long"
+        )
+
+        assert list(summary["horizon"]) == [1, 2, 3]
+        assert (summary["n"] == 1).all()
+        # n=1 -> median == p75 == the single observation.
+        assert np.allclose(summary["median_forward_return"], [5.0, 2.0, 0.0])
+        assert np.allclose(summary["median_mfe"], [10.0, 10.0, 10.0])
+        assert np.allclose(summary["p75_mfe"], summary["median_mfe"])
+        assert np.allclose(summary["median_mae"], [5.0, 5.0, 5.0])
+        assert np.allclose(summary["p75_mae"], summary["median_mae"])
+
+    def test_horizon_beyond_available_data_is_dropped(self):
+        ohlcv = _signal_fixture_ohlcv()
+        # Only 3 forward bars exist after the fill bar; horizon 10 has no data.
+        summary = summarize_signal_mae_mfe([ohlcv.index[0]], ohlcv, horizons=(1, 10))
+        assert list(summary["horizon"]) == [1]
+
+    def test_sample_count_is_reported_per_horizon(self):
+        ohlcv = _signal_fixture_ohlcv()
+        summary = summarize_signal_mae_mfe([ohlcv.index[0], ohlcv.index[3]], ohlcv, horizons=(1, 3))
+        assert list(summary["n"]) == [2, 1]
+
+    @pytest.mark.parametrize("horizons", [(0,), (1, 1)])
+    def test_invalid_horizons_fail(self, horizons):
+        with pytest.raises(ValueError, match="horizon"):
+            summarize_signal_mae_mfe(
+                [_signal_fixture_ohlcv().index[0]],
+                _signal_fixture_ohlcv(),
+                horizons=horizons,
+            )
+
+
+def test_generate_signal_report_states_assumptions_and_sample_counts(tmp_path):
+    ohlcv = _signal_fixture_ohlcv()
+    output_path = tmp_path / "signal-outcomes.html"
+
+    result = generate_signal_mae_mfe_report(
+        [ohlcv.index[0], ohlcv.index[3]],
+        ohlcv,
+        output_path=str(output_path),
+        horizons=(1, 3),
+        direction="long",
+        price_col="open",
+    )
+
+    html = output_path.read_text(encoding="utf-8")
+    assert result == str(output_path)
+    assert "Gross hypothetical outcomes" in html
+    assert "reference=next observed open" in html
+    assert "T+1: 2, T+3: 1" in html
+
+
+def test_kernel_shared_by_trade_envelope_and_signal_outcomes():
+    """compute_trade_mae_mfe's curve mode and compute_signal_outcomes both
+    delegate to _walk_forward_matrices — this pins that they stay in sync:
+    a trade opening exactly where a signal fires, same direction, produces
+    the same MFE/MAE curve either way."""
+    from librae.backtest.schema import OrderEventRecord
+
+    ohlcv = _signal_fixture_ohlcv()
+    entry_ts = ohlcv.index[1]  # matches the signal fixture's resolved fill bar
+    entry_price = 100.0
+
+    ev_open = OrderEventRecord(
+        event_id="e1",
+        ts=entry_ts,
+        symbol="X",
+        side="long",
+        event_type="open",
+        fill_quantity=1.0,
+        price=entry_price,
+        entry_price=entry_price,
+        remaining_quantity=1.0,
+        notional=entry_price,
+    )
+    ev_close = OrderEventRecord(
+        event_id="e2",
+        ts=ohlcv.index[-1],
+        symbol="X",
+        side="long",
+        event_type="close",
+        fill_quantity=1.0,
+        price=100.0,
+        entry_price=entry_price,
+        remaining_quantity=0.0,
+        notional=100.0,
+    )
+
+    trade_curve = compute_trade_mae_mfe([ev_open, ev_close], ohlcv, max_periods=3)
+    signal_df = compute_signal_outcomes([ohlcv.index[0]], ohlcv, max_periods=3, price_col="open")
+
+    assert np.allclose(trade_curve["median_mfe_curve"], signal_df["mfe"].to_numpy())
+    assert np.allclose(trade_curve["median_mae_curve"], signal_df["mae"].to_numpy())

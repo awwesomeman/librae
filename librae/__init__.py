@@ -44,7 +44,12 @@ from .core.strategy import (
     StrategyIntent,
 )
 from .core.executor import TradePnL, TradeResult, calc_trade_pnl, direction, make_fill
-from .core.metrics import compute_all
+from .core.metrics import (
+    compute_all,
+    compute_signal_outcomes,
+    generate_signal_mae_mfe_report,
+    summarize_signal_mae_mfe,
+)
 from .core.run_config import RunConfig
 from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market
@@ -83,6 +88,9 @@ __all__ = [
     "PositionSnapshot",
     "TradeResult",
     "compute_all",
+    "compute_signal_outcomes",
+    "summarize_signal_mae_mfe",
+    "generate_signal_mae_mfe_report",
     "RunConfig",
     "generate_run_id",
     "infer_timeframe",

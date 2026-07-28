@@ -3,8 +3,9 @@
 Standard metrics (Sharpe, Sortino, MDD, Calmar, etc.) delegated to QuantStats,
 which always uses ddof=1 internally (not configurable — verified against
 quantstats.stats.sharpe source, so this project doesn't expose a fake ddof knob).
-Custom metrics not in QuantStats (exposure_ratio, avg_hold_periods) computed here.
-compute_all() is the single entry point, accepts primitive sequences.
+Custom metrics not in QuantStats (exposure_ratio, avg_hold_periods) and
+on-demand trade/signal outcome analysis are computed here. Public functions
+accept primitive sequences and DataFrames rather than database dependencies.
 
 The annualization factor fed to QuantStats is always inferred from actual bar
 density (see _infer_annual_periods) so intraday timeframes annualize correctly.
@@ -17,7 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -33,6 +34,10 @@ from librae.core import EPSILON
 logger = logging.getLogger(__name__)
 
 SECONDS_PER_YEAR = 365.25 * 86400
+PERCENTAGE_POINTS_PER_FRACTION = 100.0
+
+SignalDirection = Literal["long", "short"]
+SignalPriceColumn = Literal["open", "high", "low", "close"]
 
 
 def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
@@ -301,8 +306,301 @@ def _pair_trades(
     return pairs
 
 
-def _strip_tz(ts: datetime) -> datetime:
-    return ts.replace(tzinfo=None) if ts.tzinfo else ts
+def _validate_direction(direction: str) -> SignalDirection:
+    if direction not in {"long", "short"}:
+        raise ValueError("direction must be 'long' or 'short'")
+    return direction
+
+
+def _validate_positive_integer(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _normalize_ohlcv(
+    ohlcv: pd.DataFrame,
+    *,
+    price_col: str | None = None,
+) -> tuple[pd.DataFrame, bool]:
+    """Validate single-symbol OHLCV and normalize aware indexes to UTC."""
+    if not isinstance(ohlcv.index, pd.DatetimeIndex):
+        raise TypeError("ohlcv must use a DatetimeIndex")
+    if not ohlcv.index.is_monotonic_increasing:
+        raise ValueError("ohlcv index must be sorted in increasing order")
+    if not ohlcv.index.is_unique:
+        raise ValueError("ohlcv index must contain unique timestamps")
+
+    required = {"high", "low", "close"}
+    if price_col is not None:
+        if price_col not in {"open", "high", "low", "close"}:
+            raise ValueError("price_col must be one of: open, high, low, close")
+        required.add(price_col)
+    missing = required - set(ohlcv.columns)
+    if missing:
+        raise ValueError(f"ohlcv is missing required columns: {sorted(missing)}")
+
+    normalized = ohlcv.copy()
+    index_is_aware = normalized.index.tz is not None
+    if index_is_aware:
+        normalized.index = normalized.index.tz_convert("UTC")
+
+    if normalized.empty:
+        return normalized, index_is_aware
+
+    values = normalized.loc[:, sorted(required)].to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all() or (values <= 0).any():
+        raise ValueError("ohlcv prices must be finite and positive")
+    if (normalized["high"] < normalized["low"]).any():
+        raise ValueError("ohlcv high must be greater than or equal to low")
+    if (normalized["close"] > normalized["high"]).any() or (
+        normalized["close"] < normalized["low"]
+    ).any():
+        raise ValueError("ohlcv close must be within the high/low range")
+    if price_col == "open" and (
+        (normalized["open"] > normalized["high"]).any()
+        or (normalized["open"] < normalized["low"]).any()
+    ):
+        raise ValueError("ohlcv open must be within the high/low range")
+    return normalized, index_is_aware
+
+
+def _normalize_timestamp(ts: datetime, *, index_is_aware: bool, name: str) -> pd.Timestamp:
+    normalized = pd.Timestamp(ts)
+    if pd.isna(normalized):
+        raise ValueError(f"{name} must not be NaT")
+    timestamp_is_aware = normalized.tzinfo is not None
+    if timestamp_is_aware != index_is_aware:
+        raise ValueError(f"{name} and ohlcv index must both be timezone-aware or both be naive")
+    if timestamp_is_aware:
+        normalized = normalized.tz_convert("UTC")
+    return normalized
+
+
+def _walk_forward_matrices(
+    entries: Sequence[tuple[datetime, float, SignalDirection]],
+    ohlcv: pd.DataFrame,
+    max_periods: int,
+) -> tuple[list[int], np.ndarray, np.ndarray, np.ndarray]:
+    """Shared kernel: per-entry-point forward-return/MFE/MAE, walking forward.
+
+    For each ``(ts, price, direction)`` entry, walks up to ``max_periods``
+    OHLCV bars strictly after ``ts`` and at each offset T=1..max_periods
+    tracks: forward_return (bar T's close vs. entry price), running MFE
+    (best favorable excursion up to and including bar T), running MAE
+    (worst adverse excursion up to and including bar T) — all
+    direction-adjusted so a positive value is favorable.
+
+    This is the walk-forward math shared by realized-trade envelope decay
+    (``compute_trade_mae_mfe``, entries = trade opens, ``ts`` is the fill
+    bar itself) and signal-outcome curves (``compute_signal_outcomes``,
+    entries = the bar *after* each raw signal, since a signal has no fill
+    of its own) — the only difference between the two is what supplies the
+    entry points, not the math.
+
+    Excursions are non-negative magnitudes with a zero floor. Entries with
+    no bars after them are dropped entirely. Entries with
+    fewer than ``max_periods`` bars remaining are NaN-padded past their
+    available bars.
+
+    Returns:
+        ``(kept_indices, return_mat, mfe_mat, mae_mat)`` — the input index
+        of each kept entry and three ``(n_kept, max_periods)`` matrices.
+    """
+    _validate_positive_integer(max_periods, "max_periods")
+    normalized, index_is_aware = _normalize_ohlcv(ohlcv)
+
+    kept_indices: list[int] = []
+    return_rows: list[np.ndarray] = []
+    mfe_rows: list[np.ndarray] = []
+    mae_rows: list[np.ndarray] = []
+    for entry_index, (ts, price, direction) in enumerate(entries):
+        validated_direction = _validate_direction(direction)
+        if not np.isfinite(price) or price <= 0:
+            raise ValueError("entry prices must be finite and positive")
+        entry_ts = _normalize_timestamp(ts, index_is_aware=index_is_aware, name="entry timestamp")
+        # WHY side="right": exact and intra-bar timestamps both resolve to the
+        # first actually observed bar strictly after the entry point.
+        start_pos = normalized.index.searchsorted(entry_ts, side="right")
+        window = normalized.iloc[start_pos : start_pos + max_periods]
+        if window.empty:
+            continue
+        sign = -1.0 if validated_direction == "short" else 1.0
+        closes = window["close"].to_numpy(dtype=np.float64)
+        highs = window["high"].to_numpy(dtype=np.float64)
+        lows = window["low"].to_numpy(dtype=np.float64)
+        ret_curve = sign * (closes - price) / price * PERCENTAGE_POINTS_PER_FRACTION
+        running_max_h = np.maximum.accumulate(highs)
+        running_min_l = np.minimum.accumulate(lows)
+        if validated_direction == "short":
+            mfe_curve = (price - running_min_l) / price * PERCENTAGE_POINTS_PER_FRACTION
+            mae_curve = (running_max_h - price) / price * PERCENTAGE_POINTS_PER_FRACTION
+        else:
+            mfe_curve = (running_max_h - price) / price * PERCENTAGE_POINTS_PER_FRACTION
+            mae_curve = (price - running_min_l) / price * PERCENTAGE_POINTS_PER_FRACTION
+        mfe_curve = np.maximum(mfe_curve, 0.0)
+        mae_curve = np.maximum(mae_curve, 0.0)
+        pad = max_periods - len(ret_curve)
+        if pad > 0:
+            ret_curve = np.concatenate([ret_curve, np.full(pad, np.nan)])
+            mfe_curve = np.concatenate([mfe_curve, np.full(pad, np.nan)])
+            mae_curve = np.concatenate([mae_curve, np.full(pad, np.nan)])
+        kept_indices.append(entry_index)
+        return_rows.append(ret_curve)
+        mfe_rows.append(mfe_curve)
+        mae_rows.append(mae_curve)
+
+    if not kept_indices:
+        empty = np.empty((0, max_periods))
+        return kept_indices, empty, empty, empty
+    return kept_indices, np.vstack(return_rows), np.vstack(mfe_rows), np.vstack(mae_rows)
+
+
+def compute_signal_outcomes(
+    signal_timestamps: Sequence[datetime],
+    ohlcv: pd.DataFrame,
+    max_periods: int,
+    direction: SignalDirection = "long",
+    price_col: SignalPriceColumn = "open",
+) -> pd.DataFrame:
+    """Per-signal, per-offset forward-return/MFE/MAE curve.
+
+    Computed on demand (nothing persisted), alongside Grafana's own on-demand
+    ``_FWD_CTE``/``_EXC_CTE`` panels. Python signal and trade
+    callers share ``_walk_forward_matrices``; Grafana keeps its independent
+    SQL path, pinned to the same mathematical contract by golden tests.
+
+    Matches the Grafana SQL's reference convention: each signal's reference
+    price is the *next* bar's ``price_col`` (default "open"), not the
+    signal's own bar. Offset T=1 is the first observed bar after that
+    reference bar. Results are gross hypothetical outcomes, not executable
+    fills, and are returned in percentage points.
+
+    Args:
+        signal_timestamps: Raw signal timestamps (``signal_events.ts``).
+        ohlcv: Single-symbol OHLCV DataFrame with DatetimeIndex and
+            'open'/'close'/'high'/'low'.
+        max_periods: How many bars forward to compute, per signal.
+        direction: Expected "long" or "short" price direction for this batch.
+            This is independent of an event's entry/exit label.
+        price_col: Which next-observed-bar OHLCV field is the reference price;
+            matches Grafana's ``$fill_price_field`` variable.
+
+    Returns:
+        Long-format DataFrame, one row per (signal, offset) that has data:
+        columns ``ts`` (signal timestamp), ``bar_offset``, ``forward_return``,
+        ``mfe``, ``mae``. A signal near the end of available OHLCV history
+        simply contributes fewer offset rows rather than NaN-padded ones.
+    """
+    columns = ["ts", "bar_offset", "forward_return", "mfe", "mae"]
+    validated_direction = _validate_direction(direction)
+    _validate_positive_integer(max_periods, "max_periods")
+    normalized, index_is_aware = _normalize_ohlcv(ohlcv, price_col=price_col)
+    if not len(signal_timestamps) or normalized.empty:
+        return pd.DataFrame(columns=columns)
+
+    entries: list[tuple[datetime, float, SignalDirection]] = []
+    resolved_signal_ts: list[datetime] = []
+    for sig_ts in signal_timestamps:
+        signal_ts = _normalize_timestamp(
+            sig_ts, index_is_aware=index_is_aware, name="signal timestamp"
+        )
+        reference_pos = normalized.index.searchsorted(signal_ts, side="right")
+        if reference_pos >= len(normalized):
+            continue
+        reference_ts = normalized.index[reference_pos]
+        reference_price = float(normalized.iloc[reference_pos][price_col])
+        entries.append((reference_ts, reference_price, validated_direction))
+        resolved_signal_ts.append(sig_ts)
+
+    if not entries:
+        return pd.DataFrame(columns=columns)
+
+    kept_indices, return_mat, mfe_mat, mae_mat = _walk_forward_matrices(
+        entries, normalized, max_periods
+    )
+
+    rows: list[tuple[datetime, int, float, float, float]] = []
+    for row_index, entry_index in enumerate(kept_indices):
+        sig_ts = resolved_signal_ts[entry_index]
+        for offset in range(max_periods):
+            ret = return_mat[row_index, offset]
+            if np.isnan(ret):
+                break  # ran out of forward bars; later offsets are NaN too
+            mfe = mfe_mat[row_index, offset]
+            mae = mae_mat[row_index, offset]
+            rows.append((sig_ts, offset + 1, float(ret), float(mfe), float(mae)))
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def summarize_signal_mae_mfe(
+    signal_timestamps: Sequence[datetime],
+    ohlcv: pd.DataFrame,
+    horizons: Sequence[int] = (1, 5, 10, 20, 60),
+    direction: SignalDirection = "long",
+    price_col: SignalPriceColumn = "open",
+) -> pd.DataFrame:
+    """Aggregate forward-return/MFE/MAE across signals, at a fixed set of horizons.
+
+    Local-report counterpart to Grafana's on-demand, freely-adjustable-``$n``
+    ``signal_monitor`` panels. The Python report uses
+    ``compute_signal_outcomes`` -> ``_walk_forward_matrices`` at a small fixed
+    set of horizons, while Grafana remains independently implemented in SQL
+    against the same golden contract. Nothing is persisted.
+
+    MFE and MAE are non-negative excursion magnitudes in percentage points.
+    ``n`` is reported separately at every horizon because recent signals may
+    not yet have enough forward observations.
+
+    Returns:
+        One row per horizon that has data: horizon, n,
+        median_forward_return, median_mfe, p75_mfe, median_mae, p75_mae.
+    """
+    columns = [
+        "horizon",
+        "n",
+        "median_forward_return",
+        "median_mfe",
+        "p75_mfe",
+        "median_mae",
+        "p75_mae",
+    ]
+    if not horizons:
+        return pd.DataFrame(columns=columns)
+    validated_horizons = [
+        _validate_positive_integer(horizon, "each horizon") for horizon in horizons
+    ]
+    if len(set(validated_horizons)) != len(validated_horizons):
+        raise ValueError("horizons must not contain duplicates")
+
+    outcome_df = compute_signal_outcomes(
+        signal_timestamps,
+        ohlcv,
+        max_periods=max(validated_horizons),
+        direction=direction,
+        price_col=price_col,
+    )
+    if outcome_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, float | int]] = []
+    for h in validated_horizons:
+        at_h = outcome_df[outcome_df["bar_offset"] == h]
+        if at_h.empty:
+            continue
+        rows.append(
+            {
+                "horizon": h,
+                "n": len(at_h),
+                "median_forward_return": float(at_h["forward_return"].median()),
+                "median_mfe": float(at_h["mfe"].median()),
+                "p75_mfe": float(at_h["mfe"].quantile(0.75)),
+                "median_mae": float(at_h["mae"].median()),
+                "p75_mae": float(at_h["mae"].quantile(0.75)),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def compute_trade_mae_mfe(
@@ -311,6 +609,8 @@ def compute_trade_mae_mfe(
     max_periods: int | None = None,
 ) -> dict[str, float | list[float]]:
     """Compute MAE/MFE across executed trades.
+
+    MFE and MAE are non-negative percentage-point excursion magnitudes.
 
     Args:
         order_events: Sequence of OrderEventRecord from BacktestOutput.
@@ -337,6 +637,7 @@ def compute_trade_mae_mfe(
         "p75_mfe": 0.0,
     }
     if max_periods is not None:
+        _validate_positive_integer(max_periods, "max_periods")
         empty_point = {
             "n": 0,
             "offsets": [],
@@ -350,27 +651,33 @@ def compute_trade_mae_mfe(
     if not pairs:
         return empty_point
 
-    df_no_tz = ohlcv.copy()
-    if df_no_tz.index.tz is not None:
-        df_no_tz.index = df_no_tz.index.tz_localize(None)
+    normalized, index_is_aware = _normalize_ohlcv(ohlcv)
 
     if max_periods is None:
-        maes, mfes = [], []
+        maes: list[float] = []
+        mfes: list[float] = []
         for entry_ev, exit_ev in pairs:
-            t_entry = _strip_tz(entry_ev.ts)
-            t_exit = _strip_tz(exit_ev.ts)
-            w = df_no_tz.loc[(df_no_tz.index >= t_entry) & (df_no_tz.index <= t_exit)]
+            direction = _validate_direction(entry_ev.side)
+            if not np.isfinite(entry_ev.price) or entry_ev.price <= 0:
+                raise ValueError("entry prices must be finite and positive")
+            t_entry = _normalize_timestamp(
+                entry_ev.ts, index_is_aware=index_is_aware, name="entry timestamp"
+            )
+            t_exit = _normalize_timestamp(
+                exit_ev.ts, index_is_aware=index_is_aware, name="exit timestamp"
+            )
+            w = normalized.loc[(normalized.index >= t_entry) & (normalized.index <= t_exit)]
             if not w.empty:
                 max_h = float(w["high"].max())
                 min_l = float(w["low"].min())
-                if entry_ev.side == "short":
-                    mfe = (entry_ev.price - min_l) / entry_ev.price * 100.0
-                    mae = (max_h - entry_ev.price) / entry_ev.price * 100.0
+                if direction == "short":
+                    mfe = (entry_ev.price - min_l) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
+                    mae = (max_h - entry_ev.price) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
                 else:
-                    mfe = (max_h - entry_ev.price) / entry_ev.price * 100.0
-                    mae = (entry_ev.price - min_l) / entry_ev.price * 100.0
-                mfes.append(mfe)
-                maes.append(mae)
+                    mfe = (max_h - entry_ev.price) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
+                    mae = (entry_ev.price - min_l) / entry_ev.price * PERCENTAGE_POINTS_PER_FRACTION
+                mfes.append(max(0.0, mfe))
+                maes.append(max(0.0, mae))
 
         if not mfes:
             return empty_point
@@ -378,51 +685,32 @@ def compute_trade_mae_mfe(
         return {
             "n": len(arr_mae),
             "median_mae": float(np.median(arr_mae)),
-            "p75_abs_mae": float(np.percentile(np.abs(arr_mae), 75)),
+            "p75_abs_mae": float(np.percentile(arr_mae, 75)),
             "median_mfe": float(np.median(arr_mfe)),
             "p75_mfe": float(np.percentile(arr_mfe, 75)),
         }
 
-    # Envelope decay curve: per-trade running MAE/MFE at each bar offset,
-    # padded with NaN once a trade runs out of forward bars, then aggregated
-    # column-wise with nan-aware percentiles so short-lived trades don't skew
-    # later offsets.
-    mfe_rows, mae_rows = [], []
-    for entry_ev, _exit_ev in pairs:
-        t_entry = _strip_tz(entry_ev.ts)
-        # WHY +1: offset T=1 means "1 bar after entry", not the entry bar itself.
-        start_pos = df_no_tz.index.searchsorted(t_entry, side="left") + 1
-        window = df_no_tz.iloc[start_pos : start_pos + max_periods]
-        if window.empty:
-            continue
-        running_max_h = np.maximum.accumulate(window["high"].to_numpy(dtype=np.float64))
-        running_min_l = np.minimum.accumulate(window["low"].to_numpy(dtype=np.float64))
-        if entry_ev.side == "short":
-            mfe_curve = (entry_ev.price - running_min_l) / entry_ev.price * 100.0
-            mae_curve = (running_max_h - entry_ev.price) / entry_ev.price * 100.0
-        else:
-            mfe_curve = (running_max_h - entry_ev.price) / entry_ev.price * 100.0
-            mae_curve = (entry_ev.price - running_min_l) / entry_ev.price * 100.0
-        pad = max_periods - len(mfe_curve)
-        if pad > 0:
-            mfe_curve = np.concatenate([mfe_curve, np.full(pad, np.nan)])
-            mae_curve = np.concatenate([mae_curve, np.full(pad, np.nan)])
-        mfe_rows.append(mfe_curve)
-        mae_rows.append(mae_curve)
+    # Envelope decay curve: shared kernel, then aggregate column-wise with
+    # nan-aware percentiles so short-lived trades don't skew later offsets.
+    entries = [
+        (entry_ev.ts, entry_ev.price, _validate_direction(entry_ev.side))
+        for entry_ev, _exit_ev in pairs
+    ]
+    _kept_indices, _return_mat, mfe_mat, mae_mat = _walk_forward_matrices(
+        entries, normalized, max_periods
+    )
 
-    if not mfe_rows:
+    if mfe_mat.shape[0] == 0:
         return empty_point
 
-    mfe_mat = np.vstack(mfe_rows)
-    mae_mat = np.vstack(mae_rows)
     with np.errstate(all="ignore"):
         median_mfe_curve = np.nanmedian(mfe_mat, axis=0)
         p75_mfe_curve = np.nanpercentile(mfe_mat, 75, axis=0)
         median_mae_curve = np.nanmedian(mae_mat, axis=0)
-        p75_mae_curve = np.nanpercentile(np.abs(mae_mat), 75, axis=0)
+        p75_mae_curve = np.nanpercentile(mae_mat, 75, axis=0)
 
     return {
-        "n": len(mfe_rows),
+        "n": mfe_mat.shape[0],
         "offsets": list(range(1, max_periods + 1)),
         "median_mae_curve": [float(v) for v in median_mae_curve],
         "p75_mae_curve": [float(v) for v in p75_mae_curve],
@@ -554,6 +842,47 @@ def _plot_mae_mfe_envelope(ax: Axes, envelope: dict[str, float | list[float]]) -
     ax.set_ylabel("% move from entry price")
 
 
+def _plot_signal_mae_mfe_by_horizon(ax: Axes, summary: pd.DataFrame) -> None:
+    if summary.empty:
+        _style_axes(ax)
+        ax.set_title("Signal MAE/MFE by Horizon (no data)")
+        return
+
+    x = np.arange(len(summary))
+    width = 0.35
+    mfe_err = (summary["p75_mfe"] - summary["median_mfe"]).clip(lower=0)
+    mae_err = (summary["p75_mae"] - summary["median_mae"]).clip(lower=0)
+    ax.bar(x - width / 2, summary["median_mfe"], width, color=_FAVORABLE, label="median MFE")
+    ax.bar(x + width / 2, summary["median_mae"], width, color=_ADVERSE, label="median MAE")
+    ax.errorbar(
+        x - width / 2,
+        summary["median_mfe"],
+        yerr=[np.zeros(len(summary)), mfe_err],
+        fmt="none",
+        ecolor=_FAVORABLE,
+        alpha=0.6,
+        capsize=3,
+    )
+    ax.errorbar(
+        x + width / 2,
+        summary["median_mae"],
+        yerr=[np.zeros(len(summary)), mae_err],
+        fmt="none",
+        ecolor=_ADVERSE,
+        alpha=0.6,
+        capsize=3,
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [f"{h}\nn={n}" for h, n in zip(summary["horizon"], summary["n"], strict=True)]
+    )
+    ax.legend(frameon=False, fontsize=8.5, labelcolor=_MUTED)
+    _style_axes(ax)
+    ax.set_title("Signal MAE/MFE by Horizon (error bar = p75)")
+    ax.set_xlabel("Observed bars after reference")
+    ax.set_ylabel("Percentage-point move from reference price")
+
+
 def _fmt_stat(value: float | int | None) -> str:
     if value is None:
         return "—"
@@ -593,6 +922,62 @@ h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.2rem; }
 """
 
 
+def _render_tearsheet_html(
+    page_title: str,
+    heading: str,
+    subtitle: str,
+    tiles: list[tuple[str, float | int | str | None]],
+    chart_builders: list[Callable[[Axes], None]],
+) -> str:
+    """Shared HTML assembly: stat tiles + stacked chart cards on ``_TEARSHEET_CSS``.
+
+    Used by every ``generate_*_tearsheet``/``generate_*_report`` function so
+    they stay visually consistent and none of them re-implements the
+    matplotlib-to-base64-to-HTML plumbing.
+    """
+    import base64
+    from io import BytesIO
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def _fig_to_base64(fig: Any) -> str:
+        buf = BytesIO()
+        # WHY transparent=True: lets each chart sit on the card background
+        # (light or dark) instead of a baked-in white box — see _style_axes.
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=130, transparent=True)
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    cards = []
+    for builder in chart_builders:
+        fig, ax = plt.subplots(figsize=(7.6, 3.1))
+        builder(ax)
+        cards.append(
+            f'<div class="card"><img src="data:image/png;base64,{_fig_to_base64(fig)}"/></div>'
+        )
+
+    tile_html = "".join(
+        f'<div class="tile"><div class="tile-value">{_fmt_stat(value)}</div>'
+        f'<div class="tile-label">{label}</div></div>'
+        for label, value in tiles
+    )
+
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>{page_title}</title>
+<style>{_TEARSHEET_CSS}</style>
+</head>
+<body>
+<h1>{heading}</h1>
+<div class="subtitle">{subtitle}</div>
+<div class="tiles">{tile_html}</div>
+{"".join(cards)}
+</body></html>"""
+
+
 def generate_trade_tearsheet(
     output: BacktestOutput,
     ohlcv: pd.DataFrame,
@@ -611,67 +996,80 @@ def generate_trade_tearsheet(
 
     Adding a new trade-metric dimension (e.g. R-multiple distribution, win/
     loss streaks): write one ``_plot_*(ax, data)`` function above and append
-    one entry to the ``charts`` list below — no other assembly code changes.
+    one entry to the ``chart_builders`` list below — no other assembly code
+    changes.
     """
-    import base64
-    from io import BytesIO
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     order_events = output.order_events
     durations = compute_trade_durations(order_events)
     pnl_curve = compute_pnl_by_trade(order_events)
     envelope = compute_trade_mae_mfe(order_events, ohlcv, max_periods=max_periods)
-
-    charts: list[Callable[[Axes], None]] = [
-        lambda ax: _plot_trade_durations(ax, durations),
-        lambda ax: _plot_pnl_by_trade(ax, pnl_curve),
-        lambda ax: _plot_mae_mfe_envelope(ax, envelope),
-    ]
-
-    def _fig_to_base64(fig: Any) -> str:
-        buf = BytesIO()
-        # WHY transparent=True: lets each chart sit on the card background
-        # (light or dark) instead of a baked-in white box — see _style_axes.
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=130, transparent=True)
-        plt.close(fig)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
-
-    cards = []
-    for builder in charts:
-        fig, ax = plt.subplots(figsize=(7.6, 3.1))
-        builder(ax)
-        cards.append(
-            f'<div class="card"><img src="data:image/png;base64,{_fig_to_base64(fig)}"/></div>'
-        )
-
     m = output.metrics
-    tiles = "".join(
-        f'<div class="tile"><div class="tile-value">{_fmt_stat(value)}</div>'
-        f'<div class="tile-label">{label}</div></div>'
-        for label, value in [
+
+    html = _render_tearsheet_html(
+        page_title=f"Trade Tearsheet — {output.run_metadata.run_id}",
+        heading="Trade Tearsheet",
+        subtitle=(
+            f"{output.run_metadata.strategy} · {output.run_metadata.symbol} "
+            f"· {output.run_metadata.timeframe}"
+        ),
+        tiles=[
             ("Trades", m.trades),
             ("Win rate", m.win_rate),
             ("Profit factor", m.profit_factor),
             ("Payoff ratio", m.payoff_ratio),
-        ]
+        ],
+        chart_builders=[
+            lambda ax: _plot_trade_durations(ax, durations),
+            lambda ax: _plot_pnl_by_trade(ax, pnl_curve),
+            lambda ax: _plot_mae_mfe_envelope(ax, envelope),
+        ],
+    )
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return output_path
+
+
+def generate_signal_mae_mfe_report(
+    signal_timestamps: Sequence[datetime],
+    ohlcv: pd.DataFrame,
+    output_path: str = "signal_mae_mfe.html",
+    horizons: Sequence[int] = (1, 5, 10, 20, 60),
+    direction: SignalDirection = "long",
+    price_col: SignalPriceColumn = "open",
+) -> str:
+    """Generate a descriptive local signal-outcome report.
+
+    Outcomes are gross and hypothetical: the next observed bar's
+    ``price_col`` is the reference price, offset 1 starts on the following
+    observed bar, and no costs or execution constraints are modeled. The
+    report shows a separate valid sample count for each horizon and makes no
+    statistical-significance claim.
+    """
+    summary = summarize_signal_mae_mfe(
+        signal_timestamps, ohlcv, horizons=horizons, direction=direction, price_col=price_col
+    )
+    sample_counts = (
+        ", ".join(f"T+{h}: {n}" for h, n in zip(summary["horizon"], summary["n"], strict=True))
+        if not summary.empty
+        else "none"
     )
 
-    html = f"""<!doctype html>
-<html><head><meta charset="utf-8">
-<title>Trade Tearsheet — {output.run_metadata.run_id}</title>
-<style>{_TEARSHEET_CSS}</style>
-</head>
-<body>
-<h1>Trade Tearsheet</h1>
-<div class="subtitle">{output.run_metadata.strategy} · {output.run_metadata.symbol} · {output.run_metadata.timeframe}</div>
-<div class="tiles">{tiles}</div>
-{"".join(cards)}
-</body></html>"""
-
+    html = _render_tearsheet_html(
+        page_title="Signal Outcome Report",
+        heading="Signal Outcome Report",
+        subtitle=(
+            f"Gross hypothetical outcomes · direction={direction} · "
+            f"reference=next observed {price_col} · offset 1=following observed bar · "
+            "no costs or execution constraints"
+        ),
+        tiles=[
+            ("Signals", len(signal_timestamps)),
+            ("Direction", direction),
+            ("Reference", f"next {price_col}"),
+            ("Valid samples", sample_counts),
+        ],
+        chart_builders=[lambda ax: _plot_signal_mae_mfe_by_horizon(ax, summary)],
+    )
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
     return output_path
