@@ -900,13 +900,21 @@ class LiveTrader:
             message=f"{message}; trading halted.",
         )
 
+    def _has_active_risk_exit_orders(self) -> bool:
+        """Whether every tracked order belongs to the drawdown flatten."""
+        return bool(self._active_orders) and all(
+            tracked.request.reason == REASON_DRAWDOWN_BREACH
+            and tracked.request.position_effect in ("reduce", "close")
+            for tracked in self._active_orders
+        )
+
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._running = True
         self._setup_signal_handlers()
         if not self._executor.simulation:
             try:
-                if self._halted:
+                if self._halted and not self._has_active_risk_exit_orders():
                     self._cancel_active_orders()
                 else:
                     self._advance_live_orders(submit_planned=False)
@@ -1271,7 +1279,7 @@ class LiveTrader:
 
     def _advance_live_orders(self, *, submit_planned: bool = True) -> None:
         """Poll or submit the head order; dependent orders stay serialized."""
-        while self._active_orders and not self._halted:
+        while self._active_orders and (not self._halted or self._has_active_risk_exit_orders()):
             tracked = self._active_orders[0]
             request = tracked.request
             if not tracked.placement_attempted:
@@ -1640,13 +1648,12 @@ class LiveTrader:
     ) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
+        previous_equity = self._prev_equity
         equity = self._eval_equity()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (
             (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
         )
-        period_return = (equity / self._prev_equity - 1.0) if self._prev_equity > 0 else 0.0
-        self._prev_equity = equity
 
         if (
             self._risk_limits.max_drawdown_pct
@@ -1654,6 +1661,13 @@ class LiveTrader:
             and drawdown <= -self._risk_limits.max_drawdown_pct
         ):
             self._flatten_and_halt(ts, drawdown, bars, used_volume=used_volume)
+            equity = self._eval_equity()
+            drawdown = (
+                (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
+            )
+
+        period_return = (equity / previous_equity - 1.0) if previous_equity > 0 else 0.0
+        self._prev_equity = equity
 
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, period_return)
@@ -1720,10 +1734,14 @@ class LiveTrader:
                 apply_volume_limit=False,
             )
         self._halted = True
-        if not self._executor.simulation:
-            self._cancel_active_orders()
+        self._pending_intent = []
         self._persist_state()
-        outcome = "flattened all positions" if flattened else "flatten attempt failed"
+        if flattened:
+            outcome = "flattened all positions"
+        elif self._active_orders:
+            outcome = "flattening in progress"
+        else:
+            outcome = "flatten attempt failed"
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
