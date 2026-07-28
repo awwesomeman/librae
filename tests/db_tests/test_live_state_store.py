@@ -37,6 +37,7 @@ def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_
             submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
         ),
         placement_attempted=True,
+        placement_attempted_at=datetime(2025, 1, 1, tzinfo=UTC),
         order_id="broker-1",
         status="accepted",
     )
@@ -48,6 +49,7 @@ def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_
     assert len(rows) == 1
     assert rows[0][1] == "client-1"
     assert rows[0][7] is True
+    assert rows[0][8] == datetime(2025, 1, 1, tzinfo=UTC)
 
 
 @patch("db.timescale_state.get_conn")

@@ -50,9 +50,9 @@ This is an intentional breaking change with no compatibility aliases:
 | `process_actions` | `execute_order_intents` |
 | `process_rebalance_targets` | `execute_portfolio_targets` |
 | `params["fill_price"]` | `execution.default_fill_price` |
-| `params["max_volume_participation_pct"]` | `execution.max_volume_participation_rate` |
+| `params["max_volume_participation_pct"]` | `execution.max_bar_volume_participation_rate` |
 
-Persisted live runtime state is schema v4. Older checkpoints are rejected and
+Persisted live runtime state is schema v6. Older checkpoints are rejected and
 must not be guessed or partially migrated.
 
 ## Consequences
@@ -60,8 +60,9 @@ must not be guessed or partially migrated.
 The name of each object now identifies its lifecycle stage, and backtest, sim,
 and live consume the same resolved execution policy. Users must update strategy
 imports, constructors, configuration, and restart state in one deployment.
-Actual live fills remain broker-confirmed; execution policy only controls local
-request sizing and deterministic backtest/sim fills.
+Actual live fills remain broker-confirmed; execution policy controls local
+request sizing, the optional local order timeout, and deterministic
+backtest/sim fills.
 
 ## References
 

@@ -245,9 +245,9 @@ Execution then deliberately diverges:
   the same timestamp. Current prices may size requests but local execution
   facts come only from broker reports.
 
-OHLCV caches are sorted and deduplicated. The runtime replays every cached bar
-newer than its durable per-symbol watermark in timestamp order and advances
-that watermark only after successful processing. A late symbol at the same
+OHLCV caches are sorted and deduplicated. Mode-specific backlog handling is
+defined under data staleness below. Both modes advance a durable per-symbol
+watermark only after successful processing. A late symbol at the same
 timestamp is processed with any same-timestamp bars already present in cache,
 so a waiting target basket can become executable. An older event that would
 rewind the global clock fails explicitly. If a backtest still holds a symbol
@@ -281,13 +281,19 @@ remain sequential reductions-then-additions, not exchange-level atomic.
 `PortfolioTargets` expresses a desired portfolio state, not a transactional
 all-or-none order.
 
-Acknowledgement is not execution. Submitted/accepted/cancelled/rejected
+Acknowledgement is not execution. Submitted/accepted/`cancel_pending`/cancelled/rejected
 reports never mutate positions. A partial report commits only its confirmed
 fill delta. Submitted, accepted, and partial orders remain in a durable,
 serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
 slippage, and tax can only advance. Cancelled/rejected orders halt dependent
-work. Operational/error halts cancel tracked strategy orders. A drawdown
+work. While an order remains active, polling still refreshes the OHLCV cache,
+heartbeat, and staleness state, but it does not run a new strategy decision.
+An optional local wall-clock timeout cancels an over-age order, preserves any
+confirmed partial fill, and halts dependent work for review. A non-terminal
+cancel acknowledgement remains `cancel_pending` and is reconciled without
+issuing duplicate cancel requests. Operational/error
+halts cancel tracked strategy orders. A drawdown
 breach instead clears the pending strategy decision and keeps its emergency
 reduce/close queue active until broker reports reach a terminal state,
 including across restart. The runtime also rejects live bar-field fills
@@ -374,6 +380,8 @@ config = RunConfig(
         # Optional session-level cap; both fields must be set together.
         adv_lookback_sessions=20,
         max_adv_participation_rate=0.01,
+        # Local fallback, not broker IOC/FOK/GTD.
+        live_order_timeout_seconds=120,
     ),
     risk=RiskPolicy(
         max_position_weight=0.3,  # 30% of latest known equity
@@ -411,6 +419,12 @@ free-form strategy dictionary for portfolio controls.
   intraday volume-profile estimate is needed: the current-bar cap remains the
   local liquidity constraint. Sim/live `warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
+- `live_order_timeout_seconds`: optional live-only local safety timeout measured
+  from the persisted wall-clock placement attempt. On expiry the engine first
+  refreshes the broker report, requests cancellation only if the order remains
+  non-terminal, applies any additional cumulative fill, then halts. `None`
+  leaves lifetime to the broker. This is not broker-native time-in-force:
+  IOC/FOK/GTD/DAY support remains adapter- and venue-specific.
 - `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
 - `max_order_notional`: hard-rejects an individual exposure-increasing open or
   add above this account-currency notional after normal position/liquidity
@@ -482,18 +496,20 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, and active order queue. Runtime-state
-schema v4 is intentionally breaking: older checkpoints are rejected and require
+schema v6 is intentionally breaking: older checkpoints are rejected and require
 an explicit migration or removal. `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
-Placement-attempted is saved before network I/O, so an ambiguous timeout is
-looked up rather than blindly retried. Analytics callbacks remain projections;
+Placement-attempted and its UTC wall-clock timestamp are saved before network
+I/O, so an ambiguous placement outcome is looked up rather than blindly
+retried, and local order age survives restart. Analytics callbacks remain projections;
 they are not broker fill truth. The state key is `mode:config_hash`; run only
 one active process for a key. Multi-process leader election is deliberately
 outside this small polling engine rather than hidden behind an in-process lock.
 
 #### Data staleness detection (live only)
 
-Checked on every poll cycle, not just at startup. `_check_staleness`
+Checked on every poll cycle, including while an order is active, not just at
+startup. `_check_staleness`
 compares the latest completed bar timestamp with the UTC clock. A frame is
 stale after `(STALE_DATA_TOLERANCE_BARS + 1) * timeframe` (three intervals by
 default); the extra interval accounts for the normal age of a completed bar.
@@ -530,7 +546,7 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Decision timing | completed T | completed T | completed T | completed T |
 | Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit after T decision | submit after T decision |
 | Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | paper `ExecutionReport` only | broker `ExecutionReport` only |
-| Non-final order | one-bar intent expires | one-bar intent expires | durable cumulative order lifecycle | durable cumulative order lifecycle |
+| Non-final order | one-bar intent expires | one-bar intent expires | durable cumulative order lifecycle | durable cumulative lifecycle; optional local timeout/cancel |
 | Restart | new run | restore when state is enabled | restore and reconcile | restore and reconcile |
 
 #### Use-case capability matrix
@@ -613,11 +629,11 @@ financial/execution fact.
 |------|------|
 | `Fill` | fill report: price, quantity, commission, slippage, tax |
 | `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time |
-| `ExecutionReport` | normalized live state: submitted/accepted/partial/filled/cancelled/rejected plus confirmed execution facts |
+| `ExecutionReport` | normalized live state: submitted/accepted/partial/cancel_pending/filled/cancelled/rejected plus confirmed execution facts |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
-| `ExecutionPolicy` | run-wide default fill field, current-bar participation cap, and optional session-level lagged-ADV capacity cap |
+| `ExecutionPolicy` | run-wide default fill field, liquidity caps, and optional local live-order timeout |
 | `RiskPolicy` | optional engine-level position, exposure, drawdown, order-notional, and live limit-price controls |
 
 #### Output layer

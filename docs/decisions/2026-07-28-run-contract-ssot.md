@@ -6,7 +6,7 @@ Status: accepted
 ## Decision
 
 - `RunConfig.execution: ExecutionPolicy` owns simulated fill and liquidity
-  assumptions.
+  assumptions plus the broker-agnostic local live-order timeout.
 - `RunConfig.risk: RiskPolicy` owns engine-level position, exposure, drawdown,
   order-notional, and live limit-price controls.
 - `RunConfig.params` contains strategy logic parameters only. Execution and

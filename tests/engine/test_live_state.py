@@ -38,6 +38,7 @@ def _order() -> TrackedOrder:
             submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
         ),
         placement_attempted=True,
+        placement_attempted_at=datetime(2025, 1, 2, tzinfo=UTC),
         order_id="broker-1",
         status="partial",
         filled_quantity=0.5,
@@ -116,7 +117,7 @@ def test_runtime_state_rejects_v3_schema():
         LiveRuntimeState.from_dict(raw)
 
 
-def test_runtime_state_rejects_missing_v5_fact_instead_of_defaulting():
+def test_runtime_state_rejects_missing_v6_fact_instead_of_defaulting():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
@@ -129,4 +130,22 @@ def test_runtime_state_rejects_missing_v5_fact_instead_of_defaulting():
     del raw["adv_filled_quantities"]
 
     with pytest.raises(KeyError, match="adv_filled_quantities"):
+        LiveRuntimeState.from_dict(raw)
+
+
+def test_runtime_state_rejects_attempted_order_without_attempt_time():
+    state = LiveRuntimeState(
+        state_key="live:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="live",
+        cash=1_000.0,
+        active_orders=[_order()],
+        equity_peak=1_000.0,
+        prev_equity=1_000.0,
+    )
+    raw = state.to_dict()
+    raw["active_orders"][0]["placement_attempted_at"] = None
+
+    with pytest.raises(ValueError, match="missing placement_attempted_at"):
         LiveRuntimeState.from_dict(raw)

@@ -206,12 +206,14 @@ class TestBuildConfig:
                   execution:
                     default_fill_price: close
                     max_bar_volume_participation_rate: null
+                    live_order_timeout_seconds: 120
                 """
             )
         )
         unlimited = build_config("test_strat", str(tmp_path / "run.py"))
         assert unlimited.execution.default_fill_price == "close"
         assert unlimited.execution.max_bar_volume_participation_rate is None
+        assert unlimited.execution.live_order_timeout_seconds == 120
 
     def test_unknown_execution_setting_is_rejected(self, tmp_path):
         (tmp_path / "config.yaml").write_text(

@@ -13,7 +13,8 @@ strategy interface.
 - **One decision API** — express single-symbol orders with `OrderIntent` or complete
   portfolio allocations with `PortfolioTargets`.
 - **One execution-policy source** — fill-field, current-bar participation,
-  and optional session-level lagged-ADV assumptions live in typed
+  optional session-level lagged-ADV assumptions, and the local live-order
+  timeout live in typed
   `RunConfig.execution`, not free-form strategy parameters.
 - **Causal execution** — simulations own the execution delay; live positions
   change only from broker execution reports.
@@ -81,7 +82,7 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Single-asset research | Supported with next-observed-bar simulated fills |
 | Cross-sectional selection and allocation | Configured candidate universe with point-in-time eligibility; optimizer remains strategy-owned |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
-| Paper/live broker execution (`mode=live`) | Broker-confirmed order lifecycle; sequential, not atomic across a basket |
+| Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable order lifecycle with optional local timeout; sequential, not atomic across a basket |
 | Arbitrage | OHLCV research approximation only; production multi-leg execution requires an explicit venue/adapter capability |
 | Multi-currency portfolios | Not yet modeled; the live/sim cash ledger is single-currency |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |

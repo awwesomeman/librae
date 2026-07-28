@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS broker_orders (
     side            TEXT NOT NULL,
     status          TEXT NOT NULL,
     placement_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+    placement_attempted_at TIMESTAMPTZ,
     requested_quantity DOUBLE PRECISION NOT NULL,
     filled_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
     filled_notional DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -87,9 +88,23 @@ CREATE TABLE IF NOT EXISTS broker_orders (
     PRIMARY KEY (state_key, client_order_id),
     CONSTRAINT chk_broker_order_side CHECK (side IN ('buy', 'sell')),
     CONSTRAINT chk_broker_order_status CHECK (
-        status IN ('submitted', 'accepted', 'partial', 'filled', 'cancelled', 'rejected')
+        status IN (
+            'submitted', 'accepted', 'partial', 'cancel_pending',
+            'filled', 'cancelled', 'rejected'
+        )
     )
 );
+ALTER TABLE broker_orders
+    ADD COLUMN IF NOT EXISTS placement_attempted_at TIMESTAMPTZ;
+ALTER TABLE broker_orders
+    DROP CONSTRAINT IF EXISTS chk_broker_order_status;
+ALTER TABLE broker_orders
+    ADD CONSTRAINT chk_broker_order_status CHECK (
+        status IN (
+            'submitted', 'accepted', 'partial', 'cancel_pending',
+            'filled', 'cancelled', 'rejected'
+        )
+    );
 CREATE INDEX IF NOT EXISTS idx_broker_orders_active
     ON broker_orders(state_key, status, updated_at DESC);
 

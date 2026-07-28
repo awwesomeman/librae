@@ -211,6 +211,7 @@ class TestPersistBacktest:
             "max_bar_volume_participation_rate": None,
             "adv_lookback_sessions": None,
             "max_adv_participation_rate": None,
+            "live_order_timeout_seconds": None,
         }
 
         assert counts["ohlcv"] == 20

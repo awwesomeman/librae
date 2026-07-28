@@ -307,6 +307,9 @@ class TestLiveExecutor:
         assert report.status == "rejected"
         assert report.has_fill is False
 
+    def test_pending_cancel_has_a_distinct_nonterminal_status(self):
+        assert LiveExecutor._normalize_status("pending_cancel") == "cancel_pending"
+
     def test_ccxt_base_fee_is_converted_to_cash_and_rebate_is_preserved(self):
         mock_adapter = MagicMock()
         mock_adapter.place_order.return_value = {
@@ -1538,11 +1541,13 @@ class TestLiveExecutionLifecycle:
         adapter: MagicMock,
         *,
         state_store: MemoryLiveStateStore | None = None,
+        config: RunConfig | None = None,
+        clock=None,
     ) -> LiveTrader:
         return LiveTrader(
             strategy,
             _simple_feature_fn,
-            config=_test_cfg(mode="live"),
+            config=config or _test_cfg(mode="live"),
             adapter=lambda *a, **kw: _make_ohlcv_df(),
             cost_model=_zero_cost_model(),
             order_adapter=adapter,
@@ -1552,7 +1557,7 @@ class TestLiveExecutionLifecycle:
             on_heartbeat=None,
             on_signal_outcome=None,
             state_store=state_store or MemoryLiveStateStore(),
-            clock=lambda: TEST_CLOCK_NOW,
+            clock=clock or (lambda: TEST_CLOCK_NOW),
         )
 
     def test_partial_fill_commits_only_confirmed_quantity_and_stays_open(self):
@@ -1652,6 +1657,150 @@ class TestLiveExecutionLifecycle:
         assert runner._positions["BTCUSDT"].entry_commission == 0.25
         assert runner._cash == pytest.approx(100_000.0 - 0.75 * 105.0 - 0.25)
 
+    def test_active_order_keeps_market_health_updates_without_new_strategy_decision(self):
+        adapter = _mock_order_adapter()
+        accepted = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.place_order.return_value = accepted
+        adapter.get_order.return_value = accepted
+        fetcher = MagicMock(return_value=_make_ohlcv_df())
+
+        class CountingBuy(Strategy):
+            def __init__(self):
+                self.calls = 0
+
+            def on_bar(self, ctx):
+                self.calls += 1
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+
+        strategy = CountingBuy()
+        runner = LiveTrader(
+            strategy,
+            _simple_feature_fn,
+            config=_test_cfg(mode="live"),
+            adapter=fetcher,
+            cost_model=_zero_cost_model(),
+            order_adapter=adapter,
+            on_bar=None,
+            on_order_event=None,
+            on_ohlcv=None,
+            on_heartbeat=None,
+            on_signal_outcome=None,
+            state_store=MemoryLiveStateStore(),
+            clock=lambda: TEST_CLOCK_NOW,
+        )
+
+        runner.run(max_iterations=2)
+
+        assert fetcher.call_count == 2
+        assert strategy.calls == 1
+        assert len(runner._active_orders) == 1
+        adapter.place_order.assert_called_once()
+
+    def test_live_order_timeout_cancels_preserves_partial_fill_and_halts(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="open-1",
+            status="filling",
+            quantity=2.0,
+            filled=0.5,
+            average=100.0,
+        )
+        adapter.get_order.return_value = _broker_report(
+            order_id="open-1",
+            status="filling",
+            quantity=2.0,
+            filled=0.5,
+            average=100.0,
+        )
+        adapter.cancel_order.return_value = _broker_report(
+            order_id="open-1",
+            status="cancelled",
+            quantity=2.0,
+            filled=0.75,
+            average=102.0,
+        )
+        now = [TEST_CLOCK_NOW]
+
+        class BuyTwo(Strategy):
+            def on_bar(self, ctx):
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=2.0)]
+
+        runner = self._make_trader(
+            BuyTwo(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+            ),
+            clock=lambda: now[0],
+        )
+        runner.run(max_iterations=1)
+        attempted_at = runner._active_orders[0].placement_attempted_at
+
+        now[0] += timedelta(seconds=30)
+        runner._poll_cycle()
+
+        assert attempted_at == TEST_CLOCK_NOW
+        adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
+        assert runner._halted is True
+        assert runner._active_orders == []
+        assert runner._positions["BTCUSDT"].quantity == pytest.approx(0.75)
+        assert runner._positions["BTCUSDT"].entry_price == pytest.approx(102.0)
+
+    def test_timeout_pending_cancel_is_polled_without_duplicate_cancel(self):
+        adapter = _mock_order_adapter()
+        accepted = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.place_order.return_value = accepted
+        adapter.get_order.side_effect = [
+            accepted,
+            accepted,
+            {
+                "id": "open-1",
+                "status": "cancelled",
+                "amount": 1.0,
+                "filled": 0.0,
+            },
+        ]
+        adapter.cancel_order.return_value = {
+            "id": "open-1",
+            "status": "pending_cancel",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        now = [TEST_CLOCK_NOW]
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+            ),
+            clock=lambda: now[0],
+        )
+        runner.run(max_iterations=1)
+
+        now[0] += timedelta(seconds=30)
+        runner._poll_cycle()
+
+        assert runner._halted is True
+        assert runner._active_orders[0].status == "cancel_pending"
+        adapter.cancel_order.assert_called_once()
+
+        runner._poll_cycle()
+
+        assert runner._active_orders == []
+        adapter.cancel_order.assert_called_once()
+
     def test_open_order_resumes_after_restart_without_resubmission(self):
         store = MemoryLiveStateStore()
         adapter = _mock_order_adapter()
@@ -1684,6 +1833,51 @@ class TestLiveExecutionLifecycle:
         assert second._active_orders == []
         assert second._positions["BTCUSDT"].quantity == 1.0
         assert second._positions["BTCUSDT"].entry_commission == 0.2
+
+    def test_live_order_timeout_age_survives_restart(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        accepted = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.place_order.return_value = accepted
+        config = _test_cfg(
+            mode="live",
+            execution=ExecutionPolicy(live_order_timeout_seconds=30),
+        )
+
+        first = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            state_store=store,
+            config=config,
+            clock=lambda: TEST_CLOCK_NOW,
+        )
+        first.run(max_iterations=1)
+
+        adapter.get_order.return_value = accepted
+        adapter.cancel_order.return_value = {
+            "id": "open-1",
+            "status": "cancelled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        second = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            state_store=store,
+            config=config,
+            clock=lambda: TEST_CLOCK_NOW + timedelta(seconds=30),
+        )
+        second.run(max_iterations=1)
+
+        adapter.place_order.assert_called_once()
+        adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
+        assert second._halted is True
+        assert second._active_orders == []
 
     def test_drawdown_exit_remains_active_while_halted_and_resumes_after_restart(
         self,

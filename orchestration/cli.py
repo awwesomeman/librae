@@ -235,6 +235,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         "max_bar_volume_participation_rate",
         "adv_lookback_sessions",
         "max_adv_participation_rate",
+        "live_order_timeout_seconds",
     }
     if unknown_execution_keys:
         raise ValueError(f"unknown strategy.execution settings: {sorted(unknown_execution_keys)}")

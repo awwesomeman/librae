@@ -58,15 +58,23 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
             max_adv_participation_rate=0.01,
         ),
     )
+    timed_live_order = _config(
+        execution=ExecutionPolicy(live_order_timeout_seconds=120),
+    )
 
     assert unlimited.config_hash != capped.config_hash
     assert capped.config_hash != adv_capped.config_hash
+    assert capped.config_hash != timed_live_order.config_hash
     with pytest.raises(ValueError, match="must be in"):
         ExecutionPolicy(max_bar_volume_participation_rate=1.1)
     with pytest.raises(ValueError, match="positive integer"):
         ExecutionPolicy(adv_lookback_sessions=0, max_adv_participation_rate=0.01)
     with pytest.raises(ValueError, match="configured together"):
         ExecutionPolicy(adv_lookback_sessions=20)
+    with pytest.raises(ValueError, match="live_order_timeout_seconds"):
+        ExecutionPolicy(live_order_timeout_seconds=0)
+    with pytest.raises(ValueError, match="live_order_timeout_seconds"):
+        ExecutionPolicy(live_order_timeout_seconds=True)
     intraday_adv = _config(
         execution=ExecutionPolicy(
             adv_lookback_sessions=20,
@@ -118,6 +126,7 @@ def test_run_config_rejects_ambiguous_scalar_types(override, message: str) -> No
         "max_bar_volume_participation_rate",
         "adv_lookback_sessions",
         "max_adv_participation_rate",
+        "live_order_timeout_seconds",
     ],
 )
 def test_execution_settings_are_rejected_from_strategy_params(

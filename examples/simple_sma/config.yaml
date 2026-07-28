@@ -15,6 +15,10 @@ strategy:
     # symbol registry, so each UTC date is one session. Both fields are needed:
     # adv_lookback_sessions: 20
     # max_adv_participation_rate: 0.01
+    # Optional local live safety timeout. After 120 wall-clock seconds, refresh
+    # the broker state, cancel any remainder, retain partial fills, and halt.
+    # This is not broker-native IOC/FOK/GTD; null leaves lifetime to the broker.
+    live_order_timeout_seconds: 120
   risk:
     # Rate/weight values are ratios, not percentages. Omit/null to disable.
     max_position_weight: 0.30

@@ -38,7 +38,7 @@ def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 5
+_STATE_SCHEMA_VERSION = 6
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -70,6 +70,7 @@ class TrackedOrder:
 
     request: OrderRequest
     placement_attempted: bool = False
+    placement_attempted_at: datetime | None = None
     order_id: str = ""
     status: OrderStatus = "submitted"
     filled_quantity: float = 0.0
@@ -85,6 +86,9 @@ class TrackedOrder:
         return {
             "request": request,
             "placement_attempted": self.placement_attempted,
+            "placement_attempted_at": (
+                self.placement_attempted_at.isoformat() if self.placement_attempted_at else None
+            ),
             "order_id": self.order_id,
             "status": self.status,
             "filled_quantity": self.filled_quantity,
@@ -99,9 +103,16 @@ class TrackedOrder:
     def from_dict(cls, raw: dict) -> TrackedOrder:
         request_raw = dict(raw["request"])
         request_raw["submitted_at"] = _to_utc(request_raw["submitted_at"])
+        placement_attempted = bool(raw["placement_attempted"])
+        placement_attempted_at = _to_utc(raw["placement_attempted_at"])
+        if placement_attempted and placement_attempted_at is None:
+            raise ValueError("placement-attempted order is missing placement_attempted_at")
+        if not placement_attempted and placement_attempted_at is not None:
+            raise ValueError("unattempted order cannot have placement_attempted_at")
         return cls(
             request=OrderRequest(**request_raw),
-            placement_attempted=bool(raw["placement_attempted"]),
+            placement_attempted=placement_attempted,
+            placement_attempted_at=placement_attempted_at,
             order_id=str(raw["order_id"] or ""),
             status=raw["status"],
             filled_quantity=float(raw["filled_quantity"]),

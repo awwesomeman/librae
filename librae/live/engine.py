@@ -159,6 +159,7 @@ class LiveTrader:
         self._interval_delta = interval_to_timedelta(self._timeframe)
         self._poll_seconds = config.poll_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._live_order_timeout_seconds = config.execution.live_order_timeout_seconds
 
         # --- Build per-symbol cost models and instrument routes ---
         if isinstance(cost_model, Mapping):
@@ -1078,8 +1079,6 @@ class LiveTrader:
         """Process completed market-data events without live catch-up orders."""
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
-            if self._active_orders or self._halted:
-                return
         if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
 
@@ -1098,6 +1097,12 @@ class LiveTrader:
                 logger.warning("Skipping stale live frame for %s at %s", symbol, latest_ts)
                 continue
             frames[symbol] = df
+
+        # Keep heartbeat, cache, and staleness monitoring alive while a broker
+        # order is resting. Strategy evaluation remains serialized behind the
+        # active order so a later bar cannot create a conflicting order queue.
+        if not self._executor.simulation and (self._active_orders or self._halted):
+            return
 
         pending_timestamps: set[datetime] = set()
         skipped_by_symbol: dict[str, int] = {}
@@ -1415,7 +1420,11 @@ class LiveTrader:
 
     def _advance_live_orders(self, *, submit_planned: bool = True) -> None:
         """Poll or submit the head order; dependent orders stay serialized."""
-        while self._active_orders and (not self._halted or self._has_active_risk_exit_orders()):
+        while self._active_orders and (
+            not self._halted
+            or self._has_active_risk_exit_orders()
+            or self._active_orders[0].status == "cancel_pending"
+        ):
             tracked = self._active_orders[0]
             request = tracked.request
             if not tracked.placement_attempted:
@@ -1424,7 +1433,11 @@ class LiveTrader:
                 # Persist placement-attempted before network I/O. A crash in
                 # the following call is recovered by client-order lookup and
                 # never blindly retried.
+                attempted_at = self._clock()
+                if attempted_at.tzinfo is None:
+                    raise ValueError("clock must return a timezone-aware datetime")
                 tracked.placement_attempted = True
+                tracked.placement_attempted_at = attempted_at.astimezone(UTC)
                 self._persist_state(tracked)
                 report = self._executor.submit_order(request)
                 if report is None:
@@ -1452,7 +1465,18 @@ class LiveTrader:
                     )
                     return
 
+            cancellation_was_pending = tracked.status == "cancel_pending"
             self._apply_order_report(tracked, report)
+            if (
+                cancellation_was_pending or report.status == "cancel_pending"
+            ) and report.status not in (
+                "filled",
+                "cancelled",
+                "rejected",
+            ):
+                tracked.status = "cancel_pending"
+                self._persist_state(tracked)
+                return
             if report.status in ("cancelled", "rejected"):
                 self._halt_live(
                     title=f"Order {report.status.title()}",
@@ -1463,8 +1487,72 @@ class LiveTrader:
                     ),
                 )
                 return
+            if report.status != "filled" and self._live_order_timed_out(tracked):
+                self._cancel_timed_out_order(tracked, report)
+                return
             if report.status != "filled":
                 return
+
+    def _live_order_timed_out(self, tracked: TrackedOrder) -> bool:
+        """Return whether a placement-attempted order exceeded its local timeout."""
+        timeout_seconds = self._live_order_timeout_seconds
+        if timeout_seconds is None:
+            return False
+        attempted_at = tracked.placement_attempted_at
+        if attempted_at is None:
+            raise RuntimeError("placement-attempted order is missing placement_attempted_at")
+        now = self._clock()
+        if now.tzinfo is None:
+            raise ValueError("clock must return a timezone-aware datetime")
+        return (now.astimezone(UTC) - attempted_at).total_seconds() >= timeout_seconds
+
+    def _cancel_timed_out_order(
+        self,
+        tracked: TrackedOrder,
+        latest_report: ExecutionReport,
+    ) -> None:
+        """Cancel one stale live order, preserving any cumulative broker fill."""
+        request = tracked.request
+        order_id = latest_report.order_id or tracked.order_id
+        if not order_id:
+            self._halt_live(
+                title="Order Timeout Unresolved",
+                message=(
+                    f"{request.symbol} client_order_id={request.client_order_id} "
+                    "exceeded its local timeout without a broker order id"
+                ),
+            )
+            return
+        try:
+            cancel_report = self._executor.cancel_order(request, order_id)
+            self._apply_order_report(tracked, cancel_report)
+        except Exception as exc:
+            self._halt_live(
+                title="Order Timeout Cancellation Failed",
+                message=(
+                    f"{request.symbol} order_id={order_id} could not be confirmed cancelled: {exc}"
+                ),
+            )
+            return
+
+        if cancel_report.status == "filled":
+            return
+        status = cancel_report.status
+        if status not in ("cancelled", "rejected"):
+            tracked.status = "cancel_pending"
+            self._persist_state(tracked)
+        self._halt_live(
+            title=(
+                "Order Timeout"
+                if status in ("cancelled", "rejected")
+                else "Order Timeout Cancellation Unresolved"
+            ),
+            message=(
+                f"{request.symbol} order_id={order_id} status={status} "
+                f"filled={cancel_report.filled_quantity:.4f}/"
+                f"{cancel_report.requested_quantity:.4f}"
+            ),
+        )
 
     def _apply_order_report(
         self,
@@ -1555,9 +1643,16 @@ class LiveTrader:
                         tracked.request.client_order_id,
                     )
                     continue
-                if report.status not in ("filled", "cancelled", "rejected"):
+                cancellation_was_pending = tracked.status == "cancel_pending"
+                if (
+                    report.status not in ("filled", "cancelled", "rejected", "cancel_pending")
+                    and not cancellation_was_pending
+                ):
                     report = self._executor.cancel_order(tracked.request, report.order_id)
                 self._apply_order_report(tracked, report)
+                if report.status not in ("filled", "cancelled", "rejected"):
+                    tracked.status = "cancel_pending"
+                    self._persist_state(tracked)
             except Exception:
                 logger.exception(
                     "Failed to cancel tracked order %s",

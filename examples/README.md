@@ -76,6 +76,8 @@ execution:
   max_bar_volume_participation_rate: 0.05
   adv_lookback_sessions: 20
   max_adv_participation_rate: 0.01
+  # Live-only local cancel-and-halt fallback; not broker IOC/FOK/GTD.
+  live_order_timeout_seconds: 120
 risk:
   max_position_weight: 0.30
   max_drawdown_rate: 0.20
@@ -119,7 +121,10 @@ uv run python -m examples.simple_sma.run \
 
 `mode=sim` uses simplified bar fills. Broker paper trading uses `mode=live`
 against a paper endpoint and requires an explicit broker route plus durable
-state.
+state. When `live_order_timeout_seconds` is set, its age starts at the durable
+wall-clock placement attempt. Expiry refreshes the broker state, cancels only
+the remaining quantity, records any additional partial fill, and halts for
+operator review. `null` leaves lifetime to the broker.
 
 ## Add infrastructure only when needed
 

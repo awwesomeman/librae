@@ -45,12 +45,19 @@ class ExecutionPolicy:
     optional session-level capacity limit. ADV uses exactly N completed
     sessions, excluding the execution session. Intraday data therefore needs
     a calendar_id for every configured symbol.
+
+    ``live_order_timeout_seconds`` is a local live-trading safety timeout.
+    After the first placement attempt, a non-terminal broker order older than
+    this wall-clock duration is canceled and the deployment halts for operator
+    review. It is not a broker time-in-force instruction. ``None`` leaves order
+    lifetime to the broker.
     """
 
     default_fill_price: str = "open"
     max_bar_volume_participation_rate: float | None = 0.1
     adv_lookback_sessions: int | None = None
     max_adv_participation_rate: float | None = None
+    live_order_timeout_seconds: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
@@ -78,6 +85,13 @@ class ExecutionPolicy:
         if (lookback is None) != (self.max_adv_participation_rate is None):
             raise ValueError(
                 "adv_lookback_sessions and max_adv_participation_rate must be configured together"
+            )
+        timeout = self.live_order_timeout_seconds
+        if timeout is not None and (
+            isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0
+        ):
+            raise ValueError(
+                f"live_order_timeout_seconds must be a positive integer or None, got {timeout}"
             )
 
 
@@ -306,6 +320,7 @@ class RunConfig:
             "max_bar_volume_participation_rate",
             "adv_lookback_sessions",
             "max_adv_participation_rate",
+            "live_order_timeout_seconds",
         }
         invalid_keys = sorted(legacy_execution_keys & set(self.params or {}))
         if invalid_keys:

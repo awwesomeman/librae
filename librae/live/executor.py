@@ -33,6 +33,7 @@ OrderStatus = Literal[
     "submitted",
     "accepted",
     "partial",
+    "cancel_pending",
     "filled",
     "cancelled",
     "rejected",
@@ -439,6 +440,8 @@ class LiveExecutor:
         status = str(raw_status or "").lower().replace("-", "_").replace(" ", "_")
         if any(token in status for token in ("reject", "fail", "error", "inactive")):
             return "rejected"
+        if status in ("pending_cancel", "pendingcancel"):
+            return "cancel_pending"
         if "cancel" in status or "expired" in status:
             return "cancelled"
         if status in ("filled", "closed", "complete", "completed"):
@@ -458,8 +461,6 @@ class LiveExecutor:
             "pending",
             "pending_submit",
             "pendingsubmit",
-            "pending_cancel",
-            "pendingcancel",
             "api_pending",
             "apipending",
             "presubmitted",
