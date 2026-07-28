@@ -68,27 +68,29 @@ read the [engine usage contract](../architecture.md#usage).
 ## User-controlled trading settings
 
 The examples keep strategy logic, matching, risk, and reporting in separate
-namespaces. A complete configuration may look like:
+namespaces. The user-controlled trading and runtime settings are grouped as
+follows:
 
 ```yaml
-execution:
-  default_fill_price: open
-  max_bar_volume_participation_rate: 0.05
-  adv_lookback_sessions: 20
-  max_adv_participation_rate: 0.01
-  # Live-only local cancel-and-halt fallback; not broker IOC/FOK/GTD.
-  live_order_timeout_seconds: 120
-risk:
-  max_position_weight: 0.30
-  max_drawdown_rate: 0.20
-  max_gross_exposure: 1.00
-  max_net_exposure: 1.00
-  max_order_notional: 50000
-  max_limit_price_deviation_rate: 0.10
-perf:
-  periods_per_year: 8760  # H1 24/7 returns
-params:
-  lookback: 20
+strategy:
+  execution:
+    default_fill_price: open
+    max_bar_volume_participation_rate: 0.05
+    adv_lookback_sessions: 20
+    max_adv_participation_rate: 0.01
+    # Live-only local cancel-and-halt fallback; not broker IOC/FOK/GTD.
+    live_order_timeout_seconds: 120
+  risk:
+    max_position_weight: 0.30
+    max_drawdown_rate: 0.20
+    max_gross_exposure: 1.00
+    max_net_exposure: 1.00
+    max_order_notional: 50000
+    max_limit_price_deviation_rate: 0.10
+  perf:
+    periods_per_year: 8760  # H1 24/7 returns
+  params:
+    lookback: 20
 # Operational runtime settings (top-level, not strategy params):
 poll_seconds: 5
 reconciliation_interval_seconds: 300
@@ -148,18 +150,12 @@ return MultiLegOrder(
 )
 ```
 
-The contract is not limited to arbitrage: it also covers rolls, inventory
-hedges, and ordered cross-instrument exposure transitions. Backtest/sim is a
-synchronous OHLCV approximation. Live records the signed quantity held in
-every leg before the group, submits one leg at a time, and restores that
-baseline if a leg fails or the completion deadline expires. Trading remains
-halted for review. This is best-effort recovery, not an atomic combo order.
-
-`max_completion_seconds` starts at the first confirmed fill and limits how long
-the group may remain incomplete. Every leg needs a unique symbol and an
-explicit quantity. Normal venue normalization and broker validation still
-apply to recovery orders; current-bar and lagged-ADV caps do not because
-recovery is based on broker-confirmed exposure rather than a historical bar.
+The contract also covers rolls, inventory hedges, and ordered exposure
+transitions. Backtest/sim uses a synchronous OHLCV approximation; live is
+serial best-effort execution with a completion deadline and compensating
+orders, not an atomic combo order. The exact validation, recovery, halt, and
+venue-native combo boundaries are defined in the
+[multi-leg engine contract](../architecture.md#related-multi-leg-order-contract).
 
 Cross-account legs use explicit accounts and currencies:
 

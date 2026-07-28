@@ -1,9 +1,8 @@
 """Trade chart rendering — lightweight-charts overlay of order_events on OHLCV.
 
 Pure rendering only: consumes already-computed BacktestOutput.order_events
-and never recomputes fills/PnL, so the chart can never drift from
-compute_all()'s numbers (the sole source of truth, also written to
-strategy_performance/trade_events for any downstream dashboard).
+and never recomputes fills or PnL. Aggregate performance remains owned by
+librae.core.metrics.
 """
 
 from __future__ import annotations
@@ -166,9 +165,8 @@ def _df_to_order_events(df: pd.DataFrame) -> list[OrderEventRecord]:
 def plot_trades_by_run_id(run_id: str, *, symbol: str | None = None, block: bool = True):
     """Open a persisted run's trade chart straight from TimescaleDB.
 
-    No backtest re-run needed: reads the exact order_events/OHLCV that
-    build_output()/db.timescale_writer already wrote for this run_id, so the
-    chart can't drift from what's in strategy_performance/any downstream dashboard.
+    No backtest re-run needed: reads the persisted trade_events/OHLCV for this
+    run_id and sends them through the same renderer as an in-memory run.
 
     symbol defaults to the first order-event symbol, then the first OHLCV symbol.
     """

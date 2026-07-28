@@ -82,14 +82,13 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Workflow | Current boundary |
 |---|---|
 | Single-asset research | Supported with next-observed-bar simulated fills |
-| Cross-sectional selection and allocation | Configured candidate universe with point-in-time eligibility; optimizer remains strategy-owned |
+| Cross-sectional selection and allocation | Predeclared candidate universe with point-in-time eligibility; optimizer remains strategy-owned; runtime symbol/subscription changes are not managed |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
 | Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
 | Related multi-leg execution | Explicitly sized `MultiLegOrder`; synchronous research approximation and serial live execution with a completion deadline and pre-group exposure restoration; not atomic venue execution |
 | Segregated execution accounts | Per-account cash, equity, PnL, risk metrics, persistence, and reconciliation; same-currency accounts remain separate |
 | Cross-account reporting | No implicit total; FX conversion, transfers, settlement, and cross-account netting are not modeled |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
-| Dynamic universes | Membership/eligibility data remains upstream; runtime subscription lifecycle is not yet engine-managed |
 | Short borrow / funding | User-supplied research costs only; no engine locate or borrow ledger |
 
 See the [full capability matrix](architecture.md#use-case-capability-matrix)

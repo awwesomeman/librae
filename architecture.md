@@ -235,21 +235,26 @@ weight, and drift for every configured symbol. Both are opt-in because
 retaining O(events × configured symbols) facts can be expensive for a large
 universe.
 
-The configured symbol set is static; point-in-time availability is dynamic.
-The engine advances over the union of actually observed completed bars.
-`ctx.symbols` is the configured universe, while `ctx.available_symbols` and
-`ctx.bars` contain only real current bars. This supports late starts, early
-ends, suspensions, and missing observations without guessing why data is
-absent. A last-known close is a valuation mark only: it cannot trigger an
-execution, stop, signal, or holding-age increment.
+#### Static candidate universe and point-in-time selection
 
-For stock selection, configure a survivorship-bias-free candidate superset and
-provide point-in-time membership or eligibility as an input feature. The
-strategy filters the current eligible observations before ranking or
-optimization and returns a complete `PortfolioTargets`; an omitted holding is
-therefore targeted to zero. Librae does not synthesize membership history or
-silently add/remove subscriptions. A runtime universe/subscription lifecycle
-is a missing engine capability, not behavior that strategy code should emulate.
+Backtest, sim, and live runs use a predeclared candidate universe. For stock
+selection, configure a survivorship-bias-free candidate superset and provide
+point-in-time membership or eligibility as input data. The strategy filters
+the currently eligible observations before ranking or optimization and returns
+a complete `PortfolioTargets`; an omitted holding is therefore targeted to
+zero.
+
+`ctx.symbols` is the configured universe. `ctx.available_symbols` and
+`ctx.bars` contain only symbols with a real current bar, so a temporary missing
+observation does not become a universe change. A last-known close is a
+valuation mark only and cannot trigger execution, stops, signals, or
+holding-age increments.
+
+Runtime discovery of an undeclared instrument is not supported: Librae does
+not add or remove symbols, create or cancel market-data subscriptions, or
+warm up a newly discovered symbol while a process is running. Those lifecycle
+operations require reconfiguration and restart; they are not behavior that
+strategy code should emulate.
 
 Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar.
 `PortfolioTargets` is intentionally synchronous: the basket waits for current
@@ -263,6 +268,15 @@ execution.
 exchange-native combo order exists. It covers spreads, rolls, inventory
 hedges, and ordered cross-instrument exposure transitions without encoding
 strategy-specific arbitrage types:
+
+Atomic multi-leg execution means the venue accepts the group as one
+all-or-none transaction: every leg fills or none does. Separate API requests,
+whether serial or concurrent, do not provide that guarantee; independent
+venues have no shared transaction or rollback mechanism. Librae therefore
+supports cross-venue legs as best-effort execution with compensating orders,
+not as atomic execution. If one venue or broker exposes a native combo order,
+that is an adapter-specific capability and must not be inferred from the
+general `MultiLegOrder` contract.
 
 ```python
 from librae import MultiLegOrder, OrderIntent
@@ -390,7 +404,11 @@ requirements.
 
 #### Local trade-chart viewer
 
-Use after `pip install -e ".[viz]"`. Purely renders the `order_events` already computed by `build_output()` — it doesn't re-simulate or recompute, so the numbers are guaranteed to match the `strategy_performance` table (the SSOT, see "Multi-asset / stock-picking strategies" above).
+Use after `pip install -e ".[viz]"`. It renders the OHLCV and
+`order_events` already present in `BacktestOutput`; it does not re-simulate
+fills or recompute PnL. The plotted markers therefore reflect those event
+records directly, while aggregate metrics remain owned by
+`librae/core/metrics.py`.
 
 ```python
 from librae.backtest.charts import plot_trades, plot_trades_by_run_id
@@ -405,7 +423,9 @@ plot_trades_by_run_id(
 )  # or: skip rerunning the backtest, read a persisted run straight from the DB
 ```
 
-`plot_trades_by_run_id` reads via `db.timescale_reader.load_trade_events`/`load_ohlcv` — the same source as any other downstream tool querying the `trade_events`/`ohlcv` tables, so it can never drift.
+`plot_trades_by_run_id` reads the persisted `trade_events` and `ohlcv` rows
+through `db.timescale_reader`. It uses the same rendering path as the
+in-memory form and does not rerun the strategy.
 
 #### Trade outcome analysis
 
@@ -652,7 +672,7 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
 | Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
 | Cross-account arbitrage | Separate account curves/PnL; synchronous leg approximation | Separate account curves/PnL | Best-effort serial multi-leg lifecycle; no cross-account funding or atomicity |
-| Dynamic stock universe | Upstream point-in-time membership/eligibility | Candidate set is static | Runtime subscription lifecycle is not engine-managed |
+| Dynamic stock universe | Point-in-time selection within a predeclared candidate superset | Same predeclared universe | No runtime symbol add/remove, subscription changes, or automatic warm-up |
 | Short borrow/funding | User-supplied costs only; no locate ledger | Not modeled | Broker/account responsibility; no engine borrow ledger |
 
 Daily strategy frequency reduces throughput requirements but not timestamp,
@@ -666,8 +686,8 @@ events.
 |---|---|---|
 | Alpha, covariance, objective, optimizer, and rebalance schedule | Strategy | These define strategy semantics. The engine does not hide a default optimizer. |
 | Target validation, cash scaling, reduce-before-add ordering, broker outcomes, and diagnostics | Engine | Execution correctness is shared across strategies and is not delegated to user code. |
-| Point-in-time membership, eligibility, corporate actions, and adjusted inputs | Upstream data pipeline | The engine validates supplied observations but does not invent historical facts. |
-| Runtime symbol discovery and market-data subscription changes | Not implemented | This requires an explicit engine lifecycle before live dynamic universes are supported. |
+| Point-in-time membership, eligibility, corporate actions, and adjusted inputs | Upstream data pipeline | The engine validates supplied observations but does not invent historical facts; see [Static candidate universe and point-in-time selection](#static-candidate-universe-and-point-in-time-selection). |
+| Runtime symbol discovery and market-data subscription changes | Not implemented | Reconfigure and restart when the predeclared candidate universe changes. |
 | Best-effort multi-leg lifecycle | Engine | `MultiLegOrder` owns declared ordering and completion deadline; the live engine durably captures and restores the pre-group signed exposure baseline. |
 | Atomic multi-leg execution | Not implemented | Atomicity is a venue/broker capability and is never inferred from sequential orders; cross-venue atomicity generally cannot be guaranteed. |
 
