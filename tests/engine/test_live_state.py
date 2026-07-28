@@ -22,6 +22,7 @@ def _position() -> PositionState:
         entry_slippage=0.0,
         entry_tax=0.0,
         total_entry_cost=200.0,
+        pending_market_exit_reason="stop_loss",
     )
 
 
@@ -97,7 +98,7 @@ def test_rebalance_intent_round_trip_and_memory_store_isolation():
     assert second.pending_intent == state.pending_intent
 
 
-def test_runtime_state_rejects_pre_watermark_schema():
+def test_runtime_state_rejects_v2_schema():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
@@ -107,13 +108,13 @@ def test_runtime_state_rejects_pre_watermark_schema():
         equity_peak=1_000.0,
         prev_equity=1_000.0,
     ).to_dict()
-    raw["schema_version"] = 1
+    raw["schema_version"] = 2
 
     with pytest.raises(ValueError, match="unsupported live runtime-state schema"):
         LiveRuntimeState.from_dict(raw)
 
 
-def test_runtime_state_rejects_missing_v2_fact_instead_of_defaulting():
+def test_runtime_state_rejects_missing_v3_fact_instead_of_defaulting():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
