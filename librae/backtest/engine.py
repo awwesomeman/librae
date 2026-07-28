@@ -67,6 +67,7 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
+from librae.core.trading_calendar import session_labels, validate_calendar_id
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,15 @@ class Backtest:
             else data.index.get_level_values(0).unique().tolist()
         )
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
+        from librae.config.symbols import load_symbol_registry
+
+        registry = load_symbol_registry()
+        instrument_overrides = config.instrument_overrides if config is not None else {}
+        self._calendar_ids = {
+            symbol: (instrument_overrides or {}).get(symbol, {}).get("calendar_id")
+            or (registry[symbol].calendar_id if symbol in registry else None)
+            for symbol in self._symbols
+        }
 
         # Resolve from config or explicit args
         if config is not None:
@@ -352,10 +362,16 @@ class Backtest:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
         self._timeframe = infer_timeframe(pd.DatetimeIndex(self._timeline[:20]))
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
-            raise ValueError(
-                "adv_lookback_sessions is supported only for D1 data; "
-                f"inferred timeframe={self._timeframe!r}"
+            missing_calendars = sorted(
+                symbol for symbol, calendar_id in self._calendar_ids.items() if calendar_id is None
             )
+            if missing_calendars:
+                raise ValueError(
+                    "intraday ADV requires calendar_id for every symbol; missing "
+                    f"{missing_calendars}"
+                )
+            for calendar_id in self._calendar_ids.values():
+                validate_calendar_id(calendar_id)
         self._run_id = generate_run_id(self._strategy_name, self._symbols[0], self._timeframe)
         logger.info("Backtest started: run_id=%s", self._run_id)
 
@@ -363,6 +379,7 @@ class Backtest:
         # which is the dominant cost in the hot loop.
         all_bars = self._precompute_bars()
         all_lagged_adv = self._precompute_lagged_adv()
+        all_session_labels = self._precompute_session_labels()
 
         cash = self._initial_balance
         positions: dict[str, PositionState] = {}
@@ -382,11 +399,18 @@ class Backtest:
         equity_peak = self._initial_balance
         last_equity = self._initial_balance
         halted = False
+        adv_session_by_symbol: dict[str, object] = {}
+        adv_used_quantity_by_symbol: dict[str, float] = {}
 
         for ts in self._timeline:
             event_start_index = len(all_events)
             bars = all_bars[ts]
             lagged_adv = all_lagged_adv.get(ts, {})
+            current_session_labels = all_session_labels.get(ts, {})
+            for symbol, label in current_session_labels.items():
+                if adv_session_by_symbol.get(symbol) != label:
+                    adv_session_by_symbol[symbol] = label
+                    adv_used_quantity_by_symbol[symbol] = 0.0
 
             def get_lagged_adv(
                 symbol: str,
@@ -426,6 +450,7 @@ class Backtest:
                     max_volume_participation_rate=self._max_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=get_lagged_adv,
+                    used_adv_quantity_by_symbol=adv_used_quantity_by_symbol,
                 )
                 cash += step_result.cash_delta
             else:
@@ -442,6 +467,7 @@ class Backtest:
                     max_volume_participation_rate=self._max_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=get_lagged_adv,
+                    used_adv_quantity_by_symbol=adv_used_quantity_by_symbol,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                 )
@@ -561,6 +587,7 @@ class Backtest:
                 used_quantity_by_symbol=self._filled_quantities(
                     event for event in all_events if event.ts == last_ts
                 ),
+                used_adv_quantity_by_symbol=adv_used_quantity_by_symbol,
             )
             if positions:
                 raise ValueError(
@@ -897,7 +924,7 @@ class Backtest:
         return result
 
     def _precompute_lagged_adv(self) -> dict[pd.Timestamp, dict[str, float]]:
-        """Precompute point-in-time ADV for configured D1 execution limits."""
+        """Precompute point-in-time ADV from completed trading sessions."""
         lookback = self._adv_lookback_sessions
         if lookback is None:
             return {}
@@ -905,9 +932,38 @@ class Backtest:
         result: dict[pd.Timestamp, dict[str, float]] = {}
         for symbol, symbol_data in self._data.groupby(level="symbol", sort=False):
             volume = symbol_data["volume"].droplevel("symbol")
-            lagged = calculate_lagged_adv(volume, lookback)
+            labels = None
+            if self._timeframe != "D1":
+                calendar_id = self._calendar_ids[symbol]
+                if calendar_id is None:  # guarded at run() boundary
+                    raise RuntimeError(f"missing calendar_id for {symbol}")
+                labels = session_labels(pd.DatetimeIndex(volume.index), calendar_id)
+            lagged = calculate_lagged_adv(
+                volume,
+                lookback,
+                session_labels=labels,
+            )
             for ts, value in lagged.dropna().items():
                 result.setdefault(ts, {})[symbol] = float(value)
+        return result
+
+    def _precompute_session_labels(self) -> dict[pd.Timestamp, dict[str, object]]:
+        """Map every bar to its instrument session for cumulative ADV usage."""
+        if self._adv_lookback_sessions is None:
+            return {}
+
+        result: dict[pd.Timestamp, dict[str, object]] = {}
+        for symbol, symbol_data in self._data.groupby(level="symbol", sort=False):
+            timestamps = pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
+            if self._timeframe == "D1":
+                labels: Iterable[object] = timestamps
+            else:
+                calendar_id = self._calendar_ids[symbol]
+                if calendar_id is None:  # guarded at run() boundary
+                    raise RuntimeError(f"missing calendar_id for {symbol}")
+                labels = session_labels(timestamps, calendar_id)
+            for timestamp, label in zip(timestamps, labels, strict=True):
+                result.setdefault(timestamp, {})[symbol] = label
         return result
 
     @staticmethod

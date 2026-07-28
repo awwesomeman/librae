@@ -50,6 +50,7 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
+from librae.core.trading_calendar import session_label, session_labels, validate_calendar_id
 
 from .executor import ExecutionReport, LiveExecutor, OrderRequest
 from .state import LiveRuntimeState, LiveStateStore, TrackedOrder
@@ -176,6 +177,19 @@ class LiveTrader:
             )
             for symbol in self._symbols
         }
+        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
+            missing_calendars = sorted(
+                symbol
+                for symbol, instrument in self._instruments.items()
+                if instrument.calendar_id is None
+            )
+            if missing_calendars:
+                raise ValueError(
+                    "intraday ADV requires calendar_id for every symbol; missing "
+                    f"{missing_calendars}"
+                )
+            for instrument in self._instruments.values():
+                validate_calendar_id(instrument.calendar_id)
         currencies = {instrument.currency for instrument in self._instruments.values()}
         if len(currencies) != 1:
             raise ValueError(
@@ -229,6 +243,18 @@ class LiveTrader:
                                 security_type=_instrument.security_type,
                                 exchange=_instrument.exchange,
                                 currency=_instrument.currency,
+                                drop_incomplete=drop_incomplete,
+                            )
+                        )
+                    )
+                elif instrument.data_adapter == "shioaji":
+                    self._fetchers[symbol] = (
+                        lambda _symbol, tf, limit, *, drop_incomplete=False, _adapter=instance, _instrument=instrument: (
+                            _adapter.fetch_ohlcv(
+                                _instrument.venue_symbol,
+                                tf,
+                                limit=limit,
+                                calendar_id=_instrument.calendar_id,
                                 drop_incomplete=drop_incomplete,
                             )
                         )
@@ -352,6 +378,8 @@ class LiveTrader:
         )
         self._period_index: int = 0
         self._status_period_count: int = 0
+        self._adv_session_labels: dict[str, str] = {}
+        self._adv_filled_quantities: dict[str, float] = {}
         self._restored_state = False
         if self._state_store is not None:
             restored = self._state_store.load(self._state_key)
@@ -421,6 +449,8 @@ class LiveTrader:
             period_index=self._period_index,
             status_period_count=self._status_period_count,
             halted=self._halted,
+            adv_session_labels=dict(self._adv_session_labels),
+            adv_filled_quantities=dict(self._adv_filled_quantities),
         )
 
     def _restore_state(self, state: LiveRuntimeState) -> None:
@@ -443,6 +473,8 @@ class LiveTrader:
         self._period_index = state.period_index
         self._status_period_count = state.status_period_count
         self._halted = state.halted
+        self._adv_session_labels = state.adv_session_labels
+        self._adv_filled_quantities = state.adv_filled_quantities
         self._restored_state = True
         logger.info(
             "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d halted=%s",
@@ -1203,6 +1235,7 @@ class LiveTrader:
         adv_limit = self._max_adv_participation_rate if apply_volume_limit else None
         staged_positions = deepcopy(self._positions)
         planned_quantity_by_symbol: dict[str, float] = {}
+        planned_adv_quantity_by_symbol = dict(self._adv_filled_quantities)
         lagged_adv = lagged_adv_by_symbol or {}
 
         if isinstance(intent, PortfolioTargets):
@@ -1227,6 +1260,7 @@ class LiveTrader:
                 get_volume=get_volume,
                 get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                 used_quantity_by_symbol=planned_quantity_by_symbol,
+                used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
             requests = []
             for index, event in enumerate(result.events):
@@ -1270,6 +1304,7 @@ class LiveTrader:
                 get_volume=get_volume,
                 get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                 used_quantity_by_symbol=planned_quantity_by_symbol,
+                used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
             planning_cash += result.cash_delta
             sequence_offset = len(requests)
@@ -1425,6 +1460,7 @@ class LiveTrader:
                 cost_model=self._get_cost_model(report.symbol),
                 reason=request.reason,
             )
+            self._record_adv_fill(report.symbol, delta_quantity, report.executed_at)
 
         tracked.order_id = report.order_id or tracked.order_id
         tracked.status = report.status
@@ -1475,6 +1511,31 @@ class LiveTrader:
         """Process one symbol through the portfolio-cycle path."""
         self._process_cycle({symbol: raw_df}, ts)
 
+    def _reset_adv_session(self, symbol: str, ts: datetime) -> None:
+        """Reset one symbol's cumulative ADV usage when its session changes."""
+        if self._adv_lookback_sessions is None:
+            return
+        if self._interval_delta.days >= 1:
+            label = pd.Timestamp(ts).date().isoformat()
+        else:
+            calendar_id = self._instruments[symbol].calendar_id
+            if calendar_id is None:  # guarded during construction
+                raise RuntimeError(f"missing calendar_id for {symbol}")
+            label = session_label(ts, calendar_id).isoformat()
+        if self._adv_session_labels.get(symbol) != label:
+            self._adv_session_labels[symbol] = label
+            self._adv_filled_quantities[symbol] = 0.0
+
+    def _record_adv_fill(self, symbol: str, quantity: float, executed_at: datetime) -> None:
+        """Accumulate confirmed broker fills against the active session budget."""
+        if self._adv_lookback_sessions is None:
+            return
+        if self._interval_delta.days < 1 or symbol not in self._adv_session_labels:
+            self._reset_adv_session(symbol, executed_at)
+        self._adv_filled_quantities[symbol] = (
+            self._adv_filled_quantities.get(symbol, 0.0) + quantity
+        )
+
     def _process_cycle(
         self,
         raw_frames: dict[str, pd.DataFrame],
@@ -1503,10 +1564,21 @@ class LiveTrader:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
             raw_bars[symbol] = raw_bar
             self._last_prices[symbol] = close
+            self._reset_adv_session(symbol, ts)
             if self._adv_lookback_sessions is not None:
+                calendar_id = self._instruments[symbol].calendar_id
+                labels = None
+                if self._interval_delta.days < 1:
+                    if calendar_id is None:  # guarded during construction
+                        raise RuntimeError(f"missing calendar_id for {symbol}")
+                    labels = session_labels(
+                        pd.DatetimeIndex(history.index),
+                        calendar_id,
+                    )
                 lagged_adv = calculate_lagged_adv(
                     history["volume"],
                     self._adv_lookback_sessions,
+                    session_labels=labels,
                 ).iloc[-1]
                 if not pd.isna(lagged_adv):
                     lagged_adv_by_symbol[symbol] = float(lagged_adv)
@@ -1535,6 +1607,7 @@ class LiveTrader:
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_quantity_by_symbol=cycle_used_quantity_by_symbol,
+                    used_adv_quantity_by_symbol=self._adv_filled_quantities,
                 )
                 staged_cash = self._cash + step_result.cash_delta
             else:
@@ -1551,6 +1624,7 @@ class LiveTrader:
                     max_volume_participation_rate=self._max_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
+                    used_adv_quantity_by_symbol=self._adv_filled_quantities,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                 )

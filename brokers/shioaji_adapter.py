@@ -24,6 +24,10 @@ from datetime import UTC, datetime
 from numbers import Real
 
 import pandas as pd
+from librae.core.trading_calendar import (
+    TAIFEX_INDEX_CALENDAR,
+    resample_session_ohlcv,
+)
 
 from .base import (
     AdapterInfo,
@@ -34,7 +38,7 @@ from .base import (
     passive_price,
     validate_order_signal,
 )
-from .taipei_time import resample_taifex_ohlcv, shioaji_ts_ns_to_epoch
+from .shioaji_time import shioaji_ts_ns_to_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -143,17 +147,18 @@ class ShioajiAdapter:
         end: datetime | str | None = None,
         limit: int = 200,
         drop_incomplete: bool = False,
+        calendar_id: str | None = None,
     ) -> pd.DataFrame:
         """Fetch OHLCV via Shioaji kbars API.
 
         Shioaji kbars always returns 1-min bars. When *timeframe* is coarser,
-        the result is resampled on TAIFEX session/trading-day boundaries
-        (``taipei_time.resample_taifex_ohlcv``) — not a plain UTC-epoch grid,
-        which would mislabel bars around session opens/closes.
+        the result is resampled on the instrument's calendar boundaries.
+        Futures default to ``XTAIFEX`` and stocks to ``XTAI``; callers must
+        override ``calendar_id`` for products with a different session.
 
         Shioaji's raw kbar ``ts`` encodes Taipei wall-clock time as if it
         were a UTC epoch; this is corrected to a true UTC epoch before
-        returning (``taipei_time.shioaji_ts_ns_to_epoch``).
+        returning (``shioaji_time.shioaji_ts_ns_to_epoch``).
 
         Args:
             symbol: Contract code (e.g. ``"TXFR1"``, ``"2330"``).
@@ -164,11 +169,15 @@ class ShioajiAdapter:
                 If omitted, fetches the most recent *limit* bars.
             limit: Max bars (used only when start/end are omitted).
             drop_incomplete: Drop the current still-forming candle.
+            calendar_id: Trading-calendar identifier used for resampling.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
-        where ``ts`` is a true UTC-aware datetime.
+        where ``ts`` is the true UTC-aware bar-start datetime.
         """
         contract = self._resolve_contract(symbol)
+        resolved_calendar = calendar_id or (
+            TAIFEX_INDEX_CALENDAR if getattr(contract, "security_type", None) == "FUT" else "XTAI"
+        )
 
         kbar_kwargs: dict = {}
         if start:
@@ -194,10 +203,18 @@ class ShioajiAdapter:
             from librae.core.utils import interval_to_timedelta
 
             target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
-            df = resample_taifex_ohlcv(df.set_index("ts"), target_seconds).reset_index()
+            df = resample_session_ohlcv(
+                df.set_index("ts"),
+                target_seconds,
+                resolved_calendar,
+            ).reset_index()
 
         if drop_incomplete:
-            df = drop_incomplete_ohlcv(df, timeframe)
+            df = drop_incomplete_ohlcv(
+                df,
+                timeframe,
+                calendar_id=resolved_calendar,
+            )
         if not start and not end and len(df) > limit:
             df = df.tail(limit).reset_index(drop=True)
 

@@ -968,14 +968,15 @@ class TestLiveTrader:
         with pytest.raises(ValueError, match="broker is not configured"):
             self._make_runner(config=cfg)
 
-    def test_adv_limit_rejects_intraday_runtime(self):
-        with pytest.raises(ValueError, match="only for D1"):
-            _test_cfg(
-                execution=ExecutionPolicy(
-                    adv_lookback_sessions=20,
-                    max_adv_participation_rate=0.01,
-                )
+    def test_adv_limit_accepts_intraday_runtime_with_registered_calendar(self):
+        config = _test_cfg(
+            execution=ExecutionPolicy(
+                adv_lookback_sessions=20,
+                max_adv_participation_rate=0.01,
             )
+        )
+
+        assert config.execution.adv_lookback_sessions == 20
 
     def test_reconciles_open_broker_position_at_startup(self):
         """Regression test: a process restart previously always assumed
@@ -1557,6 +1558,7 @@ class TestLiveExecutionLifecycle:
         runner = self._make_trader(_HoldStrategy(), adapter)
         runner._max_volume_participation_rate = 0.1
         runner._max_adv_participation_rate = 0.02
+        runner._adv_filled_quantities = {"BTCUSDT": 30.0}
         ts = datetime(2025, 1, 1, tzinfo=UTC)
 
         requests = runner._plan_live_orders(
@@ -1574,7 +1576,7 @@ class TestLiveExecutionLifecycle:
             lagged_adv_by_symbol={"BTCUSDT": 2_000.0},
         )
 
-        assert [request.quantity for request in requests] == [40.0]
+        assert [request.quantity for request in requests] == [10.0]
 
     def test_repeated_partial_report_is_idempotent(self):
         adapter = _mock_order_adapter()
@@ -2151,8 +2153,8 @@ class TestShioajiLiveAutoWiring:
                 quantity=signal["quantity"],
                 average=104.25,
             )
-            mock_shioaji.fetch_ohlcv.side_effect = lambda symbol, tf, limit, drop_incomplete=False: (
-                fetcher()
+            mock_shioaji.fetch_ohlcv.side_effect = (
+                lambda symbol, tf, limit, drop_incomplete=False, calendar_id=None: fetcher()
             )
             mock_cls.return_value = mock_shioaji
 

@@ -21,8 +21,6 @@ from functools import cached_property
 from math import isfinite
 from typing import Any, Literal
 
-from librae.core.utils import to_canonical
-
 logger = logging.getLogger(__name__)
 
 RunMode = Literal["backtest", "sim", "live"]
@@ -43,8 +41,9 @@ class ExecutionPolicy:
     fill. The cap also applies to stops and forced exits.
 
     ``adv_lookback_sessions`` and ``max_adv_participation_rate`` form one
-    optional D1-only capacity limit. ADV uses exactly N completed daily bars,
-    excluding the execution bar. The pair must be configured together.
+    optional session-level capacity limit. ADV uses exactly N completed
+    sessions, excluding the execution session. Intraday data therefore needs
+    a calendar_id for every configured symbol.
     """
 
     default_fill_price: str = "open"
@@ -231,14 +230,6 @@ class RunConfig:
             raise TypeError("execution must be an ExecutionPolicy")
         if not isinstance(self.risk, RiskPolicy):
             raise TypeError("risk must be a RiskPolicy")
-        if (
-            self.execution.adv_lookback_sessions is not None
-            and to_canonical(self.timeframe) != "D1"
-        ):
-            raise ValueError(
-                "adv_lookback_sessions is supported only for D1; "
-                f"configured timeframe={self.timeframe!r}"
-            )
         object.__setattr__(self, "symbols", tuple(self.symbols))
         for field_name in (
             "params",

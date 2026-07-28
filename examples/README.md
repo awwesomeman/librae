@@ -74,16 +74,16 @@ not strategy parameters or risk limits:
 |---|---:|---|
 | `default_fill_price` | `open` | Backtest/sim uses this field on the next eligible bar when the decision has no `fill_price`. It does not invent a live fill; broker reports remain authoritative. |
 | `max_volume_participation_rate` | `0.10` | One symbol can consume at most 10% of that bar's volume across all fills. Low volume causes a partial fill, zero/missing volume rejects it, and the remainder of a target rebalance is reconsidered only when the strategy emits another target. Set `null` only to model unlimited liquidity. |
-| `adv_lookback_sessions` | `null` | Optional D1-only lookback. ADV is the mean volume of exactly N completed daily bars before the execution bar; the current bar is excluded. Configure together with `max_adv_participation_rate`. |
-| `max_adv_participation_rate` | `null` | Optional cumulative limit as a fraction of lagged ADV. Before the full lookback exists, fills are rejected instead of assuming liquidity. Configure together with `adv_lookback_sessions`. |
+| `adv_lookback_sessions` | `null` | Optional lookback. ADV is the mean total volume of exactly N completed trading sessions; the active session is excluded. Configure together with `max_adv_participation_rate`. |
+| `max_adv_participation_rate` | `null` | Optional cumulative per-session limit as a fraction of lagged ADV. Before the full lookback exists, fills are rejected instead of assuming liquidity. Configure together with `adv_lookback_sessions`. |
 
 Every example sets the fill field and current-bar cap explicitly. The D1
-portfolio examples also enable the ADV pair; the H1 example omits it. Changing
-modes therefore does not silently change their assumptions. Per-decision
-controls stay on the decision itself:
+portfolio examples enable the ADV pair; the H1 example shows how to enable it
+for a registered 24/7 symbol. Changing modes therefore does not silently
+change assumptions. Per-decision controls stay on the decision itself:
 
-For a daily strategy, the two liquidity budgets compose by taking the tighter
-remaining quantity:
+The current-bar and trading-session budgets have separate usage counters and
+compose by taking the tighter remaining quantity:
 
 ```yaml
 execution:
@@ -93,12 +93,36 @@ execution:
 ```
 
 ```text
-max fill = min(5% of execution-bar volume, 1% of lagged ADV) - quantity already filled
+max fill = min(
+  5% of bar volume - quantity filled in this bar,
+  1% of lagged ADV - quantity filled in this session
+)
 ```
 
-ADV is deliberately rejected for intraday timeframes. Librae does not yet own
-exchange session calendars or an intraday volume profile, so treating a UTC
-date as every market's trading session would overstate or misassign liquidity.
+For intraday data, each symbol must have a `calendar_id` in the built-in
+registry or `instrument_overrides`; missing calendars fail at startup. Use
+`24/7` for UTC-day crypto sessions, exchange calendar IDs such as `XNYS` or
+`XTAI`, and `XTAIFEX` / `XTAIFEX_1725` for the two supported Taiwan-futures
+night-session openings. The engine sums observed bars into session volume,
+uses only N completed sessions, and applies one cumulative ADV budget across
+all bars in the active session. It does not estimate an intraday volume
+profile; the existing bar-volume cap remains the short-horizon constraint.
+For sim/live, set `warmup_periods` high enough to retain N full sessions of
+intraday bars; otherwise ADV stays unavailable and fills fail closed.
+
+An unregistered intraday instrument declares its calendar with its other
+venue/data metadata:
+
+```yaml
+instrument_overrides:
+  ES:
+    data_adapter: ibkr
+    instrument_type: contract_monthly
+    currency: USD
+    security_type: FUT
+    exchange: CME
+    calendar_id: CMES
+```
 
 | Decision field | Scope and behavior |
 |---|---|

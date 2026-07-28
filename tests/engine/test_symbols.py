@@ -36,6 +36,8 @@ class TestLoadSymbolRegistry:
         assert btc.multiplier == 1.0  # auto-defaulted — not declared in the registry
         assert btc.tick_size is None  # not overridden — CostModel falls back to market_config.py
 
+        assert btc.calendar_id == "24/7"
+
     def test_txfr1_fields(self, registry):
         txf = registry["TXFR1"]
         assert txf.market == "tw_futures"
@@ -44,6 +46,8 @@ class TestLoadSymbolRegistry:
         assert txf.continuous_alias is True
         assert txf.multiplier == 200.0  # NOT market_config.py's tw_futures default (50, = MXF's)
         assert txf.tick_size == 1.0
+
+        assert txf.calendar_id == "XTAIFEX"
 
     def test_symbol_info_is_frozen(self, registry):
         with pytest.raises(AttributeError):
@@ -190,6 +194,7 @@ class TestResolveSymbol:
                         "instrument_type": "spot",
                         "security_type": "STK",
                         "exchange": "SMART",
+                        "calendar_id": "XNYS",
                     }
                 },
                 symbol_overrides={"AAPL": {"multiplier": 1.0}},
@@ -202,6 +207,20 @@ class TestResolveSymbol:
         assert info.data_adapter == "ibkr"
         assert info.security_type == "STK"
         assert info.exchange == "SMART"
+        assert info.calendar_id == "XNYS"
+
+    def test_instrument_override_replaces_registered_calendar(self):
+        info = resolve_symbol(
+            self._cfg(
+                symbols=["BTCUSDT"],
+                market="crypto",
+                data_source="binance_spot",
+                instrument_overrides={"BTCUSDT": {"calendar_id": "XNYS"}},
+            ),
+            "BTCUSDT",
+        )
+
+        assert info.calendar_id == "XNYS"
 
     def test_unknown_data_source_requires_adapter_route(self):
         with pytest.raises(ValueError, match="No data adapter route"):

@@ -210,7 +210,7 @@ class IBKRAdapter:
             drop_incomplete: Drop the current still-forming candle.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
-        where ``ts`` is a UTC-aware datetime.
+        where ``ts`` is the UTC-aware bar-start datetime.
 
         IBKR's own pacing/lookback limits per bar size (e.g. 1-sec bars only
         go back a few days) apply and aren't paginated around here; a

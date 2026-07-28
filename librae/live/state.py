@@ -38,7 +38,7 @@ def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 4
+_STATE_SCHEMA_VERSION = 5
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -128,6 +128,8 @@ class LiveRuntimeState:
     period_index: int = 0
     status_period_count: int = 0
     halted: bool = False
+    adv_session_labels: dict[str, str] = field(default_factory=dict)
+    adv_filled_quantities: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         positions: dict[str, dict] = {}
@@ -157,6 +159,8 @@ class LiveRuntimeState:
             "period_index": self.period_index,
             "status_period_count": self.status_period_count,
             "halted": self.halted,
+            "adv_session_labels": self.adv_session_labels,
+            "adv_filled_quantities": self.adv_filled_quantities,
         }
 
     @classmethod
@@ -187,6 +191,13 @@ class LiveRuntimeState:
             period_index=int(raw["period_index"]),
             status_period_count=int(raw["status_period_count"]),
             halted=bool(raw["halted"]),
+            adv_session_labels={
+                str(symbol): str(label) for symbol, label in raw["adv_session_labels"].items()
+            },
+            adv_filled_quantities={
+                str(symbol): float(quantity)
+                for symbol, quantity in raw["adv_filled_quantities"].items()
+            },
         )
 
 

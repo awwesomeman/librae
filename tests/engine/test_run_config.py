@@ -67,13 +67,13 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         ExecutionPolicy(adv_lookback_sessions=0, max_adv_participation_rate=0.01)
     with pytest.raises(ValueError, match="configured together"):
         ExecutionPolicy(adv_lookback_sessions=20)
-    with pytest.raises(ValueError, match="only for D1"):
-        _config(
-            execution=ExecutionPolicy(
-                adv_lookback_sessions=20,
-                max_adv_participation_rate=0.01,
-            )
+    intraday_adv = _config(
+        execution=ExecutionPolicy(
+            adv_lookback_sessions=20,
+            max_adv_participation_rate=0.01,
         )
+    )
+    assert intraday_adv.execution.adv_lookback_sessions == 20
     with pytest.raises(ValueError, match="bar field"):
         ExecutionPolicy(default_fill_price="")
     with pytest.raises(TypeError, match="ExecutionPolicy"):

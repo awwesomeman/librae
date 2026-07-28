@@ -582,6 +582,7 @@ def check_stop_targets(
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
+    used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Force-close any position whose stop-loss/take-profit is hit this bar.
 
@@ -611,7 +612,8 @@ def check_stop_targets(
             bar_volume,
             max_adv_participation_rate=max_adv_participation_rate,
             lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
-            used_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
+            used_bar_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
+            used_adv_quantity=(used_adv_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
         if max_volume_qty is not None:
@@ -631,6 +633,10 @@ def check_stop_targets(
         events.append(event)
         if used_quantity_by_symbol is not None:
             used_quantity_by_symbol[sym] = used_quantity_by_symbol.get(sym, 0.0) + close_quantity
+        if used_adv_quantity_by_symbol is not None:
+            used_adv_quantity_by_symbol[sym] = (
+                used_adv_quantity_by_symbol.get(sym, 0.0) + close_quantity
+            )
         cash_delta += proceeds
         if fully_closed:
             del positions[sym]
@@ -663,6 +669,7 @@ def liquidate_all(
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
+    used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Force-close every open position right now, at this bar's close price.
 
@@ -687,7 +694,8 @@ def liquidate_all(
             bar_volume,
             max_adv_participation_rate=max_adv_participation_rate,
             lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
-            used_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
+            used_bar_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
+            used_adv_quantity=(used_adv_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
         if max_volume_qty is not None:
@@ -708,6 +716,10 @@ def liquidate_all(
         events.append(event)
         if used_quantity_by_symbol is not None:
             used_quantity_by_symbol[sym] = used_quantity_by_symbol.get(sym, 0.0) + close_quantity
+        if used_adv_quantity_by_symbol is not None:
+            used_adv_quantity_by_symbol[sym] = (
+                used_adv_quantity_by_symbol.get(sym, 0.0) + close_quantity
+            )
         cash_delta += proceeds
         if fully_closed:
             del positions[sym]
@@ -962,10 +974,11 @@ def _volume_fill_limit(
     *,
     max_adv_participation_rate: float | None = None,
     lagged_adv: float | None = None,
-    used_quantity: float = 0.0,
+    used_bar_quantity: float = 0.0,
+    used_adv_quantity: float = 0.0,
 ) -> float | None:
     """Return the tightest configured liquidity budget for this event."""
-    budgets: list[float] = []
+    remaining_budgets: list[float] = []
     if max_volume_participation_rate is not None:
         if bar_volume is None:
             logger.warning(
@@ -973,7 +986,9 @@ def _volume_fill_limit(
                 symbol,
             )
             return 0.0
-        budgets.append(max_volume_participation_rate * bar_volume)
+        remaining_budgets.append(
+            max(max_volume_participation_rate * bar_volume - used_bar_quantity, 0.0)
+        )
 
     if max_adv_participation_rate is not None:
         if lagged_adv is None or not isfinite(lagged_adv) or lagged_adv < 0:
@@ -983,11 +998,13 @@ def _volume_fill_limit(
                 symbol,
             )
             return 0.0
-        budgets.append(max_adv_participation_rate * lagged_adv)
+        remaining_budgets.append(
+            max(max_adv_participation_rate * lagged_adv - used_adv_quantity, 0.0)
+        )
 
-    if not budgets:
+    if not remaining_budgets:
         return None
-    return max(min(budgets) - used_quantity, 0.0)
+    return min(remaining_budgets)
 
 
 def simulate_fill(
@@ -1108,6 +1125,7 @@ def execute_order_intents(
     get_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
+    used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Execute symbol-level intents: open, scale, partial/full close.
 
@@ -1122,12 +1140,14 @@ def execute_order_intents(
     this data event across entries, additions, reductions, and closes. Missing
     volume rejects the fill when this limit is enabled. get_volume also feeds
     CostModel.calc_slippage's participation-scaled impact component. The
-    optional ADV limit shares the same cumulative quantity counter.
+    optional ADV limit uses a separate counter that accumulates across every
+    bar in the current trading session.
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
     cash_delta = 0.0
     volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
+    adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
 
     for action in intents:
         sym = action.symbol or primary_symbol
@@ -1148,7 +1168,8 @@ def execute_order_intents(
                 bar_volume,
                 max_adv_participation_rate=max_adv_participation_rate,
                 lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
-                used_quantity=volume_consumed.get(sym, 0.0),
+                used_bar_quantity=volume_consumed.get(sym, 0.0),
+                used_adv_quantity=adv_consumed.get(sym, 0.0),
             )
 
             if sym not in positions:
@@ -1197,6 +1218,7 @@ def execute_order_intents(
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
+                    adv_consumed[sym] = adv_consumed.get(sym, 0.0) + fill.quantity
 
             elif positions[sym].side == desired_side:
                 # SCALE IN — must specify quantity. Same severity as the
@@ -1243,6 +1265,7 @@ def execute_order_intents(
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
+                    adv_consumed[sym] = adv_consumed.get(sym, 0.0) + fill.quantity
 
             else:
                 # OPPOSITE SIDE — reject
@@ -1267,7 +1290,8 @@ def execute_order_intents(
                 bar_volume,
                 max_adv_participation_rate=max_adv_participation_rate,
                 lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
-                used_quantity=volume_consumed.get(sym, 0.0),
+                used_bar_quantity=volume_consumed.get(sym, 0.0),
+                used_adv_quantity=adv_consumed.get(sym, 0.0),
             )
             requested_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
             if max_volume_qty is not None:
@@ -1287,6 +1311,7 @@ def execute_order_intents(
             trades.append(trade)
             events.append(event)
             volume_consumed[sym] = volume_consumed.get(sym, 0.0) + requested_qty
+            adv_consumed[sym] = adv_consumed.get(sym, 0.0) + requested_qty
             cash_delta += proceeds
 
             if fully_closed:
@@ -1376,6 +1401,7 @@ def execute_portfolio_targets(
     get_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
+    used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Resolve and execute a portfolio rebalance as one deterministic batch.
 
@@ -1385,6 +1411,7 @@ def execute_portfolio_targets(
     is scaled by the same factor instead of starving later symbols.
     """
     volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
+    adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
     target_gross_exposure = sum(abs(weight) for weight in targets.weights.values())
     target_net_exposure = abs(sum(targets.weights.values()))
     if max_gross_exposure is not None and target_gross_exposure > max_gross_exposure + EPSILON:
@@ -1507,6 +1534,7 @@ def execute_portfolio_targets(
         get_volume=get_volume,
         get_lagged_adv=get_lagged_adv,
         used_quantity_by_symbol=volume_consumed,
+        used_adv_quantity_by_symbol=adv_consumed,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
     scaled_additions = _scale_additions_to_cash(
@@ -1530,6 +1558,7 @@ def execute_portfolio_targets(
         get_volume=get_volume,
         get_lagged_adv=get_lagged_adv,
         used_quantity_by_symbol=volume_consumed,
+        used_adv_quantity_by_symbol=adv_consumed,
     )
     return ExecutionResult(
         trades=[*reduction_result.trades, *addition_result.trades],
@@ -1631,6 +1660,7 @@ def execute_pending_decision_and_stops(
     max_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
+    used_adv_quantity_by_symbol: dict[str, float] | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
 ) -> tuple[float, ExecutionResult]:
@@ -1676,6 +1706,7 @@ def execute_pending_decision_and_stops(
                 max_gross_exposure=max_gross_exposure,
                 max_net_exposure=max_net_exposure,
                 used_quantity_by_symbol=used_quantity_by_symbol,
+                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                 **common_kwargs,
             )
         else:
@@ -1686,6 +1717,7 @@ def execute_pending_decision_and_stops(
                 ts,
                 **common_kwargs,
                 used_quantity_by_symbol=used_quantity_by_symbol,
+                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             )
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)
@@ -1702,6 +1734,7 @@ def execute_pending_decision_and_stops(
             max_adv_participation_rate=max_adv_participation_rate,
             get_lagged_adv=get_lagged_adv,
             used_quantity_by_symbol=used_quantity_by_symbol,
+            used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
         )
         trades.extend(stop_result.trades)
         events.extend(stop_result.events)

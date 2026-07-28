@@ -67,6 +67,8 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         period_index=8,
         status_period_count=2,
         halted=True,
+        adv_session_labels={"BTC/USDT": "2025-01-02"},
+        adv_filled_quantities={"BTC/USDT": 0.5},
     )
 
     restored = LiveRuntimeState.from_dict(state.to_dict())
@@ -114,7 +116,7 @@ def test_runtime_state_rejects_v3_schema():
         LiveRuntimeState.from_dict(raw)
 
 
-def test_runtime_state_rejects_missing_v4_fact_instead_of_defaulting():
+def test_runtime_state_rejects_missing_v5_fact_instead_of_defaulting():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
@@ -124,7 +126,7 @@ def test_runtime_state_rejects_missing_v4_fact_instead_of_defaulting():
         equity_peak=1_000.0,
         prev_equity=1_000.0,
     ).to_dict()
-    del raw["last_prices"]
+    del raw["adv_filled_quantities"]
 
-    with pytest.raises(KeyError, match="last_prices"):
+    with pytest.raises(KeyError, match="adv_filled_quantities"):
         LiveRuntimeState.from_dict(raw)

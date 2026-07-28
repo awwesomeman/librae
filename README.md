@@ -13,7 +13,7 @@ strategy interface.
 - **One decision API** — express single-symbol orders with `OrderIntent` or complete
   portfolio allocations with `PortfolioTargets`.
 - **One execution-policy source** — fill-field, current-bar participation,
-  and optional D1 lagged-ADV assumptions live in typed
+  and optional session-level lagged-ADV assumptions live in typed
   `RunConfig.execution`, not free-form strategy parameters.
 - **Causal execution** — simulations own the execution delay; live positions
   change only from broker execution reports.
@@ -22,7 +22,7 @@ strategy interface.
 - **Composable boundaries** — the engine runs in memory; persistence, broker,
   notification, and operational integrations remain optional.
 - **Explicit boundaries** — no hidden optimizer, feature pipeline, exchange
-  calendar, FX ledger, or silent data repair.
+  calendar-driven event generation, FX ledger, or silent data repair.
 
 ## Choose your path
 

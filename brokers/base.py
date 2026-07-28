@@ -56,14 +56,26 @@ def find_position(
     return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
 
 
-def drop_incomplete_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """Drop a final candle whose interval has not closed yet."""
+def drop_incomplete_ohlcv(
+    df: pd.DataFrame,
+    timeframe: str,
+    *,
+    calendar_id: str | None = None,
+) -> pd.DataFrame:
+    """Drop a final bar-start candle whose interval has not closed yet."""
     if df.empty:
         return df
     from librae.core.utils import interval_to_timedelta
 
     last_ts = pd.Timestamp(df["ts"].iloc[-1]).to_pydatetime()
-    if last_ts > datetime.now(UTC) - interval_to_timedelta(timeframe):
+    interval = interval_to_timedelta(timeframe)
+    if calendar_id is None:
+        close_at = last_ts + interval
+    else:
+        from librae.core.trading_calendar import bar_close
+
+        close_at = bar_close(last_ts, int(interval.total_seconds()), calendar_id).to_pydatetime()
+    if close_at > datetime.now(UTC):
         return df.iloc[:-1]
     return df
 

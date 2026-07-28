@@ -31,7 +31,7 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
-- OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as a UTC-aware datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
+- OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as the UTC-aware bar-start datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
 - Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the six lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
 - `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias.
@@ -70,6 +70,11 @@ librae/
 notifications/                Telegram push notifications (TelegramAdapter + TelegramCredentials)
 orchestration/cli.py          shared CLI parser + config YAML merging (build_config/run_dispatch)
 ```
+
+`librae/core/trading_calendar.py` owns session labels and session-aligned
+resampling; `librae/core/liquidity.py` owns lagged completed-session ADV.
+Neither belongs in a broker adapter or strategy. `librae/config/symbols.py`
+owns each instrument's `calendar_id`.
 
 ### Dependency direction
 
@@ -241,11 +246,27 @@ without a real bar at the final
 timestamp, forced liquidation fails explicitly rather than fabricating a fill
 from its last mark.
 
-This is a **data-driven event clock**, not an exchange-calendar framework.
-Input timestamps must be timezone-aware and ETL should normalize them to one
-shared convention, normally UTC bar-end timestamps. The engine does not infer
-holidays, suspensions, vendor outages, early closes, or settlement days.
-Calendar-sensitive strategies must provide calendar-aware upstream data.
+This is a **data-driven event clock**, not a calendar-driven event generator.
+Input timestamps must be timezone-aware and every adapter/ETL path must use
+the same convention: `ts` is the UTC bar-start instant. A bar becomes eligible
+only after its interval close; fixed-duration bars use `ts + timeframe`, while
+calendar-aligned bars use the actual segment/session close. Adapters drop a
+final still-forming interval. Keeping the vendor's bar start avoids shifting
+shortened or session-ending bars to an invented duration.
+
+`SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
+trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
+unregistered instruments set `instrument_overrides[symbol]["calendar_id"]`.
+Standard IDs are resolved by `exchange_calendars`. `XTAIFEX` (15:00 night
+open) and `XTAIFEX_1725` (17:25 night open) are Librae extensions that label a
+Taiwan-futures night session with its following regular-session date.
+Shioaji's epoch correction remains adapter-specific and is not a calendar.
+
+Calendars own session labeling and resampling boundaries only. The engine
+still does not manufacture bars or infer suspensions, vendor outages,
+settlement days, or missing observations. The current TAIFEX implementation
+uses XTAI trading dates as its holiday-session source; users requiring a
+product-specific exceptional closure must provide already filtered data.
 Cross-market baskets must provide coherent event labels; broker submissions
 remain sequential reductions-then-additions, not exchange-level atomic.
 `PortfolioTargets` expresses a desired portfolio state, not a transactional
@@ -338,7 +359,7 @@ config = RunConfig(
     execution=ExecutionPolicy(
         default_fill_price="open",
         max_volume_participation_rate=0.1,
-        # Optional and D1-only; both fields must be set together.
+        # Optional session-level cap; both fields must be set together.
         adv_lookback_sessions=20,
         max_adv_participation_rate=0.01,
     ),
@@ -365,14 +386,17 @@ free-form strategy dictionary for portfolio controls.
   fills and retain the remaining position for a later observed bar. Once
   stop-market or liquidation has triggered, its remainder stays an active
   market exit. A terminal backtest that cannot finish exits raises.
-- `adv_lookback_sessions` + `max_adv_participation_rate`: optional D1-only
-  capacity budget. For execution bar T, ADV is the mean volume of exactly N
-  completed bars ending at T-1. It never contains T's eventual volume. The
-  available quantity is the tighter of the current-bar and ADV budgets, minus
-  quantity already filled for that symbol in the event. Missing warmup rejects
-  the fill. The pair is disabled by default and invalid on intraday data:
-  without an exchange session calendar and an intraday volume profile, applying
-  one full daily ADV budget to every intraday bar would duplicate liquidity.
+- `adv_lookback_sessions` + `max_adv_participation_rate`: optional session
+  capacity budget. ADV is the mean total volume of exactly N completed trading
+  sessions before the active session; it never contains active-session volume.
+  D1 treats each row as one session. Intraday aggregates observed bars using
+  the symbol's `calendar_id`, which is required at startup. Missing warmup
+  rejects fills. Bar-volume and ADV usage are tracked separately, so available
+  quantity is `min(bar cap - filled this bar, ADV cap - filled this session)`.
+  This avoids granting the full ADV budget again on every intraday bar. No
+  intraday volume-profile estimate is needed: the current-bar cap remains the
+  local liquidity constraint. Sim/live `warmup_periods` must retain enough
+  bars to cover N full sessions. The pair is disabled by default.
 - `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
 - `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
 - `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
@@ -479,7 +503,8 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 
 Daily strategy frequency reduces throughput requirements but not timestamp,
 data, order, and restart synchronization requirements. The observed-data event
-clock is the deliberate current boundary; exchange calendars remain upstream.
+clock remains the boundary: calendars label supplied bars but do not generate
+events.
 
 #### Ownership and capability boundaries
 
@@ -549,7 +574,7 @@ financial/execution fact.
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
-| `ExecutionPolicy` | run-wide default fill field, current-bar participation cap, and optional D1 lagged-ADV capacity cap |
+| `ExecutionPolicy` | run-wide default fill field, current-bar participation cap, and optional session-level lagged-ADV capacity cap |
 | `RiskPolicy` | optional engine-level position, exposure, and drawdown limits; every value is a ratio |
 
 #### Output layer

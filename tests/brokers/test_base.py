@@ -2,9 +2,31 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from unittest.mock import patch
+
+import pandas as pd
 import pytest
 
-from brokers.base import validate_order_signal
+from brokers.base import drop_incomplete_ohlcv, validate_order_signal
+
+
+def test_drop_incomplete_uses_calendar_session_close() -> None:
+    frame = pd.DataFrame({"ts": [pd.Timestamp("2026-04-10 07:00Z")]})
+    session_close = pd.Timestamp("2026-04-13 05:45Z")
+
+    with (
+        patch("librae.core.trading_calendar.bar_close", return_value=session_close),
+        patch("brokers.base.datetime") as mocked_datetime,
+    ):
+        mocked_datetime.now.return_value = datetime(2026, 4, 13, 4, 0, tzinfo=UTC)
+        result = drop_incomplete_ohlcv(
+            frame,
+            "1d",
+            calendar_id="XTAIFEX",
+        )
+
+    assert result.empty
 
 
 @pytest.mark.parametrize(

@@ -157,7 +157,7 @@ class CryptoAdapter:
                 indicators on partial data.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
-        where ``ts`` is a UTC-aware ``datetime``.
+        where ``ts`` is the UTC-aware bar-start ``datetime``.
         """
         raw = self._exchange.fetch_ohlcv(
             symbol,

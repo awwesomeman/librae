@@ -63,6 +63,9 @@ ALLOWED_INSTRUMENT_TYPES = frozenset(
 class SymbolInfo:
     """Registry entry for a single symbol.
 
+    ``calendar_id`` is the sole trading-session identity and is intentionally
+    separate from a display timezone or vendor timestamp correction.
+
     multiplier is always populated once loaded (never None) — either from
     an explicit value, or auto-resolved to 1.0 for 'spot' (see
     _build_registry). tick_size is optional; None means "use
@@ -83,6 +86,7 @@ class SymbolInfo:
     tick_size: float | None = None
     security_type: str | None = None
     exchange: str | None = None
+    calendar_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
@@ -98,6 +102,8 @@ class SymbolInfo:
             raise ValueError(f"{self.symbol!r} venue_symbol must be non-empty")
         if not self.currency:
             raise ValueError(f"{self.symbol!r} currency must be non-empty")
+        if self.calendar_id is not None and not self.calendar_id:
+            raise ValueError(f"{self.symbol!r} calendar_id must be non-empty or None")
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
@@ -140,6 +146,7 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
                 str(data["security_type"]) if data.get("security_type") is not None else None
             ),
             exchange=str(data["exchange"]) if data.get("exchange") is not None else None,
+            calendar_id=(str(data["calendar_id"]) if data.get("calendar_id") is not None else None),
         )
     return registry
 
@@ -155,6 +162,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "data_adapter": "crypto",
             "venue_symbol": "BTC/USDT",
             "currency": "USDT",
+            "calendar_id": "24/7",
             # multiplier/tick_size omitted on purpose — spot auto-defaults
             # to multiplier=1.0, tick_size falls back to market_config.py's
             # crypto default (0.01).
@@ -166,6 +174,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "data_adapter": "crypto",
             "venue_symbol": "BTC/USDT:USDT",
             "currency": "USDT",
+            "calendar_id": "24/7",
             "continuous_alias": True,
             # Binance USDT-M linear contract, contractSize=1 BTC per
             # contract (verified via ccxt binanceusdm market info) — 1
@@ -178,6 +187,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
             "currency": "TWD",
+            "calendar_id": "XTAIFEX",
             "continuous_alias": True,
             "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
             "tick_size": 1.0,  # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
@@ -188,6 +198,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
             "currency": "TWD",
+            "calendar_id": "XTAIFEX",
             "continuous_alias": True,
             "multiplier": 50.0,  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
             "tick_size": 1.0,
@@ -198,6 +209,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
             "currency": "TWD",
+            "calendar_id": "XTAIFEX",
             "continuous_alias": True,
             "multiplier": 10.0,  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
             "tick_size": 1.0,
@@ -209,6 +221,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "data_adapter": "ibkr",
             "currency": "USD",
             "security_type": "STK",
+            "calendar_id": "XNYS",
             # multiplier/tick_size omitted — spot auto-defaults to
             # multiplier=1.0, tick_size falls back to market_config.py's
             # us_equity default (0.01).
@@ -301,6 +314,7 @@ def resolve_symbol(
         )
     security_type = route.get("security_type") or (registered.security_type if registered else None)
     exchange = route.get("exchange") or (registered.exchange if registered else None)
+    calendar_id = route.get("calendar_id") or (registered.calendar_id if registered else None)
     if data_adapter == "ibkr" and not security_type:
         raise ValueError(
             f"No security_type for IBKR symbol={symbol!r}; set "
@@ -324,4 +338,5 @@ def resolve_symbol(
         tick_size=float(tick_size) if tick_size is not None else None,
         security_type=security_type,
         exchange=exchange,
+        calendar_id=calendar_id,
     )

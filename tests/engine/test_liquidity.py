@@ -15,6 +15,26 @@ def test_lagged_adv_excludes_current_daily_bar() -> None:
     assert result.iloc[3] == pytest.approx(200.0)
 
 
+def test_intraday_adv_aggregates_completed_sessions_before_mapping_to_bars() -> None:
+    volume = pd.Series([40.0, 60.0, 100.0, 200.0, 1_000.0, 1_000.0])
+    labels = pd.Index(
+        [
+            "2025-01-01",
+            "2025-01-01",
+            "2025-01-02",
+            "2025-01-02",
+            "2025-01-03",
+            "2025-01-03",
+        ]
+    )
+
+    result = calculate_lagged_adv(volume, 2, session_labels=labels)
+
+    assert result.iloc[:4].isna().all()
+    assert result.iloc[4] == pytest.approx(200.0)
+    assert result.iloc[5] == pytest.approx(200.0)
+
+
 @pytest.mark.parametrize("invalid_volume", [float("nan"), float("inf"), -1.0])
 def test_lagged_adv_rejects_invalid_volume_history(invalid_volume: float) -> None:
     with pytest.raises(ValueError, match="finite and non-negative"):
@@ -28,7 +48,8 @@ def test_volume_limit_uses_tightest_bar_and_adv_budget() -> None:
         1_000.0,
         max_adv_participation_rate=0.02,
         lagged_adv=2_000.0,
-        used_quantity=15.0,
+        used_bar_quantity=15.0,
+        used_adv_quantity=15.0,
     )
 
     assert limit == pytest.approx(25.0)

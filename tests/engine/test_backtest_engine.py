@@ -174,19 +174,75 @@ class TestBacktestBasics:
         # Execution bar volume is 1,000, but lagged ADV is (100+200+300)/3=200.
         assert open_event.fill_quantity == pytest.approx(20.0)
 
-    def test_adv_limit_rejects_intraday_data(self) -> None:
+    def test_intraday_adv_budget_is_cumulative_across_session_bars(self) -> None:
+        class AddTwiceAfterWarmup(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index in (3, 4):
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol=ctx.symbol,
+                            quantity=15.0,
+                        )
+                    ]
+                return []
+
+        timestamps = pd.DatetimeIndex(
+            [
+                "2025-01-01 00:00Z",
+                "2025-01-01 01:00Z",
+                "2025-01-02 00:00Z",
+                "2025-01-02 01:00Z",
+                "2025-01-03 00:00Z",
+                "2025-01-03 01:00Z",
+                "2025-01-04 00:00Z",
+                "2025-01-04 01:00Z",
+            ]
+        )
+        index = pd.MultiIndex.from_arrays(
+            [["BTCUSDT"] * len(timestamps), timestamps],
+            names=["symbol", "datetime"],
+        )
+        data = pd.DataFrame(
+            {
+                "open": [100.0] * len(timestamps),
+                "high": [101.0] * len(timestamps),
+                "low": [99.0] * len(timestamps),
+                "close": [100.0] * len(timestamps),
+                "volume": [100.0] * 4 + [1_000.0] * 4,
+            },
+            index=index,
+        )
         policy = ExecutionPolicy(
-            adv_lookback_sessions=3,
+            max_volume_participation_rate=1.0,
+            adv_lookback_sessions=2,
+            max_adv_participation_rate=0.1,
+        )
+        result = Backtest(
+            data,
+            AddTwiceAfterWarmup(),
+            initial_balance=100_000.0,
+            cost_model=_zero_cost(),
+            execution_policy=policy,
+        ).run()
+
+        entry_events = [
+            event for event in result.order_events if event.event_type in ("open", "add")
+        ]
+        assert [event.fill_quantity for event in entry_events] == pytest.approx([15.0, 5.0])
+
+    def test_intraday_adv_requires_symbol_calendar(self) -> None:
+        policy = ExecutionPolicy(
+            adv_lookback_sessions=2,
             max_adv_participation_rate=0.1,
         )
         backtest = Backtest(
-            _make_multiindex_df([100.0] * 5),
+            _make_multiindex_df([100.0] * 5, symbol="UNREGISTERED"),
             HoldStrategy(),
-            cost_model=_zero_cost(),
             execution_policy=policy,
         )
 
-        with pytest.raises(ValueError, match="only for D1"):
+        with pytest.raises(ValueError, match=r"calendar_id.*UNREGISTERED"):
             backtest.run()
 
     def test_force_close_at_end(self) -> None:

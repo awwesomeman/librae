@@ -32,7 +32,7 @@ def _make_kbars_response():
     """Simulate Shioaji kbars() return value (dict of lists).
 
     ``ts`` is raw nanoseconds, encoding Taipei wall-clock time as if it were
-    a UTC epoch (Shioaji's actual behavior — see taipei_time.py) — these
+    a UTC epoch (Shioaji's actual behavior — see shioaji_time.py) — these
     values correspond to Taipei local 09:00/09:05/09:10 on 2026-04-01, i.e.
     true UTC 01:00/01:05/01:10.
     """
@@ -105,16 +105,52 @@ class TestFetchOhlcv:
     def test_drop_incomplete_applies_completed_bar_filter(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(security_type="FUT"))
 
         with patch(
             "brokers.shioaji_adapter.drop_incomplete_ohlcv",
-            side_effect=lambda df, _timeframe: df.iloc[:-1],
+            side_effect=lambda df, _timeframe, **_kwargs: df.iloc[:-1],
         ) as drop_incomplete:
             df = adapter.fetch_ohlcv("TXFR1", "1m", drop_incomplete=True)
 
         assert len(df) == 2
-        drop_incomplete.assert_called_once()
+        assert drop_incomplete.call_args.kwargs == {"calendar_id": "XTAIFEX"}
+
+    @pytest.mark.parametrize(
+        ("security_type", "expected_calendar"),
+        [("FUT", "XTAIFEX"), ("STK", "XTAI")],
+    )
+    def test_resampling_uses_instrument_calendar(self, security_type, expected_calendar):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type=security_type)
+        )
+
+        with patch(
+            "brokers.shioaji_adapter.resample_session_ohlcv",
+            side_effect=lambda frame, _seconds, _calendar: frame,
+        ) as resample:
+            adapter.fetch_ohlcv("TXFR1", "5m")
+
+        assert resample.call_args.args[2] == expected_calendar
+
+    def test_explicit_calendar_override_wins(self):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(security_type="FUT"))
+
+        with patch(
+            "brokers.shioaji_adapter.resample_session_ohlcv",
+            side_effect=lambda frame, _seconds, _calendar: frame,
+        ) as resample:
+            adapter.fetch_ohlcv(
+                "GDFR1",
+                "5m",
+                calendar_id="XTAIFEX_1725",
+            )
+
+        assert resample.call_args.args[2] == "XTAIFEX_1725"
 
 
 class TestReadOnlyGuard:
