@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
-from librae.core.run_config import ExecutionPolicy, RunConfig
+from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -224,6 +224,17 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     }
     if unknown_execution_keys:
         raise ValueError(f"unknown strategy.execution settings: {sorted(unknown_execution_keys)}")
+    risk_raw = scfg.get("risk", {})
+    if not isinstance(risk_raw, dict):
+        raise ValueError("strategy.risk must be a mapping")
+    unknown_risk_keys = set(risk_raw) - {
+        "max_position_weight",
+        "max_drawdown_rate",
+        "max_gross_exposure",
+        "max_net_exposure",
+    }
+    if unknown_risk_keys:
+        raise ValueError(f"unknown strategy.risk settings: {sorted(unknown_risk_keys)}")
     symbols_raw = scfg.get("symbol", scfg.get("symbols", ""))
     if isinstance(symbols_raw, list):
         symbols = symbols_raw
@@ -277,13 +288,8 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         )
     poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
 
-    execution = ExecutionPolicy(
-        default_fill_price=execution_raw.get("default_fill_price", "open"),
-        max_volume_participation_rate=execution_raw.get(
-            "max_volume_participation_rate",
-            0.1,
-        ),
-    )
+    execution = ExecutionPolicy(**execution_raw)
+    risk = RiskPolicy(**risk_raw)
 
     # 4. Perf params (with known exchange-calendar defaults)
     configured_annual_periods = perf.get("annual_periods")
@@ -314,6 +320,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         initial_balance=initial_balance,
         mode=args.mode,
         execution=execution,
+        risk=risk,
         broker=scfg.get("broker"),
         start=start,
         end=end,
@@ -344,17 +351,17 @@ def with_dedup_check(fn: Callable[[RunConfig], None]) -> Callable[[RunConfig], N
     """
 
     @functools.wraps(fn)
-    def wrapper(cfg: RunConfig) -> None:
-        if not cfg.no_db and not cfg.force:
-            existing = check_existing_run(cfg)
+    def wrapper(config: RunConfig) -> None:
+        if not config.no_db and not config.force:
+            existing = check_existing_run(config)
             if existing:
                 return
-        fn(cfg)
+        fn(config)
 
     return wrapper
 
 
-def check_existing_run(cfg: RunConfig) -> str | None:
+def check_existing_run(config: RunConfig) -> str | None:
     """config_hash dedup check. Returns existing run_id or None.
 
     Shared by strategy backtest + signal backtest.
@@ -365,7 +372,7 @@ def check_existing_run(cfg: RunConfig) -> str | None:
         return None
 
     try:
-        existing = get_run_by_config_hash(cfg.config_hash)
+        existing = get_run_by_config_hash(config.config_hash)
     except Exception:
         logger.warning(
             "config_hash dedup check failed (TimescaleDB unreachable?) — "
@@ -377,13 +384,13 @@ def check_existing_run(cfg: RunConfig) -> str | None:
     if not existing:
         return None
 
-    if existing["perf_params"] != cfg.perf_params:
+    if existing["perf_params"] != config.perf_params:
         # Lightweight path: skip backtest, only recompute metrics
         try:
             from db.timescale_writer import _update_perf_params, refresh_performance
 
-            refresh_performance(existing["run_id"], cfg=cfg)
-            _update_perf_params(existing["run_id"], cfg.perf_params)
+            refresh_performance(existing["run_id"], config=config)
+            _update_perf_params(existing["run_id"], config.perf_params)
             logger.info(
                 "Recomputed metrics for run_id=%s (perf_params changed)", existing["run_id"]
             )
@@ -393,7 +400,7 @@ def check_existing_run(cfg: RunConfig) -> str | None:
     else:
         logger.info(
             "Run with config_hash=%s exists (run_id=%s), skipping",
-            cfg.config_hash,
+            config.config_hash,
             existing["run_id"],
         )
     return existing["run_id"]
@@ -412,34 +419,34 @@ def run_dispatch(
 ) -> None:
     """Shared main() for all strategy runners."""
     setup_logging()
-    cfg = build_config(strategy_name, run_file)
-    cfg.log_summary()
+    config = build_config(strategy_name, run_file)
+    config.log_summary()
     dispatch: dict[str, Callable[[RunConfig], None]] = {
         "backtest": with_dedup_check(run_backtest),
         "sim": run_realtime,
         "live": run_realtime,
     }
-    dispatch[cfg.mode](cfg)
+    dispatch[config.mode](config)
 
 
 # ---------------------------------------------------------------------------
 # run_realtime_generic() — the sim/live half of a strategy's run.py.
 # The backtest half (fetch -> prepare_signals -> MultiIndex -> Backtest ->
 # save) depends on a data-access layer that lives outside librae, so it
-# doesn't belong here — this one doesn't, since LiveTrader takes cfg + a
-# feature_fn directly and does its own fetching via cfg.market.
+# doesn't belong here — this one doesn't, since LiveTrader takes config + a
+# feature_fn directly and does its own fetching via config.market.
 # ---------------------------------------------------------------------------
 
 
 def run_realtime_generic(
-    cfg: RunConfig,
+    config: RunConfig,
     strategy: Strategy,
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> None:
     """Shared sim/live body — just wires LiveTrader."""
     from librae.live.engine import LiveTrader
 
-    trader = LiveTrader(strategy, prepare_signals, cfg=cfg)
+    trader = LiveTrader(strategy, prepare_signals, config=config)
     trader.run()
 
 

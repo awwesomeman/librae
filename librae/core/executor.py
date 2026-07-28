@@ -1,7 +1,7 @@
 """Execution layer — separates trade execution from engine logic.
 
 Contains:
-- make_fill(): pure function for simulated fills (backtest uses directly)
+- simulate_fill(): pure function for simulated fills
 - _size_position(): position sizing using all available cash
 - calc_trade_pnl(): shared PnL calculation for backtest + live
 - scale_into_position(): add to existing position (weighted avg)
@@ -27,7 +27,17 @@ from typing import Literal
 from librae.core import EPSILON
 
 from .cost_model import CostModel
-from .strategy import Fill, OrderIntent, PortfolioTargets, Position, PositionState, StrategyDecision
+from .strategy import (
+    Fill,
+    OrderAction,
+    OrderIntent,
+    PortfolioTargets,
+    Position,
+    PositionEventType,
+    PositionSide,
+    PositionState,
+    StrategyDecision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +58,7 @@ class TradeResult:
     symbol: str
     entry_at: datetime
     exit_at: datetime
-    side: Literal["long", "short"]
+    side: PositionSide
     entry_price: float
     exit_price: float
     quantity: float
@@ -85,8 +95,8 @@ class OrderEvent:
 
     ts: datetime
     symbol: str
-    side: Literal["long", "short"]
-    event_type: Literal["open", "add", "reduce", "close"]
+    side: PositionSide
+    event_type: PositionEventType
     fill_quantity: float
     price: float
     entry_price: float
@@ -111,17 +121,7 @@ class ExecutionResult:
     cash_delta: float
 
 
-@dataclass(frozen=True)
-class RiskLimits:
-    """Engine-level portfolio risk limits."""
-
-    max_position_pct: float | None = None
-    max_drawdown_pct: float | None = None
-    max_gross_exposure_pct: float | None = None
-    max_net_exposure_pct: float | None = None
-
-
-def direction(side: Literal["long", "short"]) -> float:
+def side_multiplier(side: PositionSide) -> float:
     """Convert side to direction multiplier. +1 for long, -1 for short."""
     return -1.0 if side == "short" else 1.0
 
@@ -131,7 +131,7 @@ def direction(side: Literal["long", "short"]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def eval_equity(
+def calc_equity(
     cash: float,
     positions: dict[str, PositionState],
     *,
@@ -155,7 +155,7 @@ def eval_equity(
     for sym, ps in positions.items():
         price = get_price(sym, ps)
         cost_model = get_cost_model(sym)
-        unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * direction(ps.side)
+        unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * side_multiplier(ps.side)
         entry_notional = ps.entry_price * ps.quantity * cost_model.multiplier
         mtm += unrealized + entry_notional * cost_model.margin_rate(ps.side)
         snapshot[sym] = Position(
@@ -181,7 +181,7 @@ def calc_trade_pnl(
     entry_price: float,
     exit_price: float,
     quantity: float,
-    side: Literal["long", "short"],
+    side: PositionSide,
     cost_model: CostModel,
     entry_commission: float,
     entry_slippage: float,
@@ -189,7 +189,7 @@ def calc_trade_pnl(
     exit_bar_volume: float | None = None,
 ) -> TradePnL:
     """Single trade PnL breakdown. Used by backtest + live."""
-    dir_mult = direction(side)
+    dir_mult = side_multiplier(side)
     gross_pnl = cost_model.calc_pnl(entry_price, exit_price, quantity) * dir_mult
 
     exit_commission = cost_model.calc_commission(exit_price, quantity)
@@ -453,9 +453,9 @@ def apply_execution_fill(
     entry_commission = position.entry_commission * fraction
     entry_slippage = position.entry_slippage * fraction
     entry_tax = position.entry_tax * fraction
-    gross_pnl = cost_model.calc_pnl(position.entry_price, fill.price, close_quantity) * direction(
-        position.side
-    )
+    gross_pnl = cost_model.calc_pnl(
+        position.entry_price, fill.price, close_quantity
+    ) * side_multiplier(position.side)
     total_commission = entry_commission + fill.commission
     total_slippage = entry_slippage + fill.slippage
     total_tax = entry_tax + fill.tax
@@ -646,35 +646,6 @@ def queue_market_exit_all(
         position.pending_market_exit_reason = reason
 
 
-def validate_risk_params(
-    params: dict | None,
-) -> RiskLimits:
-    """Validate and extract engine-level risk limits from cfg.params.
-
-    All are optional (None = disabled) but must be > 0 if set. Shared by
-    Backtest and LiveTrader so the same rule can't drift between them.
-    """
-    p = params or {}
-    max_position_pct = p.get("max_position_pct")
-    max_drawdown_pct = p.get("max_drawdown_pct")
-    max_gross_exposure_pct = p.get("max_gross_exposure_pct")
-    max_net_exposure_pct = p.get("max_net_exposure_pct")
-    if max_position_pct is not None and max_position_pct <= 0:
-        raise ValueError(f"max_position_pct must be > 0, got {max_position_pct}")
-    if max_drawdown_pct is not None and max_drawdown_pct <= 0:
-        raise ValueError(f"max_drawdown_pct must be > 0, got {max_drawdown_pct}")
-    if max_gross_exposure_pct is not None and max_gross_exposure_pct <= 0:
-        raise ValueError(f"max_gross_exposure_pct must be > 0, got {max_gross_exposure_pct}")
-    if max_net_exposure_pct is not None and max_net_exposure_pct <= 0:
-        raise ValueError(f"max_net_exposure_pct must be > 0, got {max_net_exposure_pct}")
-    return RiskLimits(
-        max_position_pct=max_position_pct,
-        max_drawdown_pct=max_drawdown_pct,
-        max_gross_exposure_pct=max_gross_exposure_pct,
-        max_net_exposure_pct=max_net_exposure_pct,
-    )
-
-
 def liquidate_all(
     positions: dict[str, PositionState],
     bars: dict[str, dict[str, float]],
@@ -746,7 +717,7 @@ def resolve_fill_price(
     intent: OrderIntent,
     default_fill: str,
     *,
-    position_side: Literal["long", "short"] | None = None,
+    position_side: PositionSide | None = None,
 ) -> float | None:
     """Resolve actual fill price from ``intent.fill_price`` or engine default.
 
@@ -826,7 +797,12 @@ def resolve_fill_price(
 
 
 def _size_position(
-    cost_model: CostModel, price: float, cash: float, side: Literal["long", "short"]
+    cost_model: CostModel,
+    price: float,
+    cash: float,
+    side: PositionSide,
+    *,
+    bar_volume: float | None = None,
 ) -> float:
     """Largest quantity whose estimate_entry_outlay fits in cash.
 
@@ -857,7 +833,35 @@ def _size_position(
         qty = (cash - cost_model.min_commission) / linear
     else:
         qty = cash / (linear + marginal_commission)
-    return max(qty, 0.0)
+    qty = max(qty, 0.0)
+    if (
+        qty > EPSILON
+        and bar_volume is not None
+        and bar_volume > 0
+        and cost_model.volume_impact_ticks > 0
+        and cost_model.estimate_entry_outlay(
+            price,
+            qty,
+            side,
+            bar_volume=bar_volume,
+        )
+        > cash
+    ):
+        low, high = 0.0, qty
+        for _ in range(60):
+            middle = (low + high) / 2.0
+            outlay = cost_model.estimate_entry_outlay(
+                price,
+                middle,
+                side,
+                bar_volume=bar_volume,
+            )
+            if outlay <= cash:
+                low = middle
+            else:
+                high = middle
+        qty = low
+    return qty
 
 
 def _shrink_fill(
@@ -960,7 +964,7 @@ def _volume_fill_limit(
     return max(max_volume_participation_rate * bar_volume - used_quantity, 0.0)
 
 
-def make_fill(
+def simulate_fill(
     intent: OrderIntent,
     price: float,
     cash: float,
@@ -974,7 +978,13 @@ def make_fill(
 
     qty = intent.quantity
     if qty is None:
-        qty = _size_position(cost_model, price, cash, intent.action)
+        qty = _size_position(
+            cost_model,
+            price,
+            cash,
+            intent.action,
+            bar_volume=bar_volume,
+        )
     if qty <= 0:
         return None
 
@@ -1033,7 +1043,7 @@ def _try_fill(
     bar_volume: float | None = None,
 ) -> tuple[Fill | None, float]:
     """Attempt a fill and validate cash sufficiency. Returns (fill, outlay) or (None, 0)."""
-    fill = make_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
+    fill = simulate_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
     if not fill or fill.quantity <= 0:
         return None, 0.0
     if max_notional is not None:
@@ -1046,7 +1056,12 @@ def _try_fill(
         fill = _cap_fill_to_volume(fill, cost_model, max_volume_qty, bar_volume=bar_volume)
         if fill is None:
             return None, 0.0
-    outlay = cost_model.estimate_entry_outlay(price, fill.quantity, action.action)
+    outlay = cost_model.estimate_entry_outlay(
+        price,
+        fill.quantity,
+        action.action,
+        bar_volume=bar_volume,
+    )
     if available_cash - outlay < -EPSILON:
         return None, 0.0
     return fill, outlay
@@ -1095,7 +1110,7 @@ def execute_order_intents(
         reason = action.reason
 
         if action.action in ("long", "short"):
-            desired_side: Literal["long", "short"] = action.action
+            desired_side: PositionSide = action.action
 
             bar_volume = get_volume(sym) if get_volume else None
             max_volume_qty = _volume_fill_limit(
@@ -1255,6 +1270,7 @@ def _scale_additions_to_cash(
     *,
     prices: dict[str, float],
     get_cost_model: Callable[[str], CostModel],
+    get_volume: Callable[[str], float | None] | None = None,
 ) -> list[OrderIntent]:
     """Scale all rebalance additions by one factor when cash is insufficient.
 
@@ -1273,8 +1289,13 @@ def _scale_additions_to_cash(
                 continue
             price = prices[action.symbol]
             cost_model = get_cost_model(action.symbol)
-            side: Literal["long", "short"] = "short" if action.action == "short" else "long"
-            total += cost_model.estimate_entry_outlay(price, quantity, side)
+            side: PositionSide = "short" if action.action == "short" else "long"
+            total += cost_model.estimate_entry_outlay(
+                price,
+                quantity,
+                side,
+                bar_volume=get_volume(action.symbol) if get_volume else None,
+            )
         return total
 
     if total_outlay(1.0) <= available_cash + EPSILON:
@@ -1316,8 +1337,8 @@ def execute_portfolio_targets(
     primary_symbol: str,
     max_position_notional: float | None = None,
     max_volume_participation_rate: float | None = None,
-    max_gross_exposure_pct: float | None = None,
-    max_net_exposure_pct: float | None = None,
+    max_gross_exposure: float | None = None,
+    max_net_exposure: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
@@ -1332,17 +1353,17 @@ def execute_portfolio_targets(
     target_gross_exposure = sum(abs(weight) for weight in targets.weights.values())
     target_net_exposure = abs(sum(targets.weights.values()))
     if (
-        max_gross_exposure_pct is not None
-        and target_gross_exposure > max_gross_exposure_pct + EPSILON
+        max_gross_exposure is not None
+        and target_gross_exposure > max_gross_exposure + EPSILON
     ):
         raise ValueError(
             f"target gross exposure {target_gross_exposure:.6f} exceeds "
-            f"max_gross_exposure_pct={max_gross_exposure_pct:.6f}"
+            f"max_gross_exposure={max_gross_exposure:.6f}"
         )
-    if max_net_exposure_pct is not None and target_net_exposure > max_net_exposure_pct + EPSILON:
+    if max_net_exposure is not None and target_net_exposure > max_net_exposure + EPSILON:
         raise ValueError(
             f"absolute target net exposure {target_net_exposure:.6f} exceeds "
-            f"max_net_exposure_pct={max_net_exposure_pct:.6f}"
+            f"max_net_exposure={max_net_exposure:.6f}"
         )
 
     target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
@@ -1353,7 +1374,7 @@ def execute_portfolio_targets(
     prices: dict[str, float] = {}
     for symbol in relevant_symbols:
         target_weight = targets.weights.get(symbol, 0.0)
-        action_type: Literal["long", "short", "close"]
+        action_type: OrderAction
         if target_weight > EPSILON:
             action_type = "long"
         elif target_weight < -EPSILON:
@@ -1371,7 +1392,7 @@ def execute_portfolio_targets(
             raise ValueError(f"rebalance requires a valid execution price for {symbol}")
         prices[symbol] = float(raw_price)
 
-    equity, _ = eval_equity(
+    equity, _ = calc_equity(
         cash,
         positions,
         get_price=lambda symbol, _position: prices[symbol],
@@ -1386,7 +1407,7 @@ def execute_portfolio_targets(
         position = positions.get(symbol)
         current_signed_quantity = 0.0
         if position is not None:
-            current_signed_quantity = position.quantity * direction(position.side)
+            current_signed_quantity = position.quantity * side_multiplier(position.side)
 
         cost_model = get_cost_model(symbol)
         target_weight = targets.weights.get(symbol, 0.0)
@@ -1459,6 +1480,7 @@ def execute_portfolio_targets(
         cash_after_reductions,
         prices=prices,
         get_cost_model=get_cost_model,
+        get_volume=get_volume,
     )
     addition_result = execute_order_intents(
         scaled_additions,
@@ -1571,8 +1593,8 @@ def execute_pending_decision_and_stops(
     primary_symbol: str,
     max_position_notional: float | None = None,
     max_volume_participation_rate: float | None = None,
-    max_gross_exposure_pct: float | None = None,
-    max_net_exposure_pct: float | None = None,
+    max_gross_exposure: float | None = None,
+    max_net_exposure: float | None = None,
 ) -> tuple[float, ExecutionResult]:
     """Fill this bar's pending decision, then check stop-loss/take-profit —
     the two steps that must always run together, in this order, before a
@@ -1611,8 +1633,8 @@ def execute_pending_decision_and_stops(
                 positions,
                 cash,
                 ts,
-                max_gross_exposure_pct=max_gross_exposure_pct,
-                max_net_exposure_pct=max_net_exposure_pct,
+                max_gross_exposure=max_gross_exposure,
+                max_net_exposure=max_net_exposure,
                 used_quantity_by_symbol=used_quantity_by_symbol,
                 **common_kwargs,
             )

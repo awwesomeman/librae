@@ -98,7 +98,7 @@ def _extract_signals(
 def write_run_metadata(
     run_id: str,
     strategy: str,
-    symbol: str,
+    symbols: tuple[str, ...] | list[str],
     timeframe: str,
     mode: str,
     *,
@@ -109,6 +109,7 @@ def write_run_metadata(
     poll_seconds: int | None = None,
     params: dict | None = None,
     execution_policy: dict | None = None,
+    risk_policy: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
     cur: PgCursor | None = None,
@@ -120,24 +121,26 @@ def write_run_metadata(
     transaction).  Otherwise opens its own connection and commits.
     """
     sql = """INSERT INTO backtest_runs
-               (run_id, strategy, symbol, timeframe, data_source,
+               (run_id, strategy, symbols, timeframe, data_source,
                 started_at, ended_at, run_at, mode, poll_seconds,
-                params, execution_policy, perf_params, config_hash)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                params, execution_policy, risk_policy, perf_params, config_hash)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_at=EXCLUDED.run_at,
                  mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
+                 risk_policy=EXCLUDED.risk_policy,
                  perf_params=EXCLUDED.perf_params,
                  config_hash=EXCLUDED.config_hash"""
     params_val = json.dumps(params) if params is not None else None
     execution_policy_val = json.dumps(execution_policy) if execution_policy is not None else None
+    risk_policy_val = json.dumps(risk_policy) if risk_policy is not None else None
     perf_val = json.dumps(perf_params) if perf_params is not None else None
     values = (
         run_id,
         strategy,
-        symbol,
+        json.dumps(symbols),
         timeframe,
         data_source,
         _to_dt(started_at),
@@ -147,6 +150,7 @@ def write_run_metadata(
         poll_seconds,
         params_val,
         execution_policy_val,
+        risk_policy_val,
         perf_val,
         config_hash,
     )
@@ -188,12 +192,11 @@ def update_heartbeat(run_id: str, dsn: str | None = None) -> None:
 def save_backtest_output(
     output: BacktestOutput,
     *,
-    signal_series: pd.Series | None = None,
-    exit_signal_series: pd.Series | None = None,
     signal_series_by_symbol: Mapping[str, pd.Series] | None = None,
     exit_signal_series_by_symbol: Mapping[str, pd.Series] | None = None,
     params: dict | None = None,
     execution_policy: dict | None = None,
+    risk_policy: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
     dsn: str | None = None,
@@ -207,11 +210,11 @@ def save_backtest_output(
 
     Args:
         output: BacktestOutput to write.
-        signal_series: Optional Series (index=timestamp, values=signal_value)
-            to write to signal_events as entry signals.
-        exit_signal_series: Optional Series for exit signals.
+        signal_series_by_symbol: Optional entry-signal series keyed by symbol.
+        exit_signal_series_by_symbol: Optional exit-signal series keyed by symbol.
         params: Optional strategy parameters dict to store as JSONB.
         execution_policy: Resolved fill and liquidity assumptions to store.
+        risk_policy: Resolved engine-level portfolio limits to store.
         perf_params: Optional perf parameters dict to store as JSONB.
         config_hash: Optional deterministic hash for dedup.
         dsn: TimescaleDB DSN.
@@ -231,7 +234,7 @@ def save_backtest_output(
         write_run_metadata(
             run_id=meta.run_id,
             strategy=meta.strategy,
-            symbol=meta.symbol,
+            symbols=meta.symbols,
             timeframe=meta.timeframe,
             mode=meta.mode,
             started_at=meta.started_at,
@@ -240,6 +243,7 @@ def save_backtest_output(
             data_source=meta.data_source,
             params=params,
             execution_policy=execution_policy,
+            risk_policy=risk_policy,
             perf_params=perf_params,
             config_hash=config_hash,
             cur=cur,
@@ -334,10 +338,6 @@ def save_backtest_output(
         # signal_events (from feature-layer signal_series)
         entry_signals = dict(signal_series_by_symbol or {})
         exit_signals = dict(exit_signal_series_by_symbol or {})
-        if signal_series is not None:
-            entry_signals[meta.symbol] = signal_series
-        if exit_signal_series is not None:
-            exit_signals[meta.symbol] = exit_signal_series
 
         sig_count = 0
         signal_symbols = set(entry_signals) | set(exit_signals)
@@ -915,13 +915,13 @@ def write_strategy_performance(
 
 def refresh_performance(
     run_id: str,
-    cfg: RunConfig | None = None,
+    config: RunConfig | None = None,
     dsn: str | None = None,
 ) -> None:
     """Recompute KPI metrics from DB equity_curve + trade_events and upsert.
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
-    When cfg is provided, uses cfg.perf_params for annualization settings.
+    When config is provided, uses config.perf_params for annualization settings.
     """
     from types import SimpleNamespace as _NS
 
@@ -980,8 +980,8 @@ def refresh_performance(
         return values or None
 
     perf_kwargs: dict[str, Any] = {}
-    if cfg is not None:
-        perf_kwargs = cfg.perf_params
+    if config is not None:
+        perf_kwargs = config.perf_params
 
     metrics = compute_all(
         equity_values=equity_values,
@@ -1008,12 +1008,12 @@ def save_signal_results(
     run_id: str | None = None,
     mode: str = "backtest",
     signal_column: str = "entry_signal",
-    cfg: RunConfig | None = None,
+    config: RunConfig | None = None,
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
     Use this for signal quality analysis without running a full backtest.
-    When cfg is provided, stores config_hash and perf_params.
+    When config is provided, stores config_hash and perf_params.
     """
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     exit_signal_series = _extract_exit_signals(df, symbol)
@@ -1040,16 +1040,17 @@ def save_signal_results(
                 write_run_metadata(
                     run_id,
                     strategy,
-                    symbol,
+                    [symbol],
                     tf,
                     mode,
                     started_at=_to_dt(started_at),
                     ended_at=_to_dt(ended_at),
                     data_source=data_source,
-                    config_hash=cfg.config_hash if cfg else None,
-                    perf_params=cfg.perf_params if cfg else None,
-                    params=cfg.params if cfg else None,
-                    execution_policy=asdict(cfg.execution) if cfg else None,
+                    config_hash=config.config_hash if config else None,
+                    perf_params=config.perf_params if config else None,
+                    params=config.params if config else None,
+                    execution_policy=asdict(config.execution) if config else None,
+                    risk_policy=asdict(config.risk) if config else None,
                     cur=cur,
                 )
 
@@ -1091,7 +1092,7 @@ def save_signal_results(
 def save_strategy_results(
     output: BacktestOutput,
     df: pd.DataFrame,
-    cfg: RunConfig,
+    config: RunConfig,
     signal_column: str = "entry_signal",
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
@@ -1099,30 +1100,27 @@ def save_strategy_results(
     Writes: backtest_runs, equity_curve, trade_events, strategy_performance,
     signal_events, ohlcv.
     """
-    timeframe = cfg.timeframe
-    data_source = cfg.data_source
+    timeframe = config.timeframe
+    data_source = config.data_source
 
     signal_series_by_symbol: dict[str, pd.Series] = {}
     exit_signal_series_by_symbol: dict[str, pd.Series] = {}
     symbol_frames: dict[str, pd.DataFrame] = {}
-    for symbol in cfg.symbols:
+    for symbol in config.symbols:
         symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
         symbol_frames[symbol] = symbol_df
         signal_series_by_symbol[symbol] = signal_series
         exit_signal_series_by_symbol[symbol] = _extract_exit_signals(df, symbol)
 
-    primary = cfg.symbol
     counts = save_backtest_output(
         output,
-        # Keep the original single-symbol arguments for API compatibility.
-        signal_series=signal_series_by_symbol.pop(primary),
-        exit_signal_series=exit_signal_series_by_symbol.pop(primary),
         signal_series_by_symbol=signal_series_by_symbol,
         exit_signal_series_by_symbol=exit_signal_series_by_symbol,
-        params=cfg.params,
-        execution_policy=asdict(cfg.execution),
-        perf_params=cfg.perf_params,
-        config_hash=cfg.config_hash,
+        params=config.params,
+        execution_policy=asdict(config.execution),
+        risk_policy=asdict(config.risk),
+        perf_params=config.perf_params,
+        config_hash=config.config_hash,
     )
 
     ohlcv_count = 0

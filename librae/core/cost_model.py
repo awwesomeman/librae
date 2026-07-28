@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass
 from math import isfinite
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
+
+from librae.core.strategy import PositionSide
 
 if TYPE_CHECKING:
     from librae.config.market_config import MarketConfig
@@ -46,7 +48,7 @@ class CostModel:
             Spot=1.0 (pay full notional), futures=initial_margin/notional (e.g. 0.067).
         short_margin_rate: Fraction of notional deducted from cash when opening a short.
             US equity=0.5 (Reg T 50%), TW equity=0.9 (融券保證金 90%), futures same as long.
-        impact_coef: Extra slippage_ticks-equivalent at 100% single-bar volume
+        volume_impact_ticks: Extra slippage_ticks-equivalent at 100% single-bar volume
             participation, scaled linearly down to 0 at 0% participation.
             0 (default) disables market impact entirely.
         maintenance_margin_rate: Fraction of entry notional required to keep
@@ -64,7 +66,7 @@ class CostModel:
     tax_rate: float
     long_margin_rate: float = 1.0
     short_margin_rate: float = 1.0
-    impact_coef: float = 0.0
+    volume_impact_ticks: float = 0.0
     maintenance_margin_rate: float = 0.0
 
     def __post_init__(self) -> None:
@@ -80,7 +82,7 @@ class CostModel:
             "min_commission",
             "slippage_ticks",
             "tax_rate",
-            "impact_coef",
+            "volume_impact_ticks",
             "maintenance_margin_rate",
         ):
             if getattr(self, name) < 0:
@@ -101,44 +103,44 @@ class CostModel:
             tax_rate=0.0,
             long_margin_rate=1.0,
             short_margin_rate=1.0,
-            impact_coef=0.0,
+            volume_impact_ticks=0.0,
             maintenance_margin_rate=0.0,
         )
 
     @classmethod
     def from_config(
         cls,
-        cfg: RunConfig,
+        config: RunConfig,
         symbol: str | None = None,
         override: CostModel | None = None,
         markets: dict[str, MarketConfig] | None = None,
     ) -> CostModel:
         """Resolve cost model for one symbol, with standard priority:
-        explicit override > cfg.symbol_overrides[symbol] > cfg.cost_overrides
+        explicit override > config.symbol_overrides[symbol] > config.cost_overrides
         (run-wide fallback) > the built-in symbol registry's per-symbol
         multiplier (spot auto-1.0, contract_* required-explicit) and
         tick_size (optional override) > market-level defaults for
         everything else (see librae/config/symbols.py's module docstring).
 
-        symbol: which symbol to resolve for — defaults to cfg.symbol
+        symbol: which symbol to resolve for — defaults to config.symbol
             (symbols[0]). Pass explicitly to resolve a different symbol in
             a multi-asset run, e.g. one with a different contract
             multiplier (TXFR1=200 vs MXFR1=50, same tw_futures market).
 
         markets: pre-built registry passed through to get_market() —
-            lets a caller resolve cfg.market against markets it built
+            lets a caller resolve config.market against markets it built
             itself instead of librae's built-in market registry.
 
         Raises:
             ValueError: `symbol` isn't in the built-in registry (so no
                 multiplier can be resolved at all — not even the spot
                 auto-default, since we don't know the instrument_type) and
-                neither cfg.symbol_overrides[symbol] nor cfg.cost_overrides
+                neither config.symbol_overrides[symbol] nor config.cost_overrides
                 supplies multiplier either.
         """
         if override is not None:
             return override
-        symbol = symbol if symbol is not None else cfg.symbol
+        symbol = symbol if symbol is not None else config.symbol
 
         from librae.config.symbols import get_symbol
 
@@ -148,9 +150,9 @@ class CostModel:
             symbol_market = sym.market
         except KeyError:
             multiplier, tick_size = None, None
-            symbol_market = cfg.market
+            symbol_market = config.market
 
-        route = (cfg.instrument_overrides or {}).get(symbol, {})
+        route = (config.instrument_overrides or {}).get(symbol, {})
         symbol_market = route.get("market", symbol_market)
 
         from librae.config.market_config import get_market
@@ -159,15 +161,15 @@ class CostModel:
 
         # symbol_overrides[symbol] wins over the run-wide cost_overrides
         # fallback for anything both specify.
-        overrides = dict(cfg.cost_overrides or {})
-        overrides.update((cfg.symbol_overrides or {}).get(symbol, {}))
+        overrides = dict(config.cost_overrides or {})
+        overrides.update((config.symbol_overrides or {}).get(symbol, {}))
 
         multiplier = overrides.get("multiplier", multiplier)
         tick_size = overrides.get("tick_size", tick_size)
         if multiplier is None:
             raise ValueError(
-                f"No multiplier for symbol={symbol!r} — pass cfg.symbol_overrides={{"
-                f"{symbol!r}: {{'multiplier': ...}}}} (or cfg.cost_overrides for a "
+                f"No multiplier for symbol={symbol!r} — pass config.symbol_overrides={{"
+                f"{symbol!r}: {{'multiplier': ...}}}} (or config.cost_overrides for a "
                 "single-symbol run), or register it in librae/config/symbols.py's "
                 "built-in registry (spot instruments default to 1.0 automatically; "
                 "contract_* instruments need it explicit)."
@@ -197,7 +199,7 @@ class CostModel:
             tax_rate=market.tax_rate,
             long_margin_rate=market.long_margin_rate,
             short_margin_rate=market.short_margin_rate,
-            impact_coef=market.impact_coef,
+            volume_impact_ticks=market.volume_impact_ticks,
             maintenance_margin_rate=market.maintenance_margin_rate,
         )
 
@@ -217,15 +219,15 @@ class CostModel:
     def calc_slippage(self, quantity: float, *, bar_volume: float | None = None) -> float:
         """Single-side slippage cost in quote currency.
 
-        bar_volume (optional): when given together with impact_coef > 0,
+        bar_volume (optional): when given together with volume_impact_ticks > 0,
         adds a market-impact component that scales linearly with how much
         of the bar's volume this fill consumes. Omitted (the default at
         every existing call site) reproduces the flat slippage_ticks-only
         cost unchanged.
         """
         ticks = self.slippage_ticks
-        if bar_volume and bar_volume > 0 and self.impact_coef > 0:
-            ticks += self.impact_coef * (abs(quantity) / bar_volume)
+        if bar_volume and bar_volume > 0 and self.volume_impact_ticks > 0:
+            ticks += self.volume_impact_ticks * (abs(quantity) / bar_volume)
         return ticks * self.tick_size * abs(quantity) * self.multiplier
 
     def calc_tax(self, price: float, quantity: float) -> float:
@@ -235,26 +237,41 @@ class CostModel:
         notional = price * quantity * self.multiplier
         return abs(notional) * self.tax_rate
 
-    def total_cost(self, price: float, quantity: float) -> float:
+    def total_cost(
+        self,
+        price: float,
+        quantity: float,
+        *,
+        bar_volume: float | None = None,
+    ) -> float:
         """Total single-side cost: commission + slippage + tax."""
         return (
             self.calc_commission(price, quantity)
-            + self.calc_slippage(quantity)
+            + self.calc_slippage(quantity, bar_volume=bar_volume)
             + self.calc_tax(price, quantity)
         )
 
-    def margin_rate(self, side: Literal["long", "short"]) -> float:
+    def margin_rate(self, side: PositionSide) -> float:
         """Return margin rate for the given side."""
         return self.short_margin_rate if side == "short" else self.long_margin_rate
 
     def estimate_entry_outlay(
-        self, price: float, quantity: float, side: Literal["long", "short"]
+        self,
+        price: float,
+        quantity: float,
+        side: PositionSide,
+        *,
+        bar_volume: float | None = None,
     ) -> float:
         """Estimate total cash outlay for entering a position (for sizing)."""
         notional = price * quantity * self.multiplier
-        return notional * self.margin_rate(side) + self.total_cost(price, quantity)
+        return notional * self.margin_rate(side) + self.total_cost(
+            price,
+            quantity,
+            bar_volume=bar_volume,
+        )
 
-    def liquidation_price(self, entry_price: float, side: Literal["long", "short"]) -> float | None:
+    def liquidation_price(self, entry_price: float, side: PositionSide) -> float | None:
         """Approximate isolated-margin liquidation price (ignores fees/
         funding, same simplification level as the rest of this margin
         model). None if maintenance_margin_rate is disabled (0, the
@@ -295,7 +312,7 @@ class SymbolDescription:
     error: str | None = None
 
 
-def describe_symbols(cfg: RunConfig, symbols: list[str] | None = None) -> list[SymbolDescription]:
+def describe_symbols(config: RunConfig, symbols: list[str] | None = None) -> list[SymbolDescription]:
     """Resolve and report each symbol's cost-model config (multiplier,
     tick_size, margin rates) plus where each value came from —
     'symbol_overrides' > 'cost_overrides' > 'registry' > 'market_default',
@@ -303,7 +320,7 @@ def describe_symbols(cfg: RunConfig, symbols: list[str] | None = None) -> list[S
     confirm what's really applied before trusting a backtest, not something
     the engine consults itself.
 
-    symbols defaults to cfg.symbols when omitted. A symbol that can't
+    symbols defaults to config.symbols when omitted. A symbol that can't
     resolve (no multiplier anywhere) is reported with its error message
     instead of raising, so one bad entry in a large batch doesn't hide the
     rest — this is the main reason to call this on a whole symbol list at
@@ -312,21 +329,21 @@ def describe_symbols(cfg: RunConfig, symbols: list[str] | None = None) -> list[S
     from librae.config.symbols import get_symbol
 
     results: list[SymbolDescription] = []
-    for sym in symbols if symbols is not None else cfg.symbols:
-        symbol_over = (cfg.symbol_overrides or {}).get(sym, {})
-        cost_over = cfg.cost_overrides or {}
+    for sym in symbols if symbols is not None else config.symbols:
+        symbol_over = (config.symbol_overrides or {}).get(sym, {})
+        cost_over = config.cost_overrides or {}
         try:
             info = get_symbol(sym)
         except KeyError:
             info = None
-        route = (cfg.instrument_overrides or {}).get(sym, {})
-        resolved_market = route.get("market") or (info.market if info else cfg.market)
+        route = (config.instrument_overrides or {}).get(sym, {})
+        resolved_market = route.get("market") or (info.market if info else config.market)
         resolved_source = route.get("data_source") or (
-            info.data_source if info else cfg.data_source
+            info.data_source if info else config.data_source
         )
 
         try:
-            cm = CostModel.from_config(cfg, symbol=sym)
+            cm = CostModel.from_config(config, symbol=sym)
         except (KeyError, ValueError) as e:
             results.append(
                 SymbolDescription(

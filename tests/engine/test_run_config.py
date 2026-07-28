@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from librae.core.run_config import ExecutionPolicy, RunConfig
+from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
 
 
 def _config(**overrides: object) -> RunConfig:
@@ -61,6 +61,17 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         _config(execution={"max_volume_participation_rate": 0.1})
 
 
+def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
+    disabled = _config()
+    limited = _config(risk=RiskPolicy(max_drawdown_rate=0.2))
+
+    assert disabled.config_hash != limited.config_hash
+    with pytest.raises(ValueError, match="max_position_weight"):
+        RiskPolicy(max_position_weight=0)
+    with pytest.raises(TypeError, match="RiskPolicy"):
+        _config(risk={"max_drawdown_rate": 0.2})
+
+
 @pytest.mark.parametrize(
     "legacy_key",
     ["fill_price", "max_volume_participation_pct", "max_volume_participation_rate"],
@@ -69,6 +80,24 @@ def test_execution_settings_are_rejected_from_strategy_params(
     legacy_key: str,
 ) -> None:
     with pytest.raises(ValueError, match=r"RunConfig\.execution"):
+        _config(params={legacy_key: 0.1})
+
+
+@pytest.mark.parametrize(
+    "legacy_key",
+    [
+        "max_position_pct",
+        "max_drawdown_pct",
+        "max_gross_exposure_pct",
+        "max_net_exposure_pct",
+        "max_position_weight",
+        "max_drawdown_rate",
+        "max_gross_exposure",
+        "max_net_exposure",
+    ],
+)
+def test_risk_settings_are_rejected_from_strategy_params(legacy_key: str) -> None:
+    with pytest.raises(ValueError, match=r"RunConfig\.risk"):
         _config(params={legacy_key: 0.1})
 
 

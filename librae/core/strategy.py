@@ -16,13 +16,17 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Literal
 
+PositionSide = Literal["long", "short"]
+OrderAction = Literal["long", "short", "close"]
+PositionEventType = Literal["open", "add", "reduce", "close"]
+
 
 @dataclass(frozen=True)
 class Position:
     """Engine-owned position state, exposed to strategy via Context."""
 
     symbol: str
-    side: Literal["long", "short"]
+    side: PositionSide
     entry_price: float
     quantity: float
     entry_at: datetime
@@ -53,7 +57,7 @@ class Context:
 
     ts: datetime
     symbol: str
-    symbols: tuple[str, ...] | list[str]
+    symbols: tuple[str, ...]
     bar: Mapping[str, float]
     bars: Mapping[str, Mapping[str, float]]
     positions: Mapping[str, Position]
@@ -111,7 +115,7 @@ class OrderIntent:
             touches it). Same lifecycle as stop_price and simulation-only.
     """
 
-    action: Literal["long", "short", "close"]
+    action: OrderAction
     symbol: str = ""
     quantity: float | None = None
     reason: str = ""
@@ -138,6 +142,7 @@ class PortfolioTargets:
     reason: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "weights", dict(self.weights))
         if self.fill_price is not None and not isinstance(self.fill_price, str):
             raise ValueError(
                 "PortfolioTargets.fill_price must be a bar field name; "
@@ -158,7 +163,7 @@ class Fill:
     """Execution result from an Executor."""
 
     symbol: str
-    side: Literal["long", "short"]
+    side: PositionSide
     price: float
     quantity: float
     commission: float
@@ -180,7 +185,7 @@ class PositionState:
     """
 
     symbol: str
-    side: Literal["long", "short"]
+    side: PositionSide
     entry_price: float
     quantity: float
     entry_at: datetime

@@ -39,7 +39,7 @@ class TestWarmupFetcher:
         trader = LiveTrader(
             mock_strategy,
             lambda x: x,
-            cfg=cfg,
+            config=cfg,
             adapter=mock_fetcher,
             warmup_fetcher=mock_warmup,
             on_bar=None,
@@ -77,7 +77,7 @@ class TestWarmupFetcher:
         trader = LiveTrader(
             mock_strategy,
             lambda x: x,
-            cfg=cfg,
+            config=cfg,
             adapter=mock_fetcher,
             warmup_fetcher=None,
             on_bar=None,

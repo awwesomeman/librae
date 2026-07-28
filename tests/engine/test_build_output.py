@@ -84,7 +84,7 @@ class TestBuildOutputValid:
         output = bt.build_output()
         meta = output.run_metadata
         assert meta.run_id == bt.run_id
-        assert meta.symbol == "BTCUSDT"
+        assert meta.symbols == ("BTCUSDT",)
         assert meta.timeframe == "H1"
         assert meta.strategy == "buy_bar5_close_bar15"
 

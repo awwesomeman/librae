@@ -206,8 +206,8 @@ class TestRebalanceExecution:
     @pytest.mark.parametrize(
         ("limit_name", "limit", "weights"),
         [
-            ("max_gross_exposure_pct", 1.0, {"A": 0.75, "B": -0.75}),
-            ("max_net_exposure_pct", 0.5, {"A": 0.75}),
+            ("max_gross_exposure", 1.0, {"A": 0.75, "B": -0.75}),
+            ("max_net_exposure", 0.5, {"A": 0.75}),
         ],
     )
     def test_portfolio_target_limits_fail_instead_of_scaling(

@@ -27,7 +27,7 @@ def get_run_by_config_hash(
     Returns run configuration metadata, or None if not found.
     Existing old runs (config_hash=NULL) are not affected.
     """
-    sql = """SELECT run_id, params, execution_policy, perf_params
+    sql = """SELECT run_id, params, execution_policy, risk_policy, perf_params
              FROM backtest_runs
              WHERE config_hash = %s
              ORDER BY run_at DESC LIMIT 1"""
@@ -42,7 +42,8 @@ def get_run_by_config_hash(
         "run_id": row[0],
         "params": json.loads(row[1]) if row[1] else None,
         "execution_policy": json.loads(row[2]) if row[2] else None,
-        "perf_params": json.loads(row[3]) if row[3] else None,
+        "risk_policy": json.loads(row[3]) if row[3] else None,
+        "perf_params": json.loads(row[4]) if row[4] else None,
     }
 
 
@@ -65,7 +66,7 @@ def get_latest_run_id(strategy: str | None = None, dsn: str | None = None) -> st
 def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
     """List recent backtest runs."""
     sql = """
-        SELECT run_id, strategy, symbol, timeframe,
+        SELECT run_id, strategy, symbols, timeframe,
                mode, data_source, started_at, ended_at, run_at
         FROM backtest_runs
         ORDER BY run_at DESC
@@ -136,7 +137,7 @@ def load_performance(run_id: str, dsn: str | None = None) -> pd.DataFrame:
                sp.average_gross_exposure, sp.max_gross_exposure,
                sp.max_abs_net_exposure, sp.max_concentration,
                sp.total_commission, sp.total_slippage, sp.total_tax,
-               br.strategy, br.symbol, br.timeframe
+               br.strategy, br.symbols, br.timeframe
         FROM strategy_performance sp
         JOIN backtest_runs br ON sp.run_id = br.run_id
         WHERE sp.run_id = %s
@@ -299,12 +300,12 @@ def load_ohlcv(
     elif run_id:
         sql = """
             WITH meta AS (
-                SELECT symbol, timeframe, started_at, ended_at
+                SELECT symbols, timeframe, started_at, ended_at
                 FROM backtest_runs WHERE run_id = %s
             )
             SELECT ts AS _time, o.symbol, open, high, low, close, volume
             FROM ohlcv o, meta m
-            WHERE o.symbol = m.symbol
+            WHERE o.symbol IN (SELECT jsonb_array_elements_text(m.symbols))
               AND o.timeframe = m.timeframe
               AND (m.started_at IS NULL OR ts >= m.started_at)
               AND (m.ended_at IS NULL OR ts <= m.ended_at)

@@ -18,9 +18,10 @@ import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
-import pandas as pd
+from librae.core.run_config import RunMode
+from librae.core.strategy import PositionEventType, PositionSide
 
 # ---------------------------------------------------------------------------
 # Constants (from contracts.py)
@@ -32,40 +33,6 @@ SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 # but we accept old IDs with %H%M%S (6-digit) + hex8 still in the DB.
 RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$")
 
-REQUIRED_SUMMARY_KEYS: tuple[str, ...] = (
-    "full_sample_period",
-    "train_period",
-    "oos_period",
-    "asset",
-    "freq",
-)
-REQUIRED_PERF_FIELDS: tuple[str, ...] = (
-    "total_return",
-    "max_drawdown",
-    "sharpe",
-    "sortino",
-    "calmar",
-    "profit_factor",
-    "payoff_ratio",
-    "win_rate",
-    "avg_trade_return",
-    "trades",
-    "exposure_ratio",
-)
-REQUIRED_STRATEGY_CONTEXT_KEYS: tuple[str, ...] = (
-    "benchmark",
-    "data_source",
-    "last_updated_utc",
-    "summary",
-    "universe",
-    "session_rules",
-    "periods",
-    "cost_model",
-    "risk_limits",
-    "assumptions",
-    "logic",
-    "params",
-)
 REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
     "run_metadata",
     "equity_curve",
@@ -84,14 +51,18 @@ class RunMetadata:
 
     run_id: str
     strategy: str
-    symbol: str
+    symbols: tuple[str, ...]
     timeframe: str
     data_source: str
     started_at: datetime
     ended_at: datetime
     run_at: datetime
-    params: dict | None = None
-    mode: str = "backtest"
+    mode: RunMode = "backtest"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbols", tuple(self.symbols))
+        if self.mode not in ("backtest", "sim", "live"):
+            raise ValueError(f"invalid run mode: {self.mode!r}")
 
 
 @dataclass(frozen=True)
@@ -118,8 +89,8 @@ class OrderEventRecord:
     event_id: str
     ts: datetime
     symbol: str
-    side: Literal["long", "short"]
-    event_type: Literal["open", "add", "reduce", "close"]
+    side: PositionSide
+    event_type: PositionEventType
     fill_quantity: float
     price: float
     entry_price: float
@@ -145,7 +116,7 @@ class PositionSnapshotPoint:
 
     ts: datetime
     symbol: str
-    side: Literal["long", "short"]
+    side: PositionSide
     quantity: float
     price: float
     market_value: float
@@ -253,8 +224,8 @@ class BacktestOutput:
             )
         if not self.run_metadata.strategy:
             raise ValueError("run_metadata.strategy is required")
-        if not self.run_metadata.symbol:
-            raise ValueError("run_metadata.symbol is required")
+        if not self.run_metadata.symbols or any(not symbol for symbol in self.run_metadata.symbols):
+            raise ValueError("run_metadata.symbols must contain non-empty identifiers")
         if not self.run_metadata.timeframe:
             raise ValueError("run_metadata.timeframe is required")
         if self.equity_curve is None:
@@ -273,39 +244,3 @@ def require_keys(record: dict[str, Any], keys: tuple[str, ...], record_name: str
     missing = [k for k in keys if k not in record or record[k] in (None, "")]
     if missing:
         raise ValueError(f"{record_name} missing required keys: {missing}")
-
-
-def validate_record_contract(
-    record: dict[str, Any], required_keys: tuple[str, ...], record_name: str
-) -> None:
-    """Validate snake_case keys + required keys in a record."""
-    ensure_snake_case_keys(list(record.keys()), record_name)
-    require_keys(record, required_keys, record_name)
-
-
-def validate_dataframe_columns(df: pd.DataFrame, required: set[str], dataset: str) -> None:
-    """Validate that a DataFrame has all required columns."""
-    if df.empty:
-        return
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise ValueError(f"{dataset} missing required columns: {', '.join(missing)}")
-
-
-def validate_perf_fields(perf_raw: pd.DataFrame) -> None:
-    """Validate required performance fields in a DataFrame."""
-    if perf_raw.empty:
-        return
-    columns = set(perf_raw.columns)
-    missing = sorted(set(REQUIRED_PERF_FIELDS) - columns)
-    if missing:
-        raise ValueError(f"strategy_performance missing required fields: {', '.join(missing)}")
-
-
-def validate_strategy_context(record: dict[str, Any], record_name: str) -> None:
-    """Validate a strategy context record."""
-    validate_record_contract(record, REQUIRED_STRATEGY_CONTEXT_KEYS, record_name)
-    summary = record.get("summary")
-    if not isinstance(summary, dict):
-        raise ValueError(f"{record_name}.summary must be an object")
-    validate_record_contract(summary, REQUIRED_SUMMARY_KEYS, f"{record_name}.summary")

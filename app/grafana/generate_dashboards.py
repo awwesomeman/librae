@@ -348,18 +348,18 @@ BASE_PANELS_DEF: list[dict] = [
         "_x": 0,
         "_dy": 0,
         "title": "Price Trend",
-        "description": "Underlying asset close price. Matched to run's symbol, timeframe, and data source.",
+        "description": "Close price for every run symbol, matched by timeframe and data source.",
         "type": "timeseries",
         "h": 10,
         "w": 12,
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT symbol, timeframe, data_source, started_at, ended_at"
+                " SELECT symbols, timeframe, data_source, started_at, ended_at"
                 " FROM backtest_runs WHERE run_id = '${run_id}')"
-                " SELECT o.ts AS time, o.close"
+                " SELECT o.ts AS time, o.close, o.symbol AS metric"
                 " FROM ohlcv o, meta m"
-                " WHERE o.symbol = m.symbol"
+                " WHERE o.symbol IN (SELECT jsonb_array_elements_text(m.symbols))"
                 " AND o.timeframe = m.timeframe"
                 " AND (m.data_source IS NULL OR o.data_source = m.data_source)"
                 " AND (m.started_at IS NULL OR o.ts >= m.started_at)"
@@ -538,18 +538,18 @@ EXTRA_PANELS: list[dict] = [
         "Unrealized PnL",
         (
             "WITH meta AS ("
-            " SELECT symbol, timeframe, data_source"
+            " SELECT timeframe, data_source"
             " FROM backtest_runs WHERE run_id='${run_id}'"
             "),\n"
             "pos AS (\n"
-            "  SELECT side, entry_price, remaining_quantity\n"
+            "  SELECT symbol, side, entry_price, remaining_quantity\n"
             "  FROM trade_events\n"
             "  WHERE run_id = '${run_id}'\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             "),\n"
             "latest AS (\n"
-            "  SELECT close FROM ohlcv, meta\n"
-            "  WHERE ohlcv.symbol = meta.symbol AND ohlcv.timeframe = meta.timeframe\n"
+            "  SELECT close FROM ohlcv, meta, pos\n"
+            "  WHERE ohlcv.symbol = pos.symbol AND ohlcv.timeframe = meta.timeframe\n"
             "    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
@@ -786,9 +786,9 @@ def render_unified_dashboard() -> dict:
 # _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
 # so symbol/timeframe/data_source are resolved once instead of once per column.
 _SIG_WHERE = "s.run_id = '${run_id}' AND s.signal_type = '${signal_type}'"
-_META_INNER = " SELECT symbol, timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
+_META_INNER = " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
 _OHLCV_WHERE = (
-    "ohlcv.symbol = meta.symbol"
+    "ohlcv.symbol = s.symbol"
     " AND ohlcv.timeframe = meta.timeframe"
     " AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)"
 )

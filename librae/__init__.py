@@ -36,14 +36,24 @@ from .core.cost_model import (
 )
 from .core.strategy import (
     OrderIntent,
+    OrderAction,
     Strategy,
     Context,
     Fill,
     Position,
+    PositionEventType,
+    PositionSide,
     PortfolioTargets,
     StrategyDecision,
 )
-from .core.executor import TradePnL, TradeResult, calc_trade_pnl, direction, make_fill
+from .core.executor import (
+    TradePnL,
+    TradeResult,
+    calc_equity,
+    calc_trade_pnl,
+    side_multiplier,
+    simulate_fill,
+)
 from .core.metrics import (
     compute_all,
     compute_signal_outcomes,
@@ -55,7 +65,7 @@ from .core.metrics import (
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
 )
-from .core.run_config import ExecutionPolicy, RunConfig
+from .core.run_config import ExecutionPolicy, LiveMode, RiskPolicy, RunConfig, RunMode
 from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market
 
@@ -75,16 +85,20 @@ __all__ = [
     "MarketConfig",
     "get_market",
     "OrderIntent",
+    "OrderAction",
     "PortfolioTargets",
     "StrategyDecision",
     "Strategy",
     "Context",
     "Fill",
     "Position",
+    "PositionEventType",
+    "PositionSide",
     "TradePnL",
     "calc_trade_pnl",
-    "direction",
-    "make_fill",
+    "side_multiplier",
+    "simulate_fill",
+    "calc_equity",
     "Backtest",
     "BacktestResult",
     "EquitySnapshot",
@@ -103,6 +117,9 @@ __all__ = [
     "generate_trade_tearsheet",
     "RunConfig",
     "ExecutionPolicy",
+    "RiskPolicy",
+    "RunMode",
+    "LiveMode",
     "generate_run_id",
     "infer_timeframe",
     "to_ccxt",

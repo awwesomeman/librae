@@ -37,21 +37,21 @@ def _make_panel(symbols: list[str], periods: int = 180) -> pd.DataFrame:
     return pd.concat(frames, names=["symbol", "datetime"])
 
 
-def run_backtest(cfg: RunConfig) -> None:
-    data = _make_panel(cfg.symbols)
+def run_backtest(config: RunConfig) -> None:
+    data = _make_panel(config.symbols)
     timestamps = data.index.get_level_values("datetime").unique()
     target_weights = pd.DataFrame(
         [
-            {cfg.symbols[0]: 0.60, cfg.symbols[1]: 0.35},
-            {cfg.symbols[1]: 0.45, cfg.symbols[2]: 0.50},
-            {cfg.symbols[0]: 0.30, cfg.symbols[2]: 0.65},
+            {config.symbols[0]: 0.60, config.symbols[1]: 0.35},
+            {config.symbols[1]: 0.45, config.symbols[2]: 0.50},
+            {config.symbols[0]: 0.30, config.symbols[2]: 0.65},
         ],
         index=timestamps[[20, 80, 140]],
     )
     backtest = Backtest(
         data=data,
         strategy=TargetWeightsStrategy(target_weights),
-        cfg=cfg,
+        config=config,
         record_position_snapshots=True,
     )
     backtest.run()
@@ -59,7 +59,7 @@ def run_backtest(cfg: RunConfig) -> None:
     print(output.metrics)
 
 
-def run_realtime(_cfg: RunConfig) -> None:
+def run_realtime(_config: RunConfig) -> None:
     raise NotImplementedError("PortfolioTargets examples currently support backtest mode only")
 
 

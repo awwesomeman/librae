@@ -128,14 +128,14 @@ class TestSlippage:
 
 
 class TestDynamicSlippage:
-    """bar_volume/impact_coef default to disabled — every pre-existing
+    """bar_volume/volume_impact_ticks default to disabled — every pre-existing
     calc_slippage(qty) call site above is unaffected."""
 
     def test_bar_volume_omitted_unaffected(self, crypto_cost: CostModel) -> None:
         assert crypto_cost.calc_slippage(0.5) == crypto_cost.calc_slippage(0.5, bar_volume=None)
 
-    def test_zero_impact_coef_unaffected_even_with_bar_volume(self, crypto_cost: CostModel) -> None:
-        # crypto_cost fixture has impact_coef=0.0 (dataclass default)
+    def test_zero_volume_impact_ticks_unaffected_even_with_bar_volume(self, crypto_cost: CostModel) -> None:
+        # crypto_cost fixture has volume_impact_ticks=0.0 (dataclass default)
         assert crypto_cost.calc_slippage(0.5) == crypto_cost.calc_slippage(0.5, bar_volume=10.0)
 
     def test_impact_scales_with_participation(self) -> None:
@@ -146,7 +146,7 @@ class TestDynamicSlippage:
             slippage_ticks=1.0,
             tick_size=0.01,
             tax_rate=0.0,
-            impact_coef=10.0,
+            volume_impact_ticks=10.0,
         )
         # 10% participation (qty=10 / volume=100) -> +1 impact tick -> 2 ticks total
         slip_10pct = cm.calc_slippage(10.0, bar_volume=100.0)
@@ -165,7 +165,7 @@ class TestDynamicSlippage:
             slippage_ticks=1.0,
             tick_size=0.01,
             tax_rate=0.0,
-            impact_coef=10.0,
+            volume_impact_ticks=10.0,
         )
         base = cm.calc_slippage(10.0)
         assert cm.calc_slippage(10.0, bar_volume=0.0) == base

@@ -16,7 +16,7 @@ from librae.core.executor import (
     execute_order_intents,
     liquidate_all,
 )
-from librae.core.run_config import ExecutionPolicy
+from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, Fill, OrderIntent, PositionState, Strategy
 from tests.conftest import make_test_cfg
 
@@ -271,7 +271,7 @@ class TestProcessActionsVolumeCap:
             slippage_ticks=1.0,
             tick_size=0.01,
             tax_rate=0.0,
-            impact_coef=10.0,
+            volume_impact_ticks=10.0,
         )
 
         result = execute_order_intents(
@@ -337,10 +337,10 @@ class TestMaxDrawdownBreaker:
         cfg = make_test_cfg(
             mode="backtest",
             initial_balance=10_000.0,
-            params={"max_drawdown_pct": 0.2},
+            risk=RiskPolicy(max_drawdown_rate=0.2),
         )
         bt = Backtest(
-            _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
+            _make_multiindex_df(bars), OpenOnceStrategy(), config=cfg, cost_model=_zero_cost()
         )
         result = bt.run()
 
@@ -363,7 +363,7 @@ class TestMaxDrawdownBreaker:
         cfg = make_test_cfg(
             mode="backtest",
             initial_balance=10_000.0,
-            params={"max_drawdown_pct": 0.2},
+            risk=RiskPolicy(max_drawdown_rate=0.2),
         )
         cost = CostModel(
             multiplier=1.0,
@@ -376,7 +376,7 @@ class TestMaxDrawdownBreaker:
         bt = Backtest(
             _make_multiindex_df(bars),
             OpenOnceStrategy(),
-            cfg=cfg,
+            config=cfg,
             cost_model=cost,
             record_position_snapshots=True,
         )
@@ -395,7 +395,7 @@ class TestMaxDrawdownBreaker:
         assert all(snapshot.ts != exit_ts for snapshot in result.position_snapshots)
 
     def test_no_breach_when_disabled(self):
-        """Same crash, no max_drawdown_pct set -> position rides it out (baseline sanity check)."""
+        """Same crash, no max_drawdown_rate set -> position rides it out (baseline sanity check)."""
         bars = [
             {"open": 100, "high": 101, "low": 99, "close": 100},
             {"open": 100, "high": 101, "low": 99, "close": 100},
@@ -421,14 +421,14 @@ class TestMaxDrawdownBreaker:
         cfg = make_test_cfg(
             mode="backtest",
             initial_balance=10_000.0,
-            params={"max_drawdown_pct": 0.2},
+            risk=RiskPolicy(max_drawdown_rate=0.2),
         )
 
         with pytest.raises(ValueError, match="without a subsequent tradable bar"):
             Backtest(
                 _make_multiindex_df(bars),
                 OpenOnceStrategy(),
-                cfg=cfg,
+                config=cfg,
                 cost_model=_zero_cost(),
             ).run()
 
@@ -445,16 +445,16 @@ class TestMaxPositionCap:
         cfg = make_test_cfg(
             mode="backtest",
             initial_balance=10_000.0,
-            params={"max_position_pct": 0.3},
+            risk=RiskPolicy(max_position_weight=0.3),
         )
         bt = Backtest(
-            _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
+            _make_multiindex_df(bars), OpenOnceStrategy(), config=cfg, cost_model=_zero_cost()
         )
         result = bt.run()
 
         assert len(result.trades) == 1
         # Uncapped, all ~10_000 cash at price 100 would size ~100 units.
-        # max_position_pct=0.3 against last-known equity (10_000) caps notional at 3_000 -> 30 units.
+        # max_position_weight=0.3 against last-known equity (10_000) caps notional at 3_000 -> 30 units.
         assert result.trades[0].quantity == pytest.approx(30.0)
 
 
@@ -479,7 +479,7 @@ class TestMaxVolumeParticipation:
             execution=ExecutionPolicy(max_volume_participation_rate=0.5),
         )
         bt = Backtest(
-            _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
+            _make_multiindex_df(bars), OpenOnceStrategy(), config=cfg, cost_model=_zero_cost()
         )
         result = bt.run()
 
@@ -490,10 +490,37 @@ class TestMaxVolumeParticipation:
 
 
 class TestDynamicSlippage:
+    def test_all_cash_sizing_includes_volume_impact(self) -> None:
+        cost_model = CostModel(
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=1.0,
+            tax_rate=0.0,
+            volume_impact_ticks=10.0,
+        )
+        cash = 1_000.0
+
+        result = execute_order_intents(
+            [OrderIntent(action="long", symbol="TEST")],
+            {},
+            cash,
+            datetime(2025, 1, 1, tzinfo=UTC),
+            get_price=lambda _symbol, _intent: 100.0,
+            get_cost_model=lambda _symbol: cost_model,
+            primary_symbol="TEST",
+            get_volume=lambda _symbol: 10.0,
+        )
+
+        assert len(result.events) == 1
+        assert result.events[0].fill_quantity < 10.0
+        assert cash + result.cash_delta >= -1e-9
+
     def test_lower_bar_volume_produces_higher_slippage(self):
         """Same fixed-size entry, only the fill bar's volume differs -> the
         low-volume run's participation-scaled slippage must be strictly
-        higher, proving impact_coef actually moves the number end-to-end."""
+        higher, proving volume_impact_ticks actually moves the number end-to-end."""
 
         class OpenFixedQtyStrategy(Strategy):
             def on_bar(self, ctx: Context) -> list[OrderIntent]:
@@ -508,7 +535,7 @@ class TestDynamicSlippage:
             slippage_ticks=1.0,
             tick_size=0.01,
             tax_rate=0.0,
-            impact_coef=10.0,
+            volume_impact_ticks=10.0,
         )
 
         def _bars(fill_bar_volume: float) -> list[dict[str, float]]:

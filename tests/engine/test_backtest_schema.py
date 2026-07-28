@@ -21,7 +21,7 @@ def _make_run_metadata(**kwargs) -> RunMetadata:
     defaults = dict(
         run_id="demobreakout_v1-mxfr1-20260306t120000-abcd1234",
         strategy="DemoBreakout_v1",
-        symbol="MXFR1",
+        symbols=("MXFR1",),
         timeframe="H1",
         data_source="binance_spot",
         started_at=START,
@@ -76,6 +76,7 @@ def test_run_metadata_defaults() -> None:
     meta = _make_run_metadata()
     assert meta.mode == "backtest"
     assert meta.data_source == "binance_spot"
+    assert meta.symbols == ("MXFR1",)
 
 
 def test_backtest_output_validate_passes() -> None:

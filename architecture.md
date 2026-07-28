@@ -49,7 +49,7 @@ librae/
 │   ├── executor.py           simulated matching plus apply_execution_fill for externally confirmed fills
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
 │   ├── metrics.py            performance metrics + on-demand trade/signal outcome analysis
-│   ├── run_config.py         RunConfig + ExecutionPolicy — typed run parameters
+│   ├── run_config.py         RunConfig + ExecutionPolicy + RiskPolicy — typed run parameters
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── backtest/                 backtest runtime
@@ -63,7 +63,7 @@ librae/
 │   └── state.py              restart checkpoint types + LiveStateStore protocol
 │
 └── config/                   configuration management
-    ├── market_config.py      MarketConfig dataclass + built-in market registry (cost model, tick_size, multiplier, margin rate)
+    ├── market_config.py      MarketConfig dataclass + built-in market registry (costs, tick size, margin rates)
     └── symbols.py            SymbolInfo dataclass + built-in symbol registry (symbol → market/data_source/multiplier)
 
 # Outside librae, at the same level as db/ and brokers/ — reference implementations (swappable, see "Dependency direction" below)
@@ -78,7 +78,7 @@ backtest/ ──→ core/
 live/     ──→ core/
 ```
 
-`backtest/` and `live/` have no direct dependency on each other — shared execution logic lives in `core/`. Broker, persistence, and notification implementations remain constructor-injected and lazy-imported. Simulation can run standalone with `cfg.no_db=True`; live additionally requires an explicit broker route or injected order adapter plus a durable state store (see `docs/plans/refactor_librae_decouple.md`).
+`backtest/` and `live/` have no direct dependency on each other — shared execution logic lives in `core/`. Broker, persistence, and notification implementations remain constructor-injected and lazy-imported. Simulation can run standalone with `config.no_db=True`; live additionally requires an explicit broker route or injected order adapter plus a durable state store (see `docs/plans/refactor_librae_decouple.md`).
 
 ### Execution flow (strategy → engine → output)
 
@@ -96,6 +96,8 @@ Output (build_output)  →  BacktestOutput (metrics + equity/position/allocation
 
 The lifecycle terminology and breaking migration are recorded in
 [`2026-07-28-strategy-decision-execution-naming.md`](docs/decisions/2026-07-28-strategy-decision-execution-naming.md).
+Run configuration, metadata, and shared-type SSOT decisions are recorded in
+[`2026-07-28-run-contract-ssot.md`](docs/decisions/2026-07-28-run-contract-ssot.md).
 
 ### Usage
 
@@ -119,7 +121,7 @@ class MyStrategy(Strategy):
 
 # 2. Run the engine (a RunConfig is usually built via orchestration.cli.build_config())
 df = fetch_and_prepare(symbol, months)  # your own ETL
-bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
+bt = Backtest(data=df, strategy=MyStrategy(), config=config)
 bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
 bt.run()
 
@@ -144,7 +146,7 @@ cash-and-position simulation economically incomplete.
 
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
-are timezone-aware and increasing within each symbol; and `cfg.symbols`, when
+are timezone-aware and increasing within each symbol; and `config.symbols`, when
 provided, exactly matches the symbols in the frame. Required OHLCV values are
 numeric and finite, prices are positive, every bar satisfies
 `low <= open/close <= high`, and volume is non-negative. Validation never
@@ -317,22 +319,27 @@ broker execution reports determine actual fills. Emergency live exits bypass
 the local cap so the broker owns partial-fill truth.
 
 ```python
-from librae import ExecutionPolicy, RunConfig
+from librae import ExecutionPolicy, RiskPolicy, RunConfig
 
-cfg = RunConfig(
+config = RunConfig(
     ...,
     execution=ExecutionPolicy(
         default_fill_price="open",
         max_volume_participation_rate=0.1,
     ),
-    params={
-        "max_position_pct": 0.3,  # single-position notional cap = 30% of latest known equity
-        "max_gross_exposure_pct": 1.2,  # reject target baskets above 120% gross
-        "max_net_exposure_pct": 1.0,  # reject target baskets above 100% absolute net
-        "max_drawdown_pct": 0.2,  # equity down 20% from its peak -> liquidate everything and stop entering permanently
-    },
+    risk=RiskPolicy(
+        max_position_weight=0.3,  # 30% of latest known equity
+        max_gross_exposure=1.2,  # reject targets above 120% gross
+        max_net_exposure=1.0,  # reject targets above 100% absolute net
+        max_drawdown_rate=0.2,  # liquidate and halt after a 20% drawdown
+    ),
+    params={"lookback": 20},  # strategy logic only
 )
 ```
+
+`execution`, `risk`, and `params` are separate SSOTs. Putting execution or
+risk keys in `params` raises immediately; the engine never reparses a
+free-form strategy dictionary for portfolio controls.
 
 - `default_fill_price`: backtest/sim fallback for decisions without an
   explicit fill field. It is not used to manufacture live executions.
@@ -343,10 +350,10 @@ cfg = RunConfig(
   fills and retain the remaining position for a later observed bar. Once
   stop-market or liquidation has triggered, its remainder stays an active
   market exit. A terminal backtest that cannot finish exits raises.
-- `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
-- `max_gross_exposure_pct` / `max_net_exposure_pct`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
-- `max_drawdown_pct`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
-- Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
+- `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
+- `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
+- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
+- Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
 and one-way turnover (`sum(abs(traded notional)) / ending equity`) for its
@@ -361,7 +368,7 @@ code because the engine has no classification model.
 
 #### Margin / liquidation simulation
 
-`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `cfg.params`" convention as `impact_coef`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). In backtest/sim, `resolve_stop_exit` checks every bar whether a position has hit the modeled liquidation price; if so it force-closes with `REASON_LIQUIDATION`, using conservative gap-through logic. The liquidation check takes priority over stop-loss/take-profit. Live does not replay this completed-bar touch as a market order: venue margin/liquidation and broker-native protective orders are authoritative.
+`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `config.params`" convention as `volume_impact_ticks`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). In backtest/sim, `resolve_stop_exit` checks every bar whether a position has hit the modeled liquidation price; if so it force-closes with `REASON_LIQUIDATION`, using conservative gap-through logic. The liquidation check takes priority over stop-loss/take-profit. Live does not replay this completed-bar touch as a market order: venue margin/liquidation and broker-native protective orders are authoritative.
 
 The formula is a simplified isolated-margin approximation (ignoring fees/funding rates, matching the existing simplification level of this engine's margin model): long `entry*(1 + maintenance_margin_rate - margin_rate)`, short `entry*(1 - maintenance_margin_rate + margin_rate)`. Spot (`margin_rate=1.0`) never triggers unless `maintenance_margin_rate` is set.
 
@@ -397,7 +404,7 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, and active order queue. Runtime-state
-schema v3 is intentionally breaking: older checkpoints are rejected and require
+schema v4 is intentionally breaking: older checkpoints are rejected and require
 an explicit migration or removal. `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted is saved before network I/O, so an ambiguous timeout is
@@ -418,12 +425,12 @@ from librae.live.engine import LiveTrader
 trader = LiveTrader(
     strategy=MyStrategy(),
     feature_fn=prepare_signals,  # the same ETL pipeline
-    cfg=cfg,  # a RunConfig (usually built via orchestration.cli.build_config())
+    config=config,  # a RunConfig (usually built via orchestration.cli.build_config())
 )
 trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the engine
 ```
 
-Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independently injectable. `cfg.no_db=True` disables default DB callbacks/state and notifications; simulation can remain standalone, while live must receive a durable `state_store` explicitly. The order adapter is still required for live regardless of DB settings.
+Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independently injectable. `config.no_db=True` disables default DB callbacks/state and notifications; simulation can remain standalone, while live must receive a durable `state_store` explicitly. The order adapter is still required for live regardless of DB settings.
 
 #### Mode comparison
 
@@ -479,6 +486,7 @@ financial/execution fact.
 | `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioTargets` |
 | `Context` | immutable event snapshot: ts, configured symbols, current bar/bars, available_symbols, positions, cash, equity, callback period_index |
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioTargets`; `[]` means no decision |
+| `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close |
 | `PortfolioTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
@@ -493,15 +501,16 @@ financial/execution fact.
 | `ExecutionReport` | normalized live state: submitted/accepted/partial/filled/cancelled/rejected plus confirmed execution facts |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
-| `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, impact_coef (volume-impact coefficient, default 0 = off), maintenance_margin_rate (maintenance margin rate, default 0 = liquidation simulation off) |
+| `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
 | `ExecutionPolicy` | run-wide default fill field and maximum bar-volume participation rate |
+| `RiskPolicy` | optional engine-level position, exposure, and drawdown limits; every value is a ratio |
 
 #### Output layer
 
 | Type | Description |
 |------|------|
 | `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + order_events + metrics + position_snapshots + allocation_snapshots |
-| `RunMetadata` | run_id, strategy, symbol, timeframe, start/end/run timestamps |
+| `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
 | `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
 | `OrderEventRecord` | position lifecycle event (open/add/reduce/close) |
 | `EquityCurvePoint` | per-event equity/return/drawdown/benchmark plus gross/net exposure, concentration, and turnover |
@@ -512,7 +521,8 @@ financial/execution fact.
 
 | Function | Description |
 |------|------|
-| `make_fill(intent, price, cash, cost_model)` | simulate a fill (used directly by backtest) |
+| `simulate_fill(intent, price, cash, cost_model)` | build a deterministic simulated fill |
+| `calc_equity(cash, positions, ...)` | calculate mark-to-market equity and the immutable strategy snapshot |
 | `execute_order_intents(intents, ...)` | deterministic simulated intent matching; also reused on a copy for live request sizing |
 | `execute_portfolio_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
 | `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
@@ -523,7 +533,7 @@ financial/execution fact.
 | `reduce_position(pos, closed_qty)` | pro-rate position state after a partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
 | `compute_all(equity_values, timestamps, trade_pnls, ...)` | performance calculation (QuantStats adapter) |
-| `direction(side)` | `"long"` → +1.0, `"short"` → -1.0 |
+| `side_multiplier(side)` | `"long"` → +1.0, `"short"` → -1.0 |
 
 ### Design decisions
 
@@ -547,22 +557,22 @@ from librae.config.market_config import get_market
 from librae.core.cost_model import CostModel
 
 market = get_market("crypto")            # → MarketConfig (from librae's built-in registry)
-cost_model = CostModel.from_market(market)
+cost_model = CostModel.from_market(market, multiplier=1.0)
 
 # Or: register your own markets, with no dependency on librae's built-in registry
 my_markets = {"my_market": MarketConfig(name="my_market", commission_rate=0.001, ...)}
 market = get_market("my_market", markets=my_markets)
-cost_model = CostModel.from_config(cfg, markets=my_markets)
+cost_model = CostModel.from_config(config, markets=my_markets)
 ```
 
 #### Per-symbol overrides (`RunConfig.symbol_overrides`)
 
-`CostModel.from_config(cfg, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `cfg.symbol_overrides[symbol]` > `cfg.cost_overrides` (run-wide fallback) > the built-in symbol registry (`spot` auto-`multiplier=1.0`, `contract_*` required-explicit) > market-level defaults. `symbol` defaults to `cfg.symbol` (`symbols[0]`) when omitted.
+`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`spot` auto-`multiplier=1.0`, `contract_*` required-explicit) > market-level defaults. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
-`Backtest.__init__` calls this once per symbol in the run (not just `cfg.symbol`) whenever `cfg=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
+`Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 
 ```python
-cfg = RunConfig(
+config = RunConfig(
     ...,
     symbols=["TXFR1", "MXFR1"],
     market="tw_futures",
@@ -603,7 +613,7 @@ conversion remains a separate explicit model in PR 5 / Issue #18.
 
 #### TelegramAdapter (notifications)
 
-Source: behavior is configured from the caller's `config.yaml` `telegram:` block (passed in via `RunConfig.telegram_config`), secrets come from env vars. `librae` itself has no dependency on this package — `LiveTrader` only lazy-imports it to build a default implementation when nothing was explicitly overridden and `cfg.no_db=False`.
+Source: behavior is configured from the caller's `config.yaml` `telegram:` block (passed in via `RunConfig.telegram_config`), secrets come from env vars. `librae` itself has no dependency on this package — `LiveTrader` only lazy-imports it to build a default implementation when nothing was explicitly overridden and `config.no_db=False`.
 
 ```python
 from notifications.config import TelegramConfig
@@ -649,7 +659,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `send_alert` | `title, message` |
 | `send_status` | `strategy, symbol, equity, drawdown, daily_pnl, position` |
 
-Callbacks, `warmup_fetcher`, `notifier`, and `state_store` use `_UNSET` to distinguish a caller override from default wiring. Under `cfg.no_db=True`, DB callbacks/state and notifications default to `None`; live then rejects construction unless a store is explicitly injected. Otherwise callbacks come from `db.timescale_writer`, state from `db.timescale_state`, and notifications from `notifications.telegram`.
+Callbacks, `warmup_fetcher`, `notifier`, and `state_store` use `_UNSET` to distinguish a caller override from default wiring. Under `config.no_db=True`, DB callbacks/state and notifications default to `None`; live then rejects construction unless a store is explicitly injected. Otherwise callbacks come from `db.timescale_writer`, state from `db.timescale_state`, and notifications from `notifications.telegram`.
 
 #### parse_with_config (CLI + YAML merging)
 
@@ -749,6 +759,13 @@ flowchart TD
 | `factor_registry` | one row per `factor_name` — its update frequency + source, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
+
+`backtest_runs.symbols` is a JSON array and is the run-universe SSOT; there is
+no separate primary-symbol column. Single-asset convenience remains
+`RunConfig.symbol` in memory. The table stores `params`, `execution_policy`,
+`risk_policy`, and `perf_params` in separate JSONB columns so strategy logic,
+fill assumptions, portfolio limits, and reporting options cannot drift into
+one untyped bag.
 
 `signal_events` and `ohlcv` are the source facts for signal-quality analysis.
 Forward return, MFE, and MAE are derived on demand: local callers use

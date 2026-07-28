@@ -3,7 +3,7 @@
 Processes newly completed bars as data-driven events and routes intents to
 LiveExecutor. Caches OHLCV to avoid redundant fetches.
 
-Wiring is internalized: pass cfg=RunConfig to __init__,
+Wiring is internalized: pass config=RunConfig to __init__,
 the engine builds adapter, cost_model, callbacks, telegram internally.
 Use on_bar=None etc. to disable specific callbacks (e.g. in tests).
 """
@@ -29,8 +29,8 @@ from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     ExecutionResult,
     apply_execution_fill,
+    calc_equity,
     check_stop_targets,
-    eval_equity,
     execute_order_intents,
     execute_pending_decision_and_stops,
     execute_portfolio_targets,
@@ -38,7 +38,6 @@ from librae.core.executor import (
     partition_pending_decision,
     queue_market_exit_all,
     validate_decision_symbols,
-    validate_risk_params,
 )
 from librae.core.strategy import (
     Context,
@@ -104,14 +103,14 @@ class LiveTrader:
     Args:
         strategy: Strategy instance (same as backtest).
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
-        cfg: RunConfig — the sole configuration source.
+        config: RunConfig — the sole configuration source.
         adapter: Market-data fetcher override. None builds the data adapter
             from each symbol's explicit data_source route.
         order_adapter: Order gateway override. In live mode, omitting it
-            requires an explicit cfg.broker or per-symbol broker route;
+            requires an explicit config.broker or per-symbol broker route;
             execution is never inferred from the symbol or market.
         cost_model: CostModel override. None resolves one model per symbol.
-        on_bar: _UNSET -> build DB callback from cfg; None -> no callback; callable -> use it.
+        on_bar: _UNSET -> build DB callback from config; None -> no callback; callable -> use it.
         on_order_event: Same pattern as on_bar.
         on_ohlcv: Same pattern as on_bar.
         on_heartbeat: Same pattern as on_bar.
@@ -121,8 +120,8 @@ class LiveTrader:
         state_store: _UNSET -> TimescaleDB when DB is enabled; explicit
             duck-typed store -> use it. Live mode requires a store so
             placement attempts and fills survive process restarts.
-        notifier: _UNSET -> build default TelegramAdapter from cfg (skipped
-            entirely when cfg.no_db); None -> no notifications; object -> use it
+        notifier: _UNSET -> build default TelegramAdapter from config (skipped
+            entirely when config.no_db); None -> no notifications; object -> use it
             (must implement TelegramAdapter's duck-typed interface).
     """
 
@@ -131,7 +130,7 @@ class LiveTrader:
         strategy: Strategy,
         feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
         *,
-        cfg: RunConfig,
+        config: RunConfig,
         adapter: OHLCVFetcher | Mapping[str, OHLCVFetcher] | None = None,
         order_adapter: object | Mapping[str, object] | None = None,
         cost_model: CostModel | Mapping[str, CostModel] | None = None,
@@ -150,11 +149,11 @@ class LiveTrader:
 
         self._strategy = strategy
         self._feature_fn = feature_fn
-        self._cfg = cfg
-        self._symbols = cfg.symbols
-        self._timeframe = to_ccxt(cfg.timeframe)
+        self._config = config
+        self._symbols = config.symbols
+        self._timeframe = to_ccxt(config.timeframe)
         self._interval_delta = interval_to_timedelta(self._timeframe)
-        self._poll_seconds = cfg.poll_seconds
+        self._poll_seconds = config.poll_seconds
 
         # --- Build per-symbol cost models and instrument routes ---
         if isinstance(cost_model, Mapping):
@@ -166,11 +165,11 @@ class LiveTrader:
             resolved_cost_models = {symbol: cost_model for symbol in self._symbols}
         else:
             resolved_cost_models = {
-                symbol: CostModel.from_config(cfg, symbol=symbol) for symbol in self._symbols
+                symbol: CostModel.from_config(config, symbol=symbol) for symbol in self._symbols
             }
         self._instruments = {
             symbol: resolve_symbol(
-                cfg,
+                config,
                 symbol,
                 multiplier=resolved_cost_models[symbol].multiplier,
             )
@@ -206,12 +205,12 @@ class LiveTrader:
                             "orderable; inject a market-data adapter and configure a concrete "
                             "venue_symbol before using sim/live"
                         )
-                    route = (cfg.instrument_overrides or {}).get(symbol, {})
-                    broker = route.get("broker") or cfg.broker
+                    route = (config.instrument_overrides or {}).get(symbol, {})
+                    broker = route.get("broker") or config.broker
                     instance = _build_builtin_adapter(
                         instrument.data_adapter,
                         trading=(
-                            cfg.mode == "live"
+                            config.mode == "live"
                             and order_adapter is None
                             and _DATA_ADAPTER_BY_BROKER.get(broker) == instrument.data_adapter
                         ),
@@ -245,7 +244,7 @@ class LiveTrader:
                         )
                     )
 
-        if cfg.mode == "live":
+        if config.mode == "live":
             if isinstance(order_adapter, Mapping):
                 order_adapters = dict(order_adapter)
             elif order_adapter is not None:
@@ -254,8 +253,8 @@ class LiveTrader:
                 broker_instances: dict[str, object] = {}
                 order_adapters = {}
                 for symbol, instrument in self._instruments.items():
-                    route = (cfg.instrument_overrides or {}).get(symbol, {})
-                    broker = route.get("broker") or cfg.broker
+                    route = (config.instrument_overrides or {}).get(symbol, {})
+                    broker = route.get("broker") or config.broker
                     if not broker:
                         raise ValueError(
                             f"Live execution broker is not configured for {symbol!r}; "
@@ -282,26 +281,26 @@ class LiveTrader:
             order_adapters = {}
 
         # --- Resolve notifier (Telegram by default; injectable) ---
-        # cfg.no_db gates this the same way it gates the db callbacks below
+        # config.no_db gates this the same way it gates the db callbacks below
         # (dry_run implies no_db — see RunConfig.__post_init__), so a fully
         # local run never imports the notifications package.
         if notifier is not _UNSET:
             resolved_notifier = notifier
-        elif cfg.no_db:
+        elif config.no_db:
             resolved_notifier = None
         else:
             resolved_notifier = self._build_notifier()
 
         # --- Build run_id ---
-        strategy_name = cfg.strategy_name
+        strategy_name = config.strategy_name
         self._run_id = generate_run_id(
-            f"{strategy_name}_{cfg.market}",
-            cfg.symbol,
-            cfg.timeframe,
+            f"{strategy_name}_{config.market}",
+            config.symbol,
+            config.timeframe,
         )
 
         # --- Build executor ---
-        is_live = cfg.mode == "live"
+        is_live = config.mode == "live"
         self._executor = LiveExecutor(
             resolved_cost_models,
             simulation=not is_live,
@@ -312,10 +311,10 @@ class LiveTrader:
         )
 
         # --- Restore restart-critical state before callbacks capture run_id ---
-        self._state_key = f"{cfg.mode}:{cfg.config_hash}"
+        self._state_key = f"{config.mode}:{config.config_hash}"
         if state_store is not _UNSET:
             self._state_store = state_store
-        elif cfg.no_db:
+        elif config.no_db:
             self._state_store = None
         else:
             from db.timescale_state import TimescaleLiveStateStore
@@ -334,12 +333,12 @@ class LiveTrader:
         self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
-        self._cash: float = cfg.initial_balance
+        self._cash: float = config.initial_balance
         self._halted: bool = False
         self._pending_decision: StrategyDecision = []
         self._active_orders: list[TrackedOrder] = []
-        self._equity_peak: float = cfg.initial_balance
-        self._prev_equity: float = cfg.initial_balance
+        self._equity_peak: float = config.initial_balance
+        self._prev_equity: float = config.initial_balance
         self._trade_count: int = 0
         self._event_sequence: int = 0
         self._performance_dirty: bool = False
@@ -359,7 +358,7 @@ class LiveTrader:
                 self._restore_state(restored)
 
         # --- Resolve callbacks (sentinel pattern) ---
-        self._warmup_periods = (cfg.params or {}).get("warmup_periods", 720)
+        self._warmup_periods = (config.params or {}).get("warmup_periods", 720)
 
         callbacks = {
             "on_bar": (on_bar, self._build_on_bar),
@@ -372,17 +371,17 @@ class LiveTrader:
         for attr, (value, builder) in callbacks.items():
             if value is not _UNSET:
                 setattr(self, f"_{attr}", value)
-            elif cfg.no_db:
+            elif config.no_db:
                 setattr(self, f"_{attr}", None)
             else:
                 setattr(self, f"_{attr}", builder())
 
-        if not cfg.no_db:
+        if not config.no_db:
             self._register_run()
 
-        self._fill_price = cfg.execution.default_fill_price
-        self._max_volume_participation_rate = cfg.execution.max_volume_participation_rate
-        self._risk_limits = validate_risk_params(cfg.params)
+        self._fill_price = config.execution.default_fill_price
+        self._max_volume_participation_rate = config.execution.max_volume_participation_rate
+        self._risk_policy = config.risk
         self._running: bool = False
 
         # Cache status config
@@ -401,8 +400,8 @@ class LiveTrader:
         return LiveRuntimeState(
             state_key=self._state_key,
             run_id=self._run_id,
-            config_hash=self._cfg.config_hash,
-            mode=self._cfg.mode,
+            config_hash=self._config.config_hash,
+            mode=self._config.mode,
             cash=self._cash,
             positions=deepcopy(self._positions),
             last_prices=dict(self._last_prices),
@@ -422,7 +421,7 @@ class LiveTrader:
     def _restore_state(self, state: LiveRuntimeState) -> None:
         if state.state_key != self._state_key:
             raise ValueError("runtime state key does not match this configuration")
-        if state.config_hash != self._cfg.config_hash or state.mode != self._cfg.mode:
+        if state.config_hash != self._config.config_hash or state.mode != self._config.mode:
             raise ValueError("runtime state configuration does not match this run")
         self._run_id = state.run_id
         self._cash = state.cash
@@ -487,15 +486,17 @@ class LiveTrader:
         try:
             write_run_metadata(
                 run_id=self._run_id,
-                strategy=self._cfg.strategy_name,
-                symbol=self._cfg.symbol,
-                timeframe=self._cfg.timeframe,
-                mode=self._cfg.mode,
+                strategy=self._config.strategy_name,
+                symbols=self._config.symbols,
+                timeframe=self._config.timeframe,
+                mode=self._config.mode,
                 started_at=datetime.now(tz=UTC),
-                data_source=self._cfg.data_source,
-                poll_seconds=self._cfg.poll_seconds,
-                params=self._cfg.params,
-                perf_params=self._cfg.perf_params,
+                data_source=self._config.data_source,
+                poll_seconds=self._config.poll_seconds,
+                params=self._config.params,
+                execution_policy=asdict(self._config.execution),
+                risk_policy=asdict(self._config.risk),
+                perf_params=self._config.perf_params,
                 # config_hash intentionally omitted: idx_backtest_runs_config_hash is a
                 # unique index meant for backtest dedup (check_existing_run) -- sim/live
                 # runs legitimately restart with an identical config (e.g. after a
@@ -507,7 +508,7 @@ class LiveTrader:
     def _build_on_bar(self) -> Callable:
         from db.timescale_writer import write_equity_curve_point
 
-        strategy = self._cfg.strategy_name
+        strategy = self._config.strategy_name
 
         def on_bar(
             run_id_: str, ts: datetime, equity: float, drawdown: float, period_return: float
@@ -535,9 +536,9 @@ class LiveTrader:
         from librae.core.utils import make_event_id
 
         run_id = self._run_id
-        strategy = self._cfg.strategy_name
-        timeframe = self._cfg.timeframe
-        cfg = self._cfg
+        strategy = self._config.strategy_name
+        timeframe = self._config.timeframe
+        config = self._config
 
         def on_order_event(event: OrderEvent) -> None:
             self._event_sequence += 1
@@ -545,7 +546,7 @@ class LiveTrader:
             fields["event_id"] = make_event_id(run_id, self._event_sequence)
             fields["run_id"] = run_id
             fields["strategy"] = strategy
-            fields["mode"] = cfg.mode
+            fields["mode"] = config.mode
             fields["timeframe"] = timeframe
             self._db_write(write_trade_event, **fields)
             if not self._executor.simulation:
@@ -593,8 +594,8 @@ class LiveTrader:
         from db.timescale_writer import write_signal_event
 
         run_id = self._run_id
-        strategy = self._cfg.strategy_name
-        timeframe = self._cfg.timeframe
+        strategy = self._config.strategy_name
+        timeframe = self._config.timeframe
 
         def on_signal_event_cb(
             symbol: str,
@@ -609,7 +610,7 @@ class LiveTrader:
                 run_id=run_id,
                 strategy=strategy,
                 symbol=symbol,
-                mode=self._cfg.mode,
+                mode=self._config.mode,
                 timeframe=timeframe,
                 signal_value=signal_value,
                 price=price,
@@ -619,14 +620,14 @@ class LiveTrader:
         return on_signal_event_cb
 
     def _build_notifier(self) -> object | None:
-        """Default notifier: TelegramAdapter built from cfg.telegram_config
-        + TELEGRAM_* env vars. Lazy import so a fully local run (cfg.no_db,
+        """Default notifier: TelegramAdapter built from config.telegram_config
+        + TELEGRAM_* env vars. Lazy import so a fully local run (config.no_db,
         or an explicit notifier= override) never touches the notifications
         package."""
         from notifications.config import TelegramConfig
         from notifications.telegram import TelegramAdapter, TelegramCredentials
 
-        tg_config = TelegramConfig.from_dict(self._cfg.telegram_config or {})
+        tg_config = TelegramConfig.from_dict(self._config.telegram_config or {})
         tg_creds = TelegramCredentials.from_env("TELEGRAM")
         return TelegramAdapter(config=tg_config, credentials=tg_creds)
 
@@ -655,7 +656,7 @@ class LiveTrader:
     # this is how many *additional* full intervals of no progress are
     # tolerated on top of that before alerting. Pure monitoring, no effect
     # on trading, so it's an engine constant like CONSECUTIVE_ERROR_THRESHOLD
-    # rather than a cfg.params opt-in.
+    # rather than a config.params opt-in.
     STALE_DATA_TOLERANCE_BARS = 2
 
     def _notify(self, method: str, **kwargs: object) -> None:
@@ -833,7 +834,7 @@ class LiveTrader:
         return True
 
     # 1% — same style as CONSECUTIVE_ERROR_THRESHOLD: an engine constant,
-    # not a cfg.params knob (nothing in this run should reasonably need a
+    # not a config.params knob (nothing in this run should reasonably need a
     # different tolerance).
     CASH_RECONCILE_TOLERANCE_PCT = 0.01
 
@@ -956,7 +957,7 @@ class LiveTrader:
             "send_startup",
             strategy=strategy_name,
             symbol=symbols_str,
-            mode=self._cfg.mode,
+            mode=self._config.mode,
             run_id=self._run_id,
         )
 
@@ -1007,7 +1008,7 @@ class LiveTrader:
         """Start a new risk epoch after explicit operator review."""
         if self._active_orders:
             raise RuntimeError("cannot reset halt while broker orders remain unresolved")
-        equity = self._eval_equity()
+        equity = self._calc_equity()
         self._halted = False
         self._equity_peak = equity
         self._prev_equity = equity
@@ -1188,8 +1189,8 @@ class LiveTrader:
             return float(volume) if volume is not None else None
 
         max_position_notional = (
-            self._risk_limits.max_position_pct * self._prev_equity
-            if self._risk_limits.max_position_pct
+            self._risk_policy.max_position_weight * self._prev_equity
+            if self._risk_policy.max_position_weight
             else None
         )
         volume_limit = self._max_volume_participation_rate if apply_volume_limit else None
@@ -1212,8 +1213,8 @@ class LiveTrader:
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
                 max_volume_participation_rate=volume_limit,
-                max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
-                max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
+                max_gross_exposure=self._risk_policy.max_gross_exposure,
+                max_net_exposure=self._risk_policy.max_net_exposure,
                 get_volume=get_volume,
                 used_quantity_by_symbol=planned_quantity_by_symbol,
             )
@@ -1498,8 +1499,8 @@ class LiveTrader:
         cycle_used_quantity_by_symbol: dict[str, float] = {}
         if self._executor.simulation:
             max_position_notional = (
-                self._risk_limits.max_position_pct * self._prev_equity
-                if self._risk_limits.max_position_pct
+                self._risk_policy.max_position_weight * self._prev_equity
+                if self._risk_policy.max_position_weight
                 else None
             )
             if self._halted:
@@ -1524,8 +1525,8 @@ class LiveTrader:
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
                     max_volume_participation_rate=self._max_volume_participation_rate,
-                    max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
-                    max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
+                    max_gross_exposure=self._risk_policy.max_gross_exposure,
+                    max_net_exposure=self._risk_policy.max_net_exposure,
                 )
             self._commit_simulated_results(
                 cash=staged_cash,
@@ -1592,7 +1593,7 @@ class LiveTrader:
         # A waiting target-weight basket is atomic; per-symbol intents do not
         # prevent decisions for other symbols.
         if not isinstance(self._pending_decision, PortfolioTargets):
-            equity, position_snapshot = self._eval_equity_snapshot()
+            equity, position_snapshot = self._calc_equity_snapshot()
             ctx = Context(
                 ts=ts,
                 symbol=primary_symbol,
@@ -1642,9 +1643,9 @@ class LiveTrader:
             for symbol, bar in raw_bars.items():
                 self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
-    def _eval_equity(self) -> float:
+    def _calc_equity(self) -> float:
         """Total equity = cash + market value of all positions."""
-        mtm, _ = self._eval_equity_snapshot()
+        mtm, _ = self._calc_equity_snapshot()
         return mtm
 
     def _get_last_price(self, sym: str, ps: PositionState) -> float:
@@ -1656,9 +1657,9 @@ class LiveTrader:
     def _get_cost_model(self, sym: str) -> CostModel:
         return self._executor.get_cost_model(sym)
 
-    def _eval_equity_snapshot(self) -> tuple[float, dict[str, Position]]:
+    def _calc_equity_snapshot(self) -> tuple[float, dict[str, Position]]:
         """Shared MTM + snapshot computation."""
-        return eval_equity(
+        return calc_equity(
             self._cash,
             self._positions,
             get_price=self._get_last_price,
@@ -1675,21 +1676,21 @@ class LiveTrader:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
         previous_equity = self._prev_equity
-        equity = self._eval_equity()
+        equity = self._calc_equity()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (
             (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
         )
 
         if (
-            self._risk_limits.max_drawdown_pct
+            self._risk_policy.max_drawdown_rate
             and not self._halted
-            and drawdown <= -self._risk_limits.max_drawdown_pct
+            and drawdown <= -self._risk_policy.max_drawdown_rate
         ):
             self._flatten_and_halt(
                 ts, drawdown, bars, used_quantity_by_symbol=used_quantity_by_symbol
             )
-            equity = self._eval_equity()
+            equity = self._calc_equity()
             drawdown = (
                 (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
             )
@@ -1721,7 +1722,7 @@ class LiveTrader:
             from db.timescale_writer import refresh_performance
 
             # The current equity point must exist before KPI recomputation.
-            self._db_write(refresh_performance, self._run_id, cfg=self._cfg)
+            self._db_write(refresh_performance, self._run_id, config=self._config)
             self._performance_dirty = False
 
         # Periodic status notification (flags cached at init)
@@ -1793,13 +1794,13 @@ class LiveTrader:
             title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
             message=(
                 f"drawdown={drawdown:.2%} <= "
-                f"-{self._risk_limits.max_drawdown_pct:.2%} — {outcome} and halted"
+                f"-{self._risk_policy.max_drawdown_rate:.2%} — {outcome} and halted"
             ),
         )
         logger.warning(
-            "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% — %s",
+            "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_rate=%.2f%% — %s",
             ts,
             drawdown * 100,
-            self._risk_limits.max_drawdown_pct * 100,
+            self._risk_policy.max_drawdown_rate * 100,
             outcome,
         )

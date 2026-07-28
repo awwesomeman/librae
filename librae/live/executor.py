@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
+from librae.core.strategy import PositionEventType
 
 if TYPE_CHECKING:
     from notifications.telegram import TelegramAdapter
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 OrderSide = Literal["buy", "sell"]
 OrderType = Literal["market", "limit"]
-PositionEffect = Literal["open", "add", "reduce", "close"]
+PositionEffect = PositionEventType
 OrderStatus = Literal[
     "submitted",
     "accepted",

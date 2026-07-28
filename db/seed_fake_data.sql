@@ -5,12 +5,14 @@
 --  ohlcv/ohlcv_coverage_ranges/signal_events don't FK to run_id, delete separately if wanted)
 
 INSERT INTO backtest_runs
-    (run_id, strategy, symbol, timeframe, data_source, started_at, ended_at, run_at,
-     mode, poll_seconds, params, perf_params, config_hash)
+    (run_id, strategy, symbols, timeframe, data_source, started_at, ended_at, run_at,
+     mode, poll_seconds, params, execution_policy, risk_policy, perf_params, config_hash)
 VALUES
-    ('seed_test_run', 'seed_test', 'BTCUSDT', 'H1', 'binance_spot',
+    ('seed_test_run', 'seed_test', '["BTCUSDT"]'::jsonb, 'H1', 'binance_spot',
      NOW() - INTERVAL '10 days', NOW(), NOW(),
      'backtest', NULL, '{"warmup_periods": 720}'::jsonb,
+     '{"default_fill_price": "open", "max_volume_participation_rate": 0.1}'::jsonb,
+     '{"max_position_weight": 0.3}'::jsonb,
      '{"annualize": true, "annual_periods": 365}'::jsonb, md5('seed_test_run'))
 ON CONFLICT (run_id) DO NOTHING;
 

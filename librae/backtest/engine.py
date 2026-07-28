@@ -3,13 +3,13 @@
 Usage:
     from librae.core.run_config import RunConfig
 
-    bt = Backtest(data=df, strategy=my_strategy, cfg=cfg)
+    bt = Backtest(data=df, strategy=my_strategy, config=config)
     bt.add_benchmark(df.xs("BTCUSDT", level="symbol")["close"])
     bt.run()
     output = bt.build_output()
 
 The engine owns all position state. Strategies only observe via Context.
-Execution uses make_fill() from core.executor.
+Execution uses deterministic simulation functions from core.executor.
 Shared PnL calculation uses calc_trade_pnl() from core.executor.
 
 Data format: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     )
     from librae.core.run_config import RunConfig
 
-from librae.config.market_config import MarketConfig
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
@@ -49,17 +48,16 @@ from librae.core.executor import (
     OrderEvent,
     TradePnL,
     TradeResult,
+    calc_equity,
     check_stop_targets,
-    eval_equity,
     execute_pending_decision_and_stops,
     liquidate_all,
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
     validate_decision_symbols,
-    validate_risk_params,
 )
-from librae.core.run_config import ExecutionPolicy
+from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
     PortfolioTargets,
@@ -104,12 +102,12 @@ def _validate_backtest_data(
         raise ValueError("data symbols must be non-empty strings")
     if configured_symbols is not None:
         if len(configured_symbols) != len(set(configured_symbols)):
-            raise ValueError("cfg.symbols must not contain duplicates")
+            raise ValueError("config.symbols must not contain duplicates")
         actual = set(symbols)
         expected = set(configured_symbols)
         if actual != expected:
             raise ValueError(
-                "cfg.symbols must exactly match data symbols; "
+                "config.symbols must exactly match data symbols; "
                 f"configured={sorted(expected)}, data={sorted(actual)}"
             )
 
@@ -214,40 +212,36 @@ class Backtest:
     """Bar-by-bar backtest engine.
 
     Two supported construction styles:
-      - Direct args (market_config/initial_balance/data_source below): a
+      - Direct args (initial_balance/data_source below): a
         standalone single-run constructor, no RunConfig needed — the
         standard choice for tests, notebooks, and simple scripts.
-      - cfg=RunConfig: derives market_config/initial_balance/data_source
-        from cfg and additionally resolves a per-symbol CostModel for every
+      - config=RunConfig: derives cost model/initial_balance/data_source
+        from config and additionally resolves a per-symbol CostModel for every
         symbol in a multi-asset run — required when running through the
         CLI/DB pipeline (orchestration/cli.py), which builds a RunConfig.
-    Both are first-class; neither is deprecated. Passing market_config
-    without cfg only works for spot-multiplier instruments (see the
-    ValueError below) — pass cost_model= directly for anything else.
+    Both are first-class; neither is deprecated.
 
     Args:
         data: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
               For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
         strategy: Strategy subclass.
-        cfg: RunConfig — see "cfg=RunConfig" above.
-        market_config: MarketConfig for cost model — direct-args style.
+        config: RunConfig — see "config=RunConfig" above.
         initial_balance: Starting cash — direct-args style.
-        strategy_name: Override strategy name (default: from cfg or snake_case of class name).
+        strategy_name: Override strategy name (default: from config or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
         data_source: Data source identifier — direct-args style.
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
         execution_policy: Fill-price and volume assumptions for direct
-            construction. With ``cfg``, ``cfg.execution`` is the only source.
+            construction. With ``config``, ``config.execution`` is the only source.
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
         strategy: Strategy,
-        cfg: RunConfig | None = None,
-        market_config: MarketConfig | None = None,
+        config: RunConfig | None = None,
         initial_balance: float = 100_000.0,
         *,
         strategy_name: str | None = None,
@@ -256,15 +250,15 @@ class Backtest:
         record_position_snapshots: bool = False,
         execution_policy: ExecutionPolicy | None = None,
     ) -> None:
-        _validate_backtest_data(data, cfg.symbols if cfg is not None else None)
-        if cfg is not None and execution_policy is not None:
+        _validate_backtest_data(data, config.symbols if config is not None else None)
+        if config is not None and execution_policy is not None:
             raise ValueError(
-                "execution_policy cannot override cfg.execution; use one configuration source"
+                "execution_policy cannot override config.execution; use one configuration source"
             )
 
         self._data = data
         self._strategy = strategy
-        self._cfg = cfg
+        self._config = config
         self._benchmark_prices: pd.Series | None = None
         self._run_id: str | None = None
         self._timeframe: str | None = None
@@ -273,48 +267,43 @@ class Backtest:
         self._record_position_snapshots = record_position_snapshots
 
         self._symbols = (
-            list(cfg.symbols)
-            if cfg is not None
+            list(config.symbols)
+            if config is not None
             else data.index.get_level_values(0).unique().tolist()
         )
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
 
-        # Resolve from cfg or explicit args
-        if cfg is not None:
-            self._initial_balance = cfg.initial_balance
-            self._data_source = cfg.data_source
-            resolved_name = cfg.strategy_name
-            resolved_cm = CostModel.from_config(cfg, override=cost_model)
+        # Resolve from config or explicit args
+        if config is not None:
+            self._initial_balance = config.initial_balance
+            self._data_source = config.data_source
+            resolved_name = config.strategy_name
+            resolved_cm = CostModel.from_config(config, override=cost_model)
         else:
             self._initial_balance = initial_balance
             self._data_source = data_source
             resolved_name = None
-            if cost_model is not None:
-                resolved_cm = cost_model
-            elif market_config is not None:
-                raise ValueError(
-                    "market_config alone can't build a CostModel — multiplier comes from "
-                    "the symbol registry (spot=1.0 auto, contract_* explicit-required), which "
-                    "the direct-args constructor has no symbol for. Pass cost_model= directly "
-                    "(e.g. CostModel.from_market(market_config, multiplier=...)), or use cfg= instead."
-                )
-            else:
-                resolved_cm = CostModel.zero()
+            resolved_cm = cost_model if cost_model is not None else CostModel.zero()
 
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
-        if cfg is not None and cost_model is None:
+        if config is not None and cost_model is None:
             # Resolve every other symbol in this run independently (each
             # against its own registry entry/cost_overrides/symbol_overrides
             # entry) — a multi-asset run isn't guaranteed to share one
             # multiplier (e.g. tw_futures TXFR1=200 vs MXFR1=50), so only
-            # cfg.symbol (symbols[0]) got a correct CostModel above.
+            # config.symbol (symbols[0]) got a correct CostModel above.
             for sym in self._symbols:
-                if sym != cfg.symbol:
-                    self._cost_models[sym] = CostModel.from_config(cfg, symbol=sym)
-        resolved_execution = cfg.execution if cfg else execution_policy or ExecutionPolicy()
+                if sym != config.symbol:
+                    self._cost_models[sym] = CostModel.from_config(config, symbol=sym)
+        resolved_execution = (
+            config.execution
+            if config
+            else execution_policy
+            or ExecutionPolicy(max_volume_participation_rate=None)
+        )
         self._fill_price = resolved_execution.default_fill_price
         self._max_volume_participation_rate = resolved_execution.max_volume_participation_rate
-        self._risk_limits = validate_risk_params(cfg.params if cfg else None)
+        self._risk_policy = config.risk if config else RiskPolicy()
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
@@ -412,8 +401,8 @@ class Backtest:
             # LiveTrader's simulation mode so deterministic runtimes cannot
             # drift on this sequence ──
             max_position_notional = (
-                self._risk_limits.max_position_pct * last_equity
-                if self._risk_limits.max_position_pct
+                self._risk_policy.max_position_weight * last_equity
+                if self._risk_policy.max_position_weight
                 else None
             )
             if halted:
@@ -437,13 +426,13 @@ class Backtest:
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
                     max_volume_participation_rate=self._max_volume_participation_rate,
-                    max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
-                    max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
+                    max_gross_exposure=self._risk_policy.max_gross_exposure,
+                    max_net_exposure=self._risk_policy.max_net_exposure,
                 )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             # ── Step 2: equity and drawdown check ──
-            mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
+            mtm, pos_snapshot = self._calc_equity_snapshot(cash, positions, last_prices)
             had_exposure = bool(positions)
             if had_exposure:
                 exposed_periods += 1
@@ -451,19 +440,19 @@ class Backtest:
             equity_peak = max(equity_peak, mtm)
             drawdown = (mtm - equity_peak) / equity_peak if equity_peak > 0 else 0.0
             if (
-                self._risk_limits.max_drawdown_pct
+                self._risk_policy.max_drawdown_rate
                 and not halted
                 and equity_peak > 0
-                and drawdown <= -self._risk_limits.max_drawdown_pct
+                and drawdown <= -self._risk_policy.max_drawdown_rate
             ):
                 queue_market_exit_all(positions, reason=REASON_DRAWDOWN_BREACH)
                 halted = True
                 logger.warning(
-                    "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
+                    "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_rate=%.2f%% "
                     "— market exits queued for next observed opens",
                     ts,
                     drawdown * 100,
-                    self._risk_limits.max_drawdown_pct * 100,
+                    self._risk_policy.max_drawdown_rate * 100,
                 )
 
             equity_curve.append(EquitySnapshot(ts=ts, equity=mtm))
@@ -622,8 +611,8 @@ class Backtest:
         - strategy_name: from type(strategy).__name__
         - timeframe: inferred from data index
 
-        When cfg is provided, perf_params come from cfg.
-        annualize kwarg overrides cfg.annualize if explicitly passed.
+        When config is provided, perf_params come from config.
+        annualize kwarg overrides config.annualize if explicitly passed.
 
         Raises RuntimeError if called before run().
         """
@@ -646,7 +635,6 @@ class Backtest:
         ended_at = (
             timeline[-1].to_pydatetime() if hasattr(timeline[-1], "to_pydatetime") else timeline[-1]
         )
-        symbol = self._symbols[0]
         timeframe = self._timeframe
 
         # Benchmark — computed here, not in run() (analysis config, not trade facts)
@@ -674,10 +662,10 @@ class Backtest:
             for t in result.trades
         ]
 
-        # Resolve perf params from cfg or explicit args
+        # Resolve perf params from config or explicit args
         perf_kwargs: dict = {}
-        if self._cfg is not None:
-            perf_kwargs = self._cfg.perf_params.copy()
+        if self._config is not None:
+            perf_kwargs = self._config.perf_params.copy()
         if annualize is not None:
             perf_kwargs["annualize"] = annualize
         elif "annualize" not in perf_kwargs:
@@ -706,7 +694,7 @@ class Backtest:
         run_metadata = RunMetadata(
             run_id=run_id,
             strategy=self._strategy_name,
-            symbol=symbol,
+            symbols=tuple(self._symbols),
             timeframe=timeframe,
             data_source=self._data_source,
             started_at=started_at,
@@ -900,7 +888,7 @@ class Backtest:
             if symbol in bars:
                 position.periods_held += 1
 
-    def _eval_equity(
+    def _calc_equity_snapshot(
         self,
         cash: float,
         positions: dict[str, PositionState],
@@ -916,7 +904,7 @@ class Backtest:
                     f"no point-in-time mark available for open position {sym}"
                 ) from exc
 
-        return eval_equity(
+        return calc_equity(
             cash,
             positions,
             get_price=_price,

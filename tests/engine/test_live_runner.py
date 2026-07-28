@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
-from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent, RiskLimits
-from librae.core.run_config import RunConfig
+from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent
+from librae.core.run_config import RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
     OrderIntent,
@@ -361,18 +361,18 @@ class TestLiveTrader:
         fetcher=None,
         feature_fn=None,
         executor: LiveExecutor | None = None,
-        cfg: RunConfig | None = None,
+        config: RunConfig | None = None,
         **kwargs,
     ) -> LiveTrader:
-        test_cfg = cfg or _test_cfg()
+        test_config = config or _test_cfg()
         kwargs.setdefault("state_store", MemoryLiveStateStore())
         runner = LiveTrader(
             strategy or _HoldStrategy(),
             feature_fn or _simple_feature_fn,
-            cfg=test_cfg,
+            config=test_config,
             adapter=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
             cost_model=(
-                executor.get_cost_model(test_cfg.symbol) if executor else _zero_cost_model()
+                executor.get_cost_model(test_config.symbol) if executor else _zero_cost_model()
             ),
             on_bar=None,
             on_order_event=None,
@@ -395,7 +395,7 @@ class TestLiveTrader:
             LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                cfg=_test_cfg(mode="live"),
+                config=_test_cfg(mode="live"),
                 adapter=lambda *args, **kwargs: _make_ohlcv_df(),
                 order_adapter=_mock_order_adapter(),
                 cost_model=_zero_cost_model(),
@@ -511,7 +511,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=BuyBbbOnce(),
             fetcher=fetcher,
-            cfg=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
+            config=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
             order_adapter=order_adapter,
         )
 
@@ -547,7 +547,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=fetcher,
-            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"]),
         )
 
         runner._poll_cycle()
@@ -590,7 +590,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=fetcher,
-            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"]),
         )
 
         for _ in range(3):
@@ -613,7 +613,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=lambda *_args, **_kwargs: duplicated,
-            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"]),
         )
 
         runner._poll_cycle()
@@ -651,7 +651,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=fetcher,
-            cfg=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"]),
         )
 
         for _ in range(3):
@@ -708,7 +708,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=AllocationStrategy(),
             fetcher=fetcher,
-            cfg=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
+            config=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
             order_adapter=order_adapter,
         )
 
@@ -841,7 +841,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=_AlwaysBuyStrategy(),
             fetcher=fetcher,
-            cfg=cfg,
+            config=cfg,
             order_adapter=mock_order_adapter,
         )
         runner.run(max_iterations=2)
@@ -865,7 +865,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=_AlwaysBuyStrategy(),
             fetcher=fetcher,
-            cfg=_test_cfg(mode="live"),
+            config=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
 
@@ -911,7 +911,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=_AlwaysBuyStrategy(),
             fetcher=fetcher,
-            cfg=_test_cfg(mode="live"),
+            config=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
         alerts: list[tuple[str, dict]] = []
@@ -953,7 +953,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=AllocateOnce(),
             fetcher=fetcher,
-            cfg=_test_cfg(mode="live", symbols=["AAA", "BBB"]),
+            config=_test_cfg(mode="live", symbols=["AAA", "BBB"]),
             order_adapter=adapter,
         )
 
@@ -966,7 +966,7 @@ class TestLiveTrader:
     def test_live_mode_without_order_adapter_raises(self):
         cfg = _test_cfg(mode="live")
         with pytest.raises(ValueError, match="broker is not configured"):
-            self._make_runner(cfg=cfg)
+            self._make_runner(config=cfg)
 
     def test_reconciles_open_broker_position_at_startup(self):
         """Regression test: a process restart previously always assumed
@@ -984,7 +984,7 @@ class TestLiveTrader:
 
         runner = self._make_runner(
             strategy=_HoldStrategy(),
-            cfg=_test_cfg(mode="live"),
+            config=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
         runner.run(max_iterations=1)
@@ -1006,7 +1006,7 @@ class TestLiveTrader:
 
         runner = self._make_runner(
             strategy=_HoldStrategy(),
-            cfg=_test_cfg(mode="live"),
+            config=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
         runner.run(max_iterations=1)
@@ -1025,7 +1025,7 @@ class TestLiveTrader:
         }
 
         runner = self._make_runner(
-            cfg=_test_cfg(mode="live"),
+            config=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
         runner.run(max_iterations=1)
@@ -1038,7 +1038,7 @@ class TestLiveTrader:
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.get_position.side_effect = RuntimeError("broker down")
 
-        runner = self._make_runner(cfg=_test_cfg(mode="live"), order_adapter=mock_order_adapter)
+        runner = self._make_runner(config=_test_cfg(mode="live"), order_adapter=mock_order_adapter)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
         runner.run(max_iterations=1)  # must not raise
@@ -1059,7 +1059,7 @@ class TestLiveTrader:
         }
 
         cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
-        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        runner = self._make_runner(config=cfg, order_adapter=mock_order_adapter)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1085,7 +1085,7 @@ class TestLiveTrader:
         }
 
         cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
-        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        runner = self._make_runner(config=cfg, order_adapter=mock_order_adapter)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1108,7 +1108,7 @@ class TestLiveTrader:
         }
 
         cfg = _test_cfg(mode="live", symbols=["TXFR1"], market="tw_futures")
-        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        runner = self._make_runner(config=cfg, order_adapter=mock_order_adapter)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1134,7 +1134,7 @@ class TestLiveTrader:
             },
         )
         with pytest.raises(ValueError, match="one accounting currency"):
-            self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+            self._make_runner(config=cfg, order_adapter=mock_order_adapter)
 
     def test_adapter_without_get_balance_is_skipped(self):
         """A duck-typed adapter with no get_balance() at all must be silently
@@ -1143,7 +1143,7 @@ class TestLiveTrader:
         del mock_order_adapter.get_balance
 
         cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
-        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        runner = self._make_runner(config=cfg, order_adapter=mock_order_adapter)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1158,7 +1158,7 @@ class TestLiveTrader:
         mock_order_adapter.get_balance.side_effect = RuntimeError("broker down")
 
         cfg = _test_cfg(mode="live", symbols=["BTC/USDT"])
-        runner = self._make_runner(cfg=cfg, order_adapter=mock_order_adapter)
+        runner = self._make_runner(config=cfg, order_adapter=mock_order_adapter)
         runner.run(max_iterations=1)  # must not raise
 
     def test_stale_data_alerts_once_edge_triggered(self):
@@ -1309,7 +1309,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=_AlwaysBuyStrategy(),
             fetcher=fetcher,
-            cfg=cfg,
+            config=cfg,
             order_adapter=mock_order_adapter,
         )
         alerts: list[tuple[str, dict]] = []
@@ -1382,8 +1382,11 @@ class TestLiveTrader:
                     return [OrderIntent(action="long", symbol=ctx.symbol)]
                 return []
 
-        cfg = _test_cfg(params={"warmup_periods": 5, "max_drawdown_pct": 0.2})
-        runner = self._make_runner(strategy=BuyOnceStrategy(), fetcher=fetcher, cfg=cfg)
+        cfg = _test_cfg(
+            params={"warmup_periods": 5},
+            risk=RiskPolicy(max_drawdown_rate=0.2),
+        )
+        runner = self._make_runner(strategy=BuyOnceStrategy(), fetcher=fetcher, config=cfg)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -1409,7 +1412,7 @@ class TestLiveTrader:
             tax_rate=0.0,
         )
         runner = self._make_runner(executor=LiveExecutor(cost_model))
-        runner._risk_limits = RiskLimits(max_drawdown_pct=0.2)
+        runner._risk_policy = RiskPolicy(max_drawdown_rate=0.2)
         runner._cash = 0.0
         runner._positions["BTCUSDT"] = PositionState(
             symbol="BTCUSDT",
@@ -1479,7 +1482,7 @@ class TestLiveExecutionLifecycle:
         return LiveTrader(
             strategy,
             _simple_feature_fn,
-            cfg=_test_cfg(mode="live"),
+            config=_test_cfg(mode="live"),
             adapter=lambda *a, **kw: _make_ohlcv_df(),
             cost_model=_zero_cost_model(),
             order_adapter=adapter,
@@ -1609,7 +1612,7 @@ class TestLiveExecutionLifecycle:
         )
 
         first = self._make_trader(_HoldStrategy(), adapter, state_store=store)
-        first._risk_limits = RiskLimits(max_drawdown_pct=0.2)
+        first._risk_policy = RiskPolicy(max_drawdown_rate=0.2)
         first._positions["BTCUSDT"] = PositionState(
             symbol="BTCUSDT",
             side="long",
@@ -1970,7 +1973,7 @@ class TestCryptoLiveAutoWiring:
             trader = LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                cfg=_test_cfg(mode="live", broker="binance"),
+                config=_test_cfg(mode="live", broker="binance"),
                 cost_model=_zero_cost_model(),
                 on_bar=None,
                 on_order_event=None,
@@ -2024,7 +2027,7 @@ class TestMultiAdapterRouting:
         trader = LiveTrader(
             _HoldStrategy(),
             _simple_feature_fn,
-            cfg=cfg,
+            config=cfg,
             adapter=fetchers,
             on_bar=None,
             on_order_event=None,
@@ -2047,7 +2050,7 @@ class TestIBKRLiveAutoWiring:
             trader = LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                cfg=_test_cfg(
+                config=_test_cfg(
                     mode="live",
                     symbols=["MU"],
                     market="us_equity",
@@ -2086,7 +2089,7 @@ class TestShioajiLiveAutoWiring:
             trader = LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                cfg=self._shioaji_cfg(mode="live"),
+                config=self._shioaji_cfg(mode="live"),
                 cost_model=_zero_cost_model(),
                 on_bar=None,
                 on_order_event=None,
@@ -2123,7 +2126,7 @@ class TestShioajiLiveAutoWiring:
             trader = LiveTrader(
                 _AlwaysBuyStrategy(),
                 _simple_feature_fn,
-                cfg=self._shioaji_cfg(mode="live"),
+                config=self._shioaji_cfg(mode="live"),
                 cost_model=_zero_cost_model(),
                 on_bar=None,
                 on_order_event=None,

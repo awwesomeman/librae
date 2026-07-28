@@ -205,7 +205,7 @@ class TestBacktestDataContract:
         cfg = make_test_cfg(mode="backtest", symbols=["ETHUSDT"])
 
         with pytest.raises(ValueError, match="must exactly match data symbols"):
-            Backtest(df, HoldStrategy(), cfg=cfg, cost_model=_zero_cost())
+            Backtest(df, HoldStrategy(), config=cfg, cost_model=_zero_cost())
 
 
 class TestSignalDrivenStrategy:
@@ -472,7 +472,7 @@ class TestMultiAsset:
             ).run()
 
     def test_per_symbol_multiplier_resolved_independently_via_cfg(self) -> None:
-        """Regression: a multi-asset cfg= run used to build exactly one
+        """Regression: a multi-asset config= run used to build exactly one
         CostModel from cfg.symbol (symbols[0]) and apply it to every symbol
         — TXFR1 (multiplier=200) and MXFR1 (multiplier=50) in the same
         tw_futures run would have silently shared TXFR1's multiplier."""
@@ -493,7 +493,7 @@ class TestMultiAsset:
             initial_balance=100_000.0,
             mode="backtest",
         )
-        bt = Backtest(data=df, strategy=HoldStrategy(), cfg=cfg)
+        bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
         assert bt._get_cost_model("TXFR1").multiplier == 200.0
         assert bt._get_cost_model("MXFR1").multiplier == 50.0
 
@@ -516,7 +516,7 @@ class TestMultiAsset:
             mode="backtest",
         )
 
-        bt = Backtest(data=df, strategy=HoldStrategy(), cfg=cfg)
+        bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
 
         assert bt._get_cost_model("TXFR1").min_commission == 100.0
         assert bt._get_cost_model("MU").min_commission == 0.0
@@ -538,7 +538,7 @@ class TestMultiAsset:
             mode="backtest",
             symbol_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
         )
-        bt = Backtest(data=df, strategy=HoldStrategy(), cfg=cfg)
+        bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
         assert bt._get_cost_model("MY_CUSTOM_SYMBOL").multiplier == 1.0
 
 

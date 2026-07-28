@@ -555,7 +555,7 @@ def test_trade_tearsheet_uses_lifecycle_and_anchor_populations(tmp_path: Path) -
         run_metadata=RunMetadata(
             run_id="test-20260101t0000-abcdef",
             strategy="test",
-            symbol="X",
+                symbols=("X",),
             timeframe="1h",
             data_source="fixture",
             started_at=T0,

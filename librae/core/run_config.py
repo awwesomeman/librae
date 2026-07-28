@@ -3,6 +3,7 @@
 RunConfig is a frozen dataclass that holds all parameters for a run:
 - Strategy params (stored in DB backtest_runs.params)
 - Execution policy (typed fill and liquidity assumptions)
+- Risk policy (typed engine-level portfolio limits)
 - Perf params (stored in DB backtest_runs.perf_params, display only)
 - Behavior params (not stored in DB)
 
@@ -22,6 +23,9 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
+RunMode = Literal["backtest", "sim", "live"]
+LiveMode = Literal["sim", "live"]
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPolicy:
@@ -38,7 +42,7 @@ class ExecutionPolicy:
     """
 
     default_fill_price: str = "open"
-    max_volume_participation_rate: float | None = None
+    max_volume_participation_rate: float | None = 0.1
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
@@ -51,6 +55,36 @@ class ExecutionPolicy:
             or not 0 < rate <= 1
         ):
             raise ValueError(f"max_volume_participation_rate must be in (0, 1] or None, got {rate}")
+
+
+@dataclass(frozen=True, slots=True)
+class RiskPolicy:
+    """Optional engine-level portfolio risk limits.
+
+    All limits are ratios, not percentages. ``None`` disables a limit.
+    Strategy-specific parameters remain in ``RunConfig.params``.
+    """
+
+    max_position_weight: float | None = None
+    max_drawdown_rate: float | None = None
+    max_gross_exposure: float | None = None
+    max_net_exposure: float | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "max_position_weight",
+            "max_drawdown_rate",
+            "max_gross_exposure",
+            "max_net_exposure",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{field_name} must be finite and positive or None, got {value}")
 
 
 class FrozenDict(dict):
@@ -125,13 +159,14 @@ class RunConfig:
 
     # === Strategy identification (stored in DB) ===
     strategy_name: str
-    symbols: list[str] | tuple[str, ...]
+    symbols: tuple[str, ...]
     timeframe: str
     market: str
     data_source: str
     initial_balance: float
-    mode: Literal["backtest", "sim", "live"]
+    mode: RunMode
     execution: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    risk: RiskPolicy = field(default_factory=RiskPolicy)
     # Explicit live execution route. It is never inferred from market,
     # data_source, or symbol; instrument_overrides[symbol]["broker"] wins.
     broker: str | None = None
@@ -170,6 +205,8 @@ class RunConfig:
         """Validate invariants and detach mutable caller-owned values."""
         if not isinstance(self.execution, ExecutionPolicy):
             raise TypeError("execution must be an ExecutionPolicy")
+        if not isinstance(self.risk, RiskPolicy):
+            raise TypeError("risk must be a RiskPolicy")
         object.__setattr__(self, "symbols", tuple(self.symbols))
         for field_name in (
             "params",
@@ -184,6 +221,8 @@ class RunConfig:
 
         if not self.symbols or any(not symbol for symbol in self.symbols):
             raise ValueError("symbols must contain non-empty identifiers")
+        if self.mode not in ("backtest", "sim", "live"):
+            raise ValueError(f"mode must be 'backtest', 'sim', or 'live', got {self.mode!r}")
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
         if not self.market or not self.data_source:
@@ -211,6 +250,22 @@ class RunConfig:
                 "execution settings no longer belong in params; move "
                 f"{invalid_keys} to RunConfig.execution"
             )
+        legacy_risk_keys = {
+            "max_position_pct",
+            "max_drawdown_pct",
+            "max_gross_exposure_pct",
+            "max_net_exposure_pct",
+            "max_position_weight",
+            "max_drawdown_rate",
+            "max_gross_exposure",
+            "max_net_exposure",
+        }
+        invalid_keys = sorted(legacy_risk_keys & set(self.params or {}))
+        if invalid_keys:
+            raise ValueError(
+                "risk settings no longer belong in params; move "
+                f"{invalid_keys} to RunConfig.risk"
+            )
 
     @property
     def symbol(self) -> str:
@@ -232,7 +287,7 @@ class RunConfig:
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
         initial_balance, start, end, params, cost_overrides, symbol_overrides,
-        instrument_overrides, execution.
+        instrument_overrides, execution, risk.
         Excludes: perf params, behavior params.
         """
         blob = json.dumps(
@@ -254,6 +309,7 @@ class RunConfig:
                     "symbol_overrides": self.symbol_overrides,
                     "instrument_overrides": self.instrument_overrides,
                     "execution": asdict(self.execution),
+                    "risk": asdict(self.risk),
                 }
             ),
             sort_keys=True,
@@ -291,6 +347,7 @@ class RunConfig:
             f"  symbol_overrides: {self.symbol_overrides}",
             f"  instrument_overrides: {self.instrument_overrides}",
             f"  execution:   {self.execution}",
+            f"  risk:        {self.risk}",
             "  --- perf params (stored in DB, display only) ---",
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",

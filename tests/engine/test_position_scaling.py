@@ -485,7 +485,7 @@ class TestEdgeCases:
 
     def test_equity_with_scaled_position(self):
         """#22: MTM correct after scaling."""
-        from librae.core.executor import direction
+        from librae.core.executor import side_multiplier
 
         cm = _zero_cost()
         pos = _make_pos(entry_price=100.0, quantity=10.0, cm=cm)
@@ -493,7 +493,9 @@ class TestEdgeCases:
 
         # MTM at price=130
         current_price = 130.0
-        unrealized = cm.calc_pnl(pos.entry_price, current_price, pos.quantity) * direction(pos.side)
+        unrealized = cm.calc_pnl(
+            pos.entry_price, current_price, pos.quantity
+        ) * side_multiplier(pos.side)
         notional = pos.entry_price * pos.quantity * cm.multiplier
         equity_contribution = unrealized + notional
 
@@ -657,8 +659,8 @@ class TestMarginRate:
         assert proceeds == pytest.approx(110_000.0)  # 100000 + 10000
 
     def test_equity_with_margin(self):
-        """eval_equity reflects margin_locked, not full notional."""
-        from librae.core.executor import eval_equity
+        """calc_equity reflects margin_locked, not full notional."""
+        from librae.core.executor import calc_equity
 
         cm = _us_equity_cost()
         pos = _make_pos(side="short", entry_price=200.0, quantity=100.0, cm=cm)
@@ -667,7 +669,7 @@ class TestMarginRate:
         cash = initial_cash - outlay  # 90000
 
         # Price drops to 180 → unrealized profit = 2000
-        mtm, _ = eval_equity(
+        mtm, _ = calc_equity(
             cash,
             {"TEST": pos},
             get_price=lambda s, p: 180.0,

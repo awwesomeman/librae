@@ -17,7 +17,7 @@ market. A handful of hardcoded entries needs no parser, no packaging
 config, and can't go missing from the wheel.
 
 Registering your own market doesn't require editing this file at all:
-get_market(name, markets={...}) / CostModel.from_config(cfg, markets={...})
+get_market(name, markets={...}) / CostModel.from_config(config, markets={...})
 take a caller-built registry that bypasses this one entirely.
 
 multiplier is NOT here — mirrors mainstream frameworks (e.g. QuantConnect
@@ -51,11 +51,11 @@ class MarketConfig:
     commission_rate: float
     min_commission: float
     tax_rate: float
-    slippage_ticks: int
+    slippage_ticks: float
     tick_size: float
     long_margin_rate: float
     short_margin_rate: float
-    impact_coef: float = 0.0
+    volume_impact_ticks: float = 0.0
     maintenance_margin_rate: float = 0.0
 
 

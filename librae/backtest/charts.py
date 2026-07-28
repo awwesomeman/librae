@@ -170,7 +170,7 @@ def plot_trades_by_run_id(run_id: str, *, symbol: str | None = None, block: bool
     build_output()/db.timescale_writer already wrote for this run_id, so the
     chart can't drift from what's in strategy_performance/any downstream dashboard.
 
-    symbol defaults to the run's primary symbol (backtest_runs.symbol).
+    symbol defaults to the first order-event symbol, then the first OHLCV symbol.
     """
     from db.timescale_reader import load_ohlcv, load_trade_events
 

@@ -87,11 +87,22 @@ decision itself:
 | `PortfolioTargets.weights` | Signed target portfolio weights; omitted held symbols target zero. |
 | `PortfolioTargets.fill_price` | Optional backtest/sim bar-field override for the whole basket; unsupported in live. |
 
-Commissions, tax, tick slippage, market impact, multiplier, and margin are
-instrument/cost assumptions under `cost_overrides` or `symbol_overrides`.
-Position, gross/net exposure, and drawdown limits remain portfolio risk
-settings under `strategy.params`. They are separate because execution
-liquidity, accounting costs, and portfolio risk have different ownership.
+Portfolio controls live only under `strategy.risk`; every value is a ratio and
+`null`/omission disables that limit:
+
+| Setting | Expected behavior |
+|---|---|
+| `max_position_weight` | Caps a new position or addition as a fraction of latest known equity. |
+| `max_gross_exposure` | Rejects a `PortfolioTargets` basket whose sum of absolute weights exceeds the limit. |
+| `max_net_exposure` | Rejects a basket whose absolute signed-weight sum exceeds the limit. |
+| `max_drawdown_rate` | Halts new entries and liquidates after the completed-bar drawdown breaches the limit. |
+
+Commissions, tax, base tick slippage, `volume_impact_ticks`, multiplier, and
+margin are instrument/cost assumptions under `cost_overrides` or
+`symbol_overrides`. At 100% bar participation, `volume_impact_ticks` adds that
+many slippage ticks; the addition scales linearly with participation. These
+three namespaces are intentionally separate: `execution` controls matching,
+`risk` controls portfolio limits, and `params` belongs only to strategy logic.
 
 ## Portfolio example behavior
 

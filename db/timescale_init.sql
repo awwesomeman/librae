@@ -8,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE TABLE IF NOT EXISTS backtest_runs (
     run_id          TEXT PRIMARY KEY,
     strategy        TEXT NOT NULL,
-    symbol          TEXT NOT NULL,
+    symbols         JSONB NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT,
     started_at      TIMESTAMPTZ,
@@ -19,12 +19,32 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     last_heartbeat_at TIMESTAMPTZ,
     params          JSONB,
     execution_policy JSONB,
+    risk_policy     JSONB,
     perf_params     JSONB,
     config_hash     VARCHAR(32),
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
 ALTER TABLE backtest_runs
     ADD COLUMN IF NOT EXISTS execution_policy JSONB;
+ALTER TABLE backtest_runs
+    ADD COLUMN IF NOT EXISTS risk_policy JSONB;
+ALTER TABLE backtest_runs
+    ADD COLUMN IF NOT EXISTS symbols JSONB;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'backtest_runs' AND column_name = 'symbol'
+    ) THEN
+        UPDATE backtest_runs
+        SET symbols = jsonb_build_array(symbol)
+        WHERE symbols IS NULL;
+        ALTER TABLE backtest_runs DROP COLUMN symbol;
+    END IF;
+END $$;
+ALTER TABLE backtest_runs
+    ALTER COLUMN symbols SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
 

@@ -229,6 +229,39 @@ class TestBuildConfig:
         with pytest.raises(ValueError, match=r"unknown strategy\.execution"):
             build_config("test_strat", str(tmp_path / "run.py"))
 
+    def test_risk_policy_is_typed_and_unknown_keys_are_rejected(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  risk:
+                    max_position_weight: 0.25
+                    max_drawdown_rate: 0.20
+                """
+            )
+        )
+
+        config = build_config("test_strat", str(tmp_path / "run.py"))
+        assert config.risk.max_position_weight == 0.25
+        assert config.risk.max_drawdown_rate == 0.20
+
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  risk:
+                    drawdown_pct: 20
+                """
+            )
+        )
+        with pytest.raises(ValueError, match=r"unknown strategy\.risk"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
     def test_preserves_per_symbol_cost_and_route_overrides(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(

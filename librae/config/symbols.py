@@ -247,7 +247,7 @@ def get_symbol(symbol: str) -> SymbolInfo:
 
 
 def resolve_symbol(
-    cfg: RunConfig,
+    config: RunConfig,
     symbol: str,
     *,
     multiplier: float | None = None,
@@ -259,13 +259,13 @@ def resolve_symbol(
     universes; ``instrument_overrides`` supplies per-symbol routing metadata.
     """
     registered = _BUILTIN_SYMBOLS.get(symbol)
-    route = (cfg.instrument_overrides or {}).get(symbol, {})
-    costs = dict(cfg.cost_overrides or {})
-    costs.update((cfg.symbol_overrides or {}).get(symbol, {}))
+    route = (config.instrument_overrides or {}).get(symbol, {})
+    costs = dict(config.cost_overrides or {})
+    costs.update((config.symbol_overrides or {}).get(symbol, {}))
 
-    market = route.get("market") or (registered.market if registered else cfg.market)
+    market = route.get("market") or (registered.market if registered else config.market)
     data_source = route.get("data_source") or (
-        registered.data_source if registered else cfg.data_source
+        registered.data_source if registered else config.data_source
     )
     data_adapter = route.get("data_adapter") or (
         registered.data_adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)

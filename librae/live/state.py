@@ -11,8 +11,9 @@ from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Protocol
 
+from librae.core.run_config import LiveMode
 from librae.core.strategy import OrderIntent, PortfolioTargets, PositionState, StrategyDecision
 
 from .executor import OrderRequest, OrderStatus
@@ -112,7 +113,7 @@ class LiveRuntimeState:
     state_key: str
     run_id: str
     config_hash: str
-    mode: Literal["sim", "live"]
+    mode: LiveMode
     cash: float
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)

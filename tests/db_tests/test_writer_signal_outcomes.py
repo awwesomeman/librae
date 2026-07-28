@@ -32,7 +32,7 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
     write_run_metadata(
         "run-1",
         "strategy",
-        "BTCUSDT",
+        ["BTCUSDT"],
         "H1",
         "backtest",
         params={"window": 20},
@@ -40,6 +40,7 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
             "default_fill_price": "open",
             "max_volume_participation_rate": 0.1,
         },
+        risk_policy={"max_drawdown_rate": 0.2},
         cur=cursor,
     )
 
@@ -49,6 +50,7 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         "default_fill_price": "open",
         "max_volume_participation_rate": 0.1,
     }
+    assert json.loads(values[12]) == {"max_drawdown_rate": 0.2}
 
 
 class TestWriteEquityCurvePoint:
@@ -199,9 +201,7 @@ class TestPersistBacktest:
 
         mock_write_bt.assert_called_once()
         call_kwargs = mock_write_bt.call_args
-        signal_series = call_kwargs.kwargs.get("signal_series")
-        if signal_series is None:
-            signal_series = call_kwargs[1].get("signal_series")
+        signal_series = call_kwargs.kwargs["signal_series_by_symbol"]["BTCUSDT"]
         assert signal_series is not None
         # entry_signal is True every 5th bar → 4 signals (indices 0,5,10,15)
         assert len(signal_series) == 4
@@ -236,7 +236,7 @@ class TestPersistBacktest:
 
         save_strategy_results(MagicMock(), df, _test_cfg())
 
-        signal_series = mock_write_bt.call_args.kwargs["signal_series"]
+        signal_series = mock_write_bt.call_args.kwargs["signal_series_by_symbol"]["BTCUSDT"]
         # Should keep: 1.0, -1.0, 1.0, -0.5, 1.0 (5 values, excluding NaN and 0)
         assert len(signal_series) == 5
         assert 0.0 not in signal_series.values
