@@ -15,7 +15,9 @@ from db.timescale_writer import (
     write_ohlcv,
     write_run_metadata,
     write_signal_event,
+    write_strategy_performance,
 )
+from librae.backtest.schema import StrategyMetrics
 from librae.core.run_config import RunConfig
 from tests.conftest import make_test_cfg
 
@@ -53,6 +55,26 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
     assert json.loads(values[12]) == {"max_drawdown_rate": 0.2}
 
 
+def test_strategy_performance_sql_matches_account_metric_values() -> None:
+    cursor = MagicMock()
+    metrics = StrategyMetrics(total_return=0.1)
+
+    write_strategy_performance(
+        "run-1",
+        "account-a",
+        "USD",
+        100.0,
+        110.0,
+        10.0,
+        metrics,
+        cur=cursor,
+    )
+
+    sql, values = cursor.execute.call_args.args
+    assert sql.count("%s") == len(values) == 29
+    assert values[:6] == ("run-1", "account-a", "USD", 100.0, 110.0, 10.0)
+
+
 class TestWriteEquityCurvePoint:
     """write_equity_curve_point single-row upsert."""
 
@@ -72,6 +94,8 @@ class TestWriteEquityCurvePoint:
         write_equity_curve_point(
             ts=datetime(2024, 6, 1, tzinfo=UTC),
             run_id="test-run-001",
+            account_id="default",
+            currency="USD",
             equity=105_000.0,
             drawdown=-0.02,
             period_return=0.01,
@@ -83,6 +107,7 @@ class TestWriteEquityCurvePoint:
         sql = mock_cur.execute.call_args[0][0]
         assert "ON CONFLICT" in sql
         for col in (
+            "currency",
             "equity",
             "benchmark_equity",
             "drawdown",

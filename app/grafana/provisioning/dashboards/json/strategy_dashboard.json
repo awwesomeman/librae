@@ -79,6 +79,25 @@
         "hide": 0,
         "multi": false,
         "label": "Run ID"
+      },
+      {
+        "name": "account_id",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT account_id FROM strategy_performance WHERE run_id='${run_id}' ORDER BY account_id",
+        "query": "SELECT account_id FROM strategy_performance WHERE run_id='${run_id}' ORDER BY account_id",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 0,
+        "multi": false,
+        "label": "Account"
       }
     ]
   },
@@ -231,7 +250,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT symbol, side, entry_price, remaining_quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta, pos\n  WHERE ohlcv.symbol = pos.symbol AND ohlcv.timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.remaining_quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.remaining_quantity\n    ELSE (p.entry_price - l.close) * p.remaining_quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\npos AS (\n  SELECT symbol, side, entry_price, remaining_quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n    AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n),\nlatest AS (\n  SELECT close FROM ohlcv, meta, pos\n  WHERE ohlcv.symbol = pos.symbol AND ohlcv.timeframe = meta.timeframe\n    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN p.remaining_quantity > 0 THEN\n  CASE WHEN p.side='long'\n    THEN (l.close - p.entry_price) * p.remaining_quantity\n    ELSE (p.entry_price - l.close) * p.remaining_quantity\n  END ELSE NULL END AS \"PnL\"\nFROM pos p, latest l",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -298,7 +317,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH pos AS (\n  SELECT side, remaining_quantity, entry_price\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN remaining_quantity > 0 THEN\n  CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(remaining_quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2)\nELSE NULL END AS \"Position\"\nFROM pos",
+          "rawSql": "WITH pos AS (\n  SELECT side, remaining_quantity, entry_price\n  FROM trade_events\n  WHERE run_id = '${run_id}'\n    AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT CASE WHEN remaining_quantity > 0 THEN\n  CASE WHEN side='long' THEN '+' ELSE '-' END\n  || ROUND(remaining_quantity::numeric, 4) || ' @ '\n  || ROUND(entry_price::numeric, 2)\nELSE NULL END AS \"Position\"\nFROM pos",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -361,7 +380,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -419,7 +438,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -473,7 +492,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -534,7 +553,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -592,7 +611,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -653,7 +672,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -707,7 +726,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -785,7 +804,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, drawdown AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, drawdown AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -898,7 +917,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_at AS \"Entry Time\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", account_id AS \"Account\", currency AS \"Currency\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_at AS \"Entry Time\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1053,7 +1072,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Entry\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.event_type IN ('open', 'add') AND $__timeFilter(te.ts)",
+          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Entry\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.event_type IN ('open', 'add') AND $__timeFilter(te.ts)",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -1062,7 +1081,7 @@
           }
         },
         {
-          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Exit\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.event_type IN ('reduce', 'close') AND $__timeFilter(te.ts)",
+          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Exit\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.event_type IN ('reduce', 'close') AND $__timeFilter(te.ts)",
           "format": "time_series",
           "refId": "B",
           "datasource": {

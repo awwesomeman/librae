@@ -32,18 +32,19 @@ def _load_dotenv_for_tests() -> None:
 
 _load_dotenv_for_tests()
 
-from librae.core.run_config import ExecutionPolicy, RunConfig  # noqa: E402
+from librae.core.run_config import AccountConfig, ExecutionPolicy, RunConfig  # noqa: E402
 
 
 def make_test_cfg(**overrides) -> RunConfig:
     """Build a minimal RunConfig for tests (no_db=True)."""
+    initial_balance = overrides.pop("initial_balance", None)
     defaults = dict(
         strategy_name="test",
         symbols=["BTCUSDT"],
         timeframe="H1",
         market="crypto",
         data_source="binance_spot",
-        initial_balance=100_000.0,
+        accounts={"default": AccountConfig(currency="USDT", initial_cash=100_000.0)},
         mode="sim",
         no_db=True,
         poll_seconds=0,
@@ -52,5 +53,9 @@ def make_test_cfg(**overrides) -> RunConfig:
         # for volume participation opt in with an explicit policy.
         execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
     )
+    if initial_balance is not None:
+        defaults["accounts"] = {
+            "default": AccountConfig(currency="USDT", initial_cash=initial_balance)
+        }
     defaults.update(overrides)
     return RunConfig(**defaults)

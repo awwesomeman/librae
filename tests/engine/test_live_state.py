@@ -60,15 +60,15 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         run_id="run-1",
         config_hash="abc",
         mode="live",
-        cash=800.0,
+        cash_by_account={"default": 800.0},
         positions={"BTC/USDT": _position()},
         last_prices={"BTC/USDT": 101.0},
         last_cycle_ts=datetime(2025, 1, 2, tzinfo=UTC),
         last_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
         pending_decision=[OrderIntent(action="close", symbol="BTC/USDT")],
         active_orders=[_order()],
-        equity_peak=1_050.0,
-        prev_equity=1_002.0,
+        equity_peak_by_account={"default": 1_050.0},
+        prev_equity_by_account={"default": 1_002.0},
         trade_count=4,
         event_sequence=7,
         period_index=8,
@@ -91,7 +91,7 @@ def test_portfolio_targets_round_trip_and_memory_store_isolation():
         run_id="run-1",
         config_hash="abc",
         mode="sim",
-        cash=1_000.0,
+        cash_by_account={"default": 1_000.0},
         pending_decision=targets,
         live_rebalance=LiveRebalance(
             targets=targets,
@@ -102,18 +102,18 @@ def test_portfolio_targets_round_trip_and_memory_store_isolation():
             next_sequence=1,
             filled_bar_quantity_by_symbol={"AAA": 5.0},
         ),
-        equity_peak=1_000.0,
-        prev_equity=1_000.0,
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
     )
     store.save(state)
 
     first = store.load(state.state_key)
     assert first is not None
-    first.cash = 0.0
+    first.cash_by_account["default"] = 0.0
     second = store.load(state.state_key)
 
     assert second is not None
-    assert second.cash == 1_000.0
+    assert second.cash_by_account["default"] == 1_000.0
     assert second.pending_decision == state.pending_decision
 
 
@@ -131,7 +131,7 @@ def test_multi_leg_order_round_trip():
         run_id="run-1",
         config_hash="abc",
         mode="live",
-        cash=1_000.0,
+        cash_by_account={"default": 1_000.0},
         pending_decision=decision,
         live_multi_leg=LiveMultiLeg(
             order=decision,
@@ -143,8 +143,8 @@ def test_multi_leg_order_round_trip():
             next_leg_index=1,
             first_fill_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=UTC),
         ),
-        equity_peak=1_000.0,
-        prev_equity=1_000.0,
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
     )
 
     restored = LiveRuntimeState.from_dict(state.to_dict())
@@ -191,9 +191,9 @@ def test_runtime_state_rejects_v3_schema():
         run_id="run-1",
         config_hash="abc",
         mode="sim",
-        cash=1_000.0,
-        equity_peak=1_000.0,
-        prev_equity=1_000.0,
+        cash_by_account={"default": 1_000.0},
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
     ).to_dict()
     raw["schema_version"] = 3
 
@@ -207,9 +207,9 @@ def test_runtime_state_rejects_missing_v6_fact_instead_of_defaulting():
         run_id="run-1",
         config_hash="abc",
         mode="sim",
-        cash=1_000.0,
-        equity_peak=1_000.0,
-        prev_equity=1_000.0,
+        cash_by_account={"default": 1_000.0},
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
     ).to_dict()
     del raw["adv_filled_quantities"]
 
@@ -223,10 +223,10 @@ def test_runtime_state_rejects_attempted_order_without_attempt_time():
         run_id="run-1",
         config_hash="abc",
         mode="live",
-        cash=1_000.0,
+        cash_by_account={"default": 1_000.0},
         active_orders=[_order()],
-        equity_peak=1_000.0,
-        prev_equity=1_000.0,
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
     )
     raw = state.to_dict()
     raw["active_orders"][0]["placement_attempted_at"] = None

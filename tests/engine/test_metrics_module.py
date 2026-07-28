@@ -709,6 +709,8 @@ def test_kernel_shared_by_trade_entry_and_signal_outcomes():
     ev_open = OrderEventRecord(
         event_id="e1",
         ts=entry_ts,
+        account_id="default",
+        currency="USD",
         symbol="X",
         side="long",
         event_type="open",
@@ -721,6 +723,8 @@ def test_kernel_shared_by_trade_entry_and_signal_outcomes():
     ev_close = OrderEventRecord(
         event_id="e2",
         ts=ohlcv.index[-1],
+        account_id="default",
+        currency="USD",
         symbol="X",
         side="long",
         event_type="close",

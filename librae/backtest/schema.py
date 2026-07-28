@@ -35,9 +35,8 @@ RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$
 
 REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
     "run_metadata",
-    "equity_curve",
+    "accounts",
     "order_events",
-    "metrics",
 )
 
 # ---------------------------------------------------------------------------
@@ -88,6 +87,8 @@ class OrderEventRecord:
 
     event_id: str
     ts: datetime
+    account_id: str
+    currency: str
     symbol: str
     side: PositionSide
     event_type: PositionEventType
@@ -115,6 +116,8 @@ class PositionSnapshotPoint:
     """
 
     ts: datetime
+    account_id: str
+    currency: str
     symbol: str
     side: PositionSide
     quantity: float
@@ -128,6 +131,8 @@ class AllocationSnapshotPoint:
     """One symbol's target-versus-achieved portfolio weight."""
 
     ts: datetime
+    account_id: str
+    currency: str
     symbol: str
     target_weight: float | None
     realized_weight: float
@@ -186,6 +191,25 @@ class StrategyMetrics:
 
 
 @dataclass(frozen=True)
+class AccountPerformance:
+    """Equity, PnL, and metrics for one non-netted account."""
+
+    account_id: str
+    currency: str
+    initial_cash: float
+    final_equity: float
+    net_pnl: float
+    equity_curve: Sequence[EquityCurvePoint]
+    metrics: StrategyMetrics
+
+    def __post_init__(self) -> None:
+        if not self.account_id:
+            raise ValueError("account_id must be non-empty")
+        if not self.currency:
+            raise ValueError("currency must be non-empty")
+
+
+@dataclass(frozen=True)
 class BacktestOutput:
     """Top-level backtest output container.
 
@@ -194,11 +218,28 @@ class BacktestOutput:
     """
 
     run_metadata: RunMetadata
-    equity_curve: Sequence[EquityCurvePoint]
+    accounts: Sequence[AccountPerformance]
     order_events: Sequence[OrderEventRecord]
-    metrics: StrategyMetrics
     position_snapshots: Sequence[PositionSnapshotPoint]
     allocation_snapshots: Sequence[AllocationSnapshotPoint]
+
+    def _single_account(self) -> AccountPerformance:
+        if len(self.accounts) != 1:
+            raise ValueError(
+                "aggregate account values are undefined for multiple accounts; "
+                "use BacktestOutput.accounts"
+            )
+        return self.accounts[0]
+
+    @property
+    def equity_curve(self) -> Sequence[EquityCurvePoint]:
+        """Single-account compatibility view."""
+        return self._single_account().equity_curve
+
+    @property
+    def metrics(self) -> StrategyMetrics:
+        """Single-account compatibility view."""
+        return self._single_account().metrics
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict with ISO datetime strings."""
@@ -230,8 +271,25 @@ class BacktestOutput:
             raise ValueError("run_metadata.symbols must contain non-empty identifiers")
         if not self.run_metadata.timeframe:
             raise ValueError("run_metadata.timeframe is required")
-        if self.equity_curve is None:
-            raise ValueError("equity_curve is required (may be empty list)")
+        if not self.accounts:
+            raise ValueError("accounts must contain at least one account result")
+        account_currency = {account.account_id: account.currency for account in self.accounts}
+        if len(account_currency) != len(self.accounts):
+            raise ValueError("accounts must contain unique account_id values")
+        account_records = (
+            *self.order_events,
+            *self.position_snapshots,
+            *self.allocation_snapshots,
+        )
+        for record in account_records:
+            expected_currency = account_currency.get(record.account_id)
+            if expected_currency is None:
+                raise ValueError(f"record references unknown account_id: {record.account_id!r}")
+            if record.currency != expected_currency:
+                raise ValueError(
+                    f"record currency {record.currency!r} does not match account "
+                    f"{record.account_id!r} currency {expected_currency!r}"
+                )
 
 
 def ensure_snake_case_keys(keys: list[str] | tuple[str, ...], record_name: str) -> None:

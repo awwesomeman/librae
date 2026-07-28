@@ -11,7 +11,7 @@ from librae.config.symbols import (
     load_symbol_registry,
     resolve_symbol,
 )
-from librae.core.run_config import RunConfig
+from librae.core.run_config import AccountConfig, RunConfig
 
 
 @pytest.fixture
@@ -164,10 +164,18 @@ class TestResolveSymbol:
             "timeframe": "1d",
             "market": "us_equity",
             "data_source": "ibkr",
-            "initial_balance": 100_000.0,
             "mode": "backtest",
         }
         values.update(overrides)
+        symbol = values["symbols"][0]
+        route = (values.get("instrument_overrides") or {}).get(symbol, {})
+        currency = route.get("currency")
+        if currency is None:
+            try:
+                currency = get_symbol(symbol).currency
+            except KeyError:
+                currency = "USD"
+        values["accounts"] = {"default": AccountConfig(currency=currency, initial_cash=100_000.0)}
         return RunConfig(**values)
 
     def test_registered_symbol_uses_venue_metadata(self):

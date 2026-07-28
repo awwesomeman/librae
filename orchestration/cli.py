@@ -3,7 +3,7 @@
 Provides:
 - base_parser(): common CLI arguments
 - parse_with_config(): merge config.yaml + CLI args
-- build_config(): sole factory for RunConfig
+- build_config(): canonical CLI factory for RunConfig
 - run_dispatch(): shared main() for all strategy runners
 - with_dedup_check(): config_hash dedup wrapper for backtest
 - setup_logging(): root logger config
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
-from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
+from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.utils import to_canonical
 
 if TYPE_CHECKING:
@@ -208,14 +208,14 @@ def _resolve_market_and_data_source(
 
 
 # ---------------------------------------------------------------------------
-# build_config() — sole factory for RunConfig
+# build_config() — CLI factory for RunConfig
 # ---------------------------------------------------------------------------
 
 
 def build_config(strategy_name: str, run_file: str) -> RunConfig:
     """Build RunConfig from CLI args + config.yaml.
 
-    This is the sole factory for RunConfig. Handles:
+    This is the canonical CLI factory for RunConfig. It:
     1. Parse start/end from params (or convert periods -> start/end)
     2. Extract per-run and per-symbol overrides
     3. Derive dry_run -> no_db
@@ -278,7 +278,57 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         scfg.get("data_source"),
         instrument_overrides,
     )
-    initial_balance = float(scfg.get("initial_balance", 100_000))
+    if "initial_balance" in scfg:
+        raise ValueError(
+            "strategy.initial_balance was replaced by strategy.accounts; "
+            "configure {account_id: {currency, initial_cash}}"
+        )
+    accounts_raw = scfg.get("accounts")
+    accounts: dict[str, AccountConfig] = {}
+    if accounts_raw is None:
+        from librae.config.symbols import load_symbol_registry
+
+        registry = load_symbol_registry()
+        currencies = {
+            (instrument_overrides or {}).get(symbol, {}).get("currency")
+            or (registry[symbol].currency if symbol in registry else None)
+            for symbol in symbols
+        }
+        if None in currencies or len(currencies) != 1:
+            raise ValueError(
+                "strategy.accounts is required when account currency cannot be "
+                "inferred as one value for all symbols"
+            )
+        accounts["default"] = AccountConfig(
+            currency=str(next(iter(currencies))),
+            initial_cash=scfg.get("initial_cash", 100_000),
+        )
+    else:
+        if not isinstance(accounts_raw, dict) or not accounts_raw:
+            raise ValueError(
+                "strategy.accounts must be a non-empty mapping of "
+                "account_id to {currency, initial_cash}"
+            )
+        if "initial_cash" in scfg:
+            raise ValueError("strategy.initial_cash is only valid for an inferred single account")
+        for account_id, raw_account in accounts_raw.items():
+            if not isinstance(raw_account, dict):
+                raise ValueError(f"strategy.accounts.{account_id} must be a mapping")
+            unknown_account_keys = set(raw_account) - {"currency", "initial_cash"}
+            if unknown_account_keys:
+                raise ValueError(
+                    f"unknown strategy.accounts.{account_id} settings: "
+                    f"{sorted(unknown_account_keys)}"
+                )
+            try:
+                accounts[str(account_id)] = AccountConfig(
+                    currency=raw_account["currency"],
+                    initial_cash=raw_account["initial_cash"],
+                )
+            except KeyError as exc:
+                raise ValueError(
+                    f"strategy.accounts.{account_id} requires currency and initial_cash"
+                ) from exc
 
     # 1. Parse start/end (pop from params so they don't enter config_hash via params)
     start = params.pop("start", None)
@@ -355,7 +405,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         timeframe=timeframe,
         market=market,
         data_source=data_source,
-        initial_balance=initial_balance,
+        accounts=accounts,
         mode=args.mode,
         execution=execution,
         risk=risk,

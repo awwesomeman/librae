@@ -14,6 +14,8 @@ def _make_event(**kwargs) -> OrderEventRecord:
     defaults = dict(
         event_id="e1",
         ts=datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC),
+        account_id="default",
+        currency="USDT",
         symbol="BTCUSDT",
         side="long",
         event_type="open",
@@ -158,6 +160,8 @@ def test_df_to_order_events_matches_load_trade_events_shape():
             {
                 "event_id": "e1",
                 "_time": datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC),
+                "account_id": "default",
+                "currency": "USDT",
                 "symbol": "BTCUSDT",
                 "side": "long",
                 "event_type": "open",

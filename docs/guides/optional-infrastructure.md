@@ -50,6 +50,10 @@ is generated with:
 uv run python -m app.grafana.generate_dashboards
 ```
 
+The strategy dashboard selects both `run_id` and `account_id`. Equity, PnL,
+metrics, and trade events always retain their currency label; it does not
+combine accounts, including accounts that share a currency.
+
 Dashboards query the TimescaleDB tables and remain empty until a strategy has
 written data. To inspect the panels before running a real strategy, load the
 bundled fake rows:

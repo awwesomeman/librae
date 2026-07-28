@@ -7,7 +7,8 @@ RunConfig is a frozen dataclass that holds all parameters for a run:
 - Perf params (stored in DB backtest_runs.perf_params, display only)
 - Behavior params (not stored in DB)
 
-The sole factory is build_config() in orchestration/cli.py.
+CLI workflows use ``build_config()`` in ``orchestration/cli.py``; library
+callers may construct the validated dataclass directly.
 """
 
 from __future__ import annotations
@@ -26,6 +27,30 @@ logger = logging.getLogger(__name__)
 
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
+
+
+@dataclass(frozen=True, slots=True)
+class AccountConfig:
+    """One isolated cash and PnL ledger.
+
+    ``account_id`` is the key in ``RunConfig.accounts``. Currency conversion,
+    transfers, borrowing, and netting across accounts are intentionally outside
+    this contract.
+    """
+
+    currency: str
+    initial_cash: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.currency, str) or not self.currency:
+            raise ValueError("account currency must be a non-empty string")
+        if (
+            isinstance(self.initial_cash, bool)
+            or not isinstance(self.initial_cash, Real)
+            or not isfinite(self.initial_cash)
+            or self.initial_cash <= 0
+        ):
+            raise ValueError("account initial_cash must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,8 +226,8 @@ def _get_code_rev() -> str:
 class RunConfig:
     """Unified parameter container for all execution paths.
 
-    Created exclusively by build_config() in orchestration/cli.py.
-    Passed through: CLI -> engine -> DB writer.
+    CLI workflows create this through ``build_config()``. Library callers may
+    construct it directly and receive the same validation.
     """
 
     # === Strategy identification (stored in DB) ===
@@ -211,7 +236,7 @@ class RunConfig:
     timeframe: str
     market: str
     data_source: str
-    initial_balance: float
+    accounts: dict[str, AccountConfig]
     mode: RunMode
     execution: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     risk: RiskPolicy = field(default_factory=RiskPolicy)
@@ -260,6 +285,16 @@ class RunConfig:
         if isinstance(self.symbols, str):
             raise ValueError("symbols must be a collection of identifiers, not one string")
         object.__setattr__(self, "symbols", tuple(self.symbols))
+        if not isinstance(self.accounts, dict) or not self.accounts:
+            raise ValueError("accounts must be a non-empty mapping")
+        normalized_accounts: dict[str, AccountConfig] = {}
+        for account_id, account in self.accounts.items():
+            if not isinstance(account_id, str) or not account_id:
+                raise ValueError("account ids must be non-empty strings")
+            if not isinstance(account, AccountConfig):
+                raise TypeError("accounts values must be AccountConfig")
+            normalized_accounts[account_id] = account
+        object.__setattr__(self, "accounts", _freeze(normalized_accounts))
         for field_name in (
             "params",
             "cost_overrides",
@@ -285,13 +320,6 @@ class RunConfig:
                 raise ValueError(f"{field_name} must be a non-empty string")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
-        if (
-            isinstance(self.initial_balance, bool)
-            or not isinstance(self.initial_balance, Real)
-            or not isfinite(self.initial_balance)
-            or self.initial_balance <= 0
-        ):
-            raise ValueError("initial_balance must be finite and positive")
         if (
             isinstance(self.risk_free_rate, bool)
             or not isinstance(self.risk_free_rate, Real)
@@ -380,7 +408,7 @@ class RunConfig:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
-        initial_balance, start, end, params, cost_overrides, symbol_cost_overrides,
+        accounts, start, end, params, cost_overrides, symbol_cost_overrides,
         instrument_overrides, execution, risk.
         Excludes: perf params, behavior params.
         """
@@ -395,7 +423,9 @@ class RunConfig:
                     "data_source": self.data_source,
                     "mode": self.mode,
                     "broker": self.broker,
-                    "initial_balance": self.initial_balance,
+                    "accounts": {
+                        account_id: asdict(account) for account_id, account in self.accounts.items()
+                    },
                     "start": self.start,
                     "end": self.end,
                     "params": self.params,
@@ -436,6 +466,7 @@ class RunConfig:
             f"  config_hash: {self.config_hash}",
             f"  code_rev:    {code_rev}",
             "  --- strategy params (stored in DB) ---",
+            f"  accounts:    {dict(self.accounts)}",
             f"  params:      {self.params}",
             f"  cost_overrides: {self.cost_overrides}",
             f"  symbol_cost_overrides: {self.symbol_cost_overrides}",

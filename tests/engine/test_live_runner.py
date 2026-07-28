@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
 from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent
-from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
+from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
     MultiLegOrder,
@@ -173,6 +173,27 @@ def _test_cfg(**overrides) -> RunConfig:
             route = routes.setdefault(symbol, {})
             route.setdefault("instrument_type", "spot")
             route.setdefault("currency", "USDT")
+    if "accounts" not in overrides:
+        currencies = {
+            symbol: routes.get(symbol, {}).get("currency") or registry[symbol].currency
+            for symbol in symbols
+        }
+        unique_currencies = set(currencies.values())
+        if len(unique_currencies) == 1:
+            currency = next(iter(unique_currencies))
+            overrides["accounts"] = {
+                "default": AccountConfig(currency=currency, initial_cash=100_000.0)
+            }
+        else:
+            overrides["accounts"] = {
+                currency.lower(): AccountConfig(
+                    currency=currency,
+                    initial_cash=100_000.0,
+                )
+                for currency in sorted(unique_currencies)
+            }
+            for symbol, currency in currencies.items():
+                routes.setdefault(symbol, {})["account_id"] = currency.lower()
     if routes:
         overrides["instrument_overrides"] = routes
     return make_test_cfg(**overrides)
@@ -741,7 +762,7 @@ class TestLiveTrader:
         frame = _make_ohlcv_df()
         runner._process_bar("BTCUSDT", frame, frame["ts"].iloc[-1].to_pydatetime())
 
-        assert seen_equity == [runner._cash]
+        assert seen_equity == [runner._cash_by_account["default"]]
 
     @pytest.mark.parametrize("mode", ["sim", "live"])
     def test_portfolio_targets_execute_from_synchronized_realtime_context(self, mode):
@@ -937,7 +958,7 @@ class TestLiveTrader:
 
         def place_order(signal):
             assert runner._positions == {}
-            assert runner._cash == 100_000.0
+            assert runner._cash_by_account["default"] == 100_000.0
             return _broker_report(
                 quantity=signal["quantity"],
                 average=107.25,
@@ -954,7 +975,7 @@ class TestLiveTrader:
         assert runner._positions["BTCUSDT"].entry_price == 107.25
         assert runner._positions["BTCUSDT"].entry_at == executed_at
         assert runner._positions["BTCUSDT"].entry_commission == 1.5
-        assert runner._cash == pytest.approx(100_000.0 - 107.25 - 1.5)
+        assert runner._cash_by_account["default"] == pytest.approx(100_000.0 - 107.25 - 1.5)
 
     def test_acknowledgement_is_not_treated_as_fill(self):
         mock_order_adapter = _mock_order_adapter()
@@ -990,7 +1011,7 @@ class TestLiveTrader:
         assert runner._positions == {}
         assert len(runner._active_orders) == 1
         assert runner._active_orders[0].status == "accepted"
-        assert runner._cash == 100_000.0
+        assert runner._cash_by_account["default"] == 100_000.0
 
     def test_basket_failure_keeps_only_confirmed_broker_fill(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -1123,7 +1144,7 @@ class TestLiveTrader:
 
     def test_cash_drift_beyond_tolerance_alerts_without_adjusting_cash(self):
         """Drift past CASH_RECONCILE_TOLERANCE_PCT must alert with both
-        numbers but never mutate self._cash — reconciliation is alert-only,
+        numbers but never mutate local cash — reconciliation is alert-only,
         unlike position reconciliation which does adopt the broker's side."""
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.get_balance.return_value = {
@@ -1147,7 +1168,7 @@ class TestLiveTrader:
         assert len(drift_alerts) == 1
         assert "local_cash=100000.00" in drift_alerts[0]["message"]
         assert "broker_balance=50000.00" in drift_alerts[0]["message"]
-        assert runner._cash == 100_000.0  # unchanged — alert-only, never auto-adjusted
+        assert runner._cash_by_account["default"] == 100_000.0
 
     def test_cash_drift_within_tolerance_does_not_alert(self):
         mock_order_adapter = _mock_order_adapter()
@@ -1196,9 +1217,7 @@ class TestLiveTrader:
         ]
         assert len(drift_alerts) == 1
 
-    def test_multi_currency_runtime_fails_before_accounting(self):
-        mock_order_adapter = _mock_order_adapter()
-
+    def test_multi_currency_runtime_uses_isolated_accounts(self):
         cfg = _test_cfg(
             mode="live",
             symbols=["AAA", "BBB"],
@@ -1207,8 +1226,16 @@ class TestLiveTrader:
                 "BBB": {"currency": "USDT"},
             },
         )
-        with pytest.raises(ValueError, match="one accounting currency"):
-            self._make_runner(config=cfg, order_adapter=mock_order_adapter)
+        runner = self._make_runner(
+            config=cfg,
+            order_adapter={
+                "AAA": _mock_order_adapter(),
+                "BBB": _mock_order_adapter(),
+            },
+        )
+
+        assert runner._cash_by_account == {"usd": 100_000.0, "usdt": 100_000.0}
+        assert runner._currency_by_account == {"usd": "USD", "usdt": "USDT"}
 
     def test_adapter_without_get_balance_is_skipped(self):
         """A duck-typed adapter with no get_balance() at all must be silently
@@ -1424,7 +1451,7 @@ class TestLiveTrader:
         assert "qty=1.0000" in order_failed[0]["message"]
         assert runner._halted is True
         assert runner._positions == {}
-        assert runner._cash == 100_000.0
+        assert runner._cash_by_account["default"] == 100_000.0
 
     def test_db_write_alerts_after_consecutive_failures(self):
         """Regression test: DB write failures were silently swallowed
@@ -1511,7 +1538,7 @@ class TestLiveTrader:
         )
         runner = self._make_runner(executor=LiveExecutor(cost_model))
         runner._risk_policy = RiskPolicy(max_drawdown_rate=0.2)
-        runner._cash = 0.0
+        runner._cash_by_account["default"] = 0.0
         runner._positions["BTCUSDT"] = PositionState(
             symbol="BTCUSDT",
             side="long",
@@ -1525,11 +1552,13 @@ class TestLiveTrader:
             total_entry_cost=50_000.0,
         )
         runner._last_prices["BTCUSDT"] = 100.0
-        runner._equity_peak = 100_000.0
-        runner._prev_equity = 50_000.0
+        runner._equity_peak_by_account["default"] = 100_000.0
+        runner._prev_equity_by_account["default"] = 50_000.0
         callbacks: list[tuple[float, float, float]] = []
-        runner._on_bar = lambda _run_id, _ts, equity, drawdown, period_return: callbacks.append(
-            (equity, drawdown, period_return)
+        runner._on_bar = (
+            lambda _run_id, _ts, _account_id, _currency, equity, drawdown, period_return: (
+                callbacks.append((equity, drawdown, period_return))
+            )
         )
 
         runner._record_equity(
@@ -1546,10 +1575,10 @@ class TestLiveTrader:
         )
 
         assert runner._positions["BTCUSDT"].pending_market_exit_reason == REASON_DRAWDOWN_BREACH
-        assert runner._cash == pytest.approx(0.0)
+        assert runner._cash_by_account["default"] == pytest.approx(0.0)
         assert len(callbacks) == 1
         assert callbacks[0] == pytest.approx((50_000.0, -0.5, 0.0))
-        assert runner._prev_equity == pytest.approx(50_000.0)
+        assert runner._prev_equity_by_account["default"] == pytest.approx(50_000.0)
 
 
 def _make_fill_event() -> OrderEvent:
@@ -1950,7 +1979,7 @@ class TestLiveExecutionLifecycle:
 
         assert runner._positions["BTCUSDT"].quantity == 0.75
         assert runner._positions["BTCUSDT"].entry_commission == 0.25
-        assert runner._cash == pytest.approx(100_000.0 - 0.75 * 105.0 - 0.25)
+        assert runner._cash_by_account["default"] == pytest.approx(100_000.0 - 0.75 * 105.0 - 0.25)
 
     def test_active_order_keeps_market_health_updates_without_new_strategy_decision(self):
         adapter = _mock_order_adapter()
@@ -2411,7 +2440,7 @@ class TestLiveExecutionLifecycle:
         )
 
         assert runner._positions == {}
-        assert runner._cash == pytest.approx(100_007.0)
+        assert runner._cash_by_account["default"] == pytest.approx(100_007.0)
         assert [event.ts for event in events] == [first_fill_at, second_fill_at]
         assert events[-1].price == 110.0
         assert events[-1].commission == 2.0

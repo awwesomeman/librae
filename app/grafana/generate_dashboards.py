@@ -105,6 +105,13 @@ def _stat_panel(
     return panel
 
 
+def _account_metric_sql(column: str) -> str:
+    return (
+        f"SELECT {column} FROM strategy_performance"
+        " WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
+    )
+
+
 # WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
 # Threshold = 2x strategy timeframe (not poll_seconds) to avoid false Offline on brief delays.
 _STATUS_SQL = (
@@ -170,21 +177,21 @@ STATUS_PANEL: dict = {
 _KPI_CATALOGUE: dict[str, dict] = {
     "total_return": _stat_panel(
         "Total Return %",
-        "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("total_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
         description="qs.stats.comp(returns). Cumulative compounded return, not annualized.",
     ),
     "max_drawdown": _stat_panel(
         "Max Drawdown %",
-        "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("max_drawdown"),
         "percentunit",
         [{"color": "red", "value": None}],
         description="qs.stats.max_drawdown(returns). Negative ratio — largest peak-to-trough decline.",
     ),
     "sharpe": _stat_panel(
         "Sharpe Ratio",
-        "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("sharpe"),
         None,
         [
             {"color": "red", "value": None},
@@ -195,7 +202,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
     ),
     "sortino": _stat_panel(
         "Sortino Ratio",
-        "SELECT sortino FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("sortino"),
         None,
         [
             {"color": "red", "value": None},
@@ -206,7 +213,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
     ),
     "calmar": _stat_panel(
         "Calmar Ratio",
-        "SELECT calmar FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("calmar"),
         None,
         [
             {"color": "red", "value": None},
@@ -217,14 +224,14 @@ _KPI_CATALOGUE: dict[str, dict] = {
     ),
     "win_rate": _stat_panel(
         "Win Rate %",
-        "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("win_rate"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0.5}],
         description="Winning trades (net_pnl > 0) / total trades. Interpret with PF — low win rate + high PF = trend following.",
     ),
     "profit_factor": _stat_panel(
         "Profit Factor",
-        "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("profit_factor"),
         None,
         [
             {"color": "red", "value": None},
@@ -235,35 +242,35 @@ _KPI_CATALOGUE: dict[str, dict] = {
     ),
     "trades": _stat_panel(
         "Trades",
-        "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("trades"),
         None,
         [{"color": "blue", "value": None}],
         description="Total closed trades (reduce + close). Low count (<30) = metrics statistically unreliable.",
     ),
     "avg_trade_return": _stat_panel(
         "Avg Trade Return %",
-        "SELECT avg_trade_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("avg_trade_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
         description="Quantity-weighted mean net return per closed trade.",
     ),
     "exposure_ratio": _stat_panel(
         "Exposure %",
-        "SELECT exposure_ratio FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("exposure_ratio"),
         "percentunit",
         [{"color": "blue", "value": None}],
         description="Bars with any open position / total bars. Multi-asset safe — overlapping positions counted once.",
     ),
     "annual_return": _stat_panel(
         "Annual Return %",
-        "SELECT annual_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("annual_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
         description="qs.stats.cagr(returns, periods=inferred). Compound annual growth rate.",
     ),
     "benchmark_return": _stat_panel(
         "Benchmark Return %",
-        "SELECT benchmark_return FROM strategy_performance WHERE run_id = '${run_id}'",
+        _account_metric_sql("benchmark_return"),
         "percentunit",
         [{"color": "orange", "value": None}],
         description="Buy-and-hold return over the same period. Compare with Total Return for alpha.",
@@ -294,7 +301,8 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 'SELECT ts AS time, equity AS "Strategy", benchmark_equity AS "Benchmark"'
-                " FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts"
+                " FROM equity_curve WHERE run_id = '${run_id}'"
+                " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
         "fieldConfig": {
@@ -326,7 +334,8 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 'SELECT ts AS time, drawdown AS "Drawdown %"'
-                " FROM equity_curve WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts"
+                " FROM equity_curve WHERE run_id = '${run_id}'"
+                " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
         "fieldConfig": {
@@ -397,6 +406,8 @@ BASE_PANELS_DEF: list[dict] = [
                 "SELECT"
                 ' ROW_NUMBER() OVER (ORDER BY ts) AS "#",'
                 ' ts AS "Time",'
+                ' account_id AS "Account",'
+                ' currency AS "Currency",'
                 ' event_type AS "Event",'
                 ' symbol AS "Symbol",'
                 ' side AS "Side",'
@@ -411,6 +422,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' periods_held AS "Periods",'
                 ' reason AS "Reason"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
+                " AND account_id = '${account_id}'"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
                 "A",
@@ -481,6 +493,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " FROM trade_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
+                " AND te.account_id = '${account_id}'"
                 " AND te.event_type IN ('open', 'add')"
                 " AND $__timeFilter(te.ts)",
                 "A",
@@ -497,6 +510,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " FROM trade_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
+                " AND te.account_id = '${account_id}'"
                 " AND te.event_type IN ('reduce', 'close')"
                 " AND $__timeFilter(te.ts)",
                 "B",
@@ -545,6 +559,7 @@ EXTRA_PANELS: list[dict] = [
             "  SELECT symbol, side, entry_price, remaining_quantity\n"
             "  FROM trade_events\n"
             "  WHERE run_id = '${run_id}'\n"
+            "    AND account_id = '${account_id}'\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             "),\n"
             "latest AS (\n"
@@ -579,6 +594,7 @@ EXTRA_PANELS: list[dict] = [
             "  SELECT side, remaining_quantity, entry_price\n"
             "  FROM trade_events\n"
             "  WHERE run_id = '${run_id}'\n"
+            "    AND account_id = '${account_id}'\n"
             "  ORDER BY ts DESC LIMIT 1\n"
             ")\n"
             "SELECT CASE WHEN remaining_quantity > 0 THEN\n"
@@ -755,6 +771,11 @@ def render_unified_dashboard() -> dict:
         " ORDER BY run_at DESC LIMIT 20",
         label="Run ID",
     )
+    account_id_var = _make_query_variable(
+        "account_id",
+        "SELECT account_id FROM strategy_performance WHERE run_id='${run_id}' ORDER BY account_id",
+        label="Account",
+    )
 
     return {
         "uid": "strategy_dashboard",
@@ -766,7 +787,7 @@ def render_unified_dashboard() -> dict:
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [mode_var, strategy_var, run_id_var],
+            "list": [mode_var, strategy_var, run_id_var, account_id_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},

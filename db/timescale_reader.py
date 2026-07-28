@@ -77,17 +77,27 @@ def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
     return df
 
 
-def load_equity_curve(run_id: str, dsn: str | None = None) -> pd.DataFrame:
+def load_equity_curve(
+    run_id: str,
+    *,
+    account_id: str | None = None,
+    dsn: str | None = None,
+) -> pd.DataFrame:
     sql = """
-        SELECT ts AS _time, equity, benchmark_equity, drawdown,
+        SELECT ts AS _time, account_id, currency,
+               equity, benchmark_equity, drawdown,
                period_return, benchmark_period_return, gross_exposure,
                net_exposure, concentration, turnover
         FROM equity_curve
         WHERE run_id = %s
-        ORDER BY ts
     """
+    params: list = [run_id]
+    if account_id is not None:
+        sql += " AND account_id = %s"
+        params.append(account_id)
+    sql += " ORDER BY account_id, ts"
     with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=[run_id])
+        df = pd.read_sql(sql, conn, params=params)
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
     return df
@@ -97,6 +107,7 @@ def load_trade_events(
     run_id: str,
     *,
     event_types: list[str] | None = None,
+    account_id: str | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
     """Load trade_events for a run, ordered by timestamp.
@@ -105,7 +116,8 @@ def load_trade_events(
         event_types: Optional filter, e.g. ["close", "reduce"] for closed trades only.
     """
     sql = """
-        SELECT event_id, ts AS _time, symbol, side, event_type,
+        SELECT event_id, ts AS _time, account_id, currency,
+               symbol, side, event_type,
                fill_quantity, price, entry_price, remaining_quantity, notional,
                commission, slippage, tax,
                pnl, net_return, entry_at, periods_held, reason
@@ -113,6 +125,9 @@ def load_trade_events(
         WHERE run_id = %s
     """
     params: list = [run_id]
+    if account_id is not None:
+        sql += " AND account_id = %s"
+        params.append(account_id)
     if event_types:
         sql += " AND event_type = ANY(%s)"
         params.append(event_types)
@@ -124,13 +139,20 @@ def load_trade_events(
     return df
 
 
-def load_performance(run_id: str, dsn: str | None = None) -> pd.DataFrame:
+def load_performance(
+    run_id: str,
+    *,
+    account_id: str | None = None,
+    dsn: str | None = None,
+) -> pd.DataFrame:
     """Load strategy_performance joined with backtest_runs.
 
-    Returns a column-based DataFrame with one row containing all metrics.
+    Returns one currency-labeled row per account, or one selected account.
     """
     sql = """
-        SELECT sp.run_id, sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
+        SELECT sp.run_id, sp.account_id, sp.currency, sp.initial_cash,
+               sp.final_equity, sp.net_pnl,
+               sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
                sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.payoff_ratio,
                sp.trades, sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
                sp.tracking_error, sp.information_ratio, sp.total_turnover,
@@ -142,8 +164,13 @@ def load_performance(run_id: str, dsn: str | None = None) -> pd.DataFrame:
         JOIN backtest_runs br ON sp.run_id = br.run_id
         WHERE sp.run_id = %s
     """
+    params = [run_id]
+    if account_id is not None:
+        sql += " AND sp.account_id = %s"
+        params.append(account_id)
+    sql += " ORDER BY sp.account_id"
     with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=[run_id])
+        df = pd.read_sql(sql, conn, params=params)
     return df
 
 
@@ -153,7 +180,7 @@ def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     the separate signal_events table (which stores raw pre-execution signals for
     quality monitoring)."""
     sql = """
-        SELECT ts AS _time, symbol,
+        SELECT ts AS _time, account_id, currency, symbol,
                CASE WHEN event_type IN ('open', 'add') THEN 'entry' ELSE 'exit' END AS signal_type,
                price,
                CASE WHEN side='long' AND event_type IN ('open','add') THEN 1.0

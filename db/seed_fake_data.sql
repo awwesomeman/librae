@@ -17,36 +17,42 @@ VALUES
 ON CONFLICT (run_id) DO NOTHING;
 
 INSERT INTO equity_curve
-    (ts, run_id, equity, benchmark_equity, drawdown, period_return, benchmark_period_return, strategy)
+    (ts, run_id, account_id, currency, equity, benchmark_equity, drawdown,
+     period_return, benchmark_period_return, strategy)
 VALUES
-    (NOW(), 'seed_test_run', 100500, 100000, -0.01, 0.005, 0.001, 'seed_test')
-ON CONFLICT (run_id, ts) DO NOTHING;
+    (NOW(), 'seed_test_run', 'default', 'USDT', 100500, 100000, -0.01,
+     0.005, 0.001, 'seed_test')
+ON CONFLICT (run_id, account_id, ts) DO NOTHING;
 
 INSERT INTO trade_events
-    (event_id, run_id, strategy, mode, timeframe, ts, symbol, side, event_type,
+    (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
+     symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,
      commission, slippage, tax, pnl, net_return, entry_at, periods_held, reason)
 VALUES
-    ('seed_evt_1', 'seed_test_run', 'seed_test', 'backtest', 'H1', NOW(),
+    ('seed_evt_1', 'seed_test_run', 'default', 'USDT',
+     'seed_test', 'backtest', 'H1', NOW(),
      'BTCUSDT', 'long', 'close',
      0.1, 65000, 64000, 0, 6500,
      1.2, 0.5, 0, 95, 0.0148, NOW() - INTERVAL '2 hours', 2, 'exit_signal')
 ON CONFLICT (event_id, ts) DO NOTHING;
 
 INSERT INTO strategy_performance
-    (run_id, total_return, annual_return, sharpe, sortino, calmar, max_drawdown,
+    (run_id, account_id, currency, initial_cash, final_equity, net_pnl,
+     total_return, annual_return, sharpe, sortino, calmar, max_drawdown,
      win_rate, profit_factor, trades, avg_trade_return, exposure_ratio,
      benchmark_return, total_commission, total_slippage, total_tax)
 VALUES
-    ('seed_test_run', 0.05, 0.60, 1.2, 1.5, 2.0, -0.03,
+    ('seed_test_run', 'default', 'USDT', 100000, 105000, 5000,
+     0.05, 0.60, 1.2, 1.5, 2.0, -0.03,
      0.55, 1.8, 10, 0.005, 0.4,
      0.03, 12, 5, 0)
-ON CONFLICT (run_id) DO NOTHING;
+ON CONFLICT (run_id, account_id) DO NOTHING;
 
 INSERT INTO ohlcv (ts, symbol, timeframe, data_source, open, high, low, close, volume)
 VALUES
     (NOW(), 'BTCUSDT', 'H1', 'binance_spot', 64900, 65200, 64800, 65000, 123.45)
-ON CONFLICT (ts, symbol, timeframe, data_source) DO NOTHING;
+ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type) DO NOTHING;
 
 INSERT INTO ohlcv_coverage_ranges (symbol, timeframe, data_source, range_started_at, range_ended_at)
 SELECT 'BTCUSDT', 'H1', 'binance_spot', NOW() - INTERVAL '10 days', NOW()
@@ -59,4 +65,4 @@ INSERT INTO signal_events
     (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price, signal_type)
 VALUES
     (NOW(), 'seed_test_run', 'seed_test', 'BTCUSDT', 'backtest', 'H1', 1.0, 65000, 'entry')
-ON CONFLICT (ts, strategy, symbol, mode, timeframe, signal_type) DO NOTHING;
+ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type) DO NOTHING;

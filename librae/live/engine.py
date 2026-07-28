@@ -44,6 +44,7 @@ from librae.core.executor import (
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
 from librae.core.strategy import (
+    AccountSnapshot,
     Context,
     Fill,
     MultiLegOrder,
@@ -67,7 +68,7 @@ from .state import (
 
 if TYPE_CHECKING:
     from librae.core.cost_model import CostModel
-    from librae.core.executor import OrderEvent
+    from librae.core.executor import OrderEvent, TradeResult
     from librae.core.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
@@ -218,12 +219,14 @@ class LiveTrader:
                 )
             for instrument in self._instruments.values():
                 validate_calendar_id(instrument.calendar_id)
-        currencies = {instrument.currency for instrument in self._instruments.values()}
-        if len(currencies) != 1:
-            raise ValueError(
-                "LiveTrader requires one accounting currency; configure an FX/base-currency "
-                f"model before mixing {sorted(currencies)}"
-            )
+        if any(instrument.account_id is None for instrument in self._instruments.values()):
+            raise RuntimeError("resolved instruments must have an account_id")
+        self._account_id_by_symbol = {
+            symbol: str(instrument.account_id) for symbol, instrument in self._instruments.items()
+        }
+        self._currency_by_account = {
+            account_id: account.currency for account_id, account in config.accounts.items()
+        }
 
         # --- Build per-symbol market-data adapters ---
         data_adapters: dict[str, object] = {}
@@ -332,6 +335,28 @@ class LiveTrader:
             missing = set(self._symbols) - set(order_adapters)
             if missing:
                 raise ValueError(f"Missing order adapters for symbols: {sorted(missing)}")
+            adapters_by_account: dict[str, set[int]] = {}
+            accounts_by_adapter: dict[int, set[str]] = {}
+            for symbol, order_route in order_adapters.items():
+                account_id = self._account_id_by_symbol[symbol]
+                adapter_identity = id(order_route)
+                adapters_by_account.setdefault(account_id, set()).add(adapter_identity)
+                accounts_by_adapter.setdefault(adapter_identity, set()).add(account_id)
+            split_accounts = sorted(
+                account_id
+                for account_id, adapter_ids in adapters_by_account.items()
+                if len(adapter_ids) != 1
+            )
+            shared_adapters = [
+                sorted(account_ids)
+                for account_ids in accounts_by_adapter.values()
+                if len(account_ids) != 1
+            ]
+            if split_accounts or shared_adapters:
+                raise ValueError(
+                    "live account_id must map one-to-one to an order adapter; "
+                    f"split_accounts={split_accounts}, shared_adapters={shared_adapters}"
+                )
         else:
             order_adapters = {}
 
@@ -388,24 +413,26 @@ class LiveTrader:
         self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
-        self._cash: float = config.initial_balance
+        self._cash_by_account = {
+            account_id: account.initial_cash for account_id, account in config.accounts.items()
+        }
         self._halted: bool = False
         self._pending_decision: StrategyDecision = []
         self._active_orders: list[TrackedOrder] = []
         self._live_rebalance: LiveRebalance | None = None
         self._live_multi_leg: LiveMultiLeg | None = None
-        self._equity_peak: float = config.initial_balance
-        self._prev_equity: float = config.initial_balance
+        self._equity_peak_by_account = dict(self._cash_by_account)
+        self._prev_equity_by_account = dict(self._cash_by_account)
         self._trade_count: int = 0
         self._event_sequence: int = 0
         self._performance_dirty: bool = False
-        self._pending_traded_notional: float = 0.0
-        self._portfolio_diagnostics: tuple[float, float, float, float] = (
-            0.0,
-            0.0,
-            0.0,
+        self._pending_traded_notional_by_account = dict.fromkeys(
+            self._cash_by_account,
             0.0,
         )
+        self._portfolio_diagnostics_by_account = {
+            account_id: (0.0, 0.0, 0.0, 0.0) for account_id in self._cash_by_account
+        }
         self._period_index: int = 0
         self._status_period_count: int = 0
         self._adv_session_labels: dict[str, str] = {}
@@ -465,13 +492,56 @@ class LiveTrader:
 
     # --- Durable runtime state ---
 
+    def _cash_for_symbol(self, symbol: str) -> float:
+        return self._cash_by_account[self._account_id_by_symbol[symbol]]
+
+    def _account_positions(self, account_id: str) -> dict[str, PositionState]:
+        return {
+            symbol: position
+            for symbol, position in self._positions.items()
+            if self._account_id_by_symbol[symbol] == account_id
+        }
+
+    def _replace_account_positions(
+        self,
+        account_id: str,
+        account_positions: dict[str, PositionState],
+    ) -> None:
+        for symbol in list(self._positions):
+            if self._account_id_by_symbol[symbol] == account_id:
+                del self._positions[symbol]
+        self._positions.update(account_positions)
+
+    def _decisions_by_account(
+        self,
+        decision: StrategyDecision,
+        *,
+        primary_symbol: str,
+    ) -> dict[str, StrategyDecision]:
+        if isinstance(decision, PortfolioTargets):
+            account_ids = {self._account_id_by_symbol[symbol] for symbol in decision.weights}
+            if not account_ids:
+                account_ids = {self._account_id_by_symbol[primary_symbol]}
+            if len(account_ids) != 1:
+                raise ValueError(
+                    "PortfolioTargets cannot span isolated accounts; emit explicit "
+                    "OrderIntent quantities or MultiLegOrder instead"
+                )
+            return {next(iter(account_ids)): decision}
+        actions = list(decision.legs) if isinstance(decision, MultiLegOrder) else list(decision)
+        grouped: dict[str, list[OrderIntent]] = {}
+        for action in actions:
+            symbol = action.symbol or primary_symbol
+            grouped.setdefault(self._account_id_by_symbol[symbol], []).append(action)
+        return grouped
+
     def _snapshot_state(self) -> LiveRuntimeState:
         return LiveRuntimeState(
             state_key=self._state_key,
             run_id=self._run_id,
             config_hash=self._config.config_hash,
             mode=self._config.mode,
-            cash=self._cash,
+            cash_by_account=dict(self._cash_by_account),
             positions=deepcopy(self._positions),
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
@@ -480,8 +550,8 @@ class LiveTrader:
             active_orders=deepcopy(self._active_orders),
             live_rebalance=deepcopy(self._live_rebalance),
             live_multi_leg=deepcopy(self._live_multi_leg),
-            equity_peak=self._equity_peak,
-            prev_equity=self._prev_equity,
+            equity_peak_by_account=dict(self._equity_peak_by_account),
+            prev_equity_by_account=dict(self._prev_equity_by_account),
             trade_count=self._trade_count,
             event_sequence=self._event_sequence,
             period_index=self._period_index,
@@ -497,7 +567,9 @@ class LiveTrader:
         if state.config_hash != self._config.config_hash or state.mode != self._config.mode:
             raise ValueError("runtime state configuration does not match this run")
         self._run_id = state.run_id
-        self._cash = state.cash
+        if set(state.cash_by_account) != set(self._cash_by_account):
+            raise ValueError("runtime state accounts do not match this run")
+        self._cash_by_account = state.cash_by_account
         self._positions = state.positions
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
@@ -506,8 +578,8 @@ class LiveTrader:
         self._active_orders = state.active_orders
         self._live_rebalance = state.live_rebalance
         self._live_multi_leg = state.live_multi_leg
-        self._equity_peak = state.equity_peak
-        self._prev_equity = state.prev_equity
+        self._equity_peak_by_account = state.equity_peak_by_account
+        self._prev_equity_by_account = state.prev_equity_by_account
         self._trade_count = state.trade_count
         self._event_sequence = state.event_sequence
         self._period_index = state.period_index
@@ -588,13 +660,21 @@ class LiveTrader:
         strategy = self._config.strategy_name
 
         def on_bar(
-            run_id_: str, ts: datetime, equity: float, drawdown: float, period_return: float
+            run_id_: str,
+            ts: datetime,
+            account_id: str,
+            currency: str,
+            equity: float,
+            drawdown: float,
+            period_return: float,
         ) -> None:
-            gross, net, concentration, turnover = self._portfolio_diagnostics
+            gross, net, concentration, turnover = self._portfolio_diagnostics_by_account[account_id]
             self._db_write(
                 write_equity_curve_point,
                 ts=ts,
                 run_id=run_id_,
+                account_id=account_id,
+                currency=currency,
                 equity=equity,
                 drawdown=drawdown,
                 period_return=period_return,
@@ -625,6 +705,9 @@ class LiveTrader:
             fields["strategy"] = strategy
             fields["mode"] = config.mode
             fields["timeframe"] = timeframe
+            account_id = self._account_id_by_symbol[event.symbol]
+            fields["account_id"] = account_id
+            fields["currency"] = self._currency_by_account[account_id]
             self._db_write(write_trade_event, **fields)
             if not self._executor.simulation:
                 self._persist_state()
@@ -829,7 +912,7 @@ class LiveTrader:
         """Adopt real broker positions into local state at startup.
 
         Without this, a process restart while a real position is open left
-        self._positions/self._cash assuming flat/full-balance — the local
+        local positions/cash ledgers assuming flat/full-balance — the local
         book and the broker's actual book could silently diverge forever
         (double-open on the broker, or reject a legitimate opposite-side
         signal while the broker is actually flat).
@@ -972,7 +1055,7 @@ class LiveTrader:
 
     def _reconcile_cash(self) -> None:
         """Best-effort: alert on cash/broker drift at startup, never
-        auto-adjusts self._cash.
+        auto-adjusts local account cash.
 
         Unlike _reconcile_positions (where the broker's side/quantity is
         unambiguous and a wrong local position is actively dangerous for
@@ -988,51 +1071,51 @@ class LiveTrader:
         if self._executor.simulation:
             return
 
-        currencies = {instrument.currency for instrument in self._instruments.values()}
-        if len(currencies) != 1:
-            logger.warning(
-                "Cash reconciliation skipped for multi-currency run: %s",
-                sorted(currencies),
+        for account_id, local_cash in self._cash_by_account.items():
+            symbol = next(
+                symbol
+                for symbol in self._symbols
+                if self._account_id_by_symbol[symbol] == account_id
             )
-            return
-        currency = next(iter(currencies))
-        adapters: dict[int, object] = {}
-        for symbol in self._symbols:
             adapter = self._executor.get_order_adapter(symbol)
-            if callable(getattr(adapter, "get_balance", None)):
-                adapters[id(adapter)] = adapter
-        if not adapters:
-            return
-
-        try:
-            broker_total = sum(
-                float(adapter.get_balance(currency)["total"]) for adapter in adapters.values()
+            if not callable(getattr(adapter, "get_balance", None)):
+                continue
+            currency = self._currency_by_account[account_id]
+            try:
+                broker_total = float(adapter.get_balance(currency)["total"])
+            except Exception:
+                logger.exception(
+                    "Cash reconciliation failed for account=%s currency=%s; skipping",
+                    account_id,
+                    currency,
+                )
+                continue
+            if not isfinite(broker_total):
+                logger.warning(
+                    "Cash reconciliation returned non-finite total for account=%s; skipping",
+                    account_id,
+                )
+                continue
+            drift_pct = abs(broker_total - local_cash) / max(local_cash, EPSILON)
+            if drift_pct <= self.CASH_RECONCILE_TOLERANCE_PCT:
+                continue
+            logger.warning(
+                "Cash drift: account=%s local=%.2f broker=%.2f (%s), not auto-adjusted",
+                account_id,
+                local_cash,
+                broker_total,
+                currency,
             )
-        except Exception:
-            logger.exception("Cash reconciliation failed for %s — skipping", currency)
-            return
-
-        if not isfinite(broker_total):
-            logger.warning("Cash reconciliation returned a non-finite total — skipping")
-            return
-        drift_pct = abs(broker_total - self._cash) / max(self._cash, EPSILON)
-        if drift_pct <= self.CASH_RECONCILE_TOLERANCE_PCT:
-            return
-
-        logger.warning(
-            "Cash drift: local=%.2f broker=%.2f (%s), not auto-adjusted",
-            self._cash,
-            broker_total,
-            currency,
-        )
-        self._notify(
-            "send_alert",
-            title=f"[{self._executor.strategy_name}] Cash Reconciliation Drift",
-            message=(
-                f"local_cash={self._cash:.2f} broker_balance={broker_total:.2f} "
-                f"({currency}) — drift {drift_pct:.2%}, review manually"
-            ),
-        )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Cash Reconciliation Drift",
+                message=(
+                    f"account_id={account_id} local_cash={local_cash:.2f} "
+                    f"broker_balance={broker_total:.2f} ({currency}) "
+                    f"drift={drift_pct:.2%}, review manually"
+                ),
+            )
+        return
 
     def _maybe_reconcile_runtime(self) -> None:
         """Periodically compare broker facts without mutating the local ledger."""
@@ -1250,10 +1333,12 @@ class LiveTrader:
             raise RuntimeError(
                 "cannot reset halt while multi-leg exposure requires manual reconciliation"
             )
-        equity = self._calc_equity()
+        account_snapshots = self._calc_account_snapshots()
         self._halted = False
-        self._equity_peak = equity
-        self._prev_equity = equity
+        self._equity_peak_by_account = {
+            account_id: equity for account_id, (equity, _) in account_snapshots.items()
+        }
+        self._prev_equity_by_account = dict(self._equity_peak_by_account)
         self._persist_state()
 
     def _setup_signal_handlers(self) -> None:
@@ -1398,7 +1483,8 @@ class LiveTrader:
     def _publish_action_results(self, result: ExecutionResult) -> None:
         """Publish notifications and analytics after state is committed."""
         for event in result.events:
-            self._pending_traded_notional += abs(event.notional)
+            account_id = self._account_id_by_symbol[event.symbol]
+            self._pending_traded_notional_by_account[account_id] += abs(event.notional)
             logger.info(
                 "Order event: %s %s %s %.4f @ %.2f",
                 event.event_type,
@@ -1420,12 +1506,12 @@ class LiveTrader:
     def _commit_simulated_results(
         self,
         *,
-        cash: float,
+        cash_by_account: dict[str, float],
         positions: dict[str, PositionState],
         result: ExecutionResult,
     ) -> None:
         """Commit a deterministic simulated fill batch."""
-        self._cash = cash
+        self._cash_by_account = cash_by_account
         self._positions = positions
         self._trade_count += len(result.trades)
         self._publish_action_results(result)
@@ -1480,11 +1566,6 @@ class LiveTrader:
             volume = bars.get(symbol, {}).get("volume")
             return float(volume) if volume is not None else None
 
-        max_position_notional = (
-            self._risk_policy.max_position_weight * self._prev_equity
-            if apply_entry_risk_limits and self._risk_policy.max_position_weight
-            else None
-        )
         max_order_notional = (
             self._risk_policy.max_order_notional if apply_entry_risk_limits else None
         )
@@ -1501,10 +1582,29 @@ class LiveTrader:
                     "Live PortfolioTargets.fill_price is unsupported; "
                     "target rebalances submit market orders after the completed-bar decision"
                 )
+            account_ids = {self._account_id_by_symbol[symbol] for symbol in intent.weights}
+            if not account_ids:
+                account_ids = {self._account_id_by_symbol[primary_symbol]}
+            if len(account_ids) != 1:
+                raise ValueError(
+                    "PortfolioTargets cannot span isolated accounts; emit explicit "
+                    "OrderIntent quantities or MultiLegOrder instead"
+                )
+            account_id = next(iter(account_ids))
+            account_positions = {
+                symbol: position
+                for symbol, position in staged_positions.items()
+                if self._account_id_by_symbol[symbol] == account_id
+            }
+            max_position_notional = (
+                self._risk_policy.max_position_weight * self._prev_equity_by_account[account_id]
+                if apply_entry_risk_limits and self._risk_policy.max_position_weight
+                else None
+            )
             result = execute_portfolio_targets(
                 intent,
-                staged_positions,
-                self._cash,
+                account_positions,
+                self._cash_by_account[account_id],
                 ts,
                 get_price=get_price,
                 get_cost_model=self._get_cost_model,
@@ -1536,7 +1636,7 @@ class LiveTrader:
 
         actions = list(intent.legs) if isinstance(intent, MultiLegOrder) else intent
         requests: list[OrderRequest] = []
-        planning_cash = self._cash
+        planning_cash_by_account = dict(self._cash_by_account)
         for action in actions:
             if action.stop_price is not None or action.take_profit_price is not None:
                 raise ValueError(
@@ -1552,10 +1652,17 @@ class LiveTrader:
             order_type = "limit" if isinstance(action.fill_price, (int, float)) else "market"
             limit_price = float(action.fill_price) if order_type == "limit" else None
             planning_action = replace(action, fill_price="close")
+            symbol = action.symbol or primary_symbol
+            account_id = self._account_id_by_symbol[symbol]
+            max_position_notional = (
+                self._risk_policy.max_position_weight * self._prev_equity_by_account[account_id]
+                if apply_entry_risk_limits and self._risk_policy.max_position_weight
+                else None
+            )
             result = execute_order_intents(
                 [planning_action],
                 staged_positions,
-                planning_cash,
+                planning_cash_by_account[account_id],
                 ts,
                 get_price=get_price,
                 get_cost_model=self._get_cost_model,
@@ -1569,7 +1676,7 @@ class LiveTrader:
                 used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
-            planning_cash += result.cash_delta
+            planning_cash_by_account[account_id] += result.cash_delta
             sequence_offset = sequence_start + len(requests)
             for index, event in enumerate(result.events):
                 request = self._executor.request_from_event(
@@ -2133,9 +2240,10 @@ class LiveTrader:
                 slippage=max(0.0, delta_slippage),
                 tax=max(0.0, delta_tax),
             )
-            self._cash, result = apply_execution_fill(
+            account_id = self._account_id_by_symbol[report.symbol]
+            self._cash_by_account[account_id], result = apply_execution_fill(
                 self._positions,
-                self._cash,
+                self._cash_by_account[account_id],
                 fill,
                 report.executed_at,
                 order_side=report.side,
@@ -2301,45 +2409,64 @@ class LiveTrader:
         self._pending_decision = waiting_decision
         cycle_used_bar_quantity_by_symbol: dict[str, float] = {}
         if self._executor.simulation:
-            max_position_notional = (
-                self._risk_policy.max_position_weight * self._prev_equity
-                if self._risk_policy.max_position_weight
-                else None
+            decisions = self._decisions_by_account(
+                ready_decision,
+                primary_symbol=primary_symbol,
             )
-            if self._halted:
-                step_result = check_stop_targets(
-                    self._positions,
-                    raw_bars,
-                    ts,
-                    get_cost_model=self._get_cost_model,
-                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
-                    max_adv_participation_rate=self._max_adv_participation_rate,
-                    get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
-                    used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
-                    used_adv_quantity_by_symbol=self._adv_filled_quantities,
-                )
-                staged_cash = self._cash + step_result.cash_delta
-            else:
-                staged_cash, step_result = execute_pending_decision_and_stops(
-                    ts,
-                    self._positions,
-                    self._cash,
-                    ready_decision,
-                    raw_bars,
-                    get_cost_model=self._get_cost_model,
-                    default_fill=self._fill_price,
-                    primary_symbol=primary_symbol,
-                    max_position_notional=max_position_notional,
-                    max_order_notional=self._risk_policy.max_order_notional,
-                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
-                    max_adv_participation_rate=self._max_adv_participation_rate,
-                    get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
-                    used_adv_quantity_by_symbol=self._adv_filled_quantities,
-                    max_gross_exposure=self._risk_policy.max_gross_exposure,
-                    max_net_exposure=self._risk_policy.max_net_exposure,
-                )
+            staged_cash_by_account = dict(self._cash_by_account)
+            step_trades: list[TradeResult] = []
+            step_events: list[OrderEvent] = []
+            for account_id in staged_cash_by_account:
+                account_positions = self._account_positions(account_id)
+                if self._halted:
+                    account_result = check_stop_targets(
+                        account_positions,
+                        raw_bars,
+                        ts,
+                        get_cost_model=self._get_cost_model,
+                        max_bar_volume_participation_rate=(self._max_bar_volume_participation_rate),
+                        max_adv_participation_rate=self._max_adv_participation_rate,
+                        get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
+                        used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
+                        used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                    )
+                    staged_cash_by_account[account_id] += account_result.cash_delta
+                else:
+                    max_position_notional = (
+                        self._risk_policy.max_position_weight
+                        * self._prev_equity_by_account[account_id]
+                        if self._risk_policy.max_position_weight
+                        else None
+                    )
+                    staged_cash, account_result = execute_pending_decision_and_stops(
+                        ts,
+                        account_positions,
+                        staged_cash_by_account[account_id],
+                        decisions.get(account_id, []),
+                        raw_bars,
+                        get_cost_model=self._get_cost_model,
+                        default_fill=self._fill_price,
+                        primary_symbol=primary_symbol,
+                        max_position_notional=max_position_notional,
+                        max_order_notional=self._risk_policy.max_order_notional,
+                        max_bar_volume_participation_rate=(self._max_bar_volume_participation_rate),
+                        max_adv_participation_rate=self._max_adv_participation_rate,
+                        get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
+                        used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                        max_gross_exposure=self._risk_policy.max_gross_exposure,
+                        max_net_exposure=self._risk_policy.max_net_exposure,
+                    )
+                    staged_cash_by_account[account_id] = staged_cash
+                self._replace_account_positions(account_id, account_positions)
+                step_trades.extend(account_result.trades)
+                step_events.extend(account_result.events)
+            step_result = ExecutionResult(
+                trades=step_trades,
+                events=step_events,
+                cash_delta=0.0,
+            )
             self._commit_simulated_results(
-                cash=staged_cash,
+                cash_by_account=staged_cash_by_account,
                 positions=self._positions,
                 result=step_result,
             )
@@ -2410,7 +2537,12 @@ class LiveTrader:
         # A target-weight basket waits for a complete synchronous snapshot;
         # per-symbol intents do not prevent decisions for other symbols.
         if not isinstance(self._pending_decision, (PortfolioTargets, MultiLegOrder)):
-            equity, position_snapshot = self._calc_equity_snapshot()
+            account_values = self._calc_account_snapshots()
+            position_snapshot = {
+                symbol: position
+                for _, positions in account_values.values()
+                for symbol, position in positions.items()
+            }
             ctx = Context(
                 ts=ts,
                 symbol=primary_symbol,
@@ -2418,8 +2550,15 @@ class LiveTrader:
                 bar=bars.get(primary_symbol, {}),
                 bars=bars,
                 positions=position_snapshot,
-                cash=self._cash,
-                equity=equity,
+                accounts={
+                    account_id: AccountSnapshot(
+                        currency=self._currency_by_account[account_id],
+                        cash=self._cash_by_account[account_id],
+                        equity=equity,
+                    )
+                    for account_id, (equity, _) in account_values.items()
+                },
+                account_id_by_symbol=self._account_id_by_symbol,
                 period_index=self._period_index,
             )
             strategy_started = perf_counter()
@@ -2469,53 +2608,49 @@ class LiveTrader:
             for symbol, bar in raw_bars.items():
                 self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
-    def _calc_equity(self) -> float:
-        """Total equity = cash + market value of all positions."""
-        mtm, _ = self._calc_equity_snapshot()
-        return mtm
-
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:
         """Validate confirmed exposure after an exposure-increasing fill."""
-        if not self._positions:
-            return None
-        equity = self._calc_equity()
-        if equity <= EPSILON:
-            return f"confirmed portfolio equity is non-positive ({equity:.6f})"
-
-        signed_weights: list[tuple[str, float]] = []
-        for symbol, position in self._positions.items():
-            notional = (
-                position.quantity
-                * self._get_last_price(symbol, position)
-                * self._get_cost_model(symbol).multiplier
-            )
-            signed_weight = notional / equity
-            if position.side == "short":
-                signed_weight = -signed_weight
-            signed_weights.append((symbol, signed_weight))
-
-        max_position_weight = self._risk_policy.max_position_weight
-        if max_position_weight is not None:
-            for symbol, weight in signed_weights:
-                if abs(weight) > max_position_weight + EPSILON:
-                    return (
-                        f"{symbol} confirmed weight {abs(weight):.6f} exceeds "
-                        f"max_position_weight={max_position_weight:.6f}"
-                    )
-        gross = sum(abs(weight) for _, weight in signed_weights)
-        max_gross = self._risk_policy.max_gross_exposure
-        if max_gross is not None and gross > max_gross + EPSILON:
-            return (
-                f"confirmed gross exposure {gross:.6f} exceeds max_gross_exposure={max_gross:.6f}"
-            )
-        if include_net:
-            net = abs(sum(weight for _, weight in signed_weights))
-            max_net = self._risk_policy.max_net_exposure
-            if max_net is not None and net > max_net + EPSILON:
-                return (
-                    f"confirmed absolute net exposure {net:.6f} exceeds "
-                    f"max_net_exposure={max_net:.6f}"
+        for account_id, (equity, _) in self._calc_account_snapshots().items():
+            account_positions = self._account_positions(account_id)
+            if not account_positions:
+                continue
+            if equity <= EPSILON:
+                return f"account {account_id} confirmed equity is non-positive ({equity:.6f})"
+            signed_weights: list[tuple[str, float]] = []
+            for symbol, position in account_positions.items():
+                notional = (
+                    position.quantity
+                    * self._get_last_price(symbol, position)
+                    * self._get_cost_model(symbol).multiplier
                 )
+                signed_weight = notional / equity
+                if position.side == "short":
+                    signed_weight = -signed_weight
+                signed_weights.append((symbol, signed_weight))
+
+            max_position_weight = self._risk_policy.max_position_weight
+            if max_position_weight is not None:
+                for symbol, weight in signed_weights:
+                    if abs(weight) > max_position_weight + EPSILON:
+                        return (
+                            f"{symbol} confirmed weight {abs(weight):.6f} exceeds "
+                            f"max_position_weight={max_position_weight:.6f}"
+                        )
+            gross = sum(abs(weight) for _, weight in signed_weights)
+            max_gross = self._risk_policy.max_gross_exposure
+            if max_gross is not None and gross > max_gross + EPSILON:
+                return (
+                    f"account {account_id} confirmed gross exposure {gross:.6f} "
+                    f"exceeds max_gross_exposure={max_gross:.6f}"
+                )
+            if include_net:
+                net = abs(sum(weight for _, weight in signed_weights))
+                max_net = self._risk_policy.max_net_exposure
+                if max_net is not None and net > max_net + EPSILON:
+                    return (
+                        f"account {account_id} confirmed absolute net exposure "
+                        f"{net:.6f} exceeds max_net_exposure={max_net:.6f}"
+                    )
         return None
 
     def _get_last_price(self, sym: str, ps: PositionState) -> float:
@@ -2527,14 +2662,19 @@ class LiveTrader:
     def _get_cost_model(self, sym: str) -> CostModel:
         return self._executor.get_cost_model(sym)
 
-    def _calc_equity_snapshot(self) -> tuple[float, dict[str, Position]]:
-        """Shared MTM + snapshot computation."""
-        return calc_equity(
-            self._cash,
-            self._positions,
-            get_price=self._get_last_price,
-            get_cost_model=self._get_cost_model,
-        )
+    def _calc_account_snapshots(
+        self,
+    ) -> dict[str, tuple[float, dict[str, Position]]]:
+        """Mark each isolated account independently."""
+        return {
+            account_id: calc_equity(
+                self._cash_by_account[account_id],
+                self._account_positions(account_id),
+                get_price=self._get_last_price,
+                get_cost_model=self._get_cost_model,
+            )
+            for account_id in self._cash_by_account
+        }
 
     def _record_equity(
         self,
@@ -2545,54 +2685,76 @@ class LiveTrader:
     ) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
-        previous_equity = self._prev_equity
-        equity = self._calc_equity()
-        self._equity_peak = max(self._equity_peak, equity)
-        drawdown = (
-            (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
-        )
-
-        if (
-            self._risk_policy.max_drawdown_rate
-            and not self._halted
-            and drawdown <= -self._risk_policy.max_drawdown_rate
-        ):
+        snapshots = self._calc_account_snapshots()
+        breached_drawdown: float | None = None
+        for account_id, (equity, _) in snapshots.items():
+            peak = max(self._equity_peak_by_account[account_id], equity)
+            self._equity_peak_by_account[account_id] = peak
+            drawdown = (equity - peak) / peak if peak > 0 else 0.0
+            if (
+                self._risk_policy.max_drawdown_rate
+                and not self._halted
+                and drawdown <= -self._risk_policy.max_drawdown_rate
+            ):
+                breached_drawdown = drawdown
+                break
+        if breached_drawdown is not None:
             self._flatten_and_halt(
-                ts, drawdown, bars, used_bar_quantity_by_symbol=used_bar_quantity_by_symbol
+                ts,
+                breached_drawdown,
+                bars,
+                used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             )
-            equity = self._calc_equity()
-            drawdown = (
-                (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
+            snapshots = self._calc_account_snapshots()
+
+        status_values: list[tuple[str, float, float, float]] = []
+        for account_id, (equity, _) in snapshots.items():
+            previous_equity = self._prev_equity_by_account[account_id]
+            peak = self._equity_peak_by_account[account_id]
+            drawdown = (equity - peak) / peak if peak > 0 else 0.0
+            period_return = equity / previous_equity - 1.0 if previous_equity > 0 else 0.0
+            self._prev_equity_by_account[account_id] = equity
+            signed_weights: list[float] = []
+            if equity > EPSILON:
+                for symbol, position in self._account_positions(account_id).items():
+                    notional = (
+                        position.quantity
+                        * self._get_last_price(symbol, position)
+                        * self._get_cost_model(symbol).multiplier
+                    )
+                    signed_weights.append(
+                        notional / equity * (1.0 if position.side == "long" else -1.0)
+                    )
+            traded_notional = self._pending_traded_notional_by_account[account_id]
+            self._portfolio_diagnostics_by_account[account_id] = (
+                sum(abs(weight) for weight in signed_weights),
+                sum(signed_weights),
+                max((abs(weight) for weight in signed_weights), default=0.0),
+                traded_notional / equity if equity > EPSILON else 0.0,
             )
-
-        period_return = (equity / previous_equity - 1.0) if previous_equity > 0 else 0.0
-        self._prev_equity = equity
-        signed_weights = []
-        if equity > EPSILON:
-            for symbol, position in self._positions.items():
-                notional = (
-                    position.quantity
-                    * self._get_last_price(symbol, position)
-                    * self._get_cost_model(symbol).multiplier
+            self._pending_traded_notional_by_account[account_id] = 0.0
+            if self._on_bar:
+                self._on_bar(
+                    self._run_id,
+                    ts,
+                    account_id,
+                    self._currency_by_account[account_id],
+                    equity,
+                    drawdown,
+                    period_return,
                 )
-                signed_weights.append(
-                    notional / equity * (1.0 if position.side == "long" else -1.0)
-                )
-        self._portfolio_diagnostics = (
-            sum(abs(weight) for weight in signed_weights),
-            sum(signed_weights),
-            max((abs(weight) for weight in signed_weights), default=0.0),
-            self._pending_traded_notional / equity if equity > EPSILON else 0.0,
-        )
-        self._pending_traded_notional = 0.0
-
-        if self._on_bar:
-            self._on_bar(self._run_id, ts, equity, drawdown, period_return)
+            status_values.append((account_id, equity, drawdown, period_return))
         if self._performance_dirty:
             from db.timescale_writer import refresh_performance
 
             # The current equity point must exist before KPI recomputation.
-            self._db_write(refresh_performance, self._run_id, config=self._config)
+            for account_id in self._cash_by_account:
+                self._db_write(
+                    refresh_performance,
+                    self._run_id,
+                    account_id,
+                    config=self._config,
+                )
             self._performance_dirty = False
 
         # Periodic status notification (flags cached at init)
@@ -2600,19 +2762,27 @@ class LiveTrader:
             self._status_period_count += 1
             if self._status_period_count >= self._status_interval:
                 self._status_period_count = 0
-                pos_str = "flat"
-                if self._positions:
-                    parts = [f"{ps.side} {sym}" for sym, ps in self._positions.items()]
-                    pos_str = ", ".join(parts)
-                self._notify(
-                    "send_status",
-                    strategy=self._executor.strategy_name,
-                    symbol=",".join(self._symbols),
-                    equity=equity,
-                    drawdown=drawdown,
-                    daily_pnl=period_return * equity,
-                    position=pos_str,
-                )
+                for account_id, equity, drawdown, period_return in status_values:
+                    account_positions = self._account_positions(account_id)
+                    pos_str = "flat"
+                    if account_positions:
+                        parts = [
+                            f"{position.side} {symbol}"
+                            for symbol, position in account_positions.items()
+                        ]
+                        pos_str = ", ".join(parts)
+                    self._notify(
+                        "send_status",
+                        strategy=(
+                            f"{self._executor.strategy_name}:{account_id}"
+                            f"({self._currency_by_account[account_id]})"
+                        ),
+                        symbol=",".join(account_positions),
+                        equity=equity,
+                        drawdown=drawdown,
+                        daily_pnl=period_return * equity,
+                        position=pos_str,
+                    )
 
     def _flatten_and_halt(
         self,

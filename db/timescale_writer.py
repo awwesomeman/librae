@@ -222,8 +222,8 @@ def save_backtest_output(
     Returns:
         Dict mapping table names to row counts written.
     """
+    output.validate()
     meta = output.run_metadata
-    m = output.metrics
     counts: dict[str, int] = {}
 
     # WHY: single transaction for atomicity — partial writes on failure
@@ -258,11 +258,13 @@ def save_backtest_output(
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
         # equity_curve (batch)
-        if output.equity_curve:
+        if any(account.equity_curve for account in output.accounts):
             eq_rows = [
                 (
                     _to_dt(eq.ts),
                     meta.run_id,
+                    account.account_id,
+                    account.currency,
                     eq.equity,
                     eq.benchmark_equity,
                     eq.drawdown,
@@ -274,12 +276,14 @@ def save_backtest_output(
                     eq.turnover,
                     meta.strategy,
                 )
-                for eq in output.equity_curve
+                for account in output.accounts
+                for eq in account.equity_curve
             ]
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO equity_curve
-                   (ts, run_id, equity, benchmark_equity, drawdown, period_return,
+                   (ts, run_id, account_id, currency,
+                    equity, benchmark_equity, drawdown, period_return,
                     benchmark_period_return, gross_exposure, net_exposure,
                     concentration, turnover, strategy)
                    VALUES %s""",
@@ -294,6 +298,8 @@ def save_backtest_output(
                 (
                     ev.event_id,
                     meta.run_id,
+                    ev.account_id,
+                    ev.currency,
                     meta.strategy,
                     meta.mode,
                     tf,
@@ -320,7 +326,7 @@ def save_backtest_output(
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO trade_events
-                   (event_id, run_id,
+                   (event_id, run_id, account_id, currency,
                     strategy, mode, timeframe,
                     ts, symbol, side, event_type,
                     fill_quantity, price, entry_price,
@@ -405,8 +411,18 @@ def save_backtest_output(
         if sig_count:
             counts["signal_events"] = sig_count
 
-        write_strategy_performance(meta.run_id, m, cur=cur)
-        counts["strategy_performance"] = 1
+        for account in output.accounts:
+            write_strategy_performance(
+                meta.run_id,
+                account.account_id,
+                account.currency,
+                account.initial_cash,
+                account.final_equity,
+                account.net_pnl,
+                account.metrics,
+                cur=cur,
+            )
+        counts["strategy_performance"] = len(output.accounts)
 
         cur.close()
 
@@ -716,6 +732,8 @@ def write_signal_event(
 def write_equity_curve_point(
     ts: datetime,
     run_id: str,
+    account_id: str,
+    currency: str,
     equity: float,
     drawdown: float = 0.0,
     period_return: float = 0.0,
@@ -728,16 +746,18 @@ def write_equity_curve_point(
     strategy: str | None = None,
     dsn: str | None = None,
 ) -> None:
-    """Write a single equity curve point (upsert by ts + run_id)."""
+    """Write one account equity point."""
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO equity_curve
-               (ts, run_id, equity, benchmark_equity, drawdown, period_return,
+               (ts, run_id, account_id, currency,
+                equity, benchmark_equity, drawdown, period_return,
                 benchmark_period_return, gross_exposure, net_exposure,
                 concentration, turnover, strategy)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id, ts) DO UPDATE SET
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id, account_id, ts) DO UPDATE SET
+                 currency=EXCLUDED.currency,
                  equity=EXCLUDED.equity, benchmark_equity=EXCLUDED.benchmark_equity,
                  drawdown=EXCLUDED.drawdown, period_return=EXCLUDED.period_return,
                  benchmark_period_return=EXCLUDED.benchmark_period_return,
@@ -749,6 +769,8 @@ def write_equity_curve_point(
             (
                 _to_dt(ts),
                 run_id,
+                account_id,
+                currency,
                 equity,
                 benchmark_equity,
                 drawdown,
@@ -767,6 +789,8 @@ def write_equity_curve_point(
 def write_trade_event(
     event_id: str,
     run_id: str,
+    account_id: str,
+    currency: str,
     strategy: str,
     mode: str,
     timeframe: str,
@@ -794,7 +818,7 @@ def write_trade_event(
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO trade_events
-               (event_id, run_id,
+               (event_id, run_id, account_id, currency,
                 strategy, mode, timeframe,
                 ts, symbol, side, event_type,
                 fill_quantity, price, entry_price,
@@ -802,11 +826,14 @@ def write_trade_event(
                 commission, slippage, tax,
                 pnl, net_return,
                 entry_at, periods_held, reason)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
                 event_id,
                 run_id,
+                account_id,
+                currency,
                 strategy,
                 mode,
                 timeframe,
@@ -834,18 +861,24 @@ def write_trade_event(
 
 def write_strategy_performance(
     run_id: str,
+    account_id: str,
+    currency: str,
+    initial_cash: float,
+    final_equity: float,
+    net_pnl: float,
     metrics: Any,
     *,
     cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> None:
-    """Write/update strategy_performance for a run_id.
+    """Write/update one account's strategy performance.
 
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
     """
     sql = """INSERT INTO strategy_performance
-               (run_id, total_return, annual_return, sharpe, sortino, calmar,
+               (run_id, account_id, currency, initial_cash, final_equity, net_pnl,
+                total_return, annual_return, sharpe, sortino, calmar,
                 max_drawdown, win_rate, profit_factor, payoff_ratio, trades,
                 avg_trade_return, exposure_ratio, benchmark_return,
                 tracking_error, information_ratio, total_turnover,
@@ -853,8 +886,12 @@ def write_strategy_performance(
                 max_abs_net_exposure, max_concentration,
                 total_commission, total_slippage, total_tax)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id) DO UPDATE SET
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id, account_id) DO UPDATE SET
+                 currency=EXCLUDED.currency,
+                 initial_cash=EXCLUDED.initial_cash,
+                 final_equity=EXCLUDED.final_equity,
+                 net_pnl=EXCLUDED.net_pnl,
                  total_return=EXCLUDED.total_return,
                  annual_return=EXCLUDED.annual_return,
                  sharpe=EXCLUDED.sharpe,
@@ -880,6 +917,11 @@ def write_strategy_performance(
                  total_tax=EXCLUDED.total_tax"""
     params = (
         run_id,
+        account_id,
+        currency,
+        initial_cash,
+        final_equity,
+        net_pnl,
         metrics.total_return,
         metrics.annual_return,
         metrics.sharpe,
@@ -915,6 +957,7 @@ def write_strategy_performance(
 
 def refresh_performance(
     run_id: str,
+    account_id: str,
     config: RunConfig | None = None,
     dsn: str | None = None,
 ) -> None:
@@ -930,11 +973,15 @@ def refresh_performance(
     _CLOSE_TYPES = ["close", "reduce"]
     from librae.core.metrics import compute_all
 
-    eq_df = load_equity_curve(run_id)
+    eq_df = load_equity_curve(run_id, account_id=account_id)
     if eq_df.empty or len(eq_df) < 2:
         return
 
-    closed_df = load_trade_events(run_id, event_types=_CLOSE_TYPES)
+    closed_df = load_trade_events(
+        run_id,
+        event_types=_CLOSE_TYPES,
+        account_id=account_id,
+    )
     trade_rows = closed_df.to_dict("records") if not closed_df.empty else []
     required_trade_fields = (
         "pnl",
@@ -996,7 +1043,20 @@ def refresh_performance(
         concentration_values=optional_series("concentration"),
         **perf_kwargs,
     )
-    write_strategy_performance(run_id, metrics, dsn=dsn)
+    if config is None:
+        raise ValueError("config is required to refresh account performance")
+    account = config.accounts[account_id]
+    final_equity = equity_values[-1]
+    write_strategy_performance(
+        run_id,
+        account_id,
+        account.currency,
+        account.initial_cash,
+        final_equity,
+        final_equity - account.initial_cash,
+        metrics,
+        dsn=dsn,
+    )
 
 
 def save_signal_results(

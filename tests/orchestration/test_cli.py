@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from librae.core.run_config import RunConfig
+from librae.core.run_config import AccountConfig, RunConfig
 
 from orchestration.cli import (
     _resolve_market_and_data_source,
@@ -368,6 +368,18 @@ class TestBuildConfig:
                 strategy:
                   symbols: [MU, BTCUSDT]
                   timeframe: 1d
+                  accounts:
+                    ibkr:
+                      currency: USD
+                      initial_cash: 100000
+                    binance:
+                      currency: USDT
+                      initial_cash: 100000
+                  instrument_overrides:
+                    MU:
+                      account_id: ibkr
+                    BTCUSDT:
+                      account_id: binance
                 """
             )
         )
@@ -398,6 +410,10 @@ class TestBuildConfig:
                   timeframe: 1d
                   market: test
                   data_source: custom
+                  accounts:
+                    default:
+                      currency: USD
+                      initial_cash: 100000
                   symbol_cost_overrides:
                     TEST:
                       multiplier: 1.0
@@ -417,6 +433,10 @@ class TestBuildConfig:
                   timeframe: 1d
                   market: test
                   data_source: custom
+                  accounts:
+                    default:
+                      currency: USD
+                      initial_cash: 100000
                   perf:
                     annualize: false
                 """
@@ -451,7 +471,7 @@ def _make_cfg(**overrides) -> RunConfig:
         timeframe="1d",
         market="us_equity",
         data_source="local",
-        initial_balance=100_000.0,
+        accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
         mode="backtest",
     )
     defaults.update(overrides)

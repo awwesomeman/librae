@@ -7,13 +7,13 @@ from datetime import UTC, datetime
 import pandas as pd
 from examples.target_weights.strategy import TargetWeightsStrategy
 from examples.topk_selection.strategy import TopKSelectionStrategy
-from librae import Context, PortfolioTargets
+from librae import AccountSnapshot, Context, PortfolioTargets
 
 TS = datetime(2024, 1, 31, tzinfo=UTC)
 
 
 def _context(bars: dict[str, dict[str, float]], period_index: int = 20) -> Context:
-    symbols = list(bars)
+    symbols = tuple(bars)
     return Context(
         ts=TS,
         symbol=symbols[0],
@@ -21,8 +21,14 @@ def _context(bars: dict[str, dict[str, float]], period_index: int = 20) -> Conte
         bar=bars[symbols[0]],
         bars=bars,
         positions={},
-        cash=100_000.0,
-        equity=100_000.0,
+        accounts={
+            "default": AccountSnapshot(
+                currency="USD",
+                cash=100_000.0,
+                equity=100_000.0,
+            )
+        },
+        account_id_by_symbol={symbol: "default" for symbol in symbols},
         period_index=period_index,
     )
 

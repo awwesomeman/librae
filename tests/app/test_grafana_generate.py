@@ -31,6 +31,16 @@ class TestRenderUnifiedDashboard:
         var_names = [v["name"] for v in d["templating"]["list"]]
         assert "mode" in var_names
         assert "run_id" in var_names
+        assert "account_id" in var_names
+
+    def test_accounting_panels_filter_the_selected_account(self):
+        d = render_unified_dashboard()
+        accounting_tables = ("strategy_performance", "equity_curve", "trade_events")
+        for panel in d["panels"]:
+            for target in panel.get("targets", []):
+                sql = target["rawSql"]
+                if any(table in sql for table in accounting_tables):
+                    assert "${account_id}" in sql
 
     def test_no_strategy_signals_references(self):
         """Ensure no panel SQL references the deleted strategy_signals table."""

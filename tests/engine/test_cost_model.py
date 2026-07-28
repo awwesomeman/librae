@@ -281,15 +281,20 @@ class TestTotalCost:
 
 class TestFromConfig:
     def _cfg(self, symbol: str, market: str = "tw_futures", data_source: str = "shioaji", **kwargs):
-        from librae.core.run_config import RunConfig
+        from librae.config.symbols import get_symbol
+        from librae.core.run_config import AccountConfig, RunConfig
 
+        try:
+            currency = get_symbol(symbol).currency
+        except KeyError:
+            currency = "USD"
         return RunConfig(
             strategy_name="x",
             symbols=[symbol],
             timeframe="5m",
             market=market,
             data_source=data_source,
-            initial_balance=100_000.0,
+            accounts={"default": AccountConfig(currency=currency, initial_cash=100_000.0)},
             mode="backtest",
             **kwargs,
         )
@@ -349,7 +354,7 @@ class TestFromConfig:
     def test_symbol_param_resolves_its_own_market_costs(self) -> None:
         """A mixed-market run must not apply cfg.market or the first
         symbol's commission/margin schedule to every asset."""
-        from librae.core.run_config import RunConfig
+        from librae.core.run_config import AccountConfig, RunConfig
 
         cfg = RunConfig(
             strategy_name="x",
@@ -357,7 +362,7 @@ class TestFromConfig:
             timeframe="1d",
             market="multi",
             data_source="multi",
-            initial_balance=100_000.0,
+            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
             mode="backtest",
         )
 
@@ -405,7 +410,7 @@ class TestDescribeSymbols:
     confirming what a run will actually apply before trusting a backtest."""
 
     def _cfg(self, symbols: list[str], market="tw_futures", data_source="shioaji", **kwargs):
-        from librae.core.run_config import RunConfig
+        from librae.core.run_config import AccountConfig, RunConfig
 
         return RunConfig(
             strategy_name="x",
@@ -413,7 +418,7 @@ class TestDescribeSymbols:
             timeframe="5m",
             market=market,
             data_source=data_source,
-            initial_balance=100_000.0,
+            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
             mode="backtest",
             **kwargs,
         )

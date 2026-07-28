@@ -175,9 +175,28 @@ next observed bar. This conservative rule prevents a target reached before the
 entry from being recorded as profit without introducing an invented intrabar
 path model.
 
-#### Multi-asset / stock-picking strategies
+#### Accounts and multi-asset / stock-picking strategies
 
-The engine is portfolio-level by design (`positions` is a `dict[symbol]`, and `equity_curve`/`metrics` are both portfolio-level); `on_bar()` can return `OrderIntent`s for multiple different symbols within the same bar, with no changes needed to the engine/executor/schema. One thing to watch: `OrderIntent.quantity=None` defaults to spending all available cash (a single-asset convenience default) — when opening multiple positions in the same bar you must size each `quantity` yourself (see the `OrderIntent.quantity` docstring in `strategy.py`), otherwise the first OrderIntent will consume all the cash.
+`RunConfig.accounts` is the cash and PnL SSOT. Each instrument resolves one
+`instrument_overrides.<symbol>.account_id`; a single-account run may omit it.
+An account has one currency and one isolated cash/equity/risk ledger. Accounts
+are never combined merely because their currency strings match. The engine has
+no implicit FX conversion, transfer, borrowing, settlement, or cross-account
+netting.
+
+Strategies inspect `ctx.accounts[account_id]` and
+`ctx.account_id_by_symbol`. The `ctx.cash` and `ctx.equity` conveniences work
+only for a single-account run and fail when an aggregate would be ambiguous.
+`BacktestOutput.accounts` contains one `AccountPerformance` per account with
+explicit account id, currency, initial cash, final equity, net PnL, equity
+curve, and metrics.
+Top-level `output.metrics` and `output.equity_curve` are single-account
+conveniences only.
+
+Within an account the engine is portfolio-level. `on_bar()` can return
+`OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends that
+symbol's available account cash, so multi-symbol and cross-account decisions
+should normally use explicit quantities.
 
 For allocation strategies, return one `PortfolioTargets` instead:
 
@@ -202,6 +221,10 @@ omitted from `weights` targets zero. Reductions and closes execute first in
 symbol order, then additions. If entry costs exceed available cash, all
 addition quantities receive one common scale factor so symbol ordering does not
 starve later assets.
+
+`PortfolioTargets` must stay within one account because weights require one
+capital base. Cross-account hedges and arbitrage use explicitly sized
+`OrderIntent`s or `MultiLegOrder`; hedge ratios remain strategy-owned.
 
 Weights need not sum to one; any remainder stays in cash. When
 `Backtest(..., record_position_snapshots=True)` is enabled,
@@ -269,13 +292,12 @@ entry-notional and volume-participation limits; venue normalization, instrument
 rules, broker confirmation, durable order tracking, and manual fallback remain
 mandatory. This is best-effort recovery, not an atomicity claim.
 
-Examples include TAIFEX near/next-future/cash-proxy and Binance
-spot/perpetual/delivery-future spreads when all legs share one accounting
-currency and instrument multipliers produce correctly matched quantities.
-Binance `MUUSDT` versus US-listed `MU` does not yet fit the accounting
-boundary: USD and USDT require a time-varying FX mark plus separate
-cash/funding ledgers. Librae rejects mixed accounting currencies instead of
-assuming USDT = USD.
+Examples include TAIFEX near/next-future/cash-proxy, Binance
+spot/perpetual/delivery-future spreads, and cross-venue instruments. Legs may
+belong to different isolated accounts and currencies. Librae reports each
+account separately and never assumes USD = USDT; a strategy that needs a
+common return or hedge capital base must supply its own explicit FX/valuation
+model.
 
 Continuous near/next/quarterly aliases remain research series and are not
 orderable. A live deployment supplies concrete contract symbols/expiries in
@@ -628,7 +650,8 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
 | Related multi-leg execution | Synchronous `MultiLegOrder` OHLCV approximation | Synchronous approximation | Best-effort serial execution, completion deadline, durable baseline restoration, and manual fallback; no atomic fill guarantee |
 | Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
-| Asset allocation | Supported under single-currency/data-event assumptions | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
+| Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
+| Cross-account arbitrage | Separate account curves/PnL; synchronous leg approximation | Separate account curves/PnL | Best-effort serial multi-leg lifecycle; no cross-account funding or atomicity |
 | Dynamic stock universe | Upstream point-in-time membership/eligibility | Candidate set is static | Runtime subscription lifecycle is not engine-managed |
 | Short borrow/funding | User-supplied costs only; no locate ledger | Not modeled | Broker/account responsibility; no engine borrow ledger |
 
@@ -679,12 +702,13 @@ financial/execution fact.
 
 | Type | Description |
 |------|------|
-| `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioTargets` |
-| `Context` | immutable event snapshot: ts, configured symbols, current bar/bars, available_symbols, positions, cash, equity, callback period_index |
-| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioTargets`; `[]` means no decision |
+| `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioTargets \| MultiLegOrder` |
+| `Context` | immutable event snapshot: market data, positions, accounts, symbol-to-account mapping, and callback period index; cash/equity aliases are single-account only |
+| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioTargets \| MultiLegOrder`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close |
 | `PortfolioTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
+| `MultiLegOrder` | explicitly sized related legs with synchronous research approximation and durable best-effort live recovery |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
@@ -705,7 +729,8 @@ financial/execution fact.
 
 | Type | Description |
 |------|------|
-| `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + order_events + metrics + position_snapshots + allocation_snapshots |
+| `BacktestOutput` | run metadata, isolated account performance, currency-labelled order events, and optional position/allocation snapshots |
+| `AccountPerformance` | one account's currency, initial cash, final equity, net PnL, equity curve, and metrics |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
 | `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
 | `OrderEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution |
@@ -783,11 +808,16 @@ Routing metadata is intentionally separate from accounting overrides:
 ```yaml
 strategy:
   symbols: [MU]
+  accounts:
+    ibkr_main:
+      currency: USD
+      initial_cash: 100000
   market: us_equity
   data_source: ibkr
   broker: ibkr              # explicit execution choice; no symbol fallback
   instrument_overrides:
     MU:
+      account_id: ibkr_main
       data_adapter: ibkr
       venue_symbol: MU
       currency: USD
@@ -802,10 +832,12 @@ declare `instrument_type` and `currency`; an IBKR route must also declare
 `security_type` and a futures `exchange`. These are execution/accounting facts,
 so they are not guessed from multiplier, market name, or ticker shape.
 
-`LiveTrader` currently has one cash ledger and therefore requires all resolved
-instruments to share one accounting currency. A mixed-currency run fails at
-construction rather than summing unlike currencies; FX/base-currency
-conversion remains a separate explicit model in PR 5 / Issue #18.
+Multiple accounts require an explicit `account_id` for every symbol. Each live
+account maps one-to-one to an order-adapter instance so reconciliation cannot
+double-count one broker balance or sum separate broker accounts. Mixed
+currencies and same-currency separate accounts are supported as segregated
+ledgers. There is deliberately no portfolio-wide PnL, Sharpe, or drawdown
+unless a caller supplies an external reporting-currency conversion model.
 
 #### TelegramAdapter (notifications)
 
@@ -835,7 +867,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 | Param | Called as |
 |---|---|
-| `on_bar` | `on_bar(run_id, ts, equity, drawdown, period_return)` — once per processed market-data event |
+| `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return)` — once per account for each processed market-data event |
 | `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
@@ -944,9 +976,9 @@ flowchart TD
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
 | `backtest_runs` | run hub and resolved strategy/execution/performance configuration, 1 row / run | PK `run_id` | no |
-| `equity_curve` | per-event equity, return, drawdown, exposure, concentration, and turnover | FK `run_id` → `backtest_runs` CASCADE | yes (`ts`) |
-| `trade_events` | position lifecycle events (open/add/reduce/close) | FK `run_id` (nullable) | yes (`ts`) |
-| `strategy_performance` | aggregated performance, cost, benchmark, and portfolio diagnostics, 1 row / run | PK+FK `run_id` → `backtest_runs` CASCADE | no |
+| `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
+| `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close) | FK `run_id` (nullable) | yes (`ts`) |
+| `strategy_performance` | currency-labeled performance, PnL, cost, benchmark, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |

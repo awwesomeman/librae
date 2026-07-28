@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
+from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 
 
 def _config(**overrides: object) -> RunConfig:
@@ -11,7 +11,7 @@ def _config(**overrides: object) -> RunConfig:
         "timeframe": "H1",
         "market": "crypto",
         "data_source": "test",
-        "initial_balance": 10_000.0,
+        "accounts": {"default": AccountConfig(currency="USD", initial_cash=10_000.0)},
         "mode": "backtest",
         "params": {"window": 20, "nested": {"enabled": True}},
         "no_db": True,
@@ -122,7 +122,7 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
         ({"symbols": ["AAA", 1]}, "symbols"),
         ({"strategy_name": 1}, "strategy_name"),
         ({"broker": ""}, "broker"),
-        ({"initial_balance": True}, "initial_balance"),
+        ({"accounts": True}, "accounts"),
         ({"risk_free_rate": True}, "risk_free_rate"),
         ({"annualize": 1}, "annualize"),
     ],
@@ -170,7 +170,7 @@ def test_risk_settings_are_rejected_from_strategy_params(legacy_key: str) -> Non
         _config(params={legacy_key: 0.1})
 
 
-@pytest.mark.parametrize("initial_balance", [0.0, -1.0, float("nan")])
-def test_initial_balance_must_be_positive_and_finite(initial_balance: float) -> None:
-    with pytest.raises(ValueError, match="initial_balance"):
-        _config(initial_balance=initial_balance)
+@pytest.mark.parametrize("initial_cash", [0.0, -1.0, float("nan")])
+def test_initial_cash_must_be_positive_and_finite(initial_cash: float) -> None:
+    with pytest.raises(ValueError, match="initial_cash"):
+        AccountConfig(currency="USD", initial_cash=initial_cash)

@@ -2,7 +2,7 @@ strategy:
   name: sma_crossover_example
   symbol: BTCUSDT  # registered in librae/config/symbols.py (spot, multiplier=1.0 auto)
   timeframe: H1
-  initial_balance: 100000
+  initial_cash: 100000
   # broker: binance  # required only for live; never inferred from symbol/data_source
   execution:
     # Backtest/sim: use the next eligible bar's open when a decision does not

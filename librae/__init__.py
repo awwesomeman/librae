@@ -12,6 +12,7 @@ except ImportError:
     __version__ = "0.0.0.dev0+unknown"
 
 from .backtest.schema import (
+    AccountPerformance,
     AllocationSnapshotPoint,
     BacktestOutput,
     EquityCurvePoint,
@@ -21,6 +22,7 @@ from .backtest.schema import (
     RUN_ID_PATTERN,
 )
 from .backtest.engine import (
+    AccountBacktestResult,
     AllocationSnapshot,
     Backtest,
     BacktestResult,
@@ -35,6 +37,7 @@ from .core.cost_model import (
     margin_rate_from_absolute,
 )
 from .core.strategy import (
+    AccountSnapshot,
     OrderIntent,
     OrderAction,
     Strategy,
@@ -66,13 +69,22 @@ from .core.metrics import (
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
 )
-from .core.run_config import ExecutionPolicy, LiveMode, RiskPolicy, RunConfig, RunMode
+from .core.run_config import (
+    AccountConfig,
+    ExecutionPolicy,
+    LiveMode,
+    RiskPolicy,
+    RunConfig,
+    RunMode,
+)
 from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market
 
 __all__ = [
     "__version__",
     "BacktestOutput",
+    "AccountPerformance",
+    "AccountBacktestResult",
     "AllocationSnapshotPoint",
     "EquityCurvePoint",
     "PositionSnapshotPoint",
@@ -80,6 +92,8 @@ __all__ = [
     "StrategyMetrics",
     "RUN_ID_PATTERN",
     "CostModel",
+    "AccountConfig",
+    "AccountSnapshot",
     "SymbolDescription",
     "describe_symbols",
     "margin_rate_from_absolute",

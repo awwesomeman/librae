@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
 from librae.backtest.schema import (
+    AccountPerformance,
     BacktestOutput,
     EquityCurvePoint,
     RunMetadata,
@@ -67,6 +69,20 @@ def _make_metrics() -> StrategyMetrics:
     )
 
 
+def _make_account(
+    equity_curve: Sequence[EquityCurvePoint] = (),
+) -> AccountPerformance:
+    return AccountPerformance(
+        account_id="default",
+        currency="USD",
+        initial_cash=1_000_000.0,
+        final_equity=1_050_000.0,
+        net_pnl=50_000.0,
+        equity_curve=equity_curve,
+        metrics=_make_metrics(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Schema unit tests
 # ---------------------------------------------------------------------------
@@ -82,9 +98,8 @@ def test_run_metadata_defaults() -> None:
 def test_backtest_output_validate_passes() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
-        equity_curve=_make_equity_curve(),
+        accounts=(_make_account(_make_equity_curve()),),
         order_events=(),
-        metrics=_make_metrics(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -95,9 +110,8 @@ def test_backtest_output_validate_empty_run_id_raises() -> None:
     meta = _make_run_metadata(run_id="")
     output = BacktestOutput(
         run_metadata=meta,
-        equity_curve=[],
+        accounts=(_make_account(),),
         order_events=(),
-        metrics=_make_metrics(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -109,13 +123,26 @@ def test_backtest_output_validate_empty_strategy_raises() -> None:
     meta = _make_run_metadata(strategy="")
     output = BacktestOutput(
         run_metadata=meta,
-        equity_curve=[],
+        accounts=(_make_account(),),
         order_events=(),
-        metrics=_make_metrics(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
     with pytest.raises(ValueError, match="strategy"):
+        output.validate()
+
+
+def test_backtest_output_validate_rejects_duplicate_account_id() -> None:
+    account = _make_account()
+    output = BacktestOutput(
+        run_metadata=_make_run_metadata(),
+        accounts=(account, account),
+        order_events=(),
+        position_snapshots=(),
+        allocation_snapshots=(),
+    )
+
+    with pytest.raises(ValueError, match="unique account_id"):
         output.validate()
 
 

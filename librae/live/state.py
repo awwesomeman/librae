@@ -45,7 +45,7 @@ def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 8
+_STATE_SCHEMA_VERSION = 9
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -279,7 +279,7 @@ class LiveRuntimeState:
     run_id: str
     config_hash: str
     mode: LiveMode
-    cash: float
+    cash_by_account: dict[str, float]
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
@@ -288,8 +288,8 @@ class LiveRuntimeState:
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
     live_multi_leg: LiveMultiLeg | None = None
-    equity_peak: float = 0.0
-    prev_equity: float = 0.0
+    equity_peak_by_account: dict[str, float] = field(default_factory=dict)
+    prev_equity_by_account: dict[str, float] = field(default_factory=dict)
     trade_count: int = 0
     event_sequence: int = 0
     period_index: int = 0
@@ -297,6 +297,22 @@ class LiveRuntimeState:
     halted: bool = False
     adv_session_labels: dict[str, str] = field(default_factory=dict)
     adv_filled_quantities: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        account_ids = set(self.cash_by_account)
+        if not account_ids or any(not account_id for account_id in account_ids):
+            raise ValueError("live runtime state requires non-empty account ids")
+        if account_ids != set(self.equity_peak_by_account) or account_ids != set(
+            self.prev_equity_by_account
+        ):
+            raise ValueError("live runtime account cash/equity keys must match")
+        values = (
+            *self.cash_by_account.values(),
+            *self.equity_peak_by_account.values(),
+            *self.prev_equity_by_account.values(),
+        )
+        if any(not isfinite(value) for value in values):
+            raise ValueError("live runtime account values must be finite")
 
     def to_dict(self) -> dict:
         positions: dict[str, dict] = {}
@@ -310,7 +326,7 @@ class LiveRuntimeState:
             "run_id": self.run_id,
             "config_hash": self.config_hash,
             "mode": self.mode,
-            "cash": self.cash,
+            "cash_by_account": self.cash_by_account,
             "positions": positions,
             "last_prices": self.last_prices,
             "last_cycle_ts": self.last_cycle_ts.isoformat() if self.last_cycle_ts else None,
@@ -321,8 +337,8 @@ class LiveRuntimeState:
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
             "live_multi_leg": (self.live_multi_leg.to_dict() if self.live_multi_leg else None),
-            "equity_peak": self.equity_peak,
-            "prev_equity": self.prev_equity,
+            "equity_peak_by_account": self.equity_peak_by_account,
+            "prev_equity_by_account": self.prev_equity_by_account,
             "trade_count": self.trade_count,
             "event_sequence": self.event_sequence,
             "period_index": self.period_index,
@@ -346,7 +362,9 @@ class LiveRuntimeState:
             run_id=str(raw["run_id"]),
             config_hash=str(raw["config_hash"]),
             mode=raw["mode"],
-            cash=float(raw["cash"]),
+            cash_by_account={
+                str(account_id): float(cash) for account_id, cash in raw["cash_by_account"].items()
+            },
             positions=positions,
             last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},
             last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
@@ -363,8 +381,14 @@ class LiveRuntimeState:
                 if raw["live_multi_leg"] is not None
                 else None
             ),
-            equity_peak=float(raw["equity_peak"]),
-            prev_equity=float(raw["prev_equity"]),
+            equity_peak_by_account={
+                str(account_id): float(equity)
+                for account_id, equity in raw["equity_peak_by_account"].items()
+            },
+            prev_equity_by_account={
+                str(account_id): float(equity)
+                for account_id, equity in raw["prev_equity_by_account"].items()
+            },
             trade_count=int(raw["trade_count"]),
             event_sequence=int(raw["event_sequence"]),
             period_index=int(raw["period_index"]),

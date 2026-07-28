@@ -636,7 +636,7 @@ class TestMultiAsset:
         CostModel from cfg.symbol (symbols[0]) and apply it to every symbol
         — TXFR1 (multiplier=200) and MXFR1 (multiplier=50) in the same
         tw_futures run would have silently shared TXFR1's multiplier."""
-        from librae.core.run_config import RunConfig
+        from librae.core.run_config import AccountConfig, RunConfig
 
         df = pd.concat(
             [
@@ -650,7 +650,7 @@ class TestMultiAsset:
             timeframe="1h",
             market="tw_futures",
             data_source="shioaji",
-            initial_balance=100_000.0,
+            accounts={"default": AccountConfig(currency="TWD", initial_cash=100_000.0)},
             mode="backtest",
         )
         bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
@@ -658,7 +658,7 @@ class TestMultiAsset:
         assert bt._get_cost_model("MXFR1").multiplier == 50.0
 
     def test_per_symbol_market_costs_resolved_independently_via_cfg(self) -> None:
-        from librae.core.run_config import RunConfig
+        from librae.core.run_config import AccountConfig, RunConfig
 
         df = pd.concat(
             [
@@ -672,8 +672,15 @@ class TestMultiAsset:
             timeframe="1d",
             market="multi",
             data_source="multi",
-            initial_balance=100_000.0,
+            accounts={
+                "futures": AccountConfig(currency="TWD", initial_cash=100_000.0),
+                "equity": AccountConfig(currency="USD", initial_cash=100_000.0),
+            },
             mode="backtest",
+            instrument_overrides={
+                "TXFR1": {"account_id": "futures"},
+                "MU": {"account_id": "equity"},
+            },
         )
 
         bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
@@ -685,7 +692,7 @@ class TestMultiAsset:
     def test_per_symbol_multiplier_via_symbol_cost_overrides_no_yaml_edit_needed(self) -> None:
         """An unregistered symbol works via cfg.symbol_cost_overrides alone —
         no symbols.py registry entry required."""
-        from librae.core.run_config import RunConfig
+        from librae.core.run_config import AccountConfig, RunConfig
 
         df = _make_multiindex_df([1.0] * 5, symbol="MY_CUSTOM_SYMBOL")
         cfg = RunConfig(
@@ -694,9 +701,16 @@ class TestMultiAsset:
             timeframe="1h",
             market="crypto",
             data_source="x",
-            initial_balance=100_000.0,
+            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
             mode="backtest",
             symbol_cost_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
+            instrument_overrides={
+                "MY_CUSTOM_SYMBOL": {
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "data_adapter": "crypto",
+                }
+            },
         )
         bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
         assert bt._get_cost_model("MY_CUSTOM_SYMBOL").multiplier == 1.0

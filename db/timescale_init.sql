@@ -114,6 +114,8 @@ CREATE INDEX IF NOT EXISTS idx_broker_orders_active
 CREATE TABLE IF NOT EXISTS equity_curve (
     ts                  TIMESTAMPTZ NOT NULL,
     run_id              TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    account_id          TEXT NOT NULL,
+    currency            TEXT NOT NULL,
     equity              DOUBLE PRECISION,
     benchmark_equity    DOUBLE PRECISION,
     drawdown            DOUBLE PRECISION,
@@ -127,7 +129,11 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique ON equity_curve(run_id, ts);
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
+DROP INDEX IF EXISTS idx_equity_curve_unique;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique
+    ON equity_curve(run_id, account_id, ts);
 ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS gross_exposure DOUBLE PRECISION;
 ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS net_exposure DOUBLE PRECISION;
 ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS concentration DOUBLE PRECISION;
@@ -143,6 +149,8 @@ CREATE TABLE IF NOT EXISTS trade_events (
     mode            TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     ts              TIMESTAMPTZ NOT NULL,
+    account_id      TEXT NOT NULL,
+    currency        TEXT NOT NULL,
     symbol          TEXT,
     side            TEXT,
     event_type      TEXT,
@@ -167,12 +175,19 @@ SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);
 CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);
+ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
 
 -- ============================================================
--- strategy_performance — 聚合 KPI (1 row / run, FK CASCADE)
+-- strategy_performance — 帳戶 KPI (1 row / account / run, FK CASCADE)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS strategy_performance (
-    run_id          TEXT PRIMARY KEY REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL,
+    currency        TEXT NOT NULL,
+    initial_cash    DOUBLE PRECISION NOT NULL,
+    final_equity    DOUBLE PRECISION NOT NULL,
+    net_pnl         DOUBLE PRECISION NOT NULL,
     total_return    DOUBLE PRECISION,
     annual_return   DOUBLE PRECISION,
     sharpe          DOUBLE PRECISION,
@@ -195,7 +210,8 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     max_concentration DOUBLE PRECISION,
     total_commission DOUBLE PRECISION DEFAULT 0,
     total_slippage  DOUBLE PRECISION DEFAULT 0,
-    total_tax       DOUBLE PRECISION DEFAULT 0
+    total_tax       DOUBLE PRECISION DEFAULT 0,
+    PRIMARY KEY (run_id, account_id)
 );
 -- WHY: existing deployments already ran CREATE TABLE before payoff_ratio existed;
 -- IF NOT EXISTS keeps this script idempotent for both fresh and existing DBs.
@@ -207,6 +223,14 @@ ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS average_gross_exposure
 ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_gross_exposure DOUBLE PRECISION;
 ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_abs_net_exposure DOUBLE PRECISION;
 ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_concentration DOUBLE PRECISION;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS initial_cash DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS final_equity DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS net_pnl DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE strategy_performance DROP CONSTRAINT IF EXISTS strategy_performance_pkey;
+ALTER TABLE strategy_performance
+    ADD CONSTRAINT strategy_performance_pkey PRIMARY KEY (run_id, account_id);
 
 -- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)

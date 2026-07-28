@@ -38,6 +38,15 @@ class Position:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountSnapshot:
+    """Strategy-visible snapshot of one isolated account ledger."""
+
+    currency: str
+    cash: float
+    equity: float
+
+
+@dataclass(frozen=True, slots=True)
 class Context:
     """Immutable snapshot passed to strategy on each bar.
 
@@ -50,8 +59,9 @@ class Context:
         bars: Current data keyed only by symbols with an observed bar at
             this timestamp. Last-known marks are not inserted here.
         positions: Open positions keyed by symbol.
-        cash: Available cash.
-        equity: Engine-calculated mark-to-market portfolio equity.
+        accounts: Cash and mark-to-market equity keyed by isolated account id.
+            Currency is always explicit. Accounts are never combined, including
+            accounts that use the same currency.
         period_index: 0-based strategy-callback count. Live arrival events can
             share a timestamp, so this is not a business-day index.
     """
@@ -62,8 +72,8 @@ class Context:
     bar: Mapping[str, float]
     bars: Mapping[str, Mapping[str, float]]
     positions: Mapping[str, Position]
-    cash: float
-    equity: float
+    accounts: Mapping[str, AccountSnapshot]
+    account_id_by_symbol: Mapping[str, str]
     period_index: int
 
     def __post_init__(self) -> None:
@@ -81,11 +91,35 @@ class Context:
             "positions",
             MappingProxyType(dict(self.positions)),
         )
+        object.__setattr__(self, "accounts", MappingProxyType(dict(self.accounts)))
+        object.__setattr__(
+            self,
+            "account_id_by_symbol",
+            MappingProxyType(dict(self.account_id_by_symbol)),
+        )
 
     @property
     def available_symbols(self) -> tuple[str, ...]:
         """Symbols with a real, current bar in this event."""
         return tuple(self.bars)
+
+    @property
+    def cash(self) -> float:
+        """Single-account convenience; ambiguous multi-account access fails."""
+        return self._single_account().cash
+
+    @property
+    def equity(self) -> float:
+        """Single-account convenience; ambiguous multi-account access fails."""
+        return self._single_account().equity
+
+    def _single_account(self) -> AccountSnapshot:
+        if len(self.accounts) != 1:
+            raise ValueError(
+                "Context.cash/equity are ambiguous for multiple accounts; "
+                "use Context.accounts[account_id]"
+            )
+        return next(iter(self.accounts.values()))
 
 
 @dataclass(frozen=True)
