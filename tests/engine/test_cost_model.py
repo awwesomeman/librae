@@ -134,7 +134,9 @@ class TestDynamicSlippage:
     def test_bar_volume_omitted_unaffected(self, crypto_cost: CostModel) -> None:
         assert crypto_cost.calc_slippage(0.5) == crypto_cost.calc_slippage(0.5, bar_volume=None)
 
-    def test_zero_volume_impact_ticks_unaffected_even_with_bar_volume(self, crypto_cost: CostModel) -> None:
+    def test_zero_volume_impact_ticks_unaffected_even_with_bar_volume(
+        self, crypto_cost: CostModel
+    ) -> None:
         # crypto_cost fixture has volume_impact_ticks=0.0 (dataclass default)
         assert crypto_cost.calc_slippage(0.5) == crypto_cost.calc_slippage(0.5, bar_volume=10.0)
 

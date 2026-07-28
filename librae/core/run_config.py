@@ -263,8 +263,7 @@ class RunConfig:
         invalid_keys = sorted(legacy_risk_keys & set(self.params or {}))
         if invalid_keys:
             raise ValueError(
-                "risk settings no longer belong in params; move "
-                f"{invalid_keys} to RunConfig.risk"
+                f"risk settings no longer belong in params; move {invalid_keys} to RunConfig.risk"
             )
 
     @property

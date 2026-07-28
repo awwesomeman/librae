@@ -493,9 +493,9 @@ class TestEdgeCases:
 
         # MTM at price=130
         current_price = 130.0
-        unrealized = cm.calc_pnl(
-            pos.entry_price, current_price, pos.quantity
-        ) * side_multiplier(pos.side)
+        unrealized = cm.calc_pnl(pos.entry_price, current_price, pos.quantity) * side_multiplier(
+            pos.side
+        )
         notional = pos.entry_price * pos.quantity * cm.multiplier
         equity_contribution = unrealized + notional
 

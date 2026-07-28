@@ -155,7 +155,9 @@ def calc_equity(
     for sym, ps in positions.items():
         price = get_price(sym, ps)
         cost_model = get_cost_model(sym)
-        unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * side_multiplier(ps.side)
+        unrealized = cost_model.calc_pnl(ps.entry_price, price, ps.quantity) * side_multiplier(
+            ps.side
+        )
         entry_notional = ps.entry_price * ps.quantity * cost_model.multiplier
         mtm += unrealized + entry_notional * cost_model.margin_rate(ps.side)
         snapshot[sym] = Position(
@@ -1352,10 +1354,7 @@ def execute_portfolio_targets(
     volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
     target_gross_exposure = sum(abs(weight) for weight in targets.weights.values())
     target_net_exposure = abs(sum(targets.weights.values()))
-    if (
-        max_gross_exposure is not None
-        and target_gross_exposure > max_gross_exposure + EPSILON
-    ):
+    if max_gross_exposure is not None and target_gross_exposure > max_gross_exposure + EPSILON:
         raise ValueError(
             f"target gross exposure {target_gross_exposure:.6f} exceeds "
             f"max_gross_exposure={max_gross_exposure:.6f}"

@@ -312,7 +312,9 @@ class SymbolDescription:
     error: str | None = None
 
 
-def describe_symbols(config: RunConfig, symbols: list[str] | None = None) -> list[SymbolDescription]:
+def describe_symbols(
+    config: RunConfig, symbols: list[str] | None = None
+) -> list[SymbolDescription]:
     """Resolve and report each symbol's cost-model config (multiplier,
     tick_size, margin rates) plus where each value came from —
     'symbol_overrides' > 'cost_overrides' > 'registry' > 'market_default',

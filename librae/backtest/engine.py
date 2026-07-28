@@ -298,8 +298,7 @@ class Backtest:
         resolved_execution = (
             config.execution
             if config
-            else execution_policy
-            or ExecutionPolicy(max_volume_participation_rate=None)
+            else execution_policy or ExecutionPolicy(max_volume_participation_rate=None)
         )
         self._fill_price = resolved_execution.default_fill_price
         self._max_volume_participation_rate = resolved_execution.max_volume_participation_rate
