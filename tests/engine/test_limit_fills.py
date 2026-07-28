@@ -113,3 +113,45 @@ def test_unfilled_limit_does_not_roll_to_a_later_bar(caplog) -> None:
     assert result.order_events == []
     assert result.trades == []
     assert "expired unfilled" in caplog.text
+
+
+def test_resting_limit_protection_starts_on_next_bar() -> None:
+    prices = [
+        _bar(open_=100.0, high=101.0, low=99.0),
+        _bar(open_=100.0, high=110.0, low=90.0),
+        _bar(open_=100.0, high=106.0, low=99.0),
+        _bar(open_=105.0, high=106.0, low=104.0),
+        _bar(open_=105.0, high=106.0, low=104.0),
+    ]
+    timeline = pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC")
+    frame = pd.DataFrame(prices)
+    frame.index = pd.MultiIndex.from_arrays(
+        [["X"] * len(frame), timeline],
+        names=["symbol", "datetime"],
+    )
+
+    class LimitWithTarget(Strategy):
+        def on_bar(self, ctx):
+            if ctx.period_index == 0:
+                return [
+                    OrderIntent(
+                        action="long",
+                        symbol="X",
+                        quantity=1.0,
+                        fill_price=95.0,
+                        take_profit_price=105.0,
+                    )
+                ]
+            return []
+
+    result = Backtest(
+        frame,
+        LimitWithTarget(),
+        initial_balance=1_000.0,
+        cost_model=CostModel.zero(),
+        data_source="test",
+    ).run()
+
+    assert result.trades[0].entry_at == timeline[1].to_pydatetime()
+    assert result.trades[0].exit_at == timeline[2].to_pydatetime()
+    assert result.trades[0].exit_price == pytest.approx(105.0)

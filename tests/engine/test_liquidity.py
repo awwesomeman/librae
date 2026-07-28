@@ -66,3 +66,8 @@ def test_adv_limit_rejects_fill_until_full_history_exists() -> None:
         )
         == 0.0
     )
+
+
+@pytest.mark.parametrize("invalid_volume", [float("nan"), float("inf"), -1.0])
+def test_bar_volume_limit_fails_closed_on_invalid_volume(invalid_volume: float) -> None:
+    assert _volume_fill_limit("AAA", 0.10, invalid_volume) == 0.0

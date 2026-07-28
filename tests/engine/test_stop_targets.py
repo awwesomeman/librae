@@ -144,7 +144,7 @@ class TestResolveStopExit:
             },
             datetime(2026, 1, 2, tzinfo=UTC),
             get_cost_model=lambda _symbol: _zero_cost(),
-            max_volume_participation_rate=0.25,
+            max_bar_volume_participation_rate=0.25,
         )
 
         assert result.events[0].event_type == "reduce"
@@ -165,7 +165,7 @@ class TestResolveStopExit:
             },
             datetime(2026, 1, 3, tzinfo=UTC),
             get_cost_model=lambda _symbol: _zero_cost(),
-            max_volume_participation_rate=0.25,
+            max_bar_volume_participation_rate=0.25,
         )
 
         assert remainder.events[0].event_type == "close"

@@ -60,6 +60,12 @@ class OrderRequest:
     def __post_init__(self) -> None:
         if not self.client_order_id or not self.symbol:
             raise ValueError("client_order_id and symbol must be non-empty")
+        if self.side not in ("buy", "sell"):
+            raise ValueError(f"invalid order side: {self.side!r}")
+        if self.order_type not in ("market", "limit"):
+            raise ValueError(f"invalid order type: {self.order_type!r}")
+        if self.position_effect not in ("open", "add", "reduce", "close"):
+            raise ValueError(f"invalid position effect: {self.position_effect!r}")
         if self.venue_symbol is not None and not self.venue_symbol:
             raise ValueError("venue_symbol must be non-empty when supplied")
         if not isfinite(self.quantity) or self.quantity <= 0:

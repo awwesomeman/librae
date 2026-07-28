@@ -37,9 +37,10 @@ from librae.core.executor import (
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
-    validate_decision_symbols,
+    validate_strategy_decision,
 )
 from librae.core.liquidity import calculate_lagged_adv
+from librae.core.market_data import validate_ohlcv_values
 from librae.core.strategy import (
     Context,
     Fill,
@@ -411,7 +412,7 @@ class LiveTrader:
             self._register_run()
 
         self._fill_price = config.execution.default_fill_price
-        self._max_volume_participation_rate = config.execution.max_volume_participation_rate
+        self._max_bar_volume_participation_rate = config.execution.max_bar_volume_participation_rate
         self._adv_lookback_sessions = config.execution.adv_lookback_sessions
         self._max_adv_participation_rate = config.execution.max_adv_participation_rate
         self._risk_policy = config.risk
@@ -1161,6 +1162,7 @@ class LiveTrader:
             if cached is not None:
                 merged = merged.iloc[-self._warmup_periods :]
             merged = merged.reset_index(drop=True)
+            validate_ohlcv_values(merged, context=f"{symbol} runtime data")
             self._ohlcv_cache[symbol] = merged
             return merged
         except Exception:
@@ -1231,10 +1233,10 @@ class LiveTrader:
             if self._risk_policy.max_position_weight
             else None
         )
-        volume_limit = self._max_volume_participation_rate if apply_volume_limit else None
+        volume_limit = self._max_bar_volume_participation_rate if apply_volume_limit else None
         adv_limit = self._max_adv_participation_rate if apply_volume_limit else None
         staged_positions = deepcopy(self._positions)
-        planned_quantity_by_symbol: dict[str, float] = {}
+        planned_bar_quantity_by_symbol: dict[str, float] = {}
         planned_adv_quantity_by_symbol = dict(self._adv_filled_quantities)
         lagged_adv = lagged_adv_by_symbol or {}
 
@@ -1253,13 +1255,13 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_volume_participation_rate=volume_limit,
+                max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
                 max_gross_exposure=self._risk_policy.max_gross_exposure,
                 max_net_exposure=self._risk_policy.max_net_exposure,
                 get_volume=get_volume,
                 get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
-                used_quantity_by_symbol=planned_quantity_by_symbol,
+                used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
             requests = []
@@ -1299,11 +1301,11 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_volume_participation_rate=volume_limit,
+                max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
                 get_volume=get_volume,
                 get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
-                used_quantity_by_symbol=planned_quantity_by_symbol,
+                used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
             planning_cash += result.cash_delta
@@ -1590,7 +1592,7 @@ class LiveTrader:
             primary_symbol=primary_symbol,
         )
         self._pending_decision = waiting_decision
-        cycle_used_quantity_by_symbol: dict[str, float] = {}
+        cycle_used_bar_quantity_by_symbol: dict[str, float] = {}
         if self._executor.simulation:
             max_position_notional = (
                 self._risk_policy.max_position_weight * self._prev_equity
@@ -1603,10 +1605,10 @@ class LiveTrader:
                     raw_bars,
                     ts,
                     get_cost_model=self._get_cost_model,
-                    max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
-                    used_quantity_by_symbol=cycle_used_quantity_by_symbol,
+                    used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
                 )
                 staged_cash = self._cash + step_result.cash_delta
@@ -1621,7 +1623,7 @@ class LiveTrader:
                     default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
-                    max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
@@ -1634,8 +1636,8 @@ class LiveTrader:
                 result=step_result,
             )
             for event in step_result.events:
-                cycle_used_quantity_by_symbol[event.symbol] = (
-                    cycle_used_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
+                cycle_used_bar_quantity_by_symbol[event.symbol] = (
+                    cycle_used_bar_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
                 )
         elif ready_decision and not self._execute_live_decision(
             ready_decision,
@@ -1650,7 +1652,9 @@ class LiveTrader:
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
         # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(ts, raw_bars, used_quantity_by_symbol=cycle_used_quantity_by_symbol)
+        self._record_equity(
+            ts, raw_bars, used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol
+        )
         if self._halted:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
@@ -1695,8 +1699,8 @@ class LiveTrader:
                         signal_type="exit",
                     )
 
-        # A waiting target-weight basket is atomic; per-symbol intents do not
-        # prevent decisions for other symbols.
+        # A target-weight basket waits for a complete synchronous snapshot;
+        # per-symbol intents do not prevent decisions for other symbols.
         if not isinstance(self._pending_decision, PortfolioTargets):
             equity, position_snapshot = self._calc_equity_snapshot()
             ctx = Context(
@@ -1711,7 +1715,7 @@ class LiveTrader:
                 period_index=self._period_index,
             )
             intent = self._strategy.on_bar(ctx)
-            validate_decision_symbols(
+            validate_strategy_decision(
                 intent,
                 set(self._symbols),
                 primary_symbol=primary_symbol,
@@ -1781,7 +1785,7 @@ class LiveTrader:
         ts: datetime,
         bars: dict[str, dict[str, float]],
         *,
-        used_quantity_by_symbol: dict[str, float] | None = None,
+        used_bar_quantity_by_symbol: dict[str, float] | None = None,
     ) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
@@ -1798,7 +1802,7 @@ class LiveTrader:
             and drawdown <= -self._risk_policy.max_drawdown_rate
         ):
             self._flatten_and_halt(
-                ts, drawdown, bars, used_quantity_by_symbol=used_quantity_by_symbol
+                ts, drawdown, bars, used_bar_quantity_by_symbol=used_bar_quantity_by_symbol
             )
             equity = self._calc_equity()
             drawdown = (
@@ -1860,7 +1864,7 @@ class LiveTrader:
         drawdown: float,
         bars: dict[str, dict[str, float]],
         *,
-        used_quantity_by_symbol: dict[str, float] | None = None,
+        used_bar_quantity_by_symbol: dict[str, float] | None = None,
     ) -> None:
         """Queue or submit exits and permanently halt new entries."""
         exit_queued = False

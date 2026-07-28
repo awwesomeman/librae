@@ -195,7 +195,7 @@ class TestBuildConfig:
 
         capped = build_config("test_strat", str(tmp_path / "run.py"))
         assert capped.execution.default_fill_price == "open"
-        assert capped.execution.max_volume_participation_rate == 0.1
+        assert capped.execution.max_bar_volume_participation_rate == 0.1
 
         config_path.write_text(
             textwrap.dedent(
@@ -205,13 +205,13 @@ class TestBuildConfig:
                   timeframe: 1d
                   execution:
                     default_fill_price: close
-                    max_volume_participation_rate: null
+                    max_bar_volume_participation_rate: null
                 """
             )
         )
         unlimited = build_config("test_strat", str(tmp_path / "run.py"))
         assert unlimited.execution.default_fill_price == "close"
-        assert unlimited.execution.max_volume_participation_rate is None
+        assert unlimited.execution.max_bar_volume_participation_rate is None
 
     def test_unknown_execution_setting_is_rejected(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -227,6 +227,39 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match=r"unknown strategy\.execution"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_legacy_symbol_override_name_is_rejected(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  symbol_overrides:
+                    MU:
+                      multiplier: 1.0
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="symbol_cost_overrides"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_legacy_annual_period_name_is_rejected(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  perf:
+                    annual_periods: 252
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match=r"unknown strategy\.perf"):
             build_config("test_strat", str(tmp_path / "run.py"))
 
     def test_adv_execution_settings_are_typed(self, tmp_path):
@@ -291,7 +324,7 @@ class TestBuildConfig:
                   market: us_equity
                   data_source: ibkr
                   broker: ibkr
-                  symbol_overrides:
+                  symbol_cost_overrides:
                     AAPL:
                       multiplier: 1.0
                   instrument_overrides:
@@ -305,9 +338,9 @@ class TestBuildConfig:
 
         cfg = build_config("test_strat", str(tmp_path / "run.py"))
 
-        assert cfg.symbol_overrides == {"AAPL": {"multiplier": 1.0}}
+        assert cfg.symbol_cost_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
-        assert cfg.annual_periods == 252
+        assert cfg.periods_per_year == 252
         assert cfg.instrument_overrides == {
             "AAPL": {
                 "data_adapter": "ibkr",
@@ -316,7 +349,7 @@ class TestBuildConfig:
             }
         }
 
-    def test_mixed_data_sources_require_explicit_annual_periods(self, tmp_path):
+    def test_mixed_data_sources_require_explicit_periods_per_year(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(
                 """\
@@ -327,10 +360,24 @@ class TestBuildConfig:
             )
         )
 
-        with pytest.raises(ValueError, match="annual_periods"):
+        with pytest.raises(ValueError, match="periods_per_year"):
             build_config("test_strat", str(tmp_path / "run.py"))
 
-    def test_unknown_data_source_requires_explicit_annual_periods(self, tmp_path):
+    def test_intraday_annualization_requires_explicit_periods_per_year(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: BTCUSDT
+                  timeframe: H1
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match="periods_per_year"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
+    def test_unknown_data_source_requires_explicit_periods_per_year(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(
                 """\
@@ -339,14 +386,14 @@ class TestBuildConfig:
                   timeframe: 1d
                   market: test
                   data_source: custom
-                  symbol_overrides:
+                  symbol_cost_overrides:
                     TEST:
                       multiplier: 1.0
                 """
             )
         )
 
-        with pytest.raises(ValueError, match="annual_periods"):
+        with pytest.raises(ValueError, match="periods_per_year"):
             build_config("test_strat", str(tmp_path / "run.py"))
 
     def test_unknown_data_source_without_annualization_needs_no_calendar(self, tmp_path):
@@ -368,7 +415,7 @@ class TestBuildConfig:
 
         assert cfg.annualize is False
 
-    def test_annual_periods_must_be_positive(self, tmp_path):
+    def test_periods_per_year_must_be_positive(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(
                 """\
@@ -376,12 +423,12 @@ class TestBuildConfig:
                   symbol: MU
                   timeframe: 1d
                   perf:
-                    annual_periods: 0
+                    periods_per_year: 0
                 """
             )
         )
 
-        with pytest.raises(ValueError, match="annual_periods must be positive"):
+        with pytest.raises(ValueError, match="periods_per_year must be a positive integer"):
             build_config("test_strat", str(tmp_path / "run.py"))
 
 

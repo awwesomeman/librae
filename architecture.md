@@ -157,7 +157,8 @@ numeric and finite, prices are positive, every bar satisfies
 `low <= open/close <= high`, and volume is non-negative. Validation never
 sorts, forward/backward-fills, clips, or otherwise repairs data because those
 operations can change the point-in-time research sample and must remain
-explicit ETL decisions.
+explicit ETL decisions. Runtime frames use the same OHLCV value validator before
+entering the cache; an invalid refresh is logged and cannot create a new event.
 
 For an `OrderIntent`, a numeric `fill_price` is a one-eligible-bar limit order. A
 buy fills when the bar's low reaches the limit and a sell fills when its high
@@ -165,6 +166,14 @@ does; a gap through receives the opening price. An unreached limit expires
 after that bar and is logged. `PortfolioTargets.fill_price` accepts only a bar
 field name because one numeric price cannot describe a multi-symbol basket;
 use per-symbol `OrderIntent`s for limits.
+
+OHLCV cannot determine whether an intrabar high or low happened first. A new
+position therefore receives same-bar stop/take-profit processing only when its
+entry is known at the bar open (`fill_price="open"` or a limit gapped through at
+open). Protection for a resting limit or another non-open field begins on the
+next observed bar. This conservative rule prevents a target reached before the
+entry from being recorded as profit without introducing an invented intrabar
+path model.
 
 #### Multi-asset / stock-picking strategies
 
@@ -345,7 +354,10 @@ Fill-field and liquidity assumptions have one typed source:
 `RunConfig.execution`. `build_config()` defaults to next-open simulation and a
 10% per-symbol bar-volume cap in every mode. Direct `Backtest(...)`
 construction resolves the same `ExecutionPolicy()` defaults; unlimited
-liquidity therefore requires an explicit `max_volume_participation_rate=None`.
+liquidity therefore requires
+`execution=ExecutionPolicy(max_bar_volume_participation_rate=None)`.
+When `config=` is supplied, passing a second `execution=` or `risk=` policy is
+rejected instead of silently choosing one source.
 Backtest/sim enforce configured liquidity caps in the fill model. Live uses
 them for request sizing, then lets broker execution reports determine actual
 fills. Emergency live exits bypass local caps so the broker owns partial-fill
@@ -358,7 +370,7 @@ config = RunConfig(
     ...,
     execution=ExecutionPolicy(
         default_fill_price="open",
-        max_volume_participation_rate=0.1,
+        max_bar_volume_participation_rate=0.1,
         # Optional session-level cap; both fields must be set together.
         adv_lookback_sessions=20,
         max_adv_participation_rate=0.01,
@@ -379,7 +391,7 @@ free-form strategy dictionary for portfolio controls.
 
 - `default_fill_price`: backtest/sim fallback for decisions without an
   explicit fill field. It is not used to manufacture live executions.
-- `max_volume_participation_rate`: one cumulative per-symbol volume budget per
+- `max_bar_volume_participation_rate`: one cumulative per-symbol volume budget per
   simulated data event across entries, additions, reductions, ordinary
   closes, stops, modeled liquidation, drawdown exits, and terminal exits.
   Missing volume rejects the fill. Constrained exits are explicit partial
@@ -401,6 +413,13 @@ free-form strategy dictionary for portfolio controls.
 - `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
 - `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
+
+Performance annualization has a separate explicit SSOT:
+`RunConfig.periods_per_year` is the number of return observations per year
+(for example, 252 for daily US-equity bars or 8760 for hourly 24/7 bars).
+`build_config()` supplies data-source defaults only for D1. Annualized intraday
+or unknown-source runs must set `strategy.perf.periods_per_year`; the engine
+never guesses it from sample density.
 
 Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
 and one-way turnover (`sum(abs(traded notional)) / ending equity`) for its
@@ -584,7 +603,7 @@ financial/execution fact.
 | `BacktestOutput` | top-level container (frozen): run_metadata + equity_curve + order_events + metrics + position_snapshots + allocation_snapshots |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
 | `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
-| `OrderEventRecord` | position lifecycle event (open/add/reduce/close) |
+| `OrderEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution |
 | `EquityCurvePoint` | per-event equity/return/drawdown/benchmark plus gross/net exposure, concentration, and turnover |
 | `PositionSnapshotPoint` | per-bar position quantity, signed market value, and realized weight |
 | `AllocationSnapshotPoint` | per-event target weight, achieved weight, and drift for one symbol |
@@ -613,7 +632,7 @@ financial/execution fact.
 - **Lazy import**: `quantstats` is imported lazily inside `compute_all()`, keeping `import librae` under 1s; `db`/`brokers`/`notifications` follow the same pattern, see "Dependency direction" above.
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.
-- **Frozen dataclasses**: `BacktestOutput`, `StrategyMetrics`, `OrderEventRecord`, `CostModel`, etc. are all frozen to guarantee immutability.
+- **Immutable engine output**: frozen result dataclasses use tuple collections in engine-produced `BacktestOutput`; `Context` and `PortfolioTargets.weights` expose read-only mappings. Mutable `PositionState` remains internal.
 - **Unified margin-rate formula**: `margin_rate` = the fraction of notional that actually leaves available cash. On entry, `cash -= notional * margin_rate + costs`; on exit, `proceeds = notional * margin_rate + gross_pnl - exit_costs`; equity's `mtm += unrealized + notional * margin_rate`. One formula covers spot (1.0), US short selling (0.5, Reg T), Taiwan margin short selling (0.9), and futures (0.067). Callers can override the default via `cost_overrides`.
 
 ### Config API
@@ -637,9 +656,9 @@ market = get_market("my_market", markets=my_markets)
 cost_model = CostModel.from_config(config, markets=my_markets)
 ```
 
-#### Per-symbol overrides (`RunConfig.symbol_overrides`)
+#### Per-symbol overrides (`RunConfig.symbol_cost_overrides`)
 
-`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`spot` auto-`multiplier=1.0`, `contract_*` required-explicit) > market-level defaults. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
+`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`spot` auto-`multiplier=1.0`, `contract_*` required-explicit) > market-level defaults. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
 `Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 
@@ -648,11 +667,11 @@ config = RunConfig(
     ...,
     symbols=["TXFR1", "MXFR1"],
     market="tw_futures",
-    symbol_overrides={"MXFR1": {"multiplier": 55.0}},  # override just this one symbol
+    symbol_cost_overrides={"MXFR1": {"multiplier": 55.0}},  # override just this one symbol
 )
 ```
 
-This is the mechanism for registering a symbol librae doesn't know about (`pip install`ed with nothing to edit, or a one-off backtest) — `symbol_overrides={"MYSYM": {"multiplier": 1.0}}` needs no file, no path parameter, nothing beyond the `RunConfig` you're already passing to `Backtest`/`LiveTrader`.
+This is the mechanism for registering a symbol librae doesn't know about (`pip install`ed with nothing to edit, or a one-off backtest) — `symbol_cost_overrides={"MYSYM": {"multiplier": 1.0}}` needs no file, no path parameter, nothing beyond the `RunConfig` you're already passing to `Backtest`/`LiveTrader`.
 
 Routing metadata is intentionally separate from accounting overrides:
 

@@ -19,6 +19,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from math import isfinite
+from numbers import Real
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,13 @@ LiveMode = Literal["sim", "live"]
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPolicy:
-    """Run-wide simulated execution assumptions.
+    """Run-wide matching and pre-trade liquidity assumptions.
 
     ``default_fill_price`` is used by backtest and simulation when a strategy
     decision does not override ``fill_price``. Live market orders are filled
     by the broker and do not use this bar field.
 
-    ``max_volume_participation_rate`` caps the cumulative filled quantity for
+    ``max_bar_volume_participation_rate`` caps the cumulative filled quantity for
     one symbol in one bar. ``None`` disables the cap. With a cap enabled,
     missing volume rejects the fill and insufficient volume produces a partial
     fill. The cap also applies to stops and forced exits.
@@ -47,7 +48,7 @@ class ExecutionPolicy:
     """
 
     default_fill_price: str = "open"
-    max_volume_participation_rate: float | None = 0.1
+    max_bar_volume_participation_rate: float | None = 0.1
     adv_lookback_sessions: int | None = None
     max_adv_participation_rate: float | None = None
 
@@ -55,7 +56,7 @@ class ExecutionPolicy:
         if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
             raise ValueError("default_fill_price must be a non-empty bar field name")
         for field_name in (
-            "max_volume_participation_rate",
+            "max_bar_volume_participation_rate",
             "max_adv_participation_rate",
         ):
             rate = getattr(self, field_name)
@@ -198,7 +199,7 @@ class RunConfig:
     params: dict[str, Any] | None = None
     # Cost-model overrides. cost_overrides applies to every symbol in this
     # run (falls back to the built-in symbol/market registries for anything not listed);
-    # symbol_overrides applies to one symbol only and wins over
+    # symbol_cost_overrides applies to one symbol only and wins over
     # cost_overrides for that symbol — see CostModel.from_config(). This is
     # the escape hatch for a symbol that isn't in the built-in registry
     # (no file to edit, no path to point at — just pass
@@ -206,16 +207,16 @@ class RunConfig:
     # symbols with different multipliers (e.g. TXFR1=200 + MXFR1=50 in the
     # same tw_futures run).
     cost_overrides: dict[str, float] | None = None
-    symbol_overrides: dict[str, dict[str, float]] | None = None
+    symbol_cost_overrides: dict[str, dict[str, float]] | None = None
     # Broker/data routing metadata for one symbol. Cost fields remain in
-    # symbol_overrides so accounting inputs and venue identifiers cannot be
+    # symbol_cost_overrides so accounting inputs and venue identifiers cannot be
     # accidentally mixed into CostModel construction.
     instrument_overrides: dict[str, dict[str, str]] | None = None
 
     # === Perf params (stored in DB backtest_runs.perf_params, display only) ===
     annualize: bool = True
     risk_free_rate: float = 0.0
-    annual_periods: int = 365
+    periods_per_year: int = 365
 
     # === Behavior params (not stored in DB) ===
     poll_seconds: int = 60
@@ -230,11 +231,13 @@ class RunConfig:
             raise TypeError("execution must be an ExecutionPolicy")
         if not isinstance(self.risk, RiskPolicy):
             raise TypeError("risk must be a RiskPolicy")
+        if isinstance(self.symbols, str):
+            raise ValueError("symbols must be a collection of identifiers, not one string")
         object.__setattr__(self, "symbols", tuple(self.symbols))
         for field_name in (
             "params",
             "cost_overrides",
-            "symbol_overrides",
+            "symbol_cost_overrides",
             "instrument_overrides",
             "telegram_config",
         ):
@@ -242,30 +245,55 @@ class RunConfig:
             if value is not None:
                 object.__setattr__(self, field_name, _freeze(value))
 
-        if not self.symbols or any(not symbol for symbol in self.symbols):
-            raise ValueError("symbols must contain non-empty identifiers")
+        if not self.symbols or any(
+            not isinstance(symbol, str) or not symbol for symbol in self.symbols
+        ):
+            raise ValueError("symbols must contain non-empty string identifiers")
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"mode must be 'backtest', 'sim', or 'live', got {self.mode!r}")
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
-        if not self.market or not self.data_source:
-            raise ValueError("market and data_source must be non-empty")
-        if not self.strategy_name or not self.timeframe:
-            raise ValueError("strategy_name and timeframe must be non-empty")
-        if not isfinite(self.initial_balance) or self.initial_balance <= 0:
+        for field_name in ("strategy_name", "timeframe", "market", "data_source"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
+            raise ValueError("broker must be a non-empty string or None")
+        if (
+            isinstance(self.initial_balance, bool)
+            or not isinstance(self.initial_balance, Real)
+            or not isfinite(self.initial_balance)
+            or self.initial_balance <= 0
+        ):
             raise ValueError("initial_balance must be finite and positive")
-        if not isfinite(self.risk_free_rate):
-            raise ValueError("risk_free_rate must be finite")
-        if self.annual_periods <= 0:
-            raise ValueError("annual_periods must be positive")
-        if self.poll_seconds < 0:
-            raise ValueError("poll_seconds must be non-negative")
+        if (
+            isinstance(self.risk_free_rate, bool)
+            or not isinstance(self.risk_free_rate, Real)
+            or not isfinite(self.risk_free_rate)
+        ):
+            raise ValueError("risk_free_rate must be a finite number")
+        for field_name in ("annualize", "no_db", "dry_run", "force"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError(f"{field_name} must be a bool")
+        if (
+            isinstance(self.periods_per_year, bool)
+            or not isinstance(self.periods_per_year, int)
+            or self.periods_per_year <= 0
+        ):
+            raise ValueError("periods_per_year must be a positive integer")
+        if (
+            isinstance(self.poll_seconds, bool)
+            or not isinstance(self.poll_seconds, int)
+            or self.poll_seconds < 0
+        ):
+            raise ValueError("poll_seconds must be a non-negative integer")
         if self.dry_run and not self.no_db:
             raise ValueError("dry_run=True requires no_db=True; use build_config()")
         legacy_execution_keys = {
             "fill_price",
             "max_volume_participation_pct",
             "max_volume_participation_rate",
+            "max_bar_volume_participation_rate",
             "adv_lookback_sessions",
             "max_adv_participation_rate",
         }
@@ -302,7 +330,7 @@ class RunConfig:
         return {
             "annualize": self.annualize,
             "risk_free_rate": self.risk_free_rate,
-            "annual_periods": self.annual_periods,
+            "periods_per_year": self.periods_per_year,
         }
 
     @cached_property
@@ -310,7 +338,7 @@ class RunConfig:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
-        initial_balance, start, end, params, cost_overrides, symbol_overrides,
+        initial_balance, start, end, params, cost_overrides, symbol_cost_overrides,
         instrument_overrides, execution, risk.
         Excludes: perf params, behavior params.
         """
@@ -330,7 +358,7 @@ class RunConfig:
                     "end": self.end,
                     "params": self.params,
                     "cost_overrides": self.cost_overrides,
-                    "symbol_overrides": self.symbol_overrides,
+                    "symbol_cost_overrides": self.symbol_cost_overrides,
                     "instrument_overrides": self.instrument_overrides,
                     "execution": asdict(self.execution),
                     "risk": asdict(self.risk),
@@ -368,14 +396,14 @@ class RunConfig:
             "  --- strategy params (stored in DB) ---",
             f"  params:      {self.params}",
             f"  cost_overrides: {self.cost_overrides}",
-            f"  symbol_overrides: {self.symbol_overrides}",
+            f"  symbol_cost_overrides: {self.symbol_cost_overrides}",
             f"  instrument_overrides: {self.instrument_overrides}",
             f"  execution:   {self.execution}",
             f"  risk:        {self.risk}",
             "  --- perf params (stored in DB, display only) ---",
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",
-            f"  annual_periods: {self.annual_periods}",
+            f"  periods_per_year: {self.periods_per_year}",
             "  --- behavior (not stored in DB) ---",
             f"  no_db:       {self.no_db}",
             f"  dry_run:     {self.dry_run}",

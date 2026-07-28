@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
+from librae.core.utils import to_canonical
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Data-source -> annual trading days defaults
 # ---------------------------------------------------------------------------
-_DATA_SOURCE_ANNUAL_PERIODS: dict[str, int] = {
+_DAILY_PERIODS_PER_YEAR: dict[str, int] = {
     "binance_spot": 365,
     "binance_futures_continuous": 365,
     "ibkr": 252,
@@ -206,7 +207,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     1. Parse start/end from params (or convert periods -> start/end)
     2. Extract per-run and per-symbol overrides
     3. Derive dry_run -> no_db
-    4. Derive annual_periods from data_source if not specified in perf
+    4. Resolve an explicit return-observation annualization factor
     """
     p = base_parser(f"{strategy_name} strategy")
     config_path = Path(run_file).parent / "config.yaml"
@@ -215,12 +216,23 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     scfg = getattr(args, "strategy", {})
     params = dict(scfg.get("params", {}))
     perf = scfg.get("perf", {})
+    if not isinstance(perf, dict):
+        raise ValueError("strategy.perf must be a mapping")
+    unknown_perf_keys = set(perf) - {
+        "annualize",
+        "risk_free_rate",
+        "periods_per_year",
+    }
+    if unknown_perf_keys:
+        raise ValueError(f"unknown strategy.perf settings: {sorted(unknown_perf_keys)}")
+    if "symbol_overrides" in scfg:
+        raise ValueError("strategy.symbol_overrides was renamed to strategy.symbol_cost_overrides")
     execution_raw = scfg.get("execution", {})
     if not isinstance(execution_raw, dict):
         raise ValueError("strategy.execution must be a mapping")
     unknown_execution_keys = set(execution_raw) - {
         "default_fill_price",
-        "max_volume_participation_rate",
+        "max_bar_volume_participation_rate",
         "adv_lookback_sessions",
         "max_adv_participation_rate",
     }
@@ -272,7 +284,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
 
     # 2. Extract per-run and per-symbol configuration
     cost_overrides = scfg.get("cost_overrides")
-    symbol_overrides = scfg.get("symbol_overrides")
+    symbol_cost_overrides = scfg.get("symbol_cost_overrides")
 
     # 3. dry_run -> no_db
     dry_run = args.dry_run
@@ -294,23 +306,26 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     risk = RiskPolicy(**risk_raw)
 
     # 4. Perf params (with known exchange-calendar defaults)
-    configured_annual_periods = perf.get("annual_periods")
+    configured_periods_per_year = perf.get("periods_per_year")
     if args.no_annualize:
         annualize = False
     elif perf.get("annualize") is not None:
         annualize = perf["annualize"]
     else:
         annualize = True
-    default_annual_periods = _DATA_SOURCE_ANNUAL_PERIODS.get(data_source)
-    if annualize and configured_annual_periods is None and default_annual_periods is None:
+    default_periods_per_year = (
+        _DAILY_PERIODS_PER_YEAR.get(data_source) if to_canonical(timeframe) == "D1" else None
+    )
+    if annualize and configured_periods_per_year is None and default_periods_per_year is None:
         raise ValueError(
-            "strategy.perf.annual_periods is required when annualizing "
-            f"data_source={data_source!r}; there is no safe calendar default"
+            "strategy.perf.periods_per_year is required when annualizing "
+            f"timeframe={timeframe!r}, data_source={data_source!r}; "
+            "set the number of return observations per year explicitly"
         )
-    annual_periods = (
-        configured_annual_periods
-        if configured_annual_periods is not None
-        else default_annual_periods or 365
+    periods_per_year = (
+        configured_periods_per_year
+        if configured_periods_per_year is not None
+        else default_periods_per_year or 365
     )
 
     return RunConfig(
@@ -328,11 +343,11 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         end=end,
         params=params or None,
         cost_overrides=cost_overrides,
-        symbol_overrides=symbol_overrides,
+        symbol_cost_overrides=symbol_cost_overrides,
         instrument_overrides=instrument_overrides,
         annualize=annualize,
         risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
-        annual_periods=int(annual_periods),
+        periods_per_year=periods_per_year,
         poll_seconds=poll_seconds,
         no_db=no_db,
         dry_run=dry_run,

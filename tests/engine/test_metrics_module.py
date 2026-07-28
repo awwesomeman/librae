@@ -158,7 +158,8 @@ class TestComputeAllValidation:
         [
             ({"risk_free_rate": np.nan}, "risk_free_rate"),
             ({"risk_free_rate": np.inf}, "risk_free_rate"),
-            ({"annual_periods": 0}, "annual_periods"),
+            ({"risk_free_rate": True}, "risk_free_rate"),
+            ({"periods_per_year": 0}, "periods_per_year"),
         ],
     )
     def test_temporal_metric_parameters_are_validated(self, kwargs, message: str) -> None:
@@ -175,6 +176,29 @@ class TestComputeAllValidation:
 
 
 class TestComputeAllMetrics:
+    def test_annualization_uses_explicit_periods_per_year(self, monkeypatch) -> None:
+        import quantstats as qs
+
+        captured: dict[str, int] = {}
+
+        def fake_sharpe(returns, *, periods, rf):
+            captured["periods"] = periods
+            return 1.0
+
+        monkeypatch.setattr(qs.stats, "sharpe", fake_sharpe)
+        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
+
+        compute_all(
+            equity_values=[100.0, 101.0, 100.5],
+            timestamps=timestamps,
+            trade_pnls=[],
+            total_periods=3,
+            annualize=True,
+            periods_per_year=252,
+        )
+
+        assert captured["periods"] == 252
+
     def test_positive_return(self) -> None:
         pnl = _make_trade_pnl(gross_pnl=100, net_pnl=100, net_return=1.0)
         m = _call_compute_all([10_000.0, 10_000.0, 10_100.0], [pnl])

@@ -370,32 +370,32 @@ class TestFromConfig:
         assert equity.long_margin_rate == 1.0
         assert equity.short_margin_rate == 0.5
 
-    def test_symbol_overrides_unregistered_symbol_without_touching_symbols_yaml(self) -> None:
+    def test_symbol_cost_overrides_unregistered_symbol_without_touching_symbols_yaml(self) -> None:
         cm = CostModel.from_config(
             self._cfg(
                 "MY_CUSTOM_SYMBOL",
                 market="crypto",
                 data_source="x",
-                symbol_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
+                symbol_cost_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
             )
         )
         assert cm.multiplier == 1.0
 
-    def test_symbol_overrides_wins_over_run_wide_cost_overrides(self) -> None:
+    def test_symbol_cost_overrides_wins_over_run_wide_cost_overrides(self) -> None:
         cfg = self._cfg(
             "TXFR1",
             cost_overrides={"multiplier": 111.0},
-            symbol_overrides={"TXFR1": {"multiplier": 222.0}},
+            symbol_cost_overrides={"TXFR1": {"multiplier": 222.0}},
         )
         assert CostModel.from_config(cfg).multiplier == 222.0
 
     def test_cost_overrides_still_applies_as_fallback_for_symbols_not_listed(self) -> None:
-        """cost_overrides is the run-wide fallback; symbol_overrides only
+        """cost_overrides is the run-wide fallback; symbol_cost_overrides only
         overrides the specific symbols it lists."""
         cfg = self._cfg(
             "TXFR1",
             cost_overrides={"multiplier": 111.0},
-            symbol_overrides={"MXFR1": {"multiplier": 222.0}},
+            symbol_cost_overrides={"MXFR1": {"multiplier": 222.0}},
         )
         assert CostModel.from_config(cfg, symbol="TXFR1").multiplier == 111.0
 
@@ -443,11 +443,11 @@ class TestDescribeSymbols:
     def test_symbol_override_reported_as_source(self) -> None:
         from librae.core.cost_model import describe_symbols
 
-        cfg = self._cfg(["MXFR1"], symbol_overrides={"MXFR1": {"multiplier": 55.0}})
+        cfg = self._cfg(["MXFR1"], symbol_cost_overrides={"MXFR1": {"multiplier": 55.0}})
         results = describe_symbols(cfg)
 
         assert results[0].multiplier == 55.0
-        assert results[0].multiplier_source == "symbol_overrides"
+        assert results[0].multiplier_source == "symbol_cost_overrides"
 
     def test_run_wide_cost_override_reported_as_source(self) -> None:
         from librae.core.cost_model import describe_symbols

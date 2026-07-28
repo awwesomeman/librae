@@ -178,7 +178,7 @@ class TestLiquidateAll:
             TS,
             get_cost_model=lambda s: _zero_cost(),
             reason=REASON_FORCE_CLOSE,
-            max_volume_participation_rate=0.25,
+            max_bar_volume_participation_rate=0.25,
         )
 
         assert result.events[0].event_type == "reduce"
@@ -219,7 +219,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_rate=0.1,
+            max_bar_volume_participation_rate=0.1,
             get_volume=lambda s: 50.0,
         )
         assert len(result.events) == 1
@@ -239,7 +239,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_rate=0.1,
+            max_bar_volume_participation_rate=0.1,
             get_volume=lambda s: 0.0,
         )
         assert result.events == []
@@ -257,7 +257,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_rate=0.1,
+            max_bar_volume_participation_rate=0.1,
             get_volume=lambda s: None,
         )
         assert result.events == []
@@ -282,7 +282,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 110.0,
             get_cost_model=lambda s: cost_model,
             primary_symbol="TEST",
-            max_volume_participation_rate=0.25,
+            max_bar_volume_participation_rate=0.25,
             get_volume=lambda s: 20.0,
         )
 
@@ -303,7 +303,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_rate=0.25,
+            max_bar_volume_participation_rate=0.25,
             get_volume=lambda s: 20.0,
         )
 
@@ -476,7 +476,7 @@ class TestMaxVolumeParticipation:
         cfg = make_test_cfg(
             mode="backtest",
             initial_balance=10_000.0,
-            execution=ExecutionPolicy(max_volume_participation_rate=0.5),
+            execution=ExecutionPolicy(max_bar_volume_participation_rate=0.5),
         )
         bt = Backtest(
             _make_multiindex_df(bars), OpenOnceStrategy(), config=cfg, cost_model=_zero_cost()
@@ -485,7 +485,7 @@ class TestMaxVolumeParticipation:
 
         assert len(result.trades) == 1
         # Uncapped, all ~10_000 cash at price 100 would size ~100 units.
-        # max_volume_participation_rate=0.5 * bar[2].volume(20) caps it at 10 units.
+        # max_bar_volume_participation_rate=0.5 * bar[2].volume(20) caps it at 10 units.
         assert result.trades[0].quantity == pytest.approx(10.0)
 
 
@@ -552,7 +552,7 @@ class TestDynamicSlippage:
                 _make_multiindex_df(_bars(fill_bar_volume)),
                 OpenFixedQtyStrategy(),
                 cost_model=cost_model,
-                execution_policy=ExecutionPolicy(max_volume_participation_rate=None),
+                execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
             )
             result = bt.run()
             open_events = [e for e in result.order_events if e.event_type == "open"]

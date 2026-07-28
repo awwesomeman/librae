@@ -116,7 +116,7 @@ class CostModel:
         markets: dict[str, MarketConfig] | None = None,
     ) -> CostModel:
         """Resolve cost model for one symbol, with standard priority:
-        explicit override > config.symbol_overrides[symbol] > config.cost_overrides
+        explicit override > config.symbol_cost_overrides[symbol] > config.cost_overrides
         (run-wide fallback) > the built-in symbol registry's per-symbol
         multiplier (spot auto-1.0, contract_* required-explicit) and
         tick_size (optional override) > market-level defaults for
@@ -135,7 +135,7 @@ class CostModel:
             ValueError: `symbol` isn't in the built-in registry (so no
                 multiplier can be resolved at all — not even the spot
                 auto-default, since we don't know the instrument_type) and
-                neither config.symbol_overrides[symbol] nor config.cost_overrides
+                neither config.symbol_cost_overrides[symbol] nor config.cost_overrides
                 supplies multiplier either.
         """
         if override is not None:
@@ -159,16 +159,16 @@ class CostModel:
 
         mc = get_market(symbol_market, markets=markets)
 
-        # symbol_overrides[symbol] wins over the run-wide cost_overrides
+        # symbol_cost_overrides[symbol] wins over the run-wide cost_overrides
         # fallback for anything both specify.
         overrides = dict(config.cost_overrides or {})
-        overrides.update((config.symbol_overrides or {}).get(symbol, {}))
+        overrides.update((config.symbol_cost_overrides or {}).get(symbol, {}))
 
         multiplier = overrides.get("multiplier", multiplier)
         tick_size = overrides.get("tick_size", tick_size)
         if multiplier is None:
             raise ValueError(
-                f"No multiplier for symbol={symbol!r} — pass config.symbol_overrides={{"
+                f"No multiplier for symbol={symbol!r} — pass config.symbol_cost_overrides={{"
                 f"{symbol!r}: {{'multiplier': ...}}}} (or config.cost_overrides for a "
                 "single-symbol run), or register it in librae/config/symbols.py's "
                 "built-in registry (spot instruments default to 1.0 automatically; "
@@ -221,9 +221,8 @@ class CostModel:
 
         bar_volume (optional): when given together with volume_impact_ticks > 0,
         adds a market-impact component that scales linearly with how much
-        of the bar's volume this fill consumes. Omitted (the default at
-        every existing call site) reproduces the flat slippage_ticks-only
-        cost unchanged.
+        of the bar's volume this fill consumes. Omit it when no observed bar
+        volume is available; that preserves the flat slippage_ticks-only cost.
         """
         ticks = self.slippage_ticks
         if bar_volume and bar_volume > 0 and self.volume_impact_ticks > 0:
@@ -317,7 +316,7 @@ def describe_symbols(
 ) -> list[SymbolDescription]:
     """Resolve and report each symbol's cost-model config (multiplier,
     tick_size, margin rates) plus where each value came from —
-    'symbol_overrides' > 'cost_overrides' > 'registry' > 'market_default',
+    'symbol_cost_overrides' > 'cost_overrides' > 'registry' > 'market_default',
     matching CostModel.from_config's actual priority. A diagnostic to
     confirm what's really applied before trusting a backtest, not something
     the engine consults itself.
@@ -332,7 +331,7 @@ def describe_symbols(
 
     results: list[SymbolDescription] = []
     for sym in symbols if symbols is not None else config.symbols:
-        symbol_over = (config.symbol_overrides or {}).get(sym, {})
+        symbol_over = (config.symbol_cost_overrides or {}).get(sym, {})
         cost_over = config.cost_overrides or {}
         try:
             info = get_symbol(sym)
@@ -364,7 +363,7 @@ def describe_symbols(
             continue
 
         if "multiplier" in symbol_over:
-            multiplier_source = "symbol_overrides"
+            multiplier_source = "symbol_cost_overrides"
         elif "multiplier" in cost_over:
             multiplier_source = "cost_overrides"
         elif info is not None and info.instrument_type == "spot":
@@ -373,7 +372,7 @@ def describe_symbols(
             multiplier_source = "registry"
 
         if "tick_size" in symbol_over:
-            tick_size_source = "symbol_overrides"
+            tick_size_source = "symbol_cost_overrides"
         elif "tick_size" in cost_over:
             tick_size_source = "cost_overrides"
         elif info is not None and info.tick_size is not None:

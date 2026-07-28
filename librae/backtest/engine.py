@@ -23,6 +23,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from numbers import Real
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -55,9 +56,10 @@ from librae.core.executor import (
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
-    validate_decision_symbols,
+    validate_strategy_decision,
 )
 from librae.core.liquidity import calculate_lagged_adv
+from librae.core.market_data import validate_ohlcv_values
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
@@ -73,8 +75,6 @@ from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 logger = logging.getLogger(__name__)
 
 _INDEX_NAMES = ["symbol", "datetime"]
-_PRICE_COLUMNS = ("open", "high", "low", "close")
-_REQUIRED_COLUMNS = (*_PRICE_COLUMNS, "volume")
 
 
 def _validate_backtest_data(
@@ -91,11 +91,6 @@ def _validate_backtest_data(
     if data.index.nlevels != 2 or list(data.index.names) != _INDEX_NAMES:
         raise ValueError("data index levels must be exactly ('symbol', 'datetime')")
 
-    missing = sorted(set(_REQUIRED_COLUMNS) - set(data.columns))
-    if missing:
-        raise ValueError(f"data missing required OHLCV columns: {', '.join(missing)}")
-    if data.empty:
-        raise ValueError("data must contain at least one OHLCV bar")
     if not data.index.is_unique:
         raise ValueError("data index must contain unique (symbol, datetime) pairs")
 
@@ -123,28 +118,7 @@ def _validate_backtest_data(
         if not symbol_timestamps.is_monotonic_increasing:
             raise ValueError(f"data timestamps must be increasing within symbol {symbol!r}")
 
-    non_numeric = [
-        column for column in _REQUIRED_COLUMNS if not pd.api.types.is_numeric_dtype(data[column])
-    ]
-    if non_numeric:
-        raise ValueError(f"data OHLCV columns must be numeric: {', '.join(non_numeric)}")
-
-    values = data.loc[:, list(_REQUIRED_COLUMNS)].to_numpy(
-        dtype=np.float64,
-        na_value=np.nan,
-    )
-    if not np.isfinite(values).all():
-        raise ValueError("data OHLCV values must be finite")
-
-    open_price, high, low, close, volume = values.T
-    if np.any(open_price <= 0) or np.any(high <= 0) or np.any(low <= 0) or np.any(close <= 0):
-        raise ValueError("data OHLC prices must be positive")
-    if np.any(high < np.maximum.reduce([open_price, low, close])) or np.any(
-        low > np.minimum.reduce([open_price, high, close])
-    ):
-        raise ValueError("data OHLC values are inconsistent: low <= open/close <= high is required")
-    if np.any(volume < 0):
-        raise ValueError("data volume must be non-negative")
+    validate_ohlcv_values(data)
 
 
 @dataclass(frozen=True)
@@ -235,8 +209,10 @@ class Backtest:
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
-        execution_policy: Fill-price and volume assumptions for direct
+        execution: Fill-price and volume assumptions for direct
             construction. With ``config``, ``config.execution`` is the only source.
+        risk: Portfolio risk limits for direct construction. With ``config``,
+            ``config.risk`` is the only source.
     """
 
     def __init__(
@@ -250,13 +226,23 @@ class Backtest:
         cost_model: CostModel | None = None,
         data_source: str = "",
         record_position_snapshots: bool = False,
-        execution_policy: ExecutionPolicy | None = None,
+        execution: ExecutionPolicy | None = None,
+        risk: RiskPolicy | None = None,
     ) -> None:
         _validate_backtest_data(data, config.symbols if config is not None else None)
-        if config is not None and execution_policy is not None:
+        if config is not None and execution is not None:
             raise ValueError(
-                "execution_policy cannot override config.execution; use one configuration source"
+                "execution cannot override config.execution; use one configuration source"
             )
+        if config is not None and risk is not None:
+            raise ValueError("risk cannot override config.risk; use one configuration source")
+        if (
+            isinstance(initial_balance, bool)
+            or not isinstance(initial_balance, Real)
+            or not np.isfinite(initial_balance)
+            or initial_balance <= 0
+        ):
+            raise ValueError("initial_balance must be finite and positive")
 
         self._data = data
         self._strategy = strategy
@@ -299,19 +285,21 @@ class Backtest:
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
         if config is not None and cost_model is None:
             # Resolve every other symbol in this run independently (each
-            # against its own registry entry/cost_overrides/symbol_overrides
+            # against its own registry entry/cost_overrides/symbol_cost_overrides
             # entry) — a multi-asset run isn't guaranteed to share one
             # multiplier (e.g. tw_futures TXFR1=200 vs MXFR1=50), so only
             # config.symbol (symbols[0]) got a correct CostModel above.
             for sym in self._symbols:
                 if sym != config.symbol:
                     self._cost_models[sym] = CostModel.from_config(config, symbol=sym)
-        resolved_execution = config.execution if config else execution_policy or ExecutionPolicy()
+        resolved_execution = config.execution if config else execution or ExecutionPolicy()
         self._fill_price = resolved_execution.default_fill_price
-        self._max_volume_participation_rate = resolved_execution.max_volume_participation_rate
+        self._max_bar_volume_participation_rate = (
+            resolved_execution.max_bar_volume_participation_rate
+        )
         self._adv_lookback_sessions = resolved_execution.adv_lookback_sessions
         self._max_adv_participation_rate = resolved_execution.max_adv_participation_rate
-        self._risk_policy = config.risk if config else RiskPolicy()
+        self._risk_policy = config.risk if config else risk or RiskPolicy()
 
         if strategy_name is not None:
             self._strategy_name = strategy_name.lower().replace(" ", "_")
@@ -400,7 +388,7 @@ class Backtest:
         last_equity = self._initial_balance
         halted = False
         adv_session_by_symbol: dict[str, object] = {}
-        adv_used_quantity_by_symbol: dict[str, float] = {}
+        used_adv_quantity_by_symbol: dict[str, float] = {}
 
         for ts in self._timeline:
             event_start_index = len(all_events)
@@ -410,7 +398,7 @@ class Backtest:
             for symbol, label in current_session_labels.items():
                 if adv_session_by_symbol.get(symbol) != label:
                     adv_session_by_symbol[symbol] = label
-                    adv_used_quantity_by_symbol[symbol] = 0.0
+                    used_adv_quantity_by_symbol[symbol] = 0.0
 
             def get_lagged_adv(
                 symbol: str,
@@ -447,10 +435,10 @@ class Backtest:
                     bars,
                     ts,
                     get_cost_model=self._get_cost_model,
-                    max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=get_lagged_adv,
-                    used_adv_quantity_by_symbol=adv_used_quantity_by_symbol,
+                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                 )
                 cash += step_result.cash_delta
             else:
@@ -464,10 +452,10 @@ class Backtest:
                     default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
-                    max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_lagged_adv=get_lagged_adv,
-                    used_adv_quantity_by_symbol=adv_used_quantity_by_symbol,
+                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                 )
@@ -542,7 +530,7 @@ class Backtest:
                     period_index=decision_index,
                 )
                 new_decision = self._strategy.on_bar(ctx)
-                validate_decision_symbols(
+                validate_strategy_decision(
                     new_decision,
                     universe,
                     primary_symbol=primary_symbol,
@@ -581,13 +569,13 @@ class Backtest:
                 last_ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
-                max_volume_participation_rate=self._max_volume_participation_rate,
+                max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                 max_adv_participation_rate=self._max_adv_participation_rate,
                 get_lagged_adv=lambda symbol: all_lagged_adv.get(last_ts, {}).get(symbol),
-                used_quantity_by_symbol=self._filled_quantities(
+                used_bar_quantity_by_symbol=self._filled_quantities(
                     event for event in all_events if event.ts == last_ts
                 ),
-                used_adv_quantity_by_symbol=adv_used_quantity_by_symbol,
+                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             )
             if positions:
                 raise ValueError(

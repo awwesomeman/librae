@@ -7,10 +7,9 @@ Custom metrics not in QuantStats (exposure_ratio, avg_hold_periods) and
 on-demand trade/signal outcome analysis are computed here. Public functions
 accept primitive sequences and DataFrames rather than database dependencies.
 
-The annualization factor fed to QuantStats is always inferred from actual bar
-density (see _infer_annual_periods) so intraday timeframes annualize correctly.
-annual_periods (trading days/year, e.g. 365 for crypto, 252 for TW) is only a
-fallback for when density can't be inferred (<2 bars).
+Annualized metrics use one explicit ``periods_per_year`` value. The engine does
+not infer it from sample density because short or irregular samples can turn a
+few adjacent intraday bars into an implausible 24/7 annualization factor.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from numbers import Real
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -34,7 +34,6 @@ from librae.core import EPSILON
 
 logger = logging.getLogger(__name__)
 
-SECONDS_PER_YEAR = 365.25 * 86400
 PERCENTAGE_POINTS_PER_FRACTION = 100.0
 
 SignalDirection = Literal["long", "short"]
@@ -66,24 +65,6 @@ class _LifecycleState:
     events: list[OrderEventRecord]
 
 
-def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
-    """Infer how many bars fit in one year from actual data density.
-
-    Uses ``(n_bars - 1) / span_years`` — the observed interval rate — so it
-    correctly handles markets with limited trading hours (e.g. 5h/day
-    futures) and any bar frequency (H1, D1, W1, etc.). Falls back to
-    ``fallback`` (the configured trading-days/year) when there isn't
-    enough data to infer a rate from.
-    """
-    if len(index) < 2:
-        return fallback
-    span_seconds = (index[-1] - index[0]).total_seconds()
-    if span_seconds <= 0:
-        return fallback
-    span_years = span_seconds / SECONDS_PER_YEAR
-    return max(1, round((len(index) - 1) / span_years))
-
-
 def _as_positive_finite_array(values: Sequence[float], name: str) -> np.ndarray:
     """Return a float64 value curve whose observations can safely be denominators."""
     array = np.asarray(values, dtype=np.float64)
@@ -107,13 +88,13 @@ def compute_all(
     net_exposure_values: Sequence[float] | None = None,
     concentration_values: Sequence[float] | None = None,
     risk_free_rate: float = 0.0,
-    annual_periods: int = 365,
+    periods_per_year: int = 365,
 ) -> StrategyMetrics:
     """Compute all metrics from equity curve + trades.
 
     Args:
         equity_values: Finite, strictly positive equity values per bar.
-        timestamps: Corresponding timestamps (used for annualization).
+        timestamps: Corresponding timestamps used to index the return series.
         trade_pnls: TradePnL from core.executor.calc_trade_pnl().
         total_periods: Total bar count (for exposure_ratio).
         annualize: If True, compute annualized metrics.
@@ -129,10 +110,8 @@ def compute_all(
         net_exposure_values: Per-event sum of signed realized weights.
         concentration_values: Per-event largest absolute realized weight.
         risk_free_rate: Annual risk-free rate (crypto=0, TW=0.015).
-        annual_periods: Trading days per year (crypto=365, TW=252). Used only
-            as a fallback when bar density can't be inferred from timestamps
-            (<2 bars) — otherwise the real annualization factor is inferred
-            from actual bar density, see _infer_annual_periods.
+        periods_per_year: Return observations per year, such as 252 for daily
+            US-equity bars or 8760 for hourly 24/7 bars.
 
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
@@ -147,10 +126,18 @@ def compute_all(
         return StrategyMetrics(total_return=0.0, trades=0)
     if len(timestamps) != len(equity_values):
         raise ValueError("timestamps length must match equity_values")
-    if not np.isfinite(risk_free_rate):
-        raise ValueError("risk_free_rate must be finite")
-    if annual_periods <= 0:
-        raise ValueError("annual_periods must be positive")
+    if (
+        isinstance(risk_free_rate, bool)
+        or not isinstance(risk_free_rate, Real)
+        or not np.isfinite(risk_free_rate)
+    ):
+        raise ValueError("risk_free_rate must be a finite number")
+    if (
+        isinstance(periods_per_year, bool)
+        or not isinstance(periods_per_year, int)
+        or periods_per_year <= 0
+    ):
+        raise ValueError("periods_per_year must be a positive integer")
 
     eq_arr = _as_positive_finite_array(equity_values, "equity_values")
 
@@ -178,31 +165,37 @@ def compute_all(
     calmar: float | None = None
     ann_return: float | None = None
     if annualize and len(returns) >= 2:
-        # WHY: QuantStats expects bars-per-year, not trading-days-per-year,
-        # so annualization always uses actual bar density (correct for any
-        # timeframe — H1, D1, ...); annual_periods is only the fallback for
-        # when density can't be inferred.
-        periods = _infer_annual_periods(ts_index, fallback=annual_periods)
-
         # QuantStats accepts an annual risk-free rate and deannualizes it
-        # internally using periods. Passing a per-bar rate would apply that
+        # internally using periods_per_year. Passing a per-bar rate would apply that
         # conversion twice.
         return_std = float(returns.std(ddof=1))
         if np.isfinite(return_std) and return_std > 0.0:
-            sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=risk_free_rate)
+            sharpe = _safe_qs(
+                qs.stats.sharpe,
+                returns,
+                periods=periods_per_year,
+                rf=risk_free_rate,
+            )
 
         periodic_rf = (
-            float(np.power(1.0 + risk_free_rate, 1.0 / periods) - 1.0)
+            float(np.power(1.0 + risk_free_rate, 1.0 / periods_per_year) - 1.0)
             if risk_free_rate > 0.0
             else 0.0
         )
         if bool((returns < periodic_rf).any()):
-            sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=risk_free_rate)
+            sortino = _safe_qs(
+                qs.stats.sortino,
+                returns,
+                periods=periods_per_year,
+                rf=risk_free_rate,
+            )
 
         # Calmar is undefined without a drawdown. Guard the denominator here
         # because QuantStats divides by zero before _safe_qs can map inf to None.
-        calmar = _safe_qs(qs.stats.calmar, returns, periods=periods) if max_dd < 0.0 else None
-        ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods)
+        calmar = (
+            _safe_qs(qs.stats.calmar, returns, periods=periods_per_year) if max_dd < 0.0 else None
+        )
+        ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods_per_year)
 
     n_trades = len(trade_pnls)
     net_pnls = np.array([t.net_pnl for t in trade_pnls], dtype=np.float64)
@@ -268,11 +261,12 @@ def compute_all(
         benchmark_returns = np.diff(benchmark_array) / benchmark_array[:-1]
         active_returns = returns.to_numpy() - benchmark_returns
         if len(active_returns) >= 2:
-            periods = _infer_annual_periods(ts_index, fallback=annual_periods)
             active_std = float(np.std(active_returns, ddof=1))
-            tracking_error = active_std * np.sqrt(periods)
+            tracking_error = active_std * np.sqrt(periods_per_year)
             if active_std > 0.0:
-                information_ratio = float(np.mean(active_returns)) / active_std * np.sqrt(periods)
+                information_ratio = (
+                    float(np.mean(active_returns)) / active_std * np.sqrt(periods_per_year)
+                )
 
     total_turnover = _sum_optional(turnover_values)
     average_gross_exposure = _mean_optional(gross_exposure_values)

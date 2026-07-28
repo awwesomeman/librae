@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
+from numbers import Real
 from types import MappingProxyType
 from typing import Literal
 
@@ -111,8 +112,12 @@ class OrderIntent:
             checks it every bar after this one until the position closes.
             Simulation-only; live requires broker-native protective orders.
         take_profit_price: Absolute price that force-closes the position
-            (limit order — fills exactly at this price when the bar's range
-            touches it). Same lifecycle as stop_price and simulation-only.
+            (limit order — fills at the target when touched, or at the better
+            bar open after a favorable gap). Same lifecycle as stop_price and
+            simulation-only.
+            For a new entry whose simulated fill time within the bar is
+            ambiguous (for example, a resting limit), protection starts on the
+            next bar. Entries known to fill at open may trigger it immediately.
     """
 
     action: OrderAction
@@ -122,6 +127,33 @@ class OrderIntent:
     fill_price: str | float | None = None
     stop_price: float | None = None
     take_profit_price: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.action not in ("long", "short", "close"):
+            raise ValueError(f"invalid order action: {self.action!r}")
+        if not isinstance(self.symbol, str):
+            raise TypeError("OrderIntent.symbol must be a string")
+        if not isinstance(self.reason, str):
+            raise TypeError("OrderIntent.reason must be a string")
+
+        if self.quantity is not None:
+            _validate_positive_finite_number(self.quantity, "OrderIntent.quantity")
+
+        fill_price = self.fill_price
+        if isinstance(fill_price, str):
+            if not fill_price:
+                raise ValueError("OrderIntent.fill_price must be a non-empty bar field name")
+        elif fill_price is not None:
+            _validate_positive_finite_number(fill_price, "OrderIntent.fill_price")
+
+        for field_name in ("stop_price", "take_profit_price"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _validate_positive_finite_number(value, f"OrderIntent.{field_name}")
+        if self.action == "close" and (
+            self.stop_price is not None or self.take_profit_price is not None
+        ):
+            raise ValueError("close intents cannot set stop_price or take_profit_price")
 
 
 @dataclass(frozen=True)
@@ -137,22 +169,34 @@ class PortfolioTargets:
     Target weights need not sum to one; any remainder stays in cash.
     """
 
-    weights: dict[str, float]
+    weights: Mapping[str, float]
     fill_price: str | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "weights", dict(self.weights))
-        if self.fill_price is not None and not isinstance(self.fill_price, str):
+        if self.fill_price is not None and (
+            not isinstance(self.fill_price, str) or not self.fill_price
+        ):
             raise ValueError(
-                "PortfolioTargets.fill_price must be a bar field name; "
+                "PortfolioTargets.fill_price must be a non-empty bar field name; "
                 "use per-symbol OrderIntent values for limit orders"
             )
-        for symbol, raw_weight in self.weights.items():
-            if not symbol:
+        if not isinstance(self.reason, str):
+            raise TypeError("PortfolioTargets.reason must be a string")
+
+        weights = dict(self.weights)
+        for symbol, raw_weight in weights.items():
+            if not isinstance(symbol, str) or not symbol:
                 raise ValueError("target weight symbols must be non-empty")
+            if isinstance(raw_weight, bool) or not isinstance(raw_weight, Real):
+                raise TypeError(f"target weight for {symbol!r} must be numeric")
             if not isfinite(raw_weight):
                 raise ValueError(f"target weight for {symbol!r} must be finite")
+        object.__setattr__(self, "weights", MappingProxyType(weights))
+
+    def __deepcopy__(self, memo: dict[int, object]) -> PortfolioTargets:
+        """Immutable value objects can be shared across runtime snapshots."""
+        return self
 
 
 StrategyDecision = list[OrderIntent] | PortfolioTargets
@@ -210,3 +254,8 @@ class Strategy(ABC):
     def on_bar(self, ctx: Context) -> StrategyDecision:
         """Return order intents, portfolio targets, or ``[]`` for no decision."""
         ...
+
+
+def _validate_positive_finite_number(value: object, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value) or value <= 0:
+        raise ValueError(f"{field_name} must be positive and finite")

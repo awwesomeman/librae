@@ -84,7 +84,7 @@ class EquityCurvePoint:
 
 @dataclass(frozen=True)
 class OrderEventRecord:
-    """Single position lifecycle event for DB persistence."""
+    """Position lifecycle event whose costs belong only to this execution."""
 
     event_id: str
     ts: datetime

@@ -49,8 +49,8 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
 
 
 def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
-    unlimited = _config(execution=ExecutionPolicy(max_volume_participation_rate=None))
-    capped = _config(execution=ExecutionPolicy(max_volume_participation_rate=0.1))
+    unlimited = _config(execution=ExecutionPolicy(max_bar_volume_participation_rate=None))
+    capped = _config(execution=ExecutionPolicy(max_bar_volume_participation_rate=0.1))
     adv_capped = _config(
         timeframe="D1",
         execution=ExecutionPolicy(
@@ -62,7 +62,7 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     assert unlimited.config_hash != capped.config_hash
     assert capped.config_hash != adv_capped.config_hash
     with pytest.raises(ValueError, match="must be in"):
-        ExecutionPolicy(max_volume_participation_rate=1.1)
+        ExecutionPolicy(max_bar_volume_participation_rate=1.1)
     with pytest.raises(ValueError, match="positive integer"):
         ExecutionPolicy(adv_lookback_sessions=0, max_adv_participation_rate=0.01)
     with pytest.raises(ValueError, match="configured together"):
@@ -77,7 +77,7 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     with pytest.raises(ValueError, match="bar field"):
         ExecutionPolicy(default_fill_price="")
     with pytest.raises(TypeError, match="ExecutionPolicy"):
-        _config(execution={"max_volume_participation_rate": 0.1})
+        _config(execution={"max_bar_volume_participation_rate": 0.1})
 
 
 def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
@@ -92,11 +92,28 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
 
 
 @pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"symbols": "AAA"}, "symbols"),
+        ({"symbols": ["AAA", 1]}, "symbols"),
+        ({"strategy_name": 1}, "strategy_name"),
+        ({"broker": ""}, "broker"),
+        ({"initial_balance": True}, "initial_balance"),
+        ({"risk_free_rate": True}, "risk_free_rate"),
+        ({"annualize": 1}, "annualize"),
+    ],
+)
+def test_run_config_rejects_ambiguous_scalar_types(override, message: str) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        _config(**override)
+
+
+@pytest.mark.parametrize(
     "legacy_key",
     [
         "fill_price",
         "max_volume_participation_pct",
-        "max_volume_participation_rate",
+        "max_bar_volume_participation_rate",
         "adv_lookback_sessions",
         "max_adv_participation_rate",
     ],

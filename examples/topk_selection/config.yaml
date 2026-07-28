@@ -7,7 +7,7 @@ strategy:
   initial_balance: 100000
   execution:
     default_fill_price: open
-    max_volume_participation_rate: 0.10
+    max_bar_volume_participation_rate: 0.10
     adv_lookback_sessions: 20
     max_adv_participation_rate: 0.01
   cost_overrides:
@@ -18,4 +18,4 @@ strategy:
     rebalance_every: 20
     target_exposure: 0.95
   perf:
-    annual_periods: 252
+    periods_per_year: 252

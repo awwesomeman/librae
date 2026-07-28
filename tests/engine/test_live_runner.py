@@ -1531,7 +1531,7 @@ class TestLiveExecutionLifecycle:
     def test_volume_budget_is_cumulative_across_same_symbol_intents(self):
         adapter = _mock_order_adapter()
         runner = self._make_trader(_HoldStrategy(), adapter)
-        runner._max_volume_participation_rate = 0.1
+        runner._max_bar_volume_participation_rate = 0.1
         ts = datetime(2025, 1, 1, tzinfo=UTC)
 
         requests = runner._plan_live_orders(
@@ -1556,7 +1556,7 @@ class TestLiveExecutionLifecycle:
     def test_live_planning_uses_adv_as_second_volume_budget(self):
         adapter = _mock_order_adapter()
         runner = self._make_trader(_HoldStrategy(), adapter)
-        runner._max_volume_participation_rate = 0.1
+        runner._max_bar_volume_participation_rate = 0.1
         runner._max_adv_participation_rate = 0.02
         runner._adv_filled_quantities = {"BTCUSDT": 30.0}
         ts = datetime(2025, 1, 1, tzinfo=UTC)
@@ -1868,7 +1868,7 @@ class TestLiveExecutionLifecycle:
         assert runner._cash == pytest.approx(100_007.0)
         assert [event.ts for event in events] == [first_fill_at, second_fill_at]
         assert events[-1].price == 110.0
-        assert events[-1].commission == 3.0
+        assert events[-1].commission == 2.0
         assert events[-1].pnl == 7.0
         checkpoint = store.load(runner._state_key)
         assert checkpoint is not None

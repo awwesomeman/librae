@@ -21,7 +21,7 @@ symbol. A handful of hardcoded entries needs no parser, no packaging
 config, and can't go missing from the wheel.
 
 Registering your own symbol doesn't require editing this file. Cost fields
-belong in RunConfig.symbol_overrides; venue/data fields belong in
+belong in RunConfig.symbol_cost_overrides; venue/data fields belong in
 RunConfig.instrument_overrides. Execution brokerage is deliberately absent
 from the registry and must be selected by the caller.
 """
@@ -274,7 +274,7 @@ def resolve_symbol(
     registered = _BUILTIN_SYMBOLS.get(symbol)
     route = (config.instrument_overrides or {}).get(symbol, {})
     costs = dict(config.cost_overrides or {})
-    costs.update((config.symbol_overrides or {}).get(symbol, {}))
+    costs.update((config.symbol_cost_overrides or {}).get(symbol, {}))
 
     market = route.get("market") or (registered.market if registered else config.market)
     data_source = route.get("data_source") or (
@@ -296,7 +296,7 @@ def resolve_symbol(
     )
     if multiplier is None:
         raise ValueError(
-            f"No multiplier for symbol={symbol!r}; set symbol_overrides[symbol]['multiplier']"
+            f"No multiplier for symbol={symbol!r}; set symbol_cost_overrides[symbol]['multiplier']"
         )
     instrument_type = route.get("instrument_type") or (
         registered.instrument_type if registered else ""

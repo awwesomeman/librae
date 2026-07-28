@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.run_config import ExecutionPolicy
+from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 from tests.conftest import make_test_cfg
 
@@ -117,7 +117,7 @@ class TestBacktestBasics:
         assert trade.gross_pnl > 0
         assert trade.symbol == "BTCUSDT"
 
-    def test_direct_constructor_uses_execution_policy_defaults(self) -> None:
+    def test_direct_constructor_uses_execution_defaults(self) -> None:
         class BuyOnce(Strategy):
             def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 if ctx.period_index == 0:
@@ -133,6 +133,37 @@ class TestBacktestBasics:
 
         open_event = next(event for event in result.order_events if event.event_type == "open")
         assert open_event.fill_quantity == pytest.approx(10.0)
+
+    @pytest.mark.parametrize(
+        "initial_balance",
+        [0.0, -1.0, float("nan"), float("inf"), True, "100000"],
+    )
+    def test_direct_constructor_rejects_invalid_initial_balance(
+        self,
+        initial_balance: float,
+    ) -> None:
+        with pytest.raises(ValueError, match="initial_balance"):
+            Backtest(
+                _make_multiindex_df([100.0, 101.0]),
+                HoldStrategy(),
+                initial_balance=initial_balance,
+            )
+
+    @pytest.mark.parametrize(
+        ("override_name", "override"),
+        [
+            ("execution", ExecutionPolicy()),
+            ("risk", RiskPolicy(max_position_weight=0.5)),
+        ],
+    )
+    def test_config_rejects_second_policy_source(self, override_name, override) -> None:
+        with pytest.raises(ValueError, match=override_name):
+            Backtest(
+                _make_multiindex_df([100.0, 101.0]),
+                HoldStrategy(),
+                config=make_test_cfg(),
+                **{override_name: override},
+            )
 
     def test_d1_adv_limit_uses_only_completed_sessions(self) -> None:
         class BuyAfterAdvWarmup(Strategy):
@@ -157,7 +188,7 @@ class TestBacktestBasics:
             index=index,
         )
         policy = ExecutionPolicy(
-            max_volume_participation_rate=0.5,
+            max_bar_volume_participation_rate=0.5,
             adv_lookback_sessions=3,
             max_adv_participation_rate=0.1,
         )
@@ -167,7 +198,7 @@ class TestBacktestBasics:
             BuyAfterAdvWarmup(),
             initial_balance=100_000.0,
             cost_model=_zero_cost(),
-            execution_policy=policy,
+            execution=policy,
         ).run()
 
         open_event = next(event for event in result.order_events if event.event_type == "open")
@@ -214,7 +245,7 @@ class TestBacktestBasics:
             index=index,
         )
         policy = ExecutionPolicy(
-            max_volume_participation_rate=1.0,
+            max_bar_volume_participation_rate=1.0,
             adv_lookback_sessions=2,
             max_adv_participation_rate=0.1,
         )
@@ -223,7 +254,7 @@ class TestBacktestBasics:
             AddTwiceAfterWarmup(),
             initial_balance=100_000.0,
             cost_model=_zero_cost(),
-            execution_policy=policy,
+            execution=policy,
         ).run()
 
         entry_events = [
@@ -239,7 +270,7 @@ class TestBacktestBasics:
         backtest = Backtest(
             _make_multiindex_df([100.0] * 5, symbol="UNREGISTERED"),
             HoldStrategy(),
-            execution_policy=policy,
+            execution=policy,
         )
 
         with pytest.raises(ValueError, match=r"calendar_id.*UNREGISTERED"):
@@ -651,8 +682,8 @@ class TestMultiAsset:
         assert bt._get_cost_model("MU").min_commission == 0.0
         assert bt._get_cost_model("MU").short_margin_rate == 0.5
 
-    def test_per_symbol_multiplier_via_symbol_overrides_no_yaml_edit_needed(self) -> None:
-        """An unregistered symbol works via cfg.symbol_overrides alone —
+    def test_per_symbol_multiplier_via_symbol_cost_overrides_no_yaml_edit_needed(self) -> None:
+        """An unregistered symbol works via cfg.symbol_cost_overrides alone —
         no symbols.py registry entry required."""
         from librae.core.run_config import RunConfig
 
@@ -665,7 +696,7 @@ class TestMultiAsset:
             data_source="x",
             initial_balance=100_000.0,
             mode="backtest",
-            symbol_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
+            symbol_cost_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
         )
         bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
         assert bt._get_cost_model("MY_CUSTOM_SYMBOL").multiplier == 1.0

@@ -67,87 +67,30 @@ read the [engine usage contract](../architecture.md#usage).
 
 ## User-controlled trading settings
 
-Run-wide execution assumptions live only under `strategy.execution`; they are
-not strategy parameters or risk limits:
-
-| Setting | Default from `build_config()` | Expected behavior |
-|---|---:|---|
-| `default_fill_price` | `open` | Backtest/sim uses this field on the next eligible bar when the decision has no `fill_price`. It does not invent a live fill; broker reports remain authoritative. |
-| `max_volume_participation_rate` | `0.10` | One symbol can consume at most 10% of that bar's volume across all fills. Low volume causes a partial fill, zero/missing volume rejects it, and the remainder of a target rebalance is reconsidered only when the strategy emits another target. Set `null` only to model unlimited liquidity. |
-| `adv_lookback_sessions` | `null` | Optional lookback. ADV is the mean total volume of exactly N completed trading sessions; the active session is excluded. Configure together with `max_adv_participation_rate`. |
-| `max_adv_participation_rate` | `null` | Optional cumulative per-session limit as a fraction of lagged ADV. Before the full lookback exists, fills are rejected instead of assuming liquidity. Configure together with `adv_lookback_sessions`. |
-
-Every example sets the fill field and current-bar cap explicitly. The D1
-portfolio examples enable the ADV pair; the H1 example shows how to enable it
-for a registered 24/7 symbol. Changing modes therefore does not silently
-change assumptions. Per-decision controls stay on the decision itself:
-
-The current-bar and trading-session budgets have separate usage counters and
-compose by taking the tighter remaining quantity:
+The examples keep strategy logic, matching, risk, and reporting in separate
+namespaces. A complete configuration may look like:
 
 ```yaml
 execution:
-  max_volume_participation_rate: 0.05
+  default_fill_price: open
+  max_bar_volume_participation_rate: 0.05
   adv_lookback_sessions: 20
   max_adv_participation_rate: 0.01
+risk:
+  max_position_weight: 0.30
+  max_drawdown_rate: 0.20
+perf:
+  periods_per_year: 8760  # H1 24/7 returns
+params:
+  lookback: 20
 ```
 
-```text
-max fill = min(
-  5% of bar volume - quantity filled in this bar,
-  1% of lagged ADV - quantity filled in this session
-)
-```
-
-For intraday data, each symbol must have a `calendar_id` in the built-in
-registry or `instrument_overrides`; missing calendars fail at startup. Use
-`24/7` for UTC-day crypto sessions, exchange calendar IDs such as `XNYS` or
-`XTAI`, and `XTAIFEX` / `XTAIFEX_1725` for the two supported Taiwan-futures
-night-session openings. The engine sums observed bars into session volume,
-uses only N completed sessions, and applies one cumulative ADV budget across
-all bars in the active session. It does not estimate an intraday volume
-profile; the existing bar-volume cap remains the short-horizon constraint.
-For sim/live, set `warmup_periods` high enough to retain N full sessions of
-intraday bars; otherwise ADV stays unavailable and fills fail closed.
-
-An unregistered intraday instrument declares its calendar with its other
-venue/data metadata:
-
-```yaml
-instrument_overrides:
-  ES:
-    data_adapter: ibkr
-    instrument_type: contract_monthly
-    currency: USD
-    security_type: FUT
-    exchange: CME
-    calendar_id: CMES
-```
-
-| Decision field | Scope and behavior |
-|---|---|
-| `OrderIntent.quantity` | Requested units. `None` spends available cash for a single new position; multi-symbol strategies should size explicitly. |
-| `OrderIntent.fill_price` | Backtest/sim: bar-field override or one-bar numeric limit. Live: `None` is market and a number is a broker limit; bar-field strings are rejected. |
-| `OrderIntent.stop_price` / `take_profit_price` | Deterministic backtest/sim protection. Live requires broker-native protective orders. |
-| `PortfolioTargets.weights` | Signed target portfolio weights; omitted held symbols target zero. |
-| `PortfolioTargets.fill_price` | Optional backtest/sim bar-field override for the whole basket; unsupported in live. |
-
-Portfolio controls live only under `strategy.risk`; every value is a ratio and
-`null`/omission disables that limit:
-
-| Setting | Expected behavior |
-|---|---|
-| `max_position_weight` | Caps a new position or addition as a fraction of latest known equity. |
-| `max_gross_exposure` | Rejects a `PortfolioTargets` basket whose sum of absolute weights exceeds the limit. |
-| `max_net_exposure` | Rejects a basket whose absolute signed-weight sum exceeds the limit. |
-| `max_drawdown_rate` | Halts new entries and liquidates after the completed-bar drawdown breaches the limit. |
-
-Commissions, tax, base tick slippage, `volume_impact_ticks`, multiplier, and
-margin are instrument/cost assumptions under `cost_overrides` or
-`symbol_overrides`. At 100% bar participation, `volume_impact_ticks` adds that
-many slippage ticks; the addition scales linearly with participation. These
-three namespaces are intentionally separate: `execution` controls matching,
-`risk` controls portfolio limits, and `params` belongs only to strategy logic.
+Each example config comments the values it chooses. The
+[execution and risk reference](../architecture.md#execution-policy-risk-controls-and-portfolio-diagnostics)
+is the SSOT for defaults, liquidity composition, calendars, decision fields,
+protective-order timing, and failure behavior. Cost and instrument override
+priority is documented under the
+[Config API](../architecture.md#config-api).
 
 ## Portfolio example behavior
 

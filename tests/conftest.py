@@ -50,7 +50,7 @@ def make_test_cfg(**overrides) -> RunConfig:
         params={},
         # Most unit tests isolate sizing/risk behavior from liquidity. Tests
         # for volume participation opt in with an explicit policy.
-        execution=ExecutionPolicy(max_volume_participation_rate=None),
+        execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
     )
     defaults.update(overrides)
     return RunConfig(**defaults)

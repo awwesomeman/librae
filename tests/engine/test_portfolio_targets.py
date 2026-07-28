@@ -12,6 +12,7 @@ from librae.core.cost_model import CostModel
 from librae.core.executor import ExecutionResult, execute_portfolio_targets
 from librae.core.strategy import (
     Context,
+    OrderIntent,
     PortfolioTargets,
     PositionState,
     Strategy,
@@ -92,6 +93,27 @@ class TestPortfolioTargetsValidation:
     def test_rejects_non_finite_weight(self) -> None:
         with pytest.raises(ValueError, match="finite"):
             PortfolioTargets(weights={"A": float("nan")})
+
+    def test_weights_are_immutable_after_validation(self) -> None:
+        targets = PortfolioTargets(weights={"A": 1.0})
+
+        with pytest.raises(TypeError):
+            targets.weights["A"] = float("nan")
+
+
+class TestOrderIntentValidation:
+    @pytest.mark.parametrize("quantity", [0.0, -1.0, float("nan"), float("inf"), True])
+    def test_quantity_must_be_positive_and_finite(self, quantity) -> None:
+        with pytest.raises(ValueError, match="quantity"):
+            OrderIntent(action="long", symbol="A", quantity=quantity)
+
+    def test_invalid_action_fails_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="action"):
+            OrderIntent(action="buy", symbol="A")
+
+    def test_close_cannot_set_protective_prices(self) -> None:
+        with pytest.raises(ValueError, match="close intents"):
+            OrderIntent(action="close", symbol="A", stop_price=90.0)
 
 
 class TestRebalanceExecution:

@@ -24,10 +24,10 @@ class TestWarmupFetcher:
         warmup_df = pd.DataFrame(
             {
                 "ts": pd.date_range("2024-01-01", periods=100, freq="1h", tz="UTC"),
-                "open": range(100),
-                "high": range(100),
-                "low": range(100),
-                "close": range(100),
+                "open": range(1, 101),
+                "high": range(1, 101),
+                "low": range(1, 101),
+                "close": range(1, 101),
                 "volume": [100] * 100,
             }
         )
@@ -64,10 +64,10 @@ class TestWarmupFetcher:
         warmup_df = pd.DataFrame(
             {
                 "ts": pd.date_range("2024-01-01", periods=10, freq="1h", tz="UTC"),
-                "open": range(10),
-                "high": range(10),
-                "low": range(10),
-                "close": range(10),
+                "open": range(1, 11),
+                "high": range(1, 11),
+                "low": range(1, 11),
+                "close": range(1, 11),
                 "volume": [100] * 10,
             }
         )
@@ -91,3 +91,33 @@ class TestWarmupFetcher:
 
         mock_fetcher.assert_called_once()
         assert len(result) == 10
+
+    def test_invalid_runtime_ohlcv_is_not_cached(self, caplog):
+        from librae.live.engine import LiveTrader
+
+        invalid_df = pd.DataFrame(
+            {
+                "ts": pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC"),
+                "open": [1.0, 2.0],
+                "high": [1.0, 2.0],
+                "low": [1.0, 2.0],
+                "close": [1.0, 2.0],
+                "volume": [100.0, float("nan")],
+            }
+        )
+        trader = LiveTrader(
+            MagicMock(),
+            lambda x: x,
+            config=_test_cfg(params={"warmup_periods": 2}),
+            adapter=MagicMock(return_value=invalid_df),
+            warmup_fetcher=None,
+            on_bar=None,
+            on_order_event=None,
+            on_ohlcv=None,
+            on_heartbeat=None,
+            on_signal_outcome=None,
+        )
+
+        assert trader._fetch_with_cache("BTCUSDT") is None
+        assert "BTCUSDT" not in trader._ohlcv_cache
+        assert "runtime data OHLCV values must be finite" in caplog.text

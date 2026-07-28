@@ -11,9 +11,9 @@ VALUES
     ('seed_test_run', 'seed_test', '["BTCUSDT"]'::jsonb, 'H1', 'binance_spot',
      NOW() - INTERVAL '10 days', NOW(), NOW(),
      'backtest', NULL, '{"warmup_periods": 720}'::jsonb,
-     '{"default_fill_price": "open", "max_volume_participation_rate": 0.1}'::jsonb,
+     '{"default_fill_price": "open", "max_bar_volume_participation_rate": 0.1}'::jsonb,
      '{"max_position_weight": 0.3}'::jsonb,
-     '{"annualize": true, "annual_periods": 365}'::jsonb, md5('seed_test_run'))
+     '{"annualize": true, "periods_per_year": 365}'::jsonb, md5('seed_test_run'))
 ON CONFLICT (run_id) DO NOTHING;
 
 INSERT INTO equity_curve

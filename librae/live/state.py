@@ -43,7 +43,14 @@ _STATE_SCHEMA_VERSION = 5
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
     if isinstance(decision, PortfolioTargets):
-        return {"kind": "portfolio_targets", "value": asdict(decision)}
+        return {
+            "kind": "portfolio_targets",
+            "value": {
+                "weights": dict(decision.weights),
+                "fill_price": decision.fill_price,
+                "reason": decision.reason,
+            },
+        }
     return {"kind": "order_intents", "value": [asdict(intent) for intent in decision]}
 
 

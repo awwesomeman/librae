@@ -197,7 +197,7 @@ class TestResolveSymbol:
                         "calendar_id": "XNYS",
                     }
                 },
-                symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
             ),
             "AAPL",
         )
@@ -227,7 +227,7 @@ class TestResolveSymbol:
             resolve_symbol(
                 self._cfg(
                     data_source="local",
-                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
                 ),
                 "AAPL",
             )
@@ -237,7 +237,7 @@ class TestResolveSymbol:
             resolve_symbol(
                 self._cfg(
                     data_source="binance_spot",
-                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
                 ),
                 "AAPL",
             )
@@ -247,7 +247,7 @@ class TestResolveSymbol:
             resolve_symbol(
                 self._cfg(
                     data_source="binance_spot",
-                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
                     instrument_overrides={"AAPL": {"instrument_type": "spot"}},
                 ),
                 "AAPL",
@@ -257,7 +257,7 @@ class TestResolveSymbol:
         with pytest.raises(ValueError, match="security_type"):
             resolve_symbol(
                 self._cfg(
-                    symbol_overrides={"AAPL": {"multiplier": 1.0}},
+                    symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
                     instrument_overrides={
                         "AAPL": {
                             "instrument_type": "spot",

@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.executor import OrderEvent, execute_order_intents
-from librae.core.strategy import OrderIntent, PositionState, Strategy
+from librae.core.executor import OrderEvent, apply_execution_fill, execute_order_intents
+from librae.core.strategy import Fill, OrderIntent, PositionState, Strategy
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 ZERO_COST = CostModel.zero()
@@ -158,6 +158,72 @@ class TestReduceCloseEvents:
         assert e.fill_quantity == 10.0
         assert e.remaining_quantity == 0.0
         assert "TEST" not in pos
+
+    def test_event_costs_are_execution_side_only(self):
+        cost_model = CostModel(
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=1.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+        )
+        positions: dict[str, PositionState] = {}
+        open_events, _, _ = _run(
+            [OrderIntent(action="long", symbol="TEST", quantity=1.0)],
+            cost_model=cost_model,
+            positions=positions,
+        )
+        close_events, trades, _ = _run(
+            [OrderIntent(action="close", symbol="TEST")],
+            cost_model=cost_model,
+            positions=positions,
+        )
+
+        assert open_events[0].commission == 1.0
+        assert close_events[0].commission == 1.0
+        assert trades[0].commission == 2.0
+
+    def test_confirmed_fill_event_costs_are_execution_side_only(self):
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=100.0,
+                quantity=1.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=1.0,
+                entry_slippage=0.5,
+                entry_tax=0.25,
+                total_entry_cost=100.0,
+            )
+        }
+        fill = Fill(
+            symbol="TEST",
+            side="short",
+            price=110.0,
+            quantity=1.0,
+            commission=2.0,
+            slippage=1.0,
+            tax=0.5,
+        )
+
+        _, result = apply_execution_fill(
+            positions,
+            0.0,
+            fill,
+            TS,
+            order_side="sell",
+            cost_model=ZERO_COST,
+        )
+
+        assert result.events[0].commission == 2.0
+        assert result.events[0].slippage == 1.0
+        assert result.events[0].tax == 0.5
+        assert result.trades[0].commission == 3.0
+        assert result.trades[0].slippage == 1.5
+        assert result.trades[0].tax == 0.75
 
     def test_close_qty_exceeds_position_clamped(self):
         """action.quantity > pos.quantity should be clamped, not inflate the event."""

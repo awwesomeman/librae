@@ -91,7 +91,7 @@ class TradePnL:
 
 @dataclass(frozen=True)
 class OrderEvent:
-    """Single position lifecycle event — open/add/reduce/close."""
+    """Single position lifecycle event with costs from this execution only."""
 
     ts: datetime
     symbol: str
@@ -348,9 +348,9 @@ def build_close_event(
         entry_price=pos.entry_price,
         remaining_quantity=remaining_qty,
         notional=exit_price * close_qty * cost_model.multiplier,
-        commission=pnl.commission,
-        slippage=pnl.slippage,
-        tax=pnl.tax,
+        commission=pnl.exit_commission,
+        slippage=pnl.exit_slippage,
+        tax=pnl.exit_tax,
         pnl=pnl.net_pnl,
         net_return=pnl.net_return,
         entry_at=pos.entry_at,
@@ -489,9 +489,9 @@ def apply_execution_fill(
         entry_price=position.entry_price,
         remaining_quantity=remaining_quantity,
         notional=notional,
-        commission=total_commission,
-        slippage=total_slippage,
-        tax=total_tax,
+        commission=fill.commission,
+        slippage=fill.slippage,
+        tax=fill.tax,
         pnl=net_pnl,
         net_return=net_return,
         entry_at=position.entry_at,
@@ -532,9 +532,10 @@ def resolve_stop_exit(
     cost_model.maintenance_margin_rate is set — see CostModel.liquidation_price.
 
     Otherwise: stop_price is modeled as a stop-market order (worse-of-gap
-    fill); take_profit_price is modeled as a limit order (fills exactly at
-    that price once touched). Stop-loss is checked before take-profit — if
-    both would trigger on the same bar, the conservative outcome wins.
+    fill); take_profit_price is modeled as a limit order (target price once
+    touched, or a better opening price after a favorable gap). Stop-loss is
+    checked before take-profit — if both would trigger on the same bar, the
+    conservative outcome wins.
     A previously triggered, volume-limited market exit continues at this
     bar's open without checking the trigger level again.
 
@@ -578,11 +579,12 @@ def check_stop_targets(
     ts: datetime,
     *,
     get_cost_model: Callable[[str], CostModel],
-    max_volume_participation_rate: float | None = None,
+    max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
-    used_quantity_by_symbol: dict[str, float] | None = None,
+    used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
+    eligible_symbols: set[str] | None = None,
 ) -> ExecutionResult:
     """Force-close any position whose stop-loss/take-profit is hit this bar.
 
@@ -596,6 +598,8 @@ def check_stop_targets(
     cash_delta = 0.0
 
     for sym in list(positions.keys()):
+        if eligible_symbols is not None and sym not in eligible_symbols:
+            continue
         bar = bars.get(sym)
         if bar is None:
             continue
@@ -608,11 +612,11 @@ def check_stop_targets(
         bar_volume = bar.get("volume")
         max_volume_qty = _volume_fill_limit(
             sym,
-            max_volume_participation_rate,
+            max_bar_volume_participation_rate,
             bar_volume,
             max_adv_participation_rate=max_adv_participation_rate,
             lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
-            used_bar_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
+            used_bar_quantity=(used_bar_quantity_by_symbol or {}).get(sym, 0.0),
             used_adv_quantity=(used_adv_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
@@ -631,8 +635,10 @@ def check_stop_targets(
         )
         trades.append(trade)
         events.append(event)
-        if used_quantity_by_symbol is not None:
-            used_quantity_by_symbol[sym] = used_quantity_by_symbol.get(sym, 0.0) + close_quantity
+        if used_bar_quantity_by_symbol is not None:
+            used_bar_quantity_by_symbol[sym] = (
+                used_bar_quantity_by_symbol.get(sym, 0.0) + close_quantity
+            )
         if used_adv_quantity_by_symbol is not None:
             used_adv_quantity_by_symbol[sym] = (
                 used_adv_quantity_by_symbol.get(sym, 0.0) + close_quantity
@@ -665,10 +671,10 @@ def liquidate_all(
     *,
     get_cost_model: Callable[[str], CostModel],
     reason: str,
-    max_volume_participation_rate: float | None = None,
+    max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
-    used_quantity_by_symbol: dict[str, float] | None = None,
+    used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Force-close every open position right now, at this bar's close price.
@@ -690,11 +696,11 @@ def liquidate_all(
         bar_volume = bar.get("volume")
         max_volume_qty = _volume_fill_limit(
             sym,
-            max_volume_participation_rate,
+            max_bar_volume_participation_rate,
             bar_volume,
             max_adv_participation_rate=max_adv_participation_rate,
             lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
-            used_bar_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
+            used_bar_quantity=(used_bar_quantity_by_symbol or {}).get(sym, 0.0),
             used_adv_quantity=(used_adv_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
@@ -714,8 +720,10 @@ def liquidate_all(
         )
         trades.append(trade)
         events.append(event)
-        if used_quantity_by_symbol is not None:
-            used_quantity_by_symbol[sym] = used_quantity_by_symbol.get(sym, 0.0) + close_quantity
+        if used_bar_quantity_by_symbol is not None:
+            used_bar_quantity_by_symbol[sym] = (
+                used_bar_quantity_by_symbol.get(sym, 0.0) + close_quantity
+            )
         if used_adv_quantity_by_symbol is not None:
             used_adv_quantity_by_symbol[sym] = (
                 used_adv_quantity_by_symbol.get(sym, 0.0) + close_quantity
@@ -949,7 +957,7 @@ def _cap_fill_to_volume(
     *,
     bar_volume: float | None = None,
 ) -> Fill | None:
-    """Shrink a fill to at most max_qty (typically max_volume_participation_rate
+    """Shrink a fill to at most max_qty (typically max_bar_volume_participation_rate
     * bar_volume) — a per-fill "how much of this bar's liquidity can I touch"
     constraint, unlike the notional cap which accumulates across a position.
     """
@@ -969,7 +977,7 @@ def _cap_fill_to_volume(
 
 def _volume_fill_limit(
     symbol: str,
-    max_volume_participation_rate: float | None,
+    max_bar_volume_participation_rate: float | None,
     bar_volume: float | None,
     *,
     max_adv_participation_rate: float | None = None,
@@ -979,15 +987,16 @@ def _volume_fill_limit(
 ) -> float | None:
     """Return the tightest configured liquidity budget for this event."""
     remaining_budgets: list[float] = []
-    if max_volume_participation_rate is not None:
-        if bar_volume is None:
+    if max_bar_volume_participation_rate is not None:
+        if bar_volume is None or not isfinite(bar_volume) or bar_volume < 0:
             logger.warning(
-                "Fill rejected for %s: max_volume_participation_rate requires bar volume",
+                "Fill rejected for %s: max_bar_volume_participation_rate requires "
+                "finite non-negative bar volume",
                 symbol,
             )
             return 0.0
         remaining_budgets.append(
-            max(max_volume_participation_rate * bar_volume - used_bar_quantity, 0.0)
+            max(max_bar_volume_participation_rate * bar_volume - used_bar_quantity, 0.0)
         )
 
     if max_adv_participation_rate is not None:
@@ -1120,11 +1129,11 @@ def execute_order_intents(
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
-    max_volume_participation_rate: float | None = None,
+    max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
-    used_quantity_by_symbol: dict[str, float] | None = None,
+    used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Execute symbol-level intents: open, scale, partial/full close.
@@ -1136,7 +1145,7 @@ def execute_order_intents(
     (existing + added) to this value — applied identically to new entries
     and scale-ins.
 
-    max_volume_participation_rate gives each symbol one cumulative budget for
+    max_bar_volume_participation_rate gives each symbol one cumulative budget for
     this data event across entries, additions, reductions, and closes. Missing
     volume rejects the fill when this limit is enabled. get_volume also feeds
     CostModel.calc_slippage's participation-scaled impact component. The
@@ -1146,7 +1155,7 @@ def execute_order_intents(
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
     cash_delta = 0.0
-    volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
+    volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
 
     for action in intents:
@@ -1164,7 +1173,7 @@ def execute_order_intents(
             bar_volume = get_volume(sym) if get_volume else None
             max_volume_qty = _volume_fill_limit(
                 sym,
-                max_volume_participation_rate,
+                max_bar_volume_participation_rate,
                 bar_volume,
                 max_adv_participation_rate=max_adv_participation_rate,
                 lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
@@ -1286,7 +1295,7 @@ def execute_order_intents(
             bar_volume = get_volume(sym) if get_volume else None
             max_volume_qty = _volume_fill_limit(
                 sym,
-                max_volume_participation_rate,
+                max_bar_volume_participation_rate,
                 bar_volume,
                 max_adv_participation_rate=max_adv_participation_rate,
                 lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
@@ -1394,13 +1403,13 @@ def execute_portfolio_targets(
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
-    max_volume_participation_rate: float | None = None,
+    max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
-    used_quantity_by_symbol: dict[str, float] | None = None,
+    used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Resolve and execute a portfolio rebalance as one deterministic batch.
@@ -1410,7 +1419,7 @@ def execute_portfolio_targets(
     order. If transaction costs make the additions unaffordable, every addition
     is scaled by the same factor instead of starving later symbols.
     """
-    volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
+    volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
     target_gross_exposure = sum(abs(weight) for weight in targets.weights.values())
     target_net_exposure = abs(sum(targets.weights.values()))
@@ -1529,11 +1538,11 @@ def execute_portfolio_targets(
         get_price=get_price,
         get_cost_model=get_cost_model,
         primary_symbol=primary_symbol,
-        max_volume_participation_rate=max_volume_participation_rate,
+        max_bar_volume_participation_rate=max_bar_volume_participation_rate,
         max_adv_participation_rate=max_adv_participation_rate,
         get_volume=get_volume,
         get_lagged_adv=get_lagged_adv,
-        used_quantity_by_symbol=volume_consumed,
+        used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
@@ -1553,11 +1562,11 @@ def execute_portfolio_targets(
         get_cost_model=get_cost_model,
         primary_symbol=primary_symbol,
         max_position_notional=max_position_notional,
-        max_volume_participation_rate=max_volume_participation_rate,
+        max_bar_volume_participation_rate=max_bar_volume_participation_rate,
         max_adv_participation_rate=max_adv_participation_rate,
         get_volume=get_volume,
         get_lagged_adv=get_lagged_adv,
-        used_quantity_by_symbol=volume_consumed,
+        used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
     )
     return ExecutionResult(
@@ -1572,20 +1581,52 @@ def execute_portfolio_targets(
 # ---------------------------------------------------------------------------
 
 
-def validate_decision_symbols(
+def validate_strategy_decision(
     decision: StrategyDecision,
     universe: set[str],
     *,
     primary_symbol: str,
 ) -> None:
-    """Reject strategy decisions that reference an unconfigured symbol."""
+    """Validate one strategy return value before it enters engine state."""
     if isinstance(decision, PortfolioTargets):
         symbols = set(decision.weights)
     else:
-        symbols = {intent.symbol or primary_symbol for intent in decision}
+        if not isinstance(decision, list):
+            raise TypeError("strategy decision must be list[OrderIntent] or PortfolioTargets")
+        invalid = [
+            type(intent).__name__ for intent in decision if not isinstance(intent, OrderIntent)
+        ]
+        if invalid:
+            raise TypeError(f"strategy decision contains non-OrderIntent values: {invalid}")
+        resolved_symbols = [intent.symbol or primary_symbol for intent in decision]
+        if len(resolved_symbols) != len(set(resolved_symbols)):
+            raise ValueError("strategy decision must contain at most one intent per symbol")
+        symbols = set(resolved_symbols)
     unknown = symbols - universe
     if unknown:
         raise ValueError(f"strategy decision contains unknown symbols: {sorted(unknown)}")
+
+
+def _intent_executes_at_open(
+    intent: OrderIntent,
+    bar: dict[str, float],
+    default_fill: str,
+) -> bool:
+    """Return whether an entry is causally known to exist from bar open."""
+    fill_spec = intent.fill_price if intent.fill_price is not None else default_fill
+    if isinstance(fill_spec, str):
+        return fill_spec == "open"
+
+    open_raw = bar.get("open")
+    if open_raw is None:
+        return False
+    open_price = float(open_raw)
+    limit_price = float(fill_spec)
+    if intent.action == "long":
+        return open_price <= limit_price
+    if intent.action == "short":
+        return open_price >= limit_price
+    return False
 
 
 def partition_pending_decision(
@@ -1657,17 +1698,20 @@ def execute_pending_decision_and_stops(
     default_fill: str,
     primary_symbol: str,
     max_position_notional: float | None = None,
-    max_volume_participation_rate: float | None = None,
+    max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
 ) -> tuple[float, ExecutionResult]:
-    """Fill this bar's pending decision, then check stop-loss/take-profit —
-    the two steps that must always run together, in this order, before a
-    strategy sees the bar. Backtest and real-time simulation call this same
-    implementation so their deterministic bar-fill ordering cannot drift.
+    """Fill pending decisions, then check causally eligible protective exits.
+
+    Positions already open before this bar and entries known to fill at the
+    bar open may trigger protection on this bar. Protection on a new resting
+    limit or non-open field fill starts on the next bar because OHLCV cannot
+    establish whether the bar's stop/target occurred before or after entry.
+    Backtest and real-time simulation share this conservative convention.
     Live broker execution intentionally does not call it.
 
     Returns (updated cash, combined ExecutionResult for both steps).
@@ -1675,9 +1719,23 @@ def execute_pending_decision_and_stops(
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
     cash_delta_total = 0.0
-    used_quantity_by_symbol: dict[str, float] = {}
+    used_bar_quantity_by_symbol: dict[str, float] = {}
+    same_bar_protection_symbols = set(positions)
 
     if pending_decision:
+        if isinstance(pending_decision, PortfolioTargets):
+            effective_fill = pending_decision.fill_price or default_fill
+            if effective_fill == "open":
+                same_bar_protection_symbols.update(pending_decision.weights)
+        else:
+            for intent in pending_decision:
+                symbol = intent.symbol or primary_symbol
+                if intent.action in ("long", "short") and _intent_executes_at_open(
+                    intent,
+                    bars.get(symbol, {}),
+                    default_fill,
+                ):
+                    same_bar_protection_symbols.add(symbol)
 
         def get_price(sym: str, action: OrderIntent) -> float | None:
             return resolve_fill_price(
@@ -1692,7 +1750,7 @@ def execute_pending_decision_and_stops(
             "get_cost_model": get_cost_model,
             "primary_symbol": primary_symbol,
             "max_position_notional": max_position_notional,
-            "max_volume_participation_rate": max_volume_participation_rate,
+            "max_bar_volume_participation_rate": max_bar_volume_participation_rate,
             "max_adv_participation_rate": max_adv_participation_rate,
             "get_volume": lambda sym: bars.get(sym, {}).get("volume"),
             "get_lagged_adv": get_lagged_adv,
@@ -1705,7 +1763,7 @@ def execute_pending_decision_and_stops(
                 ts,
                 max_gross_exposure=max_gross_exposure,
                 max_net_exposure=max_net_exposure,
-                used_quantity_by_symbol=used_quantity_by_symbol,
+                used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                 **common_kwargs,
             )
@@ -1716,7 +1774,7 @@ def execute_pending_decision_and_stops(
                 cash,
                 ts,
                 **common_kwargs,
-                used_quantity_by_symbol=used_quantity_by_symbol,
+                used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             )
         trades.extend(fill_result.trades)
@@ -1730,11 +1788,12 @@ def execute_pending_decision_and_stops(
             bars,
             ts,
             get_cost_model=get_cost_model,
-            max_volume_participation_rate=max_volume_participation_rate,
+            max_bar_volume_participation_rate=max_bar_volume_participation_rate,
             max_adv_participation_rate=max_adv_participation_rate,
             get_lagged_adv=get_lagged_adv,
-            used_quantity_by_symbol=used_quantity_by_symbol,
+            used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+            eligible_symbols=same_bar_protection_symbols,
         )
         trades.extend(stop_result.trades)
         events.extend(stop_result.events)
