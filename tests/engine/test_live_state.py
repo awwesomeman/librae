@@ -123,7 +123,7 @@ def test_multi_leg_order_round_trip():
             OrderIntent(action="long", symbol="BTC/USDT", quantity=1.0),
             OrderIntent(action="short", symbol="BTC-PERP", quantity=1.0),
         ),
-        max_unhedged_seconds=2.5,
+        max_completion_seconds=2.5,
         reason="basis",
     )
     state = LiveRuntimeState(
@@ -135,6 +135,7 @@ def test_multi_leg_order_round_trip():
         pending_decision=decision,
         live_multi_leg=LiveMultiLeg(
             order=decision,
+            baseline_signed_quantities={"BTC/USDT": 1.0, "BTC-PERP": -1.0},
             reference_prices={"BTC/USDT": 100.0, "BTC-PERP": 101.0},
             reference_volumes={"BTC/USDT": 1_000.0, "BTC-PERP": 2_000.0},
             lagged_adv_by_symbol={"BTC/USDT": 10_000.0, "BTC-PERP": 20_000.0},
@@ -149,6 +150,11 @@ def test_multi_leg_order_round_trip():
     restored = LiveRuntimeState.from_dict(state.to_dict())
 
     assert restored.pending_decision == decision
+    assert restored.live_multi_leg is not None
+    assert restored.live_multi_leg.baseline_signed_quantities == {
+        "BTC/USDT": 1.0,
+        "BTC-PERP": -1.0,
+    }
 
 
 @pytest.mark.parametrize(

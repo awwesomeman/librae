@@ -12,7 +12,7 @@ strategy interface.
 
 - **One decision API** — express symbol orders with `OrderIntent`, complete
   allocations with `PortfolioTargets`, or an explicitly sized best-effort
-  hedge group with `MultiLegOrder`.
+  related order group with `MultiLegOrder`.
 - **One execution-policy source** — fill-field, current-bar participation,
   optional session-level lagged-ADV assumptions, and the local live-order
   timeout live in typed
@@ -84,7 +84,7 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Cross-sectional selection and allocation | Configured candidate universe with point-in-time eligibility; optimizer remains strategy-owned |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
 | Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
-| Arbitrage | Explicitly sized `MultiLegOrder`; synchronous research approximation and serial live hedging with deadline/fail-closed unwind; not atomic venue execution |
+| Related multi-leg execution | Explicitly sized `MultiLegOrder`; synchronous research approximation and serial live execution with a completion deadline and pre-group exposure restoration; not atomic venue execution |
 | Multi-currency portfolios | Not yet modeled; the live/sim cash ledger is single-currency |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
 | Dynamic universes | Membership/eligibility data remains upstream; runtime subscription lifecycle is not yet engine-managed |

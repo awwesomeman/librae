@@ -38,6 +38,7 @@ from librae.core.executor import (
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
+    side_multiplier,
     validate_strategy_decision,
 )
 from librae.core.liquidity import calculate_lagged_adv
@@ -74,7 +75,7 @@ logger = logging.getLogger(__name__)
 OHLCVFetcher = Callable[..., pd.DataFrame]
 
 _UNSET = object()  # sentinel: distinguish "not passed" from "explicitly passed None"
-_REASON_MULTI_LEG_UNWIND = "multi_leg_unwind"
+_REASON_MULTI_LEG_RESTORE = "multi_leg_restore"
 _DATA_ADAPTER_BY_BROKER = {
     "binance": "crypto",
     "ibkr": "ibkr",
@@ -1075,11 +1076,11 @@ class LiveTrader:
         self._pending_decision = []
         self._live_rebalance = None
         if self._live_multi_leg is not None and self._live_multi_leg.phase == "executing":
-            self._live_multi_leg.phase = "unwinding"
+            self._live_multi_leg.phase = "restoring"
         if not self._executor.simulation:
             self._cancel_active_orders()
             if self._live_multi_leg is not None and not self._active_orders:
-                self._queue_multi_leg_unwind()
+                self._queue_multi_leg_restore()
         self._persist_state()
         logger.error("%s: %s", title, message)
         self._notify(
@@ -1088,16 +1089,23 @@ class LiveTrader:
             message=f"{message}; trading halted.",
         )
 
-    def _has_active_risk_exit_orders(self) -> bool:
-        """Whether every tracked order is a fail-closed exposure reduction."""
+    def _has_active_recovery_orders(self) -> bool:
+        """Whether every tracked order is an engine-owned recovery order."""
         return bool(self._active_orders) and all(
-            tracked.request.reason
-            in (
-                REASON_DRAWDOWN_BREACH,
-                _REASON_MULTI_LEG_UNWIND,
+            (
+                tracked.request.reason == REASON_DRAWDOWN_BREACH
+                and tracked.request.position_effect in ("reduce", "close")
             )
-            and tracked.request.position_effect in ("reduce", "close")
+            or self._is_multi_leg_restore_order(tracked.request)
             for tracked in self._active_orders
+        )
+
+    def _is_multi_leg_restore_order(self, request: OrderRequest) -> bool:
+        """Identify engine recovery without trusting a user-controlled reason alone."""
+        return bool(
+            self._live_multi_leg is not None
+            and self._live_multi_leg.phase == "restoring"
+            and request.reason == _REASON_MULTI_LEG_RESTORE
         )
 
     def _initialize_run(self) -> None:
@@ -1109,7 +1117,7 @@ class LiveTrader:
                 )
             self._lease_acquired = True
             try:
-                if self._halted and not self._has_active_risk_exit_orders():
+                if self._halted and not self._has_active_recovery_orders():
                     self._cancel_active_orders()
                 else:
                     self._advance_live_orders(submit_planned=False)
@@ -1129,8 +1137,8 @@ class LiveTrader:
                 self._queue_next_live_rebalance_order()
                 self._advance_live_orders()
             elif self._live_multi_leg is not None and not self._active_orders:
-                if self._live_multi_leg.phase == "unwinding":
-                    self._queue_multi_leg_unwind()
+                if self._live_multi_leg.phase == "restoring":
+                    self._queue_multi_leg_restore()
                 elif not self._halted:
                     self._queue_next_live_multi_leg_order()
                 self._advance_live_orders()
@@ -1452,6 +1460,7 @@ class LiveTrader:
         ts: datetime,
         *,
         apply_volume_limit: bool = True,
+        apply_entry_risk_limits: bool = True,
         lagged_adv_by_symbol: dict[str, float] | None = None,
         used_bar_quantity_by_symbol: dict[str, float] | None = None,
         sequence_start: int = 0,
@@ -1473,8 +1482,11 @@ class LiveTrader:
 
         max_position_notional = (
             self._risk_policy.max_position_weight * self._prev_equity
-            if self._risk_policy.max_position_weight
+            if apply_entry_risk_limits and self._risk_policy.max_position_weight
             else None
+        )
+        max_order_notional = (
+            self._risk_policy.max_order_notional if apply_entry_risk_limits else None
         )
         volume_limit = self._max_bar_volume_participation_rate if apply_volume_limit else None
         adv_limit = self._max_adv_participation_rate if apply_volume_limit else None
@@ -1498,7 +1510,7 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_order_notional=self._risk_policy.max_order_notional,
+                max_order_notional=max_order_notional,
                 max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
                 max_gross_exposure=self._risk_policy.max_gross_exposure,
@@ -1549,7 +1561,7 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_order_notional=self._risk_policy.max_order_notional,
+                max_order_notional=max_order_notional,
                 max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
                 get_volume=get_volume,
@@ -1587,18 +1599,18 @@ class LiveTrader:
         if isinstance(intent, MultiLegOrder):
             if self._live_multi_leg is not None:
                 raise RuntimeError("cannot replace an active multi-leg order")
-            occupied = set(self._positions) & {leg.symbol for leg in intent.legs}
-            if occupied:
-                self._halt_live(
-                    title="Multi-leg Preflight Rejected",
-                    message=(
-                        "best-effort multi-leg execution requires flat leg symbols; "
-                        f"already open: {sorted(occupied)}"
-                    ),
-                )
-                return False
+            leg_symbols = {leg.symbol for leg in intent.legs}
             self._live_multi_leg = LiveMultiLeg(
                 order=intent,
+                baseline_signed_quantities={
+                    symbol: (
+                        self._positions[symbol].quantity
+                        * side_multiplier(self._positions[symbol].side)
+                        if symbol in self._positions
+                        else 0.0
+                    )
+                    for symbol in leg_symbols
+                },
                 reference_prices={
                     symbol: float(bar["close"])
                     for symbol, bar in bars.items()
@@ -1701,12 +1713,12 @@ class LiveTrader:
         return True
 
     def _queue_next_live_multi_leg_order(self) -> bool:
-        """Queue one hedge leg; every later leg waits for a confirmed fill."""
+        """Queue one group leg; every later leg waits for a confirmed fill."""
         group = self._live_multi_leg
         if group is None or group.phase != "executing":
             return False
         if self._active_orders:
-            raise RuntimeError("cannot queue a hedge leg while an order is active")
+            raise RuntimeError("cannot queue a multi-leg order while another order is active")
         if group.next_leg_index >= len(group.order.legs):
             violation = self._post_fill_risk_violation()
             if violation is not None:
@@ -1753,26 +1765,67 @@ class LiveTrader:
         self._persist_state(tracked)
         return True
 
-    def _queue_multi_leg_unwind(self) -> bool:
-        """Queue compensating closes for confirmed legs after group failure."""
+    def _queue_multi_leg_restore(self) -> bool:
+        """Queue compensating orders that restore pre-group signed quantities."""
         group = self._live_multi_leg
-        if group is None or group.phase != "unwinding" or self._active_orders:
+        if group is None or group.phase != "restoring" or self._active_orders:
             return False
-        leg_symbols = {leg.symbol for leg in group.order.legs}
-        actions = [
-            OrderIntent(
-                action="close",
-                symbol=symbol,
-                quantity=position.quantity,
-                reason=_REASON_MULTI_LEG_UNWIND,
+        actions: list[OrderIntent] = []
+        for leg in reversed(group.order.legs):
+            symbol = leg.symbol
+            baseline = group.baseline_signed_quantities[symbol]
+            position = self._positions.get(symbol)
+            current = (
+                position.quantity * side_multiplier(position.side) if position is not None else 0.0
             )
-            for symbol, position in self._positions.items()
-            if symbol in leg_symbols
-        ]
+            if abs(current - baseline) <= EPSILON:
+                continue
+            same_direction = (
+                abs(current) <= EPSILON
+                or abs(baseline) <= EPSILON
+                or (current > 0) == (baseline > 0)
+            )
+            if same_direction:
+                if abs(current) > abs(baseline):
+                    actions.append(
+                        OrderIntent(
+                            action="close",
+                            symbol=symbol,
+                            quantity=abs(current) - abs(baseline),
+                            reason=_REASON_MULTI_LEG_RESTORE,
+                        )
+                    )
+                else:
+                    actions.append(
+                        OrderIntent(
+                            action="long" if baseline > 0 else "short",
+                            symbol=symbol,
+                            quantity=abs(baseline) - abs(current),
+                            reason=_REASON_MULTI_LEG_RESTORE,
+                        )
+                    )
+                continue
+            actions.extend(
+                (
+                    OrderIntent(
+                        action="close",
+                        symbol=symbol,
+                        quantity=abs(current),
+                        reason=_REASON_MULTI_LEG_RESTORE,
+                    ),
+                    OrderIntent(
+                        action="long" if baseline > 0 else "short",
+                        symbol=symbol,
+                        quantity=abs(baseline),
+                        reason=_REASON_MULTI_LEG_RESTORE,
+                    ),
+                )
+            )
         if not actions:
             self._live_multi_leg = None
             self._persist_state()
             return False
+        leg_symbols = set(group.baseline_signed_quantities)
         bars = {
             symbol: {
                 "close": self._last_prices.get(
@@ -1789,14 +1842,26 @@ class LiveTrader:
                 bars,
                 self._utc_now(),
                 apply_volume_limit=False,
+                apply_entry_risk_limits=False,
             )
         except ValueError as exc:
-            logger.exception("Unable to plan multi-leg unwind")
+            logger.exception("Unable to plan multi-leg baseline restoration")
+            group.phase = "manual"
             self._persist_state()
             self._notify(
                 "send_alert",
-                title=f"[{self._executor.strategy_name}] Multi-leg Unwind Failed",
+                title=f"[{self._executor.strategy_name}] Multi-leg Restore Failed",
                 message=f"{exc}; manual broker intervention required.",
+            )
+            return False
+        if not requests:
+            group.phase = "manual"
+            self._persist_state()
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Multi-leg Restore Failed",
+                message="baseline restoration produced no broker orders; "
+                "manual broker intervention required.",
             )
             return False
         queued = [TrackedOrder(request=request) for request in requests]
@@ -1821,7 +1886,7 @@ class LiveTrader:
             and group.phase == "executing"
             and group.first_fill_at is not None
             and (self._utc_now() - group.first_fill_at).total_seconds()
-            >= group.order.max_unhedged_seconds
+            >= group.order.max_completion_seconds
         )
 
     def _halt_for_multi_leg_deadline(self) -> None:
@@ -1829,9 +1894,10 @@ class LiveTrader:
         if group is None:
             return
         self._halt_live(
-            title="Multi-leg Hedge Deadline Missed",
+            title="Multi-leg Completion Deadline Missed",
             message=(
-                f"hedge group remained incomplete for {group.order.max_unhedged_seconds:.3f}s"
+                "related order group remained incomplete for "
+                f"{group.order.max_completion_seconds:.3f}s"
             ),
         )
 
@@ -1839,7 +1905,7 @@ class LiveTrader:
         """Poll or submit the head order; dependent orders stay serialized."""
         while self._active_orders and (
             not self._halted
-            or self._has_active_risk_exit_orders()
+            or self._has_active_recovery_orders()
             or self._active_orders[0].status == "cancel_pending"
         ):
             if self._multi_leg_deadline_missed():
@@ -1912,7 +1978,7 @@ class LiveTrader:
                 self._persist_state(tracked)
                 return
             if report.status in ("cancelled", "rejected"):
-                if request.reason == _REASON_MULTI_LEG_UNWIND and self._live_multi_leg is not None:
+                if self._is_multi_leg_restore_order(request):
                     self._live_multi_leg.phase = "manual"
                 self._halt_live(
                     title=f"Order {report.status.title()}",
@@ -1926,6 +1992,7 @@ class LiveTrader:
             if (
                 report.filled_quantity > prior_filled_quantity + EPSILON
                 and request.position_effect in ("open", "add")
+                and not self._is_multi_leg_restore_order(request)
             ):
                 risk_violation = self._post_fill_risk_violation(
                     include_net=not (
@@ -1940,7 +2007,7 @@ class LiveTrader:
                     )
                     return
             if report.status != "filled" and self._live_order_timed_out(tracked):
-                if request.reason == _REASON_MULTI_LEG_UNWIND and self._live_multi_leg is not None:
+                if self._is_multi_leg_restore_order(request):
                     self._live_multi_leg.phase = "manual"
                 self._cancel_timed_out_order(tracked, report)
                 return
@@ -1956,7 +2023,7 @@ class LiveTrader:
                 if self._live_multi_leg.phase == "executing":
                     if self._queue_next_live_multi_leg_order():
                         continue
-                elif self._queue_multi_leg_unwind():
+                elif self._queue_multi_leg_restore():
                     continue
 
     def _live_order_timed_out(self, tracked: TrackedOrder) -> bool:

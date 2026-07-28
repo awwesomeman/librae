@@ -201,17 +201,18 @@ class PortfolioTargets:
 
 @dataclass(frozen=True)
 class MultiLegOrder:
-    """One best-effort hedge group executed in declared leg order.
+    """One best-effort related order group executed in declared leg order.
 
-    This contract is intended for spreads across instruments or venues where
-    no atomic exchange-native combo order exists. Every leg must be explicitly
-    sized. Backtest/sim uses one synchronous market-data event; live submits
-    one leg at a time and unwinds filled legs if the group cannot complete
-    within ``max_unhedged_seconds`` or a leg fails.
+    This contract covers spreads, rolls, inventory hedges, and other
+    cross-instrument operations where several explicitly sized orders belong
+    to one decision but no atomic exchange-native combo order exists.
+    Backtest/sim uses one synchronous market-data event. Live submits one leg
+    at a time and restores the signed exposure held before the group if a leg
+    fails or the group cannot complete within ``max_completion_seconds``.
     """
 
     legs: tuple[OrderIntent, ...]
-    max_unhedged_seconds: float = 5.0
+    max_completion_seconds: float = 5.0
     reason: str = ""
 
     def __post_init__(self) -> None:
@@ -228,8 +229,8 @@ class MultiLegOrder:
         if len(symbols) != len(set(symbols)):
             raise ValueError("MultiLegOrder requires at most one leg per symbol")
         _validate_positive_finite_number(
-            self.max_unhedged_seconds,
-            "MultiLegOrder.max_unhedged_seconds",
+            self.max_completion_seconds,
+            "MultiLegOrder.max_completion_seconds",
         )
         if not isinstance(self.reason, str):
             raise TypeError("MultiLegOrder.reason must be a string")

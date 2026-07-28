@@ -130,10 +130,10 @@ wall-clock placement attempt. Expiry refreshes the broker state, cancels only
 the remaining quantity, records any additional partial fill, and halts for
 operator review. `null` leaves lifetime to the broker.
 
-## Multi-leg arbitrage decisions
+## Related multi-leg decisions
 
-Use `MultiLegOrder` when the legs form one hedge group and must not be treated
-as unrelated strategy decisions:
+Use `MultiLegOrder` when explicitly sized legs belong to one decision and must
+execute in a declared order:
 
 ```python
 from librae import MultiLegOrder, OrderIntent
@@ -143,16 +143,23 @@ return MultiLegOrder(
         OrderIntent(action="long", symbol="TXF_NEAR", quantity=1),
         OrderIntent(action="short", symbol="TXF_NEXT", quantity=1),
     ),
-    max_unhedged_seconds=2.0,
+    max_completion_seconds=2.0,
     reason="calendar spread",
 )
 ```
 
-The same shape covers Binance spot/perpetual/delivery-future spreads after
-applying each contract's multiplier to the explicit quantities. Backtest/sim
-is a synchronous OHLCV approximation. Live is serial best-effort hedging:
-confirmed fills are durable, a failed or overdue group is unwound, and trading
-stays halted for review. It is not an atomic combo order.
+The contract is not limited to arbitrage: it also covers rolls, inventory
+hedges, and ordered cross-instrument exposure transitions. Backtest/sim is a
+synchronous OHLCV approximation. Live records the signed quantity held in
+every leg before the group, submits one leg at a time, and restores that
+baseline if a leg fails or the completion deadline expires. Trading remains
+halted for review. This is best-effort recovery, not an atomic combo order.
+
+`max_completion_seconds` starts at the first confirmed fill and limits how long
+the group may remain incomplete. Every leg needs a unique symbol and an
+explicit quantity. Normal venue normalization and broker validation still
+apply to recovery orders; current-bar and lagged-ADV caps do not because
+recovery is based on broker-confirmed exposure rather than a historical bar.
 
 Do not configure US-listed `MU` and `MUUSDT` as though USD and USDT were the
 same currency. That case remains rejected until a time-varying FX mark and

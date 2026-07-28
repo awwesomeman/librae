@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Literal, Protocol
 
 from librae.core.run_config import LiveMode
@@ -44,7 +45,7 @@ def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 7
+_STATE_SCHEMA_VERSION = 8
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -62,7 +63,7 @@ def _decision_to_dict(decision: StrategyDecision) -> dict:
             "kind": "multi_leg_order",
             "value": {
                 "legs": [asdict(leg) for leg in decision.legs],
-                "max_unhedged_seconds": decision.max_unhedged_seconds,
+                "max_completion_seconds": decision.max_completion_seconds,
                 "reason": decision.reason,
             },
         }
@@ -79,7 +80,7 @@ def _decision_from_dict(raw: dict) -> StrategyDecision:
     if kind == "multi_leg_order" and isinstance(value, dict):
         return MultiLegOrder(
             legs=tuple(OrderIntent(**item) for item in value["legs"]),
-            max_unhedged_seconds=float(value["max_unhedged_seconds"]),
+            max_completion_seconds=float(value["max_completion_seconds"]),
             reason=str(value["reason"]),
         )
     raise ValueError("invalid persisted strategy decision")
@@ -202,20 +203,22 @@ class LiveRebalance:
 
 @dataclass
 class LiveMultiLeg:
-    """Restartable best-effort multi-leg execution and compensating unwind."""
+    """Restartable best-effort multi-leg execution and baseline restoration."""
 
     order: MultiLegOrder
+    baseline_signed_quantities: dict[str, float]
     reference_prices: dict[str, float]
     reference_volumes: dict[str, float | None]
     lagged_adv_by_symbol: dict[str, float]
     decided_at: datetime
     next_leg_index: int = 0
     first_fill_at: datetime | None = None
-    phase: Literal["executing", "unwinding", "manual"] = "executing"
+    phase: Literal["executing", "restoring", "manual"] = "executing"
 
     def to_dict(self) -> dict:
         return {
             "order": _decision_to_dict(self.order),
+            "baseline_signed_quantities": self.baseline_signed_quantities,
             "reference_prices": self.reference_prices,
             "reference_volumes": self.reference_volumes,
             "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
@@ -234,13 +237,23 @@ class LiveMultiLeg:
         if decided_at is None:
             raise ValueError("live multi-leg state is missing decided_at")
         phase = str(raw["phase"])
-        if phase not in ("executing", "unwinding", "manual"):
+        if phase not in ("executing", "restoring", "manual"):
             raise ValueError(f"invalid live multi-leg phase: {phase!r}")
         next_leg_index = int(raw["next_leg_index"])
         if not 0 <= next_leg_index <= len(order.legs):
             raise ValueError("live multi-leg next_leg_index is out of range")
+        baseline_signed_quantities = {
+            str(symbol): float(quantity)
+            for symbol, quantity in raw["baseline_signed_quantities"].items()
+        }
+        leg_symbols = {leg.symbol for leg in order.legs}
+        if set(baseline_signed_quantities) != leg_symbols:
+            raise ValueError("live multi-leg baseline must cover exactly the leg symbols")
+        if any(not isfinite(quantity) for quantity in baseline_signed_quantities.values()):
+            raise ValueError("live multi-leg baseline quantities must be finite")
         return cls(
             order=order,
+            baseline_signed_quantities=baseline_signed_quantities,
             reference_prices={
                 str(symbol): float(price) for symbol, price in raw["reference_prices"].items()
             },
