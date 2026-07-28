@@ -1,369 +1,162 @@
-# librae
+# Librae
 
-Backtest and live-trading engine, multi-asset support.
+Librae is a Python engine for multi-asset backtesting, shadow simulation, and
+broker-confirmed live execution. It gives research and execution the same
+strategy interface while keeping market data, portfolio construction, broker
+routing, persistence, and monitoring replaceable.
 
-- **One strategy interface, explicit execution semantics** — `Action` and portfolio-level `RebalanceTargets` share one decision API; backtest/sim model next-bar fills, while live submits causal broker orders and books only execution reports.
-- **Portfolio-aware core** — static multi-asset strategies share portfolio positions, equity, target-weight execution, and diagnostics; optimizer/alpha logic stays in strategy code.
-- **Engine has no required I/O dependencies** — pure computation on a DataFrame you hand it; `db`/`brokers`/`notifications` are optional, lazy-imported, swappable via constructor injection.
-- **Risk built in** — concentration, gross/net target, drawdown, and bar-volume limits plus simplified margin/liquidation and impact models — explicit and off by default.
-- **No config files required** — market/symbol cost registries are plain Python with sensible built-ins; override per run via `RunConfig`, no YAML to maintain.
+> **Project status: alpha.** The research engine is usable, but live-trading
+> readiness still depends on the selected broker adapter, account setup,
+> operational controls, and strategy validation.
 
-`db/`, `brokers/`, `notifications/`, `orchestration/` are optional reference implementations for DB persistence, broker order routing, notifications, and CLI wiring — see [Reference implementations](#reference-implementations) below.
+## Why Librae
 
----
+- **One decision API** — express single-symbol orders with `Action` or complete
+  portfolio allocations with `RebalanceTargets`.
+- **Causal execution** — backtest and shadow-sim decisions made on completed bar
+  T become eligible on the next observed bar; live positions change only from
+  broker execution reports.
+- **Portfolio-aware core** — positions, cash, costs, exposure, concentration,
+  turnover, target drift, and risk limits share one state model.
+- **No required infrastructure** — the engine runs on an in-memory DataFrame.
+  TimescaleDB, broker adapters, Telegram, Grafana, and deployment scripts are
+  optional reference implementations.
+- **Explicit boundaries** — no hidden optimizer, feature pipeline, exchange
+  calendar, FX ledger, or silent data repair.
 
-## Installing as a dependency
+## Choose your path
 
-Not on PyPI yet — install from GitHub in the meantime:
+| You are... | Start here | Go deeper |
+|---|---|---|
+| Quant analyst | Run the [SMA or portfolio examples](examples/) with deterministic data | Review the [data and execution contract](architecture.md#usage) and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
+| Strategy developer | Read the strategy shape below, then adapt an [example strategy](examples/) | Use the [core types and Config API](architecture.md#core-types) |
+| Backend/platform developer | Read the [system architecture](architecture.md) | Review [optional infrastructure](docs/guides/optional-infrastructure.md), callbacks, adapters, and durable state |
+
+## Quick start
+
+Librae requires Python 3.12 or newer.
+
+Install the library directly from GitHub:
 
 ```bash
 pip install "librae @ git+https://github.com/awwesomeman/librae.git"
-pip install "librae[db,crypto-live] @ git+https://github.com/awwesomeman/librae.git"   # extras work the same way
 ```
 
-Same package contents as a future PyPI release (identical build), but not pinned like one: no `@<ref>` means you get the default branch's current HEAD. The version is derived from git (`setuptools_scm`), so `pip show librae`/`librae.__version__` do tell you what you got (e.g. `0.1.1.dev3+g1a2b3c4`) — but that's still a moving target without a pin. Pin a commit or tag if that matters: `...librae.git@<commit-or-tag>`.
+It is not on PyPI yet. For a reproducible environment, pin the dependency to a
+tag or commit. See [Getting started](docs/getting-started.md) for extras,
+versioning, environment variables, and contributor setup.
 
----
-
-## Quick Start (developing librae itself)
-
-Supports Python 3.12 / 3.13 / 3.14 (CI runs all three).
+To run a complete example from a clone:
 
 ```bash
-git clone git@github-librae:awwesomeman/librae.git
-cd librae
-uv sync --extra test --extra dev --extra db --extra crypto-live   # add --extra tw-live/--extra us-live for brokers/'s shioaji/ib_async
-cp .env.example .env   # placeholder values are enough to run the test suite
-git config core.hooksPath .githooks   # runs ruff check + format --check before each commit
-uv run pytest tests/ -q
+uv sync --extra test --extra dev
+uv run python -m examples.simple_sma.run --mode backtest --no-db
 ```
 
-Run everything through `uv run` afterwards, or `source .venv/bin/activate`.
-
-### Environment variables
-
-librae's own code (`db/`, `brokers/`, `notifications/`) reads config from env vars and never touches a `.env` file itself — loading one is the caller's job (`uv run --env-file .env ...`, direnv, your own `load_dotenv()`; `tests/conftest.py` does it for local `pytest` runs).
-
-- **Cloned this repo?** `cp .env.example .env`. Real trading/signing secrets (`BINANCE_API_KEY`/`SHIOAJI_*`) go in a separate `.env.secrets` (`cp .env.secrets.example .env.secrets`) instead — no deploy script ever syncs that one across machines.
-- **`pip install`ed, no clone?** Run `librae init` — scaffolds a minimal `.env.example` for just the vars librae's code reads (`TIMESCALE_DSN`, `TELEGRAM_*`, `BINANCE_*`, `SHIOAJI_*`, `IBKR_*`).
-- **Running tests needs no real infrastructure** — `db`/`brokers` tests mock `psycopg2`/`ccxt` entirely; `TIMESCALE_DSN` just needs to be a non-empty string.
-
----
-
-## Backtest engine (librae)
+The minimal strategy contract looks like this:
 
 ```python
-from librae import Backtest, BaseStrategy, Action, Context, RunConfig
+from librae import Action, BaseStrategy, Context
+
 
 class MyStrategy(BaseStrategy):
     def on_bar(self, ctx: Context) -> list[Action]:
         if ctx.positions.get(ctx.symbol):
-            if ctx.bar.get("exit_signal"):
-                return [Action(type="close", symbol=ctx.symbol)]
-            return []
-        if ctx.bar.get("entry_signal"):
-            return [Action(type="long", symbol=ctx.symbol)]
-        return []
-
-df = fetch_and_prepare(symbol, months)          # your own ETL, data format linked below
-bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
-bt.run()
-output = bt.build_output()                      # BacktestOutput
-```
-
-Pass raw, unshifted OHLCV and point-in-time feature columns. A strategy observes
-completed bar T, and the engine owns the execution delay: its intent is first
-eligible on T+1. Do not pre-shift prices or signals to simulate that delay, or
-the strategy will be delayed twice. The default fill is the next eligible
-bar's open.
-
-Here, **unshifted** describes timing; it does not mean adjusted or unadjusted
-prices. Librae cannot infer that distinction. Execution-oriented backtests
-should normally use the prices actually observable and tradable at the time
-(unadjusted OHLCV). The engine does not currently book splits, dividends,
-coupons, futures rolls, FX conversion, cash yield, or settlement lag. Adjusted
-series may be useful for research features, but treating them as executable
-OHLCV does not produce a complete cash-and-position simulation.
-
-Backtest input is validated rather than repaired. The index must be exactly
-`(symbol, datetime)`, with unique rows, timezone-aware timestamps increasing
-within each symbol, and the configured symbols must exactly match the data.
-`open`, `high`, `low`, `close`, and `volume` must be numeric and finite; prices
-must be positive, each bar must satisfy `low <= open/close <= high`, and volume
-must be non-negative. Sort, clean, and align data explicitly in ETL—the engine
-does not silently reorder, fill, clip, or discard invalid observations.
-
-`Action(fill_price=<number>)` is a one-bar limit order: buys require the next
-eligible bar's low to reach the limit, sells require its high, and a gap through
-the limit fills at the better opening price. If that bar does not reach the
-limit, the intent expires and is logged; it is not silently carried forward.
-
-Allocation strategies can submit a complete target portfolio without calculating quantities:
-
-```python
-from librae import RebalanceTargets
-
-class AllocationStrategy(BaseStrategy):
-    def on_bar(self, ctx: Context):
-        if ctx.period_index % 24:
-            return []
-        return RebalanceTargets(
-            weights={"BTCUSDT": 0.6, "ETHUSDT": 0.35},
-            fill_price="open",
+            return (
+                [Action(type="close", symbol=ctx.symbol)]
+                if ctx.bar.get("exit_signal")
+                else []
+            )
+        return (
+            [Action(type="long", symbol=ctx.symbol)]
+            if ctx.bar.get("entry_signal")
+            else []
         )
 ```
 
-The target is decided from bar T and filled on T+1. At execution, the engine
-uses T+1 fill prices and execution-time equity, reduces positions before adding
-exposure, and scales additions proportionally if costs make the batch
-unaffordable. Target weights need not sum to one; the remainder stays in cash.
-`RebalanceTargets.fill_price` is a bar field such as `"open"`; use per-symbol
-`Action`s when different numeric limit prices are required.
-With `record_position_snapshots=True`,
-`output.position_snapshots` records each open position's signed market value
-and realized weight after every event. `output.allocation_snapshots` records
-every configured symbol's target weight, achieved weight, and drift. The
-equity curve always includes gross exposure, net exposure, concentration, and
-one-way turnover; aggregate metrics include total turnover, average/maximum
-gross exposure, maximum absolute net exposure, maximum concentration, and
-tracking error/information ratio when a benchmark is present.
+Your data pipeline supplies timezone-aware OHLCV and point-in-time features;
+Librae owns validation, execution timing, portfolio state, costs, and output.
+Use the runnable examples for complete `RunConfig`, DataFrame, and engine
+wiring rather than copying an incomplete snippet.
 
-Portfolio limits fail explicitly rather than silently normalizing the target:
+## Mental model
 
-```python
-cfg = RunConfig(..., params={
-    "max_position_pct": 0.30,
-    "max_gross_exposure_pct": 1.20,
-    "max_net_exposure_pct": 1.00,
-    "max_drawdown_pct": 0.20,
-    "max_volume_participation_pct": 0.10,
-})
+```text
+market data + point-in-time features
+                ↓
+       strategy.on_bar(ctx)
+                ↓
+  Action(s) or RebalanceTargets
+                ↓
+ backtest / shadow sim / live engine
+                ↓
+ trades + equity + risk + diagnostics
 ```
 
-Gross exposure is `sum(abs(signed market value / equity))`, so it is also the
-engine's gross-leverage diagnostic; net exposure is the signed sum and
-concentration is the largest absolute symbol weight. Gross/net limits validate
-`RebalanceTargets` before execution. The volume limit is cumulative per symbol
-within a data event and applies to simulated
-entries, additions, reductions, stops, and forced exits. Missing volume rejects
-a constrained fill, and an exit may remain partially open for a later real
-bar. Once a simulated stop-market or liquidation triggers, any volume-limited
-remainder stays an active market exit and continues at the next observed
-bar's open; it does not become conditional on touching the trigger again.
-If the final backtest bar cannot complete liquidation, the run fails
-instead of fabricating liquidity. Live emergency exits submit the full
-remaining quantity and use broker reports as partial-fill truth.
+- **Backtest input:** a `DataFrame` indexed exactly by
+  `(symbol, datetime)`, with valid OHLCV and any precomputed feature columns.
+- **Decision timing:** the strategy observes completed data; the engine owns
+  the simulated T → T+1 execution delay. Do not pre-shift a signal to imitate
+  that delay.
+- **Portfolio logic:** optimizer and alpha logic belong to the strategy.
+  Librae accepts the resulting actions or target weights and handles execution.
+- **Outputs:** `BacktestOutput` contains run metadata, events, equity,
+  performance metrics, and optional position/allocation snapshots.
 
-The configured symbol set is static, but availability is point-in-time.
-`ctx.symbols` contains the configured universe while `ctx.available_symbols`
-and `ctx.bars` contain only symbols with a real bar at `ctx.ts`. A symbol can
-therefore start late, stop early, or miss a timestamp without stalling the
-portfolio. The latest known close may value an existing position, but is never
-inserted into `ctx.bars` and cannot trigger fills, stops, or holding-age
-increments.
+The exact validation, fill, liquidity, margin, reconciliation, and state
+semantics are documented in the [engine architecture](architecture.md#backtest-engine-design-librae).
 
-Per-symbol `Action`s become eligible independently on that symbol's next
-observed bar. `RebalanceTargets` remains an atomic decision basket and waits
-until every non-zero target and currently held symbol has a current bar; a
-waiting basket blocks another target decision instead of being silently
-replaced. Use per-symbol `Action`s when asynchronous execution is intentional.
+## Scope at a glance
 
-Execution timing intentionally differs in live mode. Each batch of newly
-completed bars invokes the strategy immediately; a delayed symbol may produce
-a second event with the same timestamp. The current close is only a
-sizing/reference price. Local quantity, entry/exit price, costs, and timestamps
-are committed from the broker execution report. An acknowledgement with no
-fill never opens a local position. Open and partial orders remain durable and
-are polled before another strategy decision; per-symbol data watermarks prevent
-completed events from being replayed after restart.
-
-Live `Action(fill_price=None)` submits a market order and a numeric
-`fill_price` submits a real broker limit order. Bar-field fills such as
-`"open"`/`"close"`, `RebalanceTargets.fill_price`, and local
-`stop_price`/`take_profit_price` are simulation-only: live rejects them rather
-than converting a historical range touch into a late market order. Protective
-orders require broker-native support. Multi-order baskets remain sequential,
-not atomic.
-
-An injected `order_adapter` implements `prepare_order`, `place_order`,
-`find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
-`prepare_order` applies venue amount/lot/step/tick/min-notional constraints
-before the request is checkpointed or submitted. Filled responses must
-include order id/status, requested and cumulative filled quantity, cumulative
-average price/costs, broker execution timestamp, and an explicit
-fee/commission amount (zero is valid); CCXT's
-`id/status/amount/filled/average/lastTradeTimestamp/fee` shape is accepted
-directly (base fees are converted at average price; unrelated fee currencies
-fail closed). Submitted/accepted/cancelled/rejected states are kept distinct.
-Placement intent is checkpointed before network I/O; ambiguous retries recover
-by deterministic client id instead of blindly resubmitting. Resting orders
-block later decisions, rejected/cancelled orders halt dependent work,
-and operational halts cancel tracked strategy orders. A drawdown breach clears
-pending strategy intent but keeps its emergency reduce/close queue active
-until broker reports reach a terminal state, including across restart.
-Untracked open orders on configured symbols halt for operator review.
-
-Market-data and execution routes are separate. `data_source` selects the
-default market-data adapter; it never chooses a broker. Live execution requires
-either an injected `order_adapter` or an explicit `strategy.broker` (overridden
-per symbol by `instrument_overrides.<symbol>.broker`). Missing execution
-routing fails at startup. This prevents a symbol such as `MU` from silently
-selecting IBKR merely because IBKR supplied its bars.
-The current live/sim cash ledger is single-currency, so a resolved
-mixed-currency universe also fails at construction until an explicit FX/base
-currency model is supplied.
-
-TimescaleDB is the default durable state store (`execution_runtime_state` plus
-the `broker_orders` ledger). `cfg.no_db=True` remains valid for simulation,
-but live mode then requires an explicitly injected durable `state_store`;
-`MemoryLiveStateStore` is only for deterministic tests. Per-symbol processed
-bar watermarks, pending intent, cash/positions, fills, equity peak, halt state,
-and the active order queue restore under the same run id. Runtime-state schema
-v3 is intentionally breaking: an older checkpoint is rejected and must be
-explicitly migrated or removed before restart. A persisted halt
-does not disappear on restart; after resolving the cause, call
-`trader.reset_halt()` explicitly.
-
-Runnable versions cover both externally scheduled allocations and dynamic
-Top-K cross-sectional selection: [`examples/target_weights/`](examples/target_weights/)
-and [`examples/topk_selection/`](examples/topk_selection/).
-
-Directory layout, dependency direction, risk/margin/reconciliation/staleness details, core types, and the full Config API: [`architecture.md`'s "Backtest Engine Design"](architecture.md#backtest-engine-design-librae).
-
-Runnable examples and what you need to know to turn on `db`/Grafana: [`examples/`](examples/).
-
-### Signal outcome analysis
-
-Raw signal quality can be evaluated locally without a database:
-
-```python
-from librae import (
-    compute_signal_outcomes,
-    generate_signal_mae_mfe_report,
-    summarize_signal_mae_mfe,
-)
-
-symbol_ohlcv = df.xs(symbol, level="symbol")
-signal_ts = symbol_ohlcv.index[symbol_ohlcv["entry_signal"].astype(bool)]
-
-outcomes = compute_signal_outcomes(
-    signal_ts,
-    symbol_ohlcv,
-    max_periods=60,
-    direction="long",
-    price_col="open",
-)
-summary = summarize_signal_mae_mfe(signal_ts, symbol_ohlcv)
-generate_signal_mae_mfe_report(signal_ts, symbol_ohlcv)
-```
-
-The API is intentionally single-symbol; evaluate each symbol independently.
-A signal on observed bar T uses the next observed bar's selected price field as
-its reference, and offset 1 starts on the following observed bar. Returns,
-MFE, and MAE are gross hypothetical percentage-point outcomes with no costs or
-execution constraints. Direction is explicit and independent of whether the
-source event is labeled entry or exit. MFE and MAE are non-negative excursion
-magnitudes, and the summary/report shows the valid sample count separately at
-each horizon because recent signals have incomplete forward windows.
-
----
-
-## Capability boundaries
-
-Labels describe what Librae itself guarantees, not whether a strategy has
-validated alpha or completed broker-specific operational review.
-
-| Primary use case | Backtest | Shadow sim (`mode=sim`) | Paper broker (`mode=live`) | Live broker |
-|---|---|---|---|---|
-| Single-asset directional | Supported research with next-observed-bar fills | Simplified bar-fill monitoring | Broker-confirmed lifecycle; adapter-dependent | Operational core supported; production readiness remains adapter/account-specific |
-| Bar-based arbitrage | Research-only OHLCV approximation | Research-only | Unsupported as atomic multi-leg execution | Unsupported as atomic multi-leg execution |
-| Portfolio optimization | Strategy owns optimizer; target execution/diagnostics supported for a static configured universe | Simplified sequential basket | Broker-confirmed but sequential and non-atomic | Adapter-dependent; no cross-venue atomicity |
-| Asset allocation | Supported research under single-currency, data-driven event assumptions | Simplified | Sequential broker execution | Adapter-dependent; FX, income, corporate actions, and settlement are outside the ledger |
-
-`mode=sim` is shadow bar simulation, not broker paper trading. Paper trading
-uses `mode=live` against a broker's paper endpoint so acknowledgements,
-partials, rejections, and fees follow the same execution-report contract as
-live. Lower-frequency or daily rebalancing reduces throughput pressure but
-does not remove data/order synchronization requirements.
-
-The engine intentionally uses actual observed data timestamps as its event
-clock instead of embedding an exchange-calendar framework. This is compact and
-appropriate for the current daily/session-oriented scope, provided ETL owns
-calendar-sensitive labeling. Missing bars are not automatically classified as
-holidays, suspensions, or outages.
-
----
-
-## Reference implementations
-
-`LiveTrader` injects these via constructor params (`adapter`/`order_adapter`/`cost_model`/`notifier`/`state_store`) and only lazy-imports explicitly selected built-ins when needed. `cfg.no_db=True` skips DB callbacks and the default state store; live mode must then receive a durable store explicitly.
-
-| Directory | Injection point | Description |
-|---|---|---|
-| `db/` | DB callback / `state_store` | TimescaleDB analytics plus atomic runtime checkpoint/order ledger (`db/timescale_init.sql`); needs `pip install librae[db]` |
-| `brokers/` | `adapter` / `order_adapter` | Shioaji (TW futures + stocks, `[tw-live]`), CCXT (crypto, `[crypto-live]`), IBKR (US stocks + futures, `[us-live]`) |
-| `notifications/` | `notifier` | Telegram notifications |
-| `orchestration/` | — | `cli.py`: `RunConfig` construction + CLI arg merging |
-
-To wire your own database/broker/notifier, implement the corresponding duck-typed interface — none of these packages (or their extras) are required.
-
-`orchestration/cli.py` is a library of helpers (`base_parser`, `parse_with_config`, `build_config`, `run_dispatch`), not an invocable command — there's no `librae backtest`/`librae run` entry point. A strategy repo calls these helpers from its own `run.py` to build a `RunConfig` and dispatch it; see any strategy's `run.py` for the pattern.
-
-### Optional ops examples
-
-Not engine injection points — a self-contained reference for running librae as a scheduled/VM deployment with Docker and Grafana. Use as-is, ignore, or swap for your own tooling. (Deliberately not covered in `architecture.md` — that document's scope is engine/DB architecture, not deployment.)
-
-| Directory | Description |
+| Workflow | Current boundary |
 |---|---|
-| `deploy/` | Dockerfile, docker-compose (TimescaleDB + Grafana), VM deploy/trade scripts |
-| `app/` | Grafana dashboard provisioning |
-| `scripts/` | One-off ops scripts (heartbeat check, dashboard push) |
+| Single-asset research | Supported with next-observed-bar simulated fills |
+| Cross-sectional selection and allocation | Supported for a static configured universe; optimizer remains strategy-owned |
+| Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
+| Paper/live broker execution (`mode=live`) | Broker-confirmed order lifecycle; sequential, not atomic across a basket |
+| Arbitrage | OHLCV research approximation only; no atomic multi-leg production execution |
+| Multi-currency portfolios | Not yet modeled; the live/sim cash ledger is single-currency |
 
-**No clone, no `deploy/`?** `LiveTrader.run()` is just a blocking polling loop — run it under whatever supervisor you already use (systemd, `pm2`, plain `docker run`, cron). For monitoring without Grafana, implement `on_heartbeat`/`on_bar` yourself and pass your own `notifier` — see [callback signatures](architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier) in `architecture.md`.
+This table is a navigation aid, not a production-readiness claim. See the
+[full capability matrix](architecture.md#use-case-capability-matrix) before
+selecting a workflow.
 
----
+## Optional integrations
 
-## Common commands
+The core package does not require these components:
 
-| Command | Description |
-|------|------|
-| `pytest tests/ -q` | Run tests |
-| `ruff check .` | Lint |
-| `ruff format .` | Format |
+| Directory | Role |
+|---|---|
+| [`brokers/`](brokers/) | CCXT crypto, Shioaji Taiwan, and IBKR US/futures adapters |
+| [`db/`](db/) | TimescaleDB analytics and durable live runtime state |
+| [`notifications/`](notifications/) | Telegram notifications |
+| [`orchestration/`](orchestration/) | CLI/config helpers used by a strategy's `run.py` |
+| [`app/`](app/) and [`deploy/`](deploy/) | Grafana and Docker/VM reference operations |
 
----
+Use, replace, or omit them through the engine's injection points. Setup and
+data-flow details live in [Optional infrastructure](docs/guides/optional-infrastructure.md).
 
-## Config overview
+## Documentation
 
-| Module | What it configures |
-|------|---------|
-| `librae/config/market_config.py` | Market cost/margin parameters — a small built-in registry (`crypto`/`tw_futures`/`us_equity`); inject your own via `get_market(markets={...})` |
-| `librae/config/symbols.py` | symbol → market/data_source + contract multiplier — same deal, override per run (see below) |
-| `db/timescale_init.sql` | DB schema for the `db/` reference example |
+| Document | Use it for |
+|---|---|
+| [Getting started](docs/getting-started.md) | Installation, extras, local setup, and first run |
+| [Examples](examples/) | Runnable single-asset and portfolio strategy patterns |
+| [Architecture](architecture.md) | Current system design, execution semantics, Config API, database conventions, and naming |
+| [Signal outcome analysis](docs/guides/signal-outcome-analysis.md) | Forward return, MFE, and MAE research |
+| [Optional infrastructure](docs/guides/optional-infrastructure.md) | TimescaleDB, Grafana, broker, notification, and deployment references |
+| [Documentation index](docs/) | Decisions, plans, research, spikes, and learnings |
 
-### Adding a market or asset
+## Development
 
-An already-registered symbol (`BTCUSDT`, `TXFR1`, `MXFR1`, `TMFR1`, `MU`, ...) needs no setup. For anything else, it's a `RunConfig` field, not a file to edit:
-
-```python
-cfg = RunConfig(
-    ..., symbols=["MYSYM"], market="crypto",
-    symbol_overrides={"MYSYM": {"multiplier": 1.0}},  # or e.g. 200.0 for a contract_* instrument
-)
+```bash
+uv run pytest tests/ -q
+uv run ruff check .
+uv run ruff format --check .
 ```
 
-`symbol_overrides` is per-symbol and wins over the run-wide `cost_overrides` fallback; `spot` instruments only need `multiplier=1.0`, `contract_*` (futures) need it explicit — it varies per contract (`tw_futures`: TXF=200 vs MXF=50). For a market with a cost/margin structure `market_config.py` doesn't have, build a `MarketConfig` and pass it via `get_market(name, markets={...})` — see [`architecture.md`'s Config API](architecture.md#config-api). Only edit `symbols.py`/`market_config.py` directly if you've cloned this repo and want something registered permanently instead of repeated per run.
-
----
-
-## Related documents
-
-- [`architecture.md`](architecture.md) — system layering, engine design, naming conventions
-- [`docs/decisions/`](docs/decisions/) — architecture decision records
-- [`docs/plans/`](docs/plans/) — execution plans
-- [`docs/learnings/ERRORS.md`](docs/learnings/ERRORS.md) — debugging log (symptom/root cause/fix/prevention)
-
----
+See [Getting started](docs/getting-started.md#contributing-to-this-repository)
+for the full environment setup.
 
 ## License
 

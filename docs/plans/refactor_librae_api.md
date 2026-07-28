@@ -50,7 +50,7 @@
 |------|------|----------|
 | `librae/live/fetch_cache.py` | LiveTrader 和 SignalPoller 各有 `_fetch_with_cache`（~30 行，98% 相同）。目前符合 Rule of Three — 只有 2 個使用者。且 SignalPoller 未來可能加 DB-first warmup（與 LiveTrader 合流），到時再抽更自然 | 等第三個使用者出現或 SignalPoller 加 warmup 時再抽 |
 | `librae/core/stats.py` | 目前 `compute_all` 完全委託 QuantStats，沒有手寫的統計函式需要共用。只有在 `signal_metrics.py` 需要部分相同的統計計算時，抽出才有意義 | 隨 signal_metrics 一起實作 |
-| `librae/core/signal_metrics.py` | `compute_signal_metrics`（hit rate、forward return 等）需搭配 `fix_look_ahead_bias.md` 的 next-bar execution 設計，現在實作容易做錯前視偏誤 | 搭配 fix_look_ahead_bias 另開 issue |
+| `librae/core/signal_metrics.py` | `compute_signal_metrics`（hit rate、forward return 等）需搭配 `fix_librae_look_ahead.md` 的 next-bar execution 設計，現在實作容易做錯前視偏誤 | 搭配 fix_librae_look_ahead 另開 issue |
 | `ON CONFLICT (config_hash)` 防護 | 目前 `write_backtest_output` 的 upsert 用 `ON CONFLICT (run_id)`，config_hash 只靠 UNIQUE INDEX 擋。單 worker 不會觸發，但多 worker race condition 時會拋 postgres error 而非 silent no-op | 已加 TODO，未來多 worker 排程時處理 |
 | `ddof` 接 QuantStats | `compute_all` 接受 `ddof` 但 QuantStats 的 sharpe/sortino 不支援自訂 ddof。目前是 pass-through 佔位 | 已加 TODO，等自己算 Sharpe 時接上 |
 
@@ -380,7 +380,7 @@ config.yaml + CLI flags
 | `librae/live/wiring.py` | **移除** | ✅ |
 | `librae/cli.py` | 新增 `build_config()`, `run_dispatch()`, `with_dedup_check()` | ✅ |
 | `librae/core/stats.py` | **延後** — 共用統計工具 | 🔲 隨 signal_metrics |
-| `librae/core/signal_metrics.py` | **延後** — 須搭配 fix_look_ahead_bias | 🔲 另開 issue |
+| `librae/core/signal_metrics.py` | **延後** — 須搭配 fix_librae_look_ahead | 🔲 另開 issue |
 | `librae/core/metrics.py` | `compute_all` 加 `risk_free_rate`、`annual_periods`、`ddof` | ✅ |
 | `db/timescale_writer.py` | `refresh_performance(cfg=)`；`save_strategy_results(output, df, cfg)` | ✅ |
 | `db/timescale_reader.py` | 新增 `find_run_by_config_hash()` | ✅ |
@@ -478,7 +478,7 @@ start 從 floored end 反推。同一 bar 窗口內重複執行，hash 保持相
 `compute_signal_metrics` 計算 forward return 時必須嚴格對齊時間軸：
 - Signal 在 $T$ 產生 → Forward Return = $Price_{T+k} / Price_{T+1\_open} - 1$
 - **絕不能**用 $T$ 期的 Close 作為分母（那是產生 signal 的價格，不是 entry price）
-- 須搭配 `fix_look_ahead_bias.md` 的 next-bar execution 邏輯
+- 須搭配 `fix_librae_look_ahead.md` 的 next-bar execution 邏輯
 
 ### 指標計算模組結構：不強制統一
 
@@ -506,5 +506,5 @@ librae/core/
 
 ## 相關 Plan
 
-- [`fix_look_ahead_bias.md`](fix_look_ahead_bias.md) — 前視偏誤修正（回測引擎 next-bar execution + Signal dashboard entry price）
+- [`fix_librae_look_ahead.md`](fix_librae_look_ahead.md) — 前視偏誤修正（回測引擎 next-bar execution + Signal dashboard entry price）
   - **與本計劃的交互**：`fill_price` 的語意取決於 next-bar execution 是否落地。引擎改為 next-bar 後，`fill_price: open` 表示「訊號在 bar[i] 產生，bar[i+1] 的 Open 成交」（最接近實務）。`fill_price: close` 則為「bar[i+1] 的 Close 成交」（保守估計）。預設值從 `close` 改為 `open`，因為這是實務上最常見的執行方式。兩個計劃應同步實施，避免 fill_price 語意在過渡期混淆。

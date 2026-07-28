@@ -354,7 +354,7 @@ ohlcv          (獨立)
 | 2026-04-02 | equity_curve +strategy_name | 同上 |
 | 2026-04-03 | ohlcv.run_id 欄位完全移除（schema + writer + reader） | 專案審計 |
 | 2026-04-04 | backtest_runs +mode/data_source 從 RunMetadata 傳遞 | 審計 #5 |
-| 2026-04-05 | +order_events hypertable（部位生命週期事件） | [position lifecycle](enhance_position_lifecycle.md) |
+| 2026-04-05 | +order_events hypertable（部位生命週期事件） | [position lifecycle](enhance_librae_position_lifecycle.md) |
 | 2026-04-05 | 移除 backtest_runs.schema_version + sample（YAGNI） | 專案審計 |
 
 ## 待處理

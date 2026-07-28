@@ -5,7 +5,7 @@
 >
 > When you add/change a table, column, or a `db/` read/write function, **you must update this document in the same change**. If a naming rule itself changes (as opposed to adding a new entry), add a new decision doc under `docs/decisions/` explaining why, as appropriate.
 >
-> **Scope**: engine layering, the DB access layer, and naming conventions — not deployment/ops. `scripts/`/`app/`/`deploy/` are optional ops tooling (Grafana, Docker, VM scripts), deliberately not architecture; see the root [README's "Optional ops examples"](README.md#optional-ops-examples) instead.
+> **Scope**: engine layering, the DB access layer, and naming conventions — not deployment/ops. `scripts/`/`app/`/`deploy/` are optional ops tooling (Grafana, Docker, VM scripts), deliberately not architecture; see [Optional infrastructure](docs/guides/optional-infrastructure.md) instead.
 >
 > **Language**: this repo is English-only outside `docs/` (which stays in the language it was originally written in — mixing languages mid-document isn't worth the churn). Keep descriptions concise and to the point — a one-line WHY beats a paragraph; link to `docs/decisions/` for the full history instead of re-explaining it here.
 
@@ -471,7 +471,7 @@ financial/execution fact.
 
 ### Config API
 
-> For the full list of config sources (env vars, built-in market/symbol registries, CLI parameter table) see [the root README's "Config overview"](README.md#config-overview). This section only covers the internal code-level API.
+> For installation extras and environment-loading behavior, see [Getting started](docs/getting-started.md). This section is the internal code-level Config API.
 
 #### MarketConfig (market costs)
 
@@ -558,7 +558,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 #### LiveTrader callback signatures (writing your own db sink or notifier)
 
-`LiveTrader`'s constructor injection points ("Reference implementations" in the root README) are duck-typed. Only the two stateful boundaries have minimal call-site `Protocol`s: `OrderAdapter` in `librae/live/executor.py` and `LiveStateStore` in `librae/live/state.py`. This table is the actual call signature for each.
+`LiveTrader`'s constructor injection points (summarized in [Optional infrastructure](docs/guides/optional-infrastructure.md)) are duck-typed. Only the two stateful boundaries have minimal call-site `Protocol`s: `OrderAdapter` in `librae/live/executor.py` and `LiveStateStore` in `librae/live/state.py`. This table is the actual call signature for each.
 
 | Param | Called as |
 |---|---|
