@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
+from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 from tests.conftest import make_test_cfg
 
@@ -115,6 +116,78 @@ class TestBacktestBasics:
         assert np.isclose(trade.exit_price, 110.0)
         assert trade.gross_pnl > 0
         assert trade.symbol == "BTCUSDT"
+
+    def test_direct_constructor_uses_execution_policy_defaults(self) -> None:
+        class BuyOnce(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=100.0)]
+                return []
+
+        result = Backtest(
+            _make_multiindex_df([100.0] * 5),
+            BuyOnce(),
+            initial_balance=100_000.0,
+            cost_model=_zero_cost(),
+        ).run()
+
+        open_event = next(event for event in result.order_events if event.event_type == "open")
+        assert open_event.fill_quantity == pytest.approx(10.0)
+
+    def test_d1_adv_limit_uses_only_completed_sessions(self) -> None:
+        class BuyAfterAdvWarmup(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 2:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=100.0)]
+                return []
+
+        timestamps = pd.date_range("2025-01-01", periods=5, freq="D", tz="UTC")
+        index = pd.MultiIndex.from_arrays(
+            [["BTCUSDT"] * 5, timestamps],
+            names=["symbol", "datetime"],
+        )
+        data = pd.DataFrame(
+            {
+                "open": [100.0] * 5,
+                "high": [101.0] * 5,
+                "low": [99.0] * 5,
+                "close": [100.0] * 5,
+                "volume": [100.0, 200.0, 300.0, 1_000.0, 1_000.0],
+            },
+            index=index,
+        )
+        policy = ExecutionPolicy(
+            max_volume_participation_rate=0.5,
+            adv_lookback_sessions=3,
+            max_adv_participation_rate=0.1,
+        )
+
+        result = Backtest(
+            data,
+            BuyAfterAdvWarmup(),
+            initial_balance=100_000.0,
+            cost_model=_zero_cost(),
+            execution_policy=policy,
+        ).run()
+
+        open_event = next(event for event in result.order_events if event.event_type == "open")
+        # Execution bar volume is 1,000, but lagged ADV is (100+200+300)/3=200.
+        assert open_event.fill_quantity == pytest.approx(20.0)
+
+    def test_adv_limit_rejects_intraday_data(self) -> None:
+        policy = ExecutionPolicy(
+            adv_lookback_sessions=3,
+            max_adv_participation_rate=0.1,
+        )
+        backtest = Backtest(
+            _make_multiindex_df([100.0] * 5),
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+            execution_policy=policy,
+        )
+
+        with pytest.raises(ValueError, match="only for D1"):
+            backtest.run()
 
     def test_force_close_at_end(self) -> None:
         prices = [100.0, 100.0, 100.0, 110.0, 120.0]

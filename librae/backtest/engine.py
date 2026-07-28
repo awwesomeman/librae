@@ -57,6 +57,7 @@ from librae.core.executor import (
     queue_market_exit_all,
     validate_decision_symbols,
 )
+from librae.core.liquidity import calculate_lagged_adv
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
@@ -295,13 +296,11 @@ class Backtest:
             for sym in self._symbols:
                 if sym != config.symbol:
                     self._cost_models[sym] = CostModel.from_config(config, symbol=sym)
-        resolved_execution = (
-            config.execution
-            if config
-            else execution_policy or ExecutionPolicy(max_volume_participation_rate=None)
-        )
+        resolved_execution = config.execution if config else execution_policy or ExecutionPolicy()
         self._fill_price = resolved_execution.default_fill_price
         self._max_volume_participation_rate = resolved_execution.max_volume_participation_rate
+        self._adv_lookback_sessions = resolved_execution.adv_lookback_sessions
+        self._max_adv_participation_rate = resolved_execution.max_adv_participation_rate
         self._risk_policy = config.risk if config else RiskPolicy()
 
         if strategy_name is not None:
@@ -352,12 +351,18 @@ class Backtest:
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
         self._timeframe = infer_timeframe(pd.DatetimeIndex(self._timeline[:20]))
+        if self._adv_lookback_sessions is not None and self._timeframe != "D1":
+            raise ValueError(
+                "adv_lookback_sessions is supported only for D1 data; "
+                f"inferred timeframe={self._timeframe!r}"
+            )
         self._run_id = generate_run_id(self._strategy_name, self._symbols[0], self._timeframe)
         logger.info("Backtest started: run_id=%s", self._run_id)
 
         # WHY: pre-convert all bars once — avoids per-bar DataFrame.to_dict()
         # which is the dominant cost in the hot loop.
         all_bars = self._precompute_bars()
+        all_lagged_adv = self._precompute_lagged_adv()
 
         cash = self._initial_balance
         positions: dict[str, PositionState] = {}
@@ -381,6 +386,14 @@ class Backtest:
         for ts in self._timeline:
             event_start_index = len(all_events)
             bars = all_bars[ts]
+            lagged_adv = all_lagged_adv.get(ts, {})
+
+            def get_lagged_adv(
+                symbol: str,
+                values: dict[str, float] = lagged_adv,
+            ) -> float | None:
+                return values.get(symbol)
+
             for symbol, bar in bars.items():
                 close = bar.get("close")
                 if close is not None and np.isfinite(close) and close > 0:
@@ -411,6 +424,8 @@ class Backtest:
                     ts,
                     get_cost_model=self._get_cost_model,
                     max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_lagged_adv=get_lagged_adv,
                 )
                 cash += step_result.cash_delta
             else:
@@ -425,6 +440,8 @@ class Backtest:
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
                     max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_lagged_adv=get_lagged_adv,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                 )
@@ -539,6 +556,8 @@ class Backtest:
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
                 max_volume_participation_rate=self._max_volume_participation_rate,
+                max_adv_participation_rate=self._max_adv_participation_rate,
+                get_lagged_adv=lambda symbol: all_lagged_adv.get(last_ts, {}).get(symbol),
                 used_quantity_by_symbol=self._filled_quantities(
                     event for event in all_events if event.ts == last_ts
                 ),
@@ -875,6 +894,20 @@ class Backtest:
         raw = self._data.to_dict(orient="index")
         for (sym, ts), row in raw.items():
             result.setdefault(ts, {})[sym] = row
+        return result
+
+    def _precompute_lagged_adv(self) -> dict[pd.Timestamp, dict[str, float]]:
+        """Precompute point-in-time ADV for configured D1 execution limits."""
+        lookback = self._adv_lookback_sessions
+        if lookback is None:
+            return {}
+
+        result: dict[pd.Timestamp, dict[str, float]] = {}
+        for symbol, symbol_data in self._data.groupby(level="symbol", sort=False):
+            volume = symbol_data["volume"].droplevel("symbol")
+            lagged = calculate_lagged_adv(volume, lookback)
+            for ts, value in lagged.dropna().items():
+                result.setdefault(ts, {})[symbol] = float(value)
         return result
 
     @staticmethod

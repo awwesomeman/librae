@@ -12,9 +12,9 @@ strategy interface.
 
 - **One decision API** — express single-symbol orders with `OrderIntent` or complete
   portfolio allocations with `PortfolioTargets`.
-- **One execution-policy source** — fill-field and volume-participation
-  assumptions live in typed `RunConfig.execution`, not free-form strategy
-  parameters.
+- **One execution-policy source** — fill-field, current-bar participation,
+  and optional D1 lagged-ADV assumptions live in typed
+  `RunConfig.execution`, not free-form strategy parameters.
 - **Causal execution** — simulations own the execution delay; live positions
   change only from broker execution reports.
 - **Portfolio-aware core** — positions, cash, costs, exposure, concentration,

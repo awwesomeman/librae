@@ -39,6 +39,7 @@ from librae.core.executor import (
     queue_market_exit_all,
     validate_decision_symbols,
 )
+from librae.core.liquidity import calculate_lagged_adv
 from librae.core.strategy import (
     Context,
     Fill,
@@ -358,7 +359,9 @@ class LiveTrader:
                 self._restore_state(restored)
 
         # --- Resolve callbacks (sentinel pattern) ---
-        self._warmup_periods = (config.params or {}).get("warmup_periods", 720)
+        configured_warmup = (config.params or {}).get("warmup_periods", 720)
+        adv_warmup = (config.execution.adv_lookback_sessions or 0) + 1
+        self._warmup_periods = max(configured_warmup, adv_warmup)
 
         callbacks = {
             "on_bar": (on_bar, self._build_on_bar),
@@ -381,6 +384,8 @@ class LiveTrader:
 
         self._fill_price = config.execution.default_fill_price
         self._max_volume_participation_rate = config.execution.max_volume_participation_rate
+        self._adv_lookback_sessions = config.execution.adv_lookback_sessions
+        self._max_adv_participation_rate = config.execution.max_adv_participation_rate
         self._risk_policy = config.risk
         self._running: bool = False
 
@@ -1172,6 +1177,7 @@ class LiveTrader:
         ts: datetime,
         *,
         apply_volume_limit: bool = True,
+        lagged_adv_by_symbol: dict[str, float] | None = None,
     ) -> list[OrderRequest]:
         """Size intent at the latest completed close without inventing fills."""
         primary_symbol = self._symbols[0]
@@ -1194,8 +1200,10 @@ class LiveTrader:
             else None
         )
         volume_limit = self._max_volume_participation_rate if apply_volume_limit else None
+        adv_limit = self._max_adv_participation_rate if apply_volume_limit else None
         staged_positions = deepcopy(self._positions)
         planned_quantity_by_symbol: dict[str, float] = {}
+        lagged_adv = lagged_adv_by_symbol or {}
 
         if isinstance(intent, PortfolioTargets):
             if intent.fill_price is not None:
@@ -1213,9 +1221,11 @@ class LiveTrader:
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
                 max_volume_participation_rate=volume_limit,
+                max_adv_participation_rate=adv_limit,
                 max_gross_exposure=self._risk_policy.max_gross_exposure,
                 max_net_exposure=self._risk_policy.max_net_exposure,
                 get_volume=get_volume,
+                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                 used_quantity_by_symbol=planned_quantity_by_symbol,
             )
             requests = []
@@ -1256,7 +1266,9 @@ class LiveTrader:
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
                 max_volume_participation_rate=volume_limit,
+                max_adv_participation_rate=adv_limit,
                 get_volume=get_volume,
+                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                 used_quantity_by_symbol=planned_quantity_by_symbol,
             )
             planning_cash += result.cash_delta
@@ -1283,6 +1295,7 @@ class LiveTrader:
         ts: datetime,
         *,
         apply_volume_limit: bool = True,
+        lagged_adv_by_symbol: dict[str, float] | None = None,
     ) -> bool:
         """Persist a deterministic order queue, then advance it serially."""
         try:
@@ -1291,6 +1304,7 @@ class LiveTrader:
                 bars,
                 ts,
                 apply_volume_limit=apply_volume_limit,
+                lagged_adv_by_symbol=lagged_adv_by_symbol,
             )
         except ValueError as exc:
             self._halt_live(title="Unsupported Live Intent", message=str(exc))
@@ -1476,6 +1490,7 @@ class LiveTrader:
         primary_symbol = self._symbols[0]
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
+        lagged_adv_by_symbol: dict[str, float] = {}
         for symbol, raw_df in raw_frames.items():
             history = raw_df[raw_df["ts"] <= ts].set_index("ts")
             history.index.name = "ts"
@@ -1488,6 +1503,13 @@ class LiveTrader:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
             raw_bars[symbol] = raw_bar
             self._last_prices[symbol] = close
+            if self._adv_lookback_sessions is not None:
+                lagged_adv = calculate_lagged_adv(
+                    history["volume"],
+                    self._adv_lookback_sessions,
+                ).iloc[-1]
+                if not pd.isna(lagged_adv):
+                    lagged_adv_by_symbol[symbol] = float(lagged_adv)
 
         ready_decision, waiting_decision = partition_pending_decision(
             self._pending_decision,
@@ -1510,6 +1532,8 @@ class LiveTrader:
                     ts,
                     get_cost_model=self._get_cost_model,
                     max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_quantity_by_symbol=cycle_used_quantity_by_symbol,
                 )
                 staged_cash = self._cash + step_result.cash_delta
@@ -1525,6 +1549,8 @@ class LiveTrader:
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
                     max_volume_participation_rate=self._max_volume_participation_rate,
+                    max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                 )
@@ -1537,7 +1563,12 @@ class LiveTrader:
                 cycle_used_quantity_by_symbol[event.symbol] = (
                     cycle_used_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
                 )
-        elif ready_decision and not self._execute_live_decision(ready_decision, raw_bars, ts):
+        elif ready_decision and not self._execute_live_decision(
+            ready_decision,
+            raw_bars,
+            ts,
+            lagged_adv_by_symbol=lagged_adv_by_symbol,
+        ):
             self._persist_state()
             return
 
@@ -1631,7 +1662,12 @@ class LiveTrader:
                     primary_symbol=primary_symbol,
                 )
                 if ready_decision:
-                    self._execute_live_decision(ready_decision, raw_bars, ts)
+                    self._execute_live_decision(
+                        ready_decision,
+                        raw_bars,
+                        ts,
+                        lagged_adv_by_symbol=lagged_adv_by_symbol,
+                    )
 
         for symbol, position in self._positions.items():
             if symbol in raw_bars:

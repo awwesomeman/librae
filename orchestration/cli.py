@@ -221,6 +221,8 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     unknown_execution_keys = set(execution_raw) - {
         "default_fill_price",
         "max_volume_participation_rate",
+        "adv_lookback_sessions",
+        "max_adv_participation_rate",
     }
     if unknown_execution_keys:
         raise ValueError(f"unknown strategy.execution settings: {sorted(unknown_execution_keys)}")

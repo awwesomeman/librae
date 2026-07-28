@@ -74,10 +74,31 @@ not strategy parameters or risk limits:
 |---|---:|---|
 | `default_fill_price` | `open` | Backtest/sim uses this field on the next eligible bar when the decision has no `fill_price`. It does not invent a live fill; broker reports remain authoritative. |
 | `max_volume_participation_rate` | `0.10` | One symbol can consume at most 10% of that bar's volume across all fills. Low volume causes a partial fill, zero/missing volume rejects it, and the remainder of a target rebalance is reconsidered only when the strategy emits another target. Set `null` only to model unlimited liquidity. |
+| `adv_lookback_sessions` | `null` | Optional D1-only lookback. ADV is the mean volume of exactly N completed daily bars before the execution bar; the current bar is excluded. Configure together with `max_adv_participation_rate`. |
+| `max_adv_participation_rate` | `null` | Optional cumulative limit as a fraction of lagged ADV. Before the full lookback exists, fills are rejected instead of assuming liquidity. Configure together with `adv_lookback_sessions`. |
 
-The examples set both values explicitly in `config.yaml`, so changing modes
-does not silently change their assumptions. Per-decision controls stay on the
-decision itself:
+Every example sets the fill field and current-bar cap explicitly. The D1
+portfolio examples also enable the ADV pair; the H1 example omits it. Changing
+modes therefore does not silently change their assumptions. Per-decision
+controls stay on the decision itself:
+
+For a daily strategy, the two liquidity budgets compose by taking the tighter
+remaining quantity:
+
+```yaml
+execution:
+  max_volume_participation_rate: 0.05
+  adv_lookback_sessions: 20
+  max_adv_participation_rate: 0.01
+```
+
+```text
+max fill = min(5% of execution-bar volume, 1% of lagged ADV) - quantity already filled
+```
+
+ADV is deliberately rejected for intraday timeframes. Librae does not yet own
+exchange session calendars or an intraday volume profile, so treating a UTC
+date as every market's trading session would overstate or misassign liquidity.
 
 | Decision field | Scope and behavior |
 |---|---|

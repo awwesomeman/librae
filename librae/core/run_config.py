@@ -21,6 +21,8 @@ from functools import cached_property
 from math import isfinite
 from typing import Any, Literal
 
+from librae.core.utils import to_canonical
+
 logger = logging.getLogger(__name__)
 
 RunMode = Literal["backtest", "sim", "live"]
@@ -39,22 +41,44 @@ class ExecutionPolicy:
     one symbol in one bar. ``None`` disables the cap. With a cap enabled,
     missing volume rejects the fill and insufficient volume produces a partial
     fill. The cap also applies to stops and forced exits.
+
+    ``adv_lookback_sessions`` and ``max_adv_participation_rate`` form one
+    optional D1-only capacity limit. ADV uses exactly N completed daily bars,
+    excluding the execution bar. The pair must be configured together.
     """
 
     default_fill_price: str = "open"
     max_volume_participation_rate: float | None = 0.1
+    adv_lookback_sessions: int | None = None
+    max_adv_participation_rate: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
             raise ValueError("default_fill_price must be a non-empty bar field name")
-        rate = self.max_volume_participation_rate
-        if rate is not None and (
-            isinstance(rate, bool)
-            or not isinstance(rate, (int, float))
-            or not isfinite(rate)
-            or not 0 < rate <= 1
+        for field_name in (
+            "max_volume_participation_rate",
+            "max_adv_participation_rate",
         ):
-            raise ValueError(f"max_volume_participation_rate must be in (0, 1] or None, got {rate}")
+            rate = getattr(self, field_name)
+            if rate is not None and (
+                isinstance(rate, bool)
+                or not isinstance(rate, (int, float))
+                or not isfinite(rate)
+                or not 0 < rate <= 1
+            ):
+                raise ValueError(f"{field_name} must be in (0, 1] or None, got {rate}")
+
+        lookback = self.adv_lookback_sessions
+        if lookback is not None and (
+            isinstance(lookback, bool) or not isinstance(lookback, int) or lookback <= 0
+        ):
+            raise ValueError(
+                f"adv_lookback_sessions must be a positive integer or None, got {lookback}"
+            )
+        if (lookback is None) != (self.max_adv_participation_rate is None):
+            raise ValueError(
+                "adv_lookback_sessions and max_adv_participation_rate must be configured together"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +231,14 @@ class RunConfig:
             raise TypeError("execution must be an ExecutionPolicy")
         if not isinstance(self.risk, RiskPolicy):
             raise TypeError("risk must be a RiskPolicy")
+        if (
+            self.execution.adv_lookback_sessions is not None
+            and to_canonical(self.timeframe) != "D1"
+        ):
+            raise ValueError(
+                "adv_lookback_sessions is supported only for D1; "
+                f"configured timeframe={self.timeframe!r}"
+            )
         object.__setattr__(self, "symbols", tuple(self.symbols))
         for field_name in (
             "params",
@@ -243,6 +275,8 @@ class RunConfig:
             "fill_price",
             "max_volume_participation_pct",
             "max_volume_participation_rate",
+            "adv_lookback_sessions",
+            "max_adv_participation_rate",
         }
         invalid_keys = sorted(legacy_execution_keys & set(self.params or {}))
         if invalid_keys:

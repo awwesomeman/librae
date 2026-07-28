@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
 from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent
-from librae.core.run_config import RiskPolicy, RunConfig
+from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
     OrderIntent,
@@ -968,6 +968,15 @@ class TestLiveTrader:
         with pytest.raises(ValueError, match="broker is not configured"):
             self._make_runner(config=cfg)
 
+    def test_adv_limit_rejects_intraday_runtime(self):
+        with pytest.raises(ValueError, match="only for D1"):
+            _test_cfg(
+                execution=ExecutionPolicy(
+                    adv_lookback_sessions=20,
+                    max_adv_participation_rate=0.01,
+                )
+            )
+
     def test_reconciles_open_broker_position_at_startup(self):
         """Regression test: a process restart previously always assumed
         flat/full-balance, even if the broker actually had a real open
@@ -1542,6 +1551,30 @@ class TestLiveExecutionLifecycle:
         )
 
         assert [request.quantity for request in requests] == [80.0, 20.0]
+
+    def test_live_planning_uses_adv_as_second_volume_budget(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(_HoldStrategy(), adapter)
+        runner._max_volume_participation_rate = 0.1
+        runner._max_adv_participation_rate = 0.02
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
+
+        requests = runner._plan_live_orders(
+            [OrderIntent(action="long", symbol="BTCUSDT", quantity=80.0)],
+            {
+                "BTCUSDT": {
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+            },
+            ts,
+            lagged_adv_by_symbol={"BTCUSDT": 2_000.0},
+        )
+
+        assert [request.quantity for request in requests] == [40.0]
 
     def test_repeated_partial_report_is_idempotent(self):
         adapter = _mock_order_adapter()

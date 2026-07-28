@@ -8,6 +8,10 @@ strategy:
   execution:
     default_fill_price: open
     max_volume_participation_rate: 0.10
+    # D1-only capacity guard: at most 1% of the mean volume from the 20
+    # completed sessions before the execution bar.
+    adv_lookback_sessions: 20
+    max_adv_participation_rate: 0.01
   cost_overrides:
     multiplier: 1.0
   perf:

@@ -209,6 +209,8 @@ class TestPersistBacktest:
         assert call_kwargs.kwargs["execution_policy"] == {
             "default_fill_price": "open",
             "max_volume_participation_rate": None,
+            "adv_lookback_sessions": None,
+            "max_adv_participation_rate": None,
         }
 
         assert counts["ohlcv"] == 20

@@ -552,6 +552,7 @@ class TestDynamicSlippage:
                 _make_multiindex_df(_bars(fill_bar_volume)),
                 OpenFixedQtyStrategy(),
                 cost_model=cost_model,
+                execution_policy=ExecutionPolicy(max_volume_participation_rate=None),
             )
             result = bt.run()
             open_events = [e for e in result.order_events if e.event_type == "open"]

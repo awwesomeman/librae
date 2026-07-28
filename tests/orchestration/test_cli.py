@@ -229,6 +229,25 @@ class TestBuildConfig:
         with pytest.raises(ValueError, match=r"unknown strategy\.execution"):
             build_config("test_strat", str(tmp_path / "run.py"))
 
+    def test_adv_execution_settings_are_typed(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: D1
+                  execution:
+                    adv_lookback_sessions: 20
+                    max_adv_participation_rate: 0.01
+                """
+            )
+        )
+
+        config = build_config("test_strat", str(tmp_path / "run.py"))
+
+        assert config.execution.adv_lookback_sessions == 20
+        assert config.execution.max_adv_participation_rate == pytest.approx(0.01)
+
     def test_risk_policy_is_typed_and_unknown_keys_are_rejected(self, tmp_path):
         config_path = tmp_path / "config.yaml"
         config_path.write_text(

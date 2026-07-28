@@ -51,10 +51,29 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
 def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     unlimited = _config(execution=ExecutionPolicy(max_volume_participation_rate=None))
     capped = _config(execution=ExecutionPolicy(max_volume_participation_rate=0.1))
+    adv_capped = _config(
+        timeframe="D1",
+        execution=ExecutionPolicy(
+            adv_lookback_sessions=20,
+            max_adv_participation_rate=0.01,
+        ),
+    )
 
     assert unlimited.config_hash != capped.config_hash
+    assert capped.config_hash != adv_capped.config_hash
     with pytest.raises(ValueError, match="must be in"):
         ExecutionPolicy(max_volume_participation_rate=1.1)
+    with pytest.raises(ValueError, match="positive integer"):
+        ExecutionPolicy(adv_lookback_sessions=0, max_adv_participation_rate=0.01)
+    with pytest.raises(ValueError, match="configured together"):
+        ExecutionPolicy(adv_lookback_sessions=20)
+    with pytest.raises(ValueError, match="only for D1"):
+        _config(
+            execution=ExecutionPolicy(
+                adv_lookback_sessions=20,
+                max_adv_participation_rate=0.01,
+            )
+        )
     with pytest.raises(ValueError, match="bar field"):
         ExecutionPolicy(default_fill_price="")
     with pytest.raises(TypeError, match="ExecutionPolicy"):
@@ -74,7 +93,13 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
 
 @pytest.mark.parametrize(
     "legacy_key",
-    ["fill_price", "max_volume_participation_pct", "max_volume_participation_rate"],
+    [
+        "fill_price",
+        "max_volume_participation_pct",
+        "max_volume_participation_rate",
+        "adv_lookback_sessions",
+        "max_adv_participation_rate",
+    ],
 )
 def test_execution_settings_are_rejected_from_strategy_params(
     legacy_key: str,

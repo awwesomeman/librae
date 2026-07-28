@@ -579,6 +579,8 @@ def check_stop_targets(
     *,
     get_cost_model: Callable[[str], CostModel],
     max_volume_participation_rate: float | None = None,
+    max_adv_participation_rate: float | None = None,
+    get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Force-close any position whose stop-loss/take-profit is hit this bar.
@@ -607,6 +609,8 @@ def check_stop_targets(
             sym,
             max_volume_participation_rate,
             bar_volume,
+            max_adv_participation_rate=max_adv_participation_rate,
+            lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
             used_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
@@ -656,6 +660,8 @@ def liquidate_all(
     get_cost_model: Callable[[str], CostModel],
     reason: str,
     max_volume_participation_rate: float | None = None,
+    max_adv_participation_rate: float | None = None,
+    get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Force-close every open position right now, at this bar's close price.
@@ -679,6 +685,8 @@ def liquidate_all(
             sym,
             max_volume_participation_rate,
             bar_volume,
+            max_adv_participation_rate=max_adv_participation_rate,
+            lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
             used_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
@@ -952,18 +960,34 @@ def _volume_fill_limit(
     max_volume_participation_rate: float | None,
     bar_volume: float | None,
     *,
+    max_adv_participation_rate: float | None = None,
+    lagged_adv: float | None = None,
     used_quantity: float = 0.0,
 ) -> float | None:
-    """Return a per-bar fill limit, rejecting unknown liquidity explicitly."""
-    if max_volume_participation_rate is None:
+    """Return the tightest configured liquidity budget for this event."""
+    budgets: list[float] = []
+    if max_volume_participation_rate is not None:
+        if bar_volume is None:
+            logger.warning(
+                "Fill rejected for %s: max_volume_participation_rate requires bar volume",
+                symbol,
+            )
+            return 0.0
+        budgets.append(max_volume_participation_rate * bar_volume)
+
+    if max_adv_participation_rate is not None:
+        if lagged_adv is None or not isfinite(lagged_adv) or lagged_adv < 0:
+            logger.warning(
+                "Fill rejected for %s: max_adv_participation_rate requires "
+                "a complete lagged ADV window",
+                symbol,
+            )
+            return 0.0
+        budgets.append(max_adv_participation_rate * lagged_adv)
+
+    if not budgets:
         return None
-    if bar_volume is None:
-        logger.warning(
-            "Fill rejected for %s: max_volume_participation_rate requires bar volume",
-            symbol,
-        )
-        return 0.0
-    return max(max_volume_participation_rate * bar_volume - used_quantity, 0.0)
+    return max(min(budgets) - used_quantity, 0.0)
 
 
 def simulate_fill(
@@ -1080,7 +1104,9 @@ def execute_order_intents(
     primary_symbol: str,
     max_position_notional: float | None = None,
     max_volume_participation_rate: float | None = None,
+    max_adv_participation_rate: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
+    get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Execute symbol-level intents: open, scale, partial/full close.
@@ -1095,7 +1121,8 @@ def execute_order_intents(
     max_volume_participation_rate gives each symbol one cumulative budget for
     this data event across entries, additions, reductions, and closes. Missing
     volume rejects the fill when this limit is enabled. get_volume also feeds
-    CostModel.calc_slippage's participation-scaled impact component.
+    CostModel.calc_slippage's participation-scaled impact component. The
+    optional ADV limit shares the same cumulative quantity counter.
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
@@ -1119,6 +1146,8 @@ def execute_order_intents(
                 sym,
                 max_volume_participation_rate,
                 bar_volume,
+                max_adv_participation_rate=max_adv_participation_rate,
+                lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
                 used_quantity=volume_consumed.get(sym, 0.0),
             )
 
@@ -1236,6 +1265,8 @@ def execute_order_intents(
                 sym,
                 max_volume_participation_rate,
                 bar_volume,
+                max_adv_participation_rate=max_adv_participation_rate,
+                lagged_adv=get_lagged_adv(sym) if get_lagged_adv else None,
                 used_quantity=volume_consumed.get(sym, 0.0),
             )
             requested_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
@@ -1339,9 +1370,11 @@ def execute_portfolio_targets(
     primary_symbol: str,
     max_position_notional: float | None = None,
     max_volume_participation_rate: float | None = None,
+    max_adv_participation_rate: float | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
+    get_lagged_adv: Callable[[str], float | None] | None = None,
     used_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
     """Resolve and execute a portfolio rebalance as one deterministic batch.
@@ -1470,7 +1503,9 @@ def execute_portfolio_targets(
         get_cost_model=get_cost_model,
         primary_symbol=primary_symbol,
         max_volume_participation_rate=max_volume_participation_rate,
+        max_adv_participation_rate=max_adv_participation_rate,
         get_volume=get_volume,
+        get_lagged_adv=get_lagged_adv,
         used_quantity_by_symbol=volume_consumed,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
@@ -1491,7 +1526,9 @@ def execute_portfolio_targets(
         primary_symbol=primary_symbol,
         max_position_notional=max_position_notional,
         max_volume_participation_rate=max_volume_participation_rate,
+        max_adv_participation_rate=max_adv_participation_rate,
         get_volume=get_volume,
+        get_lagged_adv=get_lagged_adv,
         used_quantity_by_symbol=volume_consumed,
     )
     return ExecutionResult(
@@ -1592,6 +1629,8 @@ def execute_pending_decision_and_stops(
     primary_symbol: str,
     max_position_notional: float | None = None,
     max_volume_participation_rate: float | None = None,
+    max_adv_participation_rate: float | None = None,
+    get_lagged_adv: Callable[[str], float | None] | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
 ) -> tuple[float, ExecutionResult]:
@@ -1624,7 +1663,9 @@ def execute_pending_decision_and_stops(
             "primary_symbol": primary_symbol,
             "max_position_notional": max_position_notional,
             "max_volume_participation_rate": max_volume_participation_rate,
+            "max_adv_participation_rate": max_adv_participation_rate,
             "get_volume": lambda sym: bars.get(sym, {}).get("volume"),
+            "get_lagged_adv": get_lagged_adv,
         }
         if isinstance(pending_decision, PortfolioTargets):
             fill_result = execute_portfolio_targets(
@@ -1658,6 +1699,8 @@ def execute_pending_decision_and_stops(
             ts,
             get_cost_model=get_cost_model,
             max_volume_participation_rate=max_volume_participation_rate,
+            max_adv_participation_rate=max_adv_participation_rate,
+            get_lagged_adv=get_lagged_adv,
             used_quantity_by_symbol=used_quantity_by_symbol,
         )
         trades.extend(stop_result.trades)

@@ -322,11 +322,13 @@ excursion therefore requires finer-grained data.
 
 Fill-field and liquidity assumptions have one typed source:
 `RunConfig.execution`. `build_config()` defaults to next-open simulation and a
-10% per-symbol bar-volume cap in every mode. Set the participation rate to
-`None` only for deliberately unlimited-liquidity research. Backtest/sim
-enforce the cap in the fill model. Live uses it for request sizing, then lets
-broker execution reports determine actual fills. Emergency live exits bypass
-the local cap so the broker owns partial-fill truth.
+10% per-symbol bar-volume cap in every mode. Direct `Backtest(...)`
+construction resolves the same `ExecutionPolicy()` defaults; unlimited
+liquidity therefore requires an explicit `max_volume_participation_rate=None`.
+Backtest/sim enforce configured liquidity caps in the fill model. Live uses
+them for request sizing, then lets broker execution reports determine actual
+fills. Emergency live exits bypass local caps so the broker owns partial-fill
+truth.
 
 ```python
 from librae import ExecutionPolicy, RiskPolicy, RunConfig
@@ -336,6 +338,9 @@ config = RunConfig(
     execution=ExecutionPolicy(
         default_fill_price="open",
         max_volume_participation_rate=0.1,
+        # Optional and D1-only; both fields must be set together.
+        adv_lookback_sessions=20,
+        max_adv_participation_rate=0.01,
     ),
     risk=RiskPolicy(
         max_position_weight=0.3,  # 30% of latest known equity
@@ -360,6 +365,14 @@ free-form strategy dictionary for portfolio controls.
   fills and retain the remaining position for a later observed bar. Once
   stop-market or liquidation has triggered, its remainder stays an active
   market exit. A terminal backtest that cannot finish exits raises.
+- `adv_lookback_sessions` + `max_adv_participation_rate`: optional D1-only
+  capacity budget. For execution bar T, ADV is the mean volume of exactly N
+  completed bars ending at T-1. It never contains T's eventual volume. The
+  available quantity is the tighter of the current-bar and ADV budgets, minus
+  quantity already filled for that symbol in the event. Missing warmup rejects
+  the fill. The pair is disabled by default and invalid on intraday data:
+  without an exchange session calendar and an intraday volume profile, applying
+  one full daily ADV budget to every intraday bar would duplicate liquidity.
 - `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
 - `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
 - `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
@@ -536,7 +549,7 @@ financial/execution fact.
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
-| `ExecutionPolicy` | run-wide default fill field and maximum bar-volume participation rate |
+| `ExecutionPolicy` | run-wide default fill field, current-bar participation cap, and optional D1 lagged-ADV capacity cap |
 | `RiskPolicy` | optional engine-level position, exposure, and drawdown limits; every value is a ratio |
 
 #### Output layer
