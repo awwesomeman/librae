@@ -142,7 +142,8 @@ class StrategyMetrics:
     - return fields: ratio (e.g. 0.05 = 5%)
     - max_drawdown: negative ratio (e.g. -0.15 = 15% decline)
     - win_rate/exposure_ratio: ratio 0-1
-    - sharpe/sortino/calmar/profit_factor: score (dimensionless)
+    - sharpe/sortino/calmar/profit_factor: score (dimensionless); Calmar is
+      None when maximum drawdown is zero because the ratio is undefined
     - trades: count
     - avg_trade_return: notional-weighted mean net return per realized exit
     """

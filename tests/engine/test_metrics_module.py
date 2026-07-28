@@ -6,6 +6,7 @@ timestamps, TradePnL objects).
 
 from __future__ import annotations
 
+import warnings
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -218,8 +219,16 @@ class TestComputeAllMetrics:
             _make_trade_pnl(net_pnl=80, net_return=0.8),
             _make_trade_pnl(net_pnl=50, net_return=0.5),
         ]
-        m = _call_compute_all([10_000.0, 10_100.0, 10_180.0, 10_230.0], pnls, annualize=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            m = _call_compute_all(
+                [10_000.0, 10_100.0, 10_180.0, 10_230.0],
+                pnls,
+                annualize=True,
+            )
         assert isinstance(m.sharpe, float)
+        assert m.max_drawdown == pytest.approx(0.0)
+        assert m.calmar is None
 
     def test_max_drawdown_negative(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)

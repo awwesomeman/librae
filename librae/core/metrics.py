@@ -166,7 +166,9 @@ def compute_all(
         # conversion twice.
         sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=risk_free_rate)
         sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=risk_free_rate)
-        calmar = _safe_qs(qs.stats.calmar, returns, periods=periods)
+        # Calmar is undefined without a drawdown. Guard the denominator here
+        # because QuantStats divides by zero before _safe_qs can map inf to None.
+        calmar = _safe_qs(qs.stats.calmar, returns, periods=periods) if max_dd < 0.0 else None
         ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods)
 
     n_trades = len(trade_pnls)
