@@ -41,7 +41,7 @@ NETWORK="quant_network"
 # Derive container name from strategy config + mode.
 container_name() {
     local strategy="$1" mode="$2"
-    local config="${SCRIPT_DIR}/../strategies/${strategy}/config.yaml"
+    local config="${PROJECT_ROOT}/../strategies/${strategy}/config.yaml"
     # On a no-repo VM there's no strategies/ tree to read symbol from —
     # fall back to strategy name alone (still unique per running strategy+mode).
     if [[ ! -f "${config}" ]]; then
@@ -67,8 +67,11 @@ cmd_start() {
     local container
     container=$(container_name "${strategy}" "${mode}")
 
-    if [[ "${mode}" == "live" && -z "${BINANCE_API_KEY:-}" && -z "${SHIOAJI_API_KEY:-}" ]]; then
-        echo "live mode requires BINANCE_API_KEY or SHIOAJI_API_KEY in .env.secrets" >&2
+    if [[ "${mode}" == "live" \
+        && -z "${BINANCE_API_KEY:-}" \
+        && -z "${SHIOAJI_API_KEY:-}" \
+        && -z "${IBKR_HOST:-}" ]]; then
+        echo "live mode requires Binance, Shioaji, or IBKR settings in .env.secrets" >&2
         exit 1
     fi
 
@@ -76,8 +79,14 @@ cmd_start() {
         echo "Pulling ${image}:latest..."
         docker pull -q "${image}:latest" >/dev/null
     else
+        local build_context
+        build_context="$(cd "${PROJECT_ROOT}/.." && pwd)"
+        if [[ ! -d "${build_context}/strategies" ]]; then
+            echo "Missing sibling strategy repository: ${build_context}/strategies" >&2
+            exit 1
+        fi
         echo "Building trade image locally..."
-        docker build -q -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}/.." >/dev/null
+        docker build -q -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${build_context}" >/dev/null
     fi
 
     if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
@@ -114,6 +123,13 @@ cmd_start() {
             if [[ -n "${SHIOAJI_CA_PATH:-}" && -f "${PROJECT_ROOT}/${SHIOAJI_CA_PATH}" ]]; then
                 volume_args+=(-v "${PROJECT_ROOT}/.secrets:/app/.secrets:ro")
             fi
+        fi
+        if [[ -n "${IBKR_HOST:-}" ]]; then
+            env_args+=(
+                -e IBKR_HOST="${IBKR_HOST}"
+                -e IBKR_PORT="${IBKR_PORT:-7497}"
+                -e IBKR_CLIENT_ID="${IBKR_CLIENT_ID:-1}"
+            )
         fi
     fi
 

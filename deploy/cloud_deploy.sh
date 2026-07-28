@@ -41,9 +41,10 @@ fi
 : "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
 : "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env}"
 
-echo "[1/4] Syncing deploy/ + grafana provisioning to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
-ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/app/grafana"
+echo "[1/4] Syncing deployment files to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
+ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/db ${REMOTE_DIR}/app/grafana"
 rsync -az "${SCRIPT_DIR}/" "${TARGET}:${REMOTE_DIR}/deploy/"
+rsync -az "${PROJECT_ROOT}/db/timescale_init.sql" "${TARGET}:${REMOTE_DIR}/db/timescale_init.sql"
 rsync -az "${PROJECT_ROOT}/app/grafana/provisioning/" "${TARGET}:${REMOTE_DIR}/app/grafana/provisioning/"
 scp -q "${PROJECT_ROOT}/.env" "${TARGET}:${REMOTE_DIR}/.env"
 
@@ -52,7 +53,7 @@ ssh "${TARGET}" "cd ${REMOTE_DIR}/deploy && docker compose --env-file ../.env up
 
 echo "[3/4] Waiting for TimescaleDB, loading schema..."
 ssh "${TARGET}" "until docker exec quant_timescaledb pg_isready -U quant -d quant >/dev/null 2>&1; do sleep 2; done"
-ssh "${TARGET}" "docker exec -i quant_timescaledb psql -U quant -d quant < ${REMOTE_DIR}/deploy/timescale_init.sql" >/dev/null
+ssh "${TARGET}" "docker exec -i quant_timescaledb psql -U quant -d quant < ${REMOTE_DIR}/db/timescale_init.sql" >/dev/null
 
 echo "[4/4] Pushing dashboards via a temporary SSH tunnel..."
 ssh -N -L 3000:localhost:3000 "${TARGET}" &

@@ -36,7 +36,7 @@ services:
       - "${TSDB_BIND:-127.0.0.1}:${TSDB_PORT:-5432}:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
-      - ./timescale_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ../db/timescale_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     environment:
       - POSTGRES_DB=quant
       - POSTGRES_USER=quant

@@ -21,6 +21,13 @@ LIBRAE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # this script sources it below, and trade.sh/docker-compose do the same at
 # container start; librae's own code never reads .env off disk itself.
 BUILD_CONTEXT="$(cd "${LIBRAE_ROOT}/.." && pwd)"
+STRATEGIES_DIR="${BUILD_CONTEXT}/strategies"
+
+if [[ ! -d "${STRATEGIES_DIR}" ]]; then
+    echo "Missing sibling strategy repository: ${STRATEGIES_DIR}" >&2
+    echo "Place strategies/ next to librae/ before building the trade image." >&2
+    exit 1
+fi
 
 if [[ -f "${LIBRAE_ROOT}/.env" ]]; then
     set -a

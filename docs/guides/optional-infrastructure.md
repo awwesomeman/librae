@@ -105,7 +105,24 @@ The `deploy/`, `app/`, and `scripts/` directories are operational examples,
 not engine APIs. They show one Docker/Grafana/VM arrangement and can be used,
 replaced, or ignored.
 
+The trade image intentionally combines this engine repository with a separate
+`strategies/` repository in the same parent workspace:
+
+```text
+workspace/
+├── librae/
+└── strategies/
+```
+
+Run `deploy/build_push.sh` from `librae/`; it fails before invoking Docker when
+that sibling repository is absent. The shared image installs the `db`,
+`crypto-live`, `tw-live`, and `us-live` extras. Infrastructure-only deployment
+via `cloud_deploy.sh` does not copy either application repository; it syncs the
+compose file, `db/timescale_init.sql`, Grafana provisioning, and `.env`.
+
 `LiveTrader.run()` is a blocking polling loop. A deployment should run it
 under a supervisor appropriate to the environment and must provide durable
 state, secret management, monitoring, and recovery procedures before live
-capital is enabled.
+capital is enabled. An operator can call `LiveTrader.halt(reason)` to persist a
+fail-closed halt and cancel tracked broker orders; resumption requires an
+explicit `reset_halt()` after reconciliation.
