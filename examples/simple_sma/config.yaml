@@ -32,3 +32,10 @@ strategy:
   perf:
     # H1 24/7 data has 24 * 365 return observations per year.
     periods_per_year: 8760
+
+# Operational runtime settings are top-level and do not change config_hash.
+# poll_seconds is required for sim/live; concurrent fetching is opt-in because
+# some vendor SDK clients are not thread-safe.
+# poll_seconds: 5
+# reconciliation_interval_seconds: 300
+# market_data_workers: 1

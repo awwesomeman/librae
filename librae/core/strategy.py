@@ -1,9 +1,9 @@
 """Strategy protocol and data types for the backtest engine.
 
 Defines the contract between strategies and the engine:
-- Strategy implements on_bar(ctx) → list[OrderIntent] | PortfolioTargets
+- Strategy implements on_bar(ctx) → list[OrderIntent] | PortfolioTargets | MultiLegOrder
 - Engine provides Context with market data + portfolio state
-- Engine executes order intents or portfolio targets via the execution layer
+- Engine executes symbol intents, portfolio targets, or a multi-leg group
 """
 
 from __future__ import annotations
@@ -199,7 +199,44 @@ class PortfolioTargets:
         return self
 
 
-StrategyDecision = list[OrderIntent] | PortfolioTargets
+@dataclass(frozen=True)
+class MultiLegOrder:
+    """One best-effort hedge group executed in declared leg order.
+
+    This contract is intended for spreads across instruments or venues where
+    no atomic exchange-native combo order exists. Every leg must be explicitly
+    sized. Backtest/sim uses one synchronous market-data event; live submits
+    one leg at a time and unwinds filled legs if the group cannot complete
+    within ``max_unhedged_seconds`` or a leg fails.
+    """
+
+    legs: tuple[OrderIntent, ...]
+    max_unhedged_seconds: float = 5.0
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        legs = tuple(self.legs)
+        if len(legs) < 2:
+            raise ValueError("MultiLegOrder requires at least two legs")
+        if any(not isinstance(leg, OrderIntent) for leg in legs):
+            raise TypeError("MultiLegOrder.legs must contain only OrderIntent values")
+        if any(not leg.symbol for leg in legs):
+            raise ValueError("MultiLegOrder legs require explicit symbols")
+        if any(leg.quantity is None for leg in legs):
+            raise ValueError("MultiLegOrder legs require explicit quantities")
+        symbols = [leg.symbol for leg in legs]
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("MultiLegOrder requires at most one leg per symbol")
+        _validate_positive_finite_number(
+            self.max_unhedged_seconds,
+            "MultiLegOrder.max_unhedged_seconds",
+        )
+        if not isinstance(self.reason, str):
+            raise TypeError("MultiLegOrder.reason must be a string")
+        object.__setattr__(self, "legs", legs)
+
+
+StrategyDecision = list[OrderIntent] | PortfolioTargets | MultiLegOrder
 
 
 @dataclass(frozen=True)
@@ -252,7 +289,7 @@ class Strategy(ABC):
 
     @abstractmethod
     def on_bar(self, ctx: Context) -> StrategyDecision:
-        """Return order intents, portfolio targets, or ``[]`` for no decision."""
+        """Return intents, targets, a multi-leg order, or ``[]``."""
         ...
 
 

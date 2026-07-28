@@ -89,6 +89,10 @@ perf:
   periods_per_year: 8760  # H1 24/7 returns
 params:
   lookback: 20
+# Operational runtime settings (top-level, not strategy params):
+poll_seconds: 5
+reconciliation_interval_seconds: 300
+market_data_workers: 1
 ```
 
 Each example config comments the values it chooses. The
@@ -125,6 +129,34 @@ state. When `live_order_timeout_seconds` is set, its age starts at the durable
 wall-clock placement attempt. Expiry refreshes the broker state, cancels only
 the remaining quantity, records any additional partial fill, and halts for
 operator review. `null` leaves lifetime to the broker.
+
+## Multi-leg arbitrage decisions
+
+Use `MultiLegOrder` when the legs form one hedge group and must not be treated
+as unrelated strategy decisions:
+
+```python
+from librae import MultiLegOrder, OrderIntent
+
+return MultiLegOrder(
+    legs=(
+        OrderIntent(action="long", symbol="TXF_NEAR", quantity=1),
+        OrderIntent(action="short", symbol="TXF_NEXT", quantity=1),
+    ),
+    max_unhedged_seconds=2.0,
+    reason="calendar spread",
+)
+```
+
+The same shape covers Binance spot/perpetual/delivery-future spreads after
+applying each contract's multiplier to the explicit quantities. Backtest/sim
+is a synchronous OHLCV approximation. Live is serial best-effort hedging:
+confirmed fills are durable, a failed or overdue group is unwound, and trading
+stays halted for review. It is not an atomic combo order.
+
+Do not configure US-listed `MU` and `MUUSDT` as though USD and USDT were the
+same currency. That case remains rejected until a time-varying FX mark and
+multi-currency cash/funding ledger are supplied.
 
 ## Add infrastructure only when needed
 

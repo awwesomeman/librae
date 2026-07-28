@@ -29,6 +29,7 @@ from librae.core import EPSILON
 from .cost_model import CostModel
 from .strategy import (
     Fill,
+    MultiLegOrder,
     OrderAction,
     OrderIntent,
     PortfolioTargets,
@@ -1622,9 +1623,13 @@ def validate_strategy_decision(
     """Validate one strategy return value before it enters engine state."""
     if isinstance(decision, PortfolioTargets):
         symbols = set(decision.weights)
+    elif isinstance(decision, MultiLegOrder):
+        symbols = {leg.symbol for leg in decision.legs}
     else:
         if not isinstance(decision, list):
-            raise TypeError("strategy decision must be list[OrderIntent] or PortfolioTargets")
+            raise TypeError(
+                "strategy decision must be list[OrderIntent], PortfolioTargets, or MultiLegOrder"
+            )
         invalid = [
             type(intent).__name__ for intent in decision if not isinstance(intent, OrderIntent)
         ]
@@ -1671,8 +1676,8 @@ def partition_pending_decision(
     """Split a decision into executable-now and waiting-for-data parts.
 
     Per-symbol order intents become eligible on that symbol's next observed bar.
-    PortfolioTargets remain one synchronous basket and wait until every
-    non-zero target and currently held symbol has a bar.
+    PortfolioTargets and MultiLegOrder remain synchronous and wait until every
+    required symbol has a bar.
     """
     if isinstance(decision, PortfolioTargets):
         target_symbols = {
@@ -1680,6 +1685,10 @@ def partition_pending_decision(
         }
         required_symbols = set(positions) | target_symbols
         if required_symbols.issubset(bars):
+            return decision, []
+        return [], decision
+    if isinstance(decision, MultiLegOrder):
+        if {leg.symbol for leg in decision.legs}.issubset(bars):
             return decision, []
         return [], decision
 
@@ -1705,8 +1714,11 @@ def merge_pending_decisions(
         return new_decision
     if not new_decision:
         return pending
-    if isinstance(pending, PortfolioTargets) or isinstance(new_decision, PortfolioTargets):
-        raise ValueError("cannot replace a pending intent with PortfolioTargets")
+    if isinstance(pending, (PortfolioTargets, MultiLegOrder)) or isinstance(
+        new_decision,
+        (PortfolioTargets, MultiLegOrder),
+    ):
+        raise ValueError("cannot replace a pending grouped decision")
 
     pending_intents = list(pending)
     new_intents = list(new_decision)
@@ -1761,7 +1773,12 @@ def execute_pending_decision_and_stops(
             if effective_fill == "open":
                 same_bar_protection_symbols.update(pending_decision.weights)
         else:
-            for intent in pending_decision:
+            intents = (
+                pending_decision.legs
+                if isinstance(pending_decision, MultiLegOrder)
+                else pending_decision
+            )
+            for intent in intents:
                 symbol = intent.symbol or primary_symbol
                 if intent.action in ("long", "short") and _intent_executes_at_open(
                     intent,
@@ -1802,8 +1819,13 @@ def execute_pending_decision_and_stops(
                 **common_kwargs,
             )
         else:
+            intents = (
+                list(pending_decision.legs)
+                if isinstance(pending_decision, MultiLegOrder)
+                else pending_decision
+            )
             fill_result = execute_order_intents(
-                pending_decision,
+                intents,
                 positions,
                 cash,
                 ts,

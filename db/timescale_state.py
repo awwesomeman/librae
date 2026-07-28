@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import psycopg2.extras
 from librae.live.state import LiveRuntimeState, TrackedOrder
 
-from db import get_conn
+from db import get_conn, get_pool
 
 
 class TimescaleLiveStateStore:
@@ -16,6 +16,7 @@ class TimescaleLiveStateStore:
 
     def __init__(self, dsn: str | None = None) -> None:
         self._dsn = dsn
+        self._lease_connections: dict[str, object] = {}
 
     def load(self, state_key: str) -> LiveRuntimeState | None:
         with get_conn(self._dsn) as conn:
@@ -30,6 +31,46 @@ class TimescaleLiveStateStore:
             return None
         raw = json.loads(row[0]) if isinstance(row[0], str) else row[0]
         return LiveRuntimeState.from_dict(raw)
+
+    def acquire_lease(self, state_key: str) -> bool:
+        """Hold one PostgreSQL advisory lock for this process lifetime."""
+        if state_key in self._lease_connections:
+            return True
+        pool = get_pool(self._dsn)
+        conn = pool.getconn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                (state_key,),
+            )
+            acquired = bool(cur.fetchone()[0])
+            cur.close()
+            conn.commit()
+        except Exception:
+            pool.putconn(conn, close=bool(conn.closed))
+            raise
+        if not acquired:
+            pool.putconn(conn, close=bool(conn.closed))
+            return False
+        self._lease_connections[state_key] = conn
+        return True
+
+    def release_lease(self, state_key: str) -> None:
+        conn = self._lease_connections.pop(state_key, None)
+        if conn is None:
+            return
+        pool = get_pool(self._dsn)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                (state_key,),
+            )
+            cur.close()
+            conn.commit()
+        finally:
+            pool.putconn(conn, close=bool(conn.closed))
 
     def save(
         self,

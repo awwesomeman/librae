@@ -63,6 +63,7 @@ from librae.core.market_data import validate_ohlcv_values
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
+    MultiLegOrder,
     PortfolioTargets,
     Position,
     PositionState,
@@ -518,7 +519,7 @@ class Backtest:
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
                 pending_decision = []
-            elif not isinstance(pending_decision, PortfolioTargets):
+            elif not isinstance(pending_decision, (PortfolioTargets, MultiLegOrder)):
                 ctx = Context(
                     ts=ts,
                     symbol=primary_symbol,

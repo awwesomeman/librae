@@ -8,6 +8,8 @@ Skills: python, quant
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from threading import Event
+from time import perf_counter
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -18,6 +20,7 @@ from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent
 from librae.core.run_config import ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
+    MultiLegOrder,
     OrderIntent,
     PortfolioTargets,
     PositionState,
@@ -25,7 +28,7 @@ from librae.core.strategy import (
 )
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest
-from librae.live.state import MemoryLiveStateStore
+from librae.live.state import LiveMultiLeg, MemoryLiveStateStore
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -396,6 +399,38 @@ class TestLiveTrader:
         runner = self._make_runner()
         runner.run(max_iterations=2)
         # Should not hang — reaching here means it stopped
+
+    def test_market_data_fetch_concurrency_is_explicit_and_bounded(self):
+        started = {"AAA": Event(), "BBB": Event()}
+
+        def fetcher(symbol, *_args, **_kwargs):
+            started[symbol].set()
+            other = "BBB" if symbol == "AAA" else "AAA"
+            assert started[other].wait(timeout=1)
+            return _make_ohlcv_df()
+
+        runner = self._make_runner(
+            fetcher=fetcher,
+            config=_test_cfg(
+                symbols=["AAA", "BBB"],
+                market_data_workers=2,
+            ),
+        )
+
+        frames = runner._fetch_runtime_frames()
+
+        assert list(frames) == ["AAA", "BBB"]
+        assert set(runner._cycle_fetch_seconds) == {"AAA", "BBB"}
+
+    def test_cycle_diagnostics_marks_poll_deadline_miss(self):
+        runner = self._make_runner(config=_test_cfg(poll_seconds=1))
+
+        runner._finish_cycle_diagnostics(TEST_CLOCK_NOW, perf_counter() - 2.0)
+
+        diagnostics = runner.last_cycle_diagnostics
+        assert diagnostics is not None
+        assert diagnostics.deadline_missed is True
+        assert diagnostics.cycle_seconds >= 2.0
 
     def test_live_without_default_db_requires_explicit_state_store(self):
         with pytest.raises(ValueError, match="requires durable state"):
@@ -1583,6 +1618,201 @@ class TestLiveExecutionLifecycle:
         assert runner._positions["BTCUSDT"].entry_commission == 0.25
         assert len(runner._active_orders) == 1
         assert runner._active_orders[0].status == "partial"
+
+    def test_target_rebalance_replans_from_actual_fill_before_next_symbol(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = [
+            _broker_report(
+                order_id="aaa-open",
+                quantity=500.0,
+                average=200.0,
+                executed_at=TEST_CLOCK_NOW,
+            ),
+            {
+                "id": "aaa-reduce",
+                "status": "submitted",
+                "amount": 250.0,
+                "filled": 0.0,
+            },
+        ]
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["AAA", "BBB"]),
+        )
+        runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
+
+        complete = runner._execute_live_decision(
+            PortfolioTargets(weights={"AAA": 0.5, "BBB": 0.5}),
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        second = adapter.place_order.call_args_list[1].args[0]
+        assert second["symbol"] == "AAA"
+        assert second["side"] == "sell"
+        assert second["quantity"] == pytest.approx(250.0)
+
+    def test_multi_leg_order_fills_serially(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=f"order-{adapter.place_order.call_count}",
+            quantity=signal["quantity"],
+            average=100.0,
+            executed_at=TEST_CLOCK_NOW,
+        )
+
+        class BasisTrade(Strategy):
+            def on_bar(self, ctx):
+                return MultiLegOrder(
+                    legs=(
+                        OrderIntent(action="long", symbol="SPOT", quantity=2.0),
+                        OrderIntent(action="short", symbol="PERP", quantity=2.0),
+                    ),
+                    reason="basis",
+                )
+
+        runner = self._make_trader(
+            BasisTrade(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
+        )
+        runner.run(max_iterations=1)
+
+        assert [call.args[0]["symbol"] for call in adapter.place_order.call_args_list] == [
+            "SPOT",
+            "PERP",
+        ]
+        assert runner._positions["SPOT"].side == "long"
+        assert runner._positions["PERP"].side == "short"
+        assert runner._live_multi_leg is None
+        assert runner._halted is False
+
+    def test_failed_multi_leg_order_unwinds_confirmed_leg(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = [
+            _broker_report(
+                order_id="spot",
+                quantity=2.0,
+                average=100.0,
+                executed_at=TEST_CLOCK_NOW,
+            ),
+            {"id": "perp", "status": "rejected"},
+            _broker_report(
+                order_id="unwind",
+                quantity=2.0,
+                average=99.0,
+                executed_at=TEST_CLOCK_NOW,
+            ),
+        ]
+
+        class BasisTrade(Strategy):
+            def on_bar(self, ctx):
+                return MultiLegOrder(
+                    legs=(
+                        OrderIntent(action="long", symbol="SPOT", quantity=2.0),
+                        OrderIntent(action="short", symbol="PERP", quantity=2.0),
+                    ),
+                    reason="basis",
+                )
+
+        runner = self._make_trader(
+            BasisTrade(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
+        )
+        runner.run(max_iterations=2)
+
+        assert adapter.place_order.call_count == 3
+        assert adapter.place_order.call_args_list[-1].args[0]["side"] == "sell"
+        assert runner._positions == {}
+        assert runner._live_multi_leg is None
+        assert runner._halted is True
+
+    def test_multi_leg_deadline_uses_local_runtime_clock(self):
+        now = [TEST_CLOCK_NOW]
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
+            clock=lambda: now[0],
+        )
+        order = MultiLegOrder(
+            legs=(
+                OrderIntent(action="long", symbol="SPOT", quantity=1.0),
+                OrderIntent(action="short", symbol="PERP", quantity=1.0),
+            ),
+            max_unhedged_seconds=2.0,
+        )
+        runner._live_multi_leg = LiveMultiLeg(
+            order=order,
+            reference_prices={"SPOT": 100.0, "PERP": 100.0},
+            reference_volumes={"SPOT": None, "PERP": None},
+            lagged_adv_by_symbol={},
+            decided_at=TEST_CLOCK_NOW,
+            first_fill_at=TEST_CLOCK_NOW,
+        )
+
+        assert runner._multi_leg_deadline_missed() is False
+        now[0] += timedelta(seconds=2)
+        assert runner._multi_leg_deadline_missed() is True
+
+    def test_post_fill_risk_uses_broker_price_and_halts(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="slipped",
+            quantity=100.0,
+            average=1_000.0,
+            executed_at=TEST_CLOCK_NOW,
+        )
+
+        class Buy(Strategy):
+            def on_bar(self, ctx):
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=100.0)]
+
+        runner = self._make_trader(
+            Buy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                risk=RiskPolicy(max_position_weight=0.5),
+            ),
+        )
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+
+    def test_periodic_position_mismatch_halts(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", reconciliation_interval_seconds=1),
+        )
+        runner._last_reconciliation_at = TEST_CLOCK_NOW - timedelta(seconds=2)
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 1.0,
+            "avg_price": 100.0,
+        }
+
+        runner._maybe_reconcile_runtime()
+
+        assert runner._halted is True
+
+    def test_run_releases_lease_when_startup_initialization_raises(self):
+        store = MemoryLiveStateStore()
+        runner = self._make_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
+        runner._reconcile_positions = MagicMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            runner.run(max_iterations=1)
+
+        assert store.acquire_lease(runner._state_key) is True
 
     def test_volume_budget_is_cumulative_across_same_symbol_intents(self):
         adapter = _mock_order_adapter()

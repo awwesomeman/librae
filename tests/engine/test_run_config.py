@@ -48,6 +48,20 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
     assert backtest.config_hash != simulation.config_hash
 
 
+def test_runtime_operational_settings_are_validated_but_do_not_change_config_hash() -> None:
+    default = _config()
+    tuned = _config(reconciliation_interval_seconds=30, market_data_workers=4)
+
+    assert tuned.reconciliation_interval_seconds == 30
+    assert tuned.market_data_workers == 4
+    assert tuned.config_hash == default.config_hash
+    for field in ("reconciliation_interval_seconds", "market_data_workers"):
+        with pytest.raises(ValueError, match=field):
+            _config(**{field: 0})
+        with pytest.raises(ValueError, match=field):
+            _config(**{field: True})
+
+
 def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     unlimited = _config(execution=ExecutionPolicy(max_bar_volume_participation_rate=None))
     capped = _config(execution=ExecutionPolicy(max_bar_volume_participation_rate=0.1))

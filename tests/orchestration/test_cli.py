@@ -46,16 +46,22 @@ class TestParseWithConfig:
         ns = parse_with_config(p, config_path=None)
         assert ns.mode == "backtest"
         assert ns.poll_seconds is None  # no implicit default — must be set for sim/live
+        assert ns.reconciliation_interval_seconds is None
+        assert ns.market_data_workers is None
 
     def test_yaml_scalars_become_argparse_defaults(self, config_yaml):
         cfg = config_yaml("""\
             mode: sim
             poll-seconds: 30
+            reconciliation-interval-seconds: 60
+            market-data-workers: 2
         """)
         p = base_parser("test")
         ns = parse_with_config(p, config_path=cfg)
         assert ns.mode == "sim"
         assert ns.poll_seconds == 30
+        assert ns.reconciliation_interval_seconds == 60
+        assert ns.market_data_workers == 2
 
     def test_cli_overrides_yaml(self, config_yaml, monkeypatch):
         cfg = config_yaml("""\

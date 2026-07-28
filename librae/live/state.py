@@ -11,10 +11,16 @@ from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from librae.core.run_config import LiveMode
-from librae.core.strategy import OrderIntent, PortfolioTargets, PositionState, StrategyDecision
+from librae.core.strategy import (
+    MultiLegOrder,
+    OrderIntent,
+    PortfolioTargets,
+    PositionState,
+    StrategyDecision,
+)
 
 from .executor import OrderRequest, OrderStatus
 
@@ -38,7 +44,7 @@ def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 6
+_STATE_SCHEMA_VERSION = 7
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -48,6 +54,15 @@ def _decision_to_dict(decision: StrategyDecision) -> dict:
             "value": {
                 "weights": dict(decision.weights),
                 "fill_price": decision.fill_price,
+                "reason": decision.reason,
+            },
+        }
+    if isinstance(decision, MultiLegOrder):
+        return {
+            "kind": "multi_leg_order",
+            "value": {
+                "legs": [asdict(leg) for leg in decision.legs],
+                "max_unhedged_seconds": decision.max_unhedged_seconds,
                 "reason": decision.reason,
             },
         }
@@ -61,6 +76,12 @@ def _decision_from_dict(raw: dict) -> StrategyDecision:
         return PortfolioTargets(**value)
     if kind == "order_intents" and isinstance(value, list):
         return [OrderIntent(**item) for item in value]
+    if kind == "multi_leg_order" and isinstance(value, dict):
+        return MultiLegOrder(
+            legs=tuple(OrderIntent(**item) for item in value["legs"]),
+            max_unhedged_seconds=float(value["max_unhedged_seconds"]),
+            reason=str(value["reason"]),
+        )
     raise ValueError("invalid persisted strategy decision")
 
 
@@ -125,6 +146,119 @@ class TrackedOrder:
 
 
 @dataclass
+class LiveRebalance:
+    """Restartable live target execution using one confirmed leg at a time."""
+
+    targets: PortfolioTargets
+    reference_prices: dict[str, float]
+    reference_volumes: dict[str, float | None]
+    lagged_adv_by_symbol: dict[str, float]
+    decided_at: datetime
+    next_sequence: int = 0
+    filled_bar_quantity_by_symbol: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "targets": _decision_to_dict(self.targets),
+            "reference_prices": self.reference_prices,
+            "reference_volumes": self.reference_volumes,
+            "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
+            "decided_at": self.decided_at.isoformat(),
+            "next_sequence": self.next_sequence,
+            "filled_bar_quantity_by_symbol": self.filled_bar_quantity_by_symbol,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> LiveRebalance:
+        targets = _decision_from_dict(raw["targets"])
+        if not isinstance(targets, PortfolioTargets):
+            raise ValueError("live rebalance must contain PortfolioTargets")
+        decided_at = _to_utc(raw["decided_at"])
+        if decided_at is None:
+            raise ValueError("live rebalance is missing decided_at")
+        next_sequence = int(raw["next_sequence"])
+        if next_sequence < 0:
+            raise ValueError("live rebalance next_sequence must be non-negative")
+        return cls(
+            targets=targets,
+            reference_prices={
+                str(symbol): float(price) for symbol, price in raw["reference_prices"].items()
+            },
+            reference_volumes={
+                str(symbol): (float(volume) if volume is not None else None)
+                for symbol, volume in raw["reference_volumes"].items()
+            },
+            lagged_adv_by_symbol={
+                str(symbol): float(value) for symbol, value in raw["lagged_adv_by_symbol"].items()
+            },
+            decided_at=decided_at,
+            next_sequence=next_sequence,
+            filled_bar_quantity_by_symbol={
+                str(symbol): float(quantity)
+                for symbol, quantity in raw["filled_bar_quantity_by_symbol"].items()
+            },
+        )
+
+
+@dataclass
+class LiveMultiLeg:
+    """Restartable best-effort multi-leg execution and compensating unwind."""
+
+    order: MultiLegOrder
+    reference_prices: dict[str, float]
+    reference_volumes: dict[str, float | None]
+    lagged_adv_by_symbol: dict[str, float]
+    decided_at: datetime
+    next_leg_index: int = 0
+    first_fill_at: datetime | None = None
+    phase: Literal["executing", "unwinding", "manual"] = "executing"
+
+    def to_dict(self) -> dict:
+        return {
+            "order": _decision_to_dict(self.order),
+            "reference_prices": self.reference_prices,
+            "reference_volumes": self.reference_volumes,
+            "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
+            "decided_at": self.decided_at.isoformat(),
+            "next_leg_index": self.next_leg_index,
+            "first_fill_at": (self.first_fill_at.isoformat() if self.first_fill_at else None),
+            "phase": self.phase,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> LiveMultiLeg:
+        order = _decision_from_dict(raw["order"])
+        if not isinstance(order, MultiLegOrder):
+            raise ValueError("live multi-leg state must contain MultiLegOrder")
+        decided_at = _to_utc(raw["decided_at"])
+        if decided_at is None:
+            raise ValueError("live multi-leg state is missing decided_at")
+        phase = str(raw["phase"])
+        if phase not in ("executing", "unwinding", "manual"):
+            raise ValueError(f"invalid live multi-leg phase: {phase!r}")
+        next_leg_index = int(raw["next_leg_index"])
+        if not 0 <= next_leg_index <= len(order.legs):
+            raise ValueError("live multi-leg next_leg_index is out of range")
+        return cls(
+            order=order,
+            reference_prices={
+                str(symbol): float(price) for symbol, price in raw["reference_prices"].items()
+            },
+            reference_volumes={
+                str(symbol): (float(volume) if volume is not None else None)
+                for symbol, volume in raw["reference_volumes"].items()
+            },
+            lagged_adv_by_symbol={
+                str(symbol): float(value) for symbol, value in raw["lagged_adv_by_symbol"].items()
+            },
+            decided_at=decided_at,
+            next_leg_index=next_leg_index,
+            first_fill_at=_to_utc(raw["first_fill_at"]),
+            phase=phase,
+        )
+
+
+@dataclass
 class LiveRuntimeState:
     """One restartable strategy deployment checkpoint."""
 
@@ -139,6 +273,8 @@ class LiveRuntimeState:
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     pending_decision: StrategyDecision = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
+    live_rebalance: LiveRebalance | None = None
+    live_multi_leg: LiveMultiLeg | None = None
     equity_peak: float = 0.0
     prev_equity: float = 0.0
     trade_count: int = 0
@@ -170,6 +306,8 @@ class LiveRuntimeState:
             },
             "pending_decision": _decision_to_dict(self.pending_decision),
             "active_orders": [order.to_dict() for order in self.active_orders],
+            "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
+            "live_multi_leg": (self.live_multi_leg.to_dict() if self.live_multi_leg else None),
             "equity_peak": self.equity_peak,
             "prev_equity": self.prev_equity,
             "trade_count": self.trade_count,
@@ -202,6 +340,16 @@ class LiveRuntimeState:
             last_bar_ts=_bar_timestamps_from_dict(raw["last_bar_ts"]),
             pending_decision=_decision_from_dict(raw["pending_decision"]),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
+            live_rebalance=(
+                LiveRebalance.from_dict(raw["live_rebalance"])
+                if raw["live_rebalance"] is not None
+                else None
+            ),
+            live_multi_leg=(
+                LiveMultiLeg.from_dict(raw["live_multi_leg"])
+                if raw["live_multi_leg"] is not None
+                else None
+            ),
             equity_peak=float(raw["equity_peak"]),
             prev_equity=float(raw["prev_equity"]),
             trade_count=int(raw["trade_count"]),
@@ -230,6 +378,10 @@ class LiveStateStore(Protocol):
         orders: Sequence[TrackedOrder] = (),
     ) -> None: ...
 
+    def acquire_lease(self, state_key: str) -> bool: ...
+
+    def release_lease(self, state_key: str) -> None: ...
+
 
 class MemoryLiveStateStore:
     """Process-local store for deterministic tests; not restart durability."""
@@ -237,6 +389,7 @@ class MemoryLiveStateStore:
     def __init__(self) -> None:
         self._states: dict[str, LiveRuntimeState] = {}
         self.orders: dict[str, TrackedOrder] = {}
+        self._leases: set[str] = set()
 
     def load(self, state_key: str) -> LiveRuntimeState | None:
         state = self._states.get(state_key)
@@ -250,3 +403,12 @@ class MemoryLiveStateStore:
         self._states[state.state_key] = deepcopy(state)
         for order in orders:
             self.orders[order.request.client_order_id] = deepcopy(order)
+
+    def acquire_lease(self, state_key: str) -> bool:
+        if state_key in self._leases:
+            return False
+        self._leases.add(state_key)
+        return True
+
+    def release_lease(self, state_key: str) -> None:
+        self._leases.discard(state_key)

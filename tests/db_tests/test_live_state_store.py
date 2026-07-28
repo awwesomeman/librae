@@ -61,3 +61,23 @@ def test_load_restores_json_checkpoint(mock_get_conn):
     restored = TimescaleLiveStateStore().load("live:abc")
 
     assert restored == _state()
+
+
+@patch("db.timescale_state.get_pool")
+def test_advisory_lease_holds_connection_until_release(mock_get_pool):
+    pool = MagicMock()
+    conn = MagicMock()
+    conn.closed = 0
+    cursor = conn.cursor.return_value
+    cursor.fetchone.return_value = (True,)
+    mock_get_pool.return_value = pool
+    pool.getconn.return_value = conn
+    store = TimescaleLiveStateStore()
+
+    assert store.acquire_lease("live:abc") is True
+    pool.putconn.assert_not_called()
+
+    store.release_lease("live:abc")
+
+    assert cursor.execute.call_count == 2
+    pool.putconn.assert_called_once_with(conn, close=False)

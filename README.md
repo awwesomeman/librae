@@ -10,8 +10,9 @@ strategy interface.
 
 ## Why Librae
 
-- **One decision API** — express single-symbol orders with `OrderIntent` or complete
-  portfolio allocations with `PortfolioTargets`.
+- **One decision API** — express symbol orders with `OrderIntent`, complete
+  allocations with `PortfolioTargets`, or an explicitly sized best-effort
+  hedge group with `MultiLegOrder`.
 - **One execution-policy source** — fill-field, current-bar participation,
   optional session-level lagged-ADV assumptions, and the local live-order
   timeout live in typed
@@ -53,8 +54,8 @@ uv sync --extra test --extra dev
 uv run python -m examples.simple_sma.run --mode backtest --no-db
 ```
 
-A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects or
-`PortfolioTargets`. Your data pipeline supplies timezone-aware OHLCV and
+A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects,
+`PortfolioTargets`, or `MultiLegOrder`. Your data pipeline supplies timezone-aware OHLCV and
 point-in-time features; Librae owns validation, execution timing, portfolio
 state, costs, and output. The [examples](examples/README.md) show the complete
 `RunConfig`, DataFrame, and engine wiring.
@@ -82,8 +83,8 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Single-asset research | Supported with next-observed-bar simulated fills |
 | Cross-sectional selection and allocation | Configured candidate universe with point-in-time eligibility; optimizer remains strategy-owned |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
-| Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable order lifecycle with optional local timeout; sequential, not atomic across a basket |
-| Arbitrage | OHLCV research approximation only; production multi-leg execution requires an explicit venue/adapter capability |
+| Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
+| Arbitrage | Explicitly sized `MultiLegOrder`; synchronous research approximation and serial live hedging with deadline/fail-closed unwind; not atomic venue execution |
 | Multi-currency portfolios | Not yet modeled; the live/sim cash ledger is single-currency |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
 | Dynamic universes | Membership/eligibility data remains upstream; runtime subscription lifecycle is not yet engine-managed |

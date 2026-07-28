@@ -92,7 +92,7 @@ This is a different thing from the "Data flow" section below: that one is about 
 ```
 Strategy ETL (utils.py)  →  DataFrame (MultiIndex + signal columns)
                               ↓
-Strategy logic (strategy.py)  →  on_bar(ctx) → list[OrderIntent] | PortfolioTargets
+Strategy logic (strategy.py)  →  on_bar(ctx) → list[OrderIntent] | PortfolioTargets | MultiLegOrder
                               ↓
 Engine (engine.py)     →  execute_order_intents / execute_portfolio_targets
                               ↓
@@ -234,6 +234,46 @@ bars from every non-zero target and currently held symbol, and is never
 silently replaced. Use per-symbol order intents for asynchronous cross-market
 execution.
 
+#### Multi-leg arbitrage contract
+
+`MultiLegOrder` represents a spread or hedge group where no atomic
+exchange-native combo order exists:
+
+```python
+from librae import MultiLegOrder, OrderIntent
+
+return MultiLegOrder(
+    legs=(
+        OrderIntent(action="long", symbol="BTCUSDT", quantity=0.10),
+        OrderIntent(action="short", symbol="BTCUSDT-PERP", quantity=0.10),
+    ),
+    max_unhedged_seconds=3.0,
+    reason="spot-perpetual basis",
+)
+```
+
+Every leg requires an explicit symbol and quantity, symbols cannot repeat, and
+tuple order is the live hedge order. Backtest/sim waits for one event containing
+every leg and executes a synchronous OHLCV approximation. Live requires flat
+leg symbols before entry, submits one leg at a time, and starts the unhedged
+deadline at the first confirmed fill. Rejection, cancellation, timeout, or a
+missed hedge deadline cancels the active leg, submits market closes for
+confirmed group exposure, persists `halted`, and requires reconciliation before
+`reset_halt()`.
+
+This is best-effort hedging, not an atomicity claim. TAIFEX
+near/next-future/cash-proxy and Binance spot/perpetual/delivery-future spreads
+fit when all legs share one accounting currency and instrument multipliers
+produce correctly matched quantities. Binance `MUUSDT` versus US-listed `MU`
+does not yet fit the accounting boundary: USD and USDT require a time-varying
+FX mark plus separate cash/funding ledgers. Librae rejects mixed accounting
+currencies instead of assuming USDT = USD.
+
+Continuous near/next/quarterly aliases remain research series and are not
+orderable. A live deployment supplies concrete contract symbols/expiries in
+`instrument_overrides`; contract selection and roll scheduling remain upstream
+strategy/data responsibilities.
+
 Execution then deliberately diverges:
 
 - **Backtest/sim:** an OrderIntent decided at T is eligible on that symbol's next
@@ -279,7 +319,10 @@ product-specific exceptional closure must provide already filtered data.
 Cross-market baskets must provide coherent event labels; broker submissions
 remain sequential reductions-then-additions, not exchange-level atomic.
 `PortfolioTargets` expresses a desired portfolio state, not a transactional
-all-or-none order.
+all-or-none order. Live target legs are replanned only after the previous
+broker fill is confirmed, using actual cash and positions, so slippage and
+confirmed fill outcomes change the remaining quantities instead of preserving a stale
+precomputed basket.
 
 Acknowledgement is not execution. Submitted/accepted/`cancel_pending`/cancelled/rejected
 reports never mutate positions. A partial report commits only its confirmed
@@ -301,6 +344,11 @@ including across restart. The runtime also rejects live bar-field fills
 `PortfolioTargets.fill_price`, and local stop/take-profit parameters; those
 cannot be inferred later from a completed range. Protective orders require a
 broker-native implementation.
+
+Every exposure-increasing live fill is checked again against confirmed
+position and gross limits. Net exposure is checked after a multi-leg group
+completes because transient legging exposure is governed by
+`max_unhedged_seconds`. A breach halts dependent execution.
 
 Incremental cache retention is capped by `warmup_periods` (an injected warmup
 fetcher may provide more initial history). This implementation favors
@@ -374,6 +422,8 @@ from librae import ExecutionPolicy, RiskPolicy, RunConfig
 
 config = RunConfig(
     ...,
+    reconciliation_interval_seconds=300,
+    market_data_workers=1,
     execution=ExecutionPolicy(
         default_fill_price="open",
         max_bar_volume_participation_rate=0.1,
@@ -398,6 +448,14 @@ config = RunConfig(
 `execution`, `risk`, and `params` are separate SSOTs. Putting execution or
 risk keys in `params` raises immediately; the engine never reparses a
 free-form strategy dictionary for portfolio controls.
+
+`reconciliation_interval_seconds` and `market_data_workers` are operational
+runtime settings rather than strategy semantics, so they do not change
+`config_hash`. Fetching is sequential by default because many vendor SDK
+clients are not thread-safe; a value above one opts into bounded per-cycle
+concurrency. `LiveTrader.last_cycle_diagnostics` reports per-symbol fetch time,
+strategy time, broker-order time, total cycle time, and whether the cycle
+exceeded `poll_seconds`.
 
 - `default_fill_price`: backtest/sim fallback for decisions without an
   explicit fill field. It is not used to manufacture live executions.
@@ -468,8 +526,9 @@ The formula is a simplified isolated-margin approximation (ignoring fees/funding
 
 #### Reconciliation (live only)
 
-Startup reconciliation runs automatically when `LiveTrader.run()` starts and
-is a no-op in sim mode:
+Startup reconciliation runs automatically when `LiveTrader.run()` starts.
+When no order or grouped execution is active, the checks repeat every
+`reconciliation_interval_seconds`. Reconciliation is a no-op in sim mode:
 
 - **Orders**: restore the checkpoint first, recover placement-attempted orders
   by deterministic client id, poll tracked orders, then compare the broker's
@@ -495,16 +554,19 @@ is a no-op in sim mode:
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
-prices, equity peak, halt/risk counters, and active order queue. Runtime-state
-schema v6 is intentionally breaking: older checkpoints are rejected and require
+prices, equity peak, halt/risk counters, target-rebalance/multi-leg lifecycle,
+and active order queue. Runtime-state schema v7 is intentionally breaking:
+older checkpoints are rejected and require
 an explicit migration or removal. `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
 retried, and local order age survives restart. Analytics callbacks remain projections;
-they are not broker fill truth. The state key is `mode:config_hash`; run only
-one active process for a key. Multi-process leader election is deliberately
-outside this small polling engine rather than hidden behind an in-process lock.
+they are not broker fill truth. The state key is `mode:config_hash`. Live mode
+holds a PostgreSQL session advisory lock for that key for the process lifetime;
+a second process fails before broker reconciliation or order submission.
+Custom durable stores provide the equivalent `acquire_lease` /
+`release_lease` contract.
 
 #### Data staleness detection (live only)
 
@@ -554,8 +616,8 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
 | Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
-| Arbitrage | Research-only OHLCV approximation | Research-only | Requires an explicit native multi-leg venue/adapter capability; currently unsupported |
-| Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Sequential, non-atomic, adapter-dependent |
+| Arbitrage | Synchronous `MultiLegOrder` OHLCV approximation | Synchronous approximation | Best-effort serial hedge, deadline, durable recovery, and fail-closed unwind; no atomic fill guarantee |
+| Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
 | Asset allocation | Supported under single-currency/data-event assumptions | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
 | Dynamic stock universe | Upstream point-in-time membership/eligibility | Candidate set is static | Runtime subscription lifecycle is not engine-managed |
 | Short borrow/funding | User-supplied costs only; no locate ledger | Not modeled | Broker/account responsibility; no engine borrow ledger |
@@ -573,15 +635,8 @@ events.
 | Target validation, cash scaling, reduce-before-add ordering, broker outcomes, and diagnostics | Engine | Execution correctness is shared across strategies and is not delegated to user code. |
 | Point-in-time membership, eligibility, corporate actions, and adjusted inputs | Upstream data pipeline | The engine validates supplied observations but does not invent historical facts. |
 | Runtime symbol discovery and market-data subscription changes | Not implemented | This requires an explicit engine lifecycle before live dynamic universes are supported. |
-| Atomic multi-leg execution | Not implemented | Atomicity is a venue/broker capability and cannot be inferred from OHLCV bars or generic sequential orders. |
-
-Do not model generic multi-leg execution as a boolean on the current basket
-path. If a concrete broker use case requires it, add a capability-advertised
-order contract: an adapter either submits one venue-native combo/spread order
-or rejects it before any leg is sent. Best-effort sequential or hedged legging
-is a different execution mode and must define timeout, cancel, and unwind
-semantics explicitly; it must never be reported as atomic. Cross-venue
-atomicity generally cannot be guaranteed.
+| Best-effort multi-leg lifecycle | Engine | `MultiLegOrder` owns ordering, unhedged deadline, durable state, and compensating unwind. |
+| Atomic multi-leg execution | Not implemented | Atomicity is a venue/broker capability and is never inferred from sequential orders; cross-venue atomicity generally cannot be guaranteed. |
 
 #### Intentional defaults and resiliency fallbacks
 

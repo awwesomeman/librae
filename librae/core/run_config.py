@@ -242,8 +242,10 @@ class RunConfig:
     risk_free_rate: float = 0.0
     periods_per_year: int = 365
 
-    # === Behavior params (not stored in DB) ===
+    # === Operational behavior (excluded from config_hash) ===
     poll_seconds: int = 60
+    reconciliation_interval_seconds: int = 300
+    market_data_workers: int = 1
     no_db: bool = False
     dry_run: bool = False
     force: bool = False
@@ -311,6 +313,19 @@ class RunConfig:
             or self.poll_seconds < 0
         ):
             raise ValueError("poll_seconds must be a non-negative integer")
+        reconciliation_interval = self.reconciliation_interval_seconds
+        if (
+            isinstance(reconciliation_interval, bool)
+            or not isinstance(reconciliation_interval, int)
+            or reconciliation_interval <= 0
+        ):
+            raise ValueError("reconciliation_interval_seconds must be a positive integer")
+        if (
+            isinstance(self.market_data_workers, bool)
+            or not isinstance(self.market_data_workers, int)
+            or self.market_data_workers <= 0
+        ):
+            raise ValueError("market_data_workers must be a positive integer")
         if self.dry_run and not self.no_db:
             raise ValueError("dry_run=True requires no_db=True; use build_config()")
         legacy_execution_keys = {
@@ -431,11 +446,13 @@ class RunConfig:
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",
             f"  periods_per_year: {self.periods_per_year}",
-            "  --- behavior (not stored in DB) ---",
+            "  --- operational behavior (excluded from config_hash) ---",
             f"  no_db:       {self.no_db}",
             f"  dry_run:     {self.dry_run}",
             f"  force:       {self.force}",
             f"  poll_seconds: {self.poll_seconds}",
+            f"  reconcile:    {self.reconciliation_interval_seconds}",
+            f"  data_workers: {self.market_data_workers}",
             f"  telegram:    {masked_tg}",
             "=" * 60,
         ]

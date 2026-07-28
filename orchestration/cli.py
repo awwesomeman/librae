@@ -64,6 +64,18 @@ def base_parser(description: str) -> argparse.ArgumentParser:
         help="seconds between poll cycles (required for sim/live mode — "
         "no implicit default, must match the strategy's timeframe)",
     )
+    p.add_argument(
+        "--reconciliation-interval-seconds",
+        type=int,
+        default=None,
+        help="seconds between live broker/account reconciliation checks",
+    )
+    p.add_argument(
+        "--market-data-workers",
+        type=int,
+        default=None,
+        help="bounded concurrent market-data fetches (default: 1)",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     p.add_argument(
@@ -304,6 +316,12 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
             "(e.g. <= one bar's worth of seconds)."
         )
     poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
+    reconciliation_interval_seconds = (
+        args.reconciliation_interval_seconds
+        if args.reconciliation_interval_seconds is not None
+        else 300
+    )
+    market_data_workers = args.market_data_workers if args.market_data_workers is not None else 1
 
     execution = ExecutionPolicy(**execution_raw)
     risk = RiskPolicy(**risk_raw)
@@ -352,6 +370,8 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
         periods_per_year=periods_per_year,
         poll_seconds=poll_seconds,
+        reconciliation_interval_seconds=reconciliation_interval_seconds,
+        market_data_workers=market_data_workers,
         no_db=no_db,
         dry_run=dry_run,
         force=args.force,
