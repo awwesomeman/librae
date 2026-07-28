@@ -157,6 +157,8 @@ class PositionState:
 
     On scaling: entry_price is derived from total_entry_cost / (quantity * multiplier).
     Storing total_entry_cost avoids float drift on repeated add operations.
+    A volume-limited stop-market/liquidation keeps its pending exit reason so
+    the remainder continues as a market exit on the next observed bar.
     """
 
     symbol: str
@@ -171,6 +173,7 @@ class PositionState:
     total_entry_cost: float
     stop_price: float | None = None
     take_profit_price: float | None = None
+    pending_market_exit_reason: str | None = None
 
 
 class BaseStrategy(ABC):

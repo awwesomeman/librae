@@ -236,8 +236,11 @@ fill delta. Submitted, accepted, and partial orders remain in a durable,
 serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
 slippage, and tax can only advance. Cancelled/rejected orders halt dependent
-work, and entering a halt cancels every tracked open order. The runtime also
-rejects live bar-field fills (`"open"`/`"close"`),
+work. Operational/error halts cancel tracked strategy orders. A drawdown
+breach instead clears pending strategy intent and keeps its emergency
+reduce/close queue active until broker reports reach a terminal state,
+including across restart. The runtime also rejects live bar-field fills
+(`"open"`/`"close"`),
 `RebalanceTargets.fill_price`, and local stop/take-profit parameters; those
 cannot be inferred later from a completed range. Protective orders require a
 broker-native implementation.
@@ -281,8 +284,8 @@ cfg = RunConfig(..., params={
 
 - `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
 - `max_gross_exposure_pct` / `max_net_exposure_pct`: validate `RebalanceTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
-- `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()`; live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
-- `max_volume_participation_pct`: provides one cumulative per-symbol volume budget per simulated data event across entries, additions, reductions, ordinary closes, stops, modeled liquidation, drawdown exits, and terminal exits. Missing volume rejects the fill. Constrained exits are explicit partial fills and retain the remaining position for a later observed bar; a terminal backtest that cannot finish exits raises. Live risk exits submit the full remaining request and broker reports own partial-fill truth.
+- `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()` and records post-liquidation costs in that event's equity; live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
+- `max_volume_participation_pct`: provides one cumulative per-symbol volume budget per simulated data event across entries, additions, reductions, ordinary closes, stops, modeled liquidation, drawdown exits, and terminal exits. Missing volume rejects the fill. Constrained exits are explicit partial fills and retain the remaining position for a later observed bar. Once stop-market or liquidation has triggered, its remainder stays an active market exit and continues at the next observed open without requiring another trigger touch. A terminal backtest that cannot finish exits raises. Live risk exits submit the full remaining request and broker reports own partial-fill truth.
 - Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
@@ -334,7 +337,7 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, and active order queue. Runtime-state
-schema v2 is intentionally breaking: v1 checkpoints are rejected and require
+schema v3 is intentionally breaking: older checkpoints are rejected and require
 an explicit migration or removal. `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted is saved before network I/O, so an ambiguous timeout is
@@ -452,7 +455,7 @@ financial/execution fact.
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
 | `liquidate_all(positions, bars, ts, ...)` | liquidity-aware partial/full exits shared by terminal and drawdown liquidation |
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
-| `reduce_position(pos, quantity, exit_price, cost_model)` | partial close |
+| `reduce_position(pos, closed_qty)` | pro-rate position state after a partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
 | `compute_all(equity_values, timestamps, trade_pnls, ...)` | performance calculation (QuantStats adapter) |
 | `direction(side)` | `"long"` → +1.0, `"short"` → -1.0 |
@@ -468,7 +471,7 @@ financial/execution fact.
 
 ### Config API
 
-> For the full list of config sources (env vars, built-in market/symbol registries, CLI parameter table) see [the root README's "Config overview"](../README.md#config-overview). This section only covers the internal code-level API.
+> For the full list of config sources (env vars, built-in market/symbol registries, CLI parameter table) see [the root README's "Config overview"](README.md#config-overview). This section only covers the internal code-level API.
 
 #### MarketConfig (market costs)
 

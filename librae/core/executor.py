@@ -534,6 +534,8 @@ def resolve_stop_exit(
     fill); take_profit_price is modeled as a limit order (fills exactly at
     that price once touched). Stop-loss is checked before take-profit — if
     both would trigger on the same bar, the conservative outcome wins.
+    A previously triggered, volume-limited market exit continues at this
+    bar's open without checking the trigger level again.
 
     Returns (fill_price, reason) or None if nothing is triggered.
     """
@@ -541,6 +543,9 @@ def resolve_stop_exit(
     if high is None or low is None or open_ is None:
         return None
     is_long = pos.side == "long"
+
+    if pos.pending_market_exit_reason is not None:
+        return open_, pos.pending_market_exit_reason
 
     liq_price = cost_model.liquidation_price(pos.entry_price, pos.side)
     if liq_price is not None:
@@ -625,6 +630,8 @@ def check_stop_targets(
         if fully_closed:
             del positions[sym]
         else:
+            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
+                pos.pending_market_exit_reason = reason
             reduce_position(pos, close_quantity)
 
     return ActionResults(trades=trades, events=events, cash_delta=cash_delta)

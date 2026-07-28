@@ -132,7 +132,7 @@ class LiveRuntimeState:
             item["entry_at"] = position.entry_at.isoformat()
             positions[symbol] = item
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "state_key": self.state_key,
             "run_id": self.run_id,
             "config_hash": self.config_hash,
@@ -157,7 +157,7 @@ class LiveRuntimeState:
 
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
-        if raw.get("schema_version") != 2:
+        if raw.get("schema_version") != 3:
             raise ValueError("unsupported live runtime-state schema")
         positions = {}
         for symbol, item in raw["positions"].items():

@@ -150,6 +150,28 @@ class TestResolveStopExit:
         assert result.events[0].event_type == "reduce"
         assert result.events[0].fill_quantity == pytest.approx(5.0)
         assert positions["TEST"].quantity == pytest.approx(5.0)
+        assert positions["TEST"].pending_market_exit_reason == REASON_STOP_LOSS
+
+        remainder = check_stop_targets(
+            positions,
+            {
+                "TEST": {
+                    "open": 97.0,
+                    "high": 99.0,
+                    "low": 96.0,
+                    "close": 98.0,
+                    "volume": 20.0,
+                }
+            },
+            datetime(2026, 1, 3, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+            max_volume_participation_pct=0.25,
+        )
+
+        assert remainder.events[0].event_type == "close"
+        assert remainder.events[0].price == pytest.approx(97.0)
+        assert remainder.events[0].reason == REASON_STOP_LOSS
+        assert positions == {}
 
 
 # ---------------------------------------------------------------------------

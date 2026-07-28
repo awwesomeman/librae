@@ -14,12 +14,13 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
-from librae.core.executor import OrderEvent
+from librae.core.executor import OrderEvent, RiskLimits
 from librae.core.run_config import RunConfig
 from librae.core.strategy import (
     Action,
     BaseStrategy,
     Context,
+    PositionState,
     RebalanceTargets,
 )
 from librae.live.engine import LiveTrader
@@ -1390,6 +1391,57 @@ class TestLiveTrader:
         ]
         assert len(breach_alerts) == 1
 
+    def test_drawdown_callback_uses_post_liquidation_equity(self):
+        cost_model = CostModel(
+            multiplier=1.0,
+            commission_rate=0.01,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+        )
+        runner = self._make_runner(executor=LiveExecutor(cost_model))
+        runner._risk_limits = RiskLimits(max_drawdown_pct=0.2)
+        runner._cash = 0.0
+        runner._positions["BTCUSDT"] = PositionState(
+            symbol="BTCUSDT",
+            side="long",
+            entry_price=100.0,
+            quantity=500.0,
+            entry_at=datetime(2025, 1, 1, tzinfo=UTC),
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=50_000.0,
+        )
+        runner._last_prices["BTCUSDT"] = 100.0
+        runner._equity_peak = 100_000.0
+        runner._prev_equity = 50_000.0
+        callbacks: list[tuple[float, float, float]] = []
+        runner._on_bar = lambda _run_id, _ts, equity, drawdown, period_return: callbacks.append(
+            (equity, drawdown, period_return)
+        )
+
+        runner._record_equity(
+            datetime(2025, 1, 2, tzinfo=UTC),
+            {
+                "BTCUSDT": {
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 10_000.0,
+                }
+            },
+        )
+
+        assert runner._positions == {}
+        assert runner._cash == pytest.approx(49_500.0)
+        assert len(callbacks) == 1
+        assert callbacks[0] == pytest.approx((49_500.0, -0.505, -0.01))
+        assert runner._prev_equity == pytest.approx(49_500.0)
+
 
 def _make_fill_event() -> OrderEvent:
     return OrderEvent(
@@ -1510,6 +1562,59 @@ class TestLiveExecutionLifecycle:
         assert second._active_orders == []
         assert second._positions["BTCUSDT"].quantity == 1.0
         assert second._positions["BTCUSDT"].entry_commission == 0.2
+
+    def test_drawdown_exit_remains_active_while_halted_and_resumes_after_restart(
+        self,
+    ):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="risk-exit-1",
+            status="accepted",
+            quantity=1.0,
+            filled=0.0,
+        )
+
+        first = self._make_trader(_HoldStrategy(), adapter, state_store=store)
+        first._risk_limits = RiskLimits(max_drawdown_pct=0.2)
+        first._positions["BTCUSDT"] = PositionState(
+            symbol="BTCUSDT",
+            side="long",
+            entry_price=100.0,
+            quantity=1.0,
+            entry_at=datetime(2025, 1, 1, tzinfo=UTC),
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=100.0,
+        )
+        first._last_prices["BTCUSDT"] = 80.0
+
+        first._flatten_and_halt(
+            datetime(2025, 1, 2, tzinfo=UTC),
+            -0.2,
+            {"BTCUSDT": {"close": 80.0}},
+        )
+
+        assert first._halted is True
+        assert len(first._active_orders) == 1
+        adapter.cancel_order.assert_not_called()
+
+        adapter.get_order.return_value = _broker_report(
+            order_id="risk-exit-1",
+            quantity=1.0,
+            filled=1.0,
+            average=79.0,
+        )
+        second = self._make_trader(_HoldStrategy(), adapter, state_store=store)
+        second.run(max_iterations=1)
+
+        assert second._halted is True
+        assert second._positions == {}
+        assert second._active_orders == []
+        assert adapter.place_order.call_count == 1
+        adapter.cancel_order.assert_not_called()
 
     def test_restored_cycle_does_not_repeat_decision(self):
         store = MemoryLiveStateStore()

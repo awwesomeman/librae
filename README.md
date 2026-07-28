@@ -147,7 +147,10 @@ concentration is the largest absolute symbol weight. Gross/net limits validate
 within a data event and applies to simulated
 entries, additions, reductions, stops, and forced exits. Missing volume rejects
 a constrained fill, and an exit may remain partially open for a later real
-bar. If the final backtest bar cannot complete liquidation, the run fails
+bar. Once a simulated stop-market or liquidation triggers, any volume-limited
+remainder stays an active market exit and continues at the next observed
+bar's open; it does not become conditional on touching the trigger again.
+If the final backtest bar cannot complete liquidation, the run fails
 instead of fabricating liquidity. Live emergency exits submit the full
 remaining quantity and use broker reports as partial-fill truth.
 
@@ -195,8 +198,10 @@ fail closed). Submitted/accepted/cancelled/rejected states are kept distinct.
 Placement intent is checkpointed before network I/O; ambiguous retries recover
 by deterministic client id instead of blindly resubmitting. Resting orders
 block later decisions, rejected/cancelled orders halt dependent work,
-halt-on-risk cancels tracked orders, and untracked open orders on configured
-symbols halt for operator review.
+and operational halts cancel tracked strategy orders. A drawdown breach clears
+pending strategy intent but keeps its emergency reduce/close queue active
+until broker reports reach a terminal state, including across restart.
+Untracked open orders on configured symbols halt for operator review.
 
 Market-data and execution routes are separate. `data_source` selects the
 default market-data adapter; it never chooses a broker. Live execution requires
@@ -214,7 +219,7 @@ but live mode then requires an explicitly injected durable `state_store`;
 `MemoryLiveStateStore` is only for deterministic tests. Per-symbol processed
 bar watermarks, pending intent, cash/positions, fills, equity peak, halt state,
 and the active order queue restore under the same run id. Runtime-state schema
-v2 is intentionally breaking: an older checkpoint is rejected and must be
+v3 is intentionally breaking: an older checkpoint is rejected and must be
 explicitly migrated or removed before restart. A persisted halt
 does not disappear on restart; after resolving the cause, call
 `trader.reset_halt()` explicitly.
