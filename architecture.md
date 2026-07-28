@@ -206,6 +206,14 @@ ends, suspensions, and missing observations without guessing why data is
 absent. A last-known close is a valuation mark only: it cannot trigger an
 execution, stop, signal, or holding-age increment.
 
+For stock selection, configure a survivorship-bias-free candidate superset and
+provide point-in-time membership or eligibility as an input feature. The
+strategy filters the current eligible observations before ranking or
+optimization and returns a complete `PortfolioTargets`; an omitted holding is
+therefore targeted to zero. Librae does not synthesize membership history or
+silently add/remove subscriptions. A runtime universe/subscription lifecycle
+is a missing engine capability, not behavior that strategy code should emulate.
+
 Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar.
 `PortfolioTargets` is intentionally synchronous: the basket waits for current
 bars from every non-zero target and currently held symbol, and is never
@@ -240,6 +248,8 @@ holidays, suspensions, vendor outages, early closes, or settlement days.
 Calendar-sensitive strategies must provide calendar-aware upstream data.
 Cross-market baskets must provide coherent event labels; broker submissions
 remain sequential reductions-then-additions, not exchange-level atomic.
+`PortfolioTargets` expresses a desired portfolio state, not a transactional
+all-or-none order.
 
 Acknowledgement is not execution. Submitted/accepted/cancelled/rejected
 reports never mutate positions. A partial report commits only its confirmed
@@ -448,15 +458,33 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
 | Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
-| Arbitrage | Research-only OHLCV approximation | Research-only | No atomic multi-leg/legging model; unsupported as production arbitrage |
-| Portfolio optimization | Strategy-owned optimizer; static-universe target execution and diagnostics | Simplified sequential basket | Sequential, non-atomic, adapter-dependent |
+| Arbitrage | Research-only OHLCV approximation | Research-only | Requires an explicit native multi-leg venue/adapter capability; currently unsupported |
+| Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Sequential, non-atomic, adapter-dependent |
 | Asset allocation | Supported under single-currency/data-event assumptions | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
-| Dynamic stock universe | Upstream point-in-time universe only | Not engine-managed | Not engine-managed |
+| Dynamic stock universe | Upstream point-in-time membership/eligibility | Candidate set is static | Runtime subscription lifecycle is not engine-managed |
 | Short borrow/funding | User-supplied costs only; no locate ledger | Not modeled | Broker/account responsibility; no engine borrow ledger |
 
 Daily strategy frequency reduces throughput requirements but not timestamp,
 data, order, and restart synchronization requirements. The observed-data event
 clock is the deliberate current boundary; exchange calendars remain upstream.
+
+#### Ownership and capability boundaries
+
+| Concern | Current owner | Boundary |
+|---|---|---|
+| Alpha, covariance, objective, optimizer, and rebalance schedule | Strategy | These define strategy semantics. The engine does not hide a default optimizer. |
+| Target validation, cash scaling, reduce-before-add ordering, broker outcomes, and diagnostics | Engine | Execution correctness is shared across strategies and is not delegated to user code. |
+| Point-in-time membership, eligibility, corporate actions, and adjusted inputs | Upstream data pipeline | The engine validates supplied observations but does not invent historical facts. |
+| Runtime symbol discovery and market-data subscription changes | Not implemented | This requires an explicit engine lifecycle before live dynamic universes are supported. |
+| Atomic multi-leg execution | Not implemented | Atomicity is a venue/broker capability and cannot be inferred from OHLCV bars or generic sequential orders. |
+
+Do not model generic multi-leg execution as a boolean on the current basket
+path. If a concrete broker use case requires it, add a capability-advertised
+order contract: an adapter either submits one venue-native combo/spread order
+or rejects it before any leg is sent. Best-effort sequential or hedged legging
+is a different execution mode and must define timeout, cancel, and unwind
+semantics explicitly; it must never be reported as atomic. Cross-venue
+atomicity generally cannot be guaranteed.
 
 #### Intentional defaults and resiliency fallbacks
 
@@ -473,7 +501,8 @@ financial/execution fact.
 - The live OHLCV cache may serve the last successfully fetched history after a
   transient fetch error. It does not create a new bar or fill, and staleness
   monitoring remains active.
-- Optional/not-computable analytics are `None`. Missing OHLCV volume, prepared
+- Optional/not-computable analytics are `None` (for example, Calmar when
+  maximum drawdown is zero). Missing OHLCV volume, prepared
   order quantity/limit price, broker fill price/time/fee, or persisted runtime
   facts fail explicitly instead of becoming zero or an entry-price proxy.
 

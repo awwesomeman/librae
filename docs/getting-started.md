@@ -2,7 +2,7 @@
 
 This guide covers installation, a first run, and contributor setup. Engine
 semantics and API details live in [`architecture.md`](../architecture.md);
-runnable strategy patterns live in [`examples/`](../examples/).
+runnable strategy patterns live in the [examples index](../examples/README.md).
 
 ## Requirements
 
@@ -61,7 +61,7 @@ uv sync --extra test --extra dev
 uv run python -m examples.simple_sma.run --mode backtest --no-db
 ```
 
-Continue with the [examples guide](../examples/) to compare a single-asset
+Continue with the [examples guide](../examples/README.md) to compare a single-asset
 strategy, a prepared target-weight schedule, and cross-sectional Top K.
 
 ## Environment variables

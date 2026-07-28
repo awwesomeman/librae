@@ -7,7 +7,7 @@
 | 需求 | 文件 |
 |---|---|
 | 安裝 Librae 或設定本機開發環境 | [Getting started](getting-started.md) |
-| 執行一個完整策略 | [Examples](../examples/) |
+| 執行一個完整策略 | [Examples](../examples/README.md) |
 | 理解執行語意與系統設計 | [Architecture](../architecture.md) |
 | 分析訊號的遠期表現 | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
 | 設定 DB、Grafana、broker 或部署環境 | [Optional infrastructure](guides/optional-infrastructure.md) |
@@ -17,12 +17,12 @@
 | 位置 | 用途 | 維護原則 |
 |---|---|---|
 | [`../architecture.md`](../architecture.md) | 系統現況與設計規範 | 行為或結構改變時，與程式碼同步更新 |
-| [`guides/`](guides/) | 使用者與維運者的任務導向指南 | 確保指令可執行，深入細節改連結 reference |
-| [`decisions/`](decisions/) | 架構決策紀錄（ADR） | 保留當時觀點；以 supersede 取代重寫歷史 |
-| [`plans/`](plans/) | 實作計畫與工作筆記 | 除非文件明確標示，否則狀態視為歷史資訊 |
-| [`research/`](research/) | 研究筆記與技術調查 | 清楚註明假設、資料範圍與結論 |
-| [`spikes/`](spikes/) | 限時實驗與框架評估 | 有長期影響的結論應整理到 decisions |
-| [`learnings/`](learnings/) | 錯誤與維運經驗 | 記錄現象、根因、修正與預防方式 |
+| `guides/` | 使用者與維運者的任務導向指南 | 確保指令可執行，深入細節改連結 reference |
+| `decisions/` | 架構決策紀錄（ADR） | 保留當時觀點；以 supersede 取代重寫歷史 |
+| `plans/` | 實作計畫與工作筆記 | 除非文件明確標示，否則狀態視為歷史資訊 |
+| `research/` | 研究筆記與技術調查 | 清楚註明假設、資料範圍與結論 |
+| `spikes/` | 限時實驗與框架評估 | 有長期影響的結論應整理到 decisions |
+| `learnings/` | 錯誤與維運經驗 | 記錄現象、根因、修正與預防方式 |
 
 ## 資訊衝突時，以誰為準？
 

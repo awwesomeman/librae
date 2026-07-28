@@ -28,7 +28,7 @@ strategy interface.
 
 | You are... | Start here | Go deeper |
 |---|---|---|
-| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/) with deterministic data | Review the [data and execution contract](architecture.md#usage), [core types and Config API](architecture.md#core-types), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
+| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review the [data and execution contract](architecture.md#usage), [core types and Config API](architecture.md#core-types), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
 | Backend/platform developer | Read the [system architecture](architecture.md) | Review [optional infrastructure](docs/guides/optional-infrastructure.md), callbacks, adapters, and durable state |
 
 ## Quick start
@@ -55,7 +55,7 @@ uv run python -m examples.simple_sma.run --mode backtest --no-db
 A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects or
 `PortfolioTargets`. Your data pipeline supplies timezone-aware OHLCV and
 point-in-time features; Librae owns validation, execution timing, portfolio
-state, costs, and output. The [examples](examples/) show the complete
+state, costs, and output. The [examples](examples/README.md) show the complete
 `RunConfig`, DataFrame, and engine wiring.
 
 ## Engine contract
@@ -65,8 +65,9 @@ state, costs, and output. The [examples](examples/) show the complete
 - **Decision timing:** the strategy observes completed data; the engine owns
   the simulated T → T+1 execution delay. Do not pre-shift a signal to imitate
   that delay.
-- **Portfolio logic:** optimizer and alpha logic belong to the strategy.
-  Librae accepts the resulting order intents or target weights and handles execution.
+- **Portfolio logic:** alpha, objective, covariance model, and optimizer belong
+  to the strategy. Librae accepts the resulting order intents or target weights
+  and owns their validation, sizing, sequencing, execution, and diagnostics.
 - **Outputs:** `BacktestOutput` contains run metadata, events, equity,
   performance metrics, and optional position/allocation snapshots.
 
@@ -78,20 +79,21 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Workflow | Current boundary |
 |---|---|
 | Single-asset research | Supported with next-observed-bar simulated fills |
-| Cross-sectional selection and allocation | Supported for a static configured universe; optimizer remains strategy-owned |
+| Cross-sectional selection and allocation | Configured candidate universe with point-in-time eligibility; optimizer remains strategy-owned |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
 | Paper/live broker execution (`mode=live`) | Broker-confirmed order lifecycle; sequential, not atomic across a basket |
-| Arbitrage | OHLCV research approximation only; no atomic multi-leg production execution |
+| Arbitrage | OHLCV research approximation only; production multi-leg execution requires an explicit venue/adapter capability |
 | Multi-currency portfolios | Not yet modeled; the live/sim cash ledger is single-currency |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
-| Dynamic universes / short borrow | Point-in-time universe and borrow/funding inputs remain upstream |
+| Dynamic universes | Membership/eligibility data remains upstream; runtime subscription lifecycle is not yet engine-managed |
+| Short borrow / funding | User-supplied research costs only; no engine locate or borrow ledger |
 
 See the [full capability matrix](architecture.md#use-case-capability-matrix)
 before selecting a workflow.
 
 ## Documentation
 
-The [documentation index](docs/) separates current guides and architecture
+The [documentation index](docs/README.md) separates current guides and architecture
 from historical decisions, plans, research, and operational learnings.
 
 ## Development
