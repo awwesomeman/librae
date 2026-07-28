@@ -23,6 +23,7 @@ from librae.core.metrics import (
     compute_signal_outcomes,
     compute_trade_entry_outcomes,
     generate_signal_mae_mfe_report,
+    generate_tearsheet,
     summarize_signal_mae_mfe,
 )
 from librae.core.strategy import OrderIntent, Strategy
@@ -112,6 +113,67 @@ class TestComputeAllEmpty:
         assert m.benchmark_return == pytest.approx(0.03)
 
 
+class TestComputeAllValidation:
+    @pytest.mark.parametrize("invalid_equity", [0.0, -1.0, np.nan, np.inf])
+    def test_equity_must_be_finite_and_positive(self, invalid_equity: float) -> None:
+        with pytest.raises(ValueError, match="equity_values"):
+            _call_compute_all([100.0, invalid_equity])
+
+    @pytest.mark.parametrize("invalid_benchmark", [0.0, -1.0, np.nan, np.inf])
+    def test_benchmark_must_be_finite_and_positive(self, invalid_benchmark: float) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match="benchmark_values"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[],
+                total_periods=2,
+                benchmark_values=[100.0, invalid_benchmark],
+            )
+
+    def test_equity_and_timestamp_lengths_must_match(self) -> None:
+        with pytest.raises(ValueError, match="timestamps length"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=[START],
+                trade_pnls=[],
+                total_periods=2,
+            )
+
+    def test_equity_and_benchmark_lengths_must_match(self) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match="benchmark_values length"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[],
+                total_periods=2,
+                benchmark_values=[100.0],
+            )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"risk_free_rate": np.nan}, "risk_free_rate"),
+            ({"risk_free_rate": np.inf}, "risk_free_rate"),
+            ({"annual_periods": 0}, "annual_periods"),
+        ],
+    )
+    def test_temporal_metric_parameters_are_validated(self, kwargs, message: str) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match=message):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[],
+                total_periods=2,
+                **kwargs,
+            )
+
+
 class TestComputeAllMetrics:
     def test_positive_return(self) -> None:
         pnl = _make_trade_pnl(gross_pnl=100, net_pnl=100, net_return=1.0)
@@ -134,7 +196,15 @@ class TestComputeAllMetrics:
             _make_trade_pnl(net_pnl=-10, net_return=-0.1),
         ]
         m = _call_compute_all([10_000.0, 10_200.0, 10_100.0], pnls)
-        assert np.isclose(m.profit_factor, 2.0, atol=1e-6)
+        assert m.profit_factor == 2.0
+
+    def test_profit_factor_is_none_without_losses(self) -> None:
+        pnls = [
+            _make_trade_pnl(net_pnl=20, net_return=0.2),
+            _make_trade_pnl(net_pnl=10, net_return=0.1),
+        ]
+        m = _call_compute_all([10_000.0, 10_020.0, 10_030.0], pnls)
+        assert m.profit_factor is None
 
     def test_exposure_ratio(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
@@ -171,6 +241,21 @@ class TestComputeAllMetrics:
         )
 
         assert metrics.avg_trade_return == pytest.approx(0.019)
+
+    @pytest.mark.parametrize("invalid_quantity", [0.0, -1.0, np.nan, np.inf])
+    def test_trade_quantity_weights_must_be_finite_and_positive(
+        self, invalid_quantity: float
+    ) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match="trade_quantities"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
+                total_periods=2,
+                trade_quantities=[invalid_quantity],
+            )
 
     def test_portfolio_diagnostics(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
@@ -213,6 +298,23 @@ class TestComputeAllMetrics:
             np.mean(active_returns) / active_std * np.sqrt(365)
         )
 
+    def test_zero_tracking_error_has_no_information_ratio(self) -> None:
+        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
+        equity = [100.0, 102.0, 101.0, 104.0]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            m = compute_all(
+                equity_values=equity,
+                timestamps=timestamps,
+                trade_pnls=[],
+                total_periods=4,
+                benchmark_values=equity,
+            )
+
+        assert m.tracking_error == pytest.approx(0.0)
+        assert m.information_ratio is None
+
     def test_sharpe_is_float(self) -> None:
         pnls = [
             _make_trade_pnl(net_pnl=100, net_return=1.0),
@@ -227,8 +329,35 @@ class TestComputeAllMetrics:
                 annualize=True,
             )
         assert isinstance(m.sharpe, float)
+        assert m.sortino is None
         assert m.max_drawdown == pytest.approx(0.0)
         assert m.calmar is None
+
+    def test_zero_denominator_annual_metrics_are_none_without_warning(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            m = _call_compute_all([10_000.0] * 4, annualize=True)
+
+        assert m.sharpe is None
+        assert m.sortino is None
+        assert m.calmar is None
+
+    def test_sortino_uses_excess_return_downside(self) -> None:
+        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            m = compute_all(
+                equity_values=[10_000.0] * 4,
+                timestamps=timestamps,
+                trade_pnls=[],
+                total_periods=4,
+                annualize=True,
+                risk_free_rate=0.03,
+            )
+
+        assert m.sharpe is None
+        assert isinstance(m.sortino, float)
 
     def test_max_drawdown_negative(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
@@ -315,6 +444,31 @@ class TestComputeAllWithEngine:
         assert isinstance(m, StrategyMetrics)
         assert m.trades >= 1
         assert isinstance(m.max_drawdown, float)
+
+
+def test_generate_tearsheet_uses_exact_validated_returns(monkeypatch, tmp_path) -> None:
+    import quantstats as qs
+
+    captured: dict[str, pd.Series | None] = {}
+
+    def capture_report(returns, *, benchmark, **_kwargs) -> None:
+        captured["returns"] = returns
+        captured["benchmark"] = benchmark
+
+    monkeypatch.setattr(qs.reports, "html", capture_report)
+    timestamps = pd.date_range(START, periods=3, freq="D", tz="UTC").tolist()
+    output_path = tmp_path / "tearsheet.html"
+
+    result = generate_tearsheet(
+        equity_values=np.array([100.0, 110.0, 121.0]),
+        timestamps=timestamps,
+        output_path=str(output_path),
+        benchmark_values=np.array([100.0, 105.0, 115.5]),
+    )
+
+    assert result == str(output_path)
+    assert np.allclose(captured["returns"], [0.1, 0.1])
+    assert np.allclose(captured["benchmark"], [0.05, 0.1])
 
 
 def test_compute_payoff_ratio_none_when_one_sided():

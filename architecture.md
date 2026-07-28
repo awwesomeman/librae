@@ -501,10 +501,15 @@ financial/execution fact.
 - The live OHLCV cache may serve the last successfully fetched history after a
   transient fetch error. It does not create a new bar or fill, and staleness
   monitoring remains active.
-- Optional/not-computable analytics are `None` (for example, Calmar when
-  maximum drawdown is zero). Missing OHLCV volume, prepared
-  order quantity/limit price, broker fill price/time/fee, or persisted runtime
-  facts fail explicitly instead of becoming zero or an entry-price proxy.
+- Optional/not-computable analytics are `None`: Sharpe with zero sample
+  volatility, Sortino without negative excess returns, Calmar with zero
+  drawdown, information ratio with zero tracking error, profit factor without
+  losses, and payoff ratio without both wins and losses. A zero numerator over
+  a valid denominator remains `0.0`. Equity, benchmark, and weighting curves
+  must instead contain finite positive denominators; invalid inputs fail
+  explicitly and are never repaired with an epsilon. Missing OHLCV volume,
+  prepared order quantity/limit price, broker fill price/time/fee, or persisted
+  runtime facts likewise fail instead of becoming zero or an entry-price proxy.
 
 ### Core types
 

@@ -84,6 +84,14 @@ def _infer_annual_periods(index: pd.DatetimeIndex, fallback: int) -> int:
     return max(1, round((len(index) - 1) / span_years))
 
 
+def _as_positive_finite_array(values: Sequence[float], name: str) -> np.ndarray:
+    """Return a float64 value curve whose observations can safely be denominators."""
+    array = np.asarray(values, dtype=np.float64)
+    if not np.isfinite(array).all() or np.any(array <= 0):
+        raise ValueError(f"{name} must be finite and positive")
+    return array
+
+
 def compute_all(
     equity_values: Sequence[float],
     timestamps: Sequence[datetime],
@@ -104,14 +112,16 @@ def compute_all(
     """Compute all metrics from equity curve + trades.
 
     Args:
-        equity_values: Raw equity values per bar.
+        equity_values: Finite, strictly positive equity values per bar.
         timestamps: Corresponding timestamps (used for annualization).
         trade_pnls: TradePnL from core.executor.calc_trade_pnl().
         total_periods: Total bar count (for exposure_ratio).
         annualize: If True, compute annualized metrics.
-        benchmark_values: Buy-and-hold equity values for benchmark comparison.
+        benchmark_values: Finite, strictly positive buy-and-hold equity values
+            aligned one-to-one with equity_values.
         exposed_periods: Number of bars with at least one open position.
-        trade_quantities: Per-trade closed quantity (for quantity-weighted avg return).
+        trade_quantities: Finite, positive per-trade closed quantity (for
+            quantity-weighted avg return).
         trade_notionals: Per-trade absolute notional weight. Preferred over quantity for
             weighting returns across instruments with different prices/multipliers.
         turnover_values: Per-event absolute traded notional divided by equity.
@@ -135,12 +145,25 @@ def compute_all(
 
     if len(equity_values) == 0:
         return StrategyMetrics(total_return=0.0, trades=0)
+    if len(timestamps) != len(equity_values):
+        raise ValueError("timestamps length must match equity_values")
+    if not np.isfinite(risk_free_rate):
+        raise ValueError("risk_free_rate must be finite")
+    if annual_periods <= 0:
+        raise ValueError("annual_periods must be positive")
 
-    eq_arr = np.array(equity_values, dtype=np.float64)
+    eq_arr = _as_positive_finite_array(equity_values, "equity_values")
+
+    benchmark_array: np.ndarray | None = None
+    if benchmark_values is not None:
+        if len(benchmark_values) != len(equity_values):
+            raise ValueError("benchmark_values length must match equity_values")
+        benchmark_array = _as_positive_finite_array(benchmark_values, "benchmark_values")
+
     # WHY: QuantStats max_drawdown/calmar require DatetimeIndex, not RangeIndex
     ts_index = pd.DatetimeIndex(timestamps[1:]) if len(timestamps) > 1 else pd.DatetimeIndex([])
     returns = pd.Series(
-        np.diff(eq_arr) / (eq_arr[:-1] + EPSILON),
+        np.diff(eq_arr) / eq_arr[:-1],
         index=ts_index,
         dtype=np.float64,
     )
@@ -164,8 +187,18 @@ def compute_all(
         # QuantStats accepts an annual risk-free rate and deannualizes it
         # internally using periods. Passing a per-bar rate would apply that
         # conversion twice.
-        sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=risk_free_rate)
-        sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=risk_free_rate)
+        return_std = float(returns.std(ddof=1))
+        if np.isfinite(return_std) and return_std > 0.0:
+            sharpe = _safe_qs(qs.stats.sharpe, returns, periods=periods, rf=risk_free_rate)
+
+        periodic_rf = (
+            float(np.power(1.0 + risk_free_rate, 1.0 / periods) - 1.0)
+            if risk_free_rate > 0.0
+            else 0.0
+        )
+        if bool((returns < periodic_rf).any()):
+            sortino = _safe_qs(qs.stats.sortino, returns, periods=periods, rf=risk_free_rate)
+
         # Calmar is undefined without a drawdown. Guard the denominator here
         # because QuantStats divides by zero before _safe_qs can map inf to None.
         calmar = _safe_qs(qs.stats.calmar, returns, periods=periods) if max_dd < 0.0 else None
@@ -182,9 +215,7 @@ def compute_all(
     win_rate = float(len(wins) / n_trades) if n_trades > 0 else None
     # WHY: profit_factor undefined when no losses (all wins) — return None,
     # not 0.0 which misleadingly suggests worst performance.
-    profit_factor = (
-        float(wins.sum() / (losses_abs.sum() + EPSILON)) if len(losses_abs) > 0 else None
-    )
+    profit_factor = float(wins.sum() / losses_abs.sum()) if len(losses_abs) > 0 else None
     # WHY: payoff_ratio (avg win / avg loss) is undefined without both sides present.
     payoff_ratio = (
         float(wins.mean() / losses_abs.mean()) if len(wins) > 0 and len(losses_abs) > 0 else None
@@ -196,23 +227,31 @@ def compute_all(
     # backward-compatible fallback for single-instrument partial closes.
     trade_returns = np.array([t.net_return for t in trade_pnls], dtype=np.float64)
     avg_trade_return: float | None = None
+    qty_weights: np.ndarray | None = None
     if trade_quantities is not None and len(trade_quantities) != n_trades:
         raise ValueError(
             f"trade_quantities length ({len(trade_quantities)}) "
             f"must match trade_pnls length ({n_trades})"
         )
+    if trade_quantities is not None:
+        qty_weights = np.asarray(trade_quantities, dtype=np.float64)
+        if not np.isfinite(qty_weights).all() or np.any(qty_weights <= 0):
+            raise ValueError("trade_quantities must be finite and positive")
+
+    notional_weights: np.ndarray | None = None
     if trade_notionals is not None and len(trade_notionals) != n_trades:
         raise ValueError(
             f"trade_notionals length ({len(trade_notionals)}) "
             f"must match trade_pnls length ({n_trades})"
         )
-    if n_trades > 0 and trade_notionals is not None:
-        notional_weights = np.array(trade_notionals, dtype=np.float64)
-        if np.any(notional_weights <= 0) or not np.isfinite(notional_weights).all():
+    if trade_notionals is not None:
+        notional_weights = np.asarray(trade_notionals, dtype=np.float64)
+        if not np.isfinite(notional_weights).all() or np.any(notional_weights <= 0):
             raise ValueError("trade_notionals must be finite and positive")
+
+    if n_trades > 0 and notional_weights is not None:
         avg_trade_return = float(np.average(trade_returns, weights=notional_weights)) / 100.0
-    elif n_trades > 0 and trade_quantities is not None:
-        qty_weights = np.array(trade_quantities, dtype=np.float64)
+    elif n_trades > 0 and qty_weights is not None:
         avg_trade_return = float(np.average(trade_returns, weights=qty_weights)) / 100.0
     elif n_trades > 0:
         avg_trade_return = float(np.mean(trade_returns)) / 100.0
@@ -224,18 +263,15 @@ def compute_all(
     benchmark_return: float | None = None
     tracking_error: float | None = None
     information_ratio: float | None = None
-    if benchmark_values is not None and len(benchmark_values) >= 2:
-        benchmark_return = float(benchmark_values[-1] / (benchmark_values[0] + EPSILON) - 1.0)
-        if len(benchmark_values) != len(equity_values):
-            raise ValueError("benchmark_values length must match equity_values")
-        benchmark_array = np.asarray(benchmark_values, dtype=np.float64)
-        benchmark_returns = np.diff(benchmark_array) / (benchmark_array[:-1] + EPSILON)
+    if benchmark_array is not None and len(benchmark_array) >= 2:
+        benchmark_return = float(benchmark_array[-1] / benchmark_array[0] - 1.0)
+        benchmark_returns = np.diff(benchmark_array) / benchmark_array[:-1]
         active_returns = returns.to_numpy() - benchmark_returns
         if len(active_returns) >= 2:
             periods = _infer_annual_periods(ts_index, fallback=annual_periods)
             active_std = float(np.std(active_returns, ddof=1))
             tracking_error = active_std * np.sqrt(periods)
-            if active_std > EPSILON:
+            if active_std > 0.0:
                 information_ratio = float(np.mean(active_returns)) / active_std * np.sqrt(periods)
 
     total_turnover = _sum_optional(turnover_values)
@@ -307,23 +343,27 @@ def generate_tearsheet(
     """Generate QuantStats HTML tearsheet report with interactive plots and tables."""
     import quantstats as qs
 
-    if not equity_values or len(equity_values) < 2:
+    if len(equity_values) < 2:
         logger.warning("Not enough equity curve points to generate tearsheet")
         return ""
+    if len(timestamps) != len(equity_values):
+        raise ValueError("timestamps length must match equity_values")
 
-    eq_arr = np.array(equity_values, dtype=np.float64)
-    ts_index = pd.DatetimeIndex(timestamps[1:]) if len(timestamps) > 1 else pd.DatetimeIndex([])
+    eq_arr = _as_positive_finite_array(equity_values, "equity_values")
+    ts_index = pd.DatetimeIndex(timestamps[1:])
     returns = pd.Series(
-        np.diff(eq_arr) / (eq_arr[:-1] + EPSILON),
+        np.diff(eq_arr) / eq_arr[:-1],
         index=ts_index,
         dtype=np.float64,
     )
 
     benchmark_returns = None
-    if benchmark_values and len(benchmark_values) == len(equity_values):
-        b_arr = np.array(benchmark_values, dtype=np.float64)
+    if benchmark_values is not None:
+        if len(benchmark_values) != len(equity_values):
+            raise ValueError("benchmark_values length must match equity_values")
+        b_arr = _as_positive_finite_array(benchmark_values, "benchmark_values")
         benchmark_returns = pd.Series(
-            np.diff(b_arr) / (b_arr[:-1] + EPSILON),
+            np.diff(b_arr) / b_arr[:-1],
             index=ts_index,
             dtype=np.float64,
         )

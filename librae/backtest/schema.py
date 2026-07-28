@@ -142,8 +142,9 @@ class StrategyMetrics:
     - return fields: ratio (e.g. 0.05 = 5%)
     - max_drawdown: negative ratio (e.g. -0.15 = 15% decline)
     - win_rate/exposure_ratio: ratio 0-1
-    - sharpe/sortino/calmar/profit_factor: score (dimensionless); Calmar is
-      None when maximum drawdown is zero because the ratio is undefined
+    - sharpe/sortino/calmar/profit_factor/payoff_ratio/information_ratio:
+      dimensionless scores; None when their required denominator population
+      is absent or zero
     - trades: count
     - avg_trade_return: notional-weighted mean net return per realized exit
     """
@@ -153,7 +154,7 @@ class StrategyMetrics:
     max_drawdown: float = 0.0
     trades: int = 0
 
-    # Annualized (None when periods=0 or not computable)
+    # Annualized (None when disabled, the sample is insufficient, or not computable)
     annual_return: float | None = None
     sharpe: float | None = None
     sortino: float | None = None
