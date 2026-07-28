@@ -46,25 +46,27 @@ from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     REASON_FORCE_CLOSE,
-    ActionResults,
     OrderEvent,
     TradePnL,
     TradeResult,
+    check_stop_targets,
     eval_equity,
+    execute_pending_decision_and_stops,
     liquidate_all,
-    merge_pending_intents,
-    partition_pending_intent,
-    run_pending_and_stops,
-    validate_intent_symbols,
+    merge_pending_decisions,
+    partition_pending_decision,
+    queue_market_exit_all,
+    validate_decision_symbols,
     validate_risk_params,
 )
+from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import (
-    BaseStrategy,
     Context,
+    PortfolioTargets,
     Position,
     PositionState,
-    RebalanceTargets,
-    StrategyIntent,
+    Strategy,
+    StrategyDecision,
 )
 from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
 
@@ -226,7 +228,7 @@ class Backtest:
     Args:
         data: MultiIndex DataFrame (symbol, datetime) with OHLCV + features.
               For single-asset, wrap with: pd.MultiIndex.from_arrays([["SYM"]*len(df), df.index])
-        strategy: BaseStrategy subclass.
+        strategy: Strategy subclass.
         cfg: RunConfig — see "cfg=RunConfig" above.
         market_config: MarketConfig for cost model — direct-args style.
         initial_balance: Starting cash — direct-args style.
@@ -236,12 +238,14 @@ class Backtest:
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
+        execution_policy: Fill-price and volume assumptions for direct
+            construction. With ``cfg``, ``cfg.execution`` is the only source.
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
-        strategy: BaseStrategy,
+        strategy: Strategy,
         cfg: RunConfig | None = None,
         market_config: MarketConfig | None = None,
         initial_balance: float = 100_000.0,
@@ -250,8 +254,13 @@ class Backtest:
         cost_model: CostModel | None = None,
         data_source: str = "",
         record_position_snapshots: bool = False,
+        execution_policy: ExecutionPolicy | None = None,
     ) -> None:
         _validate_backtest_data(data, cfg.symbols if cfg is not None else None)
+        if cfg is not None and execution_policy is not None:
+            raise ValueError(
+                "execution_policy cannot override cfg.execution; use one configuration source"
+            )
 
         self._data = data
         self._strategy = strategy
@@ -263,7 +272,11 @@ class Backtest:
         self._metrics: StrategyMetrics | None = None
         self._record_position_snapshots = record_position_snapshots
 
-        self._symbols = data.index.get_level_values(0).unique().tolist()
+        self._symbols = (
+            list(cfg.symbols)
+            if cfg is not None
+            else data.index.get_level_values(0).unique().tolist()
+        )
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
 
         # Resolve from cfg or explicit args
@@ -298,7 +311,9 @@ class Backtest:
             for sym in self._symbols:
                 if sym != cfg.symbol:
                     self._cost_models[sym] = CostModel.from_config(cfg, symbol=sym)
-        self._fill_price: str = (cfg.params or {}).get("fill_price", "open") if cfg else "open"
+        resolved_execution = cfg.execution if cfg else execution_policy or ExecutionPolicy()
+        self._fill_price = resolved_execution.default_fill_price
+        self._max_volume_participation_rate = resolved_execution.max_volume_participation_rate
         self._risk_limits = validate_risk_params(cfg.params if cfg else None)
 
         if strategy_name is not None:
@@ -364,7 +379,7 @@ class Backtest:
         exposed_periods = 0
         primary_symbol = self._symbols[0]
         universe = set(self._symbols)
-        pending_intent: StrategyIntent = []
+        pending_decision: StrategyDecision = []
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
         portfolio_snapshots: list[PortfolioSnapshot] = []
@@ -383,16 +398,16 @@ class Backtest:
                 if close is not None and np.isfinite(close) and close > 0:
                     last_prices[symbol] = float(close)
 
-            intent_to_execute, pending_intent = partition_pending_intent(
-                pending_intent,
+            decision_to_execute, pending_decision = partition_pending_decision(
+                pending_decision,
                 bars,
                 positions,
                 primary_symbol=primary_symbol,
             )
-            if isinstance(intent_to_execute, RebalanceTargets):
-                active_target_weights = dict(intent_to_execute.weights)
+            if isinstance(decision_to_execute, PortfolioTargets):
+                active_target_weights = dict(decision_to_execute.weights)
 
-            # ── Steps 1+1.5: fill previous bar's pending actions at current
+            # ── Steps 1+1.5: fill the previous pending decision at current
             # bar's price, then check stop-loss/take-profit — shared with
             # LiveTrader's simulation mode so deterministic runtimes cannot
             # drift on this sequence ──
@@ -402,37 +417,31 @@ class Backtest:
                 else None
             )
             if halted:
-                step_result = ActionResults(trades=[], events=[], cash_delta=0.0)
+                step_result = check_stop_targets(
+                    positions,
+                    bars,
+                    ts,
+                    get_cost_model=self._get_cost_model,
+                    max_volume_participation_rate=self._max_volume_participation_rate,
+                )
+                cash += step_result.cash_delta
             else:
-                cash, step_result = run_pending_and_stops(
+                cash, step_result = execute_pending_decision_and_stops(
                     ts,
                     positions,
                     cash,
-                    intent_to_execute,
+                    decision_to_execute,
                     bars,
                     get_cost_model=self._get_cost_model,
                     default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
-                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                    max_volume_participation_rate=self._max_volume_participation_rate,
                     max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
                     max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
                 )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
-            if halted and positions:
-                liquidation_result = liquidate_all(
-                    positions,
-                    bars,
-                    ts,
-                    get_cost_model=self._get_cost_model,
-                    reason=REASON_DRAWDOWN_BREACH,
-                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
-                )
-                trades.extend(liquidation_result.trades)
-                all_events.extend(liquidation_result.events)
-                cash += liquidation_result.cash_delta
-
             # ── Step 2: equity and drawdown check ──
             mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
             had_exposure = bool(positions)
@@ -447,26 +456,11 @@ class Backtest:
                 and equity_peak > 0
                 and drawdown <= -self._risk_limits.max_drawdown_pct
             ):
-                dd_result = liquidate_all(
-                    positions,
-                    bars,
-                    ts,
-                    get_cost_model=self._get_cost_model,
-                    reason=REASON_DRAWDOWN_BREACH,
-                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
-                    used_volume=self._filled_quantities(all_events[event_start_index:]),
-                )
-                trades.extend(dd_result.trades)
-                all_events.extend(dd_result.events)
-                cash += dd_result.cash_delta
+                queue_market_exit_all(positions, reason=REASON_DRAWDOWN_BREACH)
                 halted = True
-                # The liquidation is an event at this timestamp, so its costs
-                # and resulting flat position must be reflected in the same
-                # end-of-bar snapshot.
-                mtm, pos_snapshot = self._eval_equity(cash, positions, last_prices)
                 logger.warning(
                     "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_pct=%.2f%% "
-                    "— liquidation started",
+                    "— market exits queued for next observed opens",
                     ts,
                     drawdown * 100,
                     self._risk_limits.max_drawdown_pct * 100,
@@ -501,10 +495,10 @@ class Backtest:
 
             last_equity = mtm
 
-            # ── Step 3: strategy decision (produces next bar's pending actions) ──
+            # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
-                pending_intent = []
-            elif not isinstance(pending_intent, RebalanceTargets):
+                pending_decision = []
+            elif not isinstance(pending_decision, PortfolioTargets):
                 ctx = Context(
                     ts=ts,
                     symbol=primary_symbol,
@@ -516,15 +510,15 @@ class Backtest:
                     equity=mtm,
                     period_index=decision_index,
                 )
-                new_intent = self._strategy.on_bar(ctx)
-                validate_intent_symbols(
-                    new_intent,
+                new_decision = self._strategy.on_bar(ctx)
+                validate_decision_symbols(
+                    new_decision,
                     universe,
                     primary_symbol=primary_symbol,
                 )
-                pending_intent = merge_pending_intents(
-                    pending_intent,
-                    new_intent,
+                pending_decision = merge_pending_decisions(
+                    pending_decision,
+                    new_decision,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -532,8 +526,20 @@ class Backtest:
             self._increment_periods_held(positions, bars)
 
         # WHY: the final intent is discarded because there is no T+1 bar to fill it.
-        if pending_intent:
-            logger.warning("Discarding unresolved end-of-run strategy intent: %r", pending_intent)
+        if pending_decision:
+            logger.warning(
+                "Discarding unresolved end-of-run strategy decision: %r", pending_decision
+            )
+        unresolved_risk_exits = sorted(
+            symbol
+            for symbol, position in positions.items()
+            if position.pending_market_exit_reason is not None
+        )
+        if unresolved_risk_exits:
+            raise ValueError(
+                "cannot execute queued risk exits without a subsequent tradable bar: "
+                f"{unresolved_risk_exits}"
+            )
         # Force-close all open positions at last bar
         if self._timeline:
             last_ts = self._timeline[-1]
@@ -544,8 +550,8 @@ class Backtest:
                 last_ts,
                 get_cost_model=self._get_cost_model,
                 reason=REASON_FORCE_CLOSE,
-                max_volume_participation_pct=self._risk_limits.max_volume_participation_pct,
-                used_volume=self._filled_quantities(
+                max_volume_participation_rate=self._max_volume_participation_rate,
+                used_quantity_by_symbol=self._filled_quantities(
                     event for event in all_events if event.ts == last_ts
                 ),
             )
@@ -663,6 +669,10 @@ class Backtest:
             for t in result.trades
         ]
         trade_quantities = [t.quantity for t in result.trades]
+        trade_notionals = [
+            abs(t.entry_price * t.quantity * self._get_cost_model(t.symbol).multiplier)
+            for t in result.trades
+        ]
 
         # Resolve perf params from cfg or explicit args
         perf_kwargs: dict = {}
@@ -681,6 +691,7 @@ class Backtest:
             benchmark_values=benchmark_curve,
             exposed_periods=result.exposed_periods,
             trade_quantities=trade_quantities,
+            trade_notionals=trade_notionals,
             turnover_values=[snapshot.turnover for snapshot in result.portfolio_snapshots],
             gross_exposure_values=[
                 snapshot.gross_exposure for snapshot in result.portfolio_snapshots

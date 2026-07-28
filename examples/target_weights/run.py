@@ -60,7 +60,7 @@ def run_backtest(cfg: RunConfig) -> None:
 
 
 def run_realtime(_cfg: RunConfig) -> None:
-    raise NotImplementedError("RebalanceTargets examples currently support backtest mode only")
+    raise NotImplementedError("PortfolioTargets examples currently support backtest mode only")
 
 
 if __name__ == "__main__":

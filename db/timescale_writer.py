@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -106,6 +108,7 @@ def write_run_metadata(
     data_source: str | None = None,
     poll_seconds: int | None = None,
     params: dict | None = None,
+    execution_policy: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
     cur: PgCursor | None = None,
@@ -119,14 +122,17 @@ def write_run_metadata(
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbol, timeframe, data_source,
                 started_at, ended_at, run_at, mode, poll_seconds,
-                params, perf_params, config_hash)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                params, execution_policy, perf_params, config_hash)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_at=EXCLUDED.run_at,
                  mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
-                 params=EXCLUDED.params, perf_params=EXCLUDED.perf_params,
+                 params=EXCLUDED.params,
+                 execution_policy=EXCLUDED.execution_policy,
+                 perf_params=EXCLUDED.perf_params,
                  config_hash=EXCLUDED.config_hash"""
     params_val = json.dumps(params) if params is not None else None
+    execution_policy_val = json.dumps(execution_policy) if execution_policy is not None else None
     perf_val = json.dumps(perf_params) if perf_params is not None else None
     values = (
         run_id,
@@ -140,6 +146,7 @@ def write_run_metadata(
         mode,
         poll_seconds,
         params_val,
+        execution_policy_val,
         perf_val,
         config_hash,
     )
@@ -183,7 +190,10 @@ def save_backtest_output(
     *,
     signal_series: pd.Series | None = None,
     exit_signal_series: pd.Series | None = None,
+    signal_series_by_symbol: Mapping[str, pd.Series] | None = None,
+    exit_signal_series_by_symbol: Mapping[str, pd.Series] | None = None,
     params: dict | None = None,
+    execution_policy: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
     dsn: str | None = None,
@@ -201,6 +211,7 @@ def save_backtest_output(
             to write to signal_events as entry signals.
         exit_signal_series: Optional Series for exit signals.
         params: Optional strategy parameters dict to store as JSONB.
+        execution_policy: Resolved fill and liquidity assumptions to store.
         perf_params: Optional perf parameters dict to store as JSONB.
         config_hash: Optional deterministic hash for dedup.
         dsn: TimescaleDB DSN.
@@ -228,6 +239,7 @@ def save_backtest_output(
             run_at=meta.run_at,
             data_source=meta.data_source,
             params=params,
+            execution_policy=execution_policy,
             perf_params=perf_params,
             config_hash=config_hash,
             cur=cur,
@@ -320,11 +332,18 @@ def save_backtest_output(
             counts["trade_events"] = len(event_rows)
 
         # signal_events (from feature-layer signal_series)
+        entry_signals = dict(signal_series_by_symbol or {})
+        exit_signals = dict(exit_signal_series_by_symbol or {})
+        if signal_series is not None:
+            entry_signals[meta.symbol] = signal_series
+        if exit_signal_series is not None:
+            exit_signals[meta.symbol] = exit_signal_series
+
         sig_count = 0
-        has_signals = (signal_series is not None and not signal_series.empty) or (
-            exit_signal_series is not None and not exit_signal_series.empty
-        )
-        if has_signals:
+        signal_symbols = set(entry_signals) | set(exit_signals)
+        for signal_symbol in sorted(signal_symbols):
+            entries = entry_signals.get(signal_symbol)
+            exits = exit_signals.get(signal_symbol)
             cur.execute(
                 """DELETE FROM signal_events
                    WHERE run_id = %s AND strategy = %s AND symbol = %s AND mode = 'backtest'
@@ -333,46 +352,56 @@ def save_backtest_output(
                 (
                     meta.run_id,
                     meta.strategy,
-                    meta.symbol,
+                    signal_symbol,
                     tf,
                     _to_dt(meta.started_at),
                     _to_dt(meta.ended_at),
                 ),
             )
-        if signal_series is not None and not signal_series.empty:
-            entry_rows = [
-                (
-                    _to_dt(ts),
-                    meta.run_id,
-                    meta.strategy,
-                    meta.symbol,
-                    "backtest",
-                    tf,
-                    float(val),
-                    None,
-                    "entry",
+            if entries is not None and not entries.empty:
+                entry_rows = [
+                    (
+                        _to_dt(ts),
+                        meta.run_id,
+                        meta.strategy,
+                        signal_symbol,
+                        "backtest",
+                        tf,
+                        float(val),
+                        None,
+                        "entry",
+                    )
+                    for ts, val in entries.items()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    _SIGNAL_INSERT_SQL,
+                    entry_rows,
+                    page_size=1000,
                 )
-                for ts, val in signal_series.items()
-            ]
-            psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, entry_rows, page_size=1000)
-            sig_count += len(entry_rows)
-        if exit_signal_series is not None and not exit_signal_series.empty:
-            exit_rows = [
-                (
-                    _to_dt(ts),
-                    meta.run_id,
-                    meta.strategy,
-                    meta.symbol,
-                    "backtest",
-                    tf,
-                    float(val),
-                    None,
-                    "exit",
+                sig_count += len(entry_rows)
+            if exits is not None and not exits.empty:
+                exit_rows = [
+                    (
+                        _to_dt(ts),
+                        meta.run_id,
+                        meta.strategy,
+                        signal_symbol,
+                        "backtest",
+                        tf,
+                        float(val),
+                        None,
+                        "exit",
+                    )
+                    for ts, val in exits.items()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    _SIGNAL_INSERT_SQL,
+                    exit_rows,
+                    page_size=1000,
                 )
-                for ts, val in exit_signal_series.items()
-            ]
-            psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
-            sig_count += len(exit_rows)
+                sig_count += len(exit_rows)
         if sig_count:
             counts["signal_events"] = sig_count
 
@@ -944,6 +973,7 @@ def refresh_performance(
         for r in trade_rows
     ]
     trade_quantities = [float(r["fill_quantity"]) for r in trade_rows]
+    trade_notionals = [abs(float(r["notional"])) for r in trade_rows]
 
     def optional_series(field: str) -> list[float] | None:
         values = [float(row[field]) for row in eq_records if pd.notna(row.get(field))]
@@ -959,6 +989,7 @@ def refresh_performance(
         trade_pnls=trade_pnls,
         total_periods=len(equity_values),
         trade_quantities=trade_quantities,
+        trade_notionals=trade_notionals,
         turnover_values=optional_series("turnover"),
         gross_exposure_values=optional_series("gross_exposure"),
         net_exposure_values=optional_series("net_exposure"),
@@ -1018,6 +1049,7 @@ def save_signal_results(
                     config_hash=cfg.config_hash if cfg else None,
                     perf_params=cfg.perf_params if cfg else None,
                     params=cfg.params if cfg else None,
+                    execution_policy=asdict(cfg.execution) if cfg else None,
                     cur=cur,
                 )
 
@@ -1067,22 +1099,41 @@ def save_strategy_results(
     Writes: backtest_runs, equity_curve, trade_events, strategy_performance,
     signal_events, ohlcv.
     """
-    symbol = cfg.symbol
     timeframe = cfg.timeframe
     data_source = cfg.data_source
 
-    symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
-    exit_signal_series = _extract_exit_signals(df, symbol)
+    signal_series_by_symbol: dict[str, pd.Series] = {}
+    exit_signal_series_by_symbol: dict[str, pd.Series] = {}
+    symbol_frames: dict[str, pd.DataFrame] = {}
+    for symbol in cfg.symbols:
+        symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
+        symbol_frames[symbol] = symbol_df
+        signal_series_by_symbol[symbol] = signal_series
+        exit_signal_series_by_symbol[symbol] = _extract_exit_signals(df, symbol)
+
+    primary = cfg.symbol
     counts = save_backtest_output(
         output,
-        signal_series=signal_series,
-        exit_signal_series=exit_signal_series if not exit_signal_series.empty else None,
+        # Keep the original single-symbol arguments for API compatibility.
+        signal_series=signal_series_by_symbol.pop(primary),
+        exit_signal_series=exit_signal_series_by_symbol.pop(primary),
+        signal_series_by_symbol=signal_series_by_symbol,
+        exit_signal_series_by_symbol=exit_signal_series_by_symbol,
         params=cfg.params,
+        execution_policy=asdict(cfg.execution),
         perf_params=cfg.perf_params,
         config_hash=cfg.config_hash,
     )
 
-    ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
-    ohlcv_df.index.name = "ts"
-    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, data_source=data_source)
+    ohlcv_count = 0
+    for symbol, symbol_df in symbol_frames.items():
+        ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
+        ohlcv_df.index.name = "ts"
+        ohlcv_count += write_ohlcv(
+            ohlcv_df,
+            symbol,
+            timeframe,
+            data_source=data_source,
+        )
+    counts["ohlcv"] = ohlcv_count
     return counts

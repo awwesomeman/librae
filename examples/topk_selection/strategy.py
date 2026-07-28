@@ -5,7 +5,7 @@ from __future__ import annotations
 from math import isfinite
 
 import pandas as pd
-from librae import BaseStrategy, Context, RebalanceTargets, StrategyIntent
+from librae import Context, PortfolioTargets, Strategy, StrategyDecision
 
 
 def prepare_signals(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
@@ -15,7 +15,7 @@ def prepare_signals(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
     return out
 
 
-class TopKSelectionStrategy(BaseStrategy):
+class TopKSelectionStrategy(Strategy):
     """Select the Top K symbols by score and allocate equal target weights."""
 
     def __init__(
@@ -34,7 +34,7 @@ class TopKSelectionStrategy(BaseStrategy):
         self._rebalance_every = rebalance_every
         self._target_exposure = target_exposure
 
-    def on_bar(self, ctx: Context) -> StrategyIntent:
+    def on_bar(self, ctx: Context) -> StrategyDecision:
         if ctx.period_index % self._rebalance_every:
             return []
 
@@ -48,8 +48,7 @@ class TopKSelectionStrategy(BaseStrategy):
 
         selected = sorted(scores, key=lambda symbol: (-scores[symbol], symbol))[: self._top_k]
         weight = self._target_exposure / len(selected)
-        return RebalanceTargets(
+        return PortfolioTargets(
             weights={symbol: weight for symbol in selected},
-            fill_price="open",
             reason="top_k_selection",
         )

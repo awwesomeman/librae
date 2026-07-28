@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -65,6 +66,28 @@ class CostModel:
     short_margin_rate: float = 1.0
     impact_coef: float = 0.0
     maintenance_margin_rate: float = 0.0
+
+    def __post_init__(self) -> None:
+        values = asdict(self)
+        if not all(isfinite(value) for value in values.values()):
+            raise ValueError("CostModel values must be finite")
+        if self.multiplier <= 0:
+            raise ValueError("multiplier must be positive")
+        if self.tick_size <= 0:
+            raise ValueError("tick_size must be positive")
+        for name in (
+            "commission_rate",
+            "min_commission",
+            "slippage_ticks",
+            "tax_rate",
+            "impact_coef",
+            "maintenance_margin_rate",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative")
+        for name in ("long_margin_rate", "short_margin_rate"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
 
     @classmethod
     def zero(cls) -> CostModel:

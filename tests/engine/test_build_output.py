@@ -8,7 +8,7 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import BacktestOutput, StrategyMetrics
 from librae.core.cost_model import CostModel
-from librae.core.strategy import Action, BaseStrategy
+from librae.core.strategy import OrderIntent, Strategy
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -34,24 +34,24 @@ def _make_df(n: int = 50, symbol: str = "BTCUSDT") -> pd.DataFrame:
     )
 
 
-class BuyBar5CloseBar15(BaseStrategy):
+class BuyBar5CloseBar15(Strategy):
     def on_bar(self, ctx):
         if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
-            return [Action(type="long", symbol=ctx.symbol)]
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
         if ctx.period_index == 15 and ctx.symbol in ctx.positions:
-            return [Action(type="close", symbol=ctx.symbol)]
+            return [OrderIntent(action="close", symbol=ctx.symbol)]
         return []
 
 
-class HoldStrategy(BaseStrategy):
+class HoldStrategy(Strategy):
     def on_bar(self, ctx):
         return []
 
 
-class BuyBar5AndHold(BaseStrategy):
+class BuyBar5AndHold(Strategy):
     def on_bar(self, ctx):
         if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
-            return [Action(type="long", symbol=ctx.symbol)]
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
         return []
 
 

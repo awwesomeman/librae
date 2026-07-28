@@ -24,7 +24,7 @@ from librae.core.metrics import (
     generate_signal_mae_mfe_report,
     summarize_signal_mae_mfe,
 )
-from librae.core.strategy import Action, BaseStrategy
+from librae.core.strategy import OrderIntent, Strategy
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     SIGNAL_OUTCOME_LONG_PERCENTAGE_POINTS,
@@ -153,6 +153,24 @@ class TestComputeAllMetrics:
         assert np.isclose(m.total_commission, 2.0)
         assert np.isclose(m.total_slippage, 1.0)
 
+    def test_avg_trade_return_prefers_notional_weights(self) -> None:
+        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
+        trades = [
+            _make_trade_pnl(net_pnl=10.0, net_return=10.0),
+            _make_trade_pnl(net_pnl=9.0, net_return=1.0),
+        ]
+
+        metrics = compute_all(
+            equity_values=[100.0, 110.0, 119.0],
+            timestamps=timestamps,
+            trade_pnls=trades,
+            total_periods=3,
+            trade_quantities=[100.0, 1.0],
+            trade_notionals=[100.0, 900.0],
+        )
+
+        assert metrics.avg_trade_return == pytest.approx(0.019)
+
     def test_portfolio_diagnostics(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
         m = compute_all(
@@ -262,12 +280,12 @@ class TestComputeAllWithEngine:
             index=mi,
         )
 
-        class BuyBar10CloseBar30(BaseStrategy):
+        class BuyBar10CloseBar30(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 10 and ctx.symbol not in ctx.positions:
-                    return [Action(type="long", symbol=ctx.symbol)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol)]
                 if ctx.period_index == 30 and ctx.symbol in ctx.positions:
-                    return [Action(type="close", symbol=ctx.symbol)]
+                    return [OrderIntent(action="close", symbol=ctx.symbol)]
                 return []
 
         cost = CostModel(

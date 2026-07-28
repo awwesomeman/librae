@@ -18,10 +18,13 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     poll_seconds    INTEGER,
     last_heartbeat_at TIMESTAMPTZ,
     params          JSONB,
+    execution_policy JSONB,
     perf_params     JSONB,
     config_hash     VARCHAR(32),
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
+ALTER TABLE backtest_runs
+    ADD COLUMN IF NOT EXISTS execution_policy JSONB;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
 

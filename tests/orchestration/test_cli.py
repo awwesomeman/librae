@@ -181,6 +181,54 @@ class TestResolveMarketAndDataSource:
 
 @pytest.mark.usefixtures("_clear_argv")
 class TestBuildConfig:
+    def test_execution_policy_defaults_and_explicit_unlimited(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                """
+            )
+        )
+
+        capped = build_config("test_strat", str(tmp_path / "run.py"))
+        assert capped.execution.default_fill_price == "open"
+        assert capped.execution.max_volume_participation_rate == 0.1
+
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  execution:
+                    default_fill_price: close
+                    max_volume_participation_rate: null
+                """
+            )
+        )
+        unlimited = build_config("test_strat", str(tmp_path / "run.py"))
+        assert unlimited.execution.default_fill_price == "close"
+        assert unlimited.execution.max_volume_participation_rate is None
+
+    def test_unknown_execution_setting_is_rejected(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                  execution:
+                    volume_limit: 0.1
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match=r"unknown strategy\.execution"):
+            build_config("test_strat", str(tmp_path / "run.py"))
+
     def test_preserves_per_symbol_cost_and_route_overrides(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(

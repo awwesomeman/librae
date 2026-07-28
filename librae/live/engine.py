@@ -27,27 +27,28 @@ import pandas as pd
 from librae.core import EPSILON
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
-    ActionResults,
+    ExecutionResult,
     apply_execution_fill,
+    check_stop_targets,
     eval_equity,
-    liquidate_all,
-    merge_pending_intents,
-    partition_pending_intent,
-    process_actions,
-    process_rebalance_targets,
-    run_pending_and_stops,
-    validate_intent_symbols,
+    execute_order_intents,
+    execute_pending_decision_and_stops,
+    execute_portfolio_targets,
+    merge_pending_decisions,
+    partition_pending_decision,
+    queue_market_exit_all,
+    validate_decision_symbols,
     validate_risk_params,
 )
 from librae.core.strategy import (
-    Action,
-    BaseStrategy,
     Context,
     Fill,
+    OrderIntent,
+    PortfolioTargets,
     Position,
     PositionState,
-    RebalanceTargets,
-    StrategyIntent,
+    Strategy,
+    StrategyDecision,
 )
 
 from .executor import ExecutionReport, LiveExecutor, OrderRequest
@@ -127,7 +128,7 @@ class LiveTrader:
 
     def __init__(
         self,
-        strategy: BaseStrategy,
+        strategy: Strategy,
         feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
         *,
         cfg: RunConfig,
@@ -335,12 +336,20 @@ class LiveTrader:
         self._positions: dict[str, PositionState] = {}
         self._cash: float = cfg.initial_balance
         self._halted: bool = False
-        self._pending_intent: StrategyIntent = []
+        self._pending_decision: StrategyDecision = []
         self._active_orders: list[TrackedOrder] = []
         self._equity_peak: float = cfg.initial_balance
         self._prev_equity: float = cfg.initial_balance
         self._trade_count: int = 0
         self._event_sequence: int = 0
+        self._performance_dirty: bool = False
+        self._pending_traded_notional: float = 0.0
+        self._portfolio_diagnostics: tuple[float, float, float, float] = (
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
         self._period_index: int = 0
         self._status_period_count: int = 0
         self._restored_state = False
@@ -371,7 +380,8 @@ class LiveTrader:
         if not cfg.no_db:
             self._register_run()
 
-        self._fill_price: str = (cfg.params or {}).get("fill_price", "open")
+        self._fill_price = cfg.execution.default_fill_price
+        self._max_volume_participation_rate = cfg.execution.max_volume_participation_rate
         self._risk_limits = validate_risk_params(cfg.params)
         self._running: bool = False
 
@@ -398,7 +408,7 @@ class LiveTrader:
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
             last_bar_ts=dict(self._last_bar_ts),
-            pending_intent=deepcopy(self._pending_intent),
+            pending_decision=deepcopy(self._pending_decision),
             active_orders=deepcopy(self._active_orders),
             equity_peak=self._equity_peak,
             prev_equity=self._prev_equity,
@@ -420,7 +430,7 @@ class LiveTrader:
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
         self._last_bar_ts = state.last_bar_ts
-        self._pending_intent = state.pending_intent
+        self._pending_decision = state.pending_decision
         self._active_orders = state.active_orders
         self._equity_peak = state.equity_peak
         self._prev_equity = state.prev_equity
@@ -502,6 +512,7 @@ class LiveTrader:
         def on_bar(
             run_id_: str, ts: datetime, equity: float, drawdown: float, period_return: float
         ) -> None:
+            gross, net, concentration, turnover = self._portfolio_diagnostics
             self._db_write(
                 write_equity_curve_point,
                 ts=ts,
@@ -509,13 +520,17 @@ class LiveTrader:
                 equity=equity,
                 drawdown=drawdown,
                 period_return=period_return,
+                gross_exposure=gross,
+                net_exposure=net,
+                concentration=concentration,
+                turnover=turnover,
                 strategy=strategy,
             )
 
         return on_bar
 
     def _build_on_order_event(self) -> Callable:
-        from db.timescale_writer import refresh_performance, write_trade_event
+        from db.timescale_writer import write_trade_event
 
         from librae.core.utils import make_event_id
 
@@ -536,7 +551,7 @@ class LiveTrader:
             if not self._executor.simulation:
                 self._persist_state()
             if event.event_type in ("close", "reduce"):
-                self._db_write(refresh_performance, run_id, cfg=cfg)
+                self._performance_dirty = True
 
         return on_order_event
 
@@ -889,7 +904,7 @@ class LiveTrader:
     def _halt_live(self, *, title: str, message: str) -> None:
         """Fail closed and cancel every tracked order that may still execute."""
         self._halted = True
-        self._pending_intent = []
+        self._pending_decision = []
         if not self._executor.simulation:
             self._cancel_active_orders()
         self._persist_state()
@@ -1009,7 +1024,7 @@ class LiveTrader:
         signal.signal(signal.SIGINT, _handler)
 
     def _poll_cycle(self) -> None:
-        """Process the newest completed bars without waiting for the full universe."""
+        """Process every completed, uncommitted market-data event in order."""
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
             if self._active_orders or self._halted:
@@ -1018,7 +1033,6 @@ class LiveTrader:
             self._on_heartbeat(self._run_id)
 
         frames: dict[str, pd.DataFrame] = {}
-        latest_by_symbol: dict[str, datetime] = {}
         for symbol in self._symbols:
             df = self._fetch_with_cache(symbol)
             if df is None or df.empty:
@@ -1030,38 +1044,53 @@ class LiveTrader:
             latest_ts = latest.to_pydatetime().astimezone(UTC)
             self._check_staleness(symbol, latest_ts)
             frames[symbol] = df
-            latest_by_symbol[symbol] = latest_ts
 
-        new_bars = {
-            symbol: timestamp
-            for symbol, timestamp in latest_by_symbol.items()
-            if timestamp > self._last_bar_ts.get(symbol, datetime.min.replace(tzinfo=UTC))
-        }
-        if not new_bars:
-            return
+        pending_timestamps: set[datetime] = set()
+        for symbol, frame in frames.items():
+            watermark = self._last_bar_ts.get(symbol)
+            candidate_rows = (
+                frame.iloc[[-1]] if watermark is None else frame.loc[frame["ts"] > watermark]
+            )
+            for raw_ts in candidate_rows["ts"]:
+                timestamp = pd.Timestamp(raw_ts)
+                if timestamp.tzinfo is None:
+                    raise ValueError(f"{symbol} completed bar timestamp must be timezone-aware")
+                pending_timestamps.add(timestamp.to_pydatetime().astimezone(UTC))
 
-        cycle_ts = max(new_bars.values())
-        for symbol, timestamp in new_bars.items():
-            self._last_bar_ts[symbol] = timestamp
+        for cycle_ts in sorted(pending_timestamps):
+            if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
+                raise RuntimeError(
+                    "out-of-order completed bar cannot be applied after a newer event: "
+                    f"{cycle_ts} < {self._last_cycle_ts}"
+                )
 
-        if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
+            event_frames: dict[str, pd.DataFrame] = {}
+            advanced_symbols: list[str] = []
+            for symbol, frame in frames.items():
+                normalized = pd.to_datetime(frame["ts"], utc=True)
+                if not bool((normalized == pd.Timestamp(cycle_ts)).any()):
+                    continue
+                event_frames[symbol] = frame
+                if cycle_ts > self._last_bar_ts.get(
+                    symbol,
+                    datetime.min.replace(tzinfo=UTC),
+                ):
+                    advanced_symbols.append(symbol)
+
+            if not advanced_symbols:
+                continue
+            logger.info(
+                "New market-data event: ts=%s symbols=%s",
+                cycle_ts,
+                sorted(event_frames),
+            )
+            self._process_cycle(event_frames, cycle_ts)
+
+            # Commit watermarks only after the event was processed successfully.
+            for symbol in advanced_symbols:
+                self._last_bar_ts[symbol] = cycle_ts
+            self._last_cycle_ts = cycle_ts
             self._persist_state()
-            return
-
-        event_frames = {
-            symbol: frames[symbol]
-            for symbol, timestamp in new_bars.items()
-            if timestamp == cycle_ts
-        }
-        self._last_cycle_ts = (
-            cycle_ts if self._last_cycle_ts is None else max(self._last_cycle_ts, cycle_ts)
-        )
-        logger.info(
-            "New market-data event: ts=%s symbols=%s",
-            cycle_ts,
-            sorted(event_frames),
-        )
-        self._process_cycle(event_frames, cycle_ts)
 
     def _fetch_with_cache(self, symbol: str) -> pd.DataFrame | None:
         """Fetch OHLCV and keep a sorted, deduplicated rolling cache."""
@@ -1100,9 +1129,10 @@ class LiveTrader:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
 
-    def _publish_action_results(self, result: ActionResults) -> None:
+    def _publish_action_results(self, result: ExecutionResult) -> None:
         """Publish notifications and analytics after state is committed."""
         for event in result.events:
+            self._pending_traded_notional += abs(event.notional)
             logger.info(
                 "Order event: %s %s %s %.4f @ %.2f",
                 event.event_type,
@@ -1126,7 +1156,7 @@ class LiveTrader:
         *,
         cash: float,
         positions: dict[str, PositionState],
-        result: ActionResults,
+        result: ExecutionResult,
     ) -> None:
         """Commit a deterministic simulated fill batch."""
         self._cash = cash
@@ -1136,7 +1166,7 @@ class LiveTrader:
 
     def _plan_live_orders(
         self,
-        intent: StrategyIntent,
+        intent: StrategyDecision,
         bars: dict[str, dict[str, float]],
         ts: datetime,
         *,
@@ -1150,7 +1180,7 @@ class LiveTrader:
             if bar.get("close") is not None and float(bar["close"]) > 0
         }
 
-        def get_price(symbol: str, _action: Action) -> float | None:
+        def get_price(symbol: str, _action: OrderIntent) -> float | None:
             return prices.get(symbol)
 
         def get_volume(symbol: str) -> float | None:
@@ -1162,18 +1192,17 @@ class LiveTrader:
             if self._risk_limits.max_position_pct
             else None
         )
-        volume_limit = (
-            self._risk_limits.max_volume_participation_pct if apply_volume_limit else None
-        )
+        volume_limit = self._max_volume_participation_rate if apply_volume_limit else None
         staged_positions = deepcopy(self._positions)
+        planned_quantity_by_symbol: dict[str, float] = {}
 
-        if isinstance(intent, RebalanceTargets):
+        if isinstance(intent, PortfolioTargets):
             if intent.fill_price is not None:
                 raise ValueError(
-                    "Live RebalanceTargets.fill_price is unsupported; "
+                    "Live PortfolioTargets.fill_price is unsupported; "
                     "target rebalances submit market orders after the completed-bar decision"
                 )
-            result = process_rebalance_targets(
+            result = execute_portfolio_targets(
                 intent,
                 staged_positions,
                 self._cash,
@@ -1182,10 +1211,11 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_volume_participation_pct=volume_limit,
+                max_volume_participation_rate=volume_limit,
                 max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
                 max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
                 get_volume=get_volume,
+                used_quantity_by_symbol=planned_quantity_by_symbol,
             )
             requests = []
             for index, event in enumerate(result.events):
@@ -1201,8 +1231,6 @@ class LiveTrader:
         requests: list[OrderRequest] = []
         planning_cash = self._cash
         for action in intent:
-            if action.type == "hold":
-                continue
             if action.stop_price is not None or action.take_profit_price is not None:
                 raise ValueError(
                     "Live stop-loss/take-profit requires broker-native protective orders; "
@@ -1210,14 +1238,14 @@ class LiveTrader:
                 )
             if isinstance(action.fill_price, str):
                 raise ValueError(
-                    "Live Action.fill_price cannot name a historical bar field; "
+                    "Live OrderIntent.fill_price cannot name a historical bar field; "
                     "use None for market or a numeric price for a broker limit order"
                 )
 
             order_type = "limit" if isinstance(action.fill_price, (int, float)) else "market"
             limit_price = float(action.fill_price) if order_type == "limit" else None
             planning_action = replace(action, fill_price="close")
-            result = process_actions(
+            result = execute_order_intents(
                 [planning_action],
                 staged_positions,
                 planning_cash,
@@ -1226,8 +1254,9 @@ class LiveTrader:
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
-                max_volume_participation_pct=volume_limit,
+                max_volume_participation_rate=volume_limit,
                 get_volume=get_volume,
+                used_quantity_by_symbol=planned_quantity_by_symbol,
             )
             planning_cash += result.cash_delta
             sequence_offset = len(requests)
@@ -1246,9 +1275,9 @@ class LiveTrader:
                 )
         return requests
 
-    def _execute_live_intent(
+    def _execute_live_decision(
         self,
-        intent: StrategyIntent,
+        intent: StrategyDecision,
         bars: dict[str, dict[str, float]],
         ts: datetime,
         *,
@@ -1346,7 +1375,7 @@ class LiveTrader:
         if report.requested_quantity > request.quantity + EPSILON:
             raise ValueError("broker requested quantity exceeds the tracked request")
 
-        result: ActionResults | None = None
+        result: ExecutionResult | None = None
         cumulative_notional = (
             report.filled_quantity * report.average_price
             if report.average_price is not None
@@ -1459,14 +1488,14 @@ class LiveTrader:
             raw_bars[symbol] = raw_bar
             self._last_prices[symbol] = close
 
-        ready_intent, waiting_intent = partition_pending_intent(
-            self._pending_intent,
+        ready_decision, waiting_decision = partition_pending_decision(
+            self._pending_decision,
             raw_bars,
             self._positions,
             primary_symbol=primary_symbol,
         )
-        self._pending_intent = waiting_intent
-        cycle_used_volume: dict[str, float] = {}
+        self._pending_decision = waiting_decision
+        cycle_used_quantity_by_symbol: dict[str, float] = {}
         if self._executor.simulation:
             max_position_notional = (
                 self._risk_limits.max_position_pct * self._prev_equity
@@ -1474,20 +1503,27 @@ class LiveTrader:
                 else None
             )
             if self._halted:
-                staged_cash = self._cash
-                step_result = ActionResults(trades=[], events=[], cash_delta=0.0)
+                step_result = check_stop_targets(
+                    self._positions,
+                    raw_bars,
+                    ts,
+                    get_cost_model=self._get_cost_model,
+                    max_volume_participation_rate=self._max_volume_participation_rate,
+                    used_quantity_by_symbol=cycle_used_quantity_by_symbol,
+                )
+                staged_cash = self._cash + step_result.cash_delta
             else:
-                staged_cash, step_result = run_pending_and_stops(
+                staged_cash, step_result = execute_pending_decision_and_stops(
                     ts,
                     self._positions,
                     self._cash,
-                    ready_intent,
+                    ready_decision,
                     raw_bars,
                     get_cost_model=self._get_cost_model,
                     default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
-                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
+                    max_volume_participation_rate=self._max_volume_participation_rate,
                     max_gross_exposure_pct=self._risk_limits.max_gross_exposure_pct,
                     max_net_exposure_pct=self._risk_limits.max_net_exposure_pct,
                 )
@@ -1497,24 +1533,10 @@ class LiveTrader:
                 result=step_result,
             )
             for event in step_result.events:
-                cycle_used_volume[event.symbol] = (
-                    cycle_used_volume.get(event.symbol, 0.0) + event.fill_quantity
+                cycle_used_quantity_by_symbol[event.symbol] = (
+                    cycle_used_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
                 )
-            if self._halted and self._positions:
-                liquidation = liquidate_all(
-                    self._positions,
-                    raw_bars,
-                    ts,
-                    get_cost_model=self._get_cost_model,
-                    reason=REASON_DRAWDOWN_BREACH,
-                    max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
-                )
-                self._commit_simulated_results(
-                    cash=self._cash + liquidation.cash_delta,
-                    positions=self._positions,
-                    result=liquidation,
-                )
-        elif ready_intent and not self._execute_live_intent(ready_intent, raw_bars, ts):
+        elif ready_decision and not self._execute_live_decision(ready_decision, raw_bars, ts):
             self._persist_state()
             return
 
@@ -1522,7 +1544,7 @@ class LiveTrader:
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
         # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(ts, raw_bars, used_volume=cycle_used_volume)
+        self._record_equity(ts, raw_bars, used_quantity_by_symbol=cycle_used_quantity_by_symbol)
         if self._halted:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
@@ -1536,11 +1558,15 @@ class LiveTrader:
                 featured = self._feature_fn(history)
             except Exception:
                 logger.exception(
-                    "Feature computation failed for %s; skipping strategy decision for cycle %s",
+                    "Feature computation failed for %s; cycle %s remains uncommitted",
                     symbol,
                     ts,
                 )
-                return
+                # Execution of an already-pending order is independent of
+                # feature computation. Persist that fill, but leave the market
+                # data watermark unchanged so the decision phase is retried.
+                self._persist_state()
+                raise
 
             bar = featured.iloc[-1].to_dict()
             bars[symbol] = bar
@@ -1563,9 +1589,9 @@ class LiveTrader:
                         signal_type="exit",
                     )
 
-        # A waiting target-weight basket is atomic; per-symbol Actions do not
+        # A waiting target-weight basket is atomic; per-symbol intents do not
         # prevent decisions for other symbols.
-        if not isinstance(self._pending_intent, RebalanceTargets):
+        if not isinstance(self._pending_decision, PortfolioTargets):
             equity, position_snapshot = self._eval_equity_snapshot()
             ctx = Context(
                 ts=ts,
@@ -1579,32 +1605,32 @@ class LiveTrader:
                 period_index=self._period_index,
             )
             intent = self._strategy.on_bar(ctx)
-            validate_intent_symbols(
+            validate_decision_symbols(
                 intent,
                 set(self._symbols),
                 primary_symbol=primary_symbol,
             )
             self._period_index += 1
             if self._executor.simulation:
-                self._pending_intent = merge_pending_intents(
-                    self._pending_intent,
+                self._pending_decision = merge_pending_decisions(
+                    self._pending_decision,
                     intent,
                     primary_symbol=primary_symbol,
                 )
             else:
-                ready_intent, waiting_intent = partition_pending_intent(
+                ready_decision, waiting_decision = partition_pending_decision(
                     intent,
                     raw_bars,
                     self._positions,
                     primary_symbol=primary_symbol,
                 )
-                self._pending_intent = merge_pending_intents(
-                    self._pending_intent,
-                    waiting_intent,
+                self._pending_decision = merge_pending_decisions(
+                    self._pending_decision,
+                    waiting_decision,
                     primary_symbol=primary_symbol,
                 )
-                if ready_intent:
-                    self._execute_live_intent(ready_intent, raw_bars, ts)
+                if ready_decision:
+                    self._execute_live_decision(ready_decision, raw_bars, ts)
 
         for symbol, position in self._positions.items():
             if symbol in raw_bars:
@@ -1644,7 +1670,7 @@ class LiveTrader:
         ts: datetime,
         bars: dict[str, dict[str, float]],
         *,
-        used_volume: dict[str, float] | None = None,
+        used_quantity_by_symbol: dict[str, float] | None = None,
     ) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
@@ -1660,7 +1686,9 @@ class LiveTrader:
             and not self._halted
             and drawdown <= -self._risk_limits.max_drawdown_pct
         ):
-            self._flatten_and_halt(ts, drawdown, bars, used_volume=used_volume)
+            self._flatten_and_halt(
+                ts, drawdown, bars, used_quantity_by_symbol=used_quantity_by_symbol
+            )
             equity = self._eval_equity()
             drawdown = (
                 (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
@@ -1668,9 +1696,33 @@ class LiveTrader:
 
         period_return = (equity / previous_equity - 1.0) if previous_equity > 0 else 0.0
         self._prev_equity = equity
+        signed_weights = []
+        if equity > EPSILON:
+            for symbol, position in self._positions.items():
+                notional = (
+                    position.quantity
+                    * self._get_last_price(symbol, position)
+                    * self._get_cost_model(symbol).multiplier
+                )
+                signed_weights.append(
+                    notional / equity * (1.0 if position.side == "long" else -1.0)
+                )
+        self._portfolio_diagnostics = (
+            sum(abs(weight) for weight in signed_weights),
+            sum(signed_weights),
+            max((abs(weight) for weight in signed_weights), default=0.0),
+            self._pending_traded_notional / equity if equity > EPSILON else 0.0,
+        )
+        self._pending_traded_notional = 0.0
 
         if self._on_bar:
             self._on_bar(self._run_id, ts, equity, drawdown, period_return)
+        if self._performance_dirty:
+            from db.timescale_writer import refresh_performance
+
+            # The current equity point must exist before KPI recomputation.
+            self._db_write(refresh_performance, self._run_id, cfg=self._cfg)
+            self._performance_dirty = False
 
         # Periodic status notification (flags cached at init)
         if self._status_enabled:
@@ -1697,28 +1749,20 @@ class LiveTrader:
         drawdown: float,
         bars: dict[str, dict[str, float]],
         *,
-        used_volume: dict[str, float] | None = None,
+        used_quantity_by_symbol: dict[str, float] | None = None,
     ) -> None:
-        """Force-close every open position and permanently halt new entries."""
+        """Queue or submit exits and permanently halt new entries."""
+        exit_queued = False
         if self._executor.simulation:
-            result = liquidate_all(
+            queue_market_exit_all(
                 self._positions,
-                bars,
-                ts,
-                get_cost_model=self._get_cost_model,
                 reason=REASON_DRAWDOWN_BREACH,
-                max_volume_participation_pct=(self._risk_limits.max_volume_participation_pct),
-                used_volume=used_volume,
-            )
-            self._commit_simulated_results(
-                cash=self._cash + result.cash_delta,
-                positions=self._positions,
-                result=result,
             )
             flattened = not self._positions
+            exit_queued = not flattened
         else:
             actions = [
-                Action(type="close", symbol=symbol, reason=REASON_DRAWDOWN_BREACH)
+                OrderIntent(action="close", symbol=symbol, reason=REASON_DRAWDOWN_BREACH)
                 for symbol in self._positions
             ]
             reference_bars = {
@@ -1727,17 +1771,19 @@ class LiveTrader:
             }
             # Live emergency exits submit the full remaining quantity. Broker
             # execution reports remain authoritative for partial fills.
-            flattened = self._execute_live_intent(
+            flattened = self._execute_live_decision(
                 actions,
                 reference_bars,
                 ts,
                 apply_volume_limit=False,
             )
         self._halted = True
-        self._pending_intent = []
+        self._pending_decision = []
         self._persist_state()
         if flattened:
             outcome = "flattened all positions"
+        elif exit_queued:
+            outcome = "market exits queued for next observed opens"
         elif self._active_orders:
             outcome = "flattening in progress"
         else:

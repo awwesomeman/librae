@@ -484,3 +484,29 @@ class TestDescribeSymbols:
         results = describe_symbols(cfg, symbols=["MXFR1", "TMFR1"])
 
         assert [r.symbol for r in results] == ["MXFR1", "TMFR1"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("multiplier", 0.0),
+        ("tick_size", 0.0),
+        ("commission_rate", -0.001),
+        ("slippage_ticks", -1.0),
+        ("long_margin_rate", 0.0),
+    ],
+)
+def test_invalid_cost_inputs_fail_fast(field: str, value: float) -> None:
+    values = {
+        "multiplier": 1.0,
+        "commission_rate": 0.0,
+        "min_commission": 0.0,
+        "slippage_ticks": 0.0,
+        "tick_size": 0.01,
+        "tax_rate": 0.0,
+        "long_margin_rate": 1.0,
+        "short_margin_rate": 1.0,
+    }
+    values[field] = value
+    with pytest.raises(ValueError):
+        CostModel(**values)

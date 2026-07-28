@@ -1,17 +1,19 @@
 """Strategy protocol and data types for the backtest engine.
 
 Defines the contract between strategies and the engine:
-- Strategy implements on_bar(ctx) → list[Action] | RebalanceTargets
+- Strategy implements on_bar(ctx) → list[OrderIntent] | PortfolioTargets
 - Engine provides Context with market data + portfolio state
-- Engine executes Actions or portfolio targets via Executor
+- Engine executes order intents or portfolio targets via the execution layer
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
+from types import MappingProxyType
 from typing import Literal
 
 
@@ -51,13 +53,29 @@ class Context:
 
     ts: datetime
     symbol: str
-    symbols: list[str]
-    bar: dict[str, float]
-    bars: dict[str, dict[str, float]]
-    positions: dict[str, Position]
+    symbols: tuple[str, ...] | list[str]
+    bar: Mapping[str, float]
+    bars: Mapping[str, Mapping[str, float]]
+    positions: Mapping[str, Position]
     cash: float
     equity: float
     period_index: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbols", tuple(self.symbols))
+        object.__setattr__(self, "bar", MappingProxyType(dict(self.bar)))
+        object.__setattr__(
+            self,
+            "bars",
+            MappingProxyType(
+                {symbol: MappingProxyType(dict(values)) for symbol, values in self.bars.items()}
+            ),
+        )
+        object.__setattr__(
+            self,
+            "positions",
+            MappingProxyType(dict(self.positions)),
+        )
 
     @property
     def available_symbols(self) -> tuple[str, ...]:
@@ -66,21 +84,21 @@ class Context:
 
 
 @dataclass(frozen=True)
-class Action:
-    """What the strategy wants the engine to do.
+class OrderIntent:
+    """A symbol-level instruction requested by a strategy.
 
     Attributes:
         quantity: None sizes using all available cash (single-asset default).
-            When on_bar returns multiple long/short Actions for the same bar
+            When on_bar returns multiple long/short intents for the same bar
             (e.g. a cross-sectional/stock-picking strategy opening several
             symbols at once), leaving quantity=None on more than one of them
-            lets the first-processed Action consume all cash and starves the
+            lets the first-processed OrderIntent consume all cash and starves the
             rest — set explicit per-symbol quantity (e.g. equal-weight sizing).
         fill_price: In backtest/sim, how to resolve execution on the next bar.
             str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
             float — one-bar limit order. Buys fill when low reaches the limit;
                 sells fill when high reaches it. Gap-through fills at open.
-            None  — use engine default (RunConfig.params["fill_price"], typically "open").
+            None  — use ``RunConfig.execution.default_fill_price``.
             In live, None submits a market order and a float submits a broker
             limit order; bar-field strings are rejected as non-causal.
         stop_price: Absolute price that force-closes the position (stop-market
@@ -93,7 +111,7 @@ class Action:
             touches it). Same lifecycle as stop_price and simulation-only.
     """
 
-    type: Literal["long", "short", "close", "hold"]
+    action: Literal["long", "short", "close"]
     symbol: str = ""
     quantity: float | None = None
     reason: str = ""
@@ -103,7 +121,7 @@ class Action:
 
 
 @dataclass(frozen=True)
-class RebalanceTargets:
+class PortfolioTargets:
     """Portfolio-level target weights.
 
     Positive weights target long exposure and negative weights target short
@@ -122,8 +140,8 @@ class RebalanceTargets:
     def __post_init__(self) -> None:
         if self.fill_price is not None and not isinstance(self.fill_price, str):
             raise ValueError(
-                "RebalanceTargets.fill_price must be a bar field name; "
-                "use per-symbol Actions for limit orders"
+                "PortfolioTargets.fill_price must be a bar field name; "
+                "use per-symbol OrderIntent values for limit orders"
             )
         for symbol, raw_weight in self.weights.items():
             if not symbol:
@@ -132,7 +150,7 @@ class RebalanceTargets:
                 raise ValueError(f"target weight for {symbol!r} must be finite")
 
 
-StrategyIntent = list[Action] | RebalanceTargets
+StrategyDecision = list[OrderIntent] | PortfolioTargets
 
 
 @dataclass(frozen=True)
@@ -176,14 +194,14 @@ class PositionState:
     pending_market_exit_reason: str | None = None
 
 
-class BaseStrategy(ABC):
+class Strategy(ABC):
     """Abstract base for all strategies.
 
-    Strategies only do one thing: look at Context, return an execution intent.
+    Strategies only inspect Context and return a decision.
     Data preparation (ETL, signals) is done externally before the backtest.
     """
 
     @abstractmethod
-    def on_bar(self, ctx: Context) -> StrategyIntent:
-        """Called once per bar. Return Actions, targets, or an empty list to hold."""
+    def on_bar(self, ctx: Context) -> StrategyDecision:
+        """Return order intents, portfolio targets, or ``[]`` for no decision."""
         ...

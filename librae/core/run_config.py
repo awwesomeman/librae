@@ -2,6 +2,7 @@
 
 RunConfig is a frozen dataclass that holds all parameters for a run:
 - Strategy params (stored in DB backtest_runs.params)
+- Execution policy (typed fill and liquidity assumptions)
 - Perf params (stored in DB backtest_runs.perf_params, display only)
 - Behavior params (not stored in DB)
 
@@ -14,11 +15,67 @@ import hashlib
 import json
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from functools import cached_property
+from math import isfinite
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPolicy:
+    """Run-wide simulated execution assumptions.
+
+    ``default_fill_price`` is used by backtest and simulation when a strategy
+    decision does not override ``fill_price``. Live market orders are filled
+    by the broker and do not use this bar field.
+
+    ``max_volume_participation_rate`` caps the cumulative filled quantity for
+    one symbol in one bar. ``None`` disables the cap. With a cap enabled,
+    missing volume rejects the fill and insufficient volume produces a partial
+    fill. The cap also applies to stops and forced exits.
+    """
+
+    default_fill_price: str = "open"
+    max_volume_participation_rate: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
+            raise ValueError("default_fill_price must be a non-empty bar field name")
+        rate = self.max_volume_participation_rate
+        if rate is not None and (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not isfinite(rate)
+            or not 0 < rate <= 1
+        ):
+            raise ValueError(f"max_volume_participation_rate must be in (0, 1] or None, got {rate}")
+
+
+class FrozenDict(dict):
+    """JSON-serializable dict that rejects mutation after construction."""
+
+    def _immutable(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("RunConfig mappings are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+def _freeze(value: Any) -> Any:
+    """Recursively detach mutable caller-owned config values."""
+    if isinstance(value, dict):
+        return FrozenDict({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
 
 
 def _sanitize_for_hash(obj: Any) -> Any:
@@ -68,12 +125,13 @@ class RunConfig:
 
     # === Strategy identification (stored in DB) ===
     strategy_name: str
-    symbols: list[str]
+    symbols: list[str] | tuple[str, ...]
     timeframe: str
     market: str
     data_source: str
     initial_balance: float
     mode: Literal["backtest", "sim", "live"]
+    execution: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     # Explicit live execution route. It is never inferred from market,
     # data_source, or symbol; instrument_overrides[symbol]["broker"] wins.
     broker: str | None = None
@@ -109,17 +167,50 @@ class RunConfig:
     telegram_config: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        """Validate invariants. Raise, never mutate (frozen purity)."""
+        """Validate invariants and detach mutable caller-owned values."""
+        if not isinstance(self.execution, ExecutionPolicy):
+            raise TypeError("execution must be an ExecutionPolicy")
+        object.__setattr__(self, "symbols", tuple(self.symbols))
+        for field_name in (
+            "params",
+            "cost_overrides",
+            "symbol_overrides",
+            "instrument_overrides",
+            "telegram_config",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _freeze(value))
+
         if not self.symbols or any(not symbol for symbol in self.symbols):
             raise ValueError("symbols must contain non-empty identifiers")
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
         if not self.market or not self.data_source:
             raise ValueError("market and data_source must be non-empty")
+        if not self.strategy_name or not self.timeframe:
+            raise ValueError("strategy_name and timeframe must be non-empty")
+        if not isfinite(self.initial_balance) or self.initial_balance <= 0:
+            raise ValueError("initial_balance must be finite and positive")
+        if not isfinite(self.risk_free_rate):
+            raise ValueError("risk_free_rate must be finite")
         if self.annual_periods <= 0:
             raise ValueError("annual_periods must be positive")
+        if self.poll_seconds < 0:
+            raise ValueError("poll_seconds must be non-negative")
         if self.dry_run and not self.no_db:
             raise ValueError("dry_run=True requires no_db=True; use build_config()")
+        legacy_execution_keys = {
+            "fill_price",
+            "max_volume_participation_pct",
+            "max_volume_participation_rate",
+        }
+        invalid_keys = sorted(legacy_execution_keys & set(self.params or {}))
+        if invalid_keys:
+            raise ValueError(
+                "execution settings no longer belong in params; move "
+                f"{invalid_keys} to RunConfig.execution"
+            )
 
     @property
     def symbol(self) -> str:
@@ -141,17 +232,19 @@ class RunConfig:
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
         initial_balance, start, end, params, cost_overrides, symbol_overrides,
-        instrument_overrides.
+        instrument_overrides, execution.
         Excludes: perf params, behavior params.
         """
         blob = json.dumps(
             _sanitize_for_hash(
                 {
                     "strategy_name": self.strategy_name,
-                    "symbols": sorted(self.symbols),
+                    # Primary-symbol order is observable engine behaviour.
+                    "symbols": self.symbols,
                     "timeframe": self.timeframe,
                     "market": self.market,
                     "data_source": self.data_source,
+                    "mode": self.mode,
                     "broker": self.broker,
                     "initial_balance": self.initial_balance,
                     "start": self.start,
@@ -160,6 +253,7 @@ class RunConfig:
                     "cost_overrides": self.cost_overrides,
                     "symbol_overrides": self.symbol_overrides,
                     "instrument_overrides": self.instrument_overrides,
+                    "execution": asdict(self.execution),
                 }
             ),
             sort_keys=True,
@@ -196,6 +290,7 @@ class RunConfig:
             f"  cost_overrides: {self.cost_overrides}",
             f"  symbol_overrides: {self.symbol_overrides}",
             f"  instrument_overrides: {self.instrument_overrides}",
+            f"  execution:   {self.execution}",
             "  --- perf params (stored in DB, display only) ---",
             f"  annualize:   {self.annualize}",
             f"  risk_free_rate: {self.risk_free_rate}",

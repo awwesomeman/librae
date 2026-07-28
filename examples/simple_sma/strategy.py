@@ -8,7 +8,7 @@ differently — the same lesson as librae's own look-ahead-bias fix.
 from __future__ import annotations
 
 import pandas as pd
-from librae import Action, BaseStrategy, Context
+from librae import Context, OrderIntent, Strategy
 
 
 def prepare_signals(df: pd.DataFrame, fast: int = 10, slow: int = 30) -> pd.DataFrame:
@@ -21,14 +21,14 @@ def prepare_signals(df: pd.DataFrame, fast: int = 10, slow: int = 30) -> pd.Data
     return out
 
 
-class SmaCrossover(BaseStrategy):
+class SmaCrossover(Strategy):
     """Enter long on golden cross, close on death cross."""
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if ctx.positions.get(ctx.symbol):
             if ctx.bar.get("exit_signal"):
-                return [Action(type="close", symbol=ctx.symbol)]
+                return [OrderIntent(action="close", symbol=ctx.symbol)]
             return []
         if ctx.bar.get("entry_signal"):
-            return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+            return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
         return []

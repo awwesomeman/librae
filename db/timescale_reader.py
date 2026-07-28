@@ -24,10 +24,10 @@ def get_run_by_config_hash(
 ) -> dict[str, Any] | None:
     """Find the most recent run with the given config_hash.
 
-    Returns dict with run_id, params, perf_params, or None if not found.
+    Returns run configuration metadata, or None if not found.
     Existing old runs (config_hash=NULL) are not affected.
     """
-    sql = """SELECT run_id, params, perf_params
+    sql = """SELECT run_id, params, execution_policy, perf_params
              FROM backtest_runs
              WHERE config_hash = %s
              ORDER BY run_at DESC LIMIT 1"""
@@ -41,7 +41,8 @@ def get_run_by_config_hash(
     return {
         "run_id": row[0],
         "params": json.loads(row[1]) if row[1] else None,
-        "perf_params": json.loads(row[2]) if row[2] else None,
+        "execution_policy": json.loads(row[2]) if row[2] else None,
+        "perf_params": json.loads(row[3]) if row[3] else None,
     }
 
 

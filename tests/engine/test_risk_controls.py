@@ -13,10 +13,11 @@ from librae.core.executor import (
     REASON_FORCE_CLOSE,
     _cap_fill_to_notional,
     _cap_fill_to_volume,
+    execute_order_intents,
     liquidate_all,
-    process_actions,
 )
-from librae.core.strategy import Action, BaseStrategy, Context, Fill, PositionState
+from librae.core.run_config import ExecutionPolicy
+from librae.core.strategy import Context, Fill, OrderIntent, PositionState, Strategy
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -177,7 +178,7 @@ class TestLiquidateAll:
             TS,
             get_cost_model=lambda s: _zero_cost(),
             reason=REASON_FORCE_CLOSE,
-            max_volume_participation_pct=0.25,
+            max_volume_participation_rate=0.25,
         )
 
         assert result.events[0].event_type == "reduce"
@@ -186,14 +187,14 @@ class TestLiquidateAll:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: process_actions respects max_position_notional
+# Unit tests: execute_order_intents respects max_position_notional
 # ---------------------------------------------------------------------------
 
 
 class TestProcessActionsPositionCap:
     def test_oversized_open_gets_clamped(self):
-        actions = [Action(type="long", symbol="TEST")]
-        result = process_actions(
+        actions = [OrderIntent(action="long", symbol="TEST")]
+        result = execute_order_intents(
             actions,
             {},
             10_000.0,
@@ -209,8 +210,8 @@ class TestProcessActionsPositionCap:
 
 class TestProcessActionsVolumeCap:
     def test_oversized_open_gets_clamped_to_participation(self):
-        actions = [Action(type="long", symbol="TEST")]
-        result = process_actions(
+        actions = [OrderIntent(action="long", symbol="TEST")]
+        result = execute_order_intents(
             actions,
             {},
             10_000.0,
@@ -218,7 +219,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_pct=0.1,
+            max_volume_participation_rate=0.1,
             get_volume=lambda s: 50.0,
         )
         assert len(result.events) == 1
@@ -229,8 +230,8 @@ class TestProcessActionsVolumeCap:
         outright (0% of 0 volume = 0), not be treated as "no volume data
         available" and let an uncapped fill through — the exact opposite
         of what a volume-participation cap is supposed to guarantee."""
-        actions = [Action(type="long", symbol="TEST")]
-        result = process_actions(
+        actions = [OrderIntent(action="long", symbol="TEST")]
+        result = execute_order_intents(
             actions,
             {},
             10_000.0,
@@ -238,7 +239,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_pct=0.1,
+            max_volume_participation_rate=0.1,
             get_volume=lambda s: 0.0,
         )
         assert result.events == []
@@ -247,8 +248,8 @@ class TestProcessActionsVolumeCap:
         """No volume data (get_volume returns None) is a different case
         from a real zero-volume bar — the cap can't be computed, so it's
         skipped rather than treated as a hard reject."""
-        actions = [Action(type="long", symbol="TEST")]
-        result = process_actions(
+        actions = [OrderIntent(action="long", symbol="TEST")]
+        result = execute_order_intents(
             actions,
             {},
             10_000.0,
@@ -256,7 +257,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_pct=0.1,
+            max_volume_participation_rate=0.1,
             get_volume=lambda s: None,
         )
         assert result.events == []
@@ -273,15 +274,15 @@ class TestProcessActionsVolumeCap:
             impact_coef=10.0,
         )
 
-        result = process_actions(
-            [Action(type="close", symbol="TEST")],
+        result = execute_order_intents(
+            [OrderIntent(action="close", symbol="TEST")],
             positions,
             0.0,
             TS,
             get_price=lambda s, a: 110.0,
             get_cost_model=lambda s: cost_model,
             primary_symbol="TEST",
-            max_volume_participation_pct=0.25,
+            max_volume_participation_rate=0.25,
             get_volume=lambda s: 20.0,
         )
 
@@ -291,10 +292,10 @@ class TestProcessActionsVolumeCap:
         assert positions["TEST"].quantity == pytest.approx(5.0)
 
     def test_multiple_fills_share_one_symbol_volume_budget(self):
-        result = process_actions(
+        result = execute_order_intents(
             [
-                Action(type="long", symbol="TEST", quantity=3.0),
-                Action(type="long", symbol="TEST", quantity=3.0),
+                OrderIntent(action="long", symbol="TEST", quantity=3.0),
+                OrderIntent(action="long", symbol="TEST", quantity=3.0),
             ],
             {},
             10_000.0,
@@ -302,7 +303,7 @@ class TestProcessActionsVolumeCap:
             get_price=lambda s, a: 100.0,
             get_cost_model=lambda s: _zero_cost(),
             primary_symbol="TEST",
-            max_volume_participation_pct=0.25,
+            max_volume_participation_rate=0.25,
             get_volume=lambda s: 20.0,
         )
 
@@ -315,12 +316,12 @@ class TestProcessActionsVolumeCap:
 # ---------------------------------------------------------------------------
 
 
-class OpenOnceStrategy(BaseStrategy):
+class OpenOnceStrategy(Strategy):
     """Opens a long at bar 1, never closes itself — isolates engine-enforced exits."""
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if ctx.period_index == 1 and ctx.symbol not in ctx.positions:
-            return [Action(type="long", symbol=ctx.symbol)]
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
         return []
 
 
@@ -351,7 +352,7 @@ class TestMaxDrawdownBreaker:
         assert len(result.equity_curve) == len(bars)  # curve continues to the end, flat
         assert result.equity_curve[-1].equity == pytest.approx(result.equity_curve[3].equity)
 
-    def test_breach_snapshot_includes_liquidation_costs_and_flat_position(self) -> None:
+    def test_breach_queues_exit_for_next_bar_open(self) -> None:
         bars = [
             {"open": 100, "high": 101, "low": 99, "close": 100},
             {"open": 100, "high": 101, "low": 99, "close": 100},
@@ -384,11 +385,14 @@ class TestMaxDrawdownBreaker:
 
         close_event = next(event for event in result.order_events if event.event_type == "close")
         breach_ts = result.equity_curve[3].ts
+        exit_ts = result.equity_curve[4].ts
         assert close_event.reason == REASON_DRAWDOWN_BREACH
+        assert close_event.ts == exit_ts
+        assert close_event.price == pytest.approx(bars[4]["open"])
         assert close_event.commission > 0
-        assert result.equity_curve[3].equity == pytest.approx(result.final_equity)
         assert result.equity_curve[4].equity == pytest.approx(result.final_equity)
-        assert all(snapshot.ts != breach_ts for snapshot in result.position_snapshots)
+        assert any(snapshot.ts == breach_ts for snapshot in result.position_snapshots)
+        assert all(snapshot.ts != exit_ts for snapshot in result.position_snapshots)
 
     def test_no_breach_when_disabled(self):
         """Same crash, no max_drawdown_pct set -> position rides it out (baseline sanity check)."""
@@ -405,6 +409,28 @@ class TestMaxDrawdownBreaker:
         close_events = [e for e in result.order_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_FORCE_CLOSE  # only closed by end-of-run liquidation
+
+    def test_final_bar_breach_fails_instead_of_same_bar_fill(self) -> None:
+        bars = [
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 10, "high": 50, "low": 9, "close": 50},
+        ]
+        cfg = make_test_cfg(
+            mode="backtest",
+            initial_balance=10_000.0,
+            params={"max_drawdown_pct": 0.2},
+        )
+
+        with pytest.raises(ValueError, match="without a subsequent tradable bar"):
+            Backtest(
+                _make_multiindex_df(bars),
+                OpenOnceStrategy(),
+                cfg=cfg,
+                cost_model=_zero_cost(),
+            ).run()
 
 
 class TestMaxPositionCap:
@@ -450,7 +476,7 @@ class TestMaxVolumeParticipation:
         cfg = make_test_cfg(
             mode="backtest",
             initial_balance=10_000.0,
-            params={"max_volume_participation_pct": 0.5},
+            execution=ExecutionPolicy(max_volume_participation_rate=0.5),
         )
         bt = Backtest(
             _make_multiindex_df(bars), OpenOnceStrategy(), cfg=cfg, cost_model=_zero_cost()
@@ -459,7 +485,7 @@ class TestMaxVolumeParticipation:
 
         assert len(result.trades) == 1
         # Uncapped, all ~10_000 cash at price 100 would size ~100 units.
-        # max_volume_participation_pct=0.5 * bar[2].volume(20) caps it at 10 units.
+        # max_volume_participation_rate=0.5 * bar[2].volume(20) caps it at 10 units.
         assert result.trades[0].quantity == pytest.approx(10.0)
 
 
@@ -469,10 +495,10 @@ class TestDynamicSlippage:
         low-volume run's participation-scaled slippage must be strictly
         higher, proving impact_coef actually moves the number end-to-end."""
 
-        class OpenFixedQtyStrategy(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class OpenFixedQtyStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 if ctx.period_index == 1 and ctx.symbol not in ctx.positions:
-                    return [Action(type="long", symbol=ctx.symbol, quantity=5.0)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=5.0)]
                 return []
 
         cost_model = CostModel(

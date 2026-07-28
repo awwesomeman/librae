@@ -9,7 +9,7 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import resolve_fill_price
-from librae.core.strategy import Action, BaseStrategy
+from librae.core.strategy import OrderIntent, Strategy
 
 
 def _bar(*, open_: float, high: float, low: float) -> dict[str, float]:
@@ -20,37 +20,37 @@ def _bar(*, open_: float, high: float, low: float) -> dict[str, float]:
     ("action", "position_side", "bar", "expected"),
     [
         (
-            Action(type="long", symbol="X", fill_price=100.0),
+            OrderIntent(action="long", symbol="X", fill_price=100.0),
             None,
             _bar(open_=105, high=106, low=99),
             100.0,
         ),
         (
-            Action(type="long", symbol="X", fill_price=100.0),
+            OrderIntent(action="long", symbol="X", fill_price=100.0),
             None,
             _bar(open_=95, high=98, low=94),
             95.0,
         ),
         (
-            Action(type="short", symbol="X", fill_price=100.0),
+            OrderIntent(action="short", symbol="X", fill_price=100.0),
             None,
             _bar(open_=95, high=101, low=94),
             100.0,
         ),
         (
-            Action(type="short", symbol="X", fill_price=100.0),
+            OrderIntent(action="short", symbol="X", fill_price=100.0),
             None,
             _bar(open_=105, high=106, low=104),
             105.0,
         ),
         (
-            Action(type="close", symbol="X", fill_price=100.0),
+            OrderIntent(action="close", symbol="X", fill_price=100.0),
             "long",
             _bar(open_=105, high=106, low=104),
             105.0,
         ),
         (
-            Action(type="close", symbol="X", fill_price=100.0),
+            OrderIntent(action="close", symbol="X", fill_price=100.0),
             "short",
             _bar(open_=95, high=98, low=94),
             95.0,
@@ -67,7 +67,7 @@ def test_limit_fill_is_side_correct(action, position_side, bar, expected) -> Non
 
 
 def test_unreached_limit_expires_with_observable_log(caplog) -> None:
-    action = Action(type="long", symbol="X", fill_price=100.0)
+    action = OrderIntent(action="long", symbol="X", fill_price=100.0)
 
     with caplog.at_level(logging.INFO, logger="librae.core.executor"):
         fill = resolve_fill_price(
@@ -95,10 +95,10 @@ def test_unfilled_limit_does_not_roll_to_a_later_bar(caplog) -> None:
         names=["symbol", "datetime"],
     )
 
-    class SubmitOnce(BaseStrategy):
+    class SubmitOnce(Strategy):
         def on_bar(self, ctx):
             if ctx.period_index == 0:
-                return [Action(type="long", symbol="X", quantity=1.0, fill_price=100.0)]
+                return [OrderIntent(action="long", symbol="X", quantity=1.0, fill_price=100.0)]
             return []
 
     with caplog.at_level(logging.INFO, logger="librae.core.executor"):

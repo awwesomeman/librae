@@ -11,13 +11,13 @@ from datetime import UTC, datetime
 import pytest
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
-    ActionResults,
+    ExecutionResult,
     close_position,
-    process_actions,
+    execute_order_intents,
     reduce_position,
     scale_into_position,
 )
-from librae.core.strategy import Action, Fill, PositionState
+from librae.core.strategy import Fill, OrderIntent, PositionState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -97,18 +97,18 @@ TS = datetime(2026, 1, 10, tzinfo=UTC)
 
 
 def _run_actions(
-    actions: list[Action],
+    actions: list[OrderIntent],
     positions: dict[str, PositionState] | None = None,
     cash: float = 100_000.0,
     prices: dict[str, float] | None = None,
     cm: CostModel | None = None,
-) -> ActionResults:
+) -> ExecutionResult:
     if positions is None:
         positions = {}
     if prices is None:
         prices = {"TEST": 100.0}
     cm = cm or _zero_cost()
-    return process_actions(
+    return execute_order_intents(
         actions,
         positions,
         cash,
@@ -256,13 +256,13 @@ class TestScalingIntegration:
     def test_long_scale_and_close(self):
         """#10: buy@100, add@120, close@130 → correct PnL."""
         positions: dict[str, PositionState] = {}
-        actions = [Action(type="long", symbol="TEST", quantity=10.0)]
+        actions = [OrderIntent(action="long", symbol="TEST", quantity=10.0)]
         result = _run_actions(actions, positions, prices={"TEST": 100.0})
         assert "TEST" in positions
         assert result.cash_delta == pytest.approx(-100.0 * 10.0)
 
         # Scale in
-        actions2 = [Action(type="long", symbol="TEST", quantity=5.0)]
+        actions2 = [OrderIntent(action="long", symbol="TEST", quantity=5.0)]
         result2 = _run_actions(
             actions2, positions, cash=100_000 + result.cash_delta, prices={"TEST": 120.0}
         )
@@ -271,7 +271,7 @@ class TestScalingIntegration:
         assert positions["TEST"].entry_price == pytest.approx(expected_avg)
 
         # Close all
-        actions3 = [Action(type="close", symbol="TEST")]
+        actions3 = [OrderIntent(action="close", symbol="TEST")]
         result3 = _run_actions(
             actions3,
             positions,
@@ -287,7 +287,7 @@ class TestScalingIntegration:
         cm = _zero_cost()
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="long", symbol="TEST", quantity=10.0)],
+            [OrderIntent(action="long", symbol="TEST", quantity=10.0)],
             positions,
             prices={"TEST": 100.0},
             cm=cm,
@@ -295,7 +295,7 @@ class TestScalingIntegration:
 
         # Partial close 4
         result = _run_actions(
-            [Action(type="close", symbol="TEST", quantity=4.0)],
+            [OrderIntent(action="close", symbol="TEST", quantity=4.0)],
             positions,
             prices={"TEST": 120.0},
             cm=cm,
@@ -307,7 +307,7 @@ class TestScalingIntegration:
 
         # Close rest
         result2 = _run_actions(
-            [Action(type="close", symbol="TEST")],
+            [OrderIntent(action="close", symbol="TEST")],
             positions,
             prices={"TEST": 130.0},
             cm=cm,
@@ -341,7 +341,7 @@ class TestScalingIntegration:
 
         # Open short
         _run_actions(
-            [Action(type="short", symbol="TEST", quantity=5.0)],
+            [OrderIntent(action="short", symbol="TEST", quantity=5.0)],
             positions,
             prices={"TEST": 100.0},
             cm=cm,
@@ -350,7 +350,7 @@ class TestScalingIntegration:
 
         # Scale short
         _run_actions(
-            [Action(type="short", symbol="TEST", quantity=3.0)],
+            [OrderIntent(action="short", symbol="TEST", quantity=3.0)],
             positions,
             prices={"TEST": 110.0},
             cm=cm,
@@ -359,7 +359,7 @@ class TestScalingIntegration:
 
         # Partial close (buy-to-cover 4)
         result = _run_actions(
-            [Action(type="close", symbol="TEST", quantity=4.0)],
+            [OrderIntent(action="close", symbol="TEST", quantity=4.0)],
             positions,
             prices={"TEST": 90.0},
             cm=cm,
@@ -379,13 +379,15 @@ class TestEdgeCases:
         silently no-op, since this is a strategy action being dropped."""
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="long", symbol="TEST", quantity=10.0)], positions, prices={"TEST": 100.0}
+            [OrderIntent(action="long", symbol="TEST", quantity=10.0)],
+            positions,
+            prices={"TEST": 100.0},
         )
 
         # Try to scale without quantity
         with caplog.at_level("WARNING"):
             result = _run_actions(
-                [Action(type="long", symbol="TEST")], positions, prices={"TEST": 120.0}
+                [OrderIntent(action="long", symbol="TEST")], positions, prices={"TEST": 120.0}
             )
         assert positions["TEST"].quantity == 10.0  # unchanged
         assert result.cash_delta == 0.0
@@ -395,11 +397,15 @@ class TestEdgeCases:
         """#16: opposite-side action rejected."""
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="short", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 100.0}
+            [OrderIntent(action="short", symbol="TEST", quantity=5.0)],
+            positions,
+            prices={"TEST": 100.0},
         )
 
         result = _run_actions(
-            [Action(type="long", symbol="TEST", quantity=5.0)], positions, prices={"TEST": 90.0}
+            [OrderIntent(action="long", symbol="TEST", quantity=5.0)],
+            positions,
+            prices={"TEST": 90.0},
         )
         assert positions["TEST"].side == "short"  # unchanged
         assert result.cash_delta == 0.0
@@ -435,7 +441,7 @@ class TestEdgeCases:
         """#20: scaling rejected when cash insufficient."""
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="long", symbol="TEST", quantity=10.0)],
+            [OrderIntent(action="long", symbol="TEST", quantity=10.0)],
             positions,
             cash=1100.0,
             prices={"TEST": 100.0},
@@ -443,7 +449,7 @@ class TestEdgeCases:
 
         # Only ~100 cash left, try to add 10 more @ 100
         result = _run_actions(
-            [Action(type="long", symbol="TEST", quantity=10.0)],
+            [OrderIntent(action="long", symbol="TEST", quantity=10.0)],
             positions,
             cash=100.0,
             prices={"TEST": 100.0},
@@ -459,8 +465,8 @@ class TestEdgeCases:
 
         _run_actions(
             [
-                Action(type="long", symbol="A", quantity=5.0),
-                Action(type="long", symbol="B", quantity=3.0),
+                OrderIntent(action="long", symbol="A", quantity=5.0),
+                OrderIntent(action="long", symbol="B", quantity=3.0),
             ],
             positions,
             prices=prices,
@@ -472,7 +478,7 @@ class TestEdgeCases:
 
         # Scale A
         _run_actions(
-            [Action(type="long", symbol="A", quantity=2.0)], positions, prices=prices, cm=cm
+            [OrderIntent(action="long", symbol="A", quantity=2.0)], positions, prices=prices, cm=cm
         )
         assert positions["A"].quantity == 7.0
         assert positions["B"].quantity == 3.0  # unchanged
@@ -513,7 +519,7 @@ class TestEdgeCases:
 
         # Open
         _run_actions(
-            [Action(type="long", symbol="TEST")],  # auto-size
+            [OrderIntent(action="long", symbol="TEST")],  # auto-size
             positions,
             cash=10_000.0,
             prices={"TEST": 100.0},
@@ -523,12 +529,12 @@ class TestEdgeCases:
         assert positions["TEST"].quantity == pytest.approx(100.0)  # 10000/100
 
         # Hold (no action)
-        result2 = _run_actions([Action(type="hold")], positions, cm=cm)
+        result2 = _run_actions([], positions, cm=cm)
         assert result2.cash_delta == 0.0
 
         # Close
         result3 = _run_actions(
-            [Action(type="close", symbol="TEST")],
+            [OrderIntent(action="close", symbol="TEST")],
             positions,
             prices={"TEST": 110.0},
             cm=cm,
@@ -675,7 +681,7 @@ class TestMarginRate:
         cm = _futures_cost()
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="long", symbol="TEST")],
+            [OrderIntent(action="long", symbol="TEST")],
             positions,
             cash=100_000.0,
             prices={"TEST": 20_000.0},
@@ -703,7 +709,7 @@ class TestSizePosition:
         )
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="long", symbol="TEST")],
+            [OrderIntent(action="long", symbol="TEST")],
             positions,
             cash=100_000.0,
             prices={"TEST": 100.0},
@@ -725,7 +731,7 @@ class TestSizePosition:
         )
         positions: dict[str, PositionState] = {}
         _run_actions(
-            [Action(type="long", symbol="TEST")],
+            [OrderIntent(action="long", symbol="TEST")],
             positions,
             cash=10_000.0,
             prices={"TEST": 50.0},

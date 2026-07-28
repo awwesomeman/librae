@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,7 @@ from db.timescale_writer import (
     save_strategy_results,
     write_equity_curve_point,
     write_ohlcv,
+    write_run_metadata,
     write_signal_event,
 )
 from librae.core.run_config import RunConfig
@@ -22,6 +24,31 @@ def _test_cfg(**overrides) -> RunConfig:
     overrides.setdefault("mode", "backtest")
     overrides.setdefault("params", {"a": 1})
     return make_test_cfg(**overrides)
+
+
+def test_run_metadata_persists_execution_policy_separately_from_params():
+    cursor = MagicMock()
+
+    write_run_metadata(
+        "run-1",
+        "strategy",
+        "BTCUSDT",
+        "H1",
+        "backtest",
+        params={"window": 20},
+        execution_policy={
+            "default_fill_price": "open",
+            "max_volume_participation_rate": 0.1,
+        },
+        cur=cursor,
+    )
+
+    values = cursor.execute.call_args.args[1]
+    assert json.loads(values[10]) == {"window": 20}
+    assert json.loads(values[11]) == {
+        "default_fill_price": "open",
+        "max_volume_participation_rate": 0.1,
+    }
 
 
 class TestWriteEquityCurvePoint:
@@ -179,6 +206,10 @@ class TestPersistBacktest:
         # entry_signal is True every 5th bar → 4 signals (indices 0,5,10,15)
         assert len(signal_series) == 4
         assert all(v == 1.0 for v in signal_series.values.tolist())
+        assert call_kwargs.kwargs["execution_policy"] == {
+            "default_fill_price": "open",
+            "max_volume_participation_rate": None,
+        }
 
         assert counts["ohlcv"] == 20
 
@@ -209,6 +240,40 @@ class TestPersistBacktest:
         # Should keep: 1.0, -1.0, 1.0, -0.5, 1.0 (5 values, excluding NaN and 0)
         assert len(signal_series) == 5
         assert 0.0 not in signal_series.values
+
+    @patch("db.timescale_writer.write_ohlcv", return_value=10)
+    @patch("db.timescale_writer.save_backtest_output", return_value={})
+    def test_persists_every_configured_symbol(self, mock_write_bt, mock_write_ohlcv):
+        timestamps = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+        index = pd.MultiIndex.from_product(
+            [["AAA", "BBB"], timestamps],
+            names=["symbol", "datetime"],
+        )
+        df = pd.DataFrame(
+            {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1_000.0,
+                "entry_signal": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0],
+            },
+            index=index,
+        )
+
+        counts = save_strategy_results(
+            MagicMock(),
+            df,
+            _test_cfg(symbols=["AAA", "BBB"]),
+        )
+
+        assert mock_write_ohlcv.call_count == 2
+        assert {call.args[1] for call in mock_write_ohlcv.call_args_list} == {
+            "AAA",
+            "BBB",
+        }
+        assert "BBB" in mock_write_bt.call_args.kwargs["signal_series_by_symbol"]
+        assert counts["ohlcv"] == 20
 
 
 class TestSaveSignalResults:

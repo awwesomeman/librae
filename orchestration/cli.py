@@ -24,11 +24,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
-from librae.core.run_config import RunConfig
+from librae.core.run_config import ExecutionPolicy, RunConfig
 
 if TYPE_CHECKING:
     import pandas as pd
-    from librae.core.strategy import BaseStrategy
+    from librae.core.strategy import Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +215,15 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     scfg = getattr(args, "strategy", {})
     params = dict(scfg.get("params", {}))
     perf = scfg.get("perf", {})
+    execution_raw = scfg.get("execution", {})
+    if not isinstance(execution_raw, dict):
+        raise ValueError("strategy.execution must be a mapping")
+    unknown_execution_keys = set(execution_raw) - {
+        "default_fill_price",
+        "max_volume_participation_rate",
+    }
+    if unknown_execution_keys:
+        raise ValueError(f"unknown strategy.execution settings: {sorted(unknown_execution_keys)}")
     symbols_raw = scfg.get("symbol", scfg.get("symbols", ""))
     if isinstance(symbols_raw, list):
         symbols = symbols_raw
@@ -268,6 +277,14 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         )
     poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
 
+    execution = ExecutionPolicy(
+        default_fill_price=execution_raw.get("default_fill_price", "open"),
+        max_volume_participation_rate=execution_raw.get(
+            "max_volume_participation_rate",
+            0.1,
+        ),
+    )
+
     # 4. Perf params (with known exchange-calendar defaults)
     configured_annual_periods = perf.get("annual_periods")
     if args.no_annualize:
@@ -296,6 +313,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         data_source=data_source,
         initial_balance=initial_balance,
         mode=args.mode,
+        execution=execution,
         broker=scfg.get("broker"),
         start=start,
         end=end,
@@ -415,7 +433,7 @@ def run_dispatch(
 
 def run_realtime_generic(
     cfg: RunConfig,
-    strategy: BaseStrategy,
+    strategy: Strategy,
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> None:
     """Shared sim/live body — just wires LiveTrader."""

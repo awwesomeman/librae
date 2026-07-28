@@ -173,7 +173,7 @@ class StrategyMetrics:
     - win_rate/exposure_ratio: ratio 0-1
     - sharpe/sortino/calmar/profit_factor: score (dimensionless)
     - trades: count
-    - avg_trade_return: quantity-weighted mean net return per closed trade
+    - avg_trade_return: notional-weighted mean net return per realized exit
     """
 
     # Universal (all strategies produce these)

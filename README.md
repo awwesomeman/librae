@@ -10,8 +10,11 @@ strategy interface.
 
 ## Why Librae
 
-- **One decision API** — express single-symbol orders with `Action` or complete
-  portfolio allocations with `RebalanceTargets`.
+- **One decision API** — express single-symbol orders with `OrderIntent` or complete
+  portfolio allocations with `PortfolioTargets`.
+- **One execution-policy source** — fill-field and volume-participation
+  assumptions live in typed `RunConfig.execution`, not free-form strategy
+  parameters.
 - **Causal execution** — simulations own the execution delay; live positions
   change only from broker execution reports.
 - **Portfolio-aware core** — positions, cash, costs, exposure, concentration,
@@ -49,8 +52,8 @@ uv sync --extra test --extra dev
 uv run python -m examples.simple_sma.run --mode backtest --no-db
 ```
 
-A strategy implements `on_bar(ctx)` and returns `Action` objects or
-`RebalanceTargets`. Your data pipeline supplies timezone-aware OHLCV and
+A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects or
+`PortfolioTargets`. Your data pipeline supplies timezone-aware OHLCV and
 point-in-time features; Librae owns validation, execution timing, portfolio
 state, costs, and output. The [examples](examples/) show the complete
 `RunConfig`, DataFrame, and engine wiring.
@@ -63,7 +66,7 @@ state, costs, and output. The [examples](examples/) show the complete
   the simulated T → T+1 execution delay. Do not pre-shift a signal to imitate
   that delay.
 - **Portfolio logic:** optimizer and alpha logic belong to the strategy.
-  Librae accepts the resulting actions or target weights and handles execution.
+  Librae accepts the resulting order intents or target weights and handles execution.
 - **Outputs:** `BacktestOutput` contains run metadata, events, equity,
   performance metrics, and optional position/allocation snapshots.
 
@@ -80,6 +83,8 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Paper/live broker execution (`mode=live`) | Broker-confirmed order lifecycle; sequential, not atomic across a basket |
 | Arbitrage | OHLCV research approximation only; no atomic multi-leg production execution |
 | Multi-currency portfolios | Not yet modeled; the live/sim cash ledger is single-currency |
+| Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
+| Dynamic universes / short borrow | Point-in-time universe and borrow/funding inputs remain upstream |
 
 See the [full capability matrix](architecture.md#use-case-capability-matrix)
 before selecting a workflow.

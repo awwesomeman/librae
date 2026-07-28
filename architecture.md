@@ -45,11 +45,11 @@ Backtest and live-trading engine. Provides one strategy decision interface, posi
 ```
 librae/
 ├── core/                     shared domain model (pure computation, no I/O)
-│   ├── strategy.py           BaseStrategy, Action, RebalanceTargets, Context, Position, PositionState, Fill
+│   ├── strategy.py           Strategy, OrderIntent, PortfolioTargets, Context, Position, PositionState, Fill
 │   ├── executor.py           simulated matching plus apply_execution_fill for externally confirmed fills
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
 │   ├── metrics.py            performance metrics + on-demand trade/signal outcome analysis
-│   ├── run_config.py         RunConfig — unified run parameters (frozen dataclass)
+│   ├── run_config.py         RunConfig + ExecutionPolicy — typed run parameters
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── backtest/                 backtest runtime
@@ -87,39 +87,44 @@ This is a different thing from the "Data flow" section below: that one is about 
 ```
 Strategy ETL (utils.py)  →  DataFrame (MultiIndex + signal columns)
                               ↓
-Strategy logic (strategy.py)  →  on_bar(ctx) → list[Action] | RebalanceTargets
+Strategy logic (strategy.py)  →  on_bar(ctx) → list[OrderIntent] | PortfolioTargets
                               ↓
-Engine (engine.py)     →  process_actions / process_rebalance_targets
+Engine (engine.py)     →  execute_order_intents / execute_portfolio_targets
                               ↓
 Output (build_output)  →  BacktestOutput (metrics + equity/position/allocation facts + events)
 ```
+
+The lifecycle terminology and breaking migration are recorded in
+[`2026-07-28-strategy-decision-execution-naming.md`](docs/decisions/2026-07-28-strategy-decision-execution-naming.md).
 
 ### Usage
 
 #### Backtest
 
 ```python
-from librae import Backtest, BaseStrategy, Action, Context, RunConfig
+from librae import Backtest, Strategy, OrderIntent, Context, RunConfig
+
 
 # 1. Define a strategy
-class MyStrategy(BaseStrategy):
-    def on_bar(self, ctx: Context) -> list[Action]:
+class MyStrategy(Strategy):
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if ctx.positions.get(ctx.symbol):
             if ctx.bar.get("exit_signal"):
-                return [Action(type="close", symbol=ctx.symbol)]
+                return [OrderIntent(action="close", symbol=ctx.symbol)]
             return []
         if ctx.bar.get("entry_signal"):
-            return [Action(type="long", symbol=ctx.symbol)]
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
         return []
 
+
 # 2. Run the engine (a RunConfig is usually built via orchestration.cli.build_config())
-df = fetch_and_prepare(symbol, months)          # your own ETL
+df = fetch_and_prepare(symbol, months)  # your own ETL
 bt = Backtest(data=df, strategy=MyStrategy(), cfg=cfg)
 bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
 bt.run()
 
 # 3. Get the result
-output = bt.build_output()                      # BacktestOutput
+output = bt.build_output()  # BacktestOutput
 ```
 
 **Data format**: a MultiIndex DataFrame `(symbol, datetime)` + raw, unshifted
@@ -147,23 +152,23 @@ sorts, forward/backward-fills, clips, or otherwise repairs data because those
 operations can change the point-in-time research sample and must remain
 explicit ETL decisions.
 
-For an `Action`, a numeric `fill_price` is a one-eligible-bar limit order. A
+For an `OrderIntent`, a numeric `fill_price` is a one-eligible-bar limit order. A
 buy fills when the bar's low reaches the limit and a sell fills when its high
 does; a gap through receives the opening price. An unreached limit expires
-after that bar and is logged. `RebalanceTargets.fill_price` accepts only a bar
+after that bar and is logged. `PortfolioTargets.fill_price` accepts only a bar
 field name because one numeric price cannot describe a multi-symbol basket;
-use per-symbol `Action`s for limits.
+use per-symbol `OrderIntent`s for limits.
 
 #### Multi-asset / stock-picking strategies
 
-The engine is portfolio-level by design (`positions` is a `dict[symbol]`, and `equity_curve`/`metrics` are both portfolio-level); `on_bar()` can return `Action`s for multiple different symbols within the same bar, with no changes needed to the engine/executor/schema. One thing to watch: `Action.quantity=None` defaults to spending all available cash (a single-asset convenience default) — when opening multiple positions in the same bar you must size each `quantity` yourself (see the `Action.quantity` docstring in `strategy.py`), otherwise the first Action will consume all the cash.
+The engine is portfolio-level by design (`positions` is a `dict[symbol]`, and `equity_curve`/`metrics` are both portfolio-level); `on_bar()` can return `OrderIntent`s for multiple different symbols within the same bar, with no changes needed to the engine/executor/schema. One thing to watch: `OrderIntent.quantity=None` defaults to spending all available cash (a single-asset convenience default) — when opening multiple positions in the same bar you must size each `quantity` yourself (see the `OrderIntent.quantity` docstring in `strategy.py`), otherwise the first OrderIntent will consume all the cash.
 
-For allocation strategies, return one `RebalanceTargets` instead:
+For allocation strategies, return one `PortfolioTargets` instead:
 
 ```python
-from librae import RebalanceTargets
+from librae import PortfolioTargets
 
-return RebalanceTargets(
+return PortfolioTargets(
     weights={"AAA": 0.50, "BBB": 0.45},
     fill_price="open",
     reason="monthly allocation",
@@ -199,14 +204,15 @@ ends, suspensions, and missing observations without guessing why data is
 absent. A last-known close is a valuation mark only: it cannot trigger an
 execution, stop, signal, or holding-age increment.
 
-Per-symbol `Action`s become eligible on that symbol's next observed bar.
-`RebalanceTargets` is intentionally synchronous: the basket waits for current
+Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar.
+`PortfolioTargets` is intentionally synchronous: the basket waits for current
 bars from every non-zero target and currently held symbol, and is never
-silently replaced. Use Actions for asynchronous cross-market execution.
+silently replaced. Use per-symbol order intents for asynchronous cross-market
+execution.
 
 Execution then deliberately diverges:
 
-- **Backtest/sim:** an Action decided at T is eligible on that symbol's next
+- **Backtest/sim:** an OrderIntent decided at T is eligible on that symbol's next
   observed raw bar. Bar fields, one-bar numeric limits, stops, take-profit,
   liquidation, and estimated costs belong to this deterministic simulation
   model.
@@ -215,10 +221,13 @@ Execution then deliberately diverges:
   the same timestamp. Current prices may size requests but local execution
   facts come only from broker reports.
 
-OHLCV caches are sorted and deduplicated. A durable per-symbol watermark
-prevents duplicate or restarted bars from replaying decisions. Older
-out-of-order bars may remain as feature history but never rewind the global
-event clock. If a backtest still holds a symbol without a real bar at the final
+OHLCV caches are sorted and deduplicated. The runtime replays every cached bar
+newer than its durable per-symbol watermark in timestamp order and advances
+that watermark only after successful processing. A late symbol at the same
+timestamp is processed with any same-timestamp bars already present in cache,
+so a waiting target basket can become executable. An older event that would
+rewind the global clock fails explicitly. If a backtest still holds a symbol
+without a real bar at the final
 timestamp, forced liquidation fails explicitly rather than fabricating a fill
 from its last mark.
 
@@ -237,11 +246,11 @@ serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
 slippage, and tax can only advance. Cancelled/rejected orders halt dependent
 work. Operational/error halts cancel tracked strategy orders. A drawdown
-breach instead clears pending strategy intent and keeps its emergency
+breach instead clears the pending strategy decision and keeps its emergency
 reduce/close queue active until broker reports reach a terminal state,
 including across restart. The runtime also rejects live bar-field fills
 (`"open"`/`"close"`),
-`RebalanceTargets.fill_price`, and local stop/take-profit parameters; those
+`PortfolioTargets.fill_price`, and local stop/take-profit parameters; those
 cannot be inferred later from a completed range. Protective orders require a
 broker-native implementation.
 
@@ -258,10 +267,14 @@ Use after `pip install -e ".[viz]"`. Purely renders the `order_events` already c
 ```python
 from librae.backtest.charts import plot_trades, plot_trades_by_run_id
 
-ohlcv = df.xs(symbol, level="symbol")            # a single symbol's OHLCV
-plot_trades(ohlcv, output.order_events, symbol)  # right after a backtest run, output already in hand
+ohlcv = df.xs(symbol, level="symbol")  # a single symbol's OHLCV
+plot_trades(
+    ohlcv, output.order_events, symbol
+)  # right after a backtest run, output already in hand
 
-plot_trades_by_run_id(run_id)                    # or: skip rerunning the backtest, read a persisted run straight from the DB
+plot_trades_by_run_id(
+    run_id
+)  # or: skip rerunning the backtest, read a persisted run straight from the DB
 ```
 
 `plot_trades_by_run_id` reads via `db.timescale_reader.load_trade_events`/`load_ohlcv` — the same source as any other downstream tool querying the `trade_events`/`ohlcv` tables, so it can never drift.
@@ -293,26 +306,46 @@ use explicit fill-price state observations because OHLCV cannot establish
 whether the bar extrema occurred before or after the fill. Exact intrabar
 excursion therefore requires finer-grained data.
 
-#### Risk controls and portfolio diagnostics
+#### Execution policy, risk controls, and portfolio diagnostics
 
-All five controls default to off (`None`). Backtest/sim enforce them in the
-fill model. Live uses the latest completed bar for request sizing, then lets
-broker execution reports determine the actual fill.
+Fill-field and liquidity assumptions have one typed source:
+`RunConfig.execution`. `build_config()` defaults to next-open simulation and a
+10% per-symbol bar-volume cap in every mode. Set the participation rate to
+`None` only for deliberately unlimited-liquidity research. Backtest/sim
+enforce the cap in the fill model. Live uses it for request sizing, then lets
+broker execution reports determine actual fills. Emergency live exits bypass
+the local cap so the broker owns partial-fill truth.
 
 ```python
-cfg = RunConfig(..., params={
-    "max_position_pct": 0.3,             # single-position notional cap = 30% of latest known equity
-    "max_gross_exposure_pct": 1.2,       # reject target baskets above 120% gross
-    "max_net_exposure_pct": 1.0,         # reject target baskets above 100% absolute net
-    "max_drawdown_pct": 0.2,             # equity down 20% from its peak -> liquidate everything and stop entering permanently
-    "max_volume_participation_pct": 0.1, # fill cap = 10% of that bar's volume
-})
+from librae import ExecutionPolicy, RunConfig
+
+cfg = RunConfig(
+    ...,
+    execution=ExecutionPolicy(
+        default_fill_price="open",
+        max_volume_participation_rate=0.1,
+    ),
+    params={
+        "max_position_pct": 0.3,  # single-position notional cap = 30% of latest known equity
+        "max_gross_exposure_pct": 1.2,  # reject target baskets above 120% gross
+        "max_net_exposure_pct": 1.0,  # reject target baskets above 100% absolute net
+        "max_drawdown_pct": 0.2,  # equity down 20% from its peak -> liquidate everything and stop entering permanently
+    },
+)
 ```
 
+- `default_fill_price`: backtest/sim fallback for decisions without an
+  explicit fill field. It is not used to manufacture live executions.
+- `max_volume_participation_rate`: one cumulative per-symbol volume budget per
+  simulated data event across entries, additions, reductions, ordinary
+  closes, stops, modeled liquidation, drawdown exits, and terminal exits.
+  Missing volume rejects the fill. Constrained exits are explicit partial
+  fills and retain the remaining position for a later observed bar. Once
+  stop-market or liquidation has triggered, its remainder stays an active
+  market exit. A terminal backtest that cannot finish exits raises.
 - `max_position_pct`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
-- `max_gross_exposure_pct` / `max_net_exposure_pct`: validate `RebalanceTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
-- `max_drawdown_pct`: once triggered, simulation calls `liquidate_all()` and records post-liquidation costs in that event's equity; live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
-- `max_volume_participation_pct`: provides one cumulative per-symbol volume budget per simulated data event across entries, additions, reductions, ordinary closes, stops, modeled liquidation, drawdown exits, and terminal exits. Missing volume rejects the fill. Constrained exits are explicit partial fills and retain the remaining position for a later observed bar. Once stop-market or liquidation has triggered, its remainder stays an active market exit and continues at the next observed open without requiring another trigger touch. A terminal backtest that cannot finish exits raises. Live risk exits submit the full remaining request and broker reports own partial-fill truth.
+- `max_gross_exposure_pct` / `max_net_exposure_pct`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
+- `max_drawdown_pct`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
 - Volume-aware slippage (`CostModel.impact_coef`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `impact_coef > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
@@ -384,8 +417,8 @@ from librae.live.engine import LiveTrader
 
 trader = LiveTrader(
     strategy=MyStrategy(),
-    feature_fn=prepare_signals,     # the same ETL pipeline
-    cfg=cfg,                        # a RunConfig (usually built via orchestration.cli.build_config())
+    feature_fn=prepare_signals,  # the same ETL pipeline
+    cfg=cfg,  # a RunConfig (usually built via orchestration.cli.build_config())
 )
 trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the engine
 ```
@@ -411,6 +444,8 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Arbitrage | Research-only OHLCV approximation | Research-only | No atomic multi-leg/legging model; unsupported as production arbitrage |
 | Portfolio optimization | Strategy-owned optimizer; static-universe target execution and diagnostics | Simplified sequential basket | Sequential, non-atomic, adapter-dependent |
 | Asset allocation | Supported under single-currency/data-event assumptions | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
+| Dynamic stock universe | Upstream point-in-time universe only | Not engine-managed | Not engine-managed |
+| Short borrow/funding | User-supplied costs only; no locate ledger | Not modeled | Broker/account responsibility; no engine borrow ledger |
 
 Daily strategy frequency reduces throughput requirements but not timestamp,
 data, order, and restart synchronization requirements. The observed-data event
@@ -441,10 +476,11 @@ financial/execution fact.
 
 | Type | Description |
 |------|------|
-| `BaseStrategy` | abstract base class, implements `on_bar(ctx) -> list[Action] \| RebalanceTargets` |
+| `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioTargets` |
 | `Context` | immutable event snapshot: ts, configured symbols, current bar/bars, available_symbols, positions, cash, equity, callback period_index |
-| `Action` | strategy intent: `type` = long / short / close / hold |
-| `RebalanceTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
+| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioTargets`; `[]` means no decision |
+| `OrderIntent` | symbol-level instruction: `action` = long / short / close |
+| `PortfolioTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
@@ -458,6 +494,7 @@ financial/execution fact.
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, impact_coef (volume-impact coefficient, default 0 = off), maintenance_margin_rate (maintenance margin rate, default 0 = liquidation simulation off) |
+| `ExecutionPolicy` | run-wide default fill field and maximum bar-volume participation rate |
 
 #### Output layer
 
@@ -475,12 +512,13 @@ financial/execution fact.
 
 | Function | Description |
 |------|------|
-| `make_fill(action, price, cash, cost_model)` | simulate a fill (used directly by backtest) |
-| `process_actions(actions, ...)` | deterministic simulated action matching; also reused on a copy for live request sizing |
-| `process_rebalance_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
+| `make_fill(intent, price, cash, cost_model)` | simulate a fill (used directly by backtest) |
+| `execute_order_intents(intents, ...)` | deterministic simulated intent matching; also reused on a copy for live request sizing |
+| `execute_portfolio_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
 | `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
-| `liquidate_all(positions, bars, ts, ...)` | liquidity-aware partial/full exits shared by terminal and drawdown liquidation |
+| `queue_market_exit_all(positions, reason=...)` | queues completed-bar risk decisions for the next observed open |
+| `liquidate_all(positions, bars, ts, ...)` | liquidity-aware terminal close under the documented end-of-run convention |
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
 | `reduce_position(pos, closed_qty)` | pro-rate position state after a partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
@@ -525,7 +563,9 @@ cost_model = CostModel.from_config(cfg, markets=my_markets)
 
 ```python
 cfg = RunConfig(
-    ..., symbols=["TXFR1", "MXFR1"], market="tw_futures",
+    ...,
+    symbols=["TXFR1", "MXFR1"],
+    market="tw_futures",
     symbol_overrides={"MXFR1": {"multiplier": 55.0}},  # override just this one symbol
 )
 ```
@@ -697,7 +737,7 @@ flowchart TD
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
-| `backtest_runs` | run hub, 1 row / run | PK `run_id` | no |
+| `backtest_runs` | run hub and resolved strategy/execution/performance configuration, 1 row / run | PK `run_id` | no |
 | `equity_curve` | per-event equity, return, drawdown, exposure, concentration, and turnover | FK `run_id` → `backtest_runs` CASCADE | yes (`ts`) |
 | `trade_events` | position lifecycle events (open/add/reduce/close) | FK `run_id` (nullable) | yes (`ts`) |
 | `strategy_performance` | aggregated performance, cost, benchmark, and portfolio diagnostics, 1 row / run | PK+FK `run_id` → `backtest_runs` CASCADE | no |
@@ -724,7 +764,7 @@ If a single record holds both "the quantity filled in this event" and "the remai
 - `fill_quantity` — the quantity filled in this event
 - `remaining_quantity` — the remaining position size after the event
 
-**Only make this distinction on types that actually hold both** (the `trade_events` table, `OrderEvent`, `OrderEventRecord`). Types with a single quantity field (`Position.quantity`, `PositionState.quantity`, `Fill.quantity`, `Action.quantity`, `TradeResult.quantity`) keep `quantity` unchanged — there's no ambiguity there, so no need to match this pattern.
+**Only make this distinction on types that actually hold both** (the `trade_events` table, `OrderEvent`, `OrderEventRecord`). Types with a single quantity field (`Position.quantity`, `PositionState.quantity`, `Fill.quantity`, `OrderIntent.quantity`, `TradeResult.quantity`) keep `quantity` unchanged — there's no ambiguity there, so no need to match this pattern.
 
 ### Scalar counts are never plural
 

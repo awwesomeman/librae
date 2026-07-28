@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pandas as pd
 from examples.target_weights.strategy import TargetWeightsStrategy
 from examples.topk_selection.strategy import TopKSelectionStrategy
-from librae import Context, RebalanceTargets
+from librae import Context, PortfolioTargets
 
 TS = datetime(2024, 1, 31, tzinfo=UTC)
 
@@ -37,7 +37,7 @@ def test_target_weights_strategy_submits_only_scheduled_non_null_weights() -> No
         _context({"ALPHA": {}, "BETA": {}, "GAMMA": {}})
     )
 
-    assert isinstance(intent, RebalanceTargets)
+    assert isinstance(intent, PortfolioTargets)
     assert intent.weights == {"ALPHA": 0.6, "BETA": 0.35}
 
 
@@ -52,5 +52,5 @@ def test_topk_strategy_selects_and_equal_weights_highest_scores() -> None:
         )
     )
 
-    assert isinstance(intent, RebalanceTargets)
+    assert isinstance(intent, PortfolioTargets)
     assert intent.weights == {"BETA": 0.475, "GAMMA": 0.475}

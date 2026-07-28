@@ -5,6 +5,9 @@ strategy:
   market: us_equity
   data_source: synthetic
   initial_balance: 100000
+  execution:
+    default_fill_price: open
+    max_volume_participation_rate: 0.10
   cost_overrides:
     multiplier: 1.0
   params:

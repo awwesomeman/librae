@@ -1,4 +1,4 @@
-"""Tests for OrderEvent generation in process_actions and engine.
+"""Tests for OrderEvent generation in execute_order_intents and engine.
 
 Verifies open/add/reduce/close events have correct
 entry_price, remaining_quantity, pnl, net_return, and reason.
@@ -12,23 +12,23 @@ import numpy as np
 import pandas as pd
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.executor import OrderEvent, process_actions
-from librae.core.strategy import Action, BaseStrategy, PositionState
+from librae.core.executor import OrderEvent, execute_order_intents
+from librae.core.strategy import OrderIntent, PositionState, Strategy
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 ZERO_COST = CostModel.zero()
 
 
 def _run(
-    actions_list: list[Action],
+    actions_list: list[OrderIntent],
     cost_model: CostModel = ZERO_COST,
     positions: dict[str, PositionState] | None = None,
     cash: float = 100_000.0,
 ):
-    """Run process_actions and return (events, trades, positions)."""
+    """Run execute_order_intents and return (events, trades, positions)."""
     if positions is None:
         positions = {}
-    result = process_actions(
+    result = execute_order_intents(
         actions_list,
         positions,
         cash,
@@ -42,7 +42,7 @@ def _run(
 
 class TestOpenEvent:
     def test_buy_produces_open_event(self):
-        events, _, _ = _run([Action(type="long", symbol="TEST")])
+        events, _, _ = _run([OrderIntent(action="long", symbol="TEST")])
         assert len(events) == 1
         e = events[0]
         assert e.event_type == "open"
@@ -52,17 +52,17 @@ class TestOpenEvent:
         assert e.entry_price == 100.0
 
     def test_sell_produces_short_open(self):
-        events, _, _ = _run([Action(type="short", symbol="TEST")])
+        events, _, _ = _run([OrderIntent(action="short", symbol="TEST")])
         assert len(events) == 1
         assert events[0].event_type == "open"
         assert events[0].side == "short"
 
     def test_open_carries_reason(self):
-        events, _, _ = _run([Action(type="long", symbol="TEST", reason="RSI oversold")])
+        events, _, _ = _run([OrderIntent(action="long", symbol="TEST", reason="RSI oversold")])
         assert events[0].reason == "RSI oversold"
 
     def test_open_has_no_pnl(self):
-        events, _, _ = _run([Action(type="long", symbol="TEST")])
+        events, _, _ = _run([OrderIntent(action="long", symbol="TEST")])
         assert events[0].pnl is None
         assert events[0].net_return is None
         assert events[0].entry_at is None
@@ -86,7 +86,7 @@ class TestAddEvent:
             )
         }
         events, _, _ = _run(
-            [Action(type="long", symbol="TEST", quantity=5.0)],
+            [OrderIntent(action="long", symbol="TEST", quantity=5.0)],
             positions=positions,
         )
         assert len(events) == 1
@@ -116,7 +116,7 @@ class TestReduceCloseEvents:
             )
         }
         events, trades, _ = _run(
-            [Action(type="close", symbol="TEST", quantity=4.0)],
+            [OrderIntent(action="close", symbol="TEST", quantity=4.0)],
             positions=positions,
         )
         assert len(events) == 1
@@ -149,7 +149,7 @@ class TestReduceCloseEvents:
             )
         }
         events, _, pos = _run(
-            [Action(type="close", symbol="TEST")],
+            [OrderIntent(action="close", symbol="TEST")],
             positions=positions,
         )
         assert len(events) == 1
@@ -176,7 +176,7 @@ class TestReduceCloseEvents:
             )
         }
         events, trades, pos = _run(
-            [Action(type="close", symbol="TEST", quantity=999.0)],
+            [OrderIntent(action="close", symbol="TEST", quantity=999.0)],
             positions=positions,
         )
         assert len(events) == 1
@@ -203,7 +203,7 @@ class TestReduceCloseEvents:
             )
         }
         events, _, _ = _run(
-            [Action(type="close", symbol="TEST", reason="stop loss")],
+            [OrderIntent(action="close", symbol="TEST", reason="stop loss")],
             positions=positions,
         )
         assert events[0].reason == "stop loss"
@@ -219,7 +219,7 @@ class TestComplexLifecycle:
         def run_at(actions, price, positions, periods_held_increment=0):
             for p in positions.values():
                 p.periods_held += periods_held_increment
-            result = process_actions(
+            result = execute_order_intents(
                 actions,
                 positions,
                 1_000_000.0,
@@ -231,29 +231,29 @@ class TestComplexLifecycle:
             all_events.extend(result.events)
 
         # 1. buy 10@100
-        run_at([Action(type="long", symbol="TEST", quantity=10)], 100.0, positions)
+        run_at([OrderIntent(action="long", symbol="TEST", quantity=10)], 100.0, positions)
         assert all_events[-1].event_type == "open"
         assert all_events[-1].remaining_quantity == 10.0
 
         # 2. buy 5@120 (scale in)
-        run_at([Action(type="long", symbol="TEST", quantity=5)], 120.0, positions, 3)
+        run_at([OrderIntent(action="long", symbol="TEST", quantity=5)], 120.0, positions, 3)
         assert all_events[-1].event_type == "add"
         assert all_events[-1].remaining_quantity == 15.0
         assert np.isclose(all_events[-1].entry_price, (100 * 10 + 120 * 5) / 15)
 
         # 3. sell 3@130 (partial close)
-        run_at([Action(type="close", symbol="TEST", quantity=3)], 130.0, positions, 2)
+        run_at([OrderIntent(action="close", symbol="TEST", quantity=3)], 130.0, positions, 2)
         assert all_events[-1].event_type == "reduce"
         assert all_events[-1].remaining_quantity == 12.0
         assert all_events[-1].pnl is not None
 
         # 4. buy 8@110 (scale in again)
-        run_at([Action(type="long", symbol="TEST", quantity=8)], 110.0, positions, 1)
+        run_at([OrderIntent(action="long", symbol="TEST", quantity=8)], 110.0, positions, 1)
         assert all_events[-1].event_type == "add"
         assert all_events[-1].remaining_quantity == 20.0
 
         # 5. sell all @140 (full close)
-        run_at([Action(type="close", symbol="TEST")], 140.0, positions, 5)
+        run_at([OrderIntent(action="close", symbol="TEST")], 140.0, positions, 5)
         assert all_events[-1].event_type == "close"
         assert all_events[-1].remaining_quantity == 0.0
         assert all_events[-1].pnl is not None
@@ -269,7 +269,7 @@ class TestShortLifecycle:
         all_events: list[OrderEvent] = []
 
         def run_at(actions, price, positions):
-            result = process_actions(
+            result = execute_order_intents(
                 actions,
                 positions,
                 1_000_000.0,
@@ -280,9 +280,9 @@ class TestShortLifecycle:
             )
             all_events.extend(result.events)
 
-        run_at([Action(type="short", symbol="TEST", quantity=10)], 100.0, positions)
-        run_at([Action(type="short", symbol="TEST", quantity=5)], 110.0, positions)
-        run_at([Action(type="close", symbol="TEST")], 90.0, positions)
+        run_at([OrderIntent(action="short", symbol="TEST", quantity=10)], 100.0, positions)
+        run_at([OrderIntent(action="short", symbol="TEST", quantity=5)], 110.0, positions)
+        run_at([OrderIntent(action="close", symbol="TEST")], 90.0, positions)
 
         assert len(all_events) == 3
         assert all_events[0].event_type == "open"
@@ -316,12 +316,12 @@ class TestEngineIntegration:
             index=mi,
         )
 
-        class BuyBar5CloseBar20(BaseStrategy):
+        class BuyBar5CloseBar20(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
-                    return [Action(type="long", symbol=ctx.symbol, reason="test entry")]
+                    return [OrderIntent(action="long", symbol=ctx.symbol, reason="test entry")]
                 if ctx.period_index == 20 and ctx.symbol in ctx.positions:
-                    return [Action(type="close", symbol=ctx.symbol, reason="test exit")]
+                    return [OrderIntent(action="close", symbol=ctx.symbol, reason="test exit")]
                 return []
 
         bt = Backtest(

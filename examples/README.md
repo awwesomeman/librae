@@ -11,9 +11,9 @@ key, database, or external data service.
 
 | Example | What it teaches | Strategy output | Supported demo modes |
 |---|---|---|---|
-| [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[Action]` | backtest, shadow sim; live with explicit broker setup |
-| [`target_weights/`](target_weights/) | Execute an externally prepared allocation schedule | `RebalanceTargets` | backtest |
-| [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select Top K | `RebalanceTargets` | backtest |
+| [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[OrderIntent]` | backtest, shadow sim; live with explicit broker setup |
+| [`target_weights/`](target_weights/) | Execute an externally prepared allocation schedule | `PortfolioTargets` | backtest |
+| [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select Top K | `PortfolioTargets` | backtest |
 
 Run the backtests from the repository root:
 
@@ -65,6 +65,34 @@ live paths helps prevent research/production skew.
 For exact validation, T → T+1 execution, incomplete baskets, and fill rules,
 read the [engine usage contract](../architecture.md#usage).
 
+## User-controlled trading settings
+
+Run-wide execution assumptions live only under `strategy.execution`; they are
+not strategy parameters or risk limits:
+
+| Setting | Default from `build_config()` | Expected behavior |
+|---|---:|---|
+| `default_fill_price` | `open` | Backtest/sim uses this field on the next eligible bar when the decision has no `fill_price`. It does not invent a live fill; broker reports remain authoritative. |
+| `max_volume_participation_rate` | `0.10` | One symbol can consume at most 10% of that bar's volume across all fills. Low volume causes a partial fill, zero/missing volume rejects it, and the remainder of a target rebalance is reconsidered only when the strategy emits another target. Set `null` only to model unlimited liquidity. |
+
+The examples set both values explicitly in `config.yaml`, so changing modes
+does not silently change their assumptions. Per-decision controls stay on the
+decision itself:
+
+| Decision field | Scope and behavior |
+|---|---|
+| `OrderIntent.quantity` | Requested units. `None` spends available cash for a single new position; multi-symbol strategies should size explicitly. |
+| `OrderIntent.fill_price` | Backtest/sim: bar-field override or one-bar numeric limit. Live: `None` is market and a number is a broker limit; bar-field strings are rejected. |
+| `OrderIntent.stop_price` / `take_profit_price` | Deterministic backtest/sim protection. Live requires broker-native protective orders. |
+| `PortfolioTargets.weights` | Signed target portfolio weights; omitted held symbols target zero. |
+| `PortfolioTargets.fill_price` | Optional backtest/sim bar-field override for the whole basket; unsupported in live. |
+
+Commissions, tax, tick slippage, market impact, multiplier, and margin are
+instrument/cost assumptions under `cost_overrides` or `symbol_overrides`.
+Position, gross/net exposure, and drawdown limits remain portfolio risk
+settings under `strategy.params`. They are separate because execution
+liquidity, accounting costs, and portfolio risk have different ownership.
+
 ## Portfolio example behavior
 
 `target_weights` rotates through a precomputed schedule. `topk_selection`
@@ -74,8 +102,8 @@ Both decide on bar T and fill on T+1.
 
 The portfolio demos stay backtest-only because their bundled inputs are
 synthetic and date-specific, not because `LiveTrader` rejects portfolio
-intents. In real-time use, `RebalanceTargets` waits for a complete required
-basket; per-symbol `Action` decisions can execute asynchronously.
+intents. In real-time use, `PortfolioTargets` waits for a complete required
+basket; per-symbol `OrderIntent` decisions can execute asynchronously.
 
 The SMA example also exposes the shadow-simulation path:
 

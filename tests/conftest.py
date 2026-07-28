@@ -32,7 +32,7 @@ def _load_dotenv_for_tests() -> None:
 
 _load_dotenv_for_tests()
 
-from librae.core.run_config import RunConfig  # noqa: E402
+from librae.core.run_config import ExecutionPolicy, RunConfig  # noqa: E402
 
 
 def make_test_cfg(**overrides) -> RunConfig:
@@ -48,6 +48,9 @@ def make_test_cfg(**overrides) -> RunConfig:
         no_db=True,
         poll_seconds=0,
         params={},
+        # Most unit tests isolate sizing/risk behavior from liquidity. Tests
+        # for volume participation opt in with an explicit policy.
+        execution=ExecutionPolicy(max_volume_participation_rate=None),
     )
     defaults.update(overrides)
     return RunConfig(**defaults)

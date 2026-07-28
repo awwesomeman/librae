@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from librae.core.strategy import Action, PositionState, RebalanceTargets
+from librae.core.strategy import OrderIntent, PortfolioTargets, PositionState
 from librae.live.executor import OrderRequest
 from librae.live.state import LiveRuntimeState, MemoryLiveStateStore, TrackedOrder
 
@@ -58,7 +58,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         last_prices={"BTC/USDT": 101.0},
         last_cycle_ts=datetime(2025, 1, 2, tzinfo=UTC),
         last_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
-        pending_intent=[Action(type="close", symbol="BTC/USDT")],
+        pending_decision=[OrderIntent(action="close", symbol="BTC/USDT")],
         active_orders=[_order()],
         equity_peak=1_050.0,
         prev_equity=1_002.0,
@@ -74,7 +74,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
     assert restored == state
 
 
-def test_rebalance_intent_round_trip_and_memory_store_isolation():
+def test_portfolio_targets_round_trip_and_memory_store_isolation():
     store = MemoryLiveStateStore()
     state = LiveRuntimeState(
         state_key="sim:abc",
@@ -82,7 +82,7 @@ def test_rebalance_intent_round_trip_and_memory_store_isolation():
         config_hash="abc",
         mode="sim",
         cash=1_000.0,
-        pending_intent=RebalanceTargets(weights={"AAA": 0.6, "BBB": 0.4}),
+        pending_decision=PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4}),
         equity_peak=1_000.0,
         prev_equity=1_000.0,
     )
@@ -95,10 +95,10 @@ def test_rebalance_intent_round_trip_and_memory_store_isolation():
 
     assert second is not None
     assert second.cash == 1_000.0
-    assert second.pending_intent == state.pending_intent
+    assert second.pending_decision == state.pending_decision
 
 
-def test_runtime_state_rejects_v2_schema():
+def test_runtime_state_rejects_v3_schema():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
@@ -108,13 +108,13 @@ def test_runtime_state_rejects_v2_schema():
         equity_peak=1_000.0,
         prev_equity=1_000.0,
     ).to_dict()
-    raw["schema_version"] = 2
+    raw["schema_version"] = 3
 
     with pytest.raises(ValueError, match="unsupported live runtime-state schema"):
         LiveRuntimeState.from_dict(raw)
 
 
-def test_runtime_state_rejects_missing_v3_fact_instead_of_defaulting():
+def test_runtime_state_rejects_missing_v4_fact_instead_of_defaulting():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",

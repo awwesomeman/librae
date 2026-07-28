@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.strategy import Action, BaseStrategy, Context
+from librae.core.strategy import Context, OrderIntent, Strategy
 from tests.conftest import make_test_cfg
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -46,37 +46,37 @@ def _zero_cost() -> CostModel:
 # ── Strategies for testing ───────────────────────────────────────────────
 
 
-class HoldStrategy(BaseStrategy):
+class HoldStrategy(Strategy):
     """Never trades."""
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         return []
 
 
-class BuyBar2CloseBar4(BaseStrategy):
+class BuyBar2CloseBar4(Strategy):
     """Buy at bar 2, close at bar 4."""
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if ctx.period_index == 2 and ctx.symbol not in ctx.positions:
-            return [Action(type="long", symbol=ctx.symbol)]
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
         if ctx.period_index == 4 and ctx.symbol in ctx.positions:
-            return [Action(type="close", symbol=ctx.symbol)]
+            return [OrderIntent(action="close", symbol=ctx.symbol)]
         return []
 
 
-class SignalDrivenStrategy(BaseStrategy):
+class SignalDrivenStrategy(Strategy):
     """Trades based on entry_signal / exit_signal columns in df."""
 
     def __init__(self, max_hold_periods: int = 24):
         self.max_hold_periods = max_hold_periods
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         pos = ctx.positions.get(ctx.symbol)
         if pos:
             if ctx.bar["exit_signal"] or pos.periods_held >= self.max_hold_periods:
-                return [Action(type="close", symbol=ctx.symbol)]
+                return [OrderIntent(action="close", symbol=ctx.symbol)]
         elif ctx.bar["entry_signal"]:
-            return [Action(type="long", symbol=ctx.symbol)]
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
         return []
 
 
@@ -120,10 +120,10 @@ class TestBacktestBasics:
         prices = [100.0, 100.0, 100.0, 110.0, 120.0]
         df = _make_multiindex_df(prices)
 
-        class BuyBar2(BaseStrategy):
+        class BuyBar2(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 2 and ctx.symbol not in ctx.positions:
-                    return [Action(type="long", symbol=ctx.symbol)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol)]
                 return []
 
         bt = Backtest(
@@ -271,7 +271,7 @@ class TestMultiAsset:
 
         df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
 
-        class BuyBothBar2(BaseStrategy):
+        class BuyBothBar2(Strategy):
             def on_bar(self, ctx):
                 actions = []
                 if ctx.period_index == 2:
@@ -281,11 +281,11 @@ class TestMultiAsset:
                             bar = ctx.bars.get(sym, {})
                             price = bar.get("close", 1.0)
                             qty = (ctx.cash / n_symbols) / price if price > 0 else 0
-                            actions.append(Action(type="long", symbol=sym, quantity=qty))
+                            actions.append(OrderIntent(action="long", symbol=sym, quantity=qty))
                 if ctx.period_index == 5:
                     for sym in ctx.symbols:
                         if sym in ctx.positions:
-                            actions.append(Action(type="close", symbol=sym))
+                            actions.append(OrderIntent(action="close", symbol=sym))
                 return actions
 
         bt = Backtest(
@@ -318,7 +318,7 @@ class TestMultiAsset:
         df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
         available: list[tuple[str, ...]] = []
 
-        class ObserveUniverse(BaseStrategy):
+        class ObserveUniverse(Strategy):
             def on_bar(self, ctx):
                 available.append(ctx.available_symbols)
                 return []
@@ -360,11 +360,11 @@ class TestMultiAsset:
 
         seen_cycles: list[tuple[pd.Timestamp, int, set[str]]] = []
 
-        class BuyBbbOnFirstCycle(BaseStrategy):
+        class BuyBbbOnFirstCycle(Strategy):
             def on_bar(self, ctx):
                 seen_cycles.append((ctx.ts, ctx.period_index, set(ctx.bars)))
                 if ctx.period_index == 0:
-                    return [Action(type="long", symbol="BBB", quantity=1.0)]
+                    return [OrderIntent(action="long", symbol="BBB", quantity=1.0)]
                 return []
 
         result = Backtest(
@@ -416,10 +416,10 @@ class TestMultiAsset:
                 )
         df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
 
-        class BuyAaaOnFirstCycle(BaseStrategy):
+        class BuyAaaOnFirstCycle(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 0:
-                    return [Action(type="long", symbol="AAA", quantity=1.0)]
+                    return [OrderIntent(action="long", symbol="AAA", quantity=1.0)]
                 return []
 
         result = Backtest(
@@ -456,10 +456,10 @@ class TestMultiAsset:
                 )
         df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
 
-        class BuyAaa(BaseStrategy):
+        class BuyAaa(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 0:
-                    return [Action(type="long", symbol="AAA", quantity=1.0)]
+                    return [OrderIntent(action="long", symbol="AAA", quantity=1.0)]
                 return []
 
         with pytest.raises(ValueError, match=r"cannot force-close.*AAA"):
@@ -572,13 +572,13 @@ class TestContext:
         """Strategy can see positions in context after entry."""
         seen_positions: list[dict] = []
 
-        class Spy(BaseStrategy):
+        class Spy(Strategy):
             def on_bar(self, ctx):
                 seen_positions.append(dict(ctx.positions))
                 if ctx.period_index == 1:
-                    return [Action(type="long", symbol=ctx.symbol)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol)]
                 if ctx.period_index == 4:
-                    return [Action(type="close", symbol=ctx.symbol)]
+                    return [OrderIntent(action="close", symbol=ctx.symbol)]
                 return []
 
         df = _make_multiindex_df([100.0] * 6)
@@ -600,15 +600,15 @@ class TestContext:
         """periods_held in Position should increment each bar."""
         held_values: list[int] = []
 
-        class Tracker(BaseStrategy):
+        class Tracker(Strategy):
             def on_bar(self, ctx):
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
                     held_values.append(pos.periods_held)
                 if ctx.period_index == 1:
-                    return [Action(type="long", symbol=ctx.symbol)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol)]
                 if ctx.period_index == 5:
-                    return [Action(type="close", symbol=ctx.symbol)]
+                    return [OrderIntent(action="close", symbol=ctx.symbol)]
                 return []
 
         df = _make_multiindex_df([100.0] * 8)

@@ -35,13 +35,13 @@ from .core.cost_model import (
     margin_rate_from_absolute,
 )
 from .core.strategy import (
-    Action,
-    BaseStrategy,
+    OrderIntent,
+    Strategy,
     Context,
     Fill,
     Position,
-    RebalanceTargets,
-    StrategyIntent,
+    PortfolioTargets,
+    StrategyDecision,
 )
 from .core.executor import TradePnL, TradeResult, calc_trade_pnl, direction, make_fill
 from .core.metrics import (
@@ -55,7 +55,7 @@ from .core.metrics import (
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
 )
-from .core.run_config import RunConfig
+from .core.run_config import ExecutionPolicy, RunConfig
 from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
 from .config.market_config import MarketConfig, get_market
 
@@ -74,10 +74,10 @@ __all__ = [
     "margin_rate_from_absolute",
     "MarketConfig",
     "get_market",
-    "Action",
-    "RebalanceTargets",
-    "StrategyIntent",
-    "BaseStrategy",
+    "OrderIntent",
+    "PortfolioTargets",
+    "StrategyDecision",
+    "Strategy",
     "Context",
     "Fill",
     "Position",
@@ -102,6 +102,7 @@ __all__ = [
     "summarize_trade_entry_outcomes",
     "generate_trade_tearsheet",
     "RunConfig",
+    "ExecutionPolicy",
     "generate_run_id",
     "infer_timeframe",
     "to_ccxt",

@@ -14,14 +14,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
-from librae.core.executor import OrderEvent, RiskLimits
+from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent, RiskLimits
 from librae.core.run_config import RunConfig
 from librae.core.strategy import (
-    Action,
-    BaseStrategy,
     Context,
+    OrderIntent,
+    PortfolioTargets,
     PositionState,
-    RebalanceTargets,
+    Strategy,
 )
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest
@@ -137,18 +137,18 @@ def _simple_feature_fn(h1_base: pd.DataFrame) -> pd.DataFrame:
     return h1
 
 
-class _AlwaysBuyStrategy(BaseStrategy):
+class _AlwaysBuyStrategy(Strategy):
     """Buy if no position, close if has position."""
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         pos = ctx.positions.get(ctx.symbol)
         if pos:
-            return [Action(type="close", symbol=ctx.symbol)]
-        return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+            return [OrderIntent(action="close", symbol=ctx.symbol)]
+        return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
 
 
-class _HoldStrategy(BaseStrategy):
-    def on_bar(self, ctx: Context) -> list[Action]:
+class _HoldStrategy(Strategy):
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         return []
 
 
@@ -357,7 +357,7 @@ class TestLiveExecutor:
 class TestLiveTrader:
     def _make_runner(
         self,
-        strategy: BaseStrategy | None = None,
+        strategy: Strategy | None = None,
         fetcher=None,
         feature_fn=None,
         executor: LiveExecutor | None = None,
@@ -403,7 +403,7 @@ class TestLiveTrader:
 
     def test_same_bar_not_processed_twice(self):
         """Strategy should only be called once for the same bar timestamp."""
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
 
         runner = self._make_runner(strategy=strategy)
@@ -412,13 +412,13 @@ class TestLiveTrader:
         # First iteration detects the bar, subsequent ones see same ts → skip
         assert strategy.on_bar.call_count == 1
 
-    def test_sim_pending_intent_resumes_on_next_bar_after_restart(self):
+    def test_sim_pending_decision_resumes_on_next_bar_after_restart(self):
         store = MemoryLiveStateStore()
 
-        class BuyOnce(BaseStrategy):
+        class BuyOnce(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 0:
-                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
         first = self._make_runner(
@@ -447,7 +447,7 @@ class TestLiveTrader:
         )
         failing.run(max_iterations=1)
 
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         recovered = self._make_runner(strategy=strategy, state_store=store)
         recovered.run(max_iterations=1)
@@ -465,7 +465,7 @@ class TestLiveTrader:
             call_count += 1
             return df1 if call_count <= 1 else df2
 
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
 
         runner = self._make_runner(strategy=strategy, fetcher=fetcher)
@@ -493,14 +493,14 @@ class TestLiveTrader:
         def fetcher(symbol, *_args, **_kwargs):
             return next(responses[symbol])
 
-        class BuyBbbOnce(BaseStrategy):
+        class BuyBbbOnce(Strategy):
             def __init__(self):
                 self.emitted = False
 
             def on_bar(self, ctx):
                 if not self.emitted:
                     self.emitted = True
-                    return [Action(type="long", symbol="BBB", quantity=1.0)]
+                    return [OrderIntent(action="long", symbol="BBB", quantity=1.0)]
                 return []
 
         order_adapter = _mock_order_adapter()
@@ -516,13 +516,15 @@ class TestLiveTrader:
         )
 
         runner._poll_cycle()
-        assert runner._positions == {}
-        assert runner._pending_intent == [Action(type="long", symbol="BBB", quantity=1.0)]
-
-        runner._poll_cycle()
+        if mode == "sim":
+            assert runner._positions == {}
+            assert runner._pending_decision == [
+                OrderIntent(action="long", symbol="BBB", quantity=1.0)
+            ]
+            runner._poll_cycle()
 
         assert runner._positions["BBB"].quantity == pytest.approx(1.0)
-        assert runner._pending_intent == []
+        assert runner._pending_decision == []
 
     def test_delayed_symbol_does_not_block_available_symbol(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -540,7 +542,7 @@ class TestLiveTrader:
         def fetcher(symbol, *_args, **_kwargs):
             return next(responses[symbol])
 
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         runner = self._make_runner(
             strategy=strategy,
@@ -552,8 +554,12 @@ class TestLiveTrader:
         runner._poll_cycle()
 
         contexts = [call.args[0] for call in strategy.on_bar.call_args_list]
-        assert [ctx.ts for ctx in contexts] == [t1, t1]
-        assert [set(ctx.bars) for ctx in contexts] == [{"AAA"}, {"BBB"}]
+        assert [ctx.ts for ctx in contexts] == [t0, t1, t1]
+        assert [set(ctx.bars) for ctx in contexts] == [
+            {"AAA", "BBB"},
+            {"AAA"},
+            {"AAA", "BBB"},
+        ]
 
     def test_missing_symbol_bar_does_not_skip_available_event(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -579,7 +585,7 @@ class TestLiveTrader:
         def fetcher(symbol, *_args, **_kwargs):
             return next(responses[symbol])
 
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         runner = self._make_runner(
             strategy=strategy,
@@ -602,7 +608,7 @@ class TestLiveTrader:
         ts = datetime(2025, 1, 1, tzinfo=UTC)
         duplicated = _make_ohlcv_at([ts, ts])
 
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         runner = self._make_runner(
             strategy=strategy,
@@ -640,7 +646,7 @@ class TestLiveTrader:
         def fetcher(symbol, *_args, **_kwargs):
             return next(responses[symbol])
 
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         runner = self._make_runner(
             strategy=strategy,
@@ -656,14 +662,14 @@ class TestLiveTrader:
         assert [set(ctx.bars) for ctx in contexts] == [
             {"AAA", "BBB"},
             {"BBB"},
-            {"AAA"},
+            {"AAA", "BBB"},
         ]
 
     def test_context_exposes_engine_equity(self):
         seen_equity: list[float] = []
 
-        class EquitySpy(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class EquitySpy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 seen_equity.append(ctx.equity)
                 return []
 
@@ -674,13 +680,13 @@ class TestLiveTrader:
         assert seen_equity == [runner._cash]
 
     @pytest.mark.parametrize("mode", ["sim", "live"])
-    def test_rebalance_targets_execute_from_synchronized_realtime_context(self, mode):
+    def test_portfolio_targets_execute_from_synchronized_realtime_context(self, mode):
         contexts: list[Context] = []
 
-        class AllocationStrategy(BaseStrategy):
+        class AllocationStrategy(Strategy):
             def on_bar(self, ctx: Context):
                 contexts.append(ctx)
-                return RebalanceTargets(weights={"AAA": 0.6, "BBB": 0.4})
+                return PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
 
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
         t1 = t0 + timedelta(hours=1)
@@ -733,13 +739,13 @@ class TestLiveTrader:
         """periods_held should increment each bar while position is open."""
         periods_held_values: list[int] = []
 
-        class TrackBarsHeld(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class TrackBarsHeld(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 pos = ctx.positions.get(ctx.symbol)
                 if pos:
                     periods_held_values.append(pos.periods_held)
                     return []
-                return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
 
         call_num = 0
 
@@ -794,11 +800,11 @@ class TestLiveTrader:
         """Cash should decrease after a buy."""
         cash_values: list[float] = []
 
-        class TrackCash(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class TrackCash(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 cash_values.append(ctx.cash)
                 if not ctx.positions.get(ctx.symbol):
-                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
         call_num = 0
@@ -933,10 +939,10 @@ class TestLiveTrader:
         def fetcher(symbol, *_args, **_kwargs):
             return next(responses[symbol])
 
-        class AllocateOnce(BaseStrategy):
+        class AllocateOnce(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 0:
-                    return RebalanceTargets(weights={"AAA": 0.6, "BBB": 0.4})
+                    return PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
                 return []
 
         adapter = _mock_order_adapter()
@@ -1210,10 +1216,12 @@ class TestLiveTrader:
         enforced — a position could blow through its stop with no exit
         until the strategy itself issued a close."""
 
-        class BuyWithStopStrategy(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class BuyWithStopStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 if not ctx.positions.get(ctx.symbol):
-                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0, stop_price=95.0)]
+                    return [
+                        OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0, stop_price=95.0)
+                    ]
                 return []
 
         call_num = 0
@@ -1263,10 +1271,10 @@ class TestLiveTrader:
                 raise RuntimeError("feature blip")
             return _simple_feature_fn(h1_base)
 
-        class BuyOnceStrategy(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class BuyOnceStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 if not ctx.positions.get(ctx.symbol):
-                    return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
         def on_order_event(event):
@@ -1368,10 +1376,10 @@ class TestLiveTrader:
                 df["close"] = 50.0
             return df
 
-        class BuyOnceStrategy(BaseStrategy):
-            def on_bar(self, ctx: Context) -> list[Action]:
+        class BuyOnceStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
                 if not ctx.positions.get(ctx.symbol):
-                    return [Action(type="long", symbol=ctx.symbol)]
+                    return [OrderIntent(action="long", symbol=ctx.symbol)]
                 return []
 
         cfg = _test_cfg(params={"warmup_periods": 5, "max_drawdown_pct": 0.2})
@@ -1391,7 +1399,7 @@ class TestLiveTrader:
         ]
         assert len(breach_alerts) == 1
 
-    def test_drawdown_callback_uses_post_liquidation_equity(self):
+    def test_drawdown_callback_queues_next_bar_exit(self):
         cost_model = CostModel(
             multiplier=1.0,
             commission_rate=0.01,
@@ -1436,11 +1444,11 @@ class TestLiveTrader:
             },
         )
 
-        assert runner._positions == {}
-        assert runner._cash == pytest.approx(49_500.0)
+        assert runner._positions["BTCUSDT"].pending_market_exit_reason == REASON_DRAWDOWN_BREACH
+        assert runner._cash == pytest.approx(0.0)
         assert len(callbacks) == 1
-        assert callbacks[0] == pytest.approx((49_500.0, -0.505, -0.01))
-        assert runner._prev_equity == pytest.approx(49_500.0)
+        assert callbacks[0] == pytest.approx((50_000.0, -0.5, 0.0))
+        assert runner._prev_equity == pytest.approx(50_000.0)
 
 
 def _make_fill_event() -> OrderEvent:
@@ -1463,7 +1471,7 @@ def _make_fill_event() -> OrderEvent:
 class TestLiveExecutionLifecycle:
     def _make_trader(
         self,
-        strategy: BaseStrategy,
+        strategy: Strategy,
         adapter: MagicMock,
         *,
         state_store: MemoryLiveStateStore | None = None,
@@ -1493,9 +1501,9 @@ class TestLiveExecutionLifecycle:
             fee=0.25,
         )
 
-        class BuyTwo(BaseStrategy):
+        class BuyTwo(Strategy):
             def on_bar(self, ctx):
-                return [Action(type="long", symbol=ctx.symbol, quantity=2.0)]
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=2.0)]
 
         runner = self._make_trader(BuyTwo(), adapter)
         runner.run(max_iterations=1)
@@ -1506,6 +1514,31 @@ class TestLiveExecutionLifecycle:
         assert runner._positions["BTCUSDT"].entry_commission == 0.25
         assert len(runner._active_orders) == 1
         assert runner._active_orders[0].status == "partial"
+
+    def test_volume_budget_is_cumulative_across_same_symbol_intents(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(_HoldStrategy(), adapter)
+        runner._max_volume_participation_rate = 0.1
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
+
+        requests = runner._plan_live_orders(
+            [
+                OrderIntent(action="long", symbol="BTCUSDT", quantity=80.0),
+                OrderIntent(action="long", symbol="BTCUSDT", quantity=80.0),
+            ],
+            {
+                "BTCUSDT": {
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+            },
+            ts,
+        )
+
+        assert [request.quantity for request in requests] == [80.0, 20.0]
 
     def test_repeated_partial_report_is_idempotent(self):
         adapter = _mock_order_adapter()
@@ -1519,9 +1552,9 @@ class TestLiveExecutionLifecycle:
         adapter.place_order.return_value = partial
         adapter.get_order.return_value = partial
 
-        class BuyTwo(BaseStrategy):
+        class BuyTwo(Strategy):
             def on_bar(self, ctx):
-                return [Action(type="long", symbol=ctx.symbol, quantity=2.0)]
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=2.0)]
 
         runner = self._make_trader(BuyTwo(), adapter)
         runner.run(max_iterations=2)
@@ -1621,13 +1654,13 @@ class TestLiveExecutionLifecycle:
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report()
 
-        class CountingBuy(BaseStrategy):
+        class CountingBuy(Strategy):
             def __init__(self):
                 self.calls = 0
 
             def on_bar(self, ctx):
                 self.calls += 1
-                return [Action(type="long", symbol=ctx.symbol, quantity=1.0)]
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
 
         first_strategy = CountingBuy()
         first = self._make_trader(first_strategy, adapter, state_store=store)
@@ -1742,7 +1775,7 @@ class TestLiveExecutionLifecycle:
     def test_orphan_order_halts_before_strategy_decision(self):
         adapter = _mock_order_adapter()
         adapter.list_open_orders.return_value = [{"id": "manual-1", "clientOrderId": "external"}]
-        strategy = MagicMock(spec=BaseStrategy)
+        strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         runner = self._make_trader(strategy, adapter)
 
@@ -1812,11 +1845,11 @@ class TestLiveExecutionLifecycle:
             "filled": 0.0,
         }
 
-        class LimitBuy(BaseStrategy):
+        class LimitBuy(Strategy):
             def on_bar(self, ctx):
                 return [
-                    Action(
-                        type="long",
+                    OrderIntent(
+                        action="long",
                         symbol=ctx.symbol,
                         quantity=1.0,
                         fill_price=99.5,
@@ -1846,11 +1879,11 @@ class TestLiveExecutionLifecycle:
             "filled": 0.0,
         }
 
-        class LimitBuy(BaseStrategy):
+        class LimitBuy(Strategy):
             def on_bar(self, ctx):
                 return [
-                    Action(
-                        type="long",
+                    OrderIntent(
+                        action="long",
                         symbol=ctx.symbol,
                         quantity=1.9,
                         fill_price=99.57,
@@ -1895,11 +1928,11 @@ class TestLiveExecutionLifecycle:
         "action,match",
         [
             (
-                Action(type="long", symbol="BTCUSDT", quantity=1.0, fill_price="close"),
+                OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0, fill_price="close"),
                 "historical bar field",
             ),
             (
-                Action(type="long", symbol="BTCUSDT", quantity=1.0, stop_price=95.0),
+                OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0, stop_price=95.0),
                 "broker-native protective orders",
             ),
         ],
@@ -1907,7 +1940,7 @@ class TestLiveExecutionLifecycle:
     def test_noncausal_live_intent_fails_closed(self, action, match):
         adapter = _mock_order_adapter()
 
-        class InvalidIntent(BaseStrategy):
+        class InvalidIntent(Strategy):
             def on_bar(self, ctx):
                 return [action]
 

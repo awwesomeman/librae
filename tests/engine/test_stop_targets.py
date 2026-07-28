@@ -16,7 +16,7 @@ from librae.core.executor import (
     check_stop_targets,
     resolve_stop_exit,
 )
-from librae.core.strategy import Action, BaseStrategy, Context, PositionState
+from librae.core.strategy import Context, OrderIntent, PositionState, Strategy
 
 # ---------------------------------------------------------------------------
 # Helpers — naming mirrors tests/engine/test_position_scaling.py and
@@ -144,7 +144,7 @@ class TestResolveStopExit:
             },
             datetime(2026, 1, 2, tzinfo=UTC),
             get_cost_model=lambda _symbol: _zero_cost(),
-            max_volume_participation_pct=0.25,
+            max_volume_participation_rate=0.25,
         )
 
         assert result.events[0].event_type == "reduce"
@@ -165,7 +165,7 @@ class TestResolveStopExit:
             },
             datetime(2026, 1, 3, tzinfo=UTC),
             get_cost_model=lambda _symbol: _zero_cost(),
-            max_volume_participation_pct=0.25,
+            max_volume_participation_rate=0.25,
         )
 
         assert remainder.events[0].event_type == "close"
@@ -218,18 +218,18 @@ class TestLiquidation:
 # ---------------------------------------------------------------------------
 
 
-class OpenWithStopAtBar1(BaseStrategy):
+class OpenWithStopAtBar1(Strategy):
     """Open long at bar 1 with a fixed stop/target; never closes itself."""
 
     def __init__(self, stop_price: float | None, take_profit_price: float | None):
         self.stop_price = stop_price
         self.take_profit_price = take_profit_price
 
-    def on_bar(self, ctx: Context) -> list[Action]:
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if ctx.period_index == 1 and ctx.symbol not in ctx.positions:
             return [
-                Action(
-                    type="long",
+                OrderIntent(
+                    action="long",
                     symbol=ctx.symbol,
                     stop_price=self.stop_price,
                     take_profit_price=self.take_profit_price,

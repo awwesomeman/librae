@@ -7,10 +7,10 @@ Contains:
 - scale_into_position(): add to existing position (weighted avg)
 - reduce_position(): shrink position after partial close
 - close_position(): full or partial close with correct proceeds
-- process_actions(): deterministic simulated action loop and live request planner
+- execute_order_intents(): deterministic simulated action loop and live request planner
 - TradePnL: PnL breakdown dataclass
 
-Position sizing is the strategy's responsibility (set Action.quantity).
+Position sizing is the strategy's responsibility (set OrderIntent.quantity).
 If strategy doesn't specify quantity, executor uses all available cash
 for initial entries only. Scaling requires explicit quantity.
 """
@@ -27,7 +27,7 @@ from typing import Literal
 from librae.core import EPSILON
 
 from .cost_model import CostModel
-from .strategy import Action, Fill, Position, PositionState, RebalanceTargets, StrategyIntent
+from .strategy import Fill, OrderIntent, PortfolioTargets, Position, PositionState, StrategyDecision
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +103,8 @@ class OrderEvent:
 
 
 @dataclass
-class ActionResults:
-    """Results from processing one bar's actions."""
+class ExecutionResult:
+    """Results from executing one decision on one bar."""
 
     trades: list[TradeResult]
     events: list[OrderEvent]
@@ -113,11 +113,10 @@ class ActionResults:
 
 @dataclass(frozen=True)
 class RiskLimits:
-    """Engine-level portfolio and execution limits."""
+    """Engine-level portfolio risk limits."""
 
     max_position_pct: float | None = None
     max_drawdown_pct: float | None = None
-    max_volume_participation_pct: float | None = None
     max_gross_exposure_pct: float | None = None
     max_net_exposure_pct: float | None = None
 
@@ -368,10 +367,10 @@ def apply_execution_fill(
     order_side: Literal["buy", "sell"],
     cost_model: CostModel,
     reason: str = "",
-) -> tuple[float, ActionResults]:
+) -> tuple[float, ExecutionResult]:
     """Apply one externally confirmed execution to portfolio state.
 
-    Unlike :func:`process_actions`, this function does not simulate price,
+    Unlike :func:`execute_order_intents`, this function does not simulate price,
     quantity, or costs. ``fill`` must already contain the execution venue's
     confirmed average price, filled quantity, and cash-denominated costs.
     The order side plus current position determines whether the fill opens,
@@ -439,7 +438,7 @@ def apply_execution_fill(
             tax=fill.tax,
             reason=reason,
         )
-        result = ActionResults(trades=[], events=[event], cash_delta=-outlay)
+        result = ExecutionResult(trades=[], events=[event], cash_delta=-outlay)
         return cash - outlay, result
 
     if fill.quantity > position.quantity + EPSILON:
@@ -505,7 +504,7 @@ def apply_execution_fill(
     else:
         reduce_position(position, close_quantity)
 
-    result = ActionResults(trades=[trade], events=[event], cash_delta=proceeds)
+    result = ExecutionResult(trades=[trade], events=[event], cash_delta=proceeds)
     return cash + proceeds, result
 
 
@@ -577,9 +576,9 @@ def check_stop_targets(
     ts: datetime,
     *,
     get_cost_model: Callable[[str], CostModel],
-    max_volume_participation_pct: float | None = None,
-    used_volume: dict[str, float] | None = None,
-) -> ActionResults:
+    max_volume_participation_rate: float | None = None,
+    used_quantity_by_symbol: dict[str, float] | None = None,
+) -> ExecutionResult:
     """Force-close any position whose stop-loss/take-profit is hit this bar.
 
     Used by backtest/sim — called once per bar, before the
@@ -604,9 +603,9 @@ def check_stop_targets(
         bar_volume = bar.get("volume")
         max_volume_qty = _volume_fill_limit(
             sym,
-            max_volume_participation_pct,
+            max_volume_participation_rate,
             bar_volume,
-            used_quantity=(used_volume or {}).get(sym, 0.0),
+            used_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
         if max_volume_qty is not None:
@@ -624,8 +623,8 @@ def check_stop_targets(
         )
         trades.append(trade)
         events.append(event)
-        if used_volume is not None:
-            used_volume[sym] = used_volume.get(sym, 0.0) + close_quantity
+        if used_quantity_by_symbol is not None:
+            used_quantity_by_symbol[sym] = used_quantity_by_symbol.get(sym, 0.0) + close_quantity
         cash_delta += proceeds
         if fully_closed:
             del positions[sym]
@@ -634,7 +633,17 @@ def check_stop_targets(
                 pos.pending_market_exit_reason = reason
             reduce_position(pos, close_quantity)
 
-    return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
+    return ExecutionResult(trades=trades, events=events, cash_delta=cash_delta)
+
+
+def queue_market_exit_all(
+    positions: dict[str, PositionState],
+    *,
+    reason: str,
+) -> None:
+    """Queue market exits for the next observed tradable bar."""
+    for position in positions.values():
+        position.pending_market_exit_reason = reason
 
 
 def validate_risk_params(
@@ -648,17 +657,12 @@ def validate_risk_params(
     p = params or {}
     max_position_pct = p.get("max_position_pct")
     max_drawdown_pct = p.get("max_drawdown_pct")
-    max_volume_participation_pct = p.get("max_volume_participation_pct")
     max_gross_exposure_pct = p.get("max_gross_exposure_pct")
     max_net_exposure_pct = p.get("max_net_exposure_pct")
     if max_position_pct is not None and max_position_pct <= 0:
         raise ValueError(f"max_position_pct must be > 0, got {max_position_pct}")
     if max_drawdown_pct is not None and max_drawdown_pct <= 0:
         raise ValueError(f"max_drawdown_pct must be > 0, got {max_drawdown_pct}")
-    if max_volume_participation_pct is not None and not (0 < max_volume_participation_pct <= 1):
-        raise ValueError(
-            f"max_volume_participation_pct must be in (0, 1], got {max_volume_participation_pct}"
-        )
     if max_gross_exposure_pct is not None and max_gross_exposure_pct <= 0:
         raise ValueError(f"max_gross_exposure_pct must be > 0, got {max_gross_exposure_pct}")
     if max_net_exposure_pct is not None and max_net_exposure_pct <= 0:
@@ -666,7 +670,6 @@ def validate_risk_params(
     return RiskLimits(
         max_position_pct=max_position_pct,
         max_drawdown_pct=max_drawdown_pct,
-        max_volume_participation_pct=max_volume_participation_pct,
         max_gross_exposure_pct=max_gross_exposure_pct,
         max_net_exposure_pct=max_net_exposure_pct,
     )
@@ -679,9 +682,9 @@ def liquidate_all(
     *,
     get_cost_model: Callable[[str], CostModel],
     reason: str,
-    max_volume_participation_pct: float | None = None,
-    used_volume: dict[str, float] | None = None,
-) -> ActionResults:
+    max_volume_participation_rate: float | None = None,
+    used_quantity_by_symbol: dict[str, float] | None = None,
+) -> ExecutionResult:
     """Force-close every open position right now, at this bar's close price.
 
     Shared by end-of-run liquidation and the max-drawdown circuit breaker —
@@ -701,9 +704,9 @@ def liquidate_all(
         bar_volume = bar.get("volume")
         max_volume_qty = _volume_fill_limit(
             sym,
-            max_volume_participation_pct,
+            max_volume_participation_rate,
             bar_volume,
-            used_quantity=(used_volume or {}).get(sym, 0.0),
+            used_quantity=(used_quantity_by_symbol or {}).get(sym, 0.0),
         )
         close_quantity = pos.quantity
         if max_volume_qty is not None:
@@ -722,15 +725,15 @@ def liquidate_all(
         )
         trades.append(trade)
         events.append(event)
-        if used_volume is not None:
-            used_volume[sym] = used_volume.get(sym, 0.0) + close_quantity
+        if used_quantity_by_symbol is not None:
+            used_quantity_by_symbol[sym] = used_quantity_by_symbol.get(sym, 0.0) + close_quantity
         cash_delta += proceeds
         if fully_closed:
             del positions[sym]
         else:
             reduce_position(pos, close_quantity)
 
-    return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
+    return ExecutionResult(trades=trades, events=events, cash_delta=cash_delta)
 
 
 # ---------------------------------------------------------------------------
@@ -740,16 +743,16 @@ def liquidate_all(
 
 def resolve_fill_price(
     bar: dict[str, float],
-    action: Action,
+    intent: OrderIntent,
     default_fill: str,
     *,
     position_side: Literal["long", "short"] | None = None,
 ) -> float | None:
-    """Resolve actual fill price from action.fill_price or engine default.
+    """Resolve actual fill price from ``intent.fill_price`` or engine default.
 
     Args:
         bar: Next bar's OHLCV dict (the bar where the fill happens).
-        action: The action whose fill_price spec to use.
+        intent: The order intent whose fill-price specification to use.
         default_fill: Engine-level default field name (e.g. "open").
         position_side: Required to infer the order direction for a close.
 
@@ -762,7 +765,7 @@ def resolve_fill_price(
     A gap through the limit receives the opening price, otherwise the limit.
     The intent is good for this eligible bar only.
     """
-    fill_spec = action.fill_price if action.fill_price is not None else default_fill
+    fill_spec = intent.fill_price if intent.fill_price is not None else default_fill
 
     if isinstance(fill_spec, (int, float)):
         limit = float(fill_spec)
@@ -786,16 +789,16 @@ def resolve_fill_price(
             logger.warning("Limit order rejected: bar has invalid open")
             return None
 
-        if action.type == "long":
+        if intent.action == "long":
             order_side: Literal["buy", "sell"] | None = "buy"
-        elif action.type == "short":
+        elif intent.action == "short":
             order_side = "sell"
-        elif action.type == "close" and position_side is not None:
+        elif intent.action == "close" and position_side is not None:
             order_side = "sell" if position_side == "long" else "buy"
         else:
             order_side = None
         if order_side is None:
-            logger.warning("Limit order rejected: cannot infer order side for %s", action.type)
+            logger.warning("Limit order rejected: cannot infer order side for %s", intent.action)
             return None
 
         reached = low <= limit if order_side == "buy" else high >= limit
@@ -803,7 +806,7 @@ def resolve_fill_price(
             logger.info(
                 "Limit intent expired unfilled: %s %s at %.6f",
                 order_side,
-                action.symbol,
+                intent.symbol,
                 limit,
             )
             return None
@@ -920,7 +923,7 @@ def _cap_fill_to_volume(
     *,
     bar_volume: float | None = None,
 ) -> Fill | None:
-    """Shrink a fill to at most max_qty (typically max_volume_participation_pct
+    """Shrink a fill to at most max_qty (typically max_volume_participation_rate
     * bar_volume) — a per-fill "how much of this bar's liquidity can I touch"
     constraint, unlike the notional cap which accumulates across a position.
     """
@@ -940,44 +943,44 @@ def _cap_fill_to_volume(
 
 def _volume_fill_limit(
     symbol: str,
-    max_volume_participation_pct: float | None,
+    max_volume_participation_rate: float | None,
     bar_volume: float | None,
     *,
     used_quantity: float = 0.0,
 ) -> float | None:
     """Return a per-bar fill limit, rejecting unknown liquidity explicitly."""
-    if max_volume_participation_pct is None:
+    if max_volume_participation_rate is None:
         return None
     if bar_volume is None:
         logger.warning(
-            "Fill rejected for %s: max_volume_participation_pct requires bar volume",
+            "Fill rejected for %s: max_volume_participation_rate requires bar volume",
             symbol,
         )
         return 0.0
-    return max(max_volume_participation_pct * bar_volume - used_quantity, 0.0)
+    return max(max_volume_participation_rate * bar_volume - used_quantity, 0.0)
 
 
 def make_fill(
-    action: Action,
+    intent: OrderIntent,
     price: float,
     cash: float,
     cost_model: CostModel,
     *,
     bar_volume: float | None = None,
 ) -> Fill | None:
-    """Build a Fill for a long/short action. Returns None if rejected."""
-    if action.type not in ("long", "short"):
+    """Build a Fill for a long/short intent. Returns None if rejected."""
+    if intent.action not in ("long", "short"):
         return None
 
-    qty = action.quantity
+    qty = intent.quantity
     if qty is None:
-        qty = _size_position(cost_model, price, cash, action.type)
+        qty = _size_position(cost_model, price, cash, intent.action)
     if qty <= 0:
         return None
 
     return Fill(
-        symbol=action.symbol,
-        side=action.type,
+        symbol=intent.symbol,
+        side=intent.action,
         price=price,
         quantity=qty,
         commission=cost_model.calc_commission(price, qty),
@@ -1019,7 +1022,7 @@ def build_trade_result(
 
 
 def _try_fill(
-    action: Action,
+    action: OrderIntent,
     price: float,
     available_cash: float,
     cost_model: CostModel,
@@ -1043,27 +1046,27 @@ def _try_fill(
         fill = _cap_fill_to_volume(fill, cost_model, max_volume_qty, bar_volume=bar_volume)
         if fill is None:
             return None, 0.0
-    outlay = cost_model.estimate_entry_outlay(price, fill.quantity, action.type)
+    outlay = cost_model.estimate_entry_outlay(price, fill.quantity, action.action)
     if available_cash - outlay < -EPSILON:
         return None, 0.0
     return fill, outlay
 
 
-def process_actions(
-    actions: list[Action],
+def execute_order_intents(
+    intents: list[OrderIntent],
     positions: dict[str, PositionState],
     cash: float,
     ts: datetime,
     *,
-    get_price: Callable[[str, Action], float | None],
+    get_price: Callable[[str, OrderIntent], float | None],
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
-    max_volume_participation_pct: float | None = None,
+    max_volume_participation_rate: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
-    used_volume: dict[str, float] | None = None,
-) -> ActionResults:
-    """Process a bar's actions: open, scale, partial/full close.
+    used_quantity_by_symbol: dict[str, float] | None = None,
+) -> ExecutionResult:
+    """Execute symbol-level intents: open, scale, partial/full close.
 
     Mutates *positions* dict in place. Backtest/sim uses the resulting fills;
     live may use it only on a copied portfolio to size order requests.
@@ -1072,7 +1075,7 @@ def process_actions(
     (existing + added) to this value — applied identically to new entries
     and scale-ins.
 
-    max_volume_participation_pct gives each symbol one cumulative budget for
+    max_volume_participation_rate gives each symbol one cumulative budget for
     this data event across entries, additions, reductions, and closes. Missing
     volume rejects the fill when this limit is enabled. get_volume also feeds
     CostModel.calc_slippage's participation-scaled impact component.
@@ -1080,12 +1083,9 @@ def process_actions(
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
     cash_delta = 0.0
-    volume_consumed = used_volume if used_volume is not None else {}
+    volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
 
-    for action in actions:
-        if action.type == "hold":
-            continue
-
+    for action in intents:
         sym = action.symbol or primary_symbol
         price_raw = get_price(sym, action)
         if price_raw is None or price_raw <= 0:
@@ -1094,13 +1094,13 @@ def process_actions(
         cost_model = get_cost_model(sym)
         reason = action.reason
 
-        if action.type in ("long", "short"):
-            desired_side: Literal["long", "short"] = action.type
+        if action.action in ("long", "short"):
+            desired_side: Literal["long", "short"] = action.action
 
             bar_volume = get_volume(sym) if get_volume else None
             max_volume_qty = _volume_fill_limit(
                 sym,
-                max_volume_participation_pct,
+                max_volume_participation_rate,
                 bar_volume,
                 used_quantity=volume_consumed.get(sym, 0.0),
             )
@@ -1202,12 +1202,12 @@ def process_actions(
                 # OPPOSITE SIDE — reject
                 logger.warning(
                     "Rejected %s %s: already %s — close first",
-                    action.type,
+                    action.action,
                     sym,
                     positions[sym].side,
                 )
 
-        elif action.type == "close" and sym in positions:
+        elif action.action == "close" and sym in positions:
             pos = positions[sym]
             close_qty = action.quantity
 
@@ -1217,7 +1217,7 @@ def process_actions(
             bar_volume = get_volume(sym) if get_volume else None
             max_volume_qty = _volume_fill_limit(
                 sym,
-                max_volume_participation_pct,
+                max_volume_participation_rate,
                 bar_volume,
                 used_quantity=volume_consumed.get(sym, 0.0),
             )
@@ -1246,16 +1246,16 @@ def process_actions(
             else:
                 reduce_position(pos, trade.quantity)
 
-    return ActionResults(trades=trades, events=events, cash_delta=cash_delta)
+    return ExecutionResult(trades=trades, events=events, cash_delta=cash_delta)
 
 
 def _scale_additions_to_cash(
-    actions: list[Action],
+    actions: list[OrderIntent],
     available_cash: float,
     *,
     prices: dict[str, float],
     get_cost_model: Callable[[str], CostModel],
-) -> list[Action]:
+) -> list[OrderIntent]:
     """Scale all rebalance additions by one factor when cash is insufficient.
 
     A common factor preserves the intended cross-sectional allocation better
@@ -1273,7 +1273,7 @@ def _scale_additions_to_cash(
                 continue
             price = prices[action.symbol]
             cost_model = get_cost_model(action.symbol)
-            side: Literal["long", "short"] = "short" if action.type == "short" else "long"
+            side: Literal["long", "short"] = "short" if action.action == "short" else "long"
             total += cost_model.estimate_entry_outlay(price, quantity, side)
         return total
 
@@ -1294,8 +1294,8 @@ def _scale_additions_to_cash(
 
     logger.info("Rebalance additions scaled to %.6f of requested quantities", low)
     return [
-        Action(
-            type=action.type,
+        OrderIntent(
+            action=action.action,
             symbol=action.symbol,
             quantity=(action.quantity or 0.0) * low,
             reason=action.reason,
@@ -1305,22 +1305,22 @@ def _scale_additions_to_cash(
     ]
 
 
-def process_rebalance_targets(
-    targets: RebalanceTargets,
+def execute_portfolio_targets(
+    targets: PortfolioTargets,
     positions: dict[str, PositionState],
     cash: float,
     ts: datetime,
     *,
-    get_price: Callable[[str, Action], float | None],
+    get_price: Callable[[str, OrderIntent], float | None],
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
-    max_volume_participation_pct: float | None = None,
+    max_volume_participation_rate: float | None = None,
     max_gross_exposure_pct: float | None = None,
     max_net_exposure_pct: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
-    used_volume: dict[str, float] | None = None,
-) -> ActionResults:
+    used_quantity_by_symbol: dict[str, float] | None = None,
+) -> ExecutionResult:
     """Resolve and execute a portfolio rebalance as one deterministic batch.
 
     All relevant execution prices are resolved before mutating the portfolio.
@@ -1328,7 +1328,7 @@ def process_rebalance_targets(
     order. If transaction costs make the additions unaffordable, every addition
     is scaled by the same factor instead of starving later symbols.
     """
-    volume_consumed = used_volume if used_volume is not None else {}
+    volume_consumed = used_quantity_by_symbol if used_quantity_by_symbol is not None else {}
     target_gross_exposure = sum(abs(weight) for weight in targets.weights.values())
     target_net_exposure = abs(sum(targets.weights.values()))
     if (
@@ -1348,7 +1348,7 @@ def process_rebalance_targets(
     target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
     relevant_symbols = sorted(set(positions) | target_symbols)
     if not relevant_symbols:
-        return ActionResults(trades=[], events=[], cash_delta=0.0)
+        return ExecutionResult(trades=[], events=[], cash_delta=0.0)
 
     prices: dict[str, float] = {}
     for symbol in relevant_symbols:
@@ -1360,8 +1360,8 @@ def process_rebalance_targets(
             action_type = "short"
         else:
             action_type = "close"
-        price_action = Action(
-            type=action_type,
+        price_action = OrderIntent(
+            action=action_type,
             symbol=symbol,
             reason=targets.reason,
             fill_price=targets.fill_price,
@@ -1380,8 +1380,8 @@ def process_rebalance_targets(
     if equity <= EPSILON:
         raise ValueError("rebalance requires positive execution-time equity")
 
-    reductions: list[Action] = []
-    additions: list[Action] = []
+    reductions: list[OrderIntent] = []
+    additions: list[OrderIntent] = []
     for symbol in relevant_symbols:
         position = positions.get(symbol)
         current_signed_quantity = 0.0
@@ -1403,8 +1403,8 @@ def process_rebalance_targets(
             quantity_delta = abs(target_signed_quantity) - abs(current_signed_quantity)
             if quantity_delta < -EPSILON:
                 reductions.append(
-                    Action(
-                        type="close",
+                    OrderIntent(
+                        action="close",
                         symbol=symbol,
                         quantity=-quantity_delta,
                         reason=targets.reason,
@@ -1413,8 +1413,8 @@ def process_rebalance_targets(
                 )
             elif quantity_delta > EPSILON:
                 additions.append(
-                    Action(
-                        type="long" if target_signed_quantity > 0 else "short",
+                    OrderIntent(
+                        action="long" if target_signed_quantity > 0 else "short",
                         symbol=symbol,
                         quantity=quantity_delta,
                         reason=targets.reason,
@@ -1424,16 +1424,16 @@ def process_rebalance_targets(
             continue
 
         reductions.append(
-            Action(
-                type="close",
+            OrderIntent(
+                action="close",
                 symbol=symbol,
                 reason=targets.reason,
                 fill_price=targets.fill_price,
             )
         )
         additions.append(
-            Action(
-                type="long" if target_signed_quantity > 0 else "short",
+            OrderIntent(
+                action="long" if target_signed_quantity > 0 else "short",
                 symbol=symbol,
                 quantity=abs(target_signed_quantity),
                 reason=targets.reason,
@@ -1441,7 +1441,7 @@ def process_rebalance_targets(
             )
         )
 
-    reduction_result = process_actions(
+    reduction_result = execute_order_intents(
         reductions,
         positions,
         cash,
@@ -1449,9 +1449,9 @@ def process_rebalance_targets(
         get_price=get_price,
         get_cost_model=get_cost_model,
         primary_symbol=primary_symbol,
-        max_volume_participation_pct=max_volume_participation_pct,
+        max_volume_participation_rate=max_volume_participation_rate,
         get_volume=get_volume,
-        used_volume=volume_consumed,
+        used_quantity_by_symbol=volume_consumed,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
     scaled_additions = _scale_additions_to_cash(
@@ -1460,7 +1460,7 @@ def process_rebalance_targets(
         prices=prices,
         get_cost_model=get_cost_model,
     )
-    addition_result = process_actions(
+    addition_result = execute_order_intents(
         scaled_additions,
         positions,
         cash_after_reductions,
@@ -1469,11 +1469,11 @@ def process_rebalance_targets(
         get_cost_model=get_cost_model,
         primary_symbol=primary_symbol,
         max_position_notional=max_position_notional,
-        max_volume_participation_pct=max_volume_participation_pct,
+        max_volume_participation_rate=max_volume_participation_rate,
         get_volume=get_volume,
-        used_volume=volume_consumed,
+        used_quantity_by_symbol=volume_consumed,
     )
-    return ActionResults(
+    return ExecutionResult(
         trades=[*reduction_result.trades, *addition_result.trades],
         events=[*reduction_result.events, *addition_result.events],
         cash_delta=reduction_result.cash_delta + addition_result.cash_delta,
@@ -1485,115 +1485,111 @@ def process_rebalance_targets(
 # ---------------------------------------------------------------------------
 
 
-def validate_intent_symbols(
-    intent: StrategyIntent,
+def validate_decision_symbols(
+    decision: StrategyDecision,
     universe: set[str],
     *,
     primary_symbol: str,
 ) -> None:
-    """Reject strategy intents that reference an unconfigured symbol."""
-    if isinstance(intent, RebalanceTargets):
-        symbols = set(intent.weights)
+    """Reject strategy decisions that reference an unconfigured symbol."""
+    if isinstance(decision, PortfolioTargets):
+        symbols = set(decision.weights)
     else:
-        symbols = {action.symbol or primary_symbol for action in intent if action.type != "hold"}
+        symbols = {intent.symbol or primary_symbol for intent in decision}
     unknown = symbols - universe
     if unknown:
-        raise ValueError(f"strategy intent contains unknown symbols: {sorted(unknown)}")
+        raise ValueError(f"strategy decision contains unknown symbols: {sorted(unknown)}")
 
 
-def partition_pending_intent(
-    intent: StrategyIntent,
+def partition_pending_decision(
+    decision: StrategyDecision,
     bars: dict[str, dict[str, float]],
     positions: dict[str, PositionState],
     *,
     primary_symbol: str,
-) -> tuple[StrategyIntent, StrategyIntent]:
-    """Split an intent into executable-now and waiting-for-symbol-data parts.
+) -> tuple[StrategyDecision, StrategyDecision]:
+    """Split a decision into executable-now and waiting-for-data parts.
 
-    Per-symbol Actions become eligible on that symbol's next observed bar.
-    RebalanceTargets remain one synchronous basket and wait until every
+    Per-symbol order intents become eligible on that symbol's next observed bar.
+    PortfolioTargets remain one synchronous basket and wait until every
     non-zero target and currently held symbol has a bar.
     """
-    if isinstance(intent, RebalanceTargets):
+    if isinstance(decision, PortfolioTargets):
         target_symbols = {
-            symbol for symbol, weight in intent.weights.items() if abs(weight) > EPSILON
+            symbol for symbol, weight in decision.weights.items() if abs(weight) > EPSILON
         }
         required_symbols = set(positions) | target_symbols
         if required_symbols.issubset(bars):
-            return intent, []
-        return [], intent
+            return decision, []
+        return [], decision
 
-    ready: list[Action] = []
-    waiting: list[Action] = []
-    for action in intent:
-        symbol = action.symbol or primary_symbol
-        if action.type == "hold" or symbol in bars:
-            ready.append(action)
+    ready: list[OrderIntent] = []
+    waiting: list[OrderIntent] = []
+    for intent in decision:
+        symbol = intent.symbol or primary_symbol
+        if symbol in bars:
+            ready.append(intent)
         else:
-            waiting.append(action)
+            waiting.append(intent)
     return ready, waiting
 
 
-def merge_pending_intents(
-    pending: StrategyIntent,
-    new_intent: StrategyIntent,
+def merge_pending_decisions(
+    pending: StrategyDecision,
+    new_decision: StrategyDecision,
     *,
     primary_symbol: str,
-) -> StrategyIntent:
-    """Merge independent per-symbol Actions without replacing open intents."""
+) -> StrategyDecision:
+    """Merge independent per-symbol intents without replacing pending ones."""
     if not pending:
-        return new_intent
-    if not new_intent:
+        return new_decision
+    if not new_decision:
         return pending
-    if isinstance(pending, RebalanceTargets) or isinstance(new_intent, RebalanceTargets):
-        raise ValueError("cannot replace a pending intent with RebalanceTargets")
+    if isinstance(pending, PortfolioTargets) or isinstance(new_decision, PortfolioTargets):
+        raise ValueError("cannot replace a pending intent with PortfolioTargets")
 
-    pending_actions = [action for action in pending if action.type != "hold"]
-    new_actions = [action for action in new_intent if action.type != "hold"]
-    if not pending_actions:
-        return new_actions
-    if not new_actions:
-        return pending_actions
+    pending_intents = list(pending)
+    new_intents = list(new_decision)
 
-    pending_symbols = {action.symbol or primary_symbol for action in pending_actions}
-    new_symbols = {action.symbol or primary_symbol for action in new_actions}
+    pending_symbols = {intent.symbol or primary_symbol for intent in pending_intents}
+    new_symbols = {intent.symbol or primary_symbol for intent in new_intents}
     overlap = pending_symbols & new_symbols
     if overlap:
         raise ValueError(f"strategy emitted duplicate pending intents for {sorted(overlap)}")
-    return [*pending_actions, *new_actions]
+    return [*pending_intents, *new_intents]
 
 
-def run_pending_and_stops(
+def execute_pending_decision_and_stops(
     ts: datetime,
     positions: dict[str, PositionState],
     cash: float,
-    pending_intent: StrategyIntent,
+    pending_decision: StrategyDecision,
     bars: dict[str, dict[str, float]],
     *,
     get_cost_model: Callable[[str], CostModel],
     default_fill: str,
     primary_symbol: str,
     max_position_notional: float | None = None,
-    max_volume_participation_pct: float | None = None,
+    max_volume_participation_rate: float | None = None,
     max_gross_exposure_pct: float | None = None,
     max_net_exposure_pct: float | None = None,
-) -> tuple[float, ActionResults]:
-    """Fill this bar's pending actions, then check stop-loss/take-profit —
+) -> tuple[float, ExecutionResult]:
+    """Fill this bar's pending decision, then check stop-loss/take-profit —
     the two steps that must always run together, in this order, before a
     strategy sees the bar. Backtest and real-time simulation call this same
     implementation so their deterministic bar-fill ordering cannot drift.
     Live broker execution intentionally does not call it.
 
-    Returns (updated cash, combined ActionResults for both steps).
+    Returns (updated cash, combined ExecutionResult for both steps).
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
     cash_delta_total = 0.0
-    used_volume: dict[str, float] = {}
+    used_quantity_by_symbol: dict[str, float] = {}
 
-    if pending_intent:
+    if pending_decision:
 
-        def get_price(sym: str, action: Action) -> float | None:
+        def get_price(sym: str, action: OrderIntent) -> float | None:
             return resolve_fill_price(
                 bars.get(sym, {}),
                 action,
@@ -1606,28 +1602,28 @@ def run_pending_and_stops(
             "get_cost_model": get_cost_model,
             "primary_symbol": primary_symbol,
             "max_position_notional": max_position_notional,
-            "max_volume_participation_pct": max_volume_participation_pct,
+            "max_volume_participation_rate": max_volume_participation_rate,
             "get_volume": lambda sym: bars.get(sym, {}).get("volume"),
         }
-        if isinstance(pending_intent, RebalanceTargets):
-            fill_result = process_rebalance_targets(
-                pending_intent,
+        if isinstance(pending_decision, PortfolioTargets):
+            fill_result = execute_portfolio_targets(
+                pending_decision,
                 positions,
                 cash,
                 ts,
                 max_gross_exposure_pct=max_gross_exposure_pct,
                 max_net_exposure_pct=max_net_exposure_pct,
-                used_volume=used_volume,
+                used_quantity_by_symbol=used_quantity_by_symbol,
                 **common_kwargs,
             )
         else:
-            fill_result = process_actions(
-                pending_intent,
+            fill_result = execute_order_intents(
+                pending_decision,
                 positions,
                 cash,
                 ts,
                 **common_kwargs,
-                used_volume=used_volume,
+                used_quantity_by_symbol=used_quantity_by_symbol,
             )
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)
@@ -1640,12 +1636,12 @@ def run_pending_and_stops(
             bars,
             ts,
             get_cost_model=get_cost_model,
-            max_volume_participation_pct=max_volume_participation_pct,
-            used_volume=used_volume,
+            max_volume_participation_rate=max_volume_participation_rate,
+            used_quantity_by_symbol=used_quantity_by_symbol,
         )
         trades.extend(stop_result.trades)
         events.extend(stop_result.events)
         cash_delta_total += stop_result.cash_delta
         cash += stop_result.cash_delta
 
-    return cash, ActionResults(trades=trades, events=events, cash_delta=cash_delta_total)
+    return cash, ExecutionResult(trades=trades, events=events, cash_delta=cash_delta_total)
