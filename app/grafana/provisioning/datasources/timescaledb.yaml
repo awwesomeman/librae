@@ -6,9 +6,9 @@ datasources:
     type: grafana-postgresql-datasource
     url: $__env{VPS_DB_HOST}:5432
     database: quant
-    user: quant
+    user: grafana_reader
     secureJsonData:
-      password: $__env{POSTGRES_PASSWORD}
+      password: $__env{POSTGRES_GRAFANA_PASSWORD}
     jsonData:
       sslmode: disable
       maxOpenConns: 5

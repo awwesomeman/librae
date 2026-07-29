@@ -27,11 +27,17 @@ Install the database extra when using the reference writer or live state store:
 pip install "librae[db] @ git+https://github.com/awwesomeman/librae.git@<tag-or-commit>"
 ```
 
-Create the schema once per database:
+The reference Compose service initializes an empty database automatically. To
+apply schema or role updates to an existing reference deployment:
 
 ```bash
-psql "$TIMESCALE_DSN" -f db/timescale_init.sql
+docker exec -i quant_timescaledb psql -U quant -d quant < db/timescale_init.sql
 ```
+
+For a database outside the reference Compose setup, run the script with a
+database-owner connection and set `POSTGRES_APP_PASSWORD` and
+`POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
+the non-admin `quant_app` role and must not be used for migrations.
 
 Normal integrations call the high-level functions in
 `db.timescale_writer` and `db.timescale_reader`; upper layers should not issue
@@ -66,7 +72,7 @@ For a local Grafana instance connected to an existing database:
 
 ```bash
 cd deploy
-docker compose -f docker-compose.local.yml up -d
+docker compose --env-file ../.env -f docker-compose.local.yml up -d
 ```
 
 Open `http://localhost:3000`. Credentials and the remote database connection
@@ -107,7 +113,8 @@ observability stack.
 
 The `deploy/`, `app/`, and `scripts/` directories are operational examples,
 not engine APIs. They show one Docker/Grafana/VM arrangement and can be used,
-replaced, or ignored.
+replaced, or ignored. Read the root [security policy](../../SECURITY.md) before
+deploying them to a host with a public IP.
 
 The trade image intentionally combines this engine repository with a separate
 `strategies/` repository in the same parent workspace:

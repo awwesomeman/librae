@@ -100,6 +100,8 @@ before selecting or promoting a workflow.
 The [documentation index](docs/README.md) separates current guides and architecture
 from historical decisions, plans, research, and operational learnings.
 
+**Deploying the optional infrastructure to a host with a public IP?** `.env.example`'s defaults (passwords, port binding) are for local dev only — read `SECURITY.md` first.
+
 ## Development
 
 ```bash

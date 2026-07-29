@@ -2,6 +2,45 @@
 -- See docs/plans/enhance_db_schema.md for schema evolution history
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
+-- Managed roles: quant_app writes runtime data; grafana_reader only reads it.
+-- The connecting quant role remains reserved for migrations and administration.
+\getenv quant_app_password POSTGRES_APP_PASSWORD
+\getenv grafana_reader_password POSTGRES_GRAFANA_PASSWORD
+
+SELECT 'CREATE ROLE quant_app'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'quant_app')
+\gexec
+ALTER ROLE quant_app WITH
+    LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+    PASSWORD :'quant_app_password';
+
+SELECT 'CREATE ROLE grafana_reader'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_reader')
+\gexec
+ALTER ROLE grafana_reader WITH
+    LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+    PASSWORD :'grafana_reader_password';
+
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM quant_app, grafana_reader;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM quant_app, grafana_reader;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM quant_app, grafana_reader;
+GRANT USAGE ON SCHEMA public TO quant_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO quant_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO quant_app;
+GRANT USAGE ON SCHEMA public TO grafana_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_reader;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TABLES FROM quant_app, grafana_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM quant_app, grafana_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO quant_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO quant_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    GRANT SELECT ON TABLES TO grafana_reader;
+
 -- ============================================================
 -- backtest_runs — Run 中樞 (1 row / run)
 -- ============================================================
