@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     net_exposure        DOUBLE PRECISION,
     concentration       DOUBLE PRECISION,
     turnover            DOUBLE PRECISION,
+    exposed             BOOLEAN,
     strategy            TEXT
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
@@ -138,6 +139,7 @@ ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS gross_exposure DOUBLE PRECISIO
 ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS net_exposure DOUBLE PRECISION;
 ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS concentration DOUBLE PRECISION;
 ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS turnover DOUBLE PRECISION;
+ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS exposed BOOLEAN;
 
 -- ============================================================
 -- trade_events — 部位生命週期事件 (hypertable, 獨立)
@@ -162,6 +164,9 @@ CREATE TABLE IF NOT EXISTS trade_events (
     commission      DOUBLE PRECISION NOT NULL DEFAULT 0,
     slippage        DOUBLE PRECISION NOT NULL DEFAULT 0,
     tax             DOUBLE PRECISION NOT NULL DEFAULT 0,
+    entry_commission DOUBLE PRECISION,
+    entry_slippage  DOUBLE PRECISION,
+    entry_tax       DOUBLE PRECISION,
     pnl             DOUBLE PRECISION,
     net_return      DOUBLE PRECISION,
     entry_at        TIMESTAMPTZ,
@@ -177,6 +182,9 @@ CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DE
 CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);
 ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
 ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
+ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_commission DOUBLE PRECISION;
+ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_slippage DOUBLE PRECISION;
+ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_tax DOUBLE PRECISION;
 
 -- ============================================================
 -- strategy_performance — 帳戶 KPI (1 row / account / run, FK CASCADE)

@@ -479,7 +479,12 @@ def check_existing_run(config: RunConfig) -> str | None:
         try:
             from db.timescale_writer import _update_perf_params, refresh_performance
 
-            refresh_performance(existing["run_id"], config=config)
+            for account_id in config.accounts:
+                refresh_performance(
+                    existing["run_id"],
+                    account_id=account_id,
+                    config=config,
+                )
             _update_perf_params(existing["run_id"], config.perf_params)
             logger.info(
                 "Recomputed metrics for run_id=%s (perf_params changed)", existing["run_id"]

@@ -500,3 +500,32 @@ class TestCheckExistingRun:
             side_effect=OSError("connection refused"),
         ):
             assert check_existing_run(_make_cfg()) is None
+
+    def test_changed_perf_params_refresh_every_configured_account(self):
+        config = _make_cfg(
+            accounts={
+                "alpha": AccountConfig(currency="USD", initial_cash=100_000.0),
+                "beta": AccountConfig(currency="USD", initial_cash=50_000.0),
+            }
+        )
+        existing = {
+            "run_id": "existing-run",
+            "perf_params": {"annualize": not config.annualize},
+        }
+
+        with (
+            patch(
+                "db.timescale_reader.get_run_by_config_hash",
+                return_value=existing,
+            ),
+            patch("db.timescale_writer.refresh_performance") as refresh,
+            patch("db.timescale_writer._update_perf_params") as update_params,
+        ):
+            assert check_existing_run(config) == "existing-run"
+
+        assert [call.kwargs["account_id"] for call in refresh.call_args_list] == [
+            "alpha",
+            "beta",
+        ]
+        assert all(call.kwargs["config"] is config for call in refresh.call_args_list)
+        update_params.assert_called_once_with("existing-run", config.perf_params)

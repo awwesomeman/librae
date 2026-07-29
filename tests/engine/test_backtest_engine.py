@@ -294,6 +294,30 @@ class TestBacktestBasics:
         assert len(result.trades) == 1
         assert np.isclose(result.trades[0].exit_price, 120.0)
 
+    def test_final_turnover_includes_same_bar_fill_and_forced_close(self) -> None:
+        prices = [100.0] * 5
+        df = _make_multiindex_df(prices)
+
+        class OpenThenAdd(Strategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                if ctx.period_index == 3:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        result = Backtest(
+            df,
+            OpenThenAdd(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        assert result.portfolio_snapshots[-1].turnover == pytest.approx(0.3)
+        assert result.portfolio_snapshots[-1].gross_exposure == 0.0
+        assert result.portfolio_snapshots[-1].exposed is True
+
     def test_requires_multiindex(self) -> None:
         df = pd.DataFrame({"close": [100.0]}, index=pd.date_range("2025-01-01", periods=1))
         with pytest.raises(ValueError, match="MultiIndex"):

@@ -182,6 +182,7 @@ class TestReduceCloseEvents:
 
         assert open_events[0].commission == 1.0
         assert close_events[0].commission == 1.0
+        assert close_events[0].entry_commission == 1.0
         assert trades[0].commission == 2.0
 
     def test_confirmed_fill_event_costs_are_execution_side_only(self):
@@ -221,6 +222,9 @@ class TestReduceCloseEvents:
         assert result.events[0].commission == 2.0
         assert result.events[0].slippage == 1.0
         assert result.events[0].tax == 0.5
+        assert result.events[0].entry_commission == 1.0
+        assert result.events[0].entry_slippage == 0.5
+        assert result.events[0].entry_tax == 0.25
         assert result.trades[0].commission == 3.0
         assert result.trades[0].slippage == 1.5
         assert result.trades[0].tax == 0.75

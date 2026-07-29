@@ -165,6 +165,7 @@ class PortfolioSnapshot:
     net_exposure: float
     concentration: float
     turnover: float
+    exposed: bool
 
 
 @dataclass(frozen=True)
@@ -591,7 +592,10 @@ class Backtest:
         portfolio_snapshots_by_account: dict[str, list[PortfolioSnapshot]] = {
             account_id: [] for account_id in cash_by_account
         }
-        active_target_weights: dict[str, float] | None = None
+        active_target_weights_by_account: dict[str, dict[str, float] | None] = dict.fromkeys(
+            cash_by_account,
+            None,
+        )
         last_prices: dict[str, float] = {}
         decision_index = 0
         equity_peak_by_account = dict(self._initial_cash_by_account)
@@ -633,7 +637,17 @@ class Backtest:
                 primary_symbol=primary_symbol,
             )
             if isinstance(decision_to_execute, PortfolioTargets):
-                active_target_weights = dict(decision_to_execute.weights)
+                target_account_id = next(
+                    iter(
+                        self._decisions_by_account(
+                            decision_to_execute,
+                            primary_symbol=primary_symbol,
+                        )
+                    )
+                )
+                active_target_weights_by_account[target_account_id] = dict(
+                    decision_to_execute.weights
+                )
 
             # ── Steps 1+1.5: fill the previous pending decision at current
             # bar's price, then check stop-loss/take-profit — shared with
@@ -713,7 +727,8 @@ class Backtest:
                             account_positions,
                             last_prices,
                             mtm,
-                            active_target_weights,
+                            active_target_weights_by_account[account_id],
+                            account_id=account_id,
                         )
                     )
                 last_equity_by_account[account_id] = mtm
@@ -794,9 +809,6 @@ class Backtest:
         if self._timeline:
             last_ts = self._timeline[-1]
             last_bars = all_bars[last_ts]
-            final_events_by_account: dict[str, list[OrderEvent]] = {
-                account_id: [] for account_id in cash_by_account
-            }
             used_bar_quantity = self._filled_quantities(
                 event for event in all_events if event.ts == last_ts
             )
@@ -821,7 +833,6 @@ class Backtest:
                 )
                 trades.extend(close_result.trades)
                 all_events.extend(close_result.events)
-                final_events_by_account[account_id].extend(close_result.events)
                 cash_by_account[account_id] += close_result.cash_delta
             if positions:
                 raise ValueError(
@@ -837,14 +848,23 @@ class Backtest:
                 if equity_curve:
                     equity_curve[-1] = EquitySnapshot(ts=last_ts, equity=cash)
                 account_portfolio = portfolio_snapshots_by_account[account_id]
+                terminal_events = [
+                    event
+                    for event in all_events
+                    if event.ts == last_ts
+                    and self._account_id_by_symbol[event.symbol] == account_id
+                ]
                 account_portfolio[-1] = self._snapshot_portfolio(
                     last_ts,
                     {},
                     last_prices,
                     cash,
-                    sum(event.notional for event in final_events_by_account[account_id]) / cash
-                    if cash > EPSILON
-                    else 0.0,
+                    (
+                        sum(event.notional for event in terminal_events) / cash
+                        if cash > EPSILON
+                        else 0.0
+                    ),
+                    exposed=account_portfolio[-1].exposed,
                 )
             if self._record_position_snapshots:
                 position_snapshots = [
@@ -854,22 +874,14 @@ class Backtest:
                     snapshot for snapshot in allocation_snapshots if snapshot.ts != last_ts
                 ]
                 for account_id, cash in cash_by_account.items():
-                    account_targets = (
-                        {
-                            symbol: weight
-                            for symbol, weight in active_target_weights.items()
-                            if self._account_id_by_symbol[symbol] == account_id
-                        }
-                        if active_target_weights is not None
-                        else None
-                    )
                     allocation_snapshots.extend(
                         self._snapshot_allocations(
                             last_ts,
                             {},
                             last_prices,
                             cash,
-                            account_targets,
+                            active_target_weights_by_account[account_id],
+                            account_id=account_id,
                         )
                     )
 
@@ -1074,6 +1086,11 @@ class Backtest:
                 commission=float(e.commission),
                 slippage=float(e.slippage),
                 tax=float(e.tax),
+                entry_commission=(
+                    float(e.entry_commission) if e.entry_commission is not None else None
+                ),
+                entry_slippage=(float(e.entry_slippage) if e.entry_slippage is not None else None),
+                entry_tax=float(e.entry_tax) if e.entry_tax is not None else None,
                 pnl=float(e.pnl) if e.pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
                 entry_at=e.entry_at,
@@ -1165,6 +1182,7 @@ class Backtest:
                     net_exposure=float(portfolio.net_exposure),
                     concentration=float(portfolio.concentration),
                     turnover=float(portfolio.turnover),
+                    exposed=portfolio.exposed,
                 )
             )
         return equity_points
@@ -1349,11 +1367,16 @@ class Backtest:
         last_prices: dict[str, float],
         equity: float,
         target_weights: dict[str, float] | None,
+        *,
+        account_id: str,
     ) -> list[AllocationSnapshot]:
-        """Record every configured symbol, including unfilled target names."""
+        """Record every symbol routed to one account, including unfilled targets."""
         realized_weights = self._realized_weights(positions, last_prices, equity)
         snapshots = []
-        for symbol in sorted(self._symbols):
+        account_symbols = (
+            symbol for symbol in self._symbols if self._account_id_by_symbol[symbol] == account_id
+        )
+        for symbol in sorted(account_symbols):
             target_weight = target_weights.get(symbol, 0.0) if target_weights is not None else None
             realized_weight = realized_weights.get(symbol, 0.0)
             snapshots.append(
@@ -1376,6 +1399,8 @@ class Backtest:
         last_prices: dict[str, float],
         equity: float,
         turnover: float,
+        *,
+        exposed: bool | None = None,
     ) -> PortfolioSnapshot:
         """Compute end-of-event exposure ratios from signed market values."""
         realized_weights = self._realized_weights(positions, last_prices, equity)
@@ -1385,6 +1410,7 @@ class Backtest:
             net_exposure=sum(realized_weights.values()),
             concentration=max((abs(weight) for weight in realized_weights.values()), default=0.0),
             turnover=turnover,
+            exposed=bool(positions) if exposed is None else exposed,
         )
 
     @staticmethod
