@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grafana-user", default="admin", help="Grafana admin username")
     p.add_argument(
         "--grafana-password",
-        default=os.environ.get("GRAFANA_PASSWORD", "admin"),
+        default=os.environ.get("GF_SECURITY_ADMIN_PASSWORD", "admin"),
         help="Grafana admin password",
     )
     return p.parse_args()

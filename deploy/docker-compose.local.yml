@@ -1,12 +1,11 @@
 # Local development: Grafana only, connecting to remote VPS DB.
 #
-# Prerequisites: cp ../.env.example ../.env and fill in VPS_DB_HOST, POSTGRES_APP_PASSWORD
-# (the Grafana datasource connects as the least-privilege quant_app role,
-# not the quant superuser)
+# Prerequisites: copy ../.env.example to ../.env and set VPS_DB_HOST,
+# POSTGRES_GRAFANA_PASSWORD, and GF_SECURITY_ADMIN_PASSWORD.
 #
 # Usage:
 #   cd deploy
-#   docker compose -f docker-compose.local.yml up -d
+#   docker compose --env-file ../.env -f docker-compose.local.yml up -d
 #
 # Then open http://localhost:3000 (admin / password from .env)
 # Dashboards auto-refresh every 30 seconds from provisioning directory.
@@ -15,16 +14,18 @@
 
 services:
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.1.1
     container_name: quant_grafana_local
-    env_file: ../.env
     ports:
-      - "3000:3000"
+      - "${GF_BIND:-127.0.0.1}:${GF_PORT:-3000}:3000"
     volumes:
       - grafana_local_data:/var/lib/grafana
       - ../app/grafana/provisioning:/etc/grafana/provisioning
     environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=false
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?GF_SECURITY_ADMIN_PASSWORD must be set}
+      POSTGRES_GRAFANA_PASSWORD: ${POSTGRES_GRAFANA_PASSWORD:?POSTGRES_GRAFANA_PASSWORD must be set}
+      VPS_DB_HOST: ${VPS_DB_HOST:?VPS_DB_HOST must be set}
 
 volumes:
   grafana_local_data:

@@ -1,7 +1,8 @@
 # 2026-07-28 — Make Grafana port binding configurable
 
 > Status: implemented
-> Note: `GF_BIND` is now live in `docker-compose.yml`, following the same `TSDB_BIND` pattern already established for the `timescaledb` service (see the earlier ADR under `docs/decisions/` introducing `TSDB_BIND`)
+> Note: `GF_BIND` applies to both reference Compose files and follows the
+> existing `TSDB_BIND` pattern.
 
 ## Background
 
@@ -11,10 +12,9 @@ Consequence: on one VM deployment, this unrestricted port 3000, combined with a 
 
 ## Decision
 
-Add `GF_BIND`, defaulting to `127.0.0.1`, following the same pattern as `TSDB_BIND`:
+Add `GF_BIND`, defaulting to `127.0.0.1`, to both Grafana Compose services:
 
 ```yaml
-# deploy/docker-compose.yml
 ports:
   - "${GF_BIND:-127.0.0.1}:${GF_PORT:-3000}:3000"
 ```

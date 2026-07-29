@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # Deploy TimescaleDB + Grafana to a remote host by syncing the small file
 # subset docker-compose.yml actually needs (deploy/ + grafana provisioning),
-# then running that SAME docker-compose.yml remotely — the one already used
-# for VPS-native deployment (`cd deploy && docker compose up -d`). One
-# source of truth for container specs, so there's nothing to drift: this
-# script never redefines what the containers look like, only how the files
-# get there.
+# then running that same file remotely. This script does not redefine the
+# containers; it only controls how the required files reach the host.
 #
 # Deliberately only syncs .env, never .env.secrets (trading-enabled API
 # keys) — that file must be created directly on the remote host (see
@@ -31,7 +28,7 @@ REMOTE_DIR="quant-deploy"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Load .env from project root (for POSTGRES_PASSWORD, GF_SECURITY_ADMIN_PASSWORD)
+# Load deployment settings from the project root.
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     set -a
     # shellcheck source=/dev/null
@@ -39,6 +36,8 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     set +a
 fi
 : "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+: "${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}"
+: "${POSTGRES_GRAFANA_PASSWORD:?Set POSTGRES_GRAFANA_PASSWORD in .env}"
 : "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env}"
 
 echo "[1/4] Syncing deployment files to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
