@@ -29,8 +29,9 @@ Install: ``pip install ib-async`` or ``pip install -e '.[us-live]'``
 from __future__ import annotations
 
 import logging
+from calendar import monthrange
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from math import isfinite
 
 import pandas as pd
@@ -66,6 +67,40 @@ _BAR_SIZE_MAP = {
     "1w": "1 week",
     "1M": "1 month",
 }
+
+
+def _utc_today() -> date:
+    """Return the UTC date used for futures-expiry decisions."""
+    return datetime.now(UTC).date()
+
+
+def _contract_expiry_date(contract: object) -> date:
+    """Parse IBKR's YYYYMM or YYYYMMDD contract expiry."""
+    raw_expiry = str(getattr(contract, "lastTradeDateOrContractMonth", "")).strip()
+    date_token = raw_expiry.split(maxsplit=1)[0]
+    if len(date_token) >= 8 and date_token[:8].isdigit():
+        year, month, day = (
+            int(date_token[:4]),
+            int(date_token[4:6]),
+            int(date_token[6:8]),
+        )
+    elif len(date_token) >= 6 and date_token[:6].isdigit():
+        year, month = int(date_token[:4]), int(date_token[4:6])
+        try:
+            day = monthrange(year, month)[1]
+        except (ValueError, IndexError) as exc:
+            raise ValueError(f"Invalid IBKR contract expiry: {raw_expiry!r}") from exc
+    else:
+        raise ValueError(f"Invalid IBKR contract expiry: {raw_expiry!r}")
+    try:
+        return date(year, month, day)
+    except ValueError as exc:
+        raise ValueError(f"Invalid IBKR contract expiry: {raw_expiry!r}") from exc
+
+
+def _future_contract_is_current(contract: object) -> bool:
+    """Return whether a cached futures contract has not expired."""
+    return _contract_expiry_date(contract) >= _utc_today()
 
 
 def _require_ib_async():
@@ -143,8 +178,8 @@ class IBKRAdapter:
 
         self._ib = ib_async.IB()
         self._read_only = not trading_enabled
-        self._contract_cache: dict[str, object] = {}
-        self._contract_details_cache: dict[tuple, object] = {}
+        self._contract_cache: dict[tuple[str, str, str | None, str], object] = {}
+        self._contract_details_cache: dict[tuple[str, str, str | None, str], object] = {}
         self._ib.connect(
             creds.host,
             int(creds.port),
@@ -539,7 +574,13 @@ class IBKRAdapter:
         """
         cache_key = (symbol, security_type, exchange, currency)
         if cache_key in self._contract_cache:
-            return self._contract_cache[cache_key]
+            cached = self._contract_cache[cache_key]
+            if security_type != "FUT" or _future_contract_is_current(cached):
+                return cached
+            del self._contract_cache[cache_key]
+            detail_cache = getattr(self, "_contract_details_cache", None)
+            if detail_cache is not None:
+                detail_cache.pop(cache_key, None)
 
         if security_type not in ("STK", "FUT"):
             raise ValueError(
@@ -561,12 +602,19 @@ class IBKRAdapter:
             resolved = qualified[0]
         else:
             contract = ib_async.Future(symbol, exchange=exchange, currency=currency)
-            details = self._ib.reqContractDetails(contract)
+            details = list(self._ib.reqContractDetails(contract))
             if not details:
                 raise ValueError(f"Unknown future: {symbol} on {exchange}")
+            today = _utc_today()
+            unexpired_details = []
+            for detail in details:
+                expiry = _contract_expiry_date(detail.contract)
+                if expiry >= today:
+                    unexpired_details.append((expiry, detail))
+            if not unexpired_details:
+                raise ValueError(f"No non-expired future for {symbol} on {exchange}")
             # Front month = nearest non-expired contract by expiry date.
-            details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
-            selected = details[0]
+            selected = min(unexpired_details, key=lambda item: item[0])[1]
             resolved = selected.contract
             detail_cache = getattr(self, "_contract_details_cache", None)
             if detail_cache is None:
@@ -589,7 +637,11 @@ class IBKRAdapter:
         if cache is None:
             cache = self._contract_details_cache = {}
         if cache_key in cache:
-            return cache[cache_key]
+            cached = cache[cache_key]
+            if security_type != "FUT" or _future_contract_is_current(cached.contract):
+                return cached
+            del cache[cache_key]
+            self._contract_cache.pop(cache_key, None)
 
         contract = self._resolve_contract(
             symbol,
@@ -597,6 +649,8 @@ class IBKRAdapter:
             exchange=exchange,
             currency=currency,
         )
+        if cache_key in cache:
+            return cache[cache_key]
         details = list(self._ib.reqContractDetails(contract))
         if not details:
             raise ValueError(f"IBKR contract details unavailable for {symbol}")

@@ -124,6 +124,7 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
         ({"broker": ""}, "broker"),
         ({"accounts": True}, "accounts"),
         ({"risk_free_rate": True}, "risk_free_rate"),
+        ({"risk_free_rate": -1.0}, "risk_free_rate"),
         ({"annualize": 1}, "annualize"),
     ],
 )

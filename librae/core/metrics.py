@@ -130,8 +130,9 @@ def compute_all(
         isinstance(risk_free_rate, bool)
         or not isinstance(risk_free_rate, Real)
         or not np.isfinite(risk_free_rate)
+        or risk_free_rate <= -1.0
     ):
-        raise ValueError("risk_free_rate must be a finite number")
+        raise ValueError("risk_free_rate must be finite and greater than -1")
     if (
         isinstance(periods_per_year, bool)
         or not isinstance(periods_per_year, int)
@@ -177,11 +178,7 @@ def compute_all(
                 rf=risk_free_rate,
             )
 
-        periodic_rf = (
-            float(np.power(1.0 + risk_free_rate, 1.0 / periods_per_year) - 1.0)
-            if risk_free_rate > 0.0
-            else 0.0
-        )
+        periodic_rf = float(np.power(1.0 + risk_free_rate, 1.0 / periods_per_year) - 1.0)
         if bool((returns < periodic_rf).any()):
             sortino = _safe_qs(
                 qs.stats.sortino,
