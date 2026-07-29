@@ -189,6 +189,43 @@ def update_heartbeat(run_id: str, dsn: str | None = None) -> None:
         cur.close()
 
 
+def _claim_config_hash(
+    cur: PgCursor,
+    config_hash: str | None,
+    run_id: str,
+    *,
+    replace_existing: bool,
+) -> bool:
+    """Serialize one config hash and decide whether this run may persist."""
+    if config_hash is None:
+        return True
+
+    # WHY: the CLI's pre-run dedup check cannot prevent two workers from
+    # observing a miss concurrently. A transaction-scoped lock closes that
+    # race without holding a session lock after commit or rollback.
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (config_hash,),
+    )
+    cur.execute(
+        "SELECT run_id FROM backtest_runs WHERE config_hash = %s",
+        (config_hash,),
+    )
+    existing = cur.fetchone()
+    if existing is None or existing[0] == run_id:
+        return True
+    if replace_existing:
+        cur.execute("DELETE FROM backtest_runs WHERE run_id = %s", (existing[0],))
+        return True
+
+    logger.info(
+        "Skipping duplicate config_hash persistence for run_id=%s; canonical run_id=%s",
+        run_id,
+        existing[0],
+    )
+    return False
+
+
 def save_backtest_output(
     output: BacktestOutput,
     *,
@@ -199,14 +236,10 @@ def save_backtest_output(
     risk_policy: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
+    replace_existing: bool = False,
     dsn: str | None = None,
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
-
-    # TODO: add ON CONFLICT (config_hash) DO NOTHING as defensive safety net
-    # for multi-worker race conditions. Currently relies on UNIQUE INDEX
-    # raising a postgres error, which works but is less clean.
-    # For --force path, use ON CONFLICT (config_hash) DO UPDATE.
 
     Args:
         output: BacktestOutput to write.
@@ -217,6 +250,8 @@ def save_backtest_output(
         risk_policy: Resolved engine-level portfolio limits to store.
         perf_params: Optional perf parameters dict to store as JSONB.
         config_hash: Optional deterministic hash for dedup.
+        replace_existing: Replace the canonical run for config_hash. Used by
+            the explicit force-recompute path.
         dsn: TimescaleDB DSN.
 
     Returns:
@@ -230,6 +265,15 @@ def save_backtest_output(
     # would leave DB in inconsistent state (e.g. trades without metadata).
     with get_conn(dsn) as conn:
         cur = conn.cursor()
+
+        if not _claim_config_hash(
+            cur,
+            config_hash,
+            meta.run_id,
+            replace_existing=replace_existing,
+        ):
+            cur.close()
+            return {"backtest_runs": 0}
 
         write_run_metadata(
             run_id=meta.run_id,
@@ -1140,6 +1184,14 @@ def save_signal_results(
             cur = conn.cursor()
 
             if run_id is not None:
+                if not _claim_config_hash(
+                    cur,
+                    config.config_hash if config else None,
+                    run_id,
+                    replace_existing=config.force if config else False,
+                ):
+                    cur.close()
+                    return {"backtest_runs": 0}
                 write_run_metadata(
                     run_id,
                     strategy,
@@ -1224,6 +1276,7 @@ def save_strategy_results(
         risk_policy=asdict(config.risk),
         perf_params=config.perf_params,
         config_hash=config.config_hash,
+        replace_existing=config.force,
     )
 
     ohlcv_count = 0
