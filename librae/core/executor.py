@@ -111,6 +111,9 @@ class OrderEvent:
     entry_at: datetime | None = None
     periods_held: int | None = None
     reason: str = ""
+    entry_commission: float | None = None
+    entry_slippage: float | None = None
+    entry_tax: float | None = None
 
 
 @dataclass
@@ -352,6 +355,9 @@ def build_close_event(
         commission=pnl.exit_commission,
         slippage=pnl.exit_slippage,
         tax=pnl.exit_tax,
+        entry_commission=pnl.commission - pnl.exit_commission,
+        entry_slippage=pnl.slippage - pnl.exit_slippage,
+        entry_tax=pnl.tax - pnl.exit_tax,
         pnl=pnl.net_pnl,
         net_return=pnl.net_return,
         entry_at=pos.entry_at,
@@ -493,6 +499,9 @@ def apply_execution_fill(
         commission=fill.commission,
         slippage=fill.slippage,
         tax=fill.tax,
+        entry_commission=entry_commission,
+        entry_slippage=entry_slippage,
+        entry_tax=entry_tax,
         pnl=net_pnl,
         net_return=net_return,
         entry_at=position.entry_at,

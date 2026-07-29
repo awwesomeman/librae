@@ -16,6 +16,7 @@ from db.timescale_writer import (
     write_run_metadata,
     write_signal_event,
     write_strategy_performance,
+    write_trade_event,
 )
 from librae.backtest.schema import StrategyMetrics
 from librae.core.run_config import RunConfig
@@ -117,9 +118,46 @@ class TestWriteEquityCurvePoint:
             "net_exposure",
             "concentration",
             "turnover",
+            "exposed",
             "strategy",
         ):
             assert f"{col}=EXCLUDED.{col}" in sql
+
+
+@patch("db.timescale_writer.get_conn")
+def test_write_trade_event_sql_matches_persisted_cost_fields(mock_conn_ctx) -> None:
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor.return_value = mock_cur
+    mock_conn_ctx.return_value = mock_conn
+
+    write_trade_event(
+        event_id="event-1",
+        run_id="run-1",
+        account_id="alpha",
+        currency="USD",
+        strategy="test",
+        mode="backtest",
+        timeframe="H1",
+        ts=datetime(2024, 6, 1, tzinfo=UTC),
+        symbol="TEST",
+        side="long",
+        event_type="close",
+        fill_quantity=1.0,
+        price=110.0,
+        entry_price=100.0,
+        remaining_quantity=0.0,
+        notional=110.0,
+        commission=0.2,
+        entry_commission=0.1,
+    )
+
+    sql, values = mock_cur.execute.call_args.args
+    assert sql.count("%s") == len(values) == 27
+    assert "entry_commission, entry_slippage, entry_tax" in sql
+    assert values[19:22] == (0.1, None, None)
 
 
 def test_write_ohlcv_requires_real_volume() -> None:

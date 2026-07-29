@@ -79,6 +79,7 @@ class EquityCurvePoint:
     concentration: float = 0.0
     turnover: float = 0.0
     strategy: str | None = None
+    exposed: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,9 @@ class OrderEventRecord:
     entry_at: datetime | None = None
     periods_held: int | None = None
     reason: str = ""
+    entry_commission: float | None = None
+    entry_slippage: float | None = None
+    entry_tax: float | None = None
 
 
 @dataclass(frozen=True)

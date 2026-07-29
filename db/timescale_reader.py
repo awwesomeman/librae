@@ -87,7 +87,7 @@ def load_equity_curve(
         SELECT ts AS _time, account_id, currency,
                equity, benchmark_equity, drawdown,
                period_return, benchmark_period_return, gross_exposure,
-               net_exposure, concentration, turnover
+               net_exposure, concentration, turnover, exposed
         FROM equity_curve
         WHERE run_id = %s
     """
@@ -120,6 +120,7 @@ def load_trade_events(
                symbol, side, event_type,
                fill_quantity, price, entry_price, remaining_quantity, notional,
                commission, slippage, tax,
+               entry_commission, entry_slippage, entry_tax,
                pnl, net_return, entry_at, periods_held, reason
         FROM trade_events
         WHERE run_id = %s

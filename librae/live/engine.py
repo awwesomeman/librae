@@ -713,6 +713,7 @@ class LiveTrader:
                 net_exposure=net,
                 concentration=concentration,
                 turnover=turnover,
+                exposed=gross > EPSILON,
                 strategy=strategy,
             )
 

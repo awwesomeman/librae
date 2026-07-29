@@ -156,6 +156,38 @@ def test_portfolio_targets_reject_cross_account_capital_base() -> None:
         backtest.run()
 
 
+def test_target_weight_snapshots_remain_scoped_to_each_account() -> None:
+    class SequentialAccountTargets(Strategy):
+        def on_bar(self, ctx: Context):
+            if ctx.period_index == 0:
+                return PortfolioTargets(weights={"AAA": 0.5})
+            if ctx.period_index == 1:
+                return PortfolioTargets(weights={"BBB": 0.25})
+            return []
+
+    backtest = Backtest(
+        _frame(),
+        SequentialAccountTargets(),
+        config=_config(),
+        cost_model=CostModel.zero(),
+        record_position_snapshots=True,
+    )
+
+    backtest.run()
+    output = backtest.build_output()
+
+    third_ts = _frame().index.get_level_values("datetime").unique()[2]
+    allocations = {
+        (snapshot.account_id, snapshot.symbol): snapshot
+        for snapshot in output.allocation_snapshots
+        if snapshot.ts == third_ts
+    }
+    assert allocations[("alpha", "AAA")].target_weight == pytest.approx(0.5)
+    assert allocations[("beta", "BBB")].target_weight == pytest.approx(0.25)
+    assert ("alpha", "BBB") not in allocations
+    assert ("beta", "AAA") not in allocations
+
+
 def test_drawdown_halt_is_scoped_to_breached_account() -> None:
     timestamps = pd.date_range("2026-01-01", periods=5, freq="h", tz=UTC)
     rows = []
