@@ -1063,12 +1063,8 @@ class TestLiveTrader:
 
         assert config.execution.adv_lookback_sessions == 20
 
-    def test_reconciles_open_broker_position_at_startup(self):
-        """Regression test: a process restart previously always assumed
-        flat/full-balance, even if the broker actually had a real open
-        position — a strategy could then double-open on the broker, or a
-        legitimate opposite-side signal could be rejected against a
-        position the broker doesn't actually have."""
+    def test_first_run_nonflat_broker_state_halts_without_adoption(self):
+        """A position without a durable cash ledger cannot seed live equity."""
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.get_position.return_value = {
             "symbol": "BTCUSDT",
@@ -1082,15 +1078,15 @@ class TestLiveTrader:
             config=_test_cfg(mode="live"),
             order_adapter=mock_order_adapter,
         )
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
         runner.run(max_iterations=1)
 
-        pos = runner._positions["BTCUSDT"]
-        assert pos.side == "long"
-        assert pos.quantity == 2.0
-        assert pos.entry_price == 95.0
+        assert runner._halted is True
+        assert runner._positions == {}
+        assert any("Non-flat First-run Broker State" in item[1]["title"] for item in alerts)
 
-    def test_reconciles_short_broker_position(self):
-        """Negative size from the broker must reconcile as a short."""
+    def test_first_run_short_broker_state_halts_without_adoption(self):
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.get_position.return_value = {
             "symbol": "BTCUSDT",
@@ -1106,9 +1102,8 @@ class TestLiveTrader:
         )
         runner.run(max_iterations=1)
 
-        pos = runner._positions["BTCUSDT"]
-        assert pos.side == "short"
-        assert pos.quantity == 3.0
+        assert runner._halted is True
+        assert runner._positions == {}
 
     def test_first_run_cannot_adopt_spot_inventory_without_cost_basis(self):
         mock_order_adapter = _mock_order_adapter()
@@ -1484,7 +1479,7 @@ class TestLiveTrader:
             runner._db_write(failing_fn)
         assert len(alerts) == 2
 
-    def test_max_drawdown_breach_flattens_and_halts(self):
+    def test_max_drawdown_breach_flattens_and_halts_account(self):
         """A drawdown breach must flatten the open position, alert, and
         permanently stop new entries — the strategy is never called again
         even though it would otherwise keep re-buying."""
@@ -1517,10 +1512,11 @@ class TestLiveTrader:
 
         # bar1: buy queued. bar2: buy fills (~all cash). bar3: price craters
         # -> breach detected before the strategy sees the bar -> flattened +
-        # halted. bar4: confirms the halt sticks (no re-buy, no 2nd alert).
+        # account-halted. bar4 confirms there is no re-buy or duplicate alert.
         runner.run(max_iterations=4)
 
-        assert runner._halted is True
+        assert runner._halted is False
+        assert runner._halted_accounts == {"default"}
         assert runner._positions == {}
         breach_alerts = [
             kw for m, kw in alerts if m == "send_alert" and "Max Drawdown Breach" in kw["title"]
@@ -1579,6 +1575,154 @@ class TestLiveTrader:
         assert len(callbacks) == 1
         assert callbacks[0] == pytest.approx((50_000.0, -0.5, 0.0))
         assert runner._prev_equity_by_account["default"] == pytest.approx(50_000.0)
+
+    def test_live_drawdown_halts_only_breached_account(self):
+        alpha_adapter = _mock_order_adapter()
+        beta_adapter = _mock_order_adapter()
+        alpha_adapter.place_order.return_value = _broker_report(
+            order_id="alpha-risk-exit",
+            quantity=10.0,
+            average=50.0,
+        )
+        beta_adapter.place_order.return_value = _broker_report(
+            order_id="beta-close",
+            quantity=10.0,
+            average=100.0,
+        )
+        config = _test_cfg(
+            mode="live",
+            symbols=["AAA", "BBB"],
+            accounts={
+                "alpha": AccountConfig(currency="USD", initial_cash=1_000.0),
+                "beta": AccountConfig(currency="EUR", initial_cash=1_000.0),
+            },
+            instrument_overrides={
+                "AAA": {
+                    "account_id": "alpha",
+                    "currency": "USD",
+                    "instrument_type": "spot",
+                },
+                "BBB": {
+                    "account_id": "beta",
+                    "currency": "EUR",
+                    "instrument_type": "spot",
+                },
+            },
+            risk=RiskPolicy(max_drawdown_rate=0.2),
+        )
+        runner = self._make_runner(
+            config=config,
+            order_adapter={"AAA": alpha_adapter, "BBB": beta_adapter},
+        )
+        runner._cash_by_account = {"alpha": 0.0, "beta": 0.0}
+        runner._positions = {
+            symbol: PositionState(
+                symbol=symbol,
+                side="long",
+                entry_price=100.0,
+                quantity=10.0,
+                entry_at=datetime(2025, 1, 1, tzinfo=UTC),
+                periods_held=1,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=1_000.0,
+            )
+            for symbol in ("AAA", "BBB")
+        }
+        runner._last_prices = {"AAA": 50.0, "BBB": 100.0}
+        runner._equity_peak_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
+        runner._prev_equity_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
+        bars = {
+            "AAA": {"close": 50.0, "volume": 1_000.0},
+            "BBB": {"close": 100.0, "volume": 1_000.0},
+        }
+
+        runner._record_equity(datetime(2025, 1, 2, tzinfo=UTC), bars)
+
+        assert runner._halted is False
+        assert runner._halted_accounts == {"alpha"}
+        assert set(runner._positions) == {"BBB"}
+        alpha_adapter.place_order.assert_called_once()
+        beta_adapter.place_order.assert_not_called()
+
+        completed = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+                OrderIntent(action="close", symbol="BBB"),
+            ],
+            bars,
+            datetime(2025, 1, 2, 1, tzinfo=UTC),
+        )
+
+        assert completed is True
+        assert runner._positions == {}
+        alpha_adapter.place_order.assert_called_once()
+        beta_adapter.place_order.assert_called_once()
+
+    def test_simultaneous_account_breaches_share_one_recovery_queue(self):
+        alpha_adapter = _mock_order_adapter()
+        beta_adapter = _mock_order_adapter()
+        alpha_adapter.place_order.return_value = _broker_report(
+            order_id="alpha-risk-exit",
+            status="accepted",
+            quantity=10.0,
+            filled=0.0,
+        )
+        config = _test_cfg(
+            mode="live",
+            symbols=["AAA", "BBB"],
+            accounts={
+                "alpha": AccountConfig(currency="USD", initial_cash=1_000.0),
+                "beta": AccountConfig(currency="EUR", initial_cash=1_000.0),
+            },
+            instrument_overrides={
+                "AAA": {
+                    "account_id": "alpha",
+                    "currency": "USD",
+                    "instrument_type": "spot",
+                },
+                "BBB": {
+                    "account_id": "beta",
+                    "currency": "EUR",
+                    "instrument_type": "spot",
+                },
+            },
+            risk=RiskPolicy(max_drawdown_rate=0.2),
+        )
+        runner = self._make_runner(
+            config=config,
+            order_adapter={"AAA": alpha_adapter, "BBB": beta_adapter},
+        )
+        runner._cash_by_account = {"alpha": 0.0, "beta": 0.0}
+        runner._positions = {
+            symbol: PositionState(
+                symbol=symbol,
+                side="long",
+                entry_price=100.0,
+                quantity=10.0,
+                entry_at=datetime(2025, 1, 1, tzinfo=UTC),
+                periods_held=1,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=1_000.0,
+            )
+            for symbol in ("AAA", "BBB")
+        }
+        runner._last_prices = {"AAA": 50.0, "BBB": 50.0}
+        runner._equity_peak_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
+        runner._prev_equity_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
+        bars = {symbol: {"close": 50.0, "volume": 1_000.0} for symbol in ("AAA", "BBB")}
+
+        runner._record_equity(datetime(2025, 1, 2, tzinfo=UTC), bars)
+
+        assert runner._halted is False
+        assert runner._halted_accounts == {"alpha", "beta"}
+        assert len(runner._active_orders) == 2
+        assert [order.request.symbol for order in runner._active_orders] == ["AAA", "BBB"]
+        alpha_adapter.place_order.assert_called_once()
+        beta_adapter.place_order.assert_not_called()
 
 
 def _make_fill_event() -> OrderEvent:
@@ -2231,13 +2375,15 @@ class TestLiveExecutionLifecycle:
         )
         first._last_prices["BTCUSDT"] = 80.0
 
-        first._flatten_and_halt(
+        first._flatten_account_and_halt(
             datetime(2025, 1, 2, tzinfo=UTC),
+            "default",
             -0.2,
             {"BTCUSDT": {"close": 80.0}},
         )
 
-        assert first._halted is True
+        assert first._halted is False
+        assert first._halted_accounts == {"default"}
         assert len(first._active_orders) == 1
         adapter.cancel_order.assert_not_called()
 
@@ -2250,7 +2396,8 @@ class TestLiveExecutionLifecycle:
         second = self._make_trader(_HoldStrategy(), adapter, state_store=store)
         second.run(max_iterations=1)
 
-        assert second._halted is True
+        assert second._halted is False
+        assert second._halted_accounts == {"default"}
         assert second._positions == {}
         assert second._active_orders == []
         assert adapter.place_order.call_count == 1
@@ -2384,6 +2531,27 @@ class TestLiveExecutionLifecycle:
         restored = store.load(second._state_key)
         assert restored is not None
         assert restored.halted is False
+
+    def test_account_halt_reset_starts_new_risk_epoch(self):
+        store = MemoryLiveStateStore()
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+        )
+        runner._halted_accounts.add("default")
+        runner._equity_peak_by_account["default"] = 120_000.0
+        runner._prev_equity_by_account["default"] = 80_000.0
+        runner._cash_by_account["default"] = 90_000.0
+
+        runner.reset_halt("default")
+
+        assert runner._halted_accounts == set()
+        assert runner._equity_peak_by_account["default"] == pytest.approx(90_000.0)
+        assert runner._prev_equity_by_account["default"] == pytest.approx(90_000.0)
+        restored = store.load(runner._state_key)
+        assert restored is not None
+        assert restored.halted_accounts == set()
 
     def test_orphan_order_halts_before_strategy_decision(self):
         adapter = _mock_order_adapter()

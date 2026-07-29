@@ -45,7 +45,7 @@ def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 9
+_STATE_SCHEMA_VERSION = 10
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -295,6 +295,7 @@ class LiveRuntimeState:
     period_index: int = 0
     status_period_count: int = 0
     halted: bool = False
+    halted_accounts: set[str] = field(default_factory=set)
     adv_session_labels: dict[str, str] = field(default_factory=dict)
     adv_filled_quantities: dict[str, float] = field(default_factory=dict)
 
@@ -306,6 +307,8 @@ class LiveRuntimeState:
             self.prev_equity_by_account
         ):
             raise ValueError("live runtime account cash/equity keys must match")
+        if not self.halted_accounts <= account_ids:
+            raise ValueError("halted accounts must belong to the runtime state")
         values = (
             *self.cash_by_account.values(),
             *self.equity_peak_by_account.values(),
@@ -344,13 +347,15 @@ class LiveRuntimeState:
             "period_index": self.period_index,
             "status_period_count": self.status_period_count,
             "halted": self.halted,
+            "halted_accounts": sorted(self.halted_accounts),
             "adv_session_labels": self.adv_session_labels,
             "adv_filled_quantities": self.adv_filled_quantities,
         }
 
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
-        if raw.get("schema_version") != _STATE_SCHEMA_VERSION:
+        schema_version = raw.get("schema_version")
+        if schema_version not in (9, _STATE_SCHEMA_VERSION):
             raise ValueError("unsupported live runtime-state schema")
         positions = {}
         for symbol, item in raw["positions"].items():
@@ -394,6 +399,7 @@ class LiveRuntimeState:
             period_index=int(raw["period_index"]),
             status_period_count=int(raw["status_period_count"]),
             halted=bool(raw["halted"]),
+            halted_accounts={str(account_id) for account_id in raw.get("halted_accounts", [])},
             adv_session_labels={
                 str(symbol): str(label) for symbol, label in raw["adv_session_labels"].items()
             },

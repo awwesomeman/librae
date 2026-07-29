@@ -74,6 +74,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         period_index=8,
         status_period_count=2,
         halted=True,
+        halted_accounts={"default"},
         adv_session_labels={"BTC/USDT": "2025-01-02"},
         adv_filled_quantities={"BTC/USDT": 0.5},
     )
@@ -199,6 +200,24 @@ def test_runtime_state_rejects_v3_schema():
 
     with pytest.raises(ValueError, match="unsupported live runtime-state schema"):
         LiveRuntimeState.from_dict(raw)
+
+
+def test_runtime_state_migrates_v9_without_account_halts():
+    raw = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        cash_by_account={"default": 1_000.0},
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
+    ).to_dict()
+    raw["schema_version"] = 9
+    del raw["halted_accounts"]
+
+    restored = LiveRuntimeState.from_dict(raw)
+
+    assert restored.halted_accounts == set()
 
 
 def test_runtime_state_rejects_missing_v6_fact_instead_of_defaulting():
