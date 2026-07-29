@@ -544,7 +544,7 @@ exceeded `poll_seconds`.
   this ratio. Market orders are unaffected because their execution price is
   not known before submission.
 - `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
-- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
+- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position in the breached account and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes for that account and books only confirmed broker fills. The account halt persists across restart while unaffected accounts continue to be managed. Live emergency exits remain active while the account is halted and must reach a broker terminal state before `reset_halt(account_id)` is allowed. After operator review, `reset_halt(account_id)` starts a new risk epoch for that account; calling `reset_halt()` without an account also clears a system-wide halt and resets every account peak.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
   `reset_halt()` is required after review before new entries resume.
@@ -590,13 +590,13 @@ When no order or grouped execution is active, the checks repeat every
   configured symbols; it is not described as a complete account snapshot. A
   restored checkpoint keeps its entry time and accumulated costs, while broker
   side/quantity is a reconciliation assertion. A mismatch or unreadable
-  configured-symbol snapshot halts. Only a first run with no checkpoint adopts
-  broker exposure as a safety baseline. Crypto spot uses base-asset balance
-  inventory, not the derivatives-only positions endpoint. Since a spot balance
-  has no broker average cost, it can validate quantity against a restored
-  checkpoint but cannot seed a first-run cost basis; that case halts for
-  operator action. Ordinary spot also rejects opening/adding a short, while a
-  sell that reduces or closes owned inventory remains valid.
+  configured-symbol snapshot halts. A first run with no checkpoint must be
+  flat: broker exposure alone cannot reconstruct the engine's cash, accumulated
+  entry costs, or risk epoch, so a non-flat first run halts and requires the
+  matching checkpoint or an operator flatten. Crypto spot uses base-asset
+  balance inventory, not the derivatives-only positions endpoint. Ordinary
+  spot also rejects opening/adding a short, while a sell that reduces or closes
+  owned inventory remains valid.
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
@@ -607,9 +607,10 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance/multi-leg lifecycle,
-and active order queue. Runtime-state schema v8 is intentionally breaking:
-older checkpoints are rejected and require
-an explicit migration or removal. `broker_orders` keeps completed
+and active order queue. Runtime-state schema v10 adds durable account-scoped
+drawdown halts and migrates v9 checkpoints with no halted accounts; older
+checkpoints are rejected and require an explicit migration or removal.
+`broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
