@@ -225,6 +225,30 @@ ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_commission DOUBLE PRECIS
 ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_slippage DOUBLE PRECISION;
 ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_tax DOUBLE PRECISION;
 
+-- Timestamped perpetual-funding payments applied by research runtimes.
+CREATE TABLE IF NOT EXISTS funding_cash_flows (
+    ts              TIMESTAMPTZ NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL,
+    currency        TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    quantity        DOUBLE PRECISION NOT NULL,
+    mark_price      DOUBLE PRECISION NOT NULL,
+    multiplier      DOUBLE PRECISION NOT NULL,
+    rate            DOUBLE PRECISION NOT NULL,
+    cash_flow       DOUBLE PRECISION NOT NULL,
+    CONSTRAINT chk_funding_side CHECK (side IN ('long', 'short')),
+    CONSTRAINT chk_funding_quantity CHECK (quantity > 0),
+    CONSTRAINT chk_funding_mark_price CHECK (mark_price > 0),
+    CONSTRAINT chk_funding_multiplier CHECK (multiplier > 0)
+);
+SELECT create_hypertable('funding_cash_flows', 'ts', if_not_exists => TRUE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_funding_cash_flows_unique
+    ON funding_cash_flows(run_id, account_id, symbol, ts);
+CREATE INDEX IF NOT EXISTS idx_funding_cash_flows_run_id
+    ON funding_cash_flows(run_id, account_id, ts DESC);
+
 -- ============================================================
 -- strategy_performance — 帳戶 KPI (1 row / account / run, FK CASCADE)
 -- ============================================================

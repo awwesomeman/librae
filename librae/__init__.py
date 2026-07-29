@@ -16,6 +16,7 @@ from .backtest.schema import (
     AllocationSnapshotPoint,
     BacktestOutput,
     EquityCurvePoint,
+    FundingCashFlowRecord,
     PositionSnapshotPoint,
     RunMetadata,
     StrategyMetrics,
@@ -58,6 +59,7 @@ from .core.executor import (
     side_multiplier,
     simulate_fill,
 )
+from .core.funding import FundingCashFlow
 from .core.metrics import (
     compute_all,
     compute_signal_outcomes,
@@ -87,6 +89,7 @@ __all__ = [
     "AccountBacktestResult",
     "AllocationSnapshotPoint",
     "EquityCurvePoint",
+    "FundingCashFlowRecord",
     "PositionSnapshotPoint",
     "RunMetadata",
     "StrategyMetrics",
@@ -111,6 +114,7 @@ __all__ = [
     "PositionEventType",
     "PositionSide",
     "TradePnL",
+    "FundingCashFlow",
     "calc_trade_pnl",
     "side_multiplier",
     "simulate_fill",

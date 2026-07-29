@@ -571,11 +571,44 @@ ratio is annualized mean active return divided by that standard deviation.
 return attribution by factor, sector, or decision remains strategy/research
 code because the engine has no classification model.
 
+#### Perpetual funding cash flows
+
+Backtest and shadow-simulation bars may contain a `funding_rate` observation,
+expressed as a decimal rate for that payment. `funding_mark_price` is optional;
+the same event's raw `close` is used when it is absent. Missing rates mean no
+payment: the engine never forward-fills or fetches them.
+When rates come from `external_factors`, the data pipeline exact-joins its
+`value` as `funding_rate` on symbol and payment timestamp; an as-of join or
+forward fill would turn one payment into repeated charges.
+
+Funding is applied after the event's confirmed simulated fills and stops, and
+before its equity snapshot and strategy decision. Positive rates mean longs
+pay shorts:
+
+`cash_flow = -side_sign * quantity * mark_price * multiplier * funding_rate`
+
+where `side_sign` is `+1` for long and `-1` for short. Only the confirmed open
+quantity at that timestamp participates. Payments update account cash, equity,
+returns, and drawdown without changing execution prices or trade PnL.
+`FundingCashFlowRecord` and `funding_cash_flows` retain the rate, mark,
+quantity, multiplier, side, and realized cash flow for audit.
+
+Paper and live broker modes do not apply these research observations. Broker
+balances and exchange funding records remain authoritative. This contract
+does not add rate fetching, FX conversion, settlement, transfer, or
+cross-account netting.
+
 #### Margin / liquidation simulation
 
 `CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `config.params`" convention as `volume_impact_ticks`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). In backtest/sim, `resolve_stop_exit` checks every bar whether a position has hit the modeled liquidation price; if so it force-closes with `REASON_LIQUIDATION`, using conservative gap-through logic. The liquidation check takes priority over stop-loss/take-profit. Live does not replay this completed-bar touch as a market order: venue margin/liquidation and broker-native protective orders are authoritative.
 
-The formula is a simplified isolated-margin approximation (ignoring fees/funding rates, matching the existing simplification level of this engine's margin model): long `entry*(1 + maintenance_margin_rate - margin_rate)`, short `entry*(1 - maintenance_margin_rate + margin_rate)`. Spot (`margin_rate=1.0`) never triggers unless `maintenance_margin_rate` is set.
+The formula is a simplified isolated-margin approximation: long
+`entry*(1 + maintenance_margin_rate - margin_rate)`, short
+`entry*(1 - maintenance_margin_rate + margin_rate)`. It does not solve a
+venue-specific liquidation threshold from fees or accumulated funding;
+funding instead affects cash, equity, and drawdown through the event contract
+above. Spot (`margin_rate=1.0`) never triggers unless
+`maintenance_margin_rate` is set.
 
 `margin_rate`/`maintenance_margin_rate` are always a fraction of notional, never an absolute currency figure — there's no config field for e.g. "NT$636,000 initial margin" directly; a caller converts from the exchange's published absolute figure to a ratio before setting it (see `market_config.py`'s `tw_futures` entry for a worked example). Treated as static for the whole run — see `docs/plans/enhance_librae_real_trade.md`'s item B for why, and its known blind spots.
 
@@ -610,8 +643,9 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance/multi-leg lifecycle,
-and active order queue. Runtime-state schema v10 adds durable account-scoped
-drawdown halts and migrates v9 checkpoints with no halted accounts; older
+funding watermarks, and active order queue. Runtime-state schema v11 adds
+funding watermarks so a retried simulation event cannot apply one payment
+twice. It accepts v9/v10 checkpoints with empty funding watermarks; older
 checkpoints are rejected and require an explicit migration or removal.
 `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
@@ -664,6 +698,7 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Decision timing | completed T | completed T | completed T | completed T |
 | Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit after T decision | submit after T decision |
 | Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | paper `ExecutionReport` only | broker `ExecutionReport` only |
+| Funding truth | supplied timestamped bar observations | supplied timestamped bar observations | broker/exchange balance and records | broker/exchange balance and records |
 | Non-final order | one-bar intent expires | one-bar intent expires | durable cumulative order lifecycle | durable cumulative lifecycle; optional local timeout/cancel |
 | Restart | new run | restore when state is enabled | restore and reconcile | restore and reconcile |
 
@@ -682,7 +717,7 @@ live capital.
 | Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
 | Cross-account arbitrage | Separate account curves/PnL; synchronous leg approximation | Separate account curves/PnL | Best-effort serial multi-leg lifecycle; no cross-account funding or atomicity |
 | Dynamic stock universe | Point-in-time selection within a predeclared candidate superset | Same predeclared universe | No runtime symbol add/remove, subscription changes, or automatic warm-up |
-| Short borrow/funding | User-supplied costs only; no locate ledger | Not modeled | Broker/account responsibility; no engine borrow ledger |
+| Short borrow/funding | Timestamped perpetual funding; borrow costs remain upstream | Same funding contract | Broker/account responsibility; no engine borrow/locate ledger |
 
 Daily strategy frequency reduces throughput requirements but not timestamp,
 data, order, and restart synchronization requirements. The observed-data event
@@ -898,6 +933,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 |---|---|
 | `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return)` — once per account for each processed market-data event |
 | `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
+| `on_funding_cash_flow` | `on_funding_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
@@ -959,6 +995,7 @@ flowchart TD
         save_strategy["save_strategy_results()"] --> b_backtest_runs[("backtest_runs")]
         save_strategy --> b_equity_curve[("equity_curve")]
         save_strategy --> b_trade_events[("trade_events")]
+        save_strategy --> b_funding[("funding_cash_flows")]
         save_strategy --> b_strategy_perf[("strategy_performance")]
         save_strategy --> b_signal_events
         save_strategy --> b_ohlcv
@@ -966,6 +1003,7 @@ flowchart TD
 
     subgraph live["sim/live real-time writes"]
         callbacks["LiveTrader callbacks"] -- on_order_event --> l_trade_events[("trade_events")]
+        callbacks -- on_funding_cash_flow --> l_funding[("funding_cash_flows")]
         callbacks -- on_signal_outcome --> l_signal_events[("signal_events")]
         callbacks -- on_bar --> l_equity_curve[("equity_curve")]
         callbacks -- on_ohlcv --> l_ohlcv[("ohlcv")]
@@ -986,7 +1024,7 @@ flowchart TD
 
 ### Timestamp naming rules
 
-**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`trade_events`/`signal_events`, representing "when this row happened").
+**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`trade_events`/`funding_cash_flows`/`signal_events`, representing "when this row happened").
 **Every other point-in-time metadata field uses the `_at` suffix**, consistently — even when it's a query range filter parameter (e.g. `load_ohlcv(started_at=..., ended_at=...)`), to avoid the same root word being called `ts` in one function signature and something else in another.
 
 | Field | Meaning | Where it appears |
@@ -1000,13 +1038,14 @@ flowchart TD
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
-### Current 12 tables
+### Current 13 tables
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
 | `backtest_runs` | run hub and resolved strategy/execution/performance configuration, 1 row / run | PK `run_id` | no |
 | `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
+| `funding_cash_flows` | applied perpetual-funding rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled performance, PnL, cost, benchmark, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |

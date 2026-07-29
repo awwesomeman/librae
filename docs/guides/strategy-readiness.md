@@ -69,6 +69,8 @@ account and therefore follows the broker-confirmed execution path.
 - [ ] Commission, tax, spread/slippage, contract multiplier, short/funding
       costs, bar-volume caps, and lagged ADV capacity are configured for every
       instrument and stressed above their base estimates.
+- [ ] Perpetual funding observations use payment timestamps and decimal rates;
+      missing payments remain missing rather than being forward-filled.
 - [ ] Limit, stop, liquidation, partial-fill, terminal-exit, and insufficient
       liquidity behavior have deterministic tests where the strategy uses
       them.
@@ -108,7 +110,7 @@ strategy execution.
 
 ## Capability tracking and intentional non-goals
 
-| Capability requiring external validation or more engine work | Tracking |
+| Capability | Tracking |
 |---|---|
 | Binance sandbox order lifecycle | [Issue #31](https://github.com/awwesomeman/librae/issues/31) |
 | Shioaji simulation order lifecycle | [Issue #32](https://github.com/awwesomeman/librae/issues/32) |

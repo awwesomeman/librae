@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         AllocationSnapshotPoint,
         BacktestOutput,
         EquityCurvePoint,
+        FundingCashFlowRecord,
         OrderEventRecord,
         PositionSnapshotPoint,
         StrategyMetrics,
@@ -59,6 +60,7 @@ from librae.core.executor import (
     queue_market_exit_all,
     validate_strategy_decision,
 )
+from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
@@ -189,6 +191,7 @@ class BacktestResult:
     order_events: Sequence[OrderEvent]
     position_snapshots: Sequence[PositionSnapshot]
     allocation_snapshots: Sequence[AllocationSnapshot]
+    funding_cash_flows: Sequence[FundingCashFlow]
     accounts: Sequence[AccountBacktestResult]
 
     def _single_account(self) -> AccountBacktestResult:
@@ -589,6 +592,7 @@ class Backtest:
         pending_decision: StrategyDecision = []
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
+        funding_cash_flows: list[FundingCashFlow] = []
         portfolio_snapshots_by_account: dict[str, list[PortfolioSnapshot]] = {
             account_id: [] for account_id in cash_by_account
         }
@@ -667,6 +671,16 @@ class Backtest:
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
+            _, event_funding_cash_flows = calculate_funding_cash_flows(
+                ts,
+                bars,
+                positions,
+                get_cost_model=self._get_cost_model,
+            )
+            for cash_flow in event_funding_cash_flows:
+                account_id = self._account_id_by_symbol[cash_flow.symbol]
+                cash_by_account[account_id] += cash_flow.cash_flow
+            funding_cash_flows.extend(event_funding_cash_flows)
             # ── Step 2: equity and drawdown check ──
             position_view: dict[str, Position] = {}
             account_snapshots: dict[str, AccountSnapshot] = {}
@@ -890,6 +904,7 @@ class Backtest:
             order_events=all_events,
             position_snapshots=position_snapshots,
             allocation_snapshots=allocation_snapshots,
+            funding_cash_flows=funding_cash_flows,
             accounts=tuple(
                 AccountBacktestResult(
                     account_id=account_id,
@@ -1041,6 +1056,7 @@ class Backtest:
         event_records = self._build_event_records(result, run_id)
         position_snapshot_points = self._build_position_snapshot_records(result)
         allocation_snapshot_points = self._build_allocation_snapshot_records(result)
+        funding_cash_flow_records = self._build_funding_cash_flow_records(result)
 
         return BacktestOutput(
             run_metadata=run_metadata,
@@ -1048,6 +1064,7 @@ class Backtest:
             order_events=tuple(event_records),
             position_snapshots=tuple(position_snapshot_points),
             allocation_snapshots=tuple(allocation_snapshot_points),
+            funding_cash_flows=tuple(funding_cash_flow_records),
         )
 
     @property
@@ -1140,6 +1157,29 @@ class Backtest:
                 weight_drift=snapshot.weight_drift,
             )
             for snapshot in result.allocation_snapshots
+        ]
+
+    def _build_funding_cash_flow_records(
+        self,
+        result: BacktestResult,
+    ) -> list[FundingCashFlowRecord]:
+        """Map funding cash flows to the canonical output schema."""
+        from librae.backtest.schema import FundingCashFlowRecord
+
+        return [
+            FundingCashFlowRecord(
+                ts=cash_flow.ts,
+                account_id=self._account_id_by_symbol[cash_flow.symbol],
+                currency=self._account_currency[self._account_id_by_symbol[cash_flow.symbol]],
+                symbol=cash_flow.symbol,
+                side=cash_flow.side,
+                quantity=cash_flow.quantity,
+                mark_price=cash_flow.mark_price,
+                multiplier=cash_flow.multiplier,
+                rate=cash_flow.rate,
+                cash_flow=cash_flow.cash_flow,
+            )
+            for cash_flow in result.funding_cash_flows
         ]
 
     @staticmethod

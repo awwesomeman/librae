@@ -35,17 +35,17 @@ def _to_utc(value: str | datetime | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _bar_timestamps_from_dict(raw: dict) -> dict[str, datetime]:
+def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
     timestamps: dict[str, datetime] = {}
     for symbol, value in raw.items():
         timestamp = _to_utc(value)
         if timestamp is None:
-            raise ValueError(f"last_bar_ts[{symbol!r}] must contain a timestamp")
+            raise ValueError(f"{field}[{symbol!r}] must contain a timestamp")
         timestamps[str(symbol)] = timestamp
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 10
+_STATE_SCHEMA_VERSION = 11
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -284,6 +284,7 @@ class LiveRuntimeState:
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
+    last_funding_ts: dict[str, datetime] = field(default_factory=dict)
     pending_decision: StrategyDecision = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
@@ -336,6 +337,9 @@ class LiveRuntimeState:
             "last_bar_ts": {
                 symbol: timestamp.isoformat() for symbol, timestamp in self.last_bar_ts.items()
             },
+            "last_funding_ts": {
+                symbol: timestamp.isoformat() for symbol, timestamp in self.last_funding_ts.items()
+            },
             "pending_decision": _decision_to_dict(self.pending_decision),
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
@@ -355,7 +359,7 @@ class LiveRuntimeState:
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
         schema_version = raw.get("schema_version")
-        if schema_version not in (9, _STATE_SCHEMA_VERSION):
+        if schema_version not in (9, 10, _STATE_SCHEMA_VERSION):
             raise ValueError("unsupported live runtime-state schema")
         positions = {}
         for symbol, item in raw["positions"].items():
@@ -373,7 +377,11 @@ class LiveRuntimeState:
             positions=positions,
             last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},
             last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
-            last_bar_ts=_bar_timestamps_from_dict(raw["last_bar_ts"]),
+            last_bar_ts=_timestamps_from_dict(raw["last_bar_ts"], field="last_bar_ts"),
+            last_funding_ts=_timestamps_from_dict(
+                raw.get("last_funding_ts", {}),
+                field="last_funding_ts",
+            ),
             pending_decision=_decision_from_dict(raw["pending_decision"]),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
             live_rebalance=(

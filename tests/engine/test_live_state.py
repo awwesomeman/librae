@@ -65,6 +65,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         last_prices={"BTC/USDT": 101.0},
         last_cycle_ts=datetime(2025, 1, 2, tzinfo=UTC),
         last_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
+        last_funding_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
         pending_decision=[OrderIntent(action="close", symbol="BTC/USDT")],
         active_orders=[_order()],
         equity_peak_by_account={"default": 1_050.0},
@@ -218,6 +219,25 @@ def test_runtime_state_migrates_v9_without_account_halts():
     restored = LiveRuntimeState.from_dict(raw)
 
     assert restored.halted_accounts == set()
+    assert restored.last_funding_ts == {}
+
+
+def test_runtime_state_migrates_v10_without_funding_watermarks():
+    raw = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        cash_by_account={"default": 1_000.0},
+        equity_peak_by_account={"default": 1_000.0},
+        prev_equity_by_account={"default": 1_000.0},
+    ).to_dict()
+    raw["schema_version"] = 10
+    del raw["last_funding_ts"]
+
+    restored = LiveRuntimeState.from_dict(raw)
+
+    assert restored.last_funding_ts == {}
 
 
 def test_runtime_state_rejects_missing_v6_fact_instead_of_defaulting():
