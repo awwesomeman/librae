@@ -144,6 +144,22 @@ class AllocationSnapshotPoint:
 
 
 @dataclass(frozen=True)
+class FundingCashFlowRecord:
+    """One timestamped perpetual-funding payment."""
+
+    ts: datetime
+    account_id: str
+    currency: str
+    symbol: str
+    side: PositionSide
+    quantity: float
+    mark_price: float
+    multiplier: float
+    rate: float
+    cash_flow: float
+
+
+@dataclass(frozen=True)
 class StrategyMetrics:
     """Aggregate performance metrics for a backtest run.
 
@@ -226,6 +242,7 @@ class BacktestOutput:
     order_events: Sequence[OrderEventRecord]
     position_snapshots: Sequence[PositionSnapshotPoint]
     allocation_snapshots: Sequence[AllocationSnapshotPoint]
+    funding_cash_flows: Sequence[FundingCashFlowRecord] = ()
 
     def _single_account(self) -> AccountPerformance:
         if len(self.accounts) != 1:
@@ -284,6 +301,7 @@ class BacktestOutput:
             *self.order_events,
             *self.position_snapshots,
             *self.allocation_snapshots,
+            *self.funding_cash_flows,
         )
         for record in account_records:
             expected_currency = account_currency.get(record.account_id)

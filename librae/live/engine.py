@@ -41,6 +41,7 @@ from librae.core.executor import (
     side_multiplier,
     validate_strategy_decision,
 )
+from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
 from librae.core.strategy import (
@@ -141,6 +142,7 @@ class LiveTrader:
         on_ohlcv: Same pattern as on_bar.
         on_heartbeat: Same pattern as on_bar.
         on_signal_outcome: Same pattern as on_bar.
+        on_funding_cash_flow: Same pattern as on_bar.
         warmup_fetcher: _UNSET or None -> plain API fetch via adapter; callable ->
             use it (e.g. a DB-first fetcher supplied by the caller's data layer).
         state_store: _UNSET -> TimescaleDB when DB is enabled; explicit
@@ -166,6 +168,7 @@ class LiveTrader:
         on_ohlcv: Callable[..., None] | object | None = _UNSET,
         on_heartbeat: Callable[..., None] | object | None = _UNSET,
         on_signal_outcome: Callable[..., None] | object | None = _UNSET,
+        on_funding_cash_flow: Callable[..., None] | object | None = _UNSET,
         warmup_fetcher: Callable[..., pd.DataFrame] | object | None = _UNSET,
         state_store: LiveStateStore | object | None = _UNSET,
         clock: Callable[[], datetime] | None = None,
@@ -419,6 +422,7 @@ class LiveTrader:
         self._db_write_failures: int = 0
         self._last_cycle_ts: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
+        self._last_funding_ts: dict[str, datetime] = {}
         self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -470,6 +474,10 @@ class LiveTrader:
             "on_ohlcv": (on_ohlcv, self._build_on_ohlcv),
             "on_heartbeat": (on_heartbeat, self._build_on_heartbeat),
             "on_signal_outcome": (on_signal_outcome, self._build_on_signal_outcome),
+            "on_funding_cash_flow": (
+                on_funding_cash_flow,
+                self._build_on_funding_cash_flow,
+            ),
             "warmup_fetcher": (warmup_fetcher, self._build_warmup_fetcher),
         }
         for attr, (value, builder) in callbacks.items():
@@ -582,6 +590,7 @@ class LiveTrader:
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
             last_bar_ts=dict(self._last_bar_ts),
+            last_funding_ts=dict(self._last_funding_ts),
             pending_decision=deepcopy(self._pending_decision),
             active_orders=deepcopy(self._active_orders),
             live_rebalance=deepcopy(self._live_rebalance),
@@ -611,6 +620,7 @@ class LiveTrader:
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
         self._last_bar_ts = state.last_bar_ts
+        self._last_funding_ts = state.last_funding_ts
         self._pending_decision = state.pending_decision
         self._active_orders = state.active_orders
         self._live_rebalance = state.live_rebalance
@@ -756,6 +766,28 @@ class LiveTrader:
                 self._performance_dirty = True
 
         return on_order_event
+
+    def _build_on_funding_cash_flow(self) -> Callable:
+        from db.timescale_writer import write_funding_cash_flow
+
+        def on_funding_cash_flow(cash_flow: FundingCashFlow) -> None:
+            account_id = self._account_id_by_symbol[cash_flow.symbol]
+            self._db_write(
+                write_funding_cash_flow,
+                run_id=self._run_id,
+                account_id=account_id,
+                currency=self._currency_by_account[account_id],
+                ts=cash_flow.ts,
+                symbol=cash_flow.symbol,
+                side=cash_flow.side,
+                quantity=cash_flow.quantity,
+                mark_price=cash_flow.mark_price,
+                multiplier=cash_flow.multiplier,
+                rate=cash_flow.rate,
+                cash_flow=cash_flow.cash_flow,
+            )
+
+        return on_funding_cash_flow
 
     def _build_on_ohlcv(self) -> Callable:
         from db.timescale_writer import write_ohlcv
@@ -2513,6 +2545,7 @@ class LiveTrader:
                 positions=self._positions,
                 result=step_result,
             )
+            self._apply_funding_cash_flows(ts, raw_bars)
             for event in step_result.events:
                 cycle_used_bar_quantity_by_symbol[event.symbol] = (
                     cycle_used_bar_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
@@ -2708,6 +2741,37 @@ class LiveTrader:
 
     def _get_cost_model(self, sym: str) -> CostModel:
         return self._executor.get_cost_model(sym)
+
+    def _apply_funding_cash_flows(
+        self,
+        ts: datetime,
+        bars: Mapping[str, Mapping[str, object]],
+    ) -> None:
+        """Apply each simulation funding observation at most once."""
+        eligible_bars = {
+            symbol: bar
+            for symbol, bar in bars.items()
+            if ts
+            > self._last_funding_ts.get(
+                symbol,
+                datetime.min.replace(tzinfo=UTC),
+            )
+        }
+        observed_symbols, cash_flows = calculate_funding_cash_flows(
+            ts,
+            eligible_bars,
+            self._positions,
+            get_cost_model=self._get_cost_model,
+        )
+        for symbol in observed_symbols:
+            self._last_funding_ts[symbol] = ts
+        for cash_flow in cash_flows:
+            account_id = self._account_id_by_symbol[cash_flow.symbol]
+            self._cash_by_account[account_id] += cash_flow.cash_flow
+            if self._on_funding_cash_flow:
+                self._on_funding_cash_flow(cash_flow)
+        if cash_flows:
+            self._performance_dirty = True
 
     def _calc_account_snapshots(
         self,

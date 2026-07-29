@@ -108,6 +108,8 @@ See
 for the exact callable contracts. When Grafana is unnecessary, callbacks such
 as `on_bar`, `on_order_event`, and `on_heartbeat` can feed an existing
 observability stack.
+`on_funding_cash_flow` receives each applied shadow-simulation funding event;
+live broker balances remain authoritative.
 
 ## Deployment examples
 

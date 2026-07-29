@@ -70,8 +70,8 @@ state, costs, and output. The [examples](examples/README.md) show the complete
 - **Portfolio logic:** alpha, objective, covariance model, and optimizer belong
   to the strategy. Librae accepts the resulting order intents or target weights
   and owns their validation, sizing, sequencing, execution, and diagnostics.
-- **Outputs:** `BacktestOutput` contains run metadata, currency-labeled events,
-  one equity/PnL/metrics result per account, and optional
+- **Outputs:** `BacktestOutput` contains run metadata, currency-labeled trade
+  and funding events, one equity/PnL/metrics result per account, and optional
   position/allocation snapshots.
 
 The exact validation, fill, liquidity, margin, reconciliation, and state
@@ -89,7 +89,7 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Segregated execution accounts | Per-account cash, equity, PnL, risk metrics, persistence, and reconciliation; same-currency accounts remain separate |
 | Cross-account reporting | No implicit total; FX conversion, transfers, settlement, and cross-account netting are not modeled |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
-| Short borrow / funding | User-supplied research costs only; no engine locate or borrow ledger |
+| Short borrow / funding | Timestamped perpetual funding is supported in backtest/sim; no engine borrow/locate ledger |
 
 See the [full capability matrix](architecture.md#use-case-capability-matrix)
 and complete the [strategy readiness checklist](docs/guides/strategy-readiness.md)

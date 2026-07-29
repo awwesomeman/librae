@@ -140,6 +140,31 @@ def load_trade_events(
     return df
 
 
+def load_funding_cash_flows(
+    run_id: str,
+    *,
+    account_id: str | None = None,
+    dsn: str | None = None,
+) -> pd.DataFrame:
+    """Load applied perpetual-funding payments for a run."""
+    sql = """
+        SELECT ts AS _time, account_id, currency, symbol, side,
+               quantity, mark_price, multiplier, rate, cash_flow
+        FROM funding_cash_flows
+        WHERE run_id = %s
+    """
+    params: list = [run_id]
+    if account_id is not None:
+        sql += " AND account_id = %s"
+        params.append(account_id)
+    sql += " ORDER BY account_id, ts, symbol"
+    with get_conn(dsn) as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if not df.empty and "_time" in df.columns:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    return df
+
+
 def load_performance(
     run_id: str,
     *,
