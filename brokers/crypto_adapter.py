@@ -38,7 +38,9 @@ def _require_ccxt() -> object:
         return ccxt
     except ImportError as e:
         raise ImportError(
-            "ccxt is required for CryptoAdapter. Install it with: pip install ccxt"
+            "CryptoAdapter requires the optional 'crypto-live' dependencies. "
+            "From a repository clone run: uv sync --extra crypto-live. "
+            "For a direct install, include Librae's 'crypto-live' extra."
         ) from e
 
 

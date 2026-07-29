@@ -6,16 +6,26 @@ The optional SDK contract is covered separately without opening a socket.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from brokers.ibkr_adapter import _require_ib_async
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_missing_ib_async_names_install_extra():
+    with (
+        patch.dict("sys.modules", {"ib_async": None}),
+        pytest.raises(ImportError, match="us-live"),
+    ):
+        _require_ib_async()
 
 
 def _make_adapter(*, trading_enabled: bool = False):
@@ -532,6 +542,11 @@ class TestResolveContract:
 
 
 class TestResolveContractFutures:
+    @pytest.fixture(autouse=True)
+    def _fixed_today(self):
+        with patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)):
+            yield
+
     def _detail(self, expiry: str, contract):
         detail = MagicMock()
         detail.contract = contract
@@ -553,6 +568,88 @@ class TestResolveContractFutures:
 
         assert result is near
         mock_ib_async.Future.assert_called_once_with("ES", exchange="CME", currency="USD")
+
+    def test_ignores_expired_contract_details(self):
+        adapter = _make_adapter()
+        expired, near, far = MagicMock(), MagicMock(), MagicMock()
+        adapter._ib.reqContractDetails.return_value = [
+            self._detail("20251219", expired),
+            self._detail("20260321", near),
+            self._detail("20260620", far),
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+            result = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+
+        assert result is near
+
+    def test_expired_cached_front_month_is_resolved_again(self):
+        adapter = _make_adapter()
+        expired, current = MagicMock(), MagicMock()
+        adapter._ib.reqContractDetails.side_effect = [
+            [self._detail("20260321", expired)],
+            [self._detail("20260620", current)],
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)),
+        ):
+            first = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
+        ):
+            second = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+
+        assert first is expired
+        assert second is current
+        assert adapter._ib.reqContractDetails.call_count == 2
+
+    def test_contract_details_cache_rolls_with_expired_contract(self):
+        adapter = _make_adapter()
+        expired, current = MagicMock(), MagicMock()
+        cache_key = ("ES", "FUT", "CME", "USD")
+        expired_detail = self._detail("20260321", expired)
+        current_detail = self._detail("20260620", current)
+        adapter._contract_cache[cache_key] = expired
+        adapter._contract_details_cache = {cache_key: expired_detail}
+        adapter._ib.reqContractDetails.return_value = [current_detail]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
+        ):
+            result = adapter._contract_details(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                currency="USD",
+            )
+
+        assert result is current_detail
+        assert adapter._contract_cache[cache_key] is current
+
+    def test_no_non_expired_contract_raises(self):
+        adapter = _make_adapter()
+        expired = MagicMock()
+        adapter._ib.reqContractDetails.return_value = [
+            self._detail("20251219", expired),
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="No non-expired future"),
+        ):
+            adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
 
     def test_missing_exchange_raises(self):
         adapter = _make_adapter()

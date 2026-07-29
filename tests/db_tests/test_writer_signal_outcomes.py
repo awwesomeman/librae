@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from db.timescale_writer import (
+    _claim_config_hash,
+    save_backtest_output,
     save_signal_results,
     save_strategy_results,
     write_equity_curve_point,
@@ -16,6 +18,7 @@ from db.timescale_writer import (
     write_run_metadata,
     write_signal_event,
     write_strategy_performance,
+    write_trade_event,
 )
 from librae.backtest.schema import StrategyMetrics
 from librae.core.run_config import RunConfig
@@ -53,6 +56,85 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         "max_bar_volume_participation_rate": 0.1,
     }
     assert json.loads(values[12]) == {"max_drawdown_rate": 0.2}
+
+
+class TestConfigHashClaim:
+    def test_duplicate_run_is_skipped_after_transaction_lock(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("canonical-run",)
+
+        claimed = _claim_config_hash(
+            cursor,
+            "same-config",
+            "racing-run",
+            replace_existing=False,
+        )
+
+        assert claimed is False
+        assert "pg_advisory_xact_lock" in cursor.execute.call_args_list[0].args[0]
+        assert cursor.execute.call_args_list[0].args[1] == ("same-config",)
+        assert all(
+            "DELETE FROM backtest_runs" not in call.args[0]
+            for call in cursor.execute.call_args_list
+        )
+
+    def test_force_recompute_replaces_canonical_run_under_lock(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("canonical-run",)
+
+        claimed = _claim_config_hash(
+            cursor,
+            "same-config",
+            "forced-run",
+            replace_existing=True,
+        )
+
+        assert claimed is True
+        cursor.execute.assert_any_call(
+            "DELETE FROM backtest_runs WHERE run_id = %s",
+            ("canonical-run",),
+        )
+
+    def test_same_run_id_remains_idempotent(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("same-run",)
+
+        assert (
+            _claim_config_hash(
+                cursor,
+                "same-config",
+                "same-run",
+                replace_existing=False,
+            )
+            is True
+        )
+
+    @patch("db.timescale_writer.write_run_metadata")
+    @patch("db.timescale_writer._claim_config_hash", return_value=False)
+    @patch("db.timescale_writer.get_conn")
+    def test_losing_backtest_writer_exits_without_partial_rows(
+        self,
+        mock_conn_ctx,
+        mock_claim,
+        mock_write_metadata,
+    ) -> None:
+        connection = MagicMock()
+        connection.__enter__ = MagicMock(return_value=connection)
+        connection.__exit__ = MagicMock(return_value=False)
+        mock_conn_ctx.return_value = connection
+        output = MagicMock()
+        output.run_metadata.run_id = "racing-run"
+
+        counts = save_backtest_output(output, config_hash="same-config")
+
+        assert counts == {"backtest_runs": 0}
+        mock_claim.assert_called_once_with(
+            connection.cursor.return_value,
+            "same-config",
+            "racing-run",
+            replace_existing=False,
+        )
+        mock_write_metadata.assert_not_called()
 
 
 def test_strategy_performance_sql_matches_account_metric_values() -> None:
@@ -117,9 +199,46 @@ class TestWriteEquityCurvePoint:
             "net_exposure",
             "concentration",
             "turnover",
+            "exposed",
             "strategy",
         ):
             assert f"{col}=EXCLUDED.{col}" in sql
+
+
+@patch("db.timescale_writer.get_conn")
+def test_write_trade_event_sql_matches_persisted_cost_fields(mock_conn_ctx) -> None:
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor.return_value = mock_cur
+    mock_conn_ctx.return_value = mock_conn
+
+    write_trade_event(
+        event_id="event-1",
+        run_id="run-1",
+        account_id="alpha",
+        currency="USD",
+        strategy="test",
+        mode="backtest",
+        timeframe="H1",
+        ts=datetime(2024, 6, 1, tzinfo=UTC),
+        symbol="TEST",
+        side="long",
+        event_type="close",
+        fill_quantity=1.0,
+        price=110.0,
+        entry_price=100.0,
+        remaining_quantity=0.0,
+        notional=110.0,
+        commission=0.2,
+        entry_commission=0.1,
+    )
+
+    sql, values = mock_cur.execute.call_args.args
+    assert sql.count("%s") == len(values) == 27
+    assert "entry_commission, entry_slippage, entry_tax" in sql
+    assert values[19:22] == (0.1, None, None)
 
 
 def test_write_ohlcv_requires_real_volume() -> None:
@@ -238,8 +357,18 @@ class TestPersistBacktest:
             "max_adv_participation_rate": None,
             "live_order_timeout_seconds": None,
         }
+        assert call_kwargs.kwargs["replace_existing"] is False
 
         assert counts["ohlcv"] == 20
+
+    @patch("db.timescale_writer.write_ohlcv", return_value=20)
+    @patch("db.timescale_writer.save_backtest_output", return_value={})
+    def test_force_recompute_replaces_existing_hash(self, mock_write_bt, mock_write_ohlcv):
+        df, _symbol = self._make_featured_df()
+
+        save_strategy_results(MagicMock(), df, _test_cfg(force=True))
+
+        assert mock_write_bt.call_args.kwargs["replace_existing"] is True
 
     @patch("db.timescale_writer.write_ohlcv", return_value=20)
     @patch("db.timescale_writer.save_backtest_output", return_value={})
@@ -306,6 +435,58 @@ class TestPersistBacktest:
 
 class TestSaveSignalResults:
     """save_signal_results writes signals independently of backtest."""
+
+    @patch("db.timescale_writer.write_run_metadata")
+    @patch("db.timescale_writer._claim_config_hash", return_value=False)
+    @patch("db.timescale_writer.write_ohlcv")
+    @patch("db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("db.timescale_writer.get_conn")
+    def test_losing_config_hash_writer_exits_without_partial_rows(
+        self,
+        mock_conn_ctx,
+        mock_exec_values,
+        mock_ohlcv,
+        mock_claim,
+        mock_write_metadata,
+    ) -> None:
+        connection = MagicMock()
+        connection.__enter__ = MagicMock(return_value=connection)
+        connection.__exit__ = MagicMock(return_value=False)
+        mock_conn_ctx.return_value = connection
+        index = pd.date_range("2024-01-01", periods=1, freq="1h", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [101.0],
+                "low": [99.0],
+                "close": [100.0],
+                "volume": [10.0],
+                "entry_signal": [1.0],
+            },
+            index=index,
+        )
+        config = _test_cfg()
+
+        counts = save_signal_results(
+            df,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            run_id="racing-run",
+            config=config,
+        )
+
+        assert counts == {"backtest_runs": 0}
+        mock_claim.assert_called_once_with(
+            connection.cursor.return_value,
+            config.config_hash,
+            "racing-run",
+            replace_existing=False,
+        )
+        mock_write_metadata.assert_not_called()
+        mock_exec_values.assert_not_called()
+        mock_ohlcv.assert_not_called()
 
     @patch("db.timescale_writer.write_ohlcv", return_value=10)
     @patch("db.timescale_writer.psycopg2.extras.execute_values")

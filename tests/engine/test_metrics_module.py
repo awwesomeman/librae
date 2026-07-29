@@ -159,6 +159,7 @@ class TestComputeAllValidation:
             ({"risk_free_rate": np.nan}, "risk_free_rate"),
             ({"risk_free_rate": np.inf}, "risk_free_rate"),
             ({"risk_free_rate": True}, "risk_free_rate"),
+            ({"risk_free_rate": -1.0}, "risk_free_rate"),
             ({"periods_per_year": 0}, "periods_per_year"),
         ],
     )
@@ -382,6 +383,51 @@ class TestComputeAllMetrics:
 
         assert m.sharpe is None
         assert isinstance(m.sortino, float)
+
+    @pytest.mark.parametrize(
+        ("risk_free_rate", "period_returns", "expected_call"),
+        [
+            (-0.03, [-0.00005, -0.00004, -0.00003], False),
+            (0.0, [-0.00005, -0.00004, -0.00003], True),
+            (0.03, [0.00001, 0.00002, 0.00003], True),
+        ],
+    )
+    def test_sortino_guard_respects_signed_risk_free_rate(
+        self,
+        monkeypatch,
+        risk_free_rate: float,
+        period_returns: list[float],
+        expected_call: bool,
+    ) -> None:
+        import quantstats as qs
+
+        called = False
+
+        def fake_sortino(_returns, *, periods, rf):
+            nonlocal called
+            called = True
+            assert periods == 252
+            assert rf == risk_free_rate
+            return 1.0
+
+        monkeypatch.setattr(qs.stats, "sortino", fake_sortino)
+        equity = [100.0]
+        for period_return in period_returns:
+            equity.append(equity[-1] * (1.0 + period_return))
+        timestamps = pd.date_range(START, periods=len(equity), freq="D", tz="UTC").tolist()
+
+        metrics = compute_all(
+            equity_values=equity,
+            timestamps=timestamps,
+            trade_pnls=[],
+            total_periods=len(equity),
+            annualize=True,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=252,
+        )
+
+        assert called is expected_call
+        assert (metrics.sortino is not None) is expected_call
 
     def test_max_drawdown_negative(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)

@@ -324,8 +324,9 @@ class RunConfig:
             isinstance(self.risk_free_rate, bool)
             or not isinstance(self.risk_free_rate, Real)
             or not isfinite(self.risk_free_rate)
+            or self.risk_free_rate <= -1.0
         ):
-            raise ValueError("risk_free_rate must be a finite number")
+            raise ValueError("risk_free_rate must be finite and greater than -1")
         for field_name in ("annualize", "no_db", "dry_run", "force"):
             if not isinstance(getattr(self, field_name), bool):
                 raise TypeError(f"{field_name} must be a bool")

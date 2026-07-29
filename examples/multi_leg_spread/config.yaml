@@ -1,6 +1,6 @@
 strategy:
-  name: target_weights_example
-  symbols: [ALPHA, BETA, GAMMA]
+  name: multi_leg_spread_example
+  symbols: [SPREAD_NEAR, SPREAD_FAR]
   timeframe: D1
   market: us_equity
   data_source: synthetic
@@ -9,17 +9,12 @@ strategy:
       currency: USD
       initial_cash: 100000
   instrument_overrides:
-    ALPHA:
+    SPREAD_NEAR:
       data_adapter: ibkr
       instrument_type: spot
       currency: USD
       security_type: STK
-    BETA:
-      data_adapter: ibkr
-      instrument_type: spot
-      currency: USD
-      security_type: STK
-    GAMMA:
+    SPREAD_FAR:
       data_adapter: ibkr
       instrument_type: spot
       currency: USD
@@ -27,17 +22,18 @@ strategy:
   execution:
     default_fill_price: open
     max_bar_volume_participation_rate: 0.10
-    # Session capacity guard: at most 1% of the mean volume from the 20
-    # completed sessions before the execution bar.
-    adv_lookback_sessions: 20
-    max_adv_participation_rate: 0.01
   risk:
-    max_position_weight: 0.75
     max_drawdown_rate: 0.20
-    max_gross_exposure: 1.00
-    max_net_exposure: 1.00
-    max_order_notional: 75000
+    max_gross_exposure: 0.50
+    max_net_exposure: 0.25
   cost_overrides:
     multiplier: 1.0
+  params:
+    lookback: 20
+    hedge_ratio: 1.0
+    quantity: 10
+    entry_zscore: 1.5
+    exit_zscore: 0.25
+    max_completion_seconds: 3.0
   perf:
     periods_per_year: 252

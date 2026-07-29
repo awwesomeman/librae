@@ -59,9 +59,5 @@ def run_backtest(config: RunConfig) -> None:
     print(output.metrics)
 
 
-def run_realtime(_config: RunConfig) -> None:
-    raise NotImplementedError("PortfolioTargets examples currently support backtest mode only")
-
-
 if __name__ == "__main__":
-    run_dispatch("target_weights_example", __file__, run_backtest, run_realtime)
+    run_dispatch("target_weights_example", __file__, run_backtest)

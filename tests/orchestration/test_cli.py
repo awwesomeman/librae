@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from librae.core.run_config import AccountConfig, RunConfig
@@ -16,6 +16,7 @@ from orchestration.cli import (
     build_config,
     check_existing_run,
     parse_with_config,
+    run_dispatch,
 )
 
 
@@ -490,6 +491,20 @@ class TestCheckExistingRun:
 
         assert check_existing_run(_make_cfg()) is None
 
+    def test_missing_db_dependency_logs_install_hint(self, caplog):
+        real_import = __import__
+
+        def missing_db_dependency(name, *args, **kwargs):
+            if name == "db.timescale_reader":
+                raise ModuleNotFoundError("No module named 'psycopg2'", name="psycopg2")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=missing_db_dependency):
+            assert check_existing_run(_make_cfg()) is None
+
+        assert "uv sync --extra db" in caplog.text
+        assert "--no-db" in caplog.text
+
     def test_db_unreachable_skips_dedup_instead_of_raising(self, monkeypatch):
         monkeypatch.setenv("TIMESCALE_DSN", "postgresql://localhost:1/nonexistent")
         monkeypatch.delitem(sys.modules, "db", raising=False)
@@ -500,3 +515,63 @@ class TestCheckExistingRun:
             side_effect=OSError("connection refused"),
         ):
             assert check_existing_run(_make_cfg()) is None
+
+    def test_changed_perf_params_refresh_every_configured_account(self):
+        config = _make_cfg(
+            accounts={
+                "alpha": AccountConfig(currency="USD", initial_cash=100_000.0),
+                "beta": AccountConfig(currency="USD", initial_cash=50_000.0),
+            }
+        )
+        existing = {
+            "run_id": "existing-run",
+            "perf_params": {"annualize": not config.annualize},
+        }
+
+        with (
+            patch(
+                "db.timescale_reader.get_run_by_config_hash",
+                return_value=existing,
+            ),
+            patch("db.timescale_writer.refresh_performance") as refresh,
+            patch("db.timescale_writer._update_perf_params") as update_params,
+        ):
+            assert check_existing_run(config) == "existing-run"
+
+        assert [call.kwargs["account_id"] for call in refresh.call_args_list] == [
+            "alpha",
+            "beta",
+        ]
+        assert all(call.kwargs["config"] is config for call in refresh.call_args_list)
+        update_params.assert_called_once_with("existing-run", config.perf_params)
+
+
+class TestRunDispatch:
+    def test_backtest_only_runner_rejects_realtime_mode_before_execution(self):
+        config = _make_cfg(mode="sim", no_db=True)
+        run_backtest = MagicMock()
+
+        with (
+            patch("orchestration.cli.build_config", return_value=config),
+            patch.object(RunConfig, "log_summary") as log_summary,
+            pytest.raises(
+                ValueError,
+                match=r"does not support mode='sim'.*Use --mode backtest",
+            ),
+        ):
+            run_dispatch("research_only", "run.py", run_backtest)
+
+        run_backtest.assert_not_called()
+        log_summary.assert_not_called()
+
+    def test_backtest_only_runner_still_dispatches_backtest(self):
+        config = _make_cfg(no_db=True)
+        run_backtest = MagicMock()
+
+        with (
+            patch("orchestration.cli.build_config", return_value=config),
+            patch.object(RunConfig, "log_summary"),
+        ):
+            run_dispatch("research_only", "run.py", run_backtest)
+
+        run_backtest.assert_called_once_with(config)

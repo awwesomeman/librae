@@ -10,11 +10,19 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from brokers.crypto_adapter import CryptoAdapter
+from brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+def test_missing_ccxt_names_install_extra():
+    with (
+        patch.dict("sys.modules", {"ccxt": None}),
+        pytest.raises(ImportError, match="crypto-live"),
+    ):
+        _require_ccxt()
 
 
 @pytest.fixture

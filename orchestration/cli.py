@@ -458,7 +458,13 @@ def check_existing_run(config: RunConfig) -> str | None:
     """
     try:
         from db.timescale_reader import get_run_by_config_hash
-    except ImportError:
+    except ImportError as exc:
+        logger.warning(
+            "Database dedup is unavailable because the optional 'db' dependencies "
+            "could not be imported (%s). From a repository clone run "
+            "'uv sync --extra db', or pass --no-db when persistence is not needed.",
+            exc,
+        )
         return None
 
     try:
@@ -479,7 +485,12 @@ def check_existing_run(config: RunConfig) -> str | None:
         try:
             from db.timescale_writer import _update_perf_params, refresh_performance
 
-            refresh_performance(existing["run_id"], config=config)
+            for account_id in config.accounts:
+                refresh_performance(
+                    existing["run_id"],
+                    account_id=account_id,
+                    config=config,
+                )
             _update_perf_params(existing["run_id"], config.perf_params)
             logger.info(
                 "Recomputed metrics for run_id=%s (perf_params changed)", existing["run_id"]
@@ -505,18 +516,28 @@ def run_dispatch(
     strategy_name: str,
     run_file: str,
     run_backtest: Callable[[RunConfig], None],
-    run_realtime: Callable[[RunConfig], None],
+    run_realtime: Callable[[RunConfig], None] | None = None,
 ) -> None:
-    """Shared main() for all strategy runners."""
+    """Run a strategy through its declared mode handlers.
+
+    A runner that omits ``run_realtime`` is explicitly backtest-only. This
+    fails before strategy execution with an actionable mode error instead of
+    relying on a placeholder callback to raise ``NotImplementedError``.
+    """
     setup_logging()
     config = build_config(strategy_name, run_file)
+    if config.mode == "backtest":
+        config.log_summary()
+        with_dedup_check(run_backtest)(config)
+        return
+    if run_realtime is None:
+        raise ValueError(
+            f"{strategy_name!r} does not support mode={config.mode!r}; "
+            "supported modes: ['backtest']. Use --mode backtest, or provide "
+            "a real-time runner with market-data, broker, and state wiring."
+        )
     config.log_summary()
-    dispatch: dict[str, Callable[[RunConfig], None]] = {
-        "backtest": with_dedup_check(run_backtest),
-        "sim": run_realtime,
-        "live": run_realtime,
-    }
-    dispatch[config.mode](config)
+    run_realtime(config)
 
 
 # ---------------------------------------------------------------------------

@@ -165,6 +165,7 @@ class PortfolioSnapshot:
     net_exposure: float
     concentration: float
     turnover: float
+    exposed: bool
 
 
 @dataclass(frozen=True)
@@ -456,6 +457,32 @@ class Backtest:
             grouped.setdefault(account_id, []).append(intent)
         return grouped
 
+    def _without_halted_accounts(
+        self,
+        decision: StrategyDecision,
+        halted_accounts: set[str],
+        *,
+        primary_symbol: str,
+    ) -> StrategyDecision:
+        """Discard exposure decisions owned by drawdown-halted accounts."""
+        if not decision or not halted_accounts:
+            return decision
+        if isinstance(decision, PortfolioTargets):
+            account_ids = {self._account_id_by_symbol[symbol] for symbol in decision.weights} or {
+                self._account_id_by_symbol[primary_symbol]
+            }
+            return [] if account_ids & halted_accounts else decision
+        if isinstance(decision, MultiLegOrder):
+            account_ids = {
+                self._account_id_by_symbol[leg.symbol or primary_symbol] for leg in decision.legs
+            }
+            return [] if account_ids & halted_accounts else decision
+        return [
+            intent
+            for intent in decision
+            if self._account_id_by_symbol[intent.symbol or primary_symbol] not in halted_accounts
+        ]
+
     def _execute_account_steps(
         self,
         ts: datetime,
@@ -466,6 +493,7 @@ class Backtest:
         *,
         primary_symbol: str,
         last_equity_by_account: dict[str, float],
+        halted_accounts: set[str],
         get_lagged_adv: Callable[[str], float | None],
         used_adv_quantity_by_symbol: dict[str, float],
     ) -> ExecutionResult:
@@ -476,29 +504,42 @@ class Backtest:
         for account_id in self._initial_cash_by_account:
             account_positions = self._account_positions(positions, account_id)
             account_decision = decisions.get(account_id, [])
-            max_position_notional = (
-                self._risk_policy.max_position_weight * last_equity_by_account[account_id]
-                if self._risk_policy.max_position_weight
-                else None
-            )
-            account_cash, result = execute_pending_decision_and_stops(
-                ts,
-                account_positions,
-                cash_by_account[account_id],
-                account_decision,
-                bars,
-                get_cost_model=self._get_cost_model,
-                default_fill=self._fill_price,
-                primary_symbol=primary_symbol,
-                max_position_notional=max_position_notional,
-                max_order_notional=self._risk_policy.max_order_notional,
-                max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
-                max_adv_participation_rate=self._max_adv_participation_rate,
-                get_lagged_adv=get_lagged_adv,
-                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
-                max_gross_exposure=self._risk_policy.max_gross_exposure,
-                max_net_exposure=self._risk_policy.max_net_exposure,
-            )
+            if account_id in halted_accounts:
+                result = check_stop_targets(
+                    account_positions,
+                    bars,
+                    ts,
+                    get_cost_model=self._get_cost_model,
+                    max_bar_volume_participation_rate=(self._max_bar_volume_participation_rate),
+                    max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_lagged_adv=get_lagged_adv,
+                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                )
+                account_cash = cash_by_account[account_id] + result.cash_delta
+            else:
+                max_position_notional = (
+                    self._risk_policy.max_position_weight * last_equity_by_account[account_id]
+                    if self._risk_policy.max_position_weight
+                    else None
+                )
+                account_cash, result = execute_pending_decision_and_stops(
+                    ts,
+                    account_positions,
+                    cash_by_account[account_id],
+                    account_decision,
+                    bars,
+                    get_cost_model=self._get_cost_model,
+                    default_fill=self._fill_price,
+                    primary_symbol=primary_symbol,
+                    max_position_notional=max_position_notional,
+                    max_order_notional=self._risk_policy.max_order_notional,
+                    max_bar_volume_participation_rate=(self._max_bar_volume_participation_rate),
+                    max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_lagged_adv=get_lagged_adv,
+                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                    max_gross_exposure=self._risk_policy.max_gross_exposure,
+                    max_net_exposure=self._risk_policy.max_net_exposure,
+                )
             cash_by_account[account_id] = account_cash
             self._replace_account_positions(positions, account_id, account_positions)
             trades.extend(result.trades)
@@ -551,12 +592,15 @@ class Backtest:
         portfolio_snapshots_by_account: dict[str, list[PortfolioSnapshot]] = {
             account_id: [] for account_id in cash_by_account
         }
-        active_target_weights: dict[str, float] | None = None
+        active_target_weights_by_account: dict[str, dict[str, float] | None] = dict.fromkeys(
+            cash_by_account,
+            None,
+        )
         last_prices: dict[str, float] = {}
         decision_index = 0
         equity_peak_by_account = dict(self._initial_cash_by_account)
         last_equity_by_account = dict(self._initial_cash_by_account)
-        halted = False
+        halted_accounts: set[str] = set()
         adv_session_by_symbol: dict[str, object] = {}
         used_adv_quantity_by_symbol: dict[str, float] = {}
 
@@ -581,6 +625,11 @@ class Backtest:
                 if close is not None and np.isfinite(close) and close > 0:
                     last_prices[symbol] = float(close)
 
+            pending_decision = self._without_halted_accounts(
+                pending_decision,
+                halted_accounts,
+                primary_symbol=primary_symbol,
+            )
             decision_to_execute, pending_decision = partition_pending_decision(
                 pending_decision,
                 bars,
@@ -588,58 +637,40 @@ class Backtest:
                 primary_symbol=primary_symbol,
             )
             if isinstance(decision_to_execute, PortfolioTargets):
-                active_target_weights = dict(decision_to_execute.weights)
+                target_account_id = next(
+                    iter(
+                        self._decisions_by_account(
+                            decision_to_execute,
+                            primary_symbol=primary_symbol,
+                        )
+                    )
+                )
+                active_target_weights_by_account[target_account_id] = dict(
+                    decision_to_execute.weights
+                )
 
             # ── Steps 1+1.5: fill the previous pending decision at current
             # bar's price, then check stop-loss/take-profit — shared with
             # LiveTrader's simulation mode so deterministic runtimes cannot
             # drift on this sequence ──
-            if halted:
-                step_trades: list[TradeResult] = []
-                step_events: list[OrderEvent] = []
-                for account_id in cash_by_account:
-                    account_positions = self._account_positions(positions, account_id)
-                    account_result = check_stop_targets(
-                        account_positions,
-                        bars,
-                        ts,
-                        get_cost_model=self._get_cost_model,
-                        max_bar_volume_participation_rate=(self._max_bar_volume_participation_rate),
-                        max_adv_participation_rate=self._max_adv_participation_rate,
-                        get_lagged_adv=get_lagged_adv,
-                        used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
-                    )
-                    cash_by_account[account_id] += account_result.cash_delta
-                    self._replace_account_positions(
-                        positions,
-                        account_id,
-                        account_positions,
-                    )
-                    step_trades.extend(account_result.trades)
-                    step_events.extend(account_result.events)
-                step_result = ExecutionResult(
-                    trades=step_trades,
-                    events=step_events,
-                    cash_delta=0.0,
-                )
-            else:
-                step_result = self._execute_account_steps(
-                    ts,
-                    positions,
-                    cash_by_account,
-                    decision_to_execute,
-                    bars,
-                    primary_symbol=primary_symbol,
-                    last_equity_by_account=last_equity_by_account,
-                    get_lagged_adv=get_lagged_adv,
-                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
-                )
+            step_result = self._execute_account_steps(
+                ts,
+                positions,
+                cash_by_account,
+                decision_to_execute,
+                bars,
+                primary_symbol=primary_symbol,
+                last_equity_by_account=last_equity_by_account,
+                halted_accounts=halted_accounts,
+                get_lagged_adv=get_lagged_adv,
+                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+            )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             # ── Step 2: equity and drawdown check ──
             position_view: dict[str, Position] = {}
             account_snapshots: dict[str, AccountSnapshot] = {}
-            breached_account: tuple[str, float] | None = None
+            breached_accounts: list[tuple[str, float]] = []
             mtm = 0.0
             for account_id in cash_by_account:
                 account_positions = self._account_positions(positions, account_id)
@@ -659,10 +690,10 @@ class Backtest:
                 drawdown = (mtm - peak) / peak if peak > 0 else 0.0
                 if (
                     self._risk_policy.max_drawdown_rate
-                    and not halted
+                    and account_id not in halted_accounts
                     and drawdown <= -self._risk_policy.max_drawdown_rate
                 ):
-                    breached_account = (account_id, drawdown)
+                    breached_accounts.append((account_id, drawdown))
                 equity_curve_by_account[account_id].append(EquitySnapshot(ts=ts, equity=mtm))
                 account_events = [
                     event
@@ -696,7 +727,8 @@ class Backtest:
                             account_positions,
                             last_prices,
                             mtm,
-                            active_target_weights,
+                            active_target_weights_by_account[account_id],
+                            account_id=account_id,
                         )
                     )
                 last_equity_by_account[account_id] = mtm
@@ -706,20 +738,25 @@ class Backtest:
                     equity=mtm,
                 )
 
-            if breached_account is not None:
-                account_id, drawdown = breached_account
-                queue_market_exit_all(positions, reason=REASON_DRAWDOWN_BREACH)
-                halted = True
+            for account_id, drawdown in breached_accounts:
+                account_positions = self._account_positions(positions, account_id)
+                queue_market_exit_all(
+                    account_positions,
+                    reason=REASON_DRAWDOWN_BREACH,
+                )
+                halted_accounts.add(account_id)
                 logger.warning(
-                    "Backtest halted at %s: drawdown %.2f%% breached max_drawdown_rate=%.2f%% "
-                    "— market exits queued for next observed opens",
+                    "Backtest account %s halted at %s: drawdown %.2f%% breached "
+                    "max_drawdown_rate=%.2f%% — market exits queued for next "
+                    "observed opens",
+                    account_id,
                     ts,
                     drawdown * 100,
                     self._risk_policy.max_drawdown_rate * 100,
                 )
 
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
-            if halted:
+            if len(halted_accounts) == len(cash_by_account):
                 pending_decision = []
             elif not isinstance(pending_decision, (PortfolioTargets, MultiLegOrder)):
                 ctx = Context(
@@ -737,6 +774,11 @@ class Backtest:
                 validate_strategy_decision(
                     new_decision,
                     universe,
+                    primary_symbol=primary_symbol,
+                )
+                new_decision = self._without_halted_accounts(
+                    new_decision,
+                    halted_accounts,
                     primary_symbol=primary_symbol,
                 )
                 pending_decision = merge_pending_decisions(
@@ -767,9 +809,6 @@ class Backtest:
         if self._timeline:
             last_ts = self._timeline[-1]
             last_bars = all_bars[last_ts]
-            final_events_by_account: dict[str, list[OrderEvent]] = {
-                account_id: [] for account_id in cash_by_account
-            }
             used_bar_quantity = self._filled_quantities(
                 event for event in all_events if event.ts == last_ts
             )
@@ -794,7 +833,6 @@ class Backtest:
                 )
                 trades.extend(close_result.trades)
                 all_events.extend(close_result.events)
-                final_events_by_account[account_id].extend(close_result.events)
                 cash_by_account[account_id] += close_result.cash_delta
             if positions:
                 raise ValueError(
@@ -810,14 +848,23 @@ class Backtest:
                 if equity_curve:
                     equity_curve[-1] = EquitySnapshot(ts=last_ts, equity=cash)
                 account_portfolio = portfolio_snapshots_by_account[account_id]
+                terminal_events = [
+                    event
+                    for event in all_events
+                    if event.ts == last_ts
+                    and self._account_id_by_symbol[event.symbol] == account_id
+                ]
                 account_portfolio[-1] = self._snapshot_portfolio(
                     last_ts,
                     {},
                     last_prices,
                     cash,
-                    sum(event.notional for event in final_events_by_account[account_id]) / cash
-                    if cash > EPSILON
-                    else 0.0,
+                    (
+                        sum(event.notional for event in terminal_events) / cash
+                        if cash > EPSILON
+                        else 0.0
+                    ),
+                    exposed=account_portfolio[-1].exposed,
                 )
             if self._record_position_snapshots:
                 position_snapshots = [
@@ -827,22 +874,14 @@ class Backtest:
                     snapshot for snapshot in allocation_snapshots if snapshot.ts != last_ts
                 ]
                 for account_id, cash in cash_by_account.items():
-                    account_targets = (
-                        {
-                            symbol: weight
-                            for symbol, weight in active_target_weights.items()
-                            if self._account_id_by_symbol[symbol] == account_id
-                        }
-                        if active_target_weights is not None
-                        else None
-                    )
                     allocation_snapshots.extend(
                         self._snapshot_allocations(
                             last_ts,
                             {},
                             last_prices,
                             cash,
-                            account_targets,
+                            active_target_weights_by_account[account_id],
+                            account_id=account_id,
                         )
                     )
 
@@ -1047,6 +1086,11 @@ class Backtest:
                 commission=float(e.commission),
                 slippage=float(e.slippage),
                 tax=float(e.tax),
+                entry_commission=(
+                    float(e.entry_commission) if e.entry_commission is not None else None
+                ),
+                entry_slippage=(float(e.entry_slippage) if e.entry_slippage is not None else None),
+                entry_tax=float(e.entry_tax) if e.entry_tax is not None else None,
                 pnl=float(e.pnl) if e.pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
                 entry_at=e.entry_at,
@@ -1138,6 +1182,7 @@ class Backtest:
                     net_exposure=float(portfolio.net_exposure),
                     concentration=float(portfolio.concentration),
                     turnover=float(portfolio.turnover),
+                    exposed=portfolio.exposed,
                 )
             )
         return equity_points
@@ -1322,11 +1367,16 @@ class Backtest:
         last_prices: dict[str, float],
         equity: float,
         target_weights: dict[str, float] | None,
+        *,
+        account_id: str,
     ) -> list[AllocationSnapshot]:
-        """Record every configured symbol, including unfilled target names."""
+        """Record every symbol routed to one account, including unfilled targets."""
         realized_weights = self._realized_weights(positions, last_prices, equity)
         snapshots = []
-        for symbol in sorted(self._symbols):
+        account_symbols = (
+            symbol for symbol in self._symbols if self._account_id_by_symbol[symbol] == account_id
+        )
+        for symbol in sorted(account_symbols):
             target_weight = target_weights.get(symbol, 0.0) if target_weights is not None else None
             realized_weight = realized_weights.get(symbol, 0.0)
             snapshots.append(
@@ -1349,6 +1399,8 @@ class Backtest:
         last_prices: dict[str, float],
         equity: float,
         turnover: float,
+        *,
+        exposed: bool | None = None,
     ) -> PortfolioSnapshot:
         """Compute end-of-event exposure ratios from signed market values."""
         realized_weights = self._realized_weights(positions, last_prices, equity)
@@ -1358,6 +1410,7 @@ class Backtest:
             net_exposure=sum(realized_weights.values()),
             concentration=max((abs(weight) for weight in realized_weights.values()), default=0.0),
             turnover=turnover,
+            exposed=bool(positions) if exposed is None else exposed,
         )
 
     @staticmethod

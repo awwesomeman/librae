@@ -189,6 +189,43 @@ def update_heartbeat(run_id: str, dsn: str | None = None) -> None:
         cur.close()
 
 
+def _claim_config_hash(
+    cur: PgCursor,
+    config_hash: str | None,
+    run_id: str,
+    *,
+    replace_existing: bool,
+) -> bool:
+    """Serialize one config hash and decide whether this run may persist."""
+    if config_hash is None:
+        return True
+
+    # WHY: the CLI's pre-run dedup check cannot prevent two workers from
+    # observing a miss concurrently. A transaction-scoped lock closes that
+    # race without holding a session lock after commit or rollback.
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (config_hash,),
+    )
+    cur.execute(
+        "SELECT run_id FROM backtest_runs WHERE config_hash = %s",
+        (config_hash,),
+    )
+    existing = cur.fetchone()
+    if existing is None or existing[0] == run_id:
+        return True
+    if replace_existing:
+        cur.execute("DELETE FROM backtest_runs WHERE run_id = %s", (existing[0],))
+        return True
+
+    logger.info(
+        "Skipping duplicate config_hash persistence for run_id=%s; canonical run_id=%s",
+        run_id,
+        existing[0],
+    )
+    return False
+
+
 def save_backtest_output(
     output: BacktestOutput,
     *,
@@ -199,14 +236,10 @@ def save_backtest_output(
     risk_policy: dict | None = None,
     perf_params: dict | None = None,
     config_hash: str | None = None,
+    replace_existing: bool = False,
     dsn: str | None = None,
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
-
-    # TODO: add ON CONFLICT (config_hash) DO NOTHING as defensive safety net
-    # for multi-worker race conditions. Currently relies on UNIQUE INDEX
-    # raising a postgres error, which works but is less clean.
-    # For --force path, use ON CONFLICT (config_hash) DO UPDATE.
 
     Args:
         output: BacktestOutput to write.
@@ -217,6 +250,8 @@ def save_backtest_output(
         risk_policy: Resolved engine-level portfolio limits to store.
         perf_params: Optional perf parameters dict to store as JSONB.
         config_hash: Optional deterministic hash for dedup.
+        replace_existing: Replace the canonical run for config_hash. Used by
+            the explicit force-recompute path.
         dsn: TimescaleDB DSN.
 
     Returns:
@@ -230,6 +265,15 @@ def save_backtest_output(
     # would leave DB in inconsistent state (e.g. trades without metadata).
     with get_conn(dsn) as conn:
         cur = conn.cursor()
+
+        if not _claim_config_hash(
+            cur,
+            config_hash,
+            meta.run_id,
+            replace_existing=replace_existing,
+        ):
+            cur.close()
+            return {"backtest_runs": 0}
 
         write_run_metadata(
             run_id=meta.run_id,
@@ -274,6 +318,7 @@ def save_backtest_output(
                     eq.net_exposure,
                     eq.concentration,
                     eq.turnover,
+                    eq.exposed,
                     meta.strategy,
                 )
                 for account in output.accounts
@@ -285,7 +330,7 @@ def save_backtest_output(
                    (ts, run_id, account_id, currency,
                     equity, benchmark_equity, drawdown, period_return,
                     benchmark_period_return, gross_exposure, net_exposure,
-                    concentration, turnover, strategy)
+                    concentration, turnover, exposed, strategy)
                    VALUES %s""",
                 eq_rows,
                 page_size=1000,
@@ -315,6 +360,9 @@ def save_backtest_output(
                     ev.commission,
                     ev.slippage,
                     ev.tax,
+                    ev.entry_commission,
+                    ev.entry_slippage,
+                    ev.entry_tax,
                     ev.pnl,
                     ev.net_return,
                     _to_dt(ev.entry_at) if ev.entry_at else None,
@@ -332,6 +380,7 @@ def save_backtest_output(
                     fill_quantity, price, entry_price,
                     remaining_quantity, notional,
                     commission, slippage, tax,
+                    entry_commission, entry_slippage, entry_tax,
                     pnl, net_return,
                     entry_at, periods_held, reason)
                    VALUES %s
@@ -743,6 +792,7 @@ def write_equity_curve_point(
     net_exposure: float | None = None,
     concentration: float | None = None,
     turnover: float | None = None,
+    exposed: bool | None = None,
     strategy: str | None = None,
     dsn: str | None = None,
 ) -> None:
@@ -754,8 +804,8 @@ def write_equity_curve_point(
                (ts, run_id, account_id, currency,
                 equity, benchmark_equity, drawdown, period_return,
                 benchmark_period_return, gross_exposure, net_exposure,
-                concentration, turnover, strategy)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                concentration, turnover, exposed, strategy)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, account_id, ts) DO UPDATE SET
                  currency=EXCLUDED.currency,
                  equity=EXCLUDED.equity, benchmark_equity=EXCLUDED.benchmark_equity,
@@ -765,6 +815,7 @@ def write_equity_curve_point(
                  net_exposure=EXCLUDED.net_exposure,
                  concentration=EXCLUDED.concentration,
                  turnover=EXCLUDED.turnover,
+                 exposed=EXCLUDED.exposed,
                  strategy=EXCLUDED.strategy""",
             (
                 _to_dt(ts),
@@ -780,6 +831,7 @@ def write_equity_curve_point(
                 net_exposure,
                 concentration,
                 turnover,
+                exposed,
                 strategy,
             ),
         )
@@ -811,6 +863,9 @@ def write_trade_event(
     entry_at: datetime | None = None,
     periods_held: int | None = None,
     reason: str = "",
+    entry_commission: float | None = None,
+    entry_slippage: float | None = None,
+    entry_tax: float | None = None,
     dsn: str | None = None,
 ) -> None:
     """Write a single trade event (upsert by event_id + ts)."""
@@ -824,10 +879,12 @@ def write_trade_event(
                 fill_quantity, price, entry_price,
                 remaining_quantity, notional,
                 commission, slippage, tax,
+                entry_commission, entry_slippage, entry_tax,
                 pnl, net_return,
                 entry_at, periods_held, reason)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                       %s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
                 event_id,
@@ -849,6 +906,9 @@ def write_trade_event(
                 commission,
                 slippage,
                 tax,
+                entry_commission,
+                entry_slippage,
+                entry_tax,
                 pnl,
                 net_return,
                 _to_dt(entry_at) if entry_at else None,
@@ -988,8 +1048,14 @@ def refresh_performance(
         "commission",
         "slippage",
         "tax",
+        "entry_commission",
+        "entry_slippage",
+        "entry_tax",
         "net_return",
         "fill_quantity",
+        "price",
+        "entry_price",
+        "notional",
     )
     for row in trade_rows:
         missing = [
@@ -1006,11 +1072,19 @@ def refresh_performance(
     timestamps = [r["_time"] for r in eq_records]
     trade_pnls = [
         _NS(
-            gross_pnl=float(r["pnl"] + r["commission"] + r["slippage"] + r["tax"]),
+            gross_pnl=float(
+                r["pnl"]
+                + r["entry_commission"]
+                + r["entry_slippage"]
+                + r["entry_tax"]
+                + r["commission"]
+                + r["slippage"]
+                + r["tax"]
+            ),
             net_pnl=float(r["pnl"]),
-            commission=float(r["commission"]),
-            slippage=float(r["slippage"]),
-            tax=float(r["tax"]),
+            commission=float(r["entry_commission"] + r["commission"]),
+            slippage=float(r["entry_slippage"] + r["slippage"]),
+            tax=float(r["entry_tax"] + r["tax"]),
             gross_return=0.0,
             net_return=float(r["net_return"]),
             exit_commission=0.0,
@@ -1020,11 +1094,22 @@ def refresh_performance(
         for r in trade_rows
     ]
     trade_quantities = [float(r["fill_quantity"]) for r in trade_rows]
-    trade_notionals = [abs(float(r["notional"])) for r in trade_rows]
+    trade_notionals = [
+        abs(float(r["notional"] * r["entry_price"] / r["price"])) for r in trade_rows
+    ]
 
-    def optional_series(field: str) -> list[float] | None:
-        values = [float(row[field]) for row in eq_records if pd.notna(row.get(field))]
-        return values or None
+    def complete_optional_series(field: str) -> list[float] | None:
+        values = [row.get(field) for row in eq_records]
+        if not values or any(pd.isna(value) for value in values):
+            return None
+        return [float(value) for value in values]
+
+    exposed_values = [row.get("exposed") for row in eq_records]
+    exposed_periods = (
+        sum(bool(value) for value in exposed_values)
+        if exposed_values and not any(pd.isna(value) for value in exposed_values)
+        else None
+    )
 
     perf_kwargs: dict[str, Any] = {}
     if config is not None:
@@ -1035,12 +1120,14 @@ def refresh_performance(
         timestamps=timestamps,
         trade_pnls=trade_pnls,
         total_periods=len(equity_values),
+        benchmark_values=complete_optional_series("benchmark_equity"),
+        exposed_periods=exposed_periods,
         trade_quantities=trade_quantities,
         trade_notionals=trade_notionals,
-        turnover_values=optional_series("turnover"),
-        gross_exposure_values=optional_series("gross_exposure"),
-        net_exposure_values=optional_series("net_exposure"),
-        concentration_values=optional_series("concentration"),
+        turnover_values=complete_optional_series("turnover"),
+        gross_exposure_values=complete_optional_series("gross_exposure"),
+        net_exposure_values=complete_optional_series("net_exposure"),
+        concentration_values=complete_optional_series("concentration"),
         **perf_kwargs,
     )
     if config is None:
@@ -1097,6 +1184,14 @@ def save_signal_results(
             cur = conn.cursor()
 
             if run_id is not None:
+                if not _claim_config_hash(
+                    cur,
+                    config.config_hash if config else None,
+                    run_id,
+                    replace_existing=config.force if config else False,
+                ):
+                    cur.close()
+                    return {"backtest_runs": 0}
                 write_run_metadata(
                     run_id,
                     strategy,
@@ -1181,6 +1276,7 @@ def save_strategy_results(
         risk_policy=asdict(config.risk),
         perf_params=config.perf_params,
         config_hash=config.config_hash,
+        replace_existing=config.force,
     )
 
     ohlcv_count = 0

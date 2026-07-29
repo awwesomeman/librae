@@ -34,7 +34,7 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as the UTC-aware bar-start datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
 - Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the six lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
-- `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias.
+- `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias. Cached futures contracts and contract details are revalidated against their IBKR expiry before reuse so a long-running process rolls after expiry rather than continuing to quote or trade the stale month.
 
 ## Backtest Engine Design (`librae/`)
 
@@ -544,7 +544,7 @@ exceeded `poll_seconds`.
   this ratio. Market orders are unaffected because their execution price is
   not known before submission.
 - `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
-- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes and books only confirmed broker fills. Both persist the halt across restart. Live emergency exits remain active while halted and must reach a broker terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts a new risk epoch and resets the equity peak to current equity.
+- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position in the breached account and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes for that account and books only confirmed broker fills. The account halt persists across restart while unaffected accounts continue to be managed. Live emergency exits remain active while the account is halted and must reach a broker terminal state before `reset_halt(account_id)` is allowed. After operator review, `reset_halt(account_id)` starts a new risk epoch for that account; calling `reset_halt()` without an account also clears a system-wide halt and resets every account peak.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
   `reset_halt()` is required after review before new entries resume.
@@ -556,6 +556,9 @@ Performance annualization has a separate explicit SSOT:
 `build_config()` supplies data-source defaults only for D1. Annualized intraday
 or unknown-source runs must set `strategy.perf.periods_per_year`; the engine
 never guesses it from sample density.
+`RunConfig.risk_free_rate` is an annual effective rate greater than `-1`.
+Performance metrics deannualize positive, zero, and negative rates with the
+same compounded-return formula before comparing period returns.
 
 Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
 and one-way turnover (`sum(abs(traded notional)) / ending equity`) for its
@@ -590,13 +593,13 @@ When no order or grouped execution is active, the checks repeat every
   configured symbols; it is not described as a complete account snapshot. A
   restored checkpoint keeps its entry time and accumulated costs, while broker
   side/quantity is a reconciliation assertion. A mismatch or unreadable
-  configured-symbol snapshot halts. Only a first run with no checkpoint adopts
-  broker exposure as a safety baseline. Crypto spot uses base-asset balance
-  inventory, not the derivatives-only positions endpoint. Since a spot balance
-  has no broker average cost, it can validate quantity against a restored
-  checkpoint but cannot seed a first-run cost basis; that case halts for
-  operator action. Ordinary spot also rejects opening/adding a short, while a
-  sell that reduces or closes owned inventory remains valid.
+  configured-symbol snapshot halts. A first run with no checkpoint must be
+  flat: broker exposure alone cannot reconstruct the engine's cash, accumulated
+  entry costs, or risk epoch, so a non-flat first run halts and requires the
+  matching checkpoint or an operator flatten. Crypto spot uses base-asset
+  balance inventory, not the derivatives-only positions endpoint. Ordinary
+  spot also rejects opening/adding a short, while a sell that reduces or closes
+  owned inventory remains valid.
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
@@ -607,9 +610,10 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance/multi-leg lifecycle,
-and active order queue. Runtime-state schema v8 is intentionally breaking:
-older checkpoints are rejected and require
-an explicit migration or removal. `broker_orders` keeps completed
+and active order queue. Runtime-state schema v10 adds durable account-scoped
+drawdown halts and migrates v9 checkpoints with no halted accounts; older
+checkpoints are rejected and require an explicit migration or removal.
+`broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
@@ -664,6 +668,11 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 | Restart | new run | restore when state is enabled | restore and reconcile | restore and reconcile |
 
 #### Use-case capability matrix
+
+Use this matrix to select an engine workflow, then apply the
+[strategy readiness checklist](docs/guides/strategy-readiness.md) before
+promoting a strategy between research, shadow simulation, broker paper, and
+live capital.
 
 | Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
@@ -753,7 +762,7 @@ financial/execution fact.
 | `AccountPerformance` | one account's currency, initial cash, final equity, net PnL, equity curve, and metrics |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
 | `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
-| `OrderEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution |
+| `OrderEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution, while close/reduce records also persist their prorated entry costs for exact KPI refresh |
 | `EquityCurvePoint` | per-event equity/return/drawdown/benchmark plus gross/net exposure, concentration, and turnover |
 | `PositionSnapshotPoint` | per-bar position quantity, signed market value, and realized weight |
 | `AllocationSnapshotPoint` | per-event target weight, achieved weight, and drift for one symbol |
@@ -996,8 +1005,8 @@ flowchart TD
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
 | `backtest_runs` | run hub and resolved strategy/execution/performance configuration, 1 row / run | PK `run_id` | no |
-| `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
-| `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close) | FK `run_id` (nullable) | yes (`ts`) |
+| `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
+| `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
 | `strategy_performance` | currency-labeled performance, PnL, cost, benchmark, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
@@ -1054,6 +1063,13 @@ refresh_* — recomputes derived/aggregate data from other tables and upserts th
 Decision criteria: **single-table vs. multi-table** decides between `write_`/`save_`; **writing a full row vs. partially updating an existing one** decides between `write_`/`update_`; **whether existing data must be read first to decide what to write** (rather than a plain UPSERT) means `merge_`; **whether it re-aggregates from other tables** means `refresh_`.
 
 Examples: `save_backtest_output` (writes 5 tables in one go, a multi-table coordinator), `write_trade_event` (single-table full-row write), `update_heartbeat` (single-table partial update of one field), `merge_ohlcv_coverage_ranges` (must read existing ranges first to decide the merge result), `refresh_performance` (recomputes KPIs from `equity_curve` + `trade_events` and writes them back to `strategy_performance`).
+
+Backtest and signal-result persistence serialize writers for the same
+non-null `config_hash` with a transaction-scoped PostgreSQL advisory lock.
+After taking the lock, a normal duplicate writer skips the complete run
+without writing partial child rows. An explicit force recompute deletes and
+replaces the prior canonical run in the same transaction, so rollback restores
+the prior run if the replacement fails.
 
 **Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate: a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot — the same point-in-time-correctness principle applies to any ingestion layer built on top of `db/` (e.g. fundamentals data, where the earliest-disclosed value should win the same way).
 

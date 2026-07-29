@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC
 
 import pandas as pd
@@ -13,9 +14,11 @@ from librae import (
     MultiLegOrder,
     OrderIntent,
     PortfolioTargets,
+    RiskPolicy,
     RunConfig,
     Strategy,
 )
+from librae.core.executor import REASON_DRAWDOWN_BREACH
 
 
 def _frame() -> pd.DataFrame:
@@ -151,3 +154,100 @@ def test_portfolio_targets_reject_cross_account_capital_base() -> None:
 
     with pytest.raises(ValueError, match="cannot span isolated accounts"):
         backtest.run()
+
+
+def test_target_weight_snapshots_remain_scoped_to_each_account() -> None:
+    class SequentialAccountTargets(Strategy):
+        def on_bar(self, ctx: Context):
+            if ctx.period_index == 0:
+                return PortfolioTargets(weights={"AAA": 0.5})
+            if ctx.period_index == 1:
+                return PortfolioTargets(weights={"BBB": 0.25})
+            return []
+
+    backtest = Backtest(
+        _frame(),
+        SequentialAccountTargets(),
+        config=_config(),
+        cost_model=CostModel.zero(),
+        record_position_snapshots=True,
+    )
+
+    backtest.run()
+    output = backtest.build_output()
+
+    third_ts = _frame().index.get_level_values("datetime").unique()[2]
+    allocations = {
+        (snapshot.account_id, snapshot.symbol): snapshot
+        for snapshot in output.allocation_snapshots
+        if snapshot.ts == third_ts
+    }
+    assert allocations[("alpha", "AAA")].target_weight == pytest.approx(0.5)
+    assert allocations[("beta", "BBB")].target_weight == pytest.approx(0.25)
+    assert ("alpha", "BBB") not in allocations
+    assert ("beta", "AAA") not in allocations
+
+
+def test_drawdown_halt_is_scoped_to_breached_account() -> None:
+    timestamps = pd.date_range("2026-01-01", periods=5, freq="h", tz=UTC)
+    rows = []
+    for symbol, prices in {
+        "AAA": [100.0, 100.0, 50.0, 50.0, 50.0],
+        "BBB": [100.0, 100.0, 100.0, 100.0, 100.0],
+    }.items():
+        for ts, price in zip(timestamps, prices, strict=True):
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "datetime": ts,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 1_000.0,
+                }
+            )
+    data = pd.DataFrame(rows).set_index(["symbol", "datetime"]).sort_index()
+
+    class OpenBothAccounts(Strategy):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def on_bar(self, ctx: Context):
+            self.calls += 1
+            if ctx.period_index == 0:
+                return MultiLegOrder(
+                    legs=(
+                        OrderIntent(action="long", symbol="AAA", quantity=10.0),
+                        OrderIntent(action="long", symbol="BBB", quantity=10.0),
+                    )
+                )
+            return [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+            ]
+
+    strategy = OpenBothAccounts()
+    config = replace(
+        _config(),
+        risk=RiskPolicy(max_drawdown_rate=0.2),
+    )
+    backtest = Backtest(
+        data,
+        strategy,
+        config=config,
+        cost_model=CostModel.zero(),
+    )
+
+    result = backtest.run()
+    output = backtest.build_output()
+
+    accounts = {account.account_id: account for account in result.accounts}
+    assert accounts["alpha"].final_equity == pytest.approx(500.0)
+    assert accounts["beta"].final_equity == pytest.approx(1_000.0)
+    assert strategy.calls > 2
+    drawdown_exits = [
+        event
+        for event in output.order_events
+        if event.reason == REASON_DRAWDOWN_BREACH and event.event_type == "close"
+    ]
+    assert {event.symbol for event in drawdown_exits} == {"AAA"}

@@ -397,7 +397,16 @@ class LiveTrader:
         elif config.no_db:
             self._state_store = None
         else:
-            from db.timescale_state import TimescaleLiveStateStore
+            try:
+                from db.timescale_state import TimescaleLiveStateStore
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "TimescaleDB persistence is enabled but its optional dependencies "
+                    "are unavailable. From a repository clone run: "
+                    "uv sync --extra db. For a direct install, include Librae's "
+                    "'db' extra; otherwise set no_db=True and inject durable "
+                    "state_store for live mode."
+                ) from exc
 
             self._state_store = TimescaleLiveStateStore()
         if is_live and self._state_store is None:
@@ -417,6 +426,7 @@ class LiveTrader:
             account_id: account.initial_cash for account_id, account in config.accounts.items()
         }
         self._halted: bool = False
+        self._halted_accounts: set[str] = set()
         self._pending_decision: StrategyDecision = []
         self._active_orders: list[TrackedOrder] = []
         self._live_rebalance: LiveRebalance | None = None
@@ -535,6 +545,32 @@ class LiveTrader:
             grouped.setdefault(self._account_id_by_symbol[symbol], []).append(action)
         return grouped
 
+    def _without_halted_accounts(
+        self,
+        decision: StrategyDecision,
+        *,
+        primary_symbol: str,
+    ) -> StrategyDecision:
+        """Discard exposure decisions owned by drawdown-halted accounts."""
+        if not decision or not self._halted_accounts:
+            return decision
+        if isinstance(decision, PortfolioTargets):
+            account_ids = {self._account_id_by_symbol[symbol] for symbol in decision.weights} or {
+                self._account_id_by_symbol[primary_symbol]
+            }
+            return [] if account_ids & self._halted_accounts else decision
+        if isinstance(decision, MultiLegOrder):
+            account_ids = {
+                self._account_id_by_symbol[leg.symbol or primary_symbol] for leg in decision.legs
+            }
+            return [] if account_ids & self._halted_accounts else decision
+        return [
+            action
+            for action in decision
+            if self._account_id_by_symbol[action.symbol or primary_symbol]
+            not in self._halted_accounts
+        ]
+
     def _snapshot_state(self) -> LiveRuntimeState:
         return LiveRuntimeState(
             state_key=self._state_key,
@@ -557,6 +593,7 @@ class LiveTrader:
             period_index=self._period_index,
             status_period_count=self._status_period_count,
             halted=self._halted,
+            halted_accounts=set(self._halted_accounts),
             adv_session_labels=dict(self._adv_session_labels),
             adv_filled_quantities=dict(self._adv_filled_quantities),
         )
@@ -585,16 +622,19 @@ class LiveTrader:
         self._period_index = state.period_index
         self._status_period_count = state.status_period_count
         self._halted = state.halted
+        self._halted_accounts = set(state.halted_accounts)
         self._adv_session_labels = state.adv_session_labels
         self._adv_filled_quantities = state.adv_filled_quantities
         self._restored_state = True
         logger.info(
-            "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d halted=%s",
+            "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d "
+            "halted=%s halted_accounts=%s",
             self._state_key,
             self._run_id,
             self._last_cycle_ts,
             len(self._active_orders),
             self._halted,
+            sorted(self._halted_accounts),
         )
 
     def _persist_state(self, *orders: TrackedOrder) -> None:
@@ -682,6 +722,7 @@ class LiveTrader:
                 net_exposure=net,
                 concentration=concentration,
                 turnover=turnover,
+                exposed=gross > EPSILON,
                 strategy=strategy,
             )
 
@@ -939,7 +980,7 @@ class LiveTrader:
                     message="Persisted and broker positions differ for configured symbols",
                 )
             return
-        if self._adopt_broker_positions():
+        if self._bootstrap_broker_positions():
             self._persist_state()
             return
 
@@ -1006,46 +1047,28 @@ class LiveTrader:
                 message="Untracked open orders on configured symbols: " + ", ".join(orphans),
             )
 
-    def _adopt_broker_positions(self) -> bool:
-        """Adopt configured-symbol exposure on a first run."""
+    def _bootstrap_broker_positions(self) -> bool:
+        """Verify that a first live run starts from a reconstructible book."""
         try:
             snapshot = self._read_broker_positions()
         except Exception:
             logger.exception("Broker position snapshot failed; keeping last confirmed local book")
             return False
 
-        positions: dict[str, PositionState] = {}
-        for symbol, broker_position in snapshot.items():
-            if broker_position.average_price is None:
-                logger.error(
-                    "Cannot adopt %s inventory without broker average cost; "
-                    "restore a prior checkpoint or flatten the account",
-                    symbol,
-                )
-                return False
-            positions[symbol] = PositionState(
-                symbol=symbol,
-                side=broker_position.side,
-                entry_price=broker_position.average_price,
-                quantity=broker_position.quantity,
-                entry_at=datetime.now(tz=UTC),
-                periods_held=0,
-                entry_commission=0.0,
-                entry_slippage=0.0,
-                entry_tax=0.0,
-                total_entry_cost=broker_position.average_price
-                * broker_position.quantity
-                * self._executor.get_cost_model(symbol).multiplier,
+        if snapshot:
+            symbols = ", ".join(sorted(snapshot))
+            self._halt_live(
+                title="Non-flat First-run Broker State",
+                message=(
+                    f"Broker positions exist for configured symbols ({symbols}), but no "
+                    "durable checkpoint exists to reconstruct cash, entry costs, and the "
+                    "risk epoch. Restore the matching checkpoint or flatten those "
+                    "positions before starting this deployment"
+                ),
             )
-        self._positions = positions
-        for symbol, position in positions.items():
-            logger.warning(
-                "Adopted broker position: %s %s %.4f @ %.2f",
-                symbol,
-                position.side,
-                position.quantity,
-                position.entry_price,
-            )
+            return True
+
+        self._positions = {}
         return True
 
     # 1% — same style as CONSECUTIVE_ERROR_THRESHOLD: an engine constant,
@@ -1325,8 +1348,8 @@ class LiveTrader:
             raise ValueError("halt reason must be a non-empty string")
         self._halt_live(title="Manual Halt", message=reason.strip())
 
-    def reset_halt(self) -> None:
-        """Start a new risk epoch after explicit operator review."""
+    def reset_halt(self, account_id: str | None = None) -> None:
+        """Start a new global or account-specific risk epoch after review."""
         if self._active_orders:
             raise RuntimeError("cannot reset halt while broker orders remain unresolved")
         if self._live_multi_leg is not None:
@@ -1334,11 +1357,21 @@ class LiveTrader:
                 "cannot reset halt while multi-leg exposure requires manual reconciliation"
             )
         account_snapshots = self._calc_account_snapshots()
-        self._halted = False
-        self._equity_peak_by_account = {
-            account_id: equity for account_id, (equity, _) in account_snapshots.items()
-        }
-        self._prev_equity_by_account = dict(self._equity_peak_by_account)
+        if account_id is not None:
+            if account_id not in self._cash_by_account:
+                raise ValueError(f"unknown account_id: {account_id!r}")
+            self._halted_accounts.discard(account_id)
+            equity = account_snapshots[account_id][0]
+            self._equity_peak_by_account[account_id] = equity
+            self._prev_equity_by_account[account_id] = equity
+        else:
+            self._halted = False
+            self._halted_accounts.clear()
+            self._equity_peak_by_account = {
+                current_account_id: equity
+                for current_account_id, (equity, _) in account_snapshots.items()
+            }
+            self._prev_equity_by_account = dict(self._equity_peak_by_account)
         self._persist_state()
 
     def _setup_signal_handlers(self) -> None:
@@ -1703,6 +1736,12 @@ class LiveTrader:
         lagged_adv_by_symbol: dict[str, float] | None = None,
     ) -> bool:
         """Persist a deterministic order queue, then advance it serially."""
+        intent = self._without_halted_accounts(
+            intent,
+            primary_symbol=self._symbols[0],
+        )
+        if not intent:
+            return True
         if isinstance(intent, MultiLegOrder):
             if self._live_multi_leg is not None:
                 raise RuntimeError("cannot replace an active multi-leg order")
@@ -2400,6 +2439,10 @@ class LiveTrader:
                 if not pd.isna(lagged_adv):
                     lagged_adv_by_symbol[symbol] = float(lagged_adv)
 
+        self._pending_decision = self._without_halted_accounts(
+            self._pending_decision,
+            primary_symbol=primary_symbol,
+        )
         ready_decision, waiting_decision = partition_pending_decision(
             self._pending_decision,
             raw_bars,
@@ -2418,7 +2461,7 @@ class LiveTrader:
             step_events: list[OrderEvent] = []
             for account_id in staged_cash_by_account:
                 account_positions = self._account_positions(account_id)
-                if self._halted:
+                if self._halted or account_id in self._halted_accounts:
                     account_result = check_stop_targets(
                         account_positions,
                         raw_bars,
@@ -2571,6 +2614,10 @@ class LiveTrader:
                 set(self._symbols),
                 primary_symbol=primary_symbol,
             )
+            intent = self._without_halted_accounts(
+                intent,
+                primary_symbol=primary_symbol,
+            )
             self._period_index += 1
             if self._executor.simulation:
                 self._pending_decision = merge_pending_decisions(
@@ -2686,7 +2733,7 @@ class LiveTrader:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
         snapshots = self._calc_account_snapshots()
-        breached_drawdown: float | None = None
+        breached_accounts: list[tuple[str, float]] = []
         for account_id, (equity, _) in snapshots.items():
             peak = max(self._equity_peak_by_account[account_id], equity)
             self._equity_peak_by_account[account_id] = peak
@@ -2694,14 +2741,14 @@ class LiveTrader:
             if (
                 self._risk_policy.max_drawdown_rate
                 and not self._halted
+                and account_id not in self._halted_accounts
                 and drawdown <= -self._risk_policy.max_drawdown_rate
             ):
-                breached_drawdown = drawdown
-                break
-        if breached_drawdown is not None:
-            self._flatten_and_halt(
+                breached_accounts.append((account_id, drawdown))
+        if breached_accounts:
+            self._flatten_accounts_and_halt(
                 ts,
-                breached_drawdown,
+                breached_accounts,
                 bars,
                 used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             )
@@ -2784,31 +2831,54 @@ class LiveTrader:
                         position=pos_str,
                     )
 
-    def _flatten_and_halt(
+    def _flatten_account_and_halt(
         self,
         ts: datetime,
+        account_id: str,
         drawdown: float,
         bars: dict[str, dict[str, float]],
         *,
         used_bar_quantity_by_symbol: dict[str, float] | None = None,
     ) -> None:
-        """Queue or submit exits and permanently halt new entries."""
+        """Queue or submit exits and halt new exposure for one account."""
+        self._flatten_accounts_and_halt(
+            ts,
+            [(account_id, drawdown)],
+            bars,
+            used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
+        )
+
+    def _flatten_accounts_and_halt(
+        self,
+        ts: datetime,
+        breaches: list[tuple[str, float]],
+        bars: dict[str, dict[str, float]],
+        *,
+        used_bar_quantity_by_symbol: dict[str, float] | None = None,
+    ) -> None:
+        """Queue one serial recovery batch for all accounts breached together."""
         exit_queued = False
+        breached_account_ids = {account_id for account_id, _ in breaches}
+        account_positions = {
+            symbol: position
+            for symbol, position in self._positions.items()
+            if self._account_id_by_symbol[symbol] in breached_account_ids
+        }
         if self._executor.simulation:
             queue_market_exit_all(
-                self._positions,
+                account_positions,
                 reason=REASON_DRAWDOWN_BREACH,
             )
-            flattened = not self._positions
+            flattened = not account_positions
             exit_queued = not flattened
         else:
             actions = [
                 OrderIntent(action="close", symbol=symbol, reason=REASON_DRAWDOWN_BREACH)
-                for symbol in self._positions
+                for symbol in account_positions
             ]
             reference_bars = {
                 symbol: {"close": self._get_last_price(symbol, position)}
-                for symbol, position in self._positions.items()
+                for symbol, position in account_positions.items()
             }
             # Live emergency exits submit the full remaining quantity. Broker
             # execution reports remain authoritative for partial fills.
@@ -2818,29 +2888,35 @@ class LiveTrader:
                 ts,
                 apply_volume_limit=False,
             )
-        self._halted = True
-        self._pending_decision = []
+        self._halted_accounts.update(breached_account_ids)
+        self._pending_decision = self._without_halted_accounts(
+            self._pending_decision,
+            primary_symbol=self._symbols[0],
+        )
         self._persist_state()
         if flattened:
-            outcome = "flattened all positions"
+            outcome = "flattened account positions"
         elif exit_queued:
             outcome = "market exits queued for next observed opens"
         elif self._active_orders:
             outcome = "flattening in progress"
         else:
             outcome = "flatten attempt failed"
-        self._notify(
-            "send_alert",
-            title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
-            message=(
-                f"drawdown={drawdown:.2%} <= "
-                f"-{self._risk_policy.max_drawdown_rate:.2%} — {outcome} and halted"
-            ),
-        )
-        logger.warning(
-            "LiveTrader halted at %s: drawdown %.2f%% breached max_drawdown_rate=%.2f%% — %s",
-            ts,
-            drawdown * 100,
-            self._risk_policy.max_drawdown_rate * 100,
-            outcome,
-        )
+        for account_id, drawdown in breaches:
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
+                message=(
+                    f"account_id={account_id} drawdown={drawdown:.2%} <= "
+                    f"-{self._risk_policy.max_drawdown_rate:.2%} — {outcome} and halted"
+                ),
+            )
+            logger.warning(
+                "LiveTrader account %s halted at %s: drawdown %.2f%% breached "
+                "max_drawdown_rate=%.2f%% — %s",
+                account_id,
+                ts,
+                drawdown * 100,
+                self._risk_policy.max_drawdown_rate * 100,
+                outcome,
+            )

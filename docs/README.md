@@ -10,6 +10,7 @@
 | 執行一個完整策略 | [Examples](../examples/README.md) |
 | 理解執行語意與系統設計 | [Architecture](../architecture.md) |
 | 分析訊號的遠期表現 | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
+| 檢查策略是否可進入下一執行階段 | [Strategy readiness checklist](guides/strategy-readiness.md) |
 | 設定 DB、Grafana、broker 或部署環境 | [Optional infrastructure](guides/optional-infrastructure.md) |
 
 ## 文件類型
