@@ -397,7 +397,16 @@ class LiveTrader:
         elif config.no_db:
             self._state_store = None
         else:
-            from db.timescale_state import TimescaleLiveStateStore
+            try:
+                from db.timescale_state import TimescaleLiveStateStore
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "TimescaleDB persistence is enabled but its optional dependencies "
+                    "are unavailable. From a repository clone run: "
+                    "uv sync --extra db. For a direct install, include Librae's "
+                    "'db' extra; otherwise set no_db=True and inject durable "
+                    "state_store for live mode."
+                ) from exc
 
             self._state_store = TimescaleLiveStateStore()
         if is_live and self._state_store is None:

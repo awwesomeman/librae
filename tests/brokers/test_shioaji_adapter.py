@@ -13,9 +13,19 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from brokers.shioaji_adapter import _require_shioaji
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_missing_shioaji_names_install_extra():
+    with (
+        patch.dict("sys.modules", {"shioaji": None}),
+        pytest.raises(ImportError, match="tw-live"),
+    ):
+        _require_shioaji()
 
 
 def _make_adapter(*, ca_activated: bool = False):

@@ -111,9 +111,9 @@ def _require_ib_async():
         return ib_async
     except ImportError as e:
         raise ImportError(
-            "ib_async is required for IBKRAdapter. "
-            "Install it with: pip install ib-async  "
-            "or: pip install -e '.[us-live]'"
+            "IBKRAdapter requires the optional 'us-live' dependencies. "
+            "From a repository clone run: uv sync --extra us-live. "
+            "For a direct install, include Librae's 'us-live' extra."
         ) from e
 
 

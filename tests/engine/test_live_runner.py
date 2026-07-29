@@ -40,6 +40,23 @@ def _zero_cost_model() -> CostModel:
     return CostModel.zero()
 
 
+def test_enabled_db_without_optional_dependency_has_actionable_error():
+    config = make_test_cfg(mode="sim", no_db=False)
+
+    with (
+        patch.dict("sys.modules", {"db.timescale_state": None}),
+        pytest.raises(ModuleNotFoundError, match=r"uv sync --extra db.*no_db=True"),
+    ):
+        LiveTrader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            adapter=MagicMock(),
+            cost_model=CostModel.zero(),
+            notifier=None,
+        )
+
+
 def _mock_order_adapter() -> MagicMock:
     """order_adapter mock with realistic flat get_position()/get_balance() —
     a bare MagicMock's auto-generated return values are truthy/float-coercible

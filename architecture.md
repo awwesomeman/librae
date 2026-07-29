@@ -669,6 +669,11 @@ Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independ
 
 #### Use-case capability matrix
 
+Use this matrix to select an engine workflow, then apply the
+[strategy readiness checklist](docs/guides/strategy-readiness.md) before
+promoting a strategy between research, shadow simulation, broker paper, and
+live capital.
+
 | Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
 | Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
