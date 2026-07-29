@@ -7,10 +7,10 @@
 services:
   grafana:
     env_file: ../.env
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.1.1
     container_name: quant_grafana
     ports:
-      - "3000:3000"
+      - "${GF_BIND:-127.0.0.1}:${GF_PORT:-3000}:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ../app/grafana/provisioning:/etc/grafana/provisioning
@@ -40,7 +40,10 @@ services:
     environment:
       - POSTGRES_DB=quant
       - POSTGRES_USER=quant
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-quant_secret}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — no insecure default}
+      # Read by timescale_init.sql (via \getenv) to create the least-privilege
+      # quant_app role.
+      - POSTGRES_APP_PASSWORD=${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set — no insecure default}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U quant -d quant"]

@@ -3,6 +3,34 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- ============================================================
+-- quant_app — least-privilege role for Grafana datasource / research
+-- scripts. quant (this script's connecting role) stays superuser, reserved
+-- for migrations/admin.
+-- Password comes from the POSTGRES_APP_PASSWORD env var (present in the
+-- container both on first init via docker-entrypoint-initdb.d and on a
+-- manual re-run via `docker exec`, since it's set in the container's
+-- environment, not just at build time) — never hardcoded here.
+-- ============================================================
+-- NOTE: psql variable substitution (:'var') does not happen inside
+-- dollar-quoted (DO $$...$$) blocks, so the role create/alter is built as
+-- text here and dispatched via \gexec instead of a DO block.
+\getenv quant_app_password POSTGRES_APP_PASSWORD
+SELECT CASE
+    WHEN EXISTS (SELECT FROM pg_roles WHERE rolname = 'quant_app')
+    THEN format('ALTER ROLE quant_app WITH PASSWORD %L', :'quant_app_password')
+    ELSE format('CREATE ROLE quant_app LOGIN PASSWORD %L', :'quant_app_password')
+END AS quant_app_role_sql
+\gexec
+
+GRANT USAGE ON SCHEMA public TO quant_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO quant_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO quant_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO quant_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO quant_app;
+
+-- ============================================================
 -- backtest_runs — Run 中樞 (1 row / run)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS backtest_runs (

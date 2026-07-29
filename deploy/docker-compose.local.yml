@@ -1,6 +1,8 @@
 # Local development: Grafana only, connecting to remote VPS DB.
 #
-# Prerequisites: cp ../.env.example ../.env and fill in VPS_DB_HOST, POSTGRES_PASSWORD
+# Prerequisites: cp ../.env.example ../.env and fill in VPS_DB_HOST, POSTGRES_APP_PASSWORD
+# (the Grafana datasource connects as the least-privilege quant_app role,
+# not the quant superuser)
 #
 # Usage:
 #   cd deploy
