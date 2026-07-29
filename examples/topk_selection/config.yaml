@@ -4,12 +4,42 @@ strategy:
   timeframe: D1
   market: us_equity
   data_source: synthetic
-  initial_cash: 100000
+  accounts:
+    default:
+      currency: USD
+      initial_cash: 100000
+  instrument_overrides:
+    ALPHA:
+      data_adapter: ibkr
+      instrument_type: spot
+      currency: USD
+      security_type: STK
+    BETA:
+      data_adapter: ibkr
+      instrument_type: spot
+      currency: USD
+      security_type: STK
+    GAMMA:
+      data_adapter: ibkr
+      instrument_type: spot
+      currency: USD
+      security_type: STK
+    DELTA:
+      data_adapter: ibkr
+      instrument_type: spot
+      currency: USD
+      security_type: STK
   execution:
     default_fill_price: open
     max_bar_volume_participation_rate: 0.10
     adv_lookback_sessions: 20
     max_adv_participation_rate: 0.01
+  risk:
+    max_position_weight: 0.60
+    max_drawdown_rate: 0.20
+    max_gross_exposure: 1.00
+    max_net_exposure: 1.00
+    max_order_notional: 60000
   cost_overrides:
     multiplier: 1.0
   params:

@@ -61,8 +61,11 @@ uv sync --extra test --extra dev
 uv run python -m examples.simple_sma.run --mode backtest --no-db
 ```
 
-Continue with the [examples guide](../examples/README.md) to compare a single-asset
-strategy, a prepared target-weight schedule, and cross-sectional Top K.
+Continue with the [examples guide](../examples/README.md) to compare a
+single-asset strategy, a prepared target-weight schedule, cross-sectional
+selection, a strategy-owned optimizer, and an explicitly sized multi-leg
+decision. Use the [strategy readiness checklist](guides/strategy-readiness.md)
+before promoting a strategy beyond research.
 
 ## Environment variables
 

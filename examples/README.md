@@ -14,6 +14,8 @@ key, database, or external data service.
 | [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[OrderIntent]` | backtest, shadow sim; live with explicit broker setup |
 | [`target_weights/`](target_weights/) | Execute an externally prepared allocation schedule | `PortfolioTargets` | backtest |
 | [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select Top K | `PortfolioTargets` | backtest |
+| [`minimum_variance/`](minimum_variance/) | Keep a diagonal risk model and optimizer inside the strategy | `PortfolioTargets` | backtest |
+| [`multi_leg_spread/`](multi_leg_spread/) | Open and close an explicitly sized relative-value spread | `MultiLegOrder` | backtest |
 
 Run the backtests from the repository root:
 
@@ -21,11 +23,16 @@ Run the backtests from the repository root:
 uv run python -m examples.simple_sma.run --mode backtest --no-db
 uv run python -m examples.target_weights.run --mode backtest --no-db
 uv run python -m examples.topk_selection.run --mode backtest --no-db
+uv run python -m examples.minimum_variance.run --mode backtest --no-db
+uv run python -m examples.multi_leg_spread.run --mode backtest --no-db
 ```
 
 Start with `simple_sma` to learn the basic contract. Use `target_weights` when
 allocations are produced by another research process, and `topk_selection`
 when ranking and portfolio selection happen inside the strategy.
+`minimum_variance` shows that covariance assumptions, objectives, and
+constraints remain strategy-owned. `multi_leg_spread` demonstrates explicit
+leg sizing without claiming atomic execution.
 
 ## Shared layout
 
@@ -109,12 +116,28 @@ priority is documented under the
 `target_weights` rotates through a precomputed schedule. `topk_selection`
 computes trailing-return scores, ranks symbols at the same timestamp, selects
 the highest-ranked names, and omits dropped names so the engine closes them.
-Both decide on bar T and fill on T+1.
+`minimum_variance` estimates trailing per-symbol variance through bar T and
+solves the diagonal-covariance minimum-variance weights in strategy code. All
+three decide on bar T and fill on T+1.
 
-The portfolio demos stay backtest-only because their bundled inputs are
+The portfolio and multi-leg demos stay backtest-only because their bundled inputs are
 synthetic and date-specific, not because `LiveTrader` rejects portfolio
-intents. In real-time use, `PortfolioTargets` waits for a complete required
-basket; per-symbol `OrderIntent` decisions can execute asynchronously.
+or multi-leg decisions. A backtest-only runner rejects `--mode sim` or
+`--mode live` before strategy execution and directs the developer to add real
+market-data, broker, and state wiring. In real-time use, `PortfolioTargets`
+waits for a complete required basket; per-symbol `OrderIntent` decisions can
+execute asynchronously.
+
+`PortfolioTargets.fill_price` is mode-sensitive:
+
+- backtest/sim accepts a bar field such as `"open"` and resolves it on the next
+  observed bar;
+- live requires `None`, sizes from the latest completed close, and submits
+  market orders whose fills come only from broker reports.
+
+The bundled allocation strategies leave `fill_price=None`, so the configured
+backtest fill field applies without embedding a simulation-only price name in
+strategy code.
 
 The SMA example also exposes the shadow-simulation path:
 
@@ -135,7 +158,9 @@ operator review. `null` leaves lifetime to the broker.
 ## Related multi-leg decisions
 
 Use `MultiLegOrder` when explicitly sized legs belong to one decision and must
-execute in a declared order:
+execute in a declared order. The
+[`multi_leg_spread` example](multi_leg_spread/) is runnable and tests both
+entry and exit groups:
 
 ```python
 from librae import MultiLegOrder, OrderIntent
@@ -198,6 +223,11 @@ for account in output.accounts:
 For example, `("venue_a", 125.0, "USD")` and
 `("venue_b", -80.0, "USD")` stay as two labeled results even though both
 accounts use USD.
+
+Before adapting any example to paper or live execution, complete the
+[strategy readiness checklist](../docs/guides/strategy-readiness.md). It
+covers point-in-time data, research validation, costs and capacity, risk,
+reconciliation, broker certification, and intentional engine non-goals.
 
 ## Add infrastructure only when needed
 

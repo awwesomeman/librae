@@ -30,7 +30,7 @@ strategy interface.
 
 | You are... | Start here | Go deeper |
 |---|---|---|
-| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review the [data and execution contract](architecture.md#usage), [core types and Config API](architecture.md#core-types), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
+| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review the [strategy readiness checklist](docs/guides/strategy-readiness.md), [data and execution contract](architecture.md#usage), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
 | Backend/platform developer | Read the [system architecture](architecture.md) | Review [optional infrastructure](docs/guides/optional-infrastructure.md), callbacks, adapters, and durable state |
 
 ## Quick start
@@ -92,7 +92,8 @@ semantics are documented in the [engine architecture](architecture.md#backtest-e
 | Short borrow / funding | User-supplied research costs only; no engine locate or borrow ledger |
 
 See the [full capability matrix](architecture.md#use-case-capability-matrix)
-before selecting a workflow.
+and complete the [strategy readiness checklist](docs/guides/strategy-readiness.md)
+before selecting or promoting a workflow.
 
 ## Documentation
 

@@ -13,9 +13,19 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from brokers.ibkr_adapter import _require_ib_async
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_missing_ib_async_names_install_extra():
+    with (
+        patch.dict("sys.modules", {"ib_async": None}),
+        pytest.raises(ImportError, match="us-live"),
+    ):
+        _require_ib_async()
 
 
 def _make_adapter(*, trading_enabled: bool = False):

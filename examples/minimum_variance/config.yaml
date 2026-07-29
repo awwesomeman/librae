@@ -1,6 +1,6 @@
 strategy:
-  name: target_weights_example
-  symbols: [ALPHA, BETA, GAMMA]
+  name: minimum_variance_example
+  symbols: [LOW_VOL, MID_VOL, HIGH_VOL]
   timeframe: D1
   market: us_equity
   data_source: synthetic
@@ -9,17 +9,17 @@ strategy:
       currency: USD
       initial_cash: 100000
   instrument_overrides:
-    ALPHA:
+    LOW_VOL:
       data_adapter: ibkr
       instrument_type: spot
       currency: USD
       security_type: STK
-    BETA:
+    MID_VOL:
       data_adapter: ibkr
       instrument_type: spot
       currency: USD
       security_type: STK
-    GAMMA:
+    HIGH_VOL:
       data_adapter: ibkr
       instrument_type: spot
       currency: USD
@@ -27,17 +27,16 @@ strategy:
   execution:
     default_fill_price: open
     max_bar_volume_participation_rate: 0.10
-    # Session capacity guard: at most 1% of the mean volume from the 20
-    # completed sessions before the execution bar.
-    adv_lookback_sessions: 20
-    max_adv_participation_rate: 0.01
   risk:
-    max_position_weight: 0.75
+    max_position_weight: 0.60
     max_drawdown_rate: 0.20
     max_gross_exposure: 1.00
     max_net_exposure: 1.00
-    max_order_notional: 75000
   cost_overrides:
     multiplier: 1.0
+  params:
+    lookback: 20
+    rebalance_every: 20
+    target_exposure: 0.70
   perf:
     periods_per_year: 252

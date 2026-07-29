@@ -51,9 +51,9 @@ def _require_shioaji():
         return shioaji
     except ImportError as e:
         raise ImportError(
-            "shioaji is required for ShioajiAdapter. "
-            "Install it with: pip install shioaji  "
-            "or: pip install -e '.[tw-live]'"
+            "ShioajiAdapter requires the optional 'tw-live' dependencies. "
+            "From a repository clone run: uv sync --extra tw-live. "
+            "For a direct install, include Librae's 'tw-live' extra."
         ) from e
 
 
