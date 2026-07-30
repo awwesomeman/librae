@@ -63,10 +63,14 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     execution_policy JSONB,
     risk_policy     JSONB,
     config_hash     VARCHAR(32),
+    backtest_revision TEXT,
+    backtest_cache_key VARCHAR(32),
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_cache_key
+    ON backtest_runs(backtest_cache_key) WHERE backtest_cache_key IS NOT NULL;
 
 -- ============================================================
 -- execution_runtime_state -- atomic sim/live restart checkpoint

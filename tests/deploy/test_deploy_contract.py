@@ -147,6 +147,15 @@ def test_database_schema_does_not_embed_migrations() -> None:
     assert "DROP INDEX" not in schema
 
 
+def test_backtest_cache_identity_is_separate_from_config_hash() -> None:
+    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
+
+    assert "backtest_revision TEXT" in schema
+    assert "backtest_cache_key VARCHAR(32)" in schema
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_cache_key" in schema
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash" not in schema
+
+
 def test_local_trade_build_uses_workspace_context_and_checks_strategies() -> None:
     script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
 

@@ -64,7 +64,7 @@ def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) 
 
 
 @patch("librae.db.timescale_writer.write_run_metadata")
-@patch("librae.db.timescale_writer._claim_config_hash", return_value=True)
+@patch("librae.db.timescale_writer._claim_backtest_cache_key", return_value=True)
 @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
 @patch("librae.db.timescale_writer.get_conn")
 def test_save_backtest_output_batches_funding_diagnostics(

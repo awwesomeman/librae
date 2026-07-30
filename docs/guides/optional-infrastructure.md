@@ -65,6 +65,21 @@ Normal integrations call the high-level functions in
 ad hoc SQL. The repository runner skips database writes when
 `RunOptions.database_enabled` is false.
 
+Backtest database reuse is disabled unless the caller supplies
+`backtest_revision` through CLI/YAML orchestration and passes the same value to
+`save_strategy_results()` or `save_signal_results()`. The value is an opaque,
+immutable fingerprint owned by the strategy project and must change when
+either strategy code or input data changes. Librae combines it with
+`config_hash`; it does not infer Git state or hash the caller's dataset.
+`--force` requires a revision and replaces only the run with that combined
+cache identity.
+
+Adding `backtest_revision` and `backtest_cache_key`, changing `config_hash` to
+a non-unique index, and adding the cache-key unique index are schema changes.
+An existing database must be recreated or migrated explicitly before this
+revision is used; re-running `timescale_init.sql` cannot replace the old unique
+index in place.
+
 With repository database wiring disabled, local research remains free of
 implicit persistence. Call
 `build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then

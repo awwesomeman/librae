@@ -92,6 +92,58 @@ jobs:
           done
           test "${connected}" = true
 
+      - name: Verify backtest cache schema
+        run: |
+          set -a
+          source .env.example
+          set +a
+          docker run --rm --interactive \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python - <<'PY'
+          import os
+
+          import psycopg2
+
+          connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
+          cursor = connection.cursor()
+          rows = [
+              ("cache-run-a", "config-a", "revision-a", "cache-a"),
+              ("cache-run-b", "config-a", "revision-b", "cache-b"),
+          ]
+          for run_id, config_hash, revision, cache_key in rows:
+              cursor.execute(
+                  """
+                  INSERT INTO backtest_runs
+                      (run_id, strategy, symbols, timeframe, config_hash,
+                       backtest_revision, backtest_cache_key)
+                  VALUES (%s, 'smoke', '["MU"]', 'D1', %s, %s, %s)
+                  """,
+                  (run_id, config_hash, revision, cache_key),
+              )
+          connection.commit()
+
+          try:
+              cursor.execute(
+                  """
+                  INSERT INTO backtest_runs
+                      (run_id, strategy, symbols, timeframe, config_hash,
+                       backtest_revision, backtest_cache_key)
+                  VALUES ('cache-run-c', 'smoke', '["MU"]', 'D1',
+                          'config-b', 'revision-c', 'cache-a')
+                  """
+              )
+              connection.commit()
+          except psycopg2.errors.UniqueViolation:
+              connection.rollback()
+          else:
+              raise AssertionError("duplicate backtest_cache_key was accepted")
+          finally:
+              cursor.close()
+              connection.close()
+          PY
+
       - name: Verify Linux host-gateway routing
         run: |
           python3 -m http.server 17497 --bind 0.0.0.0 >/tmp/fake-broker.log 2>&1 &

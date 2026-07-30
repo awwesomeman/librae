@@ -5,7 +5,7 @@ Provides:
 - parse_with_config(): merge config.yaml + CLI args
 - build_run(): canonical CLI factory for RunConfig + RunOptions
 - run_dispatch(): shared main() for all strategy runners
-- with_dedup_check(): config_hash dedup wrapper for backtest
+- with_dedup_check(): opt-in revision-aware dedup wrapper for backtest
 - setup_logging(): root logger config
 
 Config merge priority (low -> high):
@@ -32,6 +32,7 @@ except ModuleNotFoundError as exc:
         "The YAML CLI requires the 'cli' extra: pip install 'librae[cli]'"
     ) from exc
 
+from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
 from librae.core.run_config import (
     DEFAULT_POLL_SECONDS,
     AccountConfig,
@@ -56,11 +57,20 @@ class RunOptions:
     database_enabled: bool = True
     dry_run: bool = False
     replace_existing: bool = False
+    backtest_revision: str | None = None
     telegram_config: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.dry_run and self.database_enabled:
             raise ValueError("dry_run=True requires database_enabled=False")
+        revision = normalize_backtest_revision(self.backtest_revision)
+        if self.replace_existing and revision is None:
+            raise ValueError("replace_existing=True requires backtest_revision")
+        object.__setattr__(
+            self,
+            "backtest_revision",
+            revision,
+        )
 
 
 def base_parser(description: str) -> argparse.ArgumentParser:
@@ -98,7 +108,14 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
     p.add_argument(
-        "--force", action="store_true", help="skip config_hash cache, force fresh computation"
+        "--backtest-revision",
+        default=None,
+        help="caller-owned strategy-code and input-data revision used for backtest caching",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="replace the cached run for the same config and backtest revision",
     )
     return p
 
@@ -402,13 +419,14 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         database_enabled=not no_db,
         dry_run=dry_run,
         replace_existing=args.force,
+        backtest_revision=args.backtest_revision,
         telegram_config=getattr(args, "telegram", None),
     )
     return config, options
 
 
 # ---------------------------------------------------------------------------
-# with_dedup_check() — config_hash dedup for backtest
+# with_dedup_check() — opt-in revision-aware dedup for backtest
 # ---------------------------------------------------------------------------
 
 
@@ -416,15 +434,19 @@ def with_dedup_check(
     fn: Callable[[RunConfig, RunOptions], None],
     options: RunOptions,
 ) -> Callable[[RunConfig], None]:
-    """Wrap run_backtest to check config_hash before running.
+    """Wrap run_backtest to check its explicit cache identity before running.
 
     Only for backtest mode. Sim/live paths don't use this.
     """
 
     @functools.wraps(fn)
     def wrapper(config: RunConfig) -> None:
-        if options.database_enabled and not options.replace_existing:
-            existing = check_existing_run(config)
+        if (
+            options.database_enabled
+            and options.backtest_revision is not None
+            and not options.replace_existing
+        ):
+            existing = check_existing_run(config, options.backtest_revision)
             if existing:
                 return
         fn(config, options)
@@ -432,13 +454,20 @@ def with_dedup_check(
     return wrapper
 
 
-def check_existing_run(config: RunConfig) -> str | None:
-    """config_hash dedup check. Returns existing run_id or None.
+def check_existing_run(
+    config: RunConfig,
+    backtest_revision: str | None,
+) -> str | None:
+    """Revision-aware cache check. Returns an existing run_id or None.
 
     Shared by strategy backtest + signal backtest.
     """
+    cache_key = build_backtest_cache_key(config.config_hash, backtest_revision)
+    if cache_key is None:
+        return None
+
     try:
-        from librae.db.timescale_reader import get_run_by_config_hash
+        from librae.db.timescale_reader import get_run_by_backtest_cache_key
     except ImportError as exc:
         logger.warning(
             "Database dedup is unavailable because the optional 'db' dependencies "
@@ -449,10 +478,10 @@ def check_existing_run(config: RunConfig) -> str | None:
         return None
 
     try:
-        existing = get_run_by_config_hash(config.config_hash)
+        existing = get_run_by_backtest_cache_key(cache_key)
     except Exception:
         logger.warning(
-            "config_hash dedup check failed (TimescaleDB unreachable?) — "
+            "backtest cache check failed (TimescaleDB unreachable?) — "
             "skipping dedup and running the backtest. Pass --no-db to "
             "suppress this check entirely.",
             exc_info=True,
@@ -462,8 +491,8 @@ def check_existing_run(config: RunConfig) -> str | None:
         return None
 
     logger.info(
-        "Run with config_hash=%s exists (run_id=%s), skipping",
-        config.config_hash,
+        "Run with backtest_cache_key=%s exists (run_id=%s), skipping",
+        cache_key,
         existing["run_id"],
     )
     return existing["run_id"]
@@ -584,6 +613,7 @@ def log_run_summary(config: RunConfig, options: RunOptions) -> None:
         f"  database_enabled: {options.database_enabled}",
         f"  dry_run:     {options.dry_run}",
         f"  replace_existing: {options.replace_existing}",
+        f"  backtest_revision: {options.backtest_revision}",
         f"  runtime:     {config.runtime}",
         f"  telegram:    {masked_telegram}",
         "=" * 60,

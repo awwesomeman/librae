@@ -113,6 +113,15 @@ adapter factories, notifier, and state store instances. Direct `LiveTrader`
 construction never imports reference integrations. Sim may run in memory,
 while live always requires an explicitly injected durable `state_store`.
 
+Database-backed backtest reuse is opt-in. `config_hash` identifies resolved
+engine configuration only; it does not identify caller-owned strategy code or
+input data. A caller that wants cache reuse supplies one immutable
+`backtest_revision` covering both, and persistence derives a separate
+`backtest_cache_key` from that revision and `config_hash`. Without a revision,
+the backtest executes and persists as a new run; this is a first-class
+no-cache mode, not a legacy compatibility path. Librae does not inspect Git or
+hash caller data implicitly.
+
 Backtest callers may use `librae.normalize_bars()` to explicitly map common
 DataFrame layouts into the canonical `(symbol, datetime)` UTC index. The
 helper preserves feature columns; `Backtest` itself does not infer column
@@ -1122,9 +1131,9 @@ financial/execution fact.
 `RunConfig` contains only inputs that define engine behavior, results, or live
 runtime policy. `librae.orchestration.cli.build_run()` returns it together with a
 `RunOptions` value for repository-owned behavior such as TimescaleDB wiring,
-dry-run notification suppression, and replacement of an existing persisted
-run. Direct library users can construct `RunConfig` without importing the
-orchestration package.
+dry-run notification suppression, caller-owned backtest revision, and
+replacement of an existing cached run. Direct library users can construct
+`RunConfig` without importing the orchestration package.
 
 #### MarketConfig (market costs)
 
@@ -1393,6 +1402,10 @@ no separate primary-symbol column. Single-asset convenience remains
 `RunConfig.symbol` in memory. The table stores `params`, `execution_policy`,
 and `risk_policy` in separate JSONB columns so strategy logic, fill
 assumptions, and portfolio limits cannot drift into one untyped bag.
+`config_hash` remains a non-unique configuration identity for analysis.
+`backtest_revision` records the caller-owned code/data fingerprint, and the
+nullable unique `backtest_cache_key` is the only backtest deduplication
+identity. Sim/live state continues to use `mode:config_hash`.
 
 `signal_events` and `ohlcv` are the source facts for signal-quality analysis.
 Forward return, MFE, and MAE are derived on demand: local callers use
@@ -1437,11 +1450,12 @@ Decision criteria: **single-table vs. multi-table** decides between `write_`/`sa
 Examples: `save_backtest_output` (writes 5 tables in one go, a multi-table coordinator), `write_trade_event` (single-table full-row write), `update_heartbeat` (single-table partial update of one field), `merge_ohlcv_coverage_ranges` (must read existing ranges first to decide the merge result), `refresh_performance` (recomputes KPIs from `equity_curve` + `trade_events` and writes them back to `strategy_performance`).
 
 Backtest and signal-result persistence serialize writers for the same
-non-null `config_hash` with a transaction-scoped PostgreSQL advisory lock.
-After taking the lock, a normal duplicate writer skips the complete run
+non-null `backtest_cache_key` with a transaction-scoped PostgreSQL advisory
+lock. After taking the lock, a normal duplicate writer skips the complete run
 without writing partial child rows. An explicit force recompute deletes and
-replaces the prior canonical run in the same transaction, so rollback restores
-the prior run if the replacement fails.
+replaces the prior canonical run for that cache key in the same transaction,
+so rollback restores the prior run if the replacement fails. A null key means
+cache reuse is disabled and does not serialize otherwise equal configurations.
 
 **Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate: a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot — the same point-in-time-correctness principle applies to any ingestion layer built on top of `librae/db/` (e.g. fundamentals data, where the earliest-disclosed value should win the same way).
 
@@ -1453,7 +1467,12 @@ load_*   — a batch query returning a DataFrame, for analysis/dashboard use
 derive_* — computes a differently-shaped result from existing data; not a direct read of a raw table
 ```
 
-Examples: `get_run_by_config_hash` (returns a dict), `load_trade_events` (returns a DataFrame), `derive_trade_signals` (reconstructs an entry/exit signal sequence *from* `trade_events` — it does **not** read the `signal_events` table; these two are easy to conflate, hence the deliberate use of `derive_` instead of `load_` to remind the caller this is derived data, not the original raw signal).
+Examples: `get_run_by_backtest_cache_key` and `get_run_by_config_hash` (return
+dicts), `load_trade_events` (returns a DataFrame), `derive_trade_signals`
+(reconstructs an entry/exit signal sequence *from* `trade_events` — it does
+**not** read the `signal_events` table; these two are easy to conflate, hence
+the deliberate use of `derive_` instead of `load_` to remind the caller this
+is derived data, not the original raw signal).
 
 ## Maintenance rules
 
