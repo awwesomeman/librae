@@ -183,9 +183,7 @@ class ShioajiAdapter:
             else:
                 contract_rank = alias_ranks.get(code)
                 contract_month = delivery_month
-            resolved_asset_class: AssetClass = (
-                "index" if root in index_roots else "equity"
-            )
+            resolved_asset_class: AssetClass = "index" if root in index_roots else "equity"
             if asset_class is not None and asset_class != resolved_asset_class:
                 continue
             raw_multiplier = getattr(contract, "unit", None)
@@ -350,15 +348,11 @@ class ShioajiAdapter:
             raw_lower = getattr(contract, "limit_down", None)
             raw_upper = getattr(contract, "limit_up", None)
             if raw_lower is None or raw_upper is None:
-                raise ValueError(
-                    f"{signal['symbol']} contract is missing price-limit boundaries"
-                )
+                raise ValueError(f"{signal['symbol']} contract is missing price-limit boundaries")
             lower = float(raw_lower)
             upper = float(raw_upper)
             if not isfinite(lower) or not isfinite(upper) or lower <= 0 or upper <= lower:
-                raise ValueError(
-                    f"{signal['symbol']} contract has invalid price-limit boundaries"
-                )
+                raise ValueError(f"{signal['symbol']} contract has invalid price-limit boundaries")
             if price < lower:
                 raise ValueError(f"{signal['symbol']} price is below limit_down {lower}")
             if price > upper:
@@ -669,9 +663,7 @@ class ShioajiAdapter:
         is_native_alias = bool(target_code) or code.endswith(("R1", "R2"))
         if continuous_alias:
             if not is_native_alias:
-                raise ValueError(
-                    f"Shioaji contract {code!r} is not a continuous R1/R2 alias"
-                )
+                raise ValueError(f"Shioaji contract {code!r} is not a continuous R1/R2 alias")
             return
         if is_native_alias:
             raise ValueError(
@@ -681,9 +673,7 @@ class ShioajiAdapter:
 
         info = self._api.contracts.info(contract)
         resolved_month = str(
-            getattr(info, "delivery_month", None)
-            or getattr(contract, "delivery_month", "")
-            or ""
+            getattr(info, "delivery_month", None) or getattr(contract, "delivery_month", "") or ""
         )
         if not resolved_month:
             raise ValueError(f"Shioaji contract {code!r} has no delivery_month metadata")

@@ -188,9 +188,7 @@ class AvailableSymbol:
     def cost_override(self) -> dict[str, float]:
         """Return broker-verified contract economics for RunConfig."""
         if self.multiplier is None:
-            raise ValueError(
-                f"{self.native_symbol} catalog metadata has no contract multiplier"
-            )
+            raise ValueError(f"{self.native_symbol} catalog metadata has no contract multiplier")
         costs = {"multiplier": self.multiplier}
         if self.tick_size is not None:
             costs["tick_size"] = self.tick_size

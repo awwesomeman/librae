@@ -205,7 +205,9 @@ class TestInstrumentTypeValidation:
                 data_adapter="crypto",
                 venue_symbol="X/USDT",
                 currency="USDT",
-                contract_month=("202609" if t.startswith("contract_") and t != "contract_perpetual" else None),
+                contract_month=(
+                    "202609" if t.startswith("contract_") and t != "contract_perpetual" else None
+                ),
                 tick_size=0.01,
             )
 

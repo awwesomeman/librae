@@ -81,9 +81,7 @@ class OrderRequest:
         if self.security_type == "FUT" and not (
             self.continuous_alias or self.contract_month is not None
         ):
-            raise ValueError(
-                "FUT order requires continuous_alias=True or contract_month='YYYYMM'"
-            )
+            raise ValueError("FUT order requires continuous_alias=True or contract_month='YYYYMM'")
         if not isfinite(self.quantity) or self.quantity <= 0:
             raise ValueError("order quantity must be positive and finite")
         if self.submitted_at.tzinfo is None:
@@ -150,17 +148,13 @@ class PositionRequest:
             not isinstance(self.security_type, str) or not self.security_type
         ):
             raise ValueError("position security_type must be non-empty when supplied")
-        if self.exchange is not None and (
-            not isinstance(self.exchange, str) or not self.exchange
-        ):
+        if self.exchange is not None and (not isinstance(self.exchange, str) or not self.exchange):
             raise ValueError("position exchange must be non-empty when supplied")
         if not isinstance(self.continuous_alias, bool):
             raise TypeError("position continuous_alias must be a bool")
         validate_contract_month(self.contract_month)
         if self.continuous_alias and self.contract_month is not None:
-            raise ValueError(
-                "position continuous_alias and contract_month are mutually exclusive"
-            )
+            raise ValueError("position continuous_alias and contract_month are mutually exclusive")
         if self.security_type == "FUT" and not (
             self.continuous_alias or self.contract_month is not None
         ):

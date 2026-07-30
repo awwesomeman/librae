@@ -44,6 +44,10 @@ def _rolling_contract(
     )
 
 
+def _mock_shioaji_actions():
+    return SimpleNamespace(Action=SimpleNamespace(Buy="Buy", Sell="Sell"))
+
+
 def test_missing_shioaji_names_install_extra():
     with (
         patch.dict("sys.modules", {"shioaji": None}),
@@ -240,9 +244,7 @@ class TestFetchOhlcv:
     def test_explicit_calendar_override_wins(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(
-            return_value=_rolling_contract("GDFR1", "GDF202608")
-        )
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract("GDFR1", "GDF202608"))
 
         with patch(
             "brokers.shioaji_adapter.resample_session_ohlcv",
@@ -421,9 +423,7 @@ class TestPlaceOrder:
         "市價單不允許當日有效委託(ROD)") -- caught live 2026-07-20. Market orders
         must be IOC; only resting limit orders may use ROD."""
         adapter = _make_adapter(ca_activated=True)
-        adapter._resolve_contract = MagicMock(
-            return_value=_rolling_contract("TMFR1", "TMF202608")
-        )
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract("TMFR1", "TMF202608"))
         mock_trade = MagicMock()
         mock_trade.status.id = "order789"
         mock_trade.status.status = "Filled"
@@ -500,7 +500,7 @@ def test_trade_lookup_resolves_continuous_symbol_to_contract_code():
     [("Buy", 2.0), ("Sell", -2.0)],
 )
 def test_position_lookup_preserves_broker_direction(direction_name, expected_size):
-    sj = _require_shioaji()
+    sj = _mock_shioaji_actions()
     adapter = _make_adapter(ca_activated=True)
     adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
     adapter._api.list_positions.return_value = [
@@ -513,7 +513,8 @@ def test_position_lookup_preserves_broker_direction(direction_name, expected_siz
         )
     ]
 
-    result = adapter.get_position(_position_request("TXFR1"))
+    with patch("brokers.shioaji_adapter._require_shioaji", return_value=sj):
+        result = adapter.get_position(_position_request("TXFR1"))
 
     assert result == {
         "symbol": "TXFR1",
@@ -524,7 +525,7 @@ def test_position_lookup_preserves_broker_direction(direction_name, expected_siz
 
 
 def test_exact_future_uses_shioaji_native_contract_code():
-    sj = _require_shioaji()
+    sj = _mock_shioaji_actions()
     adapter = _make_adapter(ca_activated=True)
     adapter._resolve_contract = MagicMock(
         return_value=SimpleNamespace(
@@ -533,9 +534,7 @@ def test_exact_future_uses_shioaji_native_contract_code():
             target_code="",
         )
     )
-    adapter._api.contracts.info.return_value = SimpleNamespace(
-        delivery_month="202608"
-    )
+    adapter._api.contracts.info.return_value = SimpleNamespace(delivery_month="202608")
     adapter._api.list_positions.return_value = [
         SimpleNamespace(
             code="TXF202608",
@@ -553,13 +552,12 @@ def test_exact_future_uses_shioaji_native_contract_code():
         contract_month="202608",
     )
 
-    result = adapter.get_position(request)
+    with patch("brokers.shioaji_adapter._require_shioaji", return_value=sj):
+        result = adapter.get_position(request)
 
     assert result["symbol"] == "TXF_202608"
     adapter._resolve_contract.assert_called_once_with("TXF202608")
-    adapter._api.list_positions.assert_called_once_with(
-        account=adapter._api.futopt_account
-    )
+    adapter._api.list_positions.assert_called_once_with(account=adapter._api.futopt_account)
 
 
 def test_exact_future_rejects_shioaji_delivery_month_mismatch():
@@ -569,9 +567,7 @@ def test_exact_future_rejects_shioaji_delivery_month_mismatch():
         code="TXFI6",
         target_code="",
     )
-    adapter._api.contracts.info.return_value = SimpleNamespace(
-        delivery_month="202609"
-    )
+    adapter._api.contracts.info.return_value = SimpleNamespace(delivery_month="202609")
 
     with pytest.raises(ValueError, match="contract month mismatch"):
         adapter._validate_contract_selection(
@@ -593,7 +589,7 @@ def test_exact_future_rejects_shioaji_continuous_alias_code():
 
 
 def test_position_lookup_rejects_multiple_matching_native_positions():
-    sj = _require_shioaji()
+    sj = _mock_shioaji_actions()
     adapter = _make_adapter(ca_activated=True)
     adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
     adapter._api.list_positions.return_value = [
@@ -613,11 +609,15 @@ def test_position_lookup_rejects_multiple_matching_native_positions():
         ),
     ]
 
-    with pytest.raises(ValueError, match="ambiguous broker positions"):
+    with (
+        patch("brokers.shioaji_adapter._require_shioaji", return_value=sj),
+        pytest.raises(ValueError, match="ambiguous broker positions"),
+    ):
         adapter.get_position(_position_request("TXFR1"))
 
 
 def test_position_lookup_rejects_unknown_direction():
+    sj = _mock_shioaji_actions()
     adapter = _make_adapter(ca_activated=True)
     adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
     adapter._api.list_positions.return_value = [
@@ -630,7 +630,10 @@ def test_position_lookup_rejects_unknown_direction():
         )
     ]
 
-    with pytest.raises(ValueError, match="unknown Shioaji position direction"):
+    with (
+        patch("brokers.shioaji_adapter._require_shioaji", return_value=sj),
+        pytest.raises(ValueError, match="unknown Shioaji position direction"),
+    ):
         adapter.get_position(_position_request("TXFR1"))
 
 

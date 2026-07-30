@@ -105,10 +105,7 @@ class BinanceStocksAdapter:
                     f"the exact query: expected {query_symbol!r}, got {symbol!r}"
                 )
             name = str(
-                raw.get("name")
-                or raw.get("displayName")
-                or raw.get("description")
-                or symbol
+                raw.get("name") or raw.get("displayName") or raw.get("description") or symbol
             )
             results.append(
                 AvailableSymbol(
@@ -122,9 +119,7 @@ class BinanceStocksAdapter:
                     currency="USD",
                     instrument_type="spot",
                     security_type="STK",
-                    exchange=(
-                        str(raw["exchange"]) if raw.get("exchange") is not None else None
-                    ),
+                    exchange=(str(raw["exchange"]) if raw.get("exchange") is not None else None),
                     multiplier=1.0,
                 )
             )

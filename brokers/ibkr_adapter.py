@@ -184,9 +184,7 @@ class IBKRAdapter:
 
         self._ib = ib_async.IB()
         self._read_only = not trading_enabled
-        self._contract_cache: dict[
-            tuple[str, str, str | None, str, str | None], object
-        ] = {}
+        self._contract_cache: dict[tuple[str, str, str | None, str, str | None], object] = {}
         self._contract_details_cache: dict[
             tuple[str, str, str | None, str, str | None], object
         ] = {}
@@ -275,9 +273,7 @@ class IBKRAdapter:
             resolved = detail.contract
             expiry = _contract_expiry_date(resolved)
             if expiry >= _utc_today():
-                raw_expiry = str(
-                    getattr(resolved, "lastTradeDateOrContractMonth", "")
-                ).strip()
+                raw_expiry = str(getattr(resolved, "lastTradeDateOrContractMonth", "")).strip()
                 unexpired.append((expiry, raw_expiry, detail))
         if not unexpired:
             raise ValueError(f"No non-expired IBKR futures found for {symbol}")
@@ -288,8 +284,7 @@ class IBKRAdapter:
             )
         )
         expiry_ranks = {
-            expiry: rank
-            for rank, expiry in enumerate(sorted({item[0] for item in unexpired}))
+            expiry: rank for rank, expiry in enumerate(sorted({item[0] for item in unexpired}))
         }
         month_counts: dict[str, int] = {}
         for _, raw_expiry, _ in unexpired:
@@ -798,9 +793,7 @@ class IBKRAdapter:
                     "or contract_month='YYYYMM'"
                 )
         elif continuous_alias or contract_month is not None:
-            raise ValueError(
-                "continuous_alias and contract_month are valid only for IBKR futures"
-            )
+            raise ValueError("continuous_alias and contract_month are valid only for IBKR futures")
 
         cache_key = (symbol, security_type, exchange, currency, contract_month)
         if cache_key in self._contract_cache:
@@ -840,27 +833,19 @@ class IBKRAdapter:
                 raw_expiry = str(
                     getattr(detail.contract, "lastTradeDateOrContractMonth", "")
                 ).strip()
-                month_matches = (
-                    contract_month is None or raw_expiry[:6] == contract_month
-                )
+                month_matches = contract_month is None or raw_expiry[:6] == contract_month
                 if month_matches and expiry >= today:
                     unexpired_details.append((expiry, detail))
             if not unexpired_details:
                 selection = (
-                    f" contract_month={contract_month}"
-                    if contract_month is not None
-                    else ""
+                    f" contract_month={contract_month}" if contract_month is not None else ""
                 )
-                raise ValueError(
-                    f"No non-expired future for {symbol} on {exchange}{selection}"
-                )
+                raise ValueError(f"No non-expired future for {symbol} on {exchange}{selection}")
             if contract_month is not None:
                 candidates = unexpired_details
             else:
                 nearest_expiry = min(item[0] for item in unexpired_details)
-                candidates = [
-                    item for item in unexpired_details if item[0] == nearest_expiry
-                ]
+                candidates = [item for item in unexpired_details if item[0] == nearest_expiry]
             if len(candidates) != 1:
                 selection = (
                     f"contract_month={contract_month}"

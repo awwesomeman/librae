@@ -3282,13 +3282,9 @@ class TestShioajiLiveAutoWiring:
                 average=104.25,
             )
             mock_shioaji.fetch_ohlcv.side_effect = (
-                lambda symbol,
-                tf,
-                limit,
-                drop_incomplete=False,
-                calendar_id=None,
-                continuous_alias=False,
-                contract_month=None: fetcher()
+                lambda symbol, tf, limit, drop_incomplete=False, calendar_id=None, continuous_alias=False, contract_month=None: (
+                    fetcher()
+                )
             )
             mock_cls.return_value = mock_shioaji
 

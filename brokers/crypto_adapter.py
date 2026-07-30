@@ -153,7 +153,9 @@ class CryptoAdapter:
         markets = self._exchange.load_markets()
         if not isinstance(markets, dict):
             raise ValueError(f"{self._exchange_id} load_markets() did not return a mapping")
-        query_token = "".join(character for character in (query or "").upper() if character.isalnum())
+        query_token = "".join(
+            character for character in (query or "").upper() if character.isalnum()
+        )
         results: list[AvailableSymbol] = []
         for market in markets.values():
             if not isinstance(market, dict) or market.get("active") is False:
@@ -648,19 +650,13 @@ class CryptoAdapter:
                 "configure an exact CCXT delivery symbol"
             )
 
-        is_delivery_future = bool(
-            market.get("future") or market.get("type") == "future"
-        )
+        is_delivery_future = bool(market.get("future") or market.get("type") == "future")
         if contract_month is None:
             if is_delivery_future:
-                raise ValueError(
-                    f"{symbol} delivery future requires contract_month='YYYYMM'"
-                )
+                raise ValueError(f"{symbol} delivery future requires contract_month='YYYYMM'")
             return
         if not is_delivery_future:
-            raise ValueError(
-                f"{symbol} contract_month is valid only for a CCXT delivery future"
-            )
+            raise ValueError(f"{symbol} contract_month is valid only for a CCXT delivery future")
         raw_expiry = market.get("expiry")
         if isinstance(raw_expiry, bool) or not isinstance(raw_expiry, (int, float)):
             raise ValueError(f"{symbol} delivery future has no numeric CCXT expiry")
