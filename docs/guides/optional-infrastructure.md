@@ -45,18 +45,20 @@ the non-admin `quant_app` role and must not be used for migrations.
 
 Normal integrations call the high-level functions in
 `db.timescale_writer` and `db.timescale_reader`; upper layers should not issue
-ad hoc SQL. In a backtest, `cfg.no_db=True` skips all database writes.
+ad hoc SQL. The repository runner skips database writes when
+`RunOptions.database_enabled` is false.
 
-For local research output, `no_db=True` remains side-effect free. Call
+With repository database wiring disabled, local research remains free of
+implicit persistence. Call
 `build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then
 use pandas to write the returned tables to Parquet, SQLite, DuckDB, or another
 format. See [Local artifacts](local-artifacts.md). Librae defines the table and
 manifest shape; the caller owns file paths, overwrite policy, transactions,
 partitioning, and retention.
 
-Live execution is different: it requires durable runtime state. With
-`cfg.no_db=True`, inject your own durable `state_store`; the in-memory
-implementation is intended for deterministic tests only.
+Live execution is different: it requires durable runtime state. When
+constructing `LiveTrader` directly, inject your own durable `state_store`; the
+in-memory implementation is intended for deterministic tests only.
 
 ## Grafana
 
@@ -117,8 +119,9 @@ rejections, or broker fees.
 
 Install `librae[telegram]` to use the bundled notifier. It reads Telegram
 secrets from environment variables and behavior from
-`RunConfig.telegram_config`. You can instead inject your own notifier or
-persistence callbacks without installing that extra.
+`RunOptions.telegram_config`. Database persistence and notifications are
+independent options. You can instead inject your own notifier or persistence
+callbacks without installing that extra.
 
 See
 [LiveTrader callback signatures](../../architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier)

@@ -210,7 +210,7 @@ librae/
 
 # Outside librae, at the same level as db/ and brokers/ — reference implementations (swappable, see "Dependency direction" below)
 notifications/                Telegram push notifications (TelegramAdapter + TelegramCredentials)
-orchestration/cli.py          shared CLI parser + config YAML merging (build_config/run_dispatch)
+orchestration/cli.py          shared CLI parser + config YAML merging (build_run/run_dispatch)
 ```
 
 `librae/core/trading_calendar.py` owns session labels and session-aligned
@@ -271,7 +271,7 @@ class MyStrategy(Strategy):
         return []
 
 
-# 2. Run the engine (a RunConfig is usually built via orchestration.cli.build_config())
+# 2. Run the engine (a RunConfig is usually built via orchestration.cli.build_run())
 df = fetch_and_prepare(symbol, months)  # your own ETL
 bt = Backtest(data=df, strategy=MyStrategy(), config=config)
 bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
@@ -290,8 +290,9 @@ responsibility and must not use information unavailable at T.
 
 #### Local artifact boundary
 
-`no_db=True` tells repository orchestration not to attach TimescaleDB; it never
-selects another backend or writes a file implicitly.
+`RunOptions(database_enabled=False)` tells repository orchestration not to
+attach TimescaleDB; it never selects another backend or writes a file
+implicitly.
 `build_market_data_artifact()` and
 `build_backtest_artifact()` expose versioned metadata plus logical pandas
 tables. Librae owns validation and table shape. The caller owns Parquet,
@@ -617,7 +618,7 @@ excursion therefore requires finer-grained data.
 #### Execution policy, risk controls, and portfolio diagnostics
 
 Fill-field and liquidity assumptions have one typed source:
-`RunConfig.execution`. `build_config()` defaults to next-open simulation and a
+`RunConfig.execution`. `build_run()` defaults to next-open simulation and a
 10% per-symbol bar-volume cap in every mode. Direct `Backtest(...)`
 construction resolves the same `ExecutionPolicy()` defaults; unlimited
 liquidity therefore requires
@@ -740,7 +741,7 @@ faster, synthetic timeframe for staggered markets.
 Performance annualization has a separate explicit SSOT:
 `RunConfig.reporting.periods_per_year` is the number of return observations per year
 (for example, 252 for daily US-equity bars or 8760 for hourly 24/7 bars).
-`build_config()` supplies data-source defaults only for D1. Annualized intraday
+`build_run()` supplies data-source defaults only for D1. Annualized intraday
 or unknown-source runs must set `strategy.perf.periods_per_year`; the engine
 never guesses it from sample density.
 `RunConfig.reporting.risk_free_rate` is an annual effective rate greater than `-1`.
@@ -873,7 +874,10 @@ from orchestration.live import build_live_trader
 trader = build_live_trader(
     strategy=MyStrategy(),
     feature_fn=prepare_signals,  # the same ETL pipeline
-    config=config,  # a RunConfig (usually built via orchestration.cli.build_config())
+    config=config,  # a RunConfig (usually built via orchestration.cli.build_run())
+    # options is the companion RunOptions returned by build_run().
+    database_enabled=options.database_enabled,
+    telegram_config=options.telegram_config,
 )
 trader.run()
 ```
@@ -1041,6 +1045,15 @@ financial/execution fact.
 
 > For installation extras and environment-loading behavior, see [Getting started](docs/getting-started.md). This section is the internal code-level Config API.
 
+#### Engine configuration and repository options
+
+`RunConfig` contains only inputs that define engine behavior, results, or live
+runtime policy. `orchestration.cli.build_run()` returns it together with a
+`RunOptions` value for repository-owned behavior such as TimescaleDB wiring,
+dry-run notification suppression, and replacement of an existing persisted
+run. Direct library users can construct `RunConfig` without importing the
+orchestration package.
+
 #### MarketConfig (market costs)
 
 Default source: `librae/config/market_config.py`'s built-in registry; you can also bypass it entirely and pass in your own (common when using librae as an external package):
@@ -1139,9 +1152,10 @@ drawdown, and reporting-currency conversion remain caller-owned.
 #### TelegramAdapter (notifications)
 
 Source: behavior is configured from the caller's `config.yaml` `telegram:`
-block (passed in via `RunConfig.telegram_config`), and secrets come from
-environment variables. `orchestration.live.build_live_trader()` builds this
-reference notifier; `LiveTrader` only receives the resulting object.
+block (held by `RunOptions.telegram_config` and passed explicitly to the
+orchestration factory), and secrets come from environment variables.
+`orchestration.live.build_live_trader()` builds this reference notifier;
+`LiveTrader` only receives the resulting object.
 
 ```python
 from notifications.config import TelegramConfig

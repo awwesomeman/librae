@@ -1,7 +1,8 @@
 # Local artifacts
 
-`no_db=True` means Librae performs no default persistence. It does not imply an
-automatic memory, Parquet, or SQLite backend.
+Disabling the repository's database wiring means Librae performs no default
+persistence. It does not imply an automatic memory, Parquet, or SQLite
+backend.
 
 When a local artifact is useful, Librae can normalize market data or a
 `BacktestOutput` into a versioned manifest and logical pandas tables. The

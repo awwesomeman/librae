@@ -1240,6 +1240,7 @@ def save_signal_results(
     mode: str = "backtest",
     signal_column: str = "entry_signal",
     config: RunConfig | None = None,
+    replace_existing: bool = False,
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
@@ -1272,7 +1273,7 @@ def save_signal_results(
                     cur,
                     config.config_hash if config else None,
                     run_id,
-                    replace_existing=config.force if config else False,
+                    replace_existing=replace_existing,
                 ):
                     cur.close()
                     return {"backtest_runs": 0}
@@ -1333,6 +1334,8 @@ def save_strategy_results(
     df: pd.DataFrame,
     config: RunConfig,
     signal_column: str = "entry_signal",
+    *,
+    replace_existing: bool = False,
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 
@@ -1360,7 +1363,7 @@ def save_strategy_results(
         risk_policy=asdict(config.risk),
         perf_params=config.perf_params,
         config_hash=config.config_hash,
-        replace_existing=config.force,
+        replace_existing=replace_existing,
     )
 
     ohlcv_count = 0

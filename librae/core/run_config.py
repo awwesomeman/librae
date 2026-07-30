@@ -8,7 +8,7 @@ two explicit non-result policies:
 - Reporting policy (stored in DB backtest_runs.perf_params)
 - Runtime polling policy (not stored in DB)
 
-CLI workflows use ``build_config()`` in ``orchestration/cli.py``; library
+CLI workflows use ``build_run()`` in ``orchestration/cli.py``; library
 callers may construct the validated dataclass directly.
 """
 
@@ -16,15 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import subprocess
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from math import isfinite
 from numbers import Real
 from typing import Any, Literal
-
-logger = logging.getLogger(__name__)
 
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
@@ -272,32 +268,11 @@ def _sanitize_for_hash(obj: Any) -> Any:
     return obj
 
 
-def _mask_token(token: str) -> str:
-    """Mask a token string: show first 4 + last 4 chars."""
-    if len(token) <= 8:
-        return "****"
-    return f"{token[:4]}...{token[-4:]}"
-
-
-def _get_code_rev() -> str:
-    """Get short git rev + dirty flag for log_summary."""
-    try:
-        # WHY: single subprocess with combined command avoids spawning two processes.
-        out = subprocess.check_output(
-            ["git", "describe", "--always", "--dirty"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        return out or "unknown"
-    except Exception:
-        return "unknown"
-
-
 @dataclass(frozen=True)
 class RunConfig:
     """Unified parameter container for all execution paths.
 
-    CLI workflows create this through ``build_config()``. Library callers may
+    CLI workflows create this through ``build_run()``. Library callers may
     construct it directly and receive the same validation.
     """
 
@@ -337,12 +312,6 @@ class RunConfig:
     reporting: ReportingPolicy = field(default_factory=ReportingPolicy)
     runtime: RuntimePolicy = field(default_factory=RuntimePolicy)
 
-    # === Deployment behavior (excluded from config_hash) ===
-    no_db: bool = False
-    dry_run: bool = False
-    force: bool = False
-    telegram_config: dict[str, Any] | None = None
-
     def __post_init__(self) -> None:
         """Validate invariants and detach mutable caller-owned values."""
         if not isinstance(self.execution, ExecutionPolicy):
@@ -376,7 +345,6 @@ class RunConfig:
             "cost_overrides",
             "symbol_cost_overrides",
             "instrument_overrides",
-            "telegram_config",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -396,11 +364,6 @@ class RunConfig:
                 raise ValueError(f"{field_name} must be a non-empty string")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
-        for field_name in ("no_db", "dry_run", "force"):
-            if not isinstance(getattr(self, field_name), bool):
-                raise TypeError(f"{field_name} must be a bool")
-        if self.dry_run and not self.no_db:
-            raise ValueError("dry_run=True requires no_db=True; use build_config()")
         legacy_execution_keys = {
             "fill_price",
             "max_volume_participation_pct",
@@ -492,47 +455,3 @@ class RunConfig:
             default=str,
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:32]
-
-    def log_summary(self) -> None:
-        """Print all params at startup (strategy / perf / behavior, 3 sections)."""
-        code_rev = _get_code_rev()
-        tg = self.telegram_config or {}
-        # Mask bot_token if present
-        masked_tg = (
-            {k: (_mask_token(str(v)) if "token" in k.lower() else v) for k, v in tg.items()}
-            if tg
-            else None
-        )
-
-        lines = [
-            "=" * 60,
-            "Run Config:",
-            f"  strategy:    {self.strategy_name}",
-            f"  symbols:     {self.symbols}",
-            f"  timeframe:   {self.timeframe}",
-            f"  mode:        {self.mode}",
-            f"  data_source: {self.data_source}",
-            f"  broker:      {self.broker}",
-            f"  start:       {self.start}",
-            f"  end:         {self.end}",
-            f"  config_hash: {self.config_hash}",
-            f"  code_rev:    {code_rev}",
-            "  --- strategy params (stored in DB) ---",
-            f"  accounts:    {dict(self.accounts)}",
-            f"  params:      {self.params}",
-            f"  cost_overrides: {self.cost_overrides}",
-            f"  symbol_cost_overrides: {self.symbol_cost_overrides}",
-            f"  instrument_overrides: {self.instrument_overrides}",
-            f"  execution:   {self.execution}",
-            f"  risk:        {self.risk}",
-            "  --- perf params (stored in DB, display only) ---",
-            f"  reporting:   {self.reporting}",
-            "  --- operational behavior (excluded from config_hash) ---",
-            f"  no_db:       {self.no_db}",
-            f"  dry_run:     {self.dry_run}",
-            f"  force:       {self.force}",
-            f"  runtime:     {self.runtime}",
-            f"  telegram:    {masked_tg}",
-            "=" * 60,
-        ]
-        logger.info("\n".join(lines))

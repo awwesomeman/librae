@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from librae import Backtest, RunConfig
-from orchestration.cli import run_dispatch
+from orchestration.cli import RunOptions, run_dispatch
 
 from .strategy import TopKSelectionStrategy, prepare_signals
 
@@ -43,7 +43,7 @@ def _make_panel(symbols: list[str], periods: int = 240) -> pd.DataFrame:
     return pd.concat(frames, names=["symbol", "datetime"])
 
 
-def run_backtest(config: RunConfig) -> None:
+def run_backtest(config: RunConfig, _options: RunOptions) -> None:
     params = config.params or {}
     data = prepare_signals(
         _make_panel(config.symbols),

@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from librae import Backtest, RunConfig
-from orchestration.cli import run_dispatch, run_realtime_generic
+from orchestration.cli import RunOptions, run_dispatch, run_realtime_generic
 
 from .strategy import SmaCrossover, prepare_signals
 
@@ -37,7 +37,7 @@ def _fetch_ohlcv(n: int = 500) -> pd.DataFrame:
     )
 
 
-def run_backtest(config: RunConfig) -> None:
+def run_backtest(config: RunConfig, _options: RunOptions) -> None:
     df = prepare_signals(_fetch_ohlcv())
     # Backtest requires a MultiIndex(symbol, datetime) — see examples/README.md.
     df.index = pd.MultiIndex.from_arrays(
@@ -51,8 +51,8 @@ def run_backtest(config: RunConfig) -> None:
     )  # swap for db.timescale_writer.save_strategy_results(output, df, config), a file, etc.
 
 
-def run_realtime(config: RunConfig) -> None:
-    run_realtime_generic(config, SmaCrossover(), prepare_signals)
+def run_realtime(config: RunConfig, options: RunOptions) -> None:
+    run_realtime_generic(config, options, SmaCrossover(), prepare_signals)
 
 
 if __name__ == "__main__":

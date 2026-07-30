@@ -42,7 +42,7 @@ from librae.core.run_config import (  # noqa: E402
 
 
 def make_test_cfg(**overrides) -> RunConfig:
-    """Build a minimal RunConfig for tests (no_db=True)."""
+    """Build a minimal RunConfig for tests."""
     initial_balance = overrides.pop("initial_balance", None)
     reporting = overrides.pop("reporting", None)
     reporting_values = {
@@ -68,7 +68,6 @@ def make_test_cfg(**overrides) -> RunConfig:
         data_source="binance_spot",
         accounts={"default": AccountConfig(currency="USDT", initial_cash=100_000.0)},
         mode="sim",
-        no_db=True,
         reporting=reporting or ReportingPolicy(**reporting_values),
         runtime=runtime or RuntimePolicy(**{"poll_seconds": 0, **runtime_values}),
         params={},

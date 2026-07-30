@@ -21,7 +21,6 @@ def _config(**overrides: object) -> RunConfig:
         "accounts": {"default": AccountConfig(currency="USD", initial_cash=10_000.0)},
         "mode": "backtest",
         "params": {"window": 20, "nested": {"enabled": True}},
-        "no_db": True,
     }
     values.update(overrides)
     return RunConfig(**values)

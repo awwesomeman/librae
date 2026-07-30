@@ -11,9 +11,10 @@ import pytest
 from librae.core.run_config import AccountConfig, RunConfig
 
 from orchestration.cli import (
+    RunOptions,
     _resolve_market_and_data_source,
     base_parser,
-    build_config,
+    build_run,
     check_existing_run,
     parse_with_config,
     run_dispatch,
@@ -188,7 +189,36 @@ class TestResolveMarketAndDataSource:
 
 
 @pytest.mark.usefixtures("_clear_argv")
-class TestBuildConfig:
+class TestBuildRun:
+    def test_dry_run_options_cannot_enable_database(self):
+        with pytest.raises(ValueError, match="database_enabled=False"):
+            RunOptions(database_enabled=True, dry_run=True)
+
+    def test_deployment_options_stay_out_of_engine_config(self, tmp_path, monkeypatch):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                telegram:
+                  enabled: true
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                """
+            )
+        )
+        monkeypatch.setattr(sys, "argv", ["test", "--dry-run", "--force"])
+
+        config, options = build_run("test_strat", str(tmp_path / "run.py"))
+
+        assert not hasattr(config, "no_db")
+        assert not hasattr(config, "telegram_config")
+        assert options == RunOptions(
+            database_enabled=False,
+            dry_run=True,
+            replace_existing=True,
+            telegram_config={"enabled": True},
+        )
+
     def test_execution_policy_defaults_and_explicit_unlimited(self, tmp_path):
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
@@ -201,7 +231,7 @@ class TestBuildConfig:
             )
         )
 
-        capped = build_config("test_strat", str(tmp_path / "run.py"))
+        capped, _ = build_run("test_strat", str(tmp_path / "run.py"))
         assert capped.execution.default_fill_price == "open"
         assert capped.execution.max_bar_volume_participation_rate == 0.1
 
@@ -219,7 +249,7 @@ class TestBuildConfig:
                 """
             )
         )
-        unlimited = build_config("test_strat", str(tmp_path / "run.py"))
+        unlimited, _ = build_run("test_strat", str(tmp_path / "run.py"))
         assert unlimited.execution.default_fill_price == "close"
         assert unlimited.execution.max_bar_volume_participation_rate is None
         assert unlimited.execution.live_order_timeout_seconds == 120
@@ -239,7 +269,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match=r"unknown strategy\.execution"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_legacy_symbol_override_name_is_rejected(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -256,7 +286,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match="symbol_cost_overrides"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_legacy_annual_period_name_is_rejected(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -272,7 +302,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match=r"unknown strategy\.perf"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_adv_execution_settings_are_typed(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -288,7 +318,7 @@ class TestBuildConfig:
             )
         )
 
-        config = build_config("test_strat", str(tmp_path / "run.py"))
+        config, _ = build_run("test_strat", str(tmp_path / "run.py"))
 
         assert config.execution.adv_lookback_sessions == 20
         assert config.execution.max_adv_participation_rate == pytest.approx(0.01)
@@ -310,7 +340,7 @@ class TestBuildConfig:
             )
         )
 
-        config = build_config("test_strat", str(tmp_path / "run.py"))
+        config, _ = build_run("test_strat", str(tmp_path / "run.py"))
         assert config.risk.max_position_weight == 0.25
         assert config.risk.max_drawdown_rate == 0.20
         assert config.risk.max_order_notional == 25_000
@@ -328,7 +358,7 @@ class TestBuildConfig:
             )
         )
         with pytest.raises(ValueError, match=r"unknown strategy\.risk"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_preserves_per_symbol_cost_and_route_overrides(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -352,7 +382,7 @@ class TestBuildConfig:
             )
         )
 
-        cfg = build_config("test_strat", str(tmp_path / "run.py"))
+        cfg, _ = build_run("test_strat", str(tmp_path / "run.py"))
 
         assert cfg.symbol_cost_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
@@ -389,7 +419,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match="periods_per_year"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_intraday_annualization_requires_explicit_periods_per_year(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -403,7 +433,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match="periods_per_year"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_unknown_data_source_requires_explicit_periods_per_year(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -426,7 +456,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match="periods_per_year"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_unknown_data_source_without_annualization_needs_no_calendar(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -447,7 +477,7 @@ class TestBuildConfig:
             )
         )
 
-        cfg = build_config("test_strat", str(tmp_path / "run.py"))
+        cfg, _ = build_run("test_strat", str(tmp_path / "run.py"))
 
         assert cfg.reporting.annualize is False
 
@@ -465,7 +495,7 @@ class TestBuildConfig:
         )
 
         with pytest.raises(ValueError, match="periods_per_year must be a positive integer"):
-            build_config("test_strat", str(tmp_path / "run.py"))
+            build_run("test_strat", str(tmp_path / "run.py"))
 
 
 def _make_cfg(**overrides) -> RunConfig:
@@ -547,12 +577,13 @@ class TestCheckExistingRun:
 
 class TestRunDispatch:
     def test_backtest_only_runner_rejects_realtime_mode_before_execution(self):
-        config = _make_cfg(mode="sim", no_db=True)
+        config = _make_cfg(mode="sim")
+        options = RunOptions(database_enabled=False)
         run_backtest = MagicMock()
 
         with (
-            patch("orchestration.cli.build_config", return_value=config),
-            patch.object(RunConfig, "log_summary") as log_summary,
+            patch("orchestration.cli.build_run", return_value=(config, options)),
+            patch("orchestration.cli.log_run_summary") as log_summary,
             pytest.raises(
                 ValueError,
                 match=r"does not support mode='sim'.*Use --mode backtest",
@@ -564,25 +595,33 @@ class TestRunDispatch:
         log_summary.assert_not_called()
 
     def test_backtest_only_runner_still_dispatches_backtest(self):
-        config = _make_cfg(no_db=True)
+        config = _make_cfg()
+        options = RunOptions(database_enabled=False)
         run_backtest = MagicMock()
 
         with (
-            patch("orchestration.cli.build_config", return_value=config),
-            patch.object(RunConfig, "log_summary"),
+            patch("orchestration.cli.build_run", return_value=(config, options)),
+            patch("orchestration.cli.log_run_summary"),
         ):
             run_dispatch("research_only", "run.py", run_backtest)
 
-        run_backtest.assert_called_once_with(config)
+        run_backtest.assert_called_once_with(config, options)
 
     def test_generic_realtime_runner_uses_deployment_factory(self):
-        config = _make_cfg(mode="sim", no_db=True)
+        config = _make_cfg(mode="sim")
+        options = RunOptions(database_enabled=False)
         trader = MagicMock()
         strategy = MagicMock()
         feature_fn = MagicMock()
 
         with patch("orchestration.live.build_live_trader", return_value=trader) as build:
-            run_realtime_generic(config, strategy, feature_fn)
+            run_realtime_generic(config, options, strategy, feature_fn)
 
-        build.assert_called_once_with(strategy, feature_fn, config=config)
+        build.assert_called_once_with(
+            strategy,
+            feature_fn,
+            config=config,
+            database_enabled=False,
+            telegram_config=None,
+        )
         trader.run.assert_called_once_with()

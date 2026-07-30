@@ -43,7 +43,7 @@ def _zero_cost_model() -> CostModel:
 
 
 def test_sim_engine_does_not_build_optional_infrastructure():
-    config = make_test_cfg(mode="sim", no_db=False)
+    config = make_test_cfg(mode="sim")
 
     trader = LiveTrader(
         MagicMock(),
@@ -2783,7 +2783,7 @@ class TestCryptoLiveFactory:
             trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                config=_test_cfg(mode="live", broker="binance", no_db=False),
+                config=_test_cfg(mode="live", broker="binance"),
             )
         return trader, mock_cls
 
@@ -2860,7 +2860,6 @@ class TestIBKRLiveFactory:
                     market="us_equity",
                     data_source="ibkr",
                     broker="ibkr",
-                    no_db=False,
                 ),
             )
 
@@ -2895,7 +2894,7 @@ class TestShioajiLiveFactory:
             trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                config=self._shioaji_cfg(mode="live", no_db=False),
+                config=self._shioaji_cfg(mode="live"),
             )
 
         # Same authenticated session used for fetching and for order placement.
@@ -2935,7 +2934,7 @@ class TestShioajiLiveFactory:
             trader = build_live_trader(
                 _AlwaysBuyStrategy(),
                 _simple_feature_fn,
-                config=self._shioaji_cfg(mode="live", no_db=False),
+                config=self._shioaji_cfg(mode="live"),
             )
             trader._clock = lambda: TEST_CLOCK_NOW
             trader._sleep = lambda _seconds: None  # no real delays in unit tests

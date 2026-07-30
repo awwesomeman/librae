@@ -119,5 +119,5 @@ The engine's default sim/live warm-up fetches directly through its injected
 adapter. If you want DB-first history with API gap filling, implement that
 policy in a callable and pass it as `warmup_fetcher`. Direct `LiveTrader`
 construction does not attach TimescaleDB. The repository orchestration factory
-does so unless `no_db=True`; live always requires an explicitly injected
-durable `state_store`.
+does so when `database_enabled=True`; live always requires an explicitly
+injected durable `state_store`.

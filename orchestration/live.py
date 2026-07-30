@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -51,12 +51,15 @@ def _build_adapter(name: str, *, trading: bool) -> object:
     raise ValueError(f"unsupported adapter: {name!r}")
 
 
-def _build_notifier(config: RunConfig) -> object:
+def _build_notifier(config: Mapping[str, object] | None) -> object | None:
+    if not config or not config.get("enabled", False):
+        return None
+
     from notifications.config import TelegramConfig
     from notifications.telegram import TelegramAdapter, TelegramCredentials
 
     return TelegramAdapter(
-        config=TelegramConfig.from_dict(config.telegram_config or {}),
+        config=TelegramConfig.from_dict(dict(config or {})),
         credentials=TelegramCredentials.from_env("TELEGRAM"),
     )
 
@@ -67,7 +70,8 @@ def _build_state_store() -> object:
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "TimescaleDB persistence is enabled but its optional dependencies "
-            "are unavailable. Install Librae's 'db' extra or use no_db=True."
+            "are unavailable. Install Librae's 'db' extra or disable repository "
+            "database wiring."
         ) from exc
     return TimescaleLiveStateStore()
 
@@ -273,6 +277,8 @@ def build_live_trader(
     feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
     *,
     config: RunConfig,
+    database_enabled: bool = True,
+    telegram_config: Mapping[str, object] | None = None,
 ) -> LiveTrader:
     """Build the repository's default sim/live deployment."""
     cost_models = {
@@ -335,9 +341,9 @@ def build_live_trader(
                 broker_instances[broker] = instance
             order_adapters[symbol] = instance
 
-    notifier = None if config.no_db else _build_notifier(config)
-    state_store = None if config.no_db else _build_state_store()
-    callbacks = None if config.no_db else _TimescaleCallbacks(config, instruments, notifier)
+    notifier = _build_notifier(telegram_config)
+    state_store = _build_state_store() if database_enabled else None
+    callbacks = _TimescaleCallbacks(config, instruments, notifier) if database_enabled else None
     market_fetchers = {
         symbol: _bind_market_data_source(
             data_adapters[symbol],

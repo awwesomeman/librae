@@ -367,7 +367,7 @@ class TestPersistBacktest:
     def test_force_recompute_replaces_existing_hash(self, mock_write_bt, mock_write_ohlcv):
         df, _symbol = self._make_featured_df()
 
-        save_strategy_results(MagicMock(), df, _test_cfg(force=True))
+        save_strategy_results(MagicMock(), df, _test_cfg(), replace_existing=True)
 
         assert mock_write_bt.call_args.kwargs["replace_existing"] is True
 

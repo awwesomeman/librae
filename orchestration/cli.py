@@ -3,7 +3,7 @@
 Provides:
 - base_parser(): common CLI arguments
 - parse_with_config(): merge config.yaml + CLI args
-- build_config(): canonical CLI factory for RunConfig
+- build_run(): canonical CLI factory for RunConfig + RunOptions
 - run_dispatch(): shared main() for all strategy runners
 - with_dedup_check(): config_hash dedup wrapper for backtest
 - setup_logging(): root logger config
@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import functools
 import logging
+import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -56,6 +58,20 @@ _DAILY_PERIODS_PER_YEAR: dict[str, int] = {
     "ibkr": 252,
     "shioaji": 252,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class RunOptions:
+    """Repository orchestration behavior that does not belong to the engine."""
+
+    database_enabled: bool = True
+    dry_run: bool = False
+    replace_existing: bool = False
+    telegram_config: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if self.dry_run and self.database_enabled:
+            raise ValueError("dry_run=True requires database_enabled=False")
 
 
 def base_parser(description: str) -> argparse.ArgumentParser:
@@ -222,17 +238,17 @@ def _resolve_market_and_data_source(
 
 
 # ---------------------------------------------------------------------------
-# build_config() — CLI factory for RunConfig
+# build_run() — CLI factory for RunConfig + RunOptions
 # ---------------------------------------------------------------------------
 
 
-def build_config(strategy_name: str, run_file: str) -> RunConfig:
-    """Build RunConfig from CLI args + config.yaml.
+def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]:
+    """Build engine config and orchestration options from CLI + YAML.
 
-    This is the canonical CLI factory for RunConfig. It:
+    This is the canonical repository runner factory. It:
     1. Parse start/end from params (or convert periods -> start/end)
     2. Extract per-run and per-symbol overrides
-    3. Derive dry_run -> no_db
+    3. Derive dry-run behavior and database wiring
     4. Resolve an explicit return-observation annualization factor
     """
     p = base_parser(f"{strategy_name} strategy")
@@ -412,7 +428,7 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         else default_periods_per_year or 365
     )
 
-    return RunConfig(
+    config = RunConfig(
         strategy_name=strategy_name,
         symbols=symbols,
         timeframe=timeframe,
@@ -439,11 +455,14 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
             reconciliation_interval_seconds=reconciliation_interval_seconds,
             market_data_workers=market_data_workers,
         ),
-        no_db=no_db,
+    )
+    options = RunOptions(
+        database_enabled=not no_db,
         dry_run=dry_run,
-        force=args.force,
+        replace_existing=args.force,
         telegram_config=getattr(args, "telegram", None),
     )
+    return config, options
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +470,10 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
 # ---------------------------------------------------------------------------
 
 
-def with_dedup_check(fn: Callable[[RunConfig], None]) -> Callable[[RunConfig], None]:
+def with_dedup_check(
+    fn: Callable[[RunConfig, RunOptions], None],
+    options: RunOptions,
+) -> Callable[[RunConfig], None]:
     """Wrap run_backtest to check config_hash before running.
 
     Only for backtest mode. Sim/live paths don't use this.
@@ -459,11 +481,11 @@ def with_dedup_check(fn: Callable[[RunConfig], None]) -> Callable[[RunConfig], N
 
     @functools.wraps(fn)
     def wrapper(config: RunConfig) -> None:
-        if not config.no_db and not config.force:
+        if options.database_enabled and not options.replace_existing:
             existing = check_existing_run(config)
             if existing:
                 return
-        fn(config)
+        fn(config, options)
 
     return wrapper
 
@@ -532,8 +554,8 @@ def check_existing_run(config: RunConfig) -> str | None:
 def run_dispatch(
     strategy_name: str,
     run_file: str,
-    run_backtest: Callable[[RunConfig], None],
-    run_realtime: Callable[[RunConfig], None] | None = None,
+    run_backtest: Callable[[RunConfig, RunOptions], None],
+    run_realtime: Callable[[RunConfig, RunOptions], None] | None = None,
 ) -> None:
     """Run a strategy through its declared mode handlers.
 
@@ -542,10 +564,10 @@ def run_dispatch(
     relying on a placeholder callback to raise ``NotImplementedError``.
     """
     setup_logging()
-    config = build_config(strategy_name, run_file)
+    config, options = build_run(strategy_name, run_file)
     if config.mode == "backtest":
-        config.log_summary()
-        with_dedup_check(run_backtest)(config)
+        log_run_summary(config, options)
+        with_dedup_check(run_backtest, options)(config)
         return
     if run_realtime is None:
         raise ValueError(
@@ -553,8 +575,8 @@ def run_dispatch(
             "supported modes: ['backtest']. Use --mode backtest, or provide "
             "a real-time runner with market-data, broker, and state wiring."
         )
-    config.log_summary()
-    run_realtime(config)
+    log_run_summary(config, options)
+    run_realtime(config, options)
 
 
 # ---------------------------------------------------------------------------
@@ -568,14 +590,84 @@ def run_dispatch(
 
 def run_realtime_generic(
     config: RunConfig,
+    options: RunOptions,
     strategy: Strategy,
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> None:
     """Run the repository's default sim/live deployment wiring."""
     from orchestration.live import build_live_trader
 
-    trader = build_live_trader(strategy, prepare_signals, config=config)
+    trader = build_live_trader(
+        strategy,
+        prepare_signals,
+        config=config,
+        database_enabled=options.database_enabled,
+        telegram_config=None if options.dry_run else options.telegram_config,
+    )
     trader.run()
+
+
+def _mask_token(token: str) -> str:
+    if len(token) <= 8:
+        return "****"
+    return f"{token[:4]}...{token[-4:]}"
+
+
+def _get_code_rev() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "describe", "--always", "--dirty"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def log_run_summary(config: RunConfig, options: RunOptions) -> None:
+    """Log engine configuration and repository orchestration separately."""
+    telegram = options.telegram_config or {}
+    masked_telegram = (
+        {
+            key: (_mask_token(str(value)) if "token" in key.lower() else value)
+            for key, value in telegram.items()
+        }
+        if telegram
+        else None
+    )
+    lines = [
+        "=" * 60,
+        "Run Config:",
+        f"  strategy:    {config.strategy_name}",
+        f"  symbols:     {config.symbols}",
+        f"  timeframe:   {config.timeframe}",
+        f"  mode:        {config.mode}",
+        f"  data_source: {config.data_source}",
+        f"  broker:      {config.broker}",
+        f"  start:       {config.start}",
+        f"  end:         {config.end}",
+        f"  config_hash: {config.config_hash}",
+        f"  code_rev:    {_get_code_rev()}",
+        "  --- strategy params (stored in DB) ---",
+        f"  accounts:    {dict(config.accounts)}",
+        f"  params:      {config.params}",
+        f"  cost_overrides: {config.cost_overrides}",
+        f"  symbol_cost_overrides: {config.symbol_cost_overrides}",
+        f"  instrument_overrides: {config.instrument_overrides}",
+        f"  execution:   {config.execution}",
+        f"  risk:        {config.risk}",
+        "  --- reporting policy ---",
+        f"  reporting:   {config.reporting}",
+        "  --- orchestration options ---",
+        f"  database_enabled: {options.database_enabled}",
+        f"  dry_run:     {options.dry_run}",
+        f"  replace_existing: {options.replace_existing}",
+        f"  runtime:     {config.runtime}",
+        f"  telegram:    {masked_telegram}",
+        "=" * 60,
+    ]
+    logger.info("\n".join(lines))
 
 
 def setup_logging() -> None:

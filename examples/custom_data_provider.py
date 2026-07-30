@@ -157,7 +157,6 @@ def main() -> None:
             warmup_periods=5,
         ),
         runtime=RuntimePolicy(poll_seconds=0),
-        no_db=True,
     )
     trader = LiveTrader(
         FactorThresholdStrategy(),

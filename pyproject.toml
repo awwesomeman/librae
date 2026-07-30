@@ -44,7 +44,7 @@ cli = [
   "pyyaml>=6.0",
 ]
 db = [
-  "psycopg2-binary>=2.9",  # db/ — TimescaleDB read/write; not needed under cfg.no_db=True
+  "psycopg2-binary>=2.9",  # db/ — optional TimescaleDB read/write integration
 ]
 parquet = [
   "pyarrow>=15",  # optional caller-selected DataFrame serialization backend
