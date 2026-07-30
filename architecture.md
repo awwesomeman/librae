@@ -414,6 +414,32 @@ Librae engine per account and coordinates them outside the engine. Librae does
 not provide FX conversion, transfer, borrowing, settlement, cross-account
 netting, or atomic execution across runs.
 
+`librae.orchestration.supervisor` defines the optional boundary for that outer
+coordination. A `DeploymentSpec` gives one process a stable `deployment_id`
+bound to one `account_id`, currency, mode, strategy configuration, entry point,
+and account-specific credential reference. The deployment identity survives
+process restarts and is distinct from the engine's `run_id`.
+`validate_deployments()` rejects duplicate deployment identities and rejects
+two live deployments that claim the same account.
+
+The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, and
+`restart`. Docker, systemd, Kubernetes, or another concrete process manager
+implements those operations and remains the lifecycle source of truth.
+`DeploymentStatus` carries observed identity, phase, timestamp, and optional
+process, run, exit, and failure facts; it is not a second state store.
+
+| Owner | Responsibility |
+|---|---|
+| Engine | One account ledger, strategy execution, orders, risk, and restart-safe trading state |
+| External supervisor | Process lifecycle, restart/backoff policy, and resource isolation |
+| Deployment adapter | Translation between the `Supervisor` protocol and one concrete process manager |
+| DB, UI, monitoring, notifications | Read-only aggregation of account- and currency-labelled status |
+
+An orchestration process that restarts must recover status by inspecting the
+external supervisor and durable engine state. It must not infer status from an
+in-memory coordinator cache. One failed or unknown deployment remains an
+account-specific fact and cannot change the lifecycle of another deployment.
+
 Within an account the engine is portfolio-level. `on_bar()` can return
 `OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends the
 account's available cash, so multi-symbol decisions should normally use
