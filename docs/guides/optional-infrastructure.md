@@ -275,6 +275,10 @@ or flat-account reset procedure below.
 
 ### Reference VM flow
 
+The target must provide Bash, rsync, and Docker Compose. Its SSH account must
+permit local TCP forwarding from the caller to the target's `localhost:3000`.
+The deployment fails when any required capability is unavailable.
+
 1. On the build machine, set `TRADE_STRATEGY_PATH` and `TRADE_IMAGE` in the
    Librae checkout's `.env`.
 2. Run `deploy/build_push.sh` and copy its printed `TRADE_IMAGE_REF` into the
@@ -358,9 +362,30 @@ container. A failed new launch remains failed for diagnosis; the script does
 not blindly reactivate the old revision. `trade.sh stop --all` applies the same
 graceful behavior to all containers carrying the Librae managed label.
 The repository CI exercises this lifecycle with a long-running simulation
-fixture and verifies the durable account lease across separate containers. It
-does not claim broker API certification; real live credentials and venue
-reconciliation remain an environment-specific release gate.
+fixture and verifies the durable account lease across separate containers.
+It also runs the real registry-to-VM path against a disposable multi-platform
+OCI registry and a clean SSH Linux target with its own Docker daemon. The
+acceptance run:
+
+- publishes the combined Librae and external-strategy image with
+  `build_push.sh` and consumes only its digest-qualified output;
+- transfers infrastructure with `cloud_deploy.sh`, verifies the current
+  schema and shared container network, and reruns without changing
+  operator-created account configuration or credentials;
+- starts a long-running broker-free deployment with `trade.sh` from the
+  published digest and removes the disposable registry, host, containers,
+  networks, volumes, and image cache afterward.
+
+This validates the documented script handoff without copying either
+application repository to the target. It does not claim registry
+authentication, image-signing policy, cloud hardening, or broker API
+certification; real live credentials and venue reconciliation remain
+environment-specific release gates.
+
+`cloud_deploy.sh` reports file transfer, Compose startup, TimescaleDB
+readiness, schema loading, Grafana readiness, and dashboard publication as
+separate stages. Readiness waits are bounded to 180 seconds by default; set
+`CLOUD_DEPLOY_TIMEOUT_SECONDS` to another positive integer for a slower host.
 
 Before the first account-specific live launch, stop any container created by
 the older `quant_live_<strategy>` naming contract. `trade.sh` rejects an

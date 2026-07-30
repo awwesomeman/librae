@@ -12,6 +12,37 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy"
 
 
+def _find_bash() -> str:
+    candidates: list[Path] = []
+    bash = shutil.which("bash")
+    if bash is not None:
+        candidates.append(Path(bash))
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git is not None:
+            candidates.append(Path(git).resolve().parent.parent / "bin/bash.exe")
+        candidates.append(
+            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git/bin/bash.exe"
+        )
+
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_file():
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "exit 0"],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return str(candidate)
+
+    pytest.skip("a working bash is required for deployment script behavior tests")
+
+
 def test_compose_database_init_mount_exists() -> None:
     compose = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text(encoding="utf-8"))
     mounts = compose["services"]["timescaledb"]["volumes"]
@@ -58,13 +89,24 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
 
     assert workflow.count('- "deploy/**"') == 2
     assert "bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh" in workflow
-    assert "docker build" in workflow
+    assert "docker/setup-qemu-action@v3" in workflow
+    assert "docker/setup-buildx-action@v3" in workflow
+    assert "registry:2.8.3" in workflow
+    assert "docker:28.3.3-dind" in workflow
+    assert "bash openssh rsync docker-cli-compose socat" in workflow
+    assert "-o DisableForwarding=no" in workflow
+    assert "-o AllowTcpForwarding=local" in workflow
+    assert "./deploy/build_push.sh" in workflow
+    assert "./deploy/cloud_deploy.sh deployment-target" in workflow
+    assert "TRADE_IMAGE: localhost:5000/librae-trade" in workflow
+    assert 'docker pull "${TRADE_IMAGE_REF}"' in workflow
     assert "docker image inspect" in workflow
     assert "docker run --rm" in workflow
     assert "EXPECTED_VERSION" in workflow
     assert "strategy-fixture/smoke/run.py" in workflow
-    assert "--build-context strategy_source=../strategy-fixture" in workflow
+    assert "TRADE_STRATEGY_PATH: ../strategy-fixture" in workflow
     assert "./deploy/trade.sh start smoke-ci ci USD smoke sim 60" in workflow
+    assert "./deploy/trade.sh start smoke-registry ci USD smoke sim 1" in workflow
     assert "./deploy/trade.sh restart smoke-ci" in workflow
     assert "./deploy/trade.sh inspect failing-ci" in workflow
     assert "librae-account-lease-owner" in workflow
@@ -72,6 +114,13 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "TRADE_TIMESCALE_DSN" in workflow
     assert "--network quant_network" in workflow
     assert "host.docker.internal:host-gateway" in workflow
+    assert "test ! -e quant-deploy/.credentials" in workflow
+    assert "test ! -e quant-deploy/strategies" in workflow
+    assert "must-not-transfer" in workflow
+    assert "Verify re-deploy preserves operator-owned files" in workflow
+    assert "Remove disposable deployment infrastructure" in workflow
+    assert "docker rm --force deployment-target deployment-registry" in workflow
+    assert "docker network rm deployment-acceptance" in workflow
 
 
 def test_registry_trade_deploy_uses_one_immutable_image_reference() -> None:
@@ -122,13 +171,7 @@ def _run_trade_script(
     existing_mode: str = "",
     existing_managed: str = "true",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    bash = shutil.which("bash")
-    if bash is None and os.name == "nt":
-        git_bash = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git/bin/bash.exe"
-        if git_bash.is_file():
-            bash = str(git_bash)
-    if bash is None:
-        pytest.skip("bash is required for deployment script behavior tests")
+    bash = _find_bash()
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     docker_log = tmp_path / "docker.log"
@@ -501,6 +544,11 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
 def test_remote_schema_path_matches_compose_source() -> None:
     script = (DEPLOY / "cloud_deploy.sh").read_text(encoding="utf-8")
 
+    assert 'DEPLOY_TIMEOUT_SECONDS="${CLOUD_DEPLOY_TIMEOUT_SECONDS:-180}"' in script
+    assert 'STAGE="file transfer"' in script
+    assert 'STAGE="Compose startup"' in script
+    assert 'STAGE="schema loading"' in script
+    assert "Cloud deployment failed during ${STAGE}" in script
     assert 'rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql"' in script
     assert '"${PROJECT_ROOT}/.env.secrets.example"' in script
     assert '"${PROJECT_ROOT}/.credentials"' not in script
@@ -513,6 +561,53 @@ def test_remote_schema_path_matches_compose_source() -> None:
         "GF_SECURITY_ADMIN_PASSWORD",
     ):
         assert f"${{{variable}:?Set {variable} in .env}}" in script
+
+
+def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    script_dir = project / "deploy"
+    script_dir.mkdir(parents=True)
+    script = script_dir / "cloud_deploy.sh"
+    shutil.copy2(DEPLOY / "cloud_deploy.sh", script)
+    (project / ".env").write_text(
+        "\n".join(
+            (
+                "POSTGRES_PASSWORD=test",
+                "POSTGRES_APP_PASSWORD=test",
+                "POSTGRES_GRAFANA_PASSWORD=test",
+                "GF_SECURITY_ADMIN_PASSWORD=test",
+            )
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_bin = project / "fake-bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text("#!/usr/bin/env bash\nexit 17\n", encoding="utf-8", newline="\n")
+    fake_ssh.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            _find_bash(),
+            "-c",
+            'PATH="$PWD/fake-bin:$PATH"; exec deploy/cloud_deploy.sh deployment-target',
+        ],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 17
+    assert "Cloud deployment failed during file transfer (exit 17)." in result.stderr
+
+
+def test_dashboard_generator_does_not_import_the_engine_package() -> None:
+    script = (ROOT / "scripts/dev_push_dashboard.py").read_text(encoding="utf-8")
+
+    assert '"librae/app/grafana/generate_dashboards.py"' in script
+    assert '"librae.app.grafana.generate_dashboards"' not in script
 
 
 def test_grafana_receives_only_its_database_password() -> None:

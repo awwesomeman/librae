@@ -475,6 +475,15 @@ These identities have deliberately separate meanings:
 | `deployment_id` | Stable external process slot across restarts and revisions |
 | `run_id` | Engine run identity restored from the accepted checkpoint |
 
+The repository's deployment acceptance path remains outside the engine. It
+publishes the real combined-source image through `build_push.sh` to a
+disposable OCI registry, transfers the documented infrastructure subset
+through `cloud_deploy.sh` to a clean disposable SSH host, and starts a
+digest-pinned broker-free process with `trade.sh`. This certifies packaging,
+transfer, Compose, schema, service-network, and process-lifecycle wiring. It
+does not certify registry authentication, cloud security policy, broker
+credentials, market data, or order execution.
+
 Within an account the engine is portfolio-level. `on_bar()` can return
 `OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends the
 account's available cash, so multi-symbol decisions should normally use

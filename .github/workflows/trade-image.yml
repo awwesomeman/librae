@@ -33,6 +33,29 @@ jobs:
       - name: Validate deployment scripts
         run: bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh
 
+      - name: Enable multi-platform builds
+        uses: docker/setup-qemu-action@v3
+
+      - name: Configure Buildx for the disposable registry
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Start disposable registry
+        run: |
+          docker network create deployment-acceptance
+          docker run --detach \
+            --name deployment-registry \
+            --network deployment-acceptance \
+            --publish 127.0.0.1:5000:5000 \
+            registry:2.8.3
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:5000/v2/ >/dev/null && exit 0
+            sleep 1
+          done
+          echo "Disposable registry did not become ready." >&2
+          exit 1
+
       - name: Prepare strategy fixture
         run: |
           mkdir -p ../strategy-fixture/smoke
@@ -91,38 +114,47 @@ jobs:
             '    initial_cash: 100000' \
             > ../strategy-fixture/failing/config.yaml
 
-      - name: Build clean trade image
+      - name: Publish multi-platform image with build_push.sh
         id: image
+        env:
+          TRADE_IMAGE: localhost:5000/librae-trade
+          TRADE_STRATEGY_PATH: ../strategy-fixture
         run: |
+          set -o pipefail
           revision="$(git rev-parse --verify HEAD)"
           version="0+g${revision:0:12}"
-          docker build \
-            --build-context strategy_source=../strategy-fixture \
-            --build-arg LIBRAE_VERSION="${version}" \
-            --build-arg LIBRAE_REVISION="${revision}" \
-            --tag librae-trade:ci \
-            --file deploy/Dockerfile \
-            .
+          ./deploy/build_push.sh | tee "${RUNNER_TEMP}/build-push.log"
+          image_ref="$(
+            sed -n 's/^TRADE_IMAGE_REF=//p' "${RUNNER_TEMP}/build-push.log"
+          )"
+          if [[ ! "${image_ref}" =~ ^localhost:5000/librae-trade@sha256:[0-9a-f]{64}$ ]]; then
+            echo "build_push.sh emitted an invalid image reference: ${image_ref}" >&2
+            exit 1
+          fi
           echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${image_ref}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify package and image identity
+      - name: Pull immutable image and verify identity
         env:
           EXPECTED_REVISION: ${{ steps.image.outputs.revision }}
           EXPECTED_VERSION: ${{ steps.image.outputs.version }}
+          TRADE_IMAGE_REF: ${{ steps.image.outputs.ref }}
         run: |
+          docker pull "${TRADE_IMAGE_REF}"
+          docker tag "${TRADE_IMAGE_REF}" librae-trade:ci
           actual_revision="$(
             docker image inspect \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-              librae-trade:ci
+              "${TRADE_IMAGE_REF}"
           )"
           test "${actual_revision}" = "${EXPECTED_REVISION}"
           docker run --rm \
             --env EXPECTED_VERSION="${EXPECTED_VERSION}" \
-            librae-trade:ci \
+            "${TRADE_IMAGE_REF}" \
             python -c \
             'import importlib.metadata as m, os; import librae; assert m.version("librae") == os.environ["EXPECTED_VERSION"]'
-          docker run --rm librae-trade:ci python -m strategies.smoke.run --once
+          docker run --rm "${TRADE_IMAGE_REF}" python -m strategies.smoke.run --once
 
       - name: Verify TimescaleDB container endpoint
         run: |
@@ -149,12 +181,13 @@ jobs:
           test "${connected}" = true
 
       - name: Verify account-specific trade launch
+        env:
+          TRADE_IMAGE_REF: ${{ steps.image.outputs.ref }}
         run: |
           set -a
           source .env.example
           set +a
-          TRADE_STRATEGY_PATH=../strategy-fixture \
-            ./deploy/trade.sh start smoke-ci ci USD smoke sim 60
+          ./deploy/trade.sh start smoke-ci ci USD smoke sim 60
           test "$(
             docker inspect \
               --format '{{ index .Config.Labels "io.librae.deployment_id" }}' \
@@ -170,10 +203,14 @@ jobs:
               --format '{{ index .Config.Labels "io.librae.currency" }}' \
               quant_smoke-ci
           )" = "USD"
+          test "$(
+            docker inspect \
+              --format '{{.Config.Image}}' \
+              quant_smoke-ci
+          )" = "${TRADE_IMAGE_REF}"
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
-          if TRADE_STRATEGY_PATH=../strategy-fixture \
-            ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then
+          if ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then
             echo "early-exit deployment was reported ready" >&2
             exit 1
           fi
@@ -282,3 +319,209 @@ jobs:
             --env-file .env.example \
             --file deploy/docker-compose.yml \
             down --volumes
+
+      - name: Start disposable SSH Docker target
+        run: |
+          docker run --detach \
+            --privileged \
+            --name deployment-target \
+            --network deployment-acceptance \
+            --publish 127.0.0.1::22 \
+            --env DOCKER_TLS_CERTDIR= \
+            docker:28.3.3-dind \
+            --insecure-registry=localhost:5000
+          for attempt in $(seq 1 60); do
+            docker exec deployment-target docker info >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec deployment-target docker info >/dev/null
+          docker exec deployment-target apk add --no-cache \
+            bash openssh rsync docker-cli-compose socat
+          docker exec deployment-target sh -c '
+            nohup socat \
+              TCP4-LISTEN:5000,bind=127.0.0.1,reuseaddr,fork \
+              TCP4:deployment-registry:5000 \
+              >/tmp/registry-proxy.log 2>&1 </dev/null &
+          '
+          for attempt in $(seq 1 30); do
+            docker exec deployment-target \
+              wget -qO- http://127.0.0.1:5000/v2/ >/dev/null \
+              && registry_ready=true \
+              && break
+            sleep 1
+          done
+          if [[ "${registry_ready:-false}" != true ]]; then
+            docker exec deployment-target \
+              cat /tmp/registry-proxy.log || true
+            exit 1
+          fi
+
+          ssh-keygen -q -t ed25519 -N "" \
+            -f "${RUNNER_TEMP}/deployment-target-key"
+          docker exec deployment-target sh -eu -c '
+            adduser -D deploy
+            passwd -d deploy
+            addgroup deploy docker
+            install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
+            chown root:docker /var/run/docker.sock
+            chmod 660 /var/run/docker.sock
+            ssh-keygen -A
+            printf "%s\n" \
+              "PasswordAuthentication no" \
+              "PermitRootLogin no" \
+              "AllowUsers deploy" \
+              >> /etc/ssh/sshd_config
+          '
+          docker exec --interactive deployment-target sh -eu -c '
+            cat > /home/deploy/.ssh/authorized_keys
+            chown deploy:deploy /home/deploy/.ssh/authorized_keys
+            chmod 600 /home/deploy/.ssh/authorized_keys
+          ' < "${RUNNER_TEMP}/deployment-target-key.pub"
+          docker exec deployment-target sh -eu -c '
+            effective_config="$(
+              /usr/sbin/sshd -T \
+                -o DisableForwarding=no \
+                -o AllowTcpForwarding=local
+            )"
+            printf "%s\n" "${effective_config}" \
+              | grep -qx "disableforwarding no"
+            printf "%s\n" "${effective_config}" \
+              | grep -qx "allowtcpforwarding local"
+          '
+          docker exec deployment-target /usr/sbin/sshd \
+            -o DisableForwarding=no \
+            -o AllowTcpForwarding=local
+
+          target_port="$(
+            docker port deployment-target 22/tcp | awk -F: 'END { print $NF }'
+          )"
+          mkdir -p "${HOME}/.ssh"
+          chmod 700 "${HOME}/.ssh"
+          cat >> "${HOME}/.ssh/config" <<EOF
+          Host deployment-target
+            HostName 127.0.0.1
+            Port ${target_port}
+            User deploy
+            IdentityFile ${RUNNER_TEMP}/deployment-target-key
+            IdentitiesOnly yes
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+          chmod 600 "${HOME}/.ssh/config"
+          for attempt in $(seq 1 30); do
+            if ssh deployment-target true >/dev/null 2>&1; then
+              ssh_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${ssh_ready:-false}" != true ]]; then
+            echo "Disposable target did not become reachable over SSH." >&2
+            exit 1
+          fi
+
+      - name: Deploy infrastructure through cloud_deploy.sh
+        env:
+          CLOUD_DEPLOY_TIMEOUT_SECONDS: "180"
+          TRADE_IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          cp .env.example .env
+          printf '\nTRADE_IMAGE_REF=%s\n' "${TRADE_IMAGE_REF}" >> .env
+          mkdir -p .credentials
+          printf '%s\n' \
+            'BINANCE_API_SECRET=must-not-transfer' \
+            > .credentials/ci.env
+          printf '%s\n' 'caller-strategy-must-not-transfer' \
+            > ../strategy-fixture/private-source-marker
+          python3 -m venv .venv
+          .venv/bin/python3 -m pip install --quiet httpx
+          ./deploy/cloud_deploy.sh deployment-target
+
+      - name: Verify remote boundary, services, and schema
+        env:
+          TRADE_IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          test "$(
+            ssh deployment-target 'cd quant-deploy && ls -A1 | sort'
+          )" = "$(printf '%s\n' .env .env.secrets.example deploy librae)"
+          ssh deployment-target '
+            set -eu
+            test ! -e quant-deploy/.git
+            test ! -e quant-deploy/.credentials
+            test ! -e quant-deploy/configs
+            test ! -e quant-deploy/strategies
+            ! grep -R "must-not-transfer" quant-deploy
+            test "$(
+              docker inspect \
+                --format "{{.State.Health.Status}}" \
+                quant_timescaledb
+            )" = "healthy"
+            wget -qO- http://127.0.0.1:3000/api/health >/dev/null
+            test "$(
+              docker exec quant_timescaledb \
+                psql -U quant -d quant -tAc \
+                "SELECT to_regclass(\$\$public.execution_runtime_state\$\$)"
+            )" = "execution_runtime_state"
+          '
+          ssh deployment-target \
+            "docker run --rm \
+              --network quant_network \
+              --env TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@quant_timescaledb:5432/quant \
+              '${TRADE_IMAGE_REF}' \
+              python -c \
+              'import os, psycopg2; connection = psycopg2.connect(os.environ[\"TIMESCALE_DSN\"]); cursor = connection.cursor(); cursor.execute(\"SELECT 1\"); assert cursor.fetchone() == (1,); connection.close()'"
+
+      - name: Verify re-deploy preserves operator-owned files
+        env:
+          CLOUD_DEPLOY_TIMEOUT_SECONDS: "180"
+        run: |
+          ssh deployment-target '
+            mkdir -p quant-deploy/.credentials quant-deploy/configs
+            printf "%s\n" operator-credential \
+              > quant-deploy/.credentials/account.env
+            printf "%s\n" operator-config \
+              > quant-deploy/configs/account.yaml
+          '
+          ./deploy/cloud_deploy.sh deployment-target
+          test "$(
+            ssh deployment-target \
+              'cat quant-deploy/.credentials/account.env'
+          )" = "operator-credential"
+          test "$(
+            ssh deployment-target \
+              'cat quant-deploy/configs/account.yaml'
+          )" = "operator-config"
+
+      - name: Start digest-pinned broker-free deployment
+        env:
+          TRADE_IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          ssh deployment-target \
+            'cd quant-deploy && ./deploy/trade.sh start smoke-registry ci USD smoke sim 1'
+          test "$(
+            ssh deployment-target \
+              'docker inspect --format "{{.Config.Image}}" quant_smoke-registry'
+          )" = "${TRADE_IMAGE_REF}"
+          ssh deployment-target \
+            'cd quant-deploy && ./deploy/trade.sh inspect smoke-registry' \
+            | grep -Fx 'phase=running'
+
+      - name: Remove disposable deployment infrastructure
+        if: always()
+        run: |
+          if docker inspect deployment-target >/dev/null 2>&1; then
+            ssh deployment-target '
+              if test -d quant-deploy/deploy; then
+                cd quant-deploy
+                ./deploy/trade.sh stop --all --force || true
+                docker compose \
+                  --env-file .env \
+                  --file deploy/docker-compose.yml \
+                  down --volumes --remove-orphans || true
+              fi
+            ' || true
+          fi
+          docker rm --force deployment-target deployment-registry \
+            >/dev/null 2>&1 || true
+          docker network rm deployment-acceptance >/dev/null 2>&1 || true
+          docker buildx prune --force >/dev/null 2>&1 || true
