@@ -55,6 +55,10 @@ For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
 `POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
 the non-admin `quant_app` role and must not be used for schema administration.
+It is the host-side endpoint used by local tools. The reference `trade.sh`
+instead reads `TRADE_TIMESCALE_DSN` and passes it into the trade container as
+`TIMESCALE_DSN`; that value uses the `quant_timescaledb` service identity on
+`quant_network`, not container loopback.
 
 Normal integrations call the high-level functions in
 `librae.db.timescale_writer` and `librae.db.timescale_reader`; upper layers should not issue
@@ -118,6 +122,13 @@ Market data and execution routing are separate. `data_source` chooses where
 bars come from; live execution needs an explicit `broker`,
 per-instrument broker override, or injected `order_adapter`. Librae does not
 infer an execution venue from a symbol.
+
+For an IBKR gateway on the Docker host, set `IBKR_HOST` to
+`host.docker.internal`; the reference trade script adds the Linux host-gateway
+mapping. For a gateway container on `quant_network`, use its service name.
+Container loopback is rejected because it would address the trade container
+itself. These settings establish routing only and do not certify an IBKR
+session or order lifecycle.
 
 Adapters and credentials can be imported from `librae.brokers` for
 caller-owned research or custom wiring. See

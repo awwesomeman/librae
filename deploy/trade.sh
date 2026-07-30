@@ -58,6 +58,7 @@ cmd_start() {
     local mode="${2:-sim}"
     local poll_seconds="${3:-60}"
     local image="${TRADE_IMAGE:-quant-trade}"
+    local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env}"
 
     if [[ "${mode}" != "sim" && "${mode}" != "live" ]]; then
         echo "mode must be 'sim' or 'live', got: ${mode}" >&2
@@ -72,6 +73,13 @@ cmd_start() {
         && -z "${SHIOAJI_API_KEY:-}" \
         && -z "${IBKR_HOST:-}" ]]; then
         echo "live mode requires Binance, Shioaji, or IBKR settings in .env.secrets" >&2
+        exit 1
+    fi
+    if [[ "${mode}" == "live" \
+        && ( "${IBKR_HOST:-}" == "localhost" \
+            || "${IBKR_HOST:-}" == "127.0.0.1" \
+            || "${IBKR_HOST:-}" == "::1" ) ]]; then
+        echo "IBKR_HOST cannot use container loopback; use host.docker.internal or a service name" >&2
         exit 1
     fi
 
@@ -98,19 +106,20 @@ cmd_start() {
             -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${build_context}" >/dev/null
     fi
 
-    if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
-        echo "Stopping existing ${container}..."
-        docker rm -f "${container}" >/dev/null
-    fi
-
-    echo "Starting ${container}: strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
+    echo "Checking TimescaleDB connectivity from ${image} on ${NETWORK}..."
+    docker run --rm \
+        --network "${NETWORK}" \
+        -e TIMESCALE_DSN="${trade_timescale_dsn}" \
+        "${image}" \
+        python -c 'import os, psycopg2; connection = psycopg2.connect(os.environ["TIMESCALE_DSN"]); cursor = connection.cursor(); cursor.execute("SELECT 1"); assert cursor.fetchone() == (1,); connection.close()'
 
     local env_args=(
-        -e TIMESCALE_DSN="${TIMESCALE_DSN:?Set TIMESCALE_DSN in .env}"
+        -e TIMESCALE_DSN="${trade_timescale_dsn}"
         -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
         -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
     )
     local volume_args=()
+    local host_args=()
     if [[ "${mode}" == "live" ]]; then
         if [[ -n "${BINANCE_API_KEY:-}" ]]; then
             env_args+=(
@@ -139,8 +148,18 @@ cmd_start() {
                 -e IBKR_PORT="${IBKR_PORT:-7497}"
                 -e IBKR_CLIENT_ID="${IBKR_CLIENT_ID:-1}"
             )
+            if [[ "${IBKR_HOST}" == "host.docker.internal" ]]; then
+                host_args+=(--add-host "host.docker.internal:host-gateway")
+            fi
         fi
     fi
+
+    if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+        echo "Stopping existing ${container}..."
+        docker rm -f "${container}" >/dev/null
+    fi
+
+    echo "Starting ${container}: strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
 
     docker run -d \
         --name "${container}" \
@@ -148,6 +167,7 @@ cmd_start() {
         --restart unless-stopped \
         "${env_args[@]}" \
         ${volume_args[@]+"${volume_args[@]}"} \
+        ${host_args[@]+"${host_args[@]}"} \
         "${image}" \
         python -m "strategies.${strategy}.run" \
         --mode "${mode}" \
