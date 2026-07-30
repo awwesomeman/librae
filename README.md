@@ -43,8 +43,11 @@ Install the library directly from GitHub:
 pip install "librae @ git+https://github.com/awwesomeman/librae.git"
 ```
 
-It is not on PyPI yet. For a reproducible environment, pin the dependency to a
-tag or commit. See [Getting started](docs/getting-started.md) for extras,
+The base install contains the in-memory backtest engine and depends only on
+NumPy and pandas. Reports, exchange calendars, CLI wiring, persistence,
+notifications, UI, and broker integrations are opt-in extras. Librae is not on
+PyPI yet; for a reproducible environment, pin the dependency to a tag or
+commit. See [Getting started](docs/getting-started.md) for the extras,
 versioning, environment variables, and contributor setup.
 
 To run a complete example from a clone:

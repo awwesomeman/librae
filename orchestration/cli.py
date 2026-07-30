@@ -23,7 +23,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "The YAML CLI requires the 'cli' extra: pip install 'librae[cli]'"
+    ) from exc
+
 from librae.core.run_config import (
     DEFAULT_POLL_SECONDS,
     AccountConfig,

@@ -16,7 +16,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+try:
+    import httpx
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "Binance Stocks data requires the 'stocks-data' extra: pip install 'librae[stocks-data]'"
+    ) from exc
+
 from librae.config.symbols import AssetClass, AvailableSymbol, InstrumentKind
 
 from .base import AdapterInfo, CredentialConfig

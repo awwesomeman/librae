@@ -115,9 +115,10 @@ rejections, or broker fees.
 
 ## Notifications and custom sinks
 
-The bundled notifier reads Telegram secrets from environment variables and
-behavior from `RunConfig.telegram_config`. You can instead inject your own
-notifier or persistence callbacks.
+Install `librae[telegram]` to use the bundled notifier. It reads Telegram
+secrets from environment variables and behavior from
+`RunConfig.telegram_config`. You can instead inject your own notifier or
+persistence callbacks without installing that extra.
 
 See
 [LiveTrader callback signatures](../../architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier)

@@ -1,11 +1,9 @@
-"""Performance metrics module — QuantStats adapter + custom metrics.
+"""Performance metrics and optional report generation.
 
-Standard metrics (Sharpe, Sortino, MDD, Calmar, etc.) delegated to QuantStats,
-which always uses ddof=1 internally (not configurable — verified against
-quantstats.stats.sharpe source, so this project doesn't expose a fake ddof knob).
-Custom metrics not in QuantStats (exposure_ratio, avg_hold_periods) and
-on-demand trade/signal outcome analysis are computed here. Public functions
-accept primitive sequences and DataFrames rather than database dependencies.
+Core metrics are computed with NumPy so backtests do not require reporting
+packages. QuantStats and Matplotlib are only loaded by the HTML report helpers.
+Public functions accept primitive sequences and DataFrames rather than database
+dependencies.
 
 Annualized metrics use one explicit ``periods_per_year`` value. The engine does
 not infer it from sample density because short or irregular samples can turn a
@@ -116,10 +114,6 @@ def compute_all(
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
     """
-    # WHY: lazy imports — quantstats pulls in matplotlib/scipy (~1-3s),
-    # deferred so `import librae` stays fast.
-    import quantstats as qs
-
     from librae.backtest.schema import StrategyMetrics
 
     if len(equity_values) == 0:
@@ -148,51 +142,42 @@ def compute_all(
             raise ValueError("benchmark_values length must match equity_values")
         benchmark_array = _as_positive_finite_array(benchmark_values, "benchmark_values")
 
-    # WHY: QuantStats max_drawdown/calmar require DatetimeIndex, not RangeIndex
-    ts_index = pd.DatetimeIndex(timestamps[1:]) if len(timestamps) > 1 else pd.DatetimeIndex([])
-    returns = pd.Series(
-        np.diff(eq_arr) / eq_arr[:-1],
-        index=ts_index,
-        dtype=np.float64,
-    )
-
-    _comp = _safe_qs(qs.stats.comp, returns) if len(returns) > 0 else None
-    total_ret = _comp if _comp is not None else 0.0
-    _dd = _safe_qs(qs.stats.max_drawdown, returns) if len(returns) > 0 else None
-    max_dd = _dd if _dd is not None else 0.0
+    with np.errstate(over="ignore", invalid="ignore"):
+        returns = eq_arr[1:] / eq_arr[:-1] - 1.0
+        total_ret = float(eq_arr[-1] / eq_arr[0] - 1.0)
+    if not np.isfinite(returns).all() or not np.isfinite(total_ret):
+        raise ValueError("equity_values produce non-finite returns")
+    drawdowns = eq_arr / np.maximum.accumulate(eq_arr) - 1.0
+    max_dd = float(np.min(drawdowns))
 
     sharpe: float | None = None
     sortino: float | None = None
     calmar: float | None = None
     ann_return: float | None = None
     if annualize and len(returns) >= 2:
-        # QuantStats accepts an annual risk-free rate and deannualizes it
-        # internally using periods_per_year. Passing a per-bar rate would apply that
-        # conversion twice.
-        return_std = float(returns.std(ddof=1))
-        if np.isfinite(return_std) and return_std > 0.0:
-            sharpe = _safe_qs(
-                qs.stats.sharpe,
-                returns,
-                periods=periods_per_year,
-                rf=risk_free_rate,
-            )
-
         periodic_rf = float(np.power(1.0 + risk_free_rate, 1.0 / periods_per_year) - 1.0)
-        if bool((returns < periodic_rf).any()):
-            sortino = _safe_qs(
-                qs.stats.sortino,
-                returns,
-                periods=periods_per_year,
-                rf=risk_free_rate,
-            )
+        excess_returns = returns - periodic_rf
+        annualization_factor = float(np.sqrt(periods_per_year))
 
-        # Calmar is undefined without a drawdown. Guard the denominator here
-        # because QuantStats divides by zero before _safe_qs can map inf to None.
-        calmar = (
-            _safe_qs(qs.stats.calmar, returns, periods=periods_per_year) if max_dd < 0.0 else None
-        )
-        ann_return = _safe_qs(qs.stats.cagr, returns, periods=periods_per_year)
+        return_std = float(np.std(excess_returns, ddof=1))
+        if return_std > 0.0:
+            value = float(np.mean(excess_returns) / return_std * annualization_factor)
+            sharpe = value if np.isfinite(value) else None
+
+        downside_returns = excess_returns[excess_returns < 0.0]
+        if len(downside_returns) > 0:
+            downside_deviation = float(
+                np.sqrt(np.sum(np.square(downside_returns)) / len(excess_returns))
+            )
+            if downside_deviation > 0.0:
+                value = float(np.mean(excess_returns) / downside_deviation * annualization_factor)
+                sortino = value if np.isfinite(value) else None
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            value = float(np.power(1.0 + total_ret, periods_per_year / len(returns)) - 1.0)
+        ann_return = value if np.isfinite(value) else None
+        if max_dd < 0.0 and ann_return is not None:
+            calmar = ann_return / abs(max_dd)
 
     n_trades = len(trade_pnls)
     net_pnls = np.array([t.net_pnl for t in trade_pnls], dtype=np.float64)
@@ -255,8 +240,8 @@ def compute_all(
     information_ratio: float | None = None
     if benchmark_array is not None and len(benchmark_array) >= 2:
         benchmark_return = float(benchmark_array[-1] / benchmark_array[0] - 1.0)
-        benchmark_returns = np.diff(benchmark_array) / benchmark_array[:-1]
-        active_returns = returns.to_numpy() - benchmark_returns
+        benchmark_returns = benchmark_array[1:] / benchmark_array[:-1] - 1.0
+        active_returns = returns - benchmark_returns
         if len(active_returns) >= 2:
             active_std = float(np.std(active_returns, ddof=1))
             tracking_error = active_std * np.sqrt(periods_per_year)
@@ -312,16 +297,15 @@ def _max_optional(values: Sequence[float] | None) -> float | None:
     return float(np.max(values)) if values is not None and len(values) > 0 else None
 
 
-def _safe_qs(fn: Callable, returns: pd.Series, **kwargs: int | float) -> float | None:
-    """Call a QuantStats function, return None if not computable."""
+def _load_quantstats() -> Any:
+    """Load the optional equity-report dependency with an actionable error."""
     try:
-        val = fn(returns, **kwargs)
-        if val is None or np.isnan(val) or np.isinf(val):
-            return None
-        return float(val)
-    except Exception:
-        logger.warning("QuantStats %s failed, returning None", fn.__name__)
-        return None
+        import quantstats
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Equity tearsheets require the 'analytics' extra: pip install 'librae[analytics]'"
+        ) from exc
+    return quantstats
 
 
 def generate_tearsheet(
@@ -332,7 +316,7 @@ def generate_tearsheet(
     benchmark_values: Sequence[float] | None = None,
 ) -> str:
     """Generate QuantStats HTML tearsheet report with interactive plots and tables."""
-    import quantstats as qs
+    qs = _load_quantstats()
 
     if len(equity_values) < 2:
         logger.warning("Not enough equity curve points to generate tearsheet")
@@ -1299,10 +1283,16 @@ def _render_tearsheet_html(
     import base64
     from io import BytesIO
 
-    import matplotlib
+    try:
+        import matplotlib
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Trade and signal reports require the 'analytics' extra: "
+            "pip install 'librae[analytics]'"
+        ) from exc
 
     def _fig_to_base64(fig: Any) -> str:
         buf = BytesIO()

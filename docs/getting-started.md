@@ -10,8 +10,9 @@ runnable strategy patterns live in the [examples index](../examples/README.md).
 - Git for direct repository installation
 - [`uv`](https://docs.astral.sh/uv/) for the repository development workflow
 
-TimescaleDB, Grafana, and broker SDKs are optional. A local backtest with
-`--no-db` needs none of them.
+The base install depends only on NumPy and pandas. TimescaleDB, Grafana,
+reporting packages, exchange calendars, CLI wiring, notification clients, and
+broker SDKs are optional. A direct Python backtest needs none of them.
 
 ## Install as a dependency
 
@@ -38,10 +39,15 @@ Install only the integration you use:
 
 | Extra | Purpose |
 |---|---|
+| `analytics` | QuantStats equity tearsheets and Matplotlib trade/signal reports |
+| `calendars` | Exchange-session labeling and resampling |
+| `cli` | Repository YAML/CLI orchestration helpers |
 | `db` | TimescaleDB persistence and durable live state |
 | `crypto-live` | CCXT crypto adapter |
 | `tw-live` | Shioaji Taiwan stocks and futures adapter |
 | `us-live` | IBKR US stocks and futures adapter |
+| `stocks-data` | Binance Stocks catalog and latest quotes |
+| `telegram` | Telegram notifications |
 | `viz` | Local trade-chart viewer |
 
 For example:

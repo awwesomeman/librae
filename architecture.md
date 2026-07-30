@@ -1022,13 +1022,16 @@ financial/execution fact.
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
 | `reduce_position(pos, closed_qty)` | pro-rate position state after a partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
-| `compute_all(equity_values, timestamps, trade_pnls, ...)` | performance calculation (QuantStats adapter) |
+| `compute_all(equity_values, timestamps, trade_pnls, ...)` | dependency-light performance calculation |
 | `side_multiplier(side)` | `"long"` → +1.0, `"short"` → -1.0 |
 
 ### Design decisions
 
 - **Primitive signature**: `compute_all()` accepts `Sequence[float]` / `Sequence[datetime]` rather than depending on `BacktestResult`, so the live engine can call it directly too.
-- **Lazy import**: `quantstats` is imported lazily inside `compute_all()`, keeping `import librae` under 1s; `db`/`brokers`/`notifications` follow the same pattern, see "Dependency direction" above.
+- **Optional reports and integrations**: core metrics use NumPy; QuantStats,
+  Matplotlib, exchange calendars, CLI YAML, DB, broker, notification, and UI
+  dependencies are loaded only by their opt-in features. See "Dependency
+  direction" above.
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.
 - **Immutable engine output**: frozen result dataclasses use tuple collections in engine-produced `BacktestOutput`; `Context` and `PortfolioTargets.weights` expose read-only mappings. Mutable `PositionState` remains internal.

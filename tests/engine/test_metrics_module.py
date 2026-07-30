@@ -177,19 +177,10 @@ class TestComputeAllValidation:
 
 
 class TestComputeAllMetrics:
-    def test_annualization_uses_explicit_periods_per_year(self, monkeypatch) -> None:
-        import quantstats as qs
-
-        captured: dict[str, int] = {}
-
-        def fake_sharpe(returns, *, periods, rf):
-            captured["periods"] = periods
-            return 1.0
-
-        monkeypatch.setattr(qs.stats, "sharpe", fake_sharpe)
+    def test_annualization_uses_explicit_periods_per_year(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
 
-        compute_all(
+        metrics = compute_all(
             equity_values=[100.0, 101.0, 100.5],
             timestamps=timestamps,
             trade_pnls=[],
@@ -198,7 +189,9 @@ class TestComputeAllMetrics:
             periods_per_year=252,
         )
 
-        assert captured["periods"] == 252
+        returns = np.array([0.01, 100.5 / 101.0 - 1.0])
+        expected = np.mean(returns) / np.std(returns, ddof=1) * np.sqrt(252)
+        assert metrics.sharpe == pytest.approx(expected)
 
     def test_positive_return(self) -> None:
         pnl = _make_trade_pnl(gross_pnl=100, net_pnl=100, net_return=1.0)
@@ -394,23 +387,10 @@ class TestComputeAllMetrics:
     )
     def test_sortino_guard_respects_signed_risk_free_rate(
         self,
-        monkeypatch,
         risk_free_rate: float,
         period_returns: list[float],
         expected_call: bool,
     ) -> None:
-        import quantstats as qs
-
-        called = False
-
-        def fake_sortino(_returns, *, periods, rf):
-            nonlocal called
-            called = True
-            assert periods == 252
-            assert rf == risk_free_rate
-            return 1.0
-
-        monkeypatch.setattr(qs.stats, "sortino", fake_sortino)
         equity = [100.0]
         for period_return in period_returns:
             equity.append(equity[-1] * (1.0 + period_return))
@@ -426,7 +406,6 @@ class TestComputeAllMetrics:
             periods_per_year=252,
         )
 
-        assert called is expected_call
         assert (metrics.sortino is not None) is expected_call
 
     def test_max_drawdown_negative(self) -> None:
@@ -434,24 +413,11 @@ class TestComputeAllMetrics:
         m = _call_compute_all([10_000.0, 10_500.0, 9_800.0, 10_200.0], [pnl])
         assert m.max_drawdown <= 0
 
-    def test_annual_metrics_share_temporal_parameters(self, monkeypatch) -> None:
-        import quantstats as qs
-
-        calls: dict[str, dict[str, float | int]] = {}
-
-        def recorder(name: str):
-            def metric(_returns, **kwargs):
-                calls[name] = kwargs
-                return 1.0
-
-            return metric
-
-        for name in ("sharpe", "sortino", "calmar", "cagr"):
-            monkeypatch.setattr(qs.stats, name, recorder(name))
-
+    def test_annual_metrics_share_temporal_parameters(self) -> None:
         timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
-        compute_all(
-            equity_values=[10_000.0, 10_100.0, 10_050.0, 10_200.0],
+        equity = np.array([10_000.0, 10_100.0, 10_050.0, 10_200.0])
+        metrics = compute_all(
+            equity_values=equity,
             timestamps=timestamps,
             trade_pnls=[_make_trade_pnl(net_pnl=200.0)],
             total_periods=4,
@@ -459,11 +425,20 @@ class TestComputeAllMetrics:
             risk_free_rate=0.03,
         )
 
-        periods = calls["sharpe"]["periods"]
-        assert calls["sharpe"] == {"periods": periods, "rf": 0.03}
-        assert calls["sortino"] == {"periods": periods, "rf": 0.03}
-        assert calls["calmar"] == {"periods": periods}
-        assert calls["cagr"] == {"periods": periods}
+        periods = 365
+        returns = equity[1:] / equity[:-1] - 1.0
+        periodic_rf = (1.0 + 0.03) ** (1.0 / periods) - 1.0
+        excess = returns - periodic_rf
+        downside = np.sqrt(np.square(excess[excess < 0.0]).sum() / len(excess))
+        annual_return = (equity[-1] / equity[0]) ** (periods / len(returns)) - 1.0
+        max_drawdown = np.min(equity / np.maximum.accumulate(equity) - 1.0)
+
+        assert metrics.sharpe == pytest.approx(
+            np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(periods)
+        )
+        assert metrics.sortino == pytest.approx(np.mean(excess) / downside * np.sqrt(periods))
+        assert metrics.annual_return == pytest.approx(annual_return)
+        assert metrics.calmar == pytest.approx(annual_return / abs(max_drawdown))
 
 
 class TestComputeAllWithEngine:

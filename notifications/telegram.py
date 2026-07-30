@@ -90,7 +90,10 @@ class TelegramAdapter:
 
                 self._client = httpx.Client(timeout=10)
             except ImportError:
-                logger.error("httpx not installed — disabling Telegram notifications")
+                logger.error(
+                    "Telegram notifications require the 'telegram' extra; "
+                    "install with pip install 'librae[telegram]'"
+                )
                 self._enabled = False
 
     @property
