@@ -46,8 +46,9 @@ account and therefore follows the broker-confirmed execution path.
       in-sample result.
 - [ ] Results are decomposed by market regime and include stress cases for
       spreads, volatility, gaps, missing bars, and delayed execution.
-- [ ] Benchmark, annualization factor, signed risk-free rate, sample standard
-      deviation convention, and not-computable metrics are documented.
+- [ ] Caller-selected benchmark, comparison population, annualization factor,
+      signed risk-free rate, sample standard deviation convention, and
+      not-computable metrics are documented.
 
 ### Portfolio and account semantics
 

@@ -22,7 +22,6 @@ blocked = {
     "lightweight_charts",
     "matplotlib",
     "psycopg2",
-    "quantstats",
     "shioaji",
     "yaml",
 }

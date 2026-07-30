@@ -43,7 +43,7 @@ Install only the integration you use:
 
 | Extra | Purpose |
 |---|---|
-| `analytics` | QuantStats equity tearsheets and Matplotlib trade/signal reports |
+| `analytics` | Matplotlib trade and signal reports |
 | `calendars` | Exchange-session labeling and resampling |
 | `cli` | Repository YAML/CLI orchestration helpers |
 | `db` | TimescaleDB persistence and durable live state |

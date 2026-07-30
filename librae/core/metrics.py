@@ -1,9 +1,9 @@
-"""Period-return performance metrics and optional report generation.
+"""Period-return performance metrics and optional trade/signal reports.
 
 Core metrics are computed with NumPy so backtests do not require reporting
-packages. QuantStats and Matplotlib are only loaded by the HTML report helpers.
-Public functions accept primitive sequences and DataFrames rather than database
-dependencies.
+packages. Matplotlib is loaded only by the optional trade/signal HTML helpers.
+Public functions accept primitive sequences and DataFrames rather than
+database dependencies.
 
 Performance summaries preserve the observation frequency supplied by the
 caller. Annualization, resampling, grouping, and reference alignment remain
@@ -401,56 +401,6 @@ def _mean_optional(values: Sequence[float] | None) -> float | None:
 
 def _max_optional(values: Sequence[float] | None) -> float | None:
     return float(np.max(values)) if values is not None and len(values) > 0 else None
-
-
-def _load_quantstats() -> Any:
-    """Load the optional equity-report dependency with an actionable error."""
-    try:
-        import quantstats
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Equity tearsheets require the 'analytics' extra: pip install 'librae[analytics]'"
-        ) from exc
-    return quantstats
-
-
-def generate_tearsheet(
-    equity_values: Sequence[float],
-    timestamps: Sequence[datetime],
-    output_path: str = "tearsheet.html",
-    title: str = "Strategy Performance Report",
-    benchmark_values: Sequence[float] | None = None,
-) -> str:
-    """Generate QuantStats HTML tearsheet report with interactive plots and tables."""
-    qs = _load_quantstats()
-
-    if len(equity_values) < 2:
-        logger.warning("Not enough equity curve points to generate tearsheet")
-        return ""
-    if len(timestamps) != len(equity_values):
-        raise ValueError("timestamps length must match equity_values")
-
-    eq_arr = _as_positive_finite_array(equity_values, "equity_values")
-    ts_index = pd.DatetimeIndex(timestamps[1:])
-    returns = pd.Series(
-        np.diff(eq_arr) / eq_arr[:-1],
-        index=ts_index,
-        dtype=np.float64,
-    )
-
-    benchmark_returns = None
-    if benchmark_values is not None:
-        if len(benchmark_values) != len(equity_values):
-            raise ValueError("benchmark_values length must match equity_values")
-        b_arr = _as_positive_finite_array(benchmark_values, "benchmark_values")
-        benchmark_returns = pd.Series(
-            np.diff(b_arr) / b_arr[:-1],
-            index=ts_index,
-            dtype=np.float64,
-        )
-
-    qs.reports.html(returns, benchmark=benchmark_returns, output=output_path, title=title)
-    return output_path
 
 
 def _lifecycle_error(event: OrderEventRecord, message: str) -> ValueError:
@@ -1443,10 +1393,9 @@ def generate_trade_tearsheet(
 ) -> str:
     """Generate a lifecycle-consistent HTML trade tearsheet.
 
-    Complements ``generate_tearsheet()`` (equity-based, QuantStats, industry
-    standard for calendar-rebalanced strategies) with completed position
-    lifecycle duration/PnL and hypothetical post-open/add entry envelopes.
-    Realized exits and completed lifecycles are labeled separately.
+    Reports completed position lifecycle duration/PnL and hypothetical
+    post-open/add entry envelopes. Realized exits and completed lifecycles are
+    labeled separately.
     """
     order_events = output.order_events
     lifecycle_outcomes = compute_trade_lifecycle_outcomes(order_events, ohlcv_by_symbol)

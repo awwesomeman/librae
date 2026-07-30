@@ -1048,9 +1048,11 @@ financial/execution fact.
 ### Design decisions
 
 - **Primitive signature**: `compute_all()` accepts `Sequence[float]` / `Sequence[datetime]` rather than depending on `BacktestResult`, so the live engine can call it directly too.
-- **Optional reports and integrations**: core metrics use NumPy; QuantStats,
-  Matplotlib, exchange calendars, CLI YAML, DB, broker, notification, and UI
-  dependencies are loaded only by their opt-in features. See
+- **Optional reports and integrations**: core metrics use NumPy; Matplotlib,
+  exchange calendars, CLI YAML, DB, broker, notification, and UI dependencies
+  are loaded only by their opt-in features. Opinionated equity tearsheets are
+  called directly by users so their alignment and annualization parameters
+  remain explicit. See
   [Product position and system boundaries](#product-position-and-system-boundaries).
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.

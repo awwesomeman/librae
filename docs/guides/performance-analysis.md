@@ -62,6 +62,53 @@ summary = summarize_performance(
 This keeps a run reproducible without pretending that hourly, irregular-event,
 and daily strategies share one annualization policy.
 
+## Choose the evaluation question first
+
+A benchmark is not an intrinsic property of a strategy. First decide whether
+the object being evaluated is a raw signal, an executed account, or only the
+intervals in which the account took exposure:
+
+| Evaluation object | Question | Suitable reference |
+|---|---|---|
+| Raw single-asset signal | Does the signal predict the next N observed bars? | Unconditional or matched same-horizon outcomes |
+| Executed directional account | Was active management better than passively holding the asset for the whole run? | Full-period adjusted-price or total-return B&H |
+| Active deployment | Did exposed intervals outperform their reference intervals? | Caller-defined active-period or exposure-scaled reference |
+| Market-neutral/arbitrage account | Did the capital and risk budget earn an adequate net return? | Absolute return, cash hurdle, or strategy-specific spread; usually not one leg's B&H |
+
+### Raw signal quality is not a B&H comparison
+
+A B&H equity curve answers an investor-level opportunity-cost question. It
+does not isolate whether individual signal events have predictive value. For a
+raw signal, inspect direction-adjusted forward return, MFE, and MAE at fixed
+horizons:
+
+```python
+from librae import compute_signal_outcomes
+
+
+outcomes = compute_signal_outcomes(
+    signal_timestamps,
+    symbol_ohlcv,
+    max_periods=20,
+    direction="long",
+)
+horizon_20 = outcomes.loc[outcomes["bar_offset"] == 20]
+```
+
+Compare `horizon_20["forward_return"]` with a caller-defined unconditional or
+matched sample using the same horizon, direction, calendar, and market regime.
+The baseline policy remains research code because matching every bar, only
+non-signal bars, or comparable volatility regimes answers different
+questions. See the [signal outcome guide](signal-outcome-analysis.md).
+
+### Full-period B&H can still be useful for an executed strategy
+
+For an executed long-directional strategy, full-period B&H is a valid
+secondary comparison: it tests whether timing, cash periods, costs, and risk
+controls improved on passive ownership. It should not be presented as proof
+that the underlying signal itself is predictive, and it is rarely meaningful
+for short-biased, market-neutral, or arbitrage strategies.
+
 ## Compare strategies and reference series
 
 Build and align each return series explicitly, then pass them as columns:
@@ -80,6 +127,7 @@ strategy_returns = pd.concat(
     axis="columns",
     join="inner",
 ).sort_index()
+strategy_column = outputs[0].run_metadata.run_id
 
 benchmark_returns = benchmark_prices.pct_change().rename("benchmark")
 comparison = pd.concat(
@@ -106,7 +154,7 @@ Period active return is ordinary column arithmetic:
 
 ```python
 active_returns = (
-    comparison["strategy"] - comparison["benchmark"]
+    comparison[strategy_column] - comparison["benchmark"]
 ).to_frame("active")
 
 active_summary = summarize_performance(
@@ -124,15 +172,37 @@ two wealth paths instead:
 
 ```python
 wealth = compute_performance_series(
-    comparison[["strategy", "benchmark"]],
+    comparison[[strategy_column, "benchmark"]],
     metrics=("wealth_index",),
 )["wealth_index"]
-relative_wealth = wealth["strategy"] / wealth["benchmark"] - 1.0
+relative_wealth = wealth[strategy_column] / wealth["benchmark"] - 1.0
 ```
 
 Full-period, active-period, exposure-scaled, and per-trade comparisons answer
 different questions. Build the intended population explicitly from order,
 position, allocation, or exposure facts before calling the generic metrics.
+
+For an active-period comparison, first construct an interval mask from the
+strategy's position or allocation facts, then apply the same mask to both
+return columns:
+
+```python
+# active_mask is a caller-built boolean Series indexed like comparison.
+active_comparison = comparison.loc[
+    active_mask,
+    [strategy_column, "benchmark"],
+]
+active_returns = (
+    active_comparison[strategy_column] - active_comparison["benchmark"]
+).to_frame("active")
+active_summary = summarize_performance(active_returns)
+```
+
+`EquityCurvePoint.exposed` describes portfolio state after that engine event.
+Do not use it as the return interval's mask without explicitly assigning
+interval ownership; otherwise entry and exit bars can be shifted by one
+observation. Exposure-scaled comparisons additionally require a caller-chosen
+gross, net, or directional exposure definition.
 
 ## Grouping and annualization
 
@@ -166,7 +236,8 @@ The generic APIs deliberately stop before economic interpretation:
 
 | Strategy style | Additional caller-owned analysis |
 |---|---|
-| Single-asset directional | buy-and-hold reference, relative wealth, trade outcomes |
+| Raw single-asset signal | matched same-horizon forward returns, hit rate, MFE, MAE |
+| Executed single-asset directional | full-period B&H opportunity cost, active-period comparison, relative wealth, trade outcomes |
 | Market-neutral or arbitrage | capital denominator, leg/spread attribution, gross/net exposure |
 | Cross-sectional selection | eligible-universe benchmark, IC, quantile returns, sector attribution |
 | Multi-asset allocation | policy benchmark, allocation drift, risk contribution |
@@ -178,7 +249,37 @@ exit, holding-period, or notional facts. Use
 trade analysis, and the [signal outcome guide](signal-outcome-analysis.md) for
 gross forward return, MFE, and MAE.
 
-Install `librae[analytics]` only when using optional QuantStats or Matplotlib
-reports. Rendering may consume caller-prepared reference data, but it must not
-silently redefine alignment, annualization, active periods, or portfolio
-aggregation.
+## Use third-party reporting directly
+
+Librae intentionally does not wrap an opinionated equity tearsheet. A thin
+wrapper would either hide the reporting library's annualization defaults or
+duplicate its evolving API. Install the library you choose and pass the
+assumptions explicitly. For example, with QuantStats:
+
+```bash
+pip install quantstats
+```
+
+```python
+import quantstats as qs
+
+
+qs.reports.html(
+    comparison[strategy_column],
+    benchmark=comparison["benchmark"],
+    rf=0.02,                 # annual risk-free rate chosen by the caller
+    periods_per_year=252,    # justified for these aligned observations
+    output="tearsheet.html",
+    title="Strategy vs benchmark",
+)
+```
+
+This example is appropriate only when `252` matches the observation and
+calendar convention. For hourly, 24/7, irregular-event, or trade-return
+series, resample or choose a justified convention before asking an external
+library for annualized statistics.
+
+Install `librae[analytics]` only for Librae's optional Matplotlib trade and
+signal reports. Reporting may consume caller-prepared reference data, but it
+must not silently redefine alignment, annualization, active periods, or
+portfolio aggregation.

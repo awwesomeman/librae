@@ -34,7 +34,6 @@ librae = "librae._scaffold:main"
 
 [project.optional-dependencies]
 analytics = [
-  "quantstats>=0.0.62",  # equity HTML tearsheet
   "matplotlib>=3.7",  # trade and signal HTML reports
 ]
 calendars = [
@@ -81,7 +80,6 @@ test = [
   "httpx>=0.24",
   "matplotlib>=3.7",
   "pyyaml>=6.0",
-  "quantstats>=0.0.62",
 ]
 viz = [
   "lightweight-charts>=2.0",  # local trade-chart exploration only (librae/backtest/charts.py)

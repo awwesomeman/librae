@@ -23,7 +23,6 @@ from librae.core.metrics import (
     compute_signal_outcomes,
     compute_trade_entry_outcomes,
     generate_signal_mae_mfe_report,
-    generate_tearsheet,
     summarize_performance,
     summarize_signal_mae_mfe,
 )
@@ -469,31 +468,6 @@ class TestComputeAllWithEngine:
         assert isinstance(m, StrategyMetrics)
         assert m.trades >= 1
         assert isinstance(m.max_drawdown, float)
-
-
-def test_generate_tearsheet_uses_exact_validated_returns(monkeypatch, tmp_path) -> None:
-    import quantstats as qs
-
-    captured: dict[str, pd.Series | None] = {}
-
-    def capture_report(returns, *, benchmark, **_kwargs) -> None:
-        captured["returns"] = returns
-        captured["benchmark"] = benchmark
-
-    monkeypatch.setattr(qs.reports, "html", capture_report)
-    timestamps = pd.date_range(START, periods=3, freq="D", tz="UTC").tolist()
-    output_path = tmp_path / "tearsheet.html"
-
-    result = generate_tearsheet(
-        equity_values=np.array([100.0, 110.0, 121.0]),
-        timestamps=timestamps,
-        output_path=str(output_path),
-        benchmark_values=np.array([100.0, 105.0, 115.5]),
-    )
-
-    assert result == str(output_path)
-    assert np.allclose(captured["returns"], [0.1, 0.1])
-    assert np.allclose(captured["benchmark"], [0.05, 0.1])
 
 
 def test_compute_payoff_ratio_none_when_one_sided():
