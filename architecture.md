@@ -11,9 +11,11 @@
 
 ## Compatibility Policy Before 1.0
 
-Until either Librae 1.0.0 is released or an interface freeze is explicitly
-declared, every functional, API, configuration, persistence-shape, and test
-contract change is treated as breaking:
+No downstream compatibility contract is currently declared. Until either
+Librae 1.0.0 is released or an interface freeze is explicitly declared, the
+repository optimizes for one clear current contract: functional, API,
+configuration, persistence-shape, and test contracts may break when that keeps
+the code simpler and easier to maintain.
 
 - Keep only the current contract in production code and `tests/`. Update or
   remove stale expectations instead of adding deprecated aliases, dual-format
@@ -858,12 +860,13 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance lifecycle, funding
-watermarks, and active order queue. Runtime-state schema v14 persists the
-exact/rolling contract identity nested in active `OrderRequest` values.
-Only the current v14 checkpoint is accepted; every older schema requires an
-explicit external migration or removal. `_STATE_SCHEMA_VERSION` is the single
-code-level version constant and must be bumped whenever the checkpoint or any
-persisted nested dataclass changes shape; it is not a business/domain version.
+watermarks, and active order queue. Runtime-state schema v15 persists scalar
+account state together with exact/rolling contract identity nested in active
+`OrderRequest` values. Only the current v15 checkpoint is accepted; every older
+schema requires an explicit external migration or removal.
+`_STATE_SCHEMA_VERSION` is the single code-level version constant and must be
+bumped whenever the checkpoint or any persisted nested dataclass changes
+shape; it is not a business/domain version.
 `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
