@@ -9,6 +9,7 @@
 | 安裝 Librae 或設定本機開發環境 | [Getting started](getting-started.md) |
 | 執行一個完整策略 | [Examples](../examples/README.md) |
 | 理解執行語意與系統設計 | [Architecture](../architecture.md) |
+| 比較策略、benchmark 與不同回測結果 | [Performance analysis](guides/performance-analysis.md) |
 | 分析訊號的遠期表現 | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
 | 檢查策略是否可進入下一執行階段 | [Strategy readiness checklist](guides/strategy-readiness.md) |
 | 串接 broker 價量或第三方因子 | [External market data and factors](guides/external-data.md) |

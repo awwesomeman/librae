@@ -787,6 +787,16 @@ ratio is annualized mean active return divided by that standard deviation.
 return attribution by factor, sector, or decision remains strategy/research
 code because the engine has no classification model.
 
+The optional benchmark is one caller-supplied positive price series. The
+engine aligns it to the run with forward fill and normalizes it to initial cash
+as a full-period buy-and-hold comparison. It does not choose the benchmark,
+define an active-period mask, or aggregate independent runs into a portfolio.
+Period active return means strategy period return minus benchmark period
+return; cumulative return gap and compounded relative wealth are separate
+caller-derived measures. Strategy-specific benchmark, attribution, and
+aggregation choices are described in the
+[performance analysis guide](docs/guides/performance-analysis.md).
+
 #### Perpetual funding cash flows
 
 Backtest and shadow-simulation bars may contain a `funding_rate` observation,

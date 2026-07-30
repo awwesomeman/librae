@@ -30,7 +30,7 @@ strategy interface.
 
 | You are... | Start here | Go deeper |
 |---|---|---|
-| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review the [strategy readiness checklist](docs/guides/strategy-readiness.md), [data and execution contract](architecture.md#usage), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
+| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review [performance analysis](docs/guides/performance-analysis.md), the [strategy readiness checklist](docs/guides/strategy-readiness.md), [data and execution contract](architecture.md#usage), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
 | Backend/platform developer | Read the [system architecture](architecture.md) | Review [optional infrastructure](docs/guides/optional-infrastructure.md), callbacks, adapters, and durable state |
 
 ## Quick start
@@ -84,7 +84,9 @@ state, costs, and output. The [examples](examples/README.md) show the complete
   and funding events, one equity/PnL/metrics result per account, and optional
   position/allocation snapshots. For caller-owned Parquet, SQLite, or other
   local storage, use the format-neutral
-  [artifact tables](docs/guides/local-artifacts.md).
+  [artifact tables](docs/guides/local-artifacts.md). Build benchmark,
+  active-return, and cross-run comparisons with the
+  [performance analysis guide](docs/guides/performance-analysis.md).
 
 The exact validation, fill, liquidity, margin, reconciliation, and state
 semantics are documented in the [engine architecture](architecture.md#engine-design-librae).
