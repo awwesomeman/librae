@@ -147,34 +147,3 @@ def plot_trades(
         )
     chart.show(block=block)
     return chart
-
-
-def _df_to_order_events(df: pd.DataFrame) -> list[OrderEventRecord]:
-    """load_trade_events() output (``_time`` column) -> OrderEventRecord list.
-
-    Reuses the same schema type as an in-memory run so _build_markers has a
-    single input shape regardless of whether the caller just ran a backtest
-    or is loading a past one — no separate DB-row marker logic to drift.
-    """
-    from librae.backtest.schema import OrderEventRecord
-
-    records = df.rename(columns={"_time": "ts"}).to_dict(orient="records")
-    return [OrderEventRecord(**r) for r in records]
-
-
-def plot_trades_by_run_id(run_id: str, *, symbol: str | None = None, block: bool = True):
-    """Open a persisted run's trade chart straight from TimescaleDB.
-
-    No backtest re-run needed: reads the persisted trade_events/OHLCV for this
-    run_id and sends them through the same renderer as an in-memory run.
-
-    symbol defaults to the first order-event symbol, then the first OHLCV symbol.
-    """
-    from db.timescale_reader import load_ohlcv, load_trade_events
-
-    ohlcv = load_ohlcv(run_id=run_id).set_index("_time")
-    order_events = _df_to_order_events(load_trade_events(run_id))
-    resolved_symbol = symbol or (
-        order_events[0].symbol if order_events else ohlcv["symbol"].iloc[0]
-    )
-    return plot_trades(ohlcv, order_events, resolved_symbol, block=block)

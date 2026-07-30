@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
-from librae.backtest.charts import _build_markers, _df_to_order_events, _prepare_ohlcv
+from librae.backtest.charts import _build_markers, _prepare_ohlcv
 from librae.backtest.schema import OrderEventRecord
 
 
@@ -151,41 +151,3 @@ def test_prepare_ohlcv_matches_marker_epoch():
 
     marker_epoch = _to_utc(idx[1]).timestamp()
     assert int(marker_epoch) == candle_epoch.iloc[1]
-
-
-def test_df_to_order_events_matches_load_trade_events_shape():
-    """Mirrors db.timescale_reader.load_trade_events()'s column set (post-SQL, _time not yet renamed)."""
-    df = pd.DataFrame(
-        [
-            {
-                "event_id": "e1",
-                "_time": datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC),
-                "account_id": "default",
-                "currency": "USDT",
-                "symbol": "BTCUSDT",
-                "side": "long",
-                "event_type": "open",
-                "fill_quantity": 1.0,
-                "price": 50_000.0,
-                "entry_price": 50_000.0,
-                "remaining_quantity": 1.0,
-                "notional": 50_000.0,
-                "commission": 1.0,
-                "slippage": 0.0,
-                "tax": 0.0,
-                "pnl": None,
-                "net_return": None,
-                "entry_at": None,
-                "periods_held": None,
-                "reason": "",
-            }
-        ]
-    )
-    events = _df_to_order_events(df)
-    assert len(events) == 1
-    assert events[0].symbol == "BTCUSDT"
-    assert events[0].ts == datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC)
-
-    markers = _build_markers(events, "BTCUSDT")
-    assert len(markers) == 1
-    assert markers[0]["shape"] == "arrow_up"

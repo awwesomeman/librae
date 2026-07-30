@@ -572,7 +572,8 @@ records directly, while aggregate metrics remain owned by
 `librae/core/metrics.py`.
 
 ```python
-from librae.backtest.charts import plot_trades, plot_trades_by_run_id
+from db.charts import plot_trades_by_run_id
+from librae.backtest.charts import plot_trades
 
 ohlcv = df.xs(symbol, level="symbol")  # a single symbol's OHLCV
 plot_trades(
@@ -584,9 +585,9 @@ plot_trades_by_run_id(
 )  # or: skip rerunning the backtest, read a persisted run straight from the DB
 ```
 
-`plot_trades_by_run_id` reads the persisted `trade_events` and `ohlcv` rows
-through `db.timescale_reader`. It uses the same rendering path as the
-in-memory form and does not rerun the strategy.
+`db.charts.plot_trades_by_run_id` reads persisted `trade_events` and `ohlcv`
+rows through `db.timescale_reader`. The database adapter then calls the same
+format-neutral renderer as the in-memory form and does not rerun the strategy.
 
 #### Trade outcome analysis
 
