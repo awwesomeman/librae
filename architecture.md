@@ -235,6 +235,7 @@ librae/
 │
 ├── artifacts.py              format-neutral manifest + tabular research/export boundary
 ├── integrations.py           stable public protocols and broker value types
+├── testing.py                offline third-party adapter conformance helpers
 │
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()

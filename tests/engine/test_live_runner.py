@@ -284,7 +284,7 @@ class TestLiveExecutor:
             def cancel_order(self, order_id, symbol):
                 return {}
 
-        with pytest.raises(ValueError, match="position reconciliation method"):
+        with pytest.raises(ValueError, match="missing required methods: get_position"):
             LiveExecutor(
                 _zero_cost_model(),
                 simulation=False,

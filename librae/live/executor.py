@@ -38,6 +38,15 @@ OrderStatus = Literal[
     "cancelled",
     "rejected",
 ]
+REQUIRED_ORDER_ADAPTER_METHODS = (
+    "prepare_order",
+    "place_order",
+    "find_order",
+    "get_order",
+    "list_open_orders",
+    "cancel_order",
+    "get_position",
+)
 
 
 class OrderSignal(TypedDict):
@@ -305,25 +314,16 @@ class LiveExecutor:
             else ({"__default__": order_adapter} if order_adapter is not None else {})
         )
         if not simulation:
-            required = (
-                "prepare_order",
-                "place_order",
-                "find_order",
-                "get_order",
-                "list_open_orders",
-                "cancel_order",
-            )
             for symbol, adapter in order_adapters.items():
-                missing = [name for name in required if not callable(getattr(adapter, name, None))]
+                missing = [
+                    name
+                    for name in REQUIRED_ORDER_ADAPTER_METHODS
+                    if not callable(getattr(adapter, name, None))
+                ]
                 if missing:
                     raise ValueError(
-                        f"Live order_adapter for {symbol!r} is missing lifecycle methods: "
+                        f"Live order_adapter for {symbol!r} is missing required methods: "
                         + ", ".join(missing)
-                    )
-                if not callable(getattr(adapter, "get_position", None)):
-                    raise ValueError(
-                        f"Live order_adapter for {symbol!r} is missing required "
-                        "position reconciliation method: get_position"
                     )
         self._cost_models = (
             dict(cost_model) if isinstance(cost_model, Mapping) else {"__default__": cost_model}
@@ -470,7 +470,7 @@ class LiveExecutor:
         try:
             adapter = self.get_order_adapter(request.symbol)
             raw = adapter.place_order(request.to_signal())
-            report = self._normalize_report(request, raw)
+            report = self.normalize_report(request, raw)
         except Exception:
             logger.exception(
                 "Order placement/report FAILED: %s %s qty=%.4f; local state unchanged",
@@ -498,13 +498,13 @@ class LiveExecutor:
             request.client_order_id,
             request.venue_symbol or request.symbol,
         )
-        return self._normalize_report(request, raw) if raw is not None else None
+        return self.normalize_report(request, raw) if raw is not None else None
 
     def get_order(self, request: OrderRequest, order_id: str) -> ExecutionReport:
         """Fetch the latest cumulative state for one broker order."""
         adapter = self.get_order_adapter(request.symbol)
         raw = adapter.get_order(order_id, request.venue_symbol or request.symbol)
-        return self._normalize_report(request, raw)
+        return self.normalize_report(request, raw)
 
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return raw open orders for startup orphan detection."""
@@ -520,10 +520,11 @@ class LiveExecutor:
         """Cancel and return the broker's latest cumulative order state."""
         adapter = self.get_order_adapter(request.symbol)
         raw = adapter.cancel_order(order_id, request.venue_symbol or request.symbol)
-        return self._normalize_report(request, raw)
+        return self.normalize_report(request, raw)
 
     @classmethod
-    def _normalize_report(cls, request: OrderRequest, raw: object) -> ExecutionReport:
+    def normalize_report(cls, request: OrderRequest, raw: object) -> ExecutionReport:
+        """Validate and normalize one cumulative broker report."""
         if not isinstance(raw, dict):
             raise ValueError("broker response must be a mapping")
 

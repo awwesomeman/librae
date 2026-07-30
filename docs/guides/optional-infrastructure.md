@@ -136,6 +136,20 @@ Use the same non-empty name in `instrument_overrides.<symbol>.data_adapter`
 or `broker`. Registration is explicit; installing a package does not execute
 or discover plugin code automatically.
 
+Third-party packages can validate fixtures without connecting to a venue:
+
+```python
+from librae.testing import (
+    normalize_broker_report,
+    validate_bar_data,
+    validate_order_adapter,
+)
+
+validate_order_adapter(adapter)
+validate_bar_data(sample_bars)
+normalized = normalize_broker_report(sample_request, sample_broker_report)
+```
+
 Paper trading uses `mode=live` with a broker's paper endpoint. `mode=sim` is a
 local shadow simulation and does not exercise acknowledgements, partial fills,
 rejections, or broker fees.
