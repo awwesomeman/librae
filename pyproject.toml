@@ -41,6 +41,9 @@ librae = "librae._scaffold:main"
 db = [
   "psycopg2-binary>=2.9",  # db/ — TimescaleDB read/write; not needed under cfg.no_db=True
 ]
+parquet = [
+  "pyarrow>=15",  # optional caller-selected DataFrame serialization backend
+]
 crypto-live = [
   "ccxt>=4.5.66,<5",  # tested CCXT API family; uv.lock pins the exact repo version
                 # declared here as well so `pip install librae[crypto-live]` actually installs it

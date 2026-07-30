@@ -14,6 +14,9 @@
 | 串接 broker 價量或第三方因子 | [External market data and factors](guides/external-data.md) |
 | 設定 DB、Grafana、broker 或部署環境 | [Optional infrastructure](guides/optional-infrastructure.md) |
 
+需要將資料或回測結果存成 Parquet、SQLite 等本地格式時，請參考
+[Local artifacts](guides/local-artifacts.md)。
+
 ## 文件類型
 
 | 位置 | 用途 | 維護原則 |

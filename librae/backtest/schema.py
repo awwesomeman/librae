@@ -4,7 +4,9 @@ All field names: strict snake_case.
 Unit fields stored alongside values for multi-market support (USDT, TWD, contracts, etc.).
 Cost/slippage fields are optional (may be None for simple backtests).
 
-Storage target: TimescaleDB via db.timescale_writer.
+Persistence is caller-selected. ``librae.artifacts`` can flatten engine output
+into format-neutral tables; ``db.timescale_writer`` is the reference database
+integration.
 
 Also contains canonical backend data contracts:
 - Schema version and validation constants
@@ -233,8 +235,8 @@ class AccountPerformance:
 class BacktestOutput:
     """Top-level backtest output container.
 
-    This is the canonical output object produced after a backtest run.
-    Persist via db.timescale_writer.save_strategy_results().
+    This is the canonical output object produced after a backtest run. Callers
+    may persist it through the reference DB writer or a tabular artifact.
     """
 
     run_metadata: RunMetadata

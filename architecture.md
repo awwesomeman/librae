@@ -190,6 +190,8 @@ librae/
 │   ├── run_config.py         RunConfig + ExecutionPolicy + RiskPolicy — typed run parameters
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
+├── artifacts.py              format-neutral manifest + tabular research/export boundary
+│
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()
 │   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord, PositionSnapshotPoint
@@ -278,6 +280,20 @@ the engine owns the execution delay, so an intent is first eligible on T+1.
 Callers must not pre-shift prices or signals to model that delay; doing so
 delays execution twice. Feature construction remains the caller's
 responsibility and must not use information unavailable at T.
+
+#### Local artifact boundary
+
+`no_db=True` only disables default persistence; it never selects another
+backend or writes a file implicitly. `build_market_data_artifact()` and
+`build_backtest_artifact()` expose versioned metadata plus logical pandas
+tables. Librae owns validation and table shape. The caller owns Parquet,
+SQLite, DuckDB, or other serialization details, including paths, overwrite
+policy, transactions, partitioning, and retention. There is intentionally no
+storage registry or sink hierarchy. See the
+[local artifact guide](docs/guides/local-artifacts.md).
+
+Artifacts are for research/export and do not satisfy live mode's durable
+state-store, active-order, reconciliation, or lease requirements.
 
 **Unshifted is a timing contract, not a price-adjustment flag.** The engine
 cannot infer whether OHLCV is adjusted. Execution-oriented tests should
@@ -980,6 +996,7 @@ financial/execution fact.
 | Type | Description |
 |------|------|
 | `BacktestOutput` | run metadata, isolated account performance, currency-labelled order events, and optional position/allocation snapshots |
+| `TabularArtifact` | versioned manifest plus logical DataFrames for caller-selected local serialization |
 | `AccountPerformance` | one account's currency, initial cash, final equity, net PnL, equity curve, and metrics |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
 | `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
