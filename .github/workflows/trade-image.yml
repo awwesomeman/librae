@@ -67,3 +67,49 @@ jobs:
             python -c \
             'import importlib.metadata as m, os; import librae; assert m.version("librae") == os.environ["EXPECTED_VERSION"]'
           docker run --rm librae-trade:ci python -m strategies.smoke.run
+
+      - name: Verify TimescaleDB container endpoint
+        run: |
+          set -a
+          source .env.example
+          set +a
+          docker compose \
+            --env-file .env.example \
+            --file deploy/docker-compose.yml \
+            up --detach timescaledb
+          connected=false
+          for attempt in $(seq 1 60); do
+            if docker run --rm \
+              --network quant_network \
+              --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+              librae-trade:ci \
+              python -c \
+              'import os, psycopg2; connection = psycopg2.connect(os.environ["TIMESCALE_DSN"]); cursor = connection.cursor(); cursor.execute("SELECT 1"); assert cursor.fetchone() == (1,); connection.close()'; then
+              connected=true
+              break
+            fi
+            sleep 1
+          done
+          test "${connected}" = true
+
+      - name: Verify Linux host-gateway routing
+        run: |
+          python3 -m http.server 17497 --bind 0.0.0.0 >/tmp/fake-broker.log 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+          until curl --fail --silent http://127.0.0.1:17497 >/dev/null; do
+            sleep 1
+          done
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            librae-trade:ci \
+            python -c \
+            'from urllib.request import urlopen; assert urlopen("http://host.docker.internal:17497", timeout=5).status == 200'
+
+      - name: Stop integration services
+        if: always()
+        run: |
+          docker compose \
+            --env-file .env.example \
+            --file deploy/docker-compose.yml \
+            down --volumes

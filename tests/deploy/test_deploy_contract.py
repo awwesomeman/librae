@@ -55,6 +55,33 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "docker run --rm" in workflow
     assert "EXPECTED_VERSION" in workflow
     assert "strategies/smoke/run.py" in workflow
+    assert "TRADE_TIMESCALE_DSN" in workflow
+    assert "--network quant_network" in workflow
+    assert "host.docker.internal:host-gateway" in workflow
+
+
+def test_trade_container_uses_reachable_service_endpoints() -> None:
+    public_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    secrets_env = (ROOT / ".env.secrets.example").read_text(encoding="utf-8")
+    script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
+
+    assert (
+        "TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@localhost:5432/quant" in public_env
+    )
+    assert (
+        "TRADE_TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@quant_timescaledb:5432/quant"
+    ) in public_env
+    assert "\nIBKR_HOST=\n" in secrets_env
+    assert "IBKR_HOST=127.0.0.1" not in secrets_env
+    assert "host.docker.internal" in secrets_env
+
+    preflight = script.index('echo "Checking TimescaleDB connectivity')
+    replacement = script.index('docker rm -f "${container}"')
+    assert preflight < replacement
+    assert 'local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?' in script
+    assert '-e TIMESCALE_DSN="${trade_timescale_dsn}"' in script
+    assert '--add-host "host.docker.internal:host-gateway"' in script
+    assert "IBKR_HOST cannot use container loopback" in script
 
 
 def test_remote_schema_path_matches_compose_source() -> None:
