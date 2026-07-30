@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from math import isfinite
-from typing import Literal, Protocol
+from typing import Protocol
 
 from librae.core.run_config import LiveMode
 from librae.core.strategy import (
@@ -47,7 +47,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 13
+_STATE_SCHEMA_VERSION = 14
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -64,7 +64,6 @@ def _decision_to_dict(decision: StrategyDecision) -> dict:
             "kind": "multi_leg_order",
             "value": {
                 "legs": [asdict(leg) for leg in decision.legs],
-                "max_completion_seconds": decision.max_completion_seconds,
                 "reason": decision.reason,
             },
         }
@@ -81,7 +80,6 @@ def _decision_from_dict(raw: dict) -> StrategyDecision:
     if kind == "multi_leg_order" and isinstance(value, dict):
         return MultiLegOrder(
             legs=tuple(OrderIntent(**item) for item in value["legs"]),
-            max_completion_seconds=float(value["max_completion_seconds"]),
             reason=str(value["reason"]),
         )
     raise ValueError("invalid persisted strategy decision")
@@ -203,76 +201,6 @@ class LiveRebalance:
 
 
 @dataclass
-class LiveMultiLeg:
-    """Restartable best-effort multi-leg execution and baseline restoration."""
-
-    order: MultiLegOrder
-    baseline_signed_quantities: dict[str, float]
-    reference_prices: dict[str, float]
-    reference_volumes: dict[str, float | None]
-    lagged_adv_by_symbol: dict[str, float]
-    decided_at: datetime
-    next_leg_index: int = 0
-    first_fill_at: datetime | None = None
-    phase: Literal["executing", "restoring", "manual"] = "executing"
-
-    def to_dict(self) -> dict:
-        return {
-            "order": _decision_to_dict(self.order),
-            "baseline_signed_quantities": self.baseline_signed_quantities,
-            "reference_prices": self.reference_prices,
-            "reference_volumes": self.reference_volumes,
-            "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
-            "decided_at": self.decided_at.isoformat(),
-            "next_leg_index": self.next_leg_index,
-            "first_fill_at": (self.first_fill_at.isoformat() if self.first_fill_at else None),
-            "phase": self.phase,
-        }
-
-    @classmethod
-    def from_dict(cls, raw: dict) -> LiveMultiLeg:
-        order = _decision_from_dict(raw["order"])
-        if not isinstance(order, MultiLegOrder):
-            raise ValueError("live multi-leg state must contain MultiLegOrder")
-        decided_at = _to_utc(raw["decided_at"])
-        if decided_at is None:
-            raise ValueError("live multi-leg state is missing decided_at")
-        phase = str(raw["phase"])
-        if phase not in ("executing", "restoring", "manual"):
-            raise ValueError(f"invalid live multi-leg phase: {phase!r}")
-        next_leg_index = int(raw["next_leg_index"])
-        if not 0 <= next_leg_index <= len(order.legs):
-            raise ValueError("live multi-leg next_leg_index is out of range")
-        baseline_signed_quantities = {
-            str(symbol): float(quantity)
-            for symbol, quantity in raw["baseline_signed_quantities"].items()
-        }
-        leg_symbols = {leg.symbol for leg in order.legs}
-        if set(baseline_signed_quantities) != leg_symbols:
-            raise ValueError("live multi-leg baseline must cover exactly the leg symbols")
-        if any(not isfinite(quantity) for quantity in baseline_signed_quantities.values()):
-            raise ValueError("live multi-leg baseline quantities must be finite")
-        return cls(
-            order=order,
-            baseline_signed_quantities=baseline_signed_quantities,
-            reference_prices={
-                str(symbol): float(price) for symbol, price in raw["reference_prices"].items()
-            },
-            reference_volumes={
-                str(symbol): (float(volume) if volume is not None else None)
-                for symbol, volume in raw["reference_volumes"].items()
-            },
-            lagged_adv_by_symbol={
-                str(symbol): float(value) for symbol, value in raw["lagged_adv_by_symbol"].items()
-            },
-            decided_at=decided_at,
-            next_leg_index=next_leg_index,
-            first_fill_at=_to_utc(raw["first_fill_at"]),
-            phase=phase,
-        )
-
-
-@dataclass
 class LiveRuntimeState:
     """One restartable strategy deployment checkpoint."""
 
@@ -289,7 +217,6 @@ class LiveRuntimeState:
     pending_decision: StrategyDecision = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
-    live_multi_leg: LiveMultiLeg | None = None
     equity_peak_by_account: dict[str, float] = field(default_factory=dict)
     prev_equity_by_account: dict[str, float] = field(default_factory=dict)
     trade_count: int = 0
@@ -344,7 +271,6 @@ class LiveRuntimeState:
             "pending_decision": _decision_to_dict(self.pending_decision),
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
-            "live_multi_leg": (self.live_multi_leg.to_dict() if self.live_multi_leg else None),
             "equity_peak_by_account": self.equity_peak_by_account,
             "prev_equity_by_account": self.prev_equity_by_account,
             "trade_count": self.trade_count,
@@ -391,11 +317,6 @@ class LiveRuntimeState:
             live_rebalance=(
                 LiveRebalance.from_dict(raw["live_rebalance"])
                 if raw["live_rebalance"] is not None
-                else None
-            ),
-            live_multi_leg=(
-                LiveMultiLeg.from_dict(raw["live_multi_leg"])
-                if raw["live_multi_leg"] is not None
                 else None
             ),
             equity_peak_by_account={

@@ -58,7 +58,6 @@ def run_backtest(config: RunConfig) -> None:
         hedge_ratio=float(params.get("hedge_ratio", 1.0)),
         entry_zscore=float(params.get("entry_zscore", 1.5)),
         exit_zscore=float(params.get("exit_zscore", 0.25)),
-        max_completion_seconds=float(params.get("max_completion_seconds", 3.0)),
     )
     backtest = Backtest(data=data, strategy=strategy, config=config)
     backtest.run()

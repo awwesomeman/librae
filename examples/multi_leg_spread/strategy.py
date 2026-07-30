@@ -48,7 +48,6 @@ class MultiLegSpreadStrategy(Strategy):
         hedge_ratio: float = 1.0,
         entry_zscore: float = 1.5,
         exit_zscore: float = 0.25,
-        max_completion_seconds: float = 3.0,
     ) -> None:
         if near_symbol == far_symbol:
             raise ValueError("spread symbols must differ")
@@ -63,15 +62,12 @@ class MultiLegSpreadStrategy(Strategy):
             raise ValueError("entry_zscore must be finite and positive")
         if not isfinite(exit_zscore) or not 0 <= exit_zscore < entry_zscore:
             raise ValueError("exit_zscore must be in [0, entry_zscore)")
-        if not isfinite(max_completion_seconds) or max_completion_seconds <= 0:
-            raise ValueError("max_completion_seconds must be finite and positive")
         self._near_symbol = near_symbol
         self._far_symbol = far_symbol
         self._quantity = quantity
         self._far_quantity = far_quantity
         self._entry_zscore = entry_zscore
         self._exit_zscore = exit_zscore
-        self._max_completion_seconds = max_completion_seconds
 
     def on_bar(self, ctx: Context) -> StrategyDecision:
         required = {self._near_symbol, self._far_symbol}
@@ -100,7 +96,6 @@ class MultiLegSpreadStrategy(Strategy):
                         quantity=self._far_quantity,
                     ),
                 ),
-                max_completion_seconds=self._max_completion_seconds,
                 reason="spread_entry",
             )
 
@@ -122,7 +117,6 @@ class MultiLegSpreadStrategy(Strategy):
                         quantity=far_position.quantity,
                     ),
                 ),
-                max_completion_seconds=self._max_completion_seconds,
                 reason="spread_exit",
             )
         return []

@@ -8,7 +8,6 @@ import pytest
 from librae.core.strategy import MultiLegOrder, OrderIntent, PortfolioTargets, PositionState
 from librae.live.executor import OrderRequest
 from librae.live.state import (
-    LiveMultiLeg,
     LiveRebalance,
     LiveRuntimeState,
     MemoryLiveStateStore,
@@ -149,26 +148,15 @@ def test_multi_leg_order_round_trip():
             OrderIntent(action="long", symbol="BTC/USDT", quantity=1.0),
             OrderIntent(action="short", symbol="BTC-PERP", quantity=1.0),
         ),
-        max_completion_seconds=2.5,
         reason="basis",
     )
     state = LiveRuntimeState(
         state_key="live:abc",
         run_id="run-1",
         config_hash="abc",
-        mode="live",
+        mode="sim",
         cash_by_account={"default": 1_000.0},
         pending_decision=decision,
-        live_multi_leg=LiveMultiLeg(
-            order=decision,
-            baseline_signed_quantities={"BTC/USDT": 1.0, "BTC-PERP": -1.0},
-            reference_prices={"BTC/USDT": 100.0, "BTC-PERP": 101.0},
-            reference_volumes={"BTC/USDT": 1_000.0, "BTC-PERP": 2_000.0},
-            lagged_adv_by_symbol={"BTC/USDT": 10_000.0, "BTC-PERP": 20_000.0},
-            decided_at=datetime(2025, 1, 1, tzinfo=UTC),
-            next_leg_index=1,
-            first_fill_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=UTC),
-        ),
         equity_peak_by_account={"default": 1_000.0},
         prev_equity_by_account={"default": 1_000.0},
     )
@@ -176,11 +164,6 @@ def test_multi_leg_order_round_trip():
     restored = LiveRuntimeState.from_dict(state.to_dict())
 
     assert restored.pending_decision == decision
-    assert restored.live_multi_leg is not None
-    assert restored.live_multi_leg.baseline_signed_quantities == {
-        "BTC/USDT": 1.0,
-        "BTC-PERP": -1.0,
-    }
 
 
 @pytest.mark.parametrize(

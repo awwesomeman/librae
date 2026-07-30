@@ -428,19 +428,19 @@ execution.
 
 #### Related multi-leg order contract
 
-`MultiLegOrder` represents explicitly sized related orders where no atomic
-exchange-native combo order exists. It covers spreads, rolls, inventory
-hedges, and ordered cross-instrument exposure transitions without encoding
-strategy-specific arbitrage types:
+`MultiLegOrder` represents explicitly sized related orders for synchronous
+research simulation. It covers spreads, rolls, inventory hedges, and ordered
+cross-instrument exposure transitions without encoding strategy-specific
+arbitrage types:
 
 Atomic multi-leg execution means the venue accepts the group as one
 all-or-none transaction: every leg fills or none does. Separate API requests,
-whether serial or concurrent, do not provide that guarantee; independent
-venues have no shared transaction or rollback mechanism. Librae therefore
-supports cross-venue legs as best-effort execution with compensating orders,
-not as atomic execution. If one venue or broker exposes a native combo order,
-that is an adapter-specific capability and must not be inferred from the
-general `MultiLegOrder` contract.
+whether serial or concurrent, do not provide that guarantee; compensating
+orders can add further exposure instead of restoring a portfolio. Generic live
+execution therefore rejects `MultiLegOrder` and halts before sending any leg.
+If one venue or broker exposes a native combo order, use that adapter-specific
+capability. Cross-venue coordination belongs to a strategy-owned deployment
+coordinator with explicit partial-fill and recovery policy.
 
 ```python
 from librae import MultiLegOrder, OrderIntent
@@ -450,25 +450,15 @@ return MultiLegOrder(
         OrderIntent(action="long", symbol="BTCUSDT", quantity=0.10),
         OrderIntent(action="short", symbol="BTCUSDT-PERP", quantity=0.10),
     ),
-    max_completion_seconds=3.0,
     reason="spot-perpetual basis",
 )
 ```
 
 Every leg requires an explicit symbol and quantity, symbols cannot repeat, and
-tuple order is the live submission order. Backtest/sim waits for one event
-containing every leg and executes a synchronous OHLCV approximation. Live
-captures each leg symbol's pre-group signed quantity, submits one leg at a
-time, and starts `max_completion_seconds` at the first confirmed fill.
-Rejection, cancellation, timeout, or a missed completion deadline cancels the
-active leg and restores those signed quantities with market orders. The halt
-persists and requires reconciliation before `reset_halt()`.
-
-Restoration returns exposure quantity, not historical cost basis, and may need
-to add exposure while the engine is halted. It therefore bypasses only local
-entry-notional and volume-participation limits; venue normalization, instrument
-rules, broker confirmation, durable order tracking, and manual fallback remain
-mandatory. This is best-effort recovery, not an atomicity claim.
+tuple order is the simulation order. Backtest/sim waits for one event containing
+every leg and executes a synchronous OHLCV approximation. This is useful for
+strategy research but does not claim intrabar sequencing, venue atomicity, or
+recoverability in production.
 
 Examples include TAIFEX near/next-future/cash-proxy and Binance
 spot/perpetual/delivery-future spreads. Every leg in one `MultiLegOrder` belongs
@@ -554,11 +544,7 @@ simulation-only because they cannot be inferred later from a completed range.
 Protective live orders require a broker-native implementation.
 
 Every exposure-increasing live fill is checked again against confirmed
-position and gross limits. Net exposure is checked after a multi-leg group
-completes because transient legging exposure is governed by
-`max_completion_seconds`. Exact baseline-restoration fills are excluded from
-this entry check; applying a new-entry limit to them could prevent recovery to
-the already accepted pre-group exposure. A breach halts dependent execution.
+position, gross, and net limits. A breach halts dependent execution.
 
 Incremental cache retention is capped by the validated
 `ExecutionPolicy.warmup_periods` (default 720; an injected warmup
@@ -834,10 +820,10 @@ When no order or grouped execution is active, the checks repeat every
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
-prices, equity peak, halt/risk counters, target-rebalance/multi-leg lifecycle,
-funding watermarks, and active order queue. Runtime-state schema v12 persists
-the exact/rolling contract identity nested in active `OrderRequest` values.
-Only the current v12 checkpoint is accepted; every older schema requires an
+prices, equity peak, halt/risk counters, target-rebalance lifecycle, funding
+watermarks, and active order queue. Runtime-state schema v14 persists the
+exact/rolling contract identity nested in active `OrderRequest` values.
+Only the current v14 checkpoint is accepted; every older schema requires an
 explicit external migration or removal. `_STATE_SCHEMA_VERSION` is the single
 code-level version constant and must be bumped whenever the checkpoint or any
 persisted nested dataclass changes shape; it is not a business/domain version.
@@ -906,7 +892,7 @@ live capital.
 | Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
 | Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
-| Related multi-leg execution | Synchronous `MultiLegOrder` OHLCV approximation | Synchronous approximation | Best-effort serial execution, completion deadline, durable baseline restoration, and manual fallback; no atomic fill guarantee |
+| Related multi-leg execution | Synchronous `MultiLegOrder` OHLCV approximation | Synchronous approximation | Generic runner halts before submission; use a venue-native combo or strategy-owned coordinator |
 | Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
 | Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
 | Cross-account arbitrage | Separate independent runs; no synchronized engine contract | Same | Strategy-owned external orchestration; no shared funding or atomicity |
@@ -926,8 +912,8 @@ events.
 | Target validation, cash scaling, reduce-before-add ordering, broker outcomes, and diagnostics | Engine | Execution correctness is shared across strategies and is not delegated to user code. |
 | Point-in-time membership, eligibility, corporate actions, and adjusted inputs | Upstream data pipeline | The engine validates supplied observations but does not invent historical facts; see [Static candidate universe and point-in-time selection](#static-candidate-universe-and-point-in-time-selection). |
 | Runtime symbol discovery and market-data subscription changes | Not implemented | Reconfigure and restart when the predeclared candidate universe changes. |
-| Best-effort multi-leg lifecycle | Engine | `MultiLegOrder` owns declared ordering and completion deadline; the live engine durably captures and restores the pre-group signed exposure baseline. |
-| Atomic multi-leg execution | Not implemented | Atomicity is a venue/broker capability and is never inferred from sequential orders; cross-venue atomicity generally cannot be guaranteed. |
+| Research multi-leg approximation | Engine | `MultiLegOrder` owns explicit quantities and declared simulation order within one observed-data event. |
+| Live multi-leg execution | Adapter or deployment | Generic live execution fails closed; venue-native atomicity is explicit and cross-venue recovery policy remains strategy-owned. |
 
 #### Intentional defaults and resiliency fallbacks
 
@@ -974,7 +960,7 @@ financial/execution fact.
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close |
 | `PortfolioTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
-| `MultiLegOrder` | explicitly sized related legs with synchronous research approximation and durable best-effort live recovery |
+| `MultiLegOrder` | explicitly sized related legs with a synchronous backtest/sim approximation; rejected by generic live execution |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 

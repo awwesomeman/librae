@@ -96,7 +96,7 @@ For custom broker fetches and third-party factors, see
 | Cross-sectional selection and allocation | Predeclared candidate universe with point-in-time eligibility; optimizer remains strategy-owned; runtime symbol/subscription changes are not managed |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
 | Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
-| Related multi-leg execution | Explicitly sized `MultiLegOrder`; synchronous research approximation and serial live execution with a completion deadline and pre-group exposure restoration; not atomic venue execution |
+| Related multi-leg execution | Explicitly sized `MultiLegOrder` for synchronous backtest/sim approximation; generic live execution fails closed before submission |
 | Execution account | One named account and currency per run; use separate runs for separate broker accounts or currencies |
 | Cross-account coordination | Caller-owned; the engine does not model FX, transfers, settlement, netting, or atomic execution across runs |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |

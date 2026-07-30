@@ -166,16 +166,15 @@ return MultiLegOrder(
         OrderIntent(action="long", symbol="TXF_NEAR", quantity=1),
         OrderIntent(action="short", symbol="TXF_NEXT", quantity=1),
     ),
-    max_completion_seconds=2.0,
     reason="calendar spread",
 )
 ```
 
 The contract also covers rolls, inventory hedges, and ordered exposure
-transitions. Backtest/sim uses a synchronous OHLCV approximation; live is
-serial best-effort execution with a completion deadline and compensating
-orders, not an atomic combo order. The exact validation, recovery, halt, and
-venue-native combo boundaries are defined in the
+transitions. Backtest/sim uses a synchronous OHLCV approximation. The generic
+live runner rejects the group before submitting any leg; production execution
+requires a venue-native combo adapter or a strategy-owned coordinator. The
+exact boundary is defined in the
 [multi-leg engine contract](../architecture.md#related-multi-leg-order-contract).
 
 All legs in one runner use its single account:

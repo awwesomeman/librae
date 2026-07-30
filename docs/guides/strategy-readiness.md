@@ -88,8 +88,8 @@ account and therefore follows the broker-confirmed execution path.
       restart recovery, and placement-ambiguity handling are exercised.
 - [ ] Stale-data, cycle-deadline, database, notification, and broker failures
       have alerts and an operator response.
-- [ ] The kill switch, account halt/reset, unresolved-order procedure, and
-      manual multi-leg recovery are rehearsed.
+- [ ] The kill switch, account halt/reset, and unresolved-order procedure are
+      rehearsed.
 - [ ] The chosen broker/account lifecycle is certified in the applicable
       tracking issue below before paper or live claims are made.
 
@@ -99,7 +99,7 @@ account and therefore follows the broker-confirmed execution path.
 |---|---|---|
 | `OrderIntent` | `limit_price=None` uses the configured next-bar market fill; a numeric limit is valid for one eligible bar | `None` submits market; numeric `limit_price` submits limit |
 | `PortfolioTargets` | Complete one-account target state, resolved with the configured next-bar fill | The engine sizes from the latest completed close and replans from confirmed fills |
-| `MultiLegOrder` | Explicit quantities execute as one synchronous OHLCV approximation | Legs execute serially with a deadline and durable baseline restoration; no atomic guarantee |
+| `MultiLegOrder` | Explicit quantities execute as one synchronous OHLCV approximation | Rejected before submission; use a venue-native combo or strategy-owned coordinator |
 
 The runnable [minimum-variance example](../../examples/minimum_variance/)
 keeps the risk model and optimizer in strategy code. The

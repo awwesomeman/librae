@@ -34,6 +34,5 @@ strategy:
     quantity: 10
     entry_zscore: 1.5
     exit_zscore: 0.25
-    max_completion_seconds: 3.0
   perf:
     periods_per_year: 252

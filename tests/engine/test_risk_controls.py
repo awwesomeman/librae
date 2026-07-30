@@ -393,7 +393,6 @@ class TestPortfolioExposureLimits:
                 OrderIntent(action="long", symbol="AAA", quantity=1.5),
                 OrderIntent(action="short", symbol="BBB", quantity=1.5),
             ),
-            max_completion_seconds=5.0,
         )
 
         with pytest.raises(ValueError, match="post-decision gross exposure"):

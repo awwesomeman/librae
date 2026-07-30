@@ -29,7 +29,7 @@ from librae.core.strategy import (
 )
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
-from librae.live.state import LiveMultiLeg, MemoryLiveStateStore
+from librae.live.state import MemoryLiveStateStore
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -1908,125 +1908,21 @@ class TestLiveExecutionLifecycle:
         assert second["side"] == "sell"
         assert second["quantity"] == pytest.approx(250.0)
 
-    def test_multi_leg_order_fills_serially(self):
+    def test_live_multi_leg_fails_closed_without_submitting_orders(self):
         adapter = _mock_order_adapter()
-        adapter.place_order.side_effect = lambda signal: _broker_report(
-            order_id=f"order-{adapter.place_order.call_count}",
-            quantity=signal["quantity"],
-            average=100.0,
-            executed_at=TEST_CLOCK_NOW,
-        )
-
-        class BasisTrade(Strategy):
-            def on_bar(self, ctx):
-                return MultiLegOrder(
-                    legs=(
-                        OrderIntent(action="long", symbol="SPOT", quantity=2.0),
-                        OrderIntent(action="short", symbol="PERP", quantity=2.0),
-                    ),
-                    reason="basis",
-                )
-
-        runner = self._make_trader(
-            BasisTrade(),
-            adapter,
-            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
-        )
-        runner.run(max_iterations=1)
-
-        assert [call.args[0]["symbol"] for call in adapter.place_order.call_args_list] == [
-            "SPOT",
-            "PERP",
-        ]
-        assert runner._positions["SPOT"].side == "long"
-        assert runner._positions["PERP"].side == "short"
-        assert runner._live_multi_leg is None
-        assert runner._halted is False
-
-    def test_failed_multi_leg_order_restores_flat_baseline(self):
-        adapter = _mock_order_adapter()
-        adapter.place_order.side_effect = [
-            _broker_report(
-                order_id="spot",
-                quantity=2.0,
-                average=100.0,
-                executed_at=TEST_CLOCK_NOW,
-            ),
-            {"id": "perp", "status": "rejected"},
-            _broker_report(
-                order_id="restore",
-                quantity=2.0,
-                average=99.0,
-                executed_at=TEST_CLOCK_NOW,
-            ),
-        ]
-
-        class BasisTrade(Strategy):
-            def on_bar(self, ctx):
-                return MultiLegOrder(
-                    legs=(
-                        OrderIntent(action="long", symbol="SPOT", quantity=2.0),
-                        OrderIntent(action="short", symbol="PERP", quantity=2.0),
-                    ),
-                    reason="basis",
-                )
-
-        runner = self._make_trader(
-            BasisTrade(),
-            adapter,
-            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
-        )
-        runner.run(max_iterations=2)
-
-        assert adapter.place_order.call_count == 3
-        assert adapter.place_order.call_args_list[-1].args[0]["side"] == "sell"
-        assert runner._positions == {}
-        assert runner._live_multi_leg is None
-        assert runner._halted is True
-
-    def test_failed_multi_leg_order_restores_preexisting_exposure(self):
-        adapter = _mock_order_adapter()
-        adapter.place_order.side_effect = [
-            _broker_report(
-                order_id="reduce-spot",
-                quantity=1.0,
-                average=100.0,
-                executed_at=TEST_CLOCK_NOW,
-            ),
-            {"id": "short-perp", "status": "rejected"},
-            _broker_report(
-                order_id="restore-spot",
-                quantity=1.0,
-                average=101.0,
-                executed_at=TEST_CLOCK_NOW,
-            ),
-        ]
         runner = self._make_trader(
             _HoldStrategy(),
             adapter,
             config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
         )
-        runner._positions["SPOT"] = PositionState(
-            symbol="SPOT",
-            side="long",
-            entry_price=100.0,
-            quantity=1.0,
-            entry_at=TEST_CLOCK_NOW,
-            periods_held=1,
-            entry_commission=0.0,
-            entry_slippage=0.0,
-            entry_tax=0.0,
-            total_entry_cost=100.0,
-        )
-        runner._last_prices = {"SPOT": 100.0, "PERP": 100.0}
 
         complete = runner._execute_live_decision(
             MultiLegOrder(
                 legs=(
-                    OrderIntent(action="close", symbol="SPOT", quantity=1.0),
+                    OrderIntent(action="long", symbol="SPOT", quantity=1.0),
                     OrderIntent(action="short", symbol="PERP", quantity=1.0),
                 ),
-                reason="inventory-transition",
+                reason="basis",
             ),
             {
                 "SPOT": {"close": 100.0, "volume": 10_000.0},
@@ -2034,48 +1930,11 @@ class TestLiveExecutionLifecycle:
             },
             TEST_CLOCK_NOW,
         )
-        runner._advance_live_orders()
 
         assert complete is False
-        assert [call.args[0]["side"] for call in adapter.place_order.call_args_list] == [
-            "sell",
-            "sell",
-            "buy",
-        ]
-        assert runner._positions["SPOT"].side == "long"
-        assert runner._positions["SPOT"].quantity == pytest.approx(1.0)
-        assert "PERP" not in runner._positions
-        assert runner._live_multi_leg is None
         assert runner._halted is True
-
-    def test_multi_leg_deadline_uses_local_runtime_clock(self):
-        now = [TEST_CLOCK_NOW]
-        runner = self._make_trader(
-            _HoldStrategy(),
-            _mock_order_adapter(),
-            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
-            clock=lambda: now[0],
-        )
-        order = MultiLegOrder(
-            legs=(
-                OrderIntent(action="long", symbol="SPOT", quantity=1.0),
-                OrderIntent(action="short", symbol="PERP", quantity=1.0),
-            ),
-            max_completion_seconds=2.0,
-        )
-        runner._live_multi_leg = LiveMultiLeg(
-            order=order,
-            baseline_signed_quantities={"SPOT": 0.0, "PERP": 0.0},
-            reference_prices={"SPOT": 100.0, "PERP": 100.0},
-            reference_volumes={"SPOT": None, "PERP": None},
-            lagged_adv_by_symbol={},
-            decided_at=TEST_CLOCK_NOW,
-            first_fill_at=TEST_CLOCK_NOW,
-        )
-
-        assert runner._multi_leg_deadline_missed() is False
-        now[0] += timedelta(seconds=2)
-        assert runner._multi_leg_deadline_missed() is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
 
     def test_post_fill_risk_uses_broker_price_and_halts(self):
         adapter = _mock_order_adapter()
@@ -2216,7 +2075,7 @@ class TestLiveExecutionLifecycle:
                 datetime(2025, 1, 1, tzinfo=UTC),
             )
 
-    def test_live_multi_leg_rejects_transient_net_exposure_before_submission(self):
+    def test_live_order_batch_rejects_transient_net_exposure_before_submission(self):
         adapter = _mock_order_adapter()
         runner = self._make_trader(
             _HoldStrategy(),
@@ -2231,12 +2090,10 @@ class TestLiveExecutionLifecycle:
 
         with pytest.raises(ValueError, match="post-decision absolute net exposure"):
             runner._plan_live_orders(
-                MultiLegOrder(
-                    legs=(
-                        OrderIntent(action="long", symbol="AAA", quantity=600.0),
-                        OrderIntent(action="short", symbol="BBB", quantity=600.0),
-                    )
-                ),
+                [
+                    OrderIntent(action="long", symbol="AAA", quantity=600.0),
+                    OrderIntent(action="short", symbol="BBB", quantity=600.0),
+                ],
                 {
                     symbol: {
                         "open": 100.0,
