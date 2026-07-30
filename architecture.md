@@ -37,7 +37,7 @@ brokers (broker/exchange adapters)  →  librae (core → backtest / live)  → 
 
 - `brokers/`: one flat adapter per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), exposing market/account methods plus the live order lifecycle described below.
 - `librae/core/`: shared strategy/portfolio types and pure execution functions. Deterministic bar matching serves backtest/sim; `apply_execution_fill` serves confirmed live fills.
-- `librae/backtest/engine.py`: bar-by-bar backtest engine, produces `BacktestOutput` (the DB-persistence dataclasses defined in `librae/backtest/schema.py`: RunMetadata/EquityCurvePoint/OrderEventRecord/StrategyMetrics).
+- `librae/backtest/engine.py`: bar-by-bar execution only; raw result models live in `librae/backtest/result.py`, while persistence records live in `librae/backtest/schema.py`.
 - `librae/live/engine.py`: the real-time polling engine for sim/live mode — sim uses deterministic bar fills; live submits through a broker adapter and applies normalized execution reports.
 - `db/timescale_writer.py` / `db/timescale_reader.py` / `db/timescale_state.py`: the sole DB access layer — upper layers use analytics helpers or the runtime store, never raw SQL; schema is defined in `db/timescale_init.sql`.
 
@@ -196,6 +196,7 @@ librae/
 │
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()
+│   ├── result.py             raw side-effect-free backtest result models
 │   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord, PositionSnapshotPoint
 │   └── charts.py             plot_trades — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
 │

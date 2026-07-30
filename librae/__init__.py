@@ -22,10 +22,10 @@ from .backtest.schema import (
     StrategyMetrics,
     RUN_ID_PATTERN,
 )
-from .backtest.engine import (
+from .backtest.engine import Backtest
+from .backtest.result import (
     AccountBacktestResult,
     AllocationSnapshot,
-    Backtest,
     BacktestResult,
     EquitySnapshot,
     PortfolioSnapshot,

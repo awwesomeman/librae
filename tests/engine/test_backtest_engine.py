@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import librae
 import numpy as np
 import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
+from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 from tests.conftest import make_test_cfg
 
 # ── Helpers ───────────────────────────────────────────────────────────────
+
+
+def test_result_model_is_reexported_from_public_api() -> None:
+    assert librae.BacktestResult is BacktestResult
 
 
 def _make_multiindex_df(
