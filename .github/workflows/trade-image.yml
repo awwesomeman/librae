@@ -38,7 +38,15 @@ jobs:
           mkdir -p ../strategy-fixture/smoke
           touch ../strategy-fixture/smoke/__init__.py
           printf '%s\n' 'print("strategy fixture ready")' > ../strategy-fixture/smoke/run.py
-          printf '%s\n' 'strategy:' '  symbol: MU' '  timeframe: D1' > ../strategy-fixture/smoke/config.yaml
+          printf '%s\n' \
+            'strategy:' \
+            '  symbol: MU' \
+            '  timeframe: D1' \
+            '  account:' \
+            '    account_id: ci' \
+            '    currency: USD' \
+            '    initial_cash: 100000' \
+            > ../strategy-fixture/smoke/config.yaml
 
       - name: Build clean trade image
         id: image
@@ -96,6 +104,25 @@ jobs:
             sleep 1
           done
           test "${connected}" = true
+
+      - name: Verify account-specific trade launch
+        run: |
+          set -a
+          source .env.example
+          set +a
+          TRADE_STRATEGY_PATH=../strategy-fixture \
+            ./deploy/trade.sh start smoke-ci ci smoke sim 60
+          test "$(
+            docker inspect \
+              --format '{{ index .Config.Labels "io.librae.deployment_id" }}' \
+              quant_smoke-ci
+          )" = "smoke-ci"
+          test "$(
+            docker inspect \
+              --format '{{ index .Config.Labels "io.librae.account_id" }}' \
+              quant_smoke-ci
+          )" = "ci"
+          ./deploy/trade.sh stop smoke-ci
 
       - name: Verify backtest cache schema
         run: |

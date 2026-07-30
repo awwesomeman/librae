@@ -235,10 +235,12 @@ package. Each deployable name has one explicit entry contract:
     └── config.yaml
 ```
 
-`trade.sh start my_strategy` runs `python -m strategies.my_strategy.run`.
-Strategy helpers may live beside those required files. The source directory
-does not have to use Git; it should have its own `.dockerignore` when it
-contains files that must not enter the image.
+`trade.sh` runs `python -m strategies.my_strategy.run`. The packaged
+`config.yaml` is the default, while `--config <path>` mounts an
+operator-selected configuration read-only and passes it through the runner's
+existing `--config` option. Strategy helpers may live beside the required
+files. The source directory does not have to use Git; it should have its own
+`.dockerignore` when it contains files that must not enter the image.
 
 Run `deploy/build_push.sh` from `librae/`; it fails before invoking Docker when
 the selected source directory is absent. The shared image installs the
@@ -251,8 +253,8 @@ Grafana provisioning, and `.env`.
 This combined-source builder is optional. A caller-owned image may instead
 install a pinned Librae distribution and copy its own strategy package, as
 long as it provides the `strategies.<name>.run` module invoked by `trade.sh`.
-The final image digest, rather than the package installation source, is the
-deployment identity.
+The final image digest identifies the selected image bytes, independently of
+the stable `deployment_id` that identifies one running process.
 
 `TRADE_IMAGE` names the registry repository used only by `build_push.sh`. The
 script publishes a Librae-revision candidate tag and prints
@@ -274,11 +276,65 @@ safe. Apply the reconciliation procedure below before changing revisions.
    `.env` that `cloud_deploy.sh` will sync.
 3. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
    start TimescaleDB and Grafana. It does not start a strategy.
-4. Create `.env.secrets` directly on the VM; deployment scripts never sync
-   broker credentials.
-5. On the VM, run
-   `./deploy/trade.sh start my_strategy sim 60`. Use `live` only after broker
-   and checkpoint procedures are satisfied.
+4. Create account configuration files and copy `.env.secrets.example` to one
+   `.credentials/<account>.env` file per live account directly on the VM.
+   Deployment scripts never sync broker credentials.
+
+   ```bash
+   mkdir -p .credentials
+   cp .env.secrets.example .credentials/ibkr-main.env
+   chmod 600 .credentials/ibkr-main.env
+   ```
+
+5. On the VM, start each deployment with a stable id, the account id declared
+   by its selected configuration, and a strategy name:
+
+   ```bash
+   ./deploy/trade.sh start momentum-paper paper momentum sim 60 \
+       --config configs/paper.yaml
+
+   ./deploy/trade.sh start momentum-live ibkr_main momentum live 60 \
+       --config configs/ibkr-main.yaml \
+       --credentials .credentials/ibkr-main.env
+   ```
+
+   Use `live` only after broker and checkpoint procedures are satisfied.
+
+Each selected configuration must explicitly bind the deployment account:
+
+```yaml
+strategy:
+  account:
+    account_id: ibkr_main
+    currency: USD
+    initial_cash: 100000
+```
+
+The image preflight rejects a missing or different `account_id` before an
+existing container is replaced. Container names derive from `deployment_id`,
+so the same image and strategy can run for multiple accounts:
+
+```bash
+./deploy/trade.sh start momentum-main ibkr_main momentum live 60 \
+    --config configs/ibkr-main.yaml \
+    --credentials .credentials/ibkr-main.env
+
+./deploy/trade.sh start momentum-ira ibkr_ira momentum live 60 \
+    --config configs/ibkr-ira.yaml \
+    --credentials .credentials/ibkr-ira.env
+```
+
+Both containers receive the same `TRADE_TIMESCALE_DSN` and use the same
+TimescaleDB. Their run and account identifiers keep persisted facts distinct.
+Starting another live deployment for an account already owned by a running
+container fails before replacement. `trade.sh stop <deployment_id>` removes
+one deployment; `trade.sh stop --all` removes all containers carrying the
+Librae managed label.
+
+Before the first account-specific live launch, stop any container created by
+the older `quant_live_<strategy>` naming contract. `trade.sh` rejects an
+unlabeled legacy live container because it cannot prove which account that
+process owns.
 
 `LiveTrader.run()` is a blocking polling loop. A deployment should run it
 under a supervisor appropriate to the environment and must provide durable

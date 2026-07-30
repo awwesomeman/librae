@@ -22,6 +22,7 @@ dist/
 .env
 .env.local
 .env.secrets
+.credentials/
 .secrets/
 
 # Local logs

@@ -5,6 +5,7 @@
 **/*.egg-info
 **/.env
 **/.env.*
+**/.credentials
 **/.secrets
 
 tests
