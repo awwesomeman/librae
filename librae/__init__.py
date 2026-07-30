@@ -90,6 +90,7 @@ from .artifacts import (
     build_backtest_artifact,
     build_market_data_artifact,
 )
+from .data import normalize_bars
 
 __all__ = [
     "__version__",
@@ -117,6 +118,7 @@ __all__ = [
     "TabularArtifact",
     "build_backtest_artifact",
     "build_market_data_artifact",
+    "normalize_bars",
     "OrderIntent",
     "OrderAction",
     "MultiLegOrder",

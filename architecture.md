@@ -98,6 +98,11 @@ adapter factories, notifier, and state store instances. Direct `LiveTrader`
 construction never imports reference integrations. Sim may run in memory,
 while live always requires an explicitly injected durable `state_store`.
 
+Backtest callers may use `librae.normalize_bars()` to explicitly map common
+DataFrame layouts into the canonical `(symbol, datetime)` UTC index. The
+helper preserves feature columns; `Backtest` itself does not infer column
+names, timestamps, symbols, or data-source semantics.
+
 `timeframe` defines the completed strategy bar and data-event clock.
 `poll_seconds` independently defines the runtime loop cadence: each cycle may
 refresh active orders, run due reconciliation/heartbeat work, and check the
@@ -234,6 +239,7 @@ librae/
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── artifacts.py              format-neutral manifest + tabular research/export boundary
+├── data.py                   explicit caller-side bar normalization
 ├── integrations.py           stable public protocols and broker value types
 ├── testing.py                offline third-party adapter conformance helpers
 │

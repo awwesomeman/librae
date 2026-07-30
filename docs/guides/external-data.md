@@ -8,6 +8,32 @@ platform.
 | Backtest | Caller | Pass one prepared point-in-time DataFrame. `Backtest` does not read a DB or call a broker API. |
 | Sim/live | Caller or built-in broker adapter | `LiveTrader` polls completed-bar snapshots. It does not subscribe to streaming ticks. |
 
+For common backtest layouts, normalize explicitly before constructing the
+engine:
+
+```python
+from librae import Backtest, normalize_bars
+
+bars = normalize_bars(
+    vendor_frame,
+    column_mapping={
+        "ticker": "symbol",
+        "date": "datetime",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    },
+)
+backtest = Backtest(data=bars, strategy=strategy, config=config)
+```
+
+For a single-symbol DataFrame with a timezone-aware `DatetimeIndex`, pass
+`symbol="BTCUSDT"` instead. The helper converts timestamps to UTC, sorts the
+canonical index, validates OHLCV, and preserves extra feature columns. It does
+not localize naive timestamps or infer vendor-specific fields.
+
 ## Broker OHLCV outside the engine
 
 Broker adapters and credential types are public:
