@@ -1,5 +1,8 @@
--- TimescaleDB Schema — fresh deployment (DROP + rebuild)
+-- TimescaleDB schema for a fresh or current-revision database.
+-- This file is not a migration; recreate or migrate older schemas explicitly.
 -- See docs/plans/enhance_db_schema.md for schema evolution history
+\set ON_ERROR_STOP on
+
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Managed roles: quant_app writes runtime data; grafana_reader only reads it.
@@ -63,27 +66,6 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     config_hash     VARCHAR(32),
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))
 );
-ALTER TABLE backtest_runs
-    ADD COLUMN IF NOT EXISTS execution_policy JSONB;
-ALTER TABLE backtest_runs
-    ADD COLUMN IF NOT EXISTS risk_policy JSONB;
-ALTER TABLE backtest_runs
-    ADD COLUMN IF NOT EXISTS symbols JSONB;
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'backtest_runs' AND column_name = 'symbol'
-    ) THEN
-        UPDATE backtest_runs
-        SET symbols = jsonb_build_array(symbol)
-        WHERE symbols IS NULL;
-        ALTER TABLE backtest_runs DROP COLUMN symbol;
-    END IF;
-END $$;
-ALTER TABLE backtest_runs
-    ALTER COLUMN symbols SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
 
@@ -133,17 +115,6 @@ CREATE TABLE IF NOT EXISTS broker_orders (
         )
     )
 );
-ALTER TABLE broker_orders
-    ADD COLUMN IF NOT EXISTS placement_attempted_at TIMESTAMPTZ;
-ALTER TABLE broker_orders
-    DROP CONSTRAINT IF EXISTS chk_broker_order_status;
-ALTER TABLE broker_orders
-    ADD CONSTRAINT chk_broker_order_status CHECK (
-        status IN (
-            'submitted', 'accepted', 'partial', 'cancel_pending',
-            'filled', 'cancelled', 'rejected'
-        )
-    );
 CREATE INDEX IF NOT EXISTS idx_broker_orders_active
     ON broker_orders(state_key, status, updated_at DESC);
 
@@ -169,16 +140,8 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
-DROP INDEX IF EXISTS idx_equity_curve_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique
     ON equity_curve(run_id, account_id, ts);
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS gross_exposure DOUBLE PRECISION;
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS net_exposure DOUBLE PRECISION;
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS concentration DOUBLE PRECISION;
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS turnover DOUBLE PRECISION;
-ALTER TABLE equity_curve ADD COLUMN IF NOT EXISTS exposed BOOLEAN;
 
 -- ============================================================
 -- trade_events — 部位生命週期事件 (hypertable, 獨立)
@@ -219,11 +182,6 @@ SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);
 CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);
-ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
-ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_commission DOUBLE PRECISION;
-ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_slippage DOUBLE PRECISION;
-ALTER TABLE trade_events ADD COLUMN IF NOT EXISTS entry_tax DOUBLE PRECISION;
 
 -- Timestamped perpetual-funding payments applied by research runtimes.
 CREATE TABLE IF NOT EXISTS funding_cash_flows (
@@ -284,24 +242,6 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
     total_tax       DOUBLE PRECISION DEFAULT 0,
     PRIMARY KEY (run_id, account_id)
 );
--- WHY: existing deployments already ran CREATE TABLE before payoff_ratio existed;
--- IF NOT EXISTS keeps this script idempotent for both fresh and existing DBs.
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS payoff_ratio DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS tracking_error DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS information_ratio DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS total_turnover DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS average_gross_exposure DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_gross_exposure DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_abs_net_exposure DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS max_concentration DOUBLE PRECISION;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UNSPECIFIED';
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS initial_cash DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS final_equity DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS net_pnl DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE strategy_performance DROP CONSTRAINT IF EXISTS strategy_performance_pkey;
-ALTER TABLE strategy_performance
-    ADD CONSTRAINT strategy_performance_pkey PRIMARY KEY (run_id, account_id);
 
 -- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)
@@ -352,12 +292,8 @@ CREATE TABLE IF NOT EXISTS signal_events (
 SELECT create_hypertable('signal_events', 'ts', if_not_exists => TRUE);
 -- run_id is part of the dedup key so re-writing one run's signals (e.g. a
 -- parameter-sweep re-run) can never collide with / silently overwrite
--- another run's rows for the same (ts, strategy, symbol, ...) — same
--- per-run isolation as equity_curve/trade_events. DROP+CREATE (not
--- IF NOT EXISTS) so re-running this script also migrates an
--- already-provisioned DB from the old (pre-run_id) index definition.
-DROP INDEX IF EXISTS idx_signal_events_unique;
-CREATE UNIQUE INDEX idx_signal_events_unique
+-- another run's rows for the same (ts, strategy, symbol, ...).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_events_unique
     ON signal_events (ts, run_id, strategy, symbol, mode, timeframe, signal_type);
 CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_lookup

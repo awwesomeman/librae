@@ -81,6 +81,14 @@ def test_database_roles_match_runtime_boundaries() -> None:
     assert "INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO grafana_reader" not in schema
 
 
+def test_database_schema_does_not_embed_migrations() -> None:
+    schema = (ROOT / "db" / "timescale_init.sql").read_text(encoding="utf-8")
+
+    assert r"\set ON_ERROR_STOP on" in schema
+    assert "ALTER TABLE" not in schema
+    assert "DROP INDEX" not in schema
+
+
 def test_local_trade_build_uses_workspace_context_and_checks_strategies() -> None:
     script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
 

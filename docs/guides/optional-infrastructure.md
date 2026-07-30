@@ -33,17 +33,21 @@ Install the database extra when using the reference writer or live state store:
 pip install "librae[db] @ git+https://github.com/awwesomeman/librae.git@<tag-or-commit>"
 ```
 
-The reference Compose service initializes an empty database automatically. To
-apply schema or role updates to an existing reference deployment:
+The reference Compose service initializes an empty database automatically.
+`timescale_init.sql` defines the current schema and does not migrate an older
+one. Re-running it is supported only when the database already matches the
+current revision, for example when refreshing role grants:
 
 ```bash
 docker exec -i quant_timescaledb psql -U quant -d quant < db/timescale_init.sql
 ```
 
+When a revision changes the schema, recreate disposable development data or
+perform an explicit operator-owned migration before running the new revision.
 For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
 `POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
-the non-admin `quant_app` role and must not be used for migrations.
+the non-admin `quant_app` role and must not be used for schema administration.
 
 Normal integrations call the high-level functions in
 `db.timescale_writer` and `db.timescale_reader`; upper layers should not issue

@@ -33,9 +33,9 @@ Status: accepted
 | `CostModel.impact_coef` | `CostModel.volume_impact_ticks` |
 | `make_fill` / `eval_equity` / `direction` | `simulate_fill` / `calc_equity` / `side_multiplier` |
 
-No compatibility aliases are retained. The database initialization script
-migrates an existing scalar `symbol` into a one-element `symbols` array before
-dropping the old column.
+No compatibility aliases or database migrations are retained. Existing
+development databases must be recreated or migrated explicitly outside the
+initialization script.
 
 ## Rationale
 
