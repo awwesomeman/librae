@@ -9,6 +9,7 @@ execution, notifications, monitoring, or deployment.
 | Component | Directory | Engine boundary |
 |---|---|---|
 | TimescaleDB analytics and runtime state | [`db/`](../../db/) | callbacks and `state_store` |
+| Local research artifacts | [`librae/artifacts.py`](../../librae/artifacts.py) | format-neutral manifest and tables |
 | Broker market data and order routing | [`brokers/`](../../brokers/) | `adapter` and `order_adapter` |
 | Telegram notifications | [`notifications/`](../../notifications/) | `notifier` |
 | Strategy CLI/config wiring | [`orchestration/`](../../orchestration/) | strategy-owned `run.py` helpers |
@@ -42,6 +43,13 @@ the non-admin `quant_app` role and must not be used for migrations.
 Normal integrations call the high-level functions in
 `db.timescale_writer` and `db.timescale_reader`; upper layers should not issue
 ad hoc SQL. In a backtest, `cfg.no_db=True` skips all database writes.
+
+For local research output, `no_db=True` remains side-effect free. Call
+`build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then
+use pandas to write the returned tables to Parquet, SQLite, DuckDB, or another
+format. See [Local artifacts](local-artifacts.md). Librae defines the table and
+manifest shape; the caller owns file paths, overwrite policy, transactions,
+partitioning, and retention.
 
 Live execution is different: it requires durable runtime state. With
 `cfg.no_db=True`, inject your own durable `state_store`; the in-memory

@@ -72,7 +72,9 @@ state, costs, and output. The [examples](examples/README.md) show the complete
   and owns their validation, sizing, sequencing, execution, and diagnostics.
 - **Outputs:** `BacktestOutput` contains run metadata, currency-labeled trade
   and funding events, one equity/PnL/metrics result per account, and optional
-  position/allocation snapshots.
+  position/allocation snapshots. For caller-owned Parquet, SQLite, or other
+  local storage, use the format-neutral
+  [artifact tables](docs/guides/local-artifacts.md).
 
 The exact validation, fill, liquidity, margin, reconciliation, and state
 semantics are documented in the [engine architecture](architecture.md#backtest-engine-design-librae).

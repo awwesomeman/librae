@@ -11,6 +11,7 @@
 | 理解執行語意與系統設計 | [Architecture](../architecture.md) |
 | 分析訊號的遠期表現 | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
 | 檢查策略是否可進入下一執行階段 | [Strategy readiness checklist](guides/strategy-readiness.md) |
+| 將資料或回測結果存成 Parquet、SQLite 等本地格式 | [Local artifacts](guides/local-artifacts.md) |
 | 設定 DB、Grafana、broker 或部署環境 | [Optional infrastructure](guides/optional-infrastructure.md) |
 
 ## 文件類型
