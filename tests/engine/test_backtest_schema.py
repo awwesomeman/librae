@@ -106,6 +106,21 @@ def test_backtest_output_validate_passes() -> None:
     output.validate()  # should not raise
 
 
+def test_backtest_output_serializes_scalar_account() -> None:
+    output = BacktestOutput(
+        run_metadata=_make_run_metadata(),
+        account=_make_account(_make_equity_curve()),
+        order_events=(),
+        position_snapshots=(),
+        allocation_snapshots=(),
+    )
+
+    payload = output.to_dict()
+
+    assert payload["account"]["account_id"] == "default"
+    assert "accounts" not in payload
+
+
 def test_backtest_output_validate_empty_run_id_raises() -> None:
     meta = _make_run_metadata(run_id="")
     output = BacktestOutput(

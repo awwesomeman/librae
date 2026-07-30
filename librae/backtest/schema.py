@@ -7,11 +7,6 @@ Cost/slippage fields are optional (may be None for simple backtests).
 Persistence is caller-selected. ``librae.artifacts`` can flatten engine output
 into format-neutral tables; ``db.timescale_writer`` is the reference database
 integration.
-
-Also contains canonical backend data contracts:
-- Schema version and validation constants
-- Parsing utilities (timestamps, snake_case)
-- Record validation functions
 """
 
 from __future__ import annotations
@@ -26,18 +21,10 @@ from librae.core.run_config import RunMode
 from librae.core.strategy import PositionEventType, PositionSide
 
 # ---------------------------------------------------------------------------
-# Constants (from contracts.py)
+# Constants
 # ---------------------------------------------------------------------------
 
-SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-
 RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4}-[a-f0-9]{6}$")
-
-REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
-    "run_metadata",
-    "accounts",
-    "order_events",
-)
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -296,17 +283,3 @@ class BacktestOutput:
                     f"record currency {record.currency!r} does not match account "
                     f"{record.account_id!r} currency {self.account.currency!r}"
                 )
-
-
-def ensure_snake_case_keys(keys: list[str] | tuple[str, ...], record_name: str) -> None:
-    """Validate that all keys are snake_case."""
-    invalid = [k for k in keys if not SNAKE_CASE_PATTERN.match(str(k))]
-    if invalid:
-        raise ValueError(f"{record_name} has non-snake_case keys: {invalid}")
-
-
-def require_keys(record: dict[str, Any], keys: tuple[str, ...], record_name: str) -> None:
-    """Validate that all required keys are present and non-empty."""
-    missing = [k for k in keys if k not in record or record[k] in (None, "")]
-    if missing:
-        raise ValueError(f"{record_name} missing required keys: {missing}")
