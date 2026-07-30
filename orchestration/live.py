@@ -1,0 +1,369 @@
+"""Deployment wiring for Librae's injected live engine."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import asdict
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pandas as pd
+from librae.config.symbols import resolve_symbol
+from librae.core.cost_model import CostModel
+from librae.core.utils import make_event_id
+from librae.live.engine import LiveTrader, _bind_market_data_source
+
+if TYPE_CHECKING:
+    from librae.config.symbols import SymbolInfo
+    from librae.core.executor import OrderEvent
+    from librae.core.funding import FundingCashFlow
+    from librae.core.run_config import RunConfig
+    from librae.core.strategy import Strategy
+
+logger = logging.getLogger(__name__)
+
+_DATA_ADAPTER_BY_BROKER = {
+    "binance": "crypto",
+    "ibkr": "ibkr",
+    "shioaji": "shioaji",
+}
+_DB_FAILURE_ALERT_THRESHOLD = 3
+
+
+def _build_adapter(name: str, *, trading: bool) -> object:
+    """Construct one explicitly configured repository adapter."""
+    if name == "shioaji":
+        from brokers.shioaji_adapter import ShioajiAdapter
+
+        return ShioajiAdapter()
+    if name == "ibkr":
+        from brokers.ibkr_adapter import IBKRAdapter
+
+        return IBKRAdapter(trading_enabled=trading)
+    if name in ("crypto", "binance"):
+        from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
+
+        credentials = (
+            CryptoCredentials.from_env("BINANCE", exchange_id="binance") if trading else None
+        )
+        return CryptoAdapter(credentials=credentials)
+    raise ValueError(f"unsupported adapter: {name!r}")
+
+
+def _build_notifier(config: RunConfig) -> object:
+    from notifications.config import TelegramConfig
+    from notifications.telegram import TelegramAdapter, TelegramCredentials
+
+    return TelegramAdapter(
+        config=TelegramConfig.from_dict(config.telegram_config or {}),
+        credentials=TelegramCredentials.from_env("TELEGRAM"),
+    )
+
+
+def _build_state_store() -> object:
+    try:
+        from db.timescale_state import TimescaleLiveStateStore
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "TimescaleDB persistence is enabled but its optional dependencies "
+            "are unavailable. Install Librae's 'db' extra or use no_db=True."
+        ) from exc
+    return TimescaleLiveStateStore()
+
+
+class _TimescaleCallbacks:
+    """Best-effort analytics sink; runtime checkpoints remain fail-fast."""
+
+    def __init__(
+        self,
+        config: RunConfig,
+        instruments: dict[str, SymbolInfo],
+        notifier: object | None,
+    ) -> None:
+        self._config = config
+        self._instruments = instruments
+        self._notifier = notifier
+        self._run_id = ""
+        self._failures = 0
+
+    def _write(self, callback: Callable[..., object], *args: object, **kwargs: object) -> None:
+        try:
+            callback(*args, **kwargs)
+            self._failures = 0
+        except Exception as exc:
+            self._failures += 1
+            logger.warning(
+                "DB %s failed (%d consecutive): %s",
+                callback.__name__,
+                self._failures,
+                exc,
+            )
+            if self._failures == _DB_FAILURE_ALERT_THRESHOLD:
+                self._alert(
+                    title=f"[{self._config.strategy_name}] DB Write Failing",
+                    message=(
+                        f"{self._failures} consecutive DB write failures "
+                        f"(last: {callback.__name__}); trading continues."
+                    ),
+                )
+
+    def _alert(self, *, title: str, message: str) -> None:
+        notifier = self._notifier
+        if notifier is None or not bool(getattr(notifier, "enabled", False)):
+            return
+        try:
+            notifier.send_alert(title=title, message=message)
+        except Exception:
+            logger.exception("DB failure notification failed")
+
+    def register_run(self, run_id: str) -> None:
+        from db.timescale_writer import write_run_metadata
+
+        self._run_id = run_id
+        self._write(
+            write_run_metadata,
+            run_id=run_id,
+            strategy=self._config.strategy_name,
+            symbols=self._config.symbols,
+            timeframe=self._config.timeframe,
+            mode=self._config.mode,
+            started_at=datetime.now(tz=UTC),
+            data_source=self._config.data_source,
+            poll_seconds=self._config.poll_seconds,
+            params=self._config.params,
+            execution_policy=asdict(self._config.execution),
+            risk_policy=asdict(self._config.risk),
+            perf_params=self._config.perf_params,
+        )
+
+    def on_bar(
+        self,
+        run_id: str,
+        ts: datetime,
+        account_id: str,
+        currency: str,
+        equity: float,
+        drawdown: float,
+        period_return: float,
+        gross_exposure: float,
+        net_exposure: float,
+        concentration: float,
+        turnover: float,
+    ) -> None:
+        from db.timescale_writer import write_equity_curve_point
+
+        self._write(
+            write_equity_curve_point,
+            ts=ts,
+            run_id=run_id,
+            account_id=account_id,
+            currency=currency,
+            equity=equity,
+            drawdown=drawdown,
+            period_return=period_return,
+            gross_exposure=gross_exposure,
+            net_exposure=net_exposure,
+            concentration=concentration,
+            turnover=turnover,
+            exposed=gross_exposure > 0,
+            strategy=self._config.strategy_name,
+        )
+
+    def on_order_event(self, event: OrderEvent, sequence: int) -> None:
+        from db.timescale_writer import write_trade_event
+
+        fields = asdict(event)
+        fields.update(
+            event_id=make_event_id(self._run_id, sequence),
+            run_id=self._run_id,
+            strategy=self._config.strategy_name,
+            mode=self._config.mode,
+            timeframe=self._config.timeframe,
+            account_id=self._config.account_id,
+            currency=self._config.account.currency,
+        )
+        self._write(write_trade_event, **fields)
+
+    def on_funding_cash_flow(self, cash_flow: FundingCashFlow) -> None:
+        from db.timescale_writer import write_funding_cash_flow
+
+        self._write(
+            write_funding_cash_flow,
+            run_id=self._run_id,
+            account_id=self._config.account_id,
+            currency=self._config.account.currency,
+            ts=cash_flow.ts,
+            symbol=cash_flow.symbol,
+            side=cash_flow.side,
+            quantity=cash_flow.quantity,
+            mark_price=cash_flow.mark_price,
+            multiplier=cash_flow.multiplier,
+            rate=cash_flow.rate,
+            cash_flow=cash_flow.cash_flow,
+        )
+
+    def on_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        bar: dict[str, float],
+        ts: datetime,
+    ) -> None:
+        from db.timescale_writer import write_ohlcv
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "ts": ts,
+                    "open": bar["open"],
+                    "high": bar["high"],
+                    "low": bar["low"],
+                    "close": bar["close"],
+                    "volume": bar["volume"],
+                }
+            ]
+        ).set_index("ts")
+        instrument = self._instruments[symbol]
+        self._write(
+            write_ohlcv,
+            frame,
+            symbol,
+            timeframe,
+            data_source=instrument.data_source,
+            instrument_type=instrument.instrument_type,
+        )
+
+    def on_heartbeat(self, run_id: str) -> None:
+        from db.timescale_writer import update_heartbeat
+
+        self._write(update_heartbeat, run_id)
+
+    def on_signal_outcome(
+        self,
+        symbol: str,
+        ts: datetime,
+        signal_value: float,
+        price: float,
+        signal_type: str = "entry",
+    ) -> None:
+        from db.timescale_writer import write_signal_event
+
+        self._write(
+            write_signal_event,
+            ts=ts,
+            run_id=self._run_id,
+            strategy=self._config.strategy_name,
+            symbol=symbol,
+            mode=self._config.mode,
+            timeframe=self._config.timeframe,
+            signal_value=signal_value,
+            price=price,
+            signal_type=signal_type,
+        )
+
+    def on_performance(self, run_id: str, account_id: str) -> None:
+        from db.timescale_writer import refresh_performance
+
+        self._write(refresh_performance, run_id, account_id, config=self._config)
+
+
+def build_live_trader(
+    strategy: Strategy,
+    feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    *,
+    config: RunConfig,
+) -> LiveTrader:
+    """Build the repository's default sim/live deployment."""
+    cost_models = {
+        symbol: CostModel.from_config(config, symbol=symbol) for symbol in config.symbols
+    }
+    instruments = {
+        symbol: resolve_symbol(
+            config,
+            symbol,
+            multiplier=cost_models[symbol].multiplier,
+        )
+        for symbol in config.symbols
+    }
+
+    adapter_instances: dict[tuple[str, str], object] = {}
+    data_adapters: dict[str, object] = {}
+    for symbol, instrument in instruments.items():
+        if instrument.data_adapter == "crypto" and instrument.continuous_alias:
+            raise ValueError(
+                f"{symbol!r} is a continuous crypto alias and is not directly orderable; "
+                "configure a concrete venue_symbol or inject a custom adapter into LiveTrader"
+            )
+        route = (config.instrument_overrides or {}).get(symbol, {})
+        broker = route.get("broker") or config.broker
+        trading = (
+            config.mode == "live"
+            and broker is not None
+            and _DATA_ADAPTER_BY_BROKER.get(broker) == instrument.data_adapter
+        )
+        key = (instrument.data_adapter, instrument.data_source)
+        instance = adapter_instances.get(key)
+        if instance is None:
+            instance = _build_adapter(instrument.data_adapter, trading=trading)
+            adapter_instances[key] = instance
+        data_adapters[symbol] = instance
+
+    order_adapters: dict[str, object] | None = None
+    if config.mode == "live":
+        broker_instances: dict[str, object] = {}
+        order_adapters = {}
+        for symbol, instrument in instruments.items():
+            route = (config.instrument_overrides or {}).get(symbol, {})
+            broker = route.get("broker") or config.broker
+            if not broker:
+                raise ValueError(
+                    f"live execution broker is not configured for {symbol!r}; "
+                    "set strategy.broker or instrument_overrides"
+                )
+            adapter_name = _DATA_ADAPTER_BY_BROKER.get(broker)
+            if adapter_name is None:
+                raise ValueError(f"unsupported execution broker: {broker!r}")
+            instance = broker_instances.get(broker)
+            if instance is None:
+                data_instance = data_adapters[symbol]
+                instance = (
+                    data_instance
+                    if adapter_name == instrument.data_adapter
+                    else _build_adapter(broker, trading=True)
+                )
+                broker_instances[broker] = instance
+            order_adapters[symbol] = instance
+
+    notifier = None if config.no_db else _build_notifier(config)
+    state_store = None if config.no_db else _build_state_store()
+    callbacks = None if config.no_db else _TimescaleCallbacks(config, instruments, notifier)
+    market_fetchers = {
+        symbol: _bind_market_data_source(
+            data_adapters[symbol],
+            instrument,
+            prefer_fetch_method=True,
+        )
+        for symbol, instrument in instruments.items()
+    }
+
+    trader = LiveTrader(
+        strategy,
+        feature_fn,
+        config=config,
+        adapter=market_fetchers,
+        order_adapter=order_adapters,
+        cost_model=cost_models,
+        notifier=notifier,
+        state_store=state_store,
+        on_bar=callbacks.on_bar if callbacks else None,
+        on_order_event=callbacks.on_order_event if callbacks else None,
+        on_ohlcv=callbacks.on_ohlcv if callbacks else None,
+        on_heartbeat=callbacks.on_heartbeat if callbacks else None,
+        on_signal_outcome=callbacks.on_signal_outcome if callbacks else None,
+        on_funding_cash_flow=callbacks.on_funding_cash_flow if callbacks else None,
+        on_performance=callbacks.on_performance if callbacks else None,
+    )
+    if callbacks is not None:
+        callbacks.register_run(trader.run_id)
+    return trader

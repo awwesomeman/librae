@@ -17,6 +17,7 @@ from orchestration.cli import (
     check_existing_run,
     parse_with_config,
     run_dispatch,
+    run_realtime_generic,
 )
 
 
@@ -573,3 +574,15 @@ class TestRunDispatch:
             run_dispatch("research_only", "run.py", run_backtest)
 
         run_backtest.assert_called_once_with(config)
+
+    def test_generic_realtime_runner_uses_deployment_factory(self):
+        config = _make_cfg(mode="sim", no_db=True)
+        trader = MagicMock()
+        strategy = MagicMock()
+        feature_fn = MagicMock()
+
+        with patch("orchestration.live.build_live_trader", return_value=trader) as build:
+            run_realtime_generic(config, strategy, feature_fn)
+
+        build.assert_called_once_with(strategy, feature_fn, config=config)
+        trader.run.assert_called_once_with()

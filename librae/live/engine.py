@@ -1,11 +1,8 @@
-"""LiveTrader — polling loop for sim and live modes.
+"""Polling engine for shadow simulation and broker-confirmed live execution.
 
 Processes newly completed bars as data-driven events and routes intents to
-LiveExecutor. Caches OHLCV to avoid redundant fetches.
-
-Wiring is internalized: pass config=RunConfig to __init__,
-the engine builds adapter, cost_model, callbacks, telegram internally.
-Use on_bar=None etc. to disable specific callbacks (e.g. in tests).
+LiveExecutor. Infrastructure integrations are constructor-injected; deployment
+factories belong outside the engine.
 """
 
 from __future__ import annotations
@@ -17,7 +14,7 @@ import types
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
 from time import perf_counter
@@ -42,7 +39,7 @@ from librae.core.executor import (
     validate_exposure_transition,
     validate_strategy_decision,
 )
-from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
+from librae.core.funding import calculate_funding_cash_flows
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
 from librae.core.strategy import (
@@ -93,14 +90,6 @@ class BarDataFetcher(Protocol):
     ) -> pd.DataFrame: ...
 
 
-_UNSET = object()  # sentinel: distinguish "not passed" from "explicitly passed None"
-_DATA_ADAPTER_BY_BROKER = {
-    "binance": "crypto",
-    "ibkr": "ibkr",
-    "shioaji": "shioaji",
-}
-
-
 @dataclass(frozen=True)
 class _BrokerPosition:
     side: Literal["long", "short"]
@@ -120,26 +109,6 @@ class CycleDiagnostics:
     deadline_missed: bool
 
 
-def _build_builtin_adapter(name: str, *, trading: bool) -> object:
-    """Construct one explicitly selected built-in adapter."""
-    if name == "shioaji":
-        from brokers.shioaji_adapter import ShioajiAdapter
-
-        return ShioajiAdapter()
-    if name == "ibkr":
-        from brokers.ibkr_adapter import IBKRAdapter
-
-        return IBKRAdapter(trading_enabled=trading)
-    if name in ("crypto", "binance"):
-        from brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
-
-        credentials = (
-            CryptoCredentials.from_env("BINANCE", exchange_id="binance") if trading else None
-        )
-        return CryptoAdapter(credentials=credentials)
-    raise ValueError(f"Unsupported adapter: {name!r}")
-
-
 def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
@@ -149,9 +118,10 @@ def _bind_market_data_source(
     """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
     if callable(source) and not prefer_fetch_method:
         return source
-
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
     if not callable(fetch_ohlcv):
+        if callable(source):
+            return source
         raise TypeError(
             "adapter must be a bar-data callable or expose a callable fetch_ohlcv method"
         )
@@ -196,26 +166,17 @@ class LiveTrader:
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         config: RunConfig — the sole configuration source.
         adapter: Callable bar fetcher, concrete adapter with ``fetch_ohlcv``,
-            or per-symbol mapping. None builds adapters from the configured
-            data routes. Extra point-in-time columns reach ``feature_fn``.
-        order_adapter: Order gateway override. In live mode, omitting it
-            requires an explicit config.broker or per-symbol broker route;
-            execution is never inferred from the symbol or market.
+            or per-symbol mapping. Required. Extra point-in-time columns reach
+            ``feature_fn``.
+        order_adapter: Required broker gateway in live mode; unused in sim.
         cost_model: CostModel override. None resolves one model per symbol.
-        on_bar: _UNSET -> build DB callback from config; None -> no callback; callable -> use it.
-        on_order_event: Same pattern as on_bar.
-        on_ohlcv: Same pattern as on_bar.
-        on_heartbeat: Same pattern as on_bar.
-        on_signal_outcome: Same pattern as on_bar.
-        on_funding_cash_flow: Same pattern as on_bar.
-        warmup_fetcher: _UNSET or None -> plain API fetch via adapter; callable ->
-            use it (e.g. a DB-first fetcher supplied by the caller's data layer).
-        state_store: _UNSET -> TimescaleDB when DB is enabled; explicit
-            duck-typed store -> use it. Live mode requires a store so
-            placement attempts and fills survive process restarts.
-        notifier: _UNSET -> build default TelegramAdapter from config (skipped
-            entirely when config.no_db); None -> no notifications; object -> use it
-            (must implement TelegramAdapter's duck-typed interface).
+        callbacks: Optional analytics hooks. They have no default persistence
+            implementation inside the engine.
+        warmup_fetcher: Optional data-layer warmup hook; otherwise the injected
+            market-data adapter is used.
+        state_store: Optional checkpoint store. Live mode requires a durable
+            store so placement attempts and fills survive process restarts.
+        notifier: Optional duck-typed operational notifier.
     """
 
     def __init__(
@@ -227,15 +188,16 @@ class LiveTrader:
         adapter: object | Mapping[str, object] | None = None,
         order_adapter: object | Mapping[str, object] | None = None,
         cost_model: CostModel | Mapping[str, CostModel] | None = None,
-        notifier: object | None = _UNSET,
-        on_bar: Callable[..., None] | object | None = _UNSET,
-        on_order_event: Callable[..., None] | object | None = _UNSET,
-        on_ohlcv: Callable[..., None] | object | None = _UNSET,
-        on_heartbeat: Callable[..., None] | object | None = _UNSET,
-        on_signal_outcome: Callable[..., None] | object | None = _UNSET,
-        on_funding_cash_flow: Callable[..., None] | object | None = _UNSET,
-        warmup_fetcher: Callable[..., pd.DataFrame] | object | None = _UNSET,
-        state_store: LiveStateStore | object | None = _UNSET,
+        notifier: object | None = None,
+        on_bar: Callable[..., None] | None = None,
+        on_order_event: Callable[..., None] | None = None,
+        on_ohlcv: Callable[..., None] | None = None,
+        on_heartbeat: Callable[..., None] | None = None,
+        on_signal_outcome: Callable[..., None] | None = None,
+        on_funding_cash_flow: Callable[..., None] | None = None,
+        on_performance: Callable[..., None] | None = None,
+        warmup_fetcher: Callable[..., pd.DataFrame] | None = None,
+        state_store: LiveStateStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         from librae.config.symbols import resolve_symbol
@@ -304,50 +266,23 @@ class LiveTrader:
             account_id: account.currency for account_id, account in config.accounts.items()
         }
 
-        # --- Build per-symbol market-data adapters ---
-        data_adapters: dict[str, object] = {}
-        if adapter is not None:
-            if isinstance(adapter, Mapping):
-                missing = set(self._symbols) - set(adapter)
-                if missing:
-                    raise ValueError(f"Missing market-data adapters for symbols: {sorted(missing)}")
-                sources = dict(adapter)
-            else:
-                sources = {symbol: adapter for symbol in self._symbols}
-            self._fetchers = {
-                symbol: _bind_market_data_source(sources[symbol], self._instruments[symbol])
-                for symbol in self._symbols
-            }
+        # --- Bind caller-owned market-data adapters ---
+        if adapter is None:
+            raise ValueError(
+                "LiveTrader requires an explicit market-data adapter; use "
+                "orchestration.live.build_live_trader() for built-in wiring"
+            )
+        if isinstance(adapter, Mapping):
+            missing = set(self._symbols) - set(adapter)
+            if missing:
+                raise ValueError(f"Missing market-data adapters for symbols: {sorted(missing)}")
+            sources = dict(adapter)
         else:
-            adapter_instances: dict[tuple[str, str], object] = {}
-            self._fetchers: dict[str, BarDataFetcher] = {}
-            for symbol, instrument in self._instruments.items():
-                key = (instrument.data_adapter, instrument.data_source)
-                instance = adapter_instances.get(key)
-                if instance is None:
-                    if instrument.data_adapter == "crypto" and instrument.continuous_alias:
-                        raise ValueError(
-                            f"{symbol!r} is a continuous crypto alias and is not directly "
-                            "orderable; inject a market-data adapter and configure a concrete "
-                            "venue_symbol before using sim/live"
-                        )
-                    route = (config.instrument_overrides or {}).get(symbol, {})
-                    broker = route.get("broker") or config.broker
-                    instance = _build_builtin_adapter(
-                        instrument.data_adapter,
-                        trading=(
-                            config.mode == "live"
-                            and order_adapter is None
-                            and _DATA_ADAPTER_BY_BROKER.get(broker) == instrument.data_adapter
-                        ),
-                    )
-                adapter_instances[key] = instance
-                data_adapters[symbol] = instance
-                self._fetchers[symbol] = _bind_market_data_source(
-                    instance,
-                    instrument,
-                    prefer_fetch_method=True,
-                )
+            sources = {symbol: adapter for symbol in self._symbols}
+        self._fetchers = {
+            symbol: _bind_market_data_source(sources[symbol], self._instruments[symbol])
+            for symbol in self._symbols
+        }
 
         if config.mode == "live":
             if isinstance(order_adapter, Mapping):
@@ -355,30 +290,10 @@ class LiveTrader:
             elif order_adapter is not None:
                 order_adapters = {symbol: order_adapter for symbol in self._symbols}
             else:
-                broker_instances: dict[str, object] = {}
-                order_adapters = {}
-                for symbol, instrument in self._instruments.items():
-                    route = (config.instrument_overrides or {}).get(symbol, {})
-                    broker = route.get("broker") or config.broker
-                    if not broker:
-                        raise ValueError(
-                            f"Live execution broker is not configured for {symbol!r}; "
-                            "set strategy.broker/instrument_overrides or inject order_adapter"
-                        )
-                    broker_data_adapter = _DATA_ADAPTER_BY_BROKER.get(broker)
-                    if broker_data_adapter is None:
-                        raise ValueError(f"Unsupported execution broker: {broker!r}")
-                    instance = broker_instances.get(broker)
-                    if instance is None:
-                        data_instance = data_adapters.get(symbol)
-                        instance = (
-                            data_instance
-                            if broker_data_adapter == instrument.data_adapter
-                            and data_instance is not None
-                            else _build_builtin_adapter(broker, trading=True)
-                        )
-                        broker_instances[broker] = instance
-                    order_adapters[symbol] = instance
+                raise ValueError(
+                    "live mode requires an explicit order_adapter; use "
+                    "orchestration.live.build_live_trader() for built-in wiring"
+                )
             missing = set(self._symbols) - set(order_adapters)
             if missing:
                 raise ValueError(f"Missing order adapters for symbols: {sorted(missing)}")
@@ -407,17 +322,6 @@ class LiveTrader:
         else:
             order_adapters = {}
 
-        # --- Resolve notifier (Telegram by default; injectable) ---
-        # config.no_db gates this the same way it gates the db callbacks below
-        # (dry_run implies no_db — see RunConfig.__post_init__), so a fully
-        # local run never imports the notifications package.
-        if notifier is not _UNSET:
-            resolved_notifier = notifier
-        elif config.no_db:
-            resolved_notifier = None
-        else:
-            resolved_notifier = self._build_notifier()
-
         # --- Build run_id ---
         strategy_name = config.strategy_name
         self._run_id = generate_run_id(
@@ -431,7 +335,7 @@ class LiveTrader:
         self._executor = LiveExecutor(
             resolved_cost_models,
             simulation=not is_live,
-            telegram=resolved_notifier,
+            telegram=notifier,
             strategy_name=strategy_name,
             order_adapter=order_adapters if is_live else None,
             instruments=self._instruments,
@@ -439,31 +343,12 @@ class LiveTrader:
 
         # --- Restore restart-critical state before callbacks capture run_id ---
         self._state_key = f"{config.mode}:{config.config_hash}"
-        if state_store is not _UNSET:
-            self._state_store = state_store
-        elif config.no_db:
-            self._state_store = None
-        else:
-            try:
-                from db.timescale_state import TimescaleLiveStateStore
-            except ModuleNotFoundError as exc:
-                raise ModuleNotFoundError(
-                    "TimescaleDB persistence is enabled but its optional dependencies "
-                    "are unavailable. From a repository clone run: "
-                    "uv sync --extra db. For a direct install, include Librae's "
-                    "'db' extra; otherwise set no_db=True and inject durable "
-                    "state_store for live mode."
-                ) from exc
-
-            self._state_store = TimescaleLiveStateStore()
+        self._state_store = state_store
         if is_live and self._state_store is None:
-            raise ValueError(
-                "Live mode requires durable state; enable DB or pass state_store explicitly"
-            )
+            raise ValueError("live mode requires an explicit durable state_store")
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
-        self._db_write_failures: int = 0
         self._last_cycle_ts: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_funding_ts: dict[str, datetime] = {}
@@ -506,33 +391,18 @@ class LiveTrader:
             if restored is not None:
                 self._restore_state(restored)
 
-        # --- Resolve callbacks (sentinel pattern) ---
         configured_warmup = config.execution.warmup_periods
         adv_warmup = (config.execution.adv_lookback_sessions or 0) + 1
         self._warmup_periods = max(configured_warmup, adv_warmup)
 
-        callbacks = {
-            "on_bar": (on_bar, self._build_on_bar),
-            "on_order_event": (on_order_event, self._build_on_order_event),
-            "on_ohlcv": (on_ohlcv, self._build_on_ohlcv),
-            "on_heartbeat": (on_heartbeat, self._build_on_heartbeat),
-            "on_signal_outcome": (on_signal_outcome, self._build_on_signal_outcome),
-            "on_funding_cash_flow": (
-                on_funding_cash_flow,
-                self._build_on_funding_cash_flow,
-            ),
-            "warmup_fetcher": (warmup_fetcher, self._build_warmup_fetcher),
-        }
-        for attr, (value, builder) in callbacks.items():
-            if value is not _UNSET:
-                setattr(self, f"_{attr}", value)
-            elif config.no_db:
-                setattr(self, f"_{attr}", None)
-            else:
-                setattr(self, f"_{attr}", builder())
-
-        if not config.no_db:
-            self._register_run()
+        self._on_bar = on_bar
+        self._on_order_event = on_order_event
+        self._on_ohlcv = on_ohlcv
+        self._on_heartbeat = on_heartbeat
+        self._on_signal_outcome = on_signal_outcome
+        self._on_funding_cash_flow = on_funding_cash_flow
+        self._on_performance = on_performance
+        self._warmup_fetcher = warmup_fetcher
 
         self._fill_price = config.execution.default_fill_price
         self._max_bar_volume_participation_rate = config.execution.max_bar_volume_participation_rate
@@ -692,234 +562,6 @@ class LiveTrader:
         """Critical checkpoint write; failures propagate and stop the cycle."""
         if self._state_store is not None:
             self._state_store.save(self._snapshot_state(), orders)
-
-    # --- Callback builders ---
-
-    def _db_write(self, fn: Callable[..., object], *args: object, **kwargs: object) -> None:
-        """Best-effort analytics write; runtime checkpoints use _persist_state.
-
-        Analytics failures do not interrupt trading, but sustained failures
-        alert. Checkpoint failures propagate because trading without durable
-        state would make restart behavior unsafe.
-        """
-        try:
-            fn(*args, **kwargs)
-            self._db_write_failures = 0
-        except Exception as e:
-            self._db_write_failures += 1
-            logger.warning(
-                "DB %s failed (%d consecutive): %s", fn.__name__, self._db_write_failures, e
-            )
-            if self._db_write_failures == self.CONSECUTIVE_ERROR_THRESHOLD:
-                self._notify(
-                    "send_alert",
-                    title=f"[{self._executor.strategy_name}] DB Write Failing",
-                    message=(
-                        f"{self._db_write_failures} consecutive DB write failures "
-                        f"(last: {fn.__name__}). Check DB connectivity — trading continues."
-                    ),
-                )
-
-    def _register_run(self) -> None:
-        from db.timescale_writer import write_run_metadata
-
-        try:
-            write_run_metadata(
-                run_id=self._run_id,
-                strategy=self._config.strategy_name,
-                symbols=self._config.symbols,
-                timeframe=self._config.timeframe,
-                mode=self._config.mode,
-                started_at=datetime.now(tz=UTC),
-                data_source=self._config.data_source,
-                poll_seconds=self._config.poll_seconds,
-                params=self._config.params,
-                execution_policy=asdict(self._config.execution),
-                risk_policy=asdict(self._config.risk),
-                perf_params=self._config.perf_params,
-                # config_hash intentionally omitted: idx_backtest_runs_config_hash is a
-                # unique index meant for backtest dedup (check_existing_run) -- sim/live
-                # runs legitimately restart with an identical config (e.g. after a
-                # crash) and must never collide on it.
-            )
-        except Exception as e:
-            logger.warning("DB write_run_metadata failed: %s", e)
-
-    def _build_on_bar(self) -> Callable:
-        from db.timescale_writer import write_equity_curve_point
-
-        strategy = self._config.strategy_name
-
-        def on_bar(
-            run_id_: str,
-            ts: datetime,
-            account_id: str,
-            currency: str,
-            equity: float,
-            drawdown: float,
-            period_return: float,
-        ) -> None:
-            gross, net, concentration, turnover = self._portfolio_diagnostics_by_account[account_id]
-            self._db_write(
-                write_equity_curve_point,
-                ts=ts,
-                run_id=run_id_,
-                account_id=account_id,
-                currency=currency,
-                equity=equity,
-                drawdown=drawdown,
-                period_return=period_return,
-                gross_exposure=gross,
-                net_exposure=net,
-                concentration=concentration,
-                turnover=turnover,
-                exposed=gross > EPSILON,
-                strategy=strategy,
-            )
-
-        return on_bar
-
-    def _build_on_order_event(self) -> Callable:
-        from db.timescale_writer import write_trade_event
-
-        from librae.core.utils import make_event_id
-
-        run_id = self._run_id
-        strategy = self._config.strategy_name
-        timeframe = self._config.timeframe
-        config = self._config
-
-        def on_order_event(event: OrderEvent) -> None:
-            self._event_sequence += 1
-            fields = asdict(event)
-            fields["event_id"] = make_event_id(run_id, self._event_sequence)
-            fields["run_id"] = run_id
-            fields["strategy"] = strategy
-            fields["mode"] = config.mode
-            fields["timeframe"] = timeframe
-            account_id = self._account_id_by_symbol[event.symbol]
-            fields["account_id"] = account_id
-            fields["currency"] = self._currency_by_account[account_id]
-            self._db_write(write_trade_event, **fields)
-            if not self._executor.simulation:
-                self._persist_state()
-            if event.event_type in ("close", "reduce"):
-                self._performance_dirty = True
-
-        return on_order_event
-
-    def _build_on_funding_cash_flow(self) -> Callable:
-        from db.timescale_writer import write_funding_cash_flow
-
-        def on_funding_cash_flow(cash_flow: FundingCashFlow) -> None:
-            account_id = self._account_id_by_symbol[cash_flow.symbol]
-            self._db_write(
-                write_funding_cash_flow,
-                run_id=self._run_id,
-                account_id=account_id,
-                currency=self._currency_by_account[account_id],
-                ts=cash_flow.ts,
-                symbol=cash_flow.symbol,
-                side=cash_flow.side,
-                quantity=cash_flow.quantity,
-                mark_price=cash_flow.mark_price,
-                multiplier=cash_flow.multiplier,
-                rate=cash_flow.rate,
-                cash_flow=cash_flow.cash_flow,
-            )
-
-        return on_funding_cash_flow
-
-    def _build_on_ohlcv(self) -> Callable:
-        from db.timescale_writer import write_ohlcv
-
-        def on_ohlcv(symbol: str, timeframe_: str, bar: dict[str, float], ts: datetime) -> None:
-            row = pd.DataFrame(
-                [
-                    {
-                        "ts": ts,
-                        "open": bar["open"],
-                        "high": bar["high"],
-                        "low": bar["low"],
-                        "close": bar["close"],
-                        "volume": bar["volume"],
-                    }
-                ]
-            ).set_index("ts")
-            self._db_write(
-                write_ohlcv,
-                row,
-                symbol,
-                timeframe_,
-                data_source=self._instruments[symbol].data_source,
-            )
-
-        return on_ohlcv
-
-    def _build_on_heartbeat(self) -> Callable:
-        from db.timescale_writer import update_heartbeat
-
-        def on_heartbeat(run_id_: str) -> None:
-            self._db_write(update_heartbeat, run_id_)
-
-        return on_heartbeat
-
-    def _build_on_signal_outcome(self) -> Callable:
-        from db.timescale_writer import write_signal_event
-
-        run_id = self._run_id
-        strategy = self._config.strategy_name
-        timeframe = self._config.timeframe
-
-        def on_signal_event_cb(
-            symbol: str,
-            ts: datetime,
-            signal_value: float,
-            price: float,
-            signal_type: str = "entry",
-        ) -> None:
-            self._db_write(
-                write_signal_event,
-                ts=ts,
-                run_id=run_id,
-                strategy=strategy,
-                symbol=symbol,
-                mode=self._config.mode,
-                timeframe=timeframe,
-                signal_value=signal_value,
-                price=price,
-                signal_type=signal_type,
-            )
-
-        return on_signal_event_cb
-
-    def _build_notifier(self) -> object | None:
-        """Default notifier: TelegramAdapter built from config.telegram_config
-        + TELEGRAM_* env vars. Lazy import so a fully local run (config.no_db,
-        or an explicit notifier= override) never touches the notifications
-        package."""
-        from notifications.config import TelegramConfig
-        from notifications.telegram import TelegramAdapter, TelegramCredentials
-
-        tg_config = TelegramConfig.from_dict(self._config.telegram_config or {})
-        tg_creds = TelegramCredentials.from_env("TELEGRAM")
-        return TelegramAdapter(config=tg_config, credentials=tg_creds)
-
-    def _build_warmup_fetcher(self) -> Callable:
-        """Default warmup: plain API fetch via the symbol's adapter — librae has no
-        data-access layer of its own to warm up from. A DB-first fetcher
-        (read cached history, gap-fill from API) needs a data-access layer
-        that lives outside librae; pass warmup_fetcher= explicitly for that."""
-
-        def warmup_fetcher(symbol: str, tf_ccxt: str, limit: int) -> pd.DataFrame:
-            return self._fetchers[symbol](
-                symbol,
-                tf_ccxt,
-                limit,
-                drop_incomplete=True,
-            )
-
-        return warmup_fetcher
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
     # unreachable), not a transient blip — worth alerting the operator.
@@ -1417,6 +1059,11 @@ class LiveTrader:
         """Return measured latency for the latest poll cycle."""
         return self._last_cycle_diagnostics
 
+    @property
+    def run_id(self) -> str:
+        """Stable id used by callbacks and persisted runtime facts."""
+        return self._run_id
+
     def halt(self, reason: str = "operator requested halt") -> None:
         """Fail closed immediately until an operator calls ``reset_halt``."""
         if not isinstance(reason, str) or not reason.strip():
@@ -1587,6 +1234,7 @@ class LiveTrader:
     def _publish_action_results(self, result: ExecutionResult) -> None:
         """Publish notifications and analytics after state is committed."""
         for event in result.events:
+            self._event_sequence += 1
             account_id = self._account_id_by_symbol[event.symbol]
             self._pending_traded_notional_by_account[account_id] += abs(event.notional)
             logger.info(
@@ -1597,8 +1245,10 @@ class LiveTrader:
                 event.fill_quantity,
                 event.price,
             )
+            if event.event_type in ("close", "reduce"):
+                self._performance_dirty = True
             if self._on_order_event:
-                self._on_order_event(event)
+                self._on_order_event(event, self._event_sequence)
 
             if event.event_type in ("open", "add"):
                 self._executor.notify_entry(event.symbol, event.side, event.price, event.event_type)
@@ -2728,6 +2378,9 @@ class LiveTrader:
             )
             self._pending_traded_notional_by_account[account_id] = 0.0
             if self._on_bar:
+                gross, net, concentration, turnover = self._portfolio_diagnostics_by_account[
+                    account_id
+                ]
                 self._on_bar(
                     self._run_id,
                     ts,
@@ -2736,19 +2389,17 @@ class LiveTrader:
                     equity,
                     drawdown,
                     period_return,
+                    gross,
+                    net,
+                    concentration,
+                    turnover,
                 )
             status_values.append((account_id, equity, drawdown, period_return))
         if self._performance_dirty:
-            from db.timescale_writer import refresh_performance
-
             # The current equity point must exist before KPI recomputation.
-            for account_id in self._cash_by_account:
-                self._db_write(
-                    refresh_performance,
-                    self._run_id,
-                    account_id,
-                    config=self._config,
-                )
+            if self._on_performance:
+                for account_id in self._cash_by_account:
+                    self._on_performance(self._run_id, account_id)
             self._performance_dirty = False
 
         # Periodic status notification (flags cached at init)

@@ -48,14 +48,16 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 | Mode | Supplied by | Librae does | Librae does not |
 |---|---|---|---|
 | Backtest | Caller-prepared DataFrame | Validate OHLCV/features and run deterministic events | Read TimescaleDB or call a broker/vendor API |
-| Sim | `LiveTrader.adapter` or configured broker adapter | Poll completed-bar snapshots and retain a rolling history | Subscribe to streaming ticks or ingest third-party factors |
+| Sim | Injected `LiveTrader.adapter` or orchestration factory | Poll completed-bar snapshots and retain a rolling history | Subscribe to streaming ticks or ingest third-party factors |
 | Live | Same as sim | Poll bars, submit orders, and require durable runtime state | Treat analytics storage as execution state |
 
-The default sim/live warm-up calls the selected API adapter directly. DB-first
-history plus API gap filling is a caller-owned policy injected through
-`warmup_fetcher`; it is not a hidden engine fallback. `no_db=True` disables
-default TimescaleDB callbacks/state. Sim may then run in memory, while live
-still requires an explicitly injected durable `state_store`.
+The engine's default sim/live warm-up calls its injected adapter directly.
+DB-first history plus API gap filling is a caller-owned policy injected through
+`warmup_fetcher`; it is not a hidden engine fallback. The repository's
+`orchestration.live.build_live_trader()` factory supplies the built-in broker,
+TimescaleDB, and Telegram integrations. Direct `LiveTrader` construction never
+imports them. Sim may run in memory, while live always requires an explicitly
+injected durable `state_store`.
 
 `timeframe` defines the completed strategy bar and data-event clock.
 `poll_seconds` independently defines the runtime loop cadence: each cycle may
@@ -223,7 +225,12 @@ backtest/ ──→ core/
 live/     ──→ core/
 ```
 
-`backtest/` and `live/` have no direct dependency on each other — shared execution logic lives in `core/`. Broker, persistence, and notification implementations remain constructor-injected and lazy-imported. Simulation can run standalone with `config.no_db=True`; live additionally requires an explicit broker route or injected order adapter plus a durable state store (see `docs/plans/refactor_librae_decouple.md`).
+`backtest/` and `live/` have no direct dependency on each other; shared
+execution logic lives in `core/`. `LiveTrader` accepts broker, persistence,
+notification, and analytics implementations only through constructor
+injection. `orchestration/live.py` owns the repository's optional default
+wiring. Simulation can run standalone; live additionally requires an explicit
+order adapter and durable state store.
 
 ### Execution flow (strategy → engine → output)
 
@@ -283,8 +290,9 @@ responsibility and must not use information unavailable at T.
 
 #### Local artifact boundary
 
-`no_db=True` only disables default persistence; it never selects another
-backend or writes a file implicitly. `build_market_data_artifact()` and
+`no_db=True` tells repository orchestration not to attach TimescaleDB; it never
+selects another backend or writes a file implicitly.
+`build_market_data_artifact()` and
 `build_backtest_artifact()` expose versioned metadata plus logical pandas
 tables. Librae owns validation and table shape. The caller owns Parquet,
 SQLite, DuckDB, or other serialization details, including paths, overwrite
@@ -469,7 +477,8 @@ model.
 Continuous near/next/quarterly aliases are dynamic identities, not exact
 contracts. They are orderable only when the selected adapter implements that
 explicit route (for example Shioaji's native `TXFR1` or IBKR front-month
-resolution); Crypto auto-wiring rejects its research-only continuous series.
+resolution); the repository's Crypto orchestration rejects its research-only
+continuous series.
 A strategy that needs expiry-stable exposure supplies `contract_month` and a
 unique canonical `symbol`. Roll timing remains an upstream strategy decision;
 the engine never silently converts an exact contract into a rolling alias.
@@ -858,17 +867,20 @@ time-based integrations deterministic; production defaults to UTC now.
 #### Sim monitoring
 
 ```python
-from librae.live.engine import LiveTrader
+from orchestration.live import build_live_trader
 
-trader = LiveTrader(
+trader = build_live_trader(
     strategy=MyStrategy(),
     feature_fn=prepare_signals,  # the same ETL pipeline
     config=config,  # a RunConfig (usually built via orchestration.cli.build_config())
 )
-trader.run()  # DB writes, Telegram, heartbeat, KPI updates all handled by the engine
+trader.run()
 ```
 
-Analytics callbacks, `notifier`, `order_adapter`, and `state_store` are independently injectable. `config.no_db=True` disables default DB callbacks/state and notifications; simulation can remain standalone, while live must receive a durable `state_store` explicitly. The order adapter is still required for live regardless of DB settings.
+The factory composes built-in adapters and, when enabled, TimescaleDB and
+Telegram. Advanced callers construct `LiveTrader` directly and inject
+`adapter`, `order_adapter`, analytics callbacks, `notifier`, and `state_store`
+independently. The engine never selects these implementations from config.
 
 #### Mode comparison
 
@@ -1120,7 +1132,10 @@ drawdown, and reporting-currency conversion remain caller-owned.
 
 #### TelegramAdapter (notifications)
 
-Source: behavior is configured from the caller's `config.yaml` `telegram:` block (passed in via `RunConfig.telegram_config`), secrets come from env vars. `librae` itself has no dependency on this package — `LiveTrader` only lazy-imports it to build a default implementation when nothing was explicitly overridden and `config.no_db=False`.
+Source: behavior is configured from the caller's `config.yaml` `telegram:`
+block (passed in via `RunConfig.telegram_config`), and secrets come from
+environment variables. `orchestration.live.build_live_trader()` builds this
+reference notifier; `LiveTrader` only receives the resulting object.
 
 ```python
 from notifications.config import TelegramConfig
@@ -1147,12 +1162,13 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | Param | Called as |
 |---|---|
 | `adapter` | callable `adapter(symbol, timeframe, limit, *, drop_incomplete=False) -> pd.DataFrame`, a concrete object with `fetch_ohlcv`, or a per-symbol mapping; UTC `ts` + OHLCV are required and extra point-in-time columns are preserved |
-| `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return)` — once per account for each processed market-data event |
-| `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
+| `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return, gross_exposure, net_exposure, concentration, turnover)` |
+| `on_order_event` | `on_order_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close |
 | `on_funding_cash_flow` | `on_funding_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
+| `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
 | `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`, plus mandatory live reconciliation `get_position(PositionRequest)`; all order results follow the cumulative execution-report contract above |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
@@ -1168,7 +1184,10 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `send_alert` | `title, message` |
 | `send_status` | `strategy, symbol, equity, drawdown, daily_pnl, position` |
 
-Callbacks, `warmup_fetcher`, `notifier`, and `state_store` use `_UNSET` to distinguish a caller override from default wiring. Under `config.no_db=True`, DB callbacks/state and notifications default to `None`; live then rejects construction unless a store is explicitly injected. Otherwise callbacks come from `db.timescale_writer`, state from `db.timescale_state`, and notifications from `notifications.telegram`.
+All integrations default to `None` in direct `LiveTrader` construction except
+the required market-data adapter. Live mode rejects construction without an
+order adapter and durable state store. The orchestration factory is the only
+place that selects the repository's built-in implementations.
 
 #### parse_with_config (CLI + YAML merging)
 

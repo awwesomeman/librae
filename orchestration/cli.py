@@ -559,10 +559,10 @@ def run_realtime_generic(
     strategy: Strategy,
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> None:
-    """Shared sim/live body — just wires LiveTrader."""
-    from librae.live.engine import LiveTrader
+    """Run the repository's default sim/live deployment wiring."""
+    from orchestration.live import build_live_trader
 
-    trader = LiveTrader(strategy, prepare_signals, config=config)
+    trader = build_live_trader(strategy, prepare_signals, config=config)
     trader.run()
 
 

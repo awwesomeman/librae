@@ -30,6 +30,7 @@ from librae.core.strategy import (
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
 from librae.live.state import MemoryLiveStateStore
+from orchestration.live import build_live_trader
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -41,21 +42,19 @@ def _zero_cost_model() -> CostModel:
     return CostModel.zero()
 
 
-def test_enabled_db_without_optional_dependency_has_actionable_error():
+def test_sim_engine_does_not_build_optional_infrastructure():
     config = make_test_cfg(mode="sim", no_db=False)
 
-    with (
-        patch.dict("sys.modules", {"db.timescale_state": None}),
-        pytest.raises(ModuleNotFoundError, match=r"uv sync --extra db.*no_db=True"),
-    ):
-        LiveTrader(
-            MagicMock(),
-            lambda frame: frame,
-            config=config,
-            adapter=MagicMock(),
-            cost_model=CostModel.zero(),
-            notifier=None,
-        )
+    trader = LiveTrader(
+        MagicMock(),
+        lambda frame: frame,
+        config=config,
+        adapter=MagicMock(),
+        cost_model=CostModel.zero(),
+    )
+
+    assert trader._state_store is None
+    assert trader._on_bar is None
 
 
 def _mock_order_adapter() -> MagicMock:
@@ -597,7 +596,7 @@ class TestLiveTrader:
         assert diagnostics.cycle_seconds >= 2.0
 
     def test_live_without_default_db_requires_explicit_state_store(self):
-        with pytest.raises(ValueError, match="requires durable state"):
+        with pytest.raises(ValueError, match="requires an explicit durable state_store"):
             LiveTrader(
                 _HoldStrategy(),
                 _simple_feature_fn,
@@ -1193,7 +1192,7 @@ class TestLiveTrader:
 
     def test_live_mode_without_order_adapter_raises(self):
         cfg = _test_cfg(mode="live")
-        with pytest.raises(ValueError, match="broker is not configured"):
+        with pytest.raises(ValueError, match="requires an explicit order_adapter"):
             self._make_runner(config=cfg)
 
     def test_adv_limit_accepts_intraday_runtime_with_registered_calendar(self):
@@ -1620,7 +1619,7 @@ class TestLiveTrader:
                     return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
-        def on_order_event(event):
+        def on_order_event(event, _sequence):
             if event.event_type == "open":
                 fill_prices.append(event.price)
 
@@ -1670,37 +1669,6 @@ class TestLiveTrader:
         assert runner._halted is True
         assert runner._positions == {}
         assert runner._cash_by_account["default"] == 100_000.0
-
-    def test_db_write_alerts_after_consecutive_failures(self):
-        """Regression test: DB write failures were silently swallowed
-        forever with no escalation. After CONSECUTIVE_ERROR_THRESHOLD
-        consecutive failures, one Telegram alert must fire; a later success
-        resets the counter so a renewed outage can alert again."""
-        runner = self._make_runner()
-        alerts: list[tuple[str, dict]] = []
-        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
-
-        failing_fn = MagicMock(side_effect=RuntimeError("db down"))
-        failing_fn.__name__ = "failing_fn"
-
-        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD - 1):
-            runner._db_write(failing_fn)
-        assert not alerts  # not yet at threshold
-
-        runner._db_write(failing_fn)
-        assert len(alerts) == 1
-        assert alerts[0][0] == "send_alert"
-        assert "DB Write Failing" in alerts[0][1]["title"]
-
-        ok_fn = MagicMock(return_value=None)
-        ok_fn.__name__ = "ok_fn"
-        runner._db_write(ok_fn)
-        assert runner._db_write_failures == 0
-
-        # A renewed outage must alert again, not stay silent forever.
-        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD):
-            runner._db_write(failing_fn)
-        assert len(alerts) == 2
 
     def test_max_drawdown_breach_flattens_and_halts_account(self):
         """A drawdown breach must flatten the open position, alert, and
@@ -1777,11 +1745,7 @@ class TestLiveTrader:
         runner._equity_peak_by_account["default"] = 100_000.0
         runner._prev_equity_by_account["default"] = 50_000.0
         callbacks: list[tuple[float, float, float]] = []
-        runner._on_bar = (
-            lambda _run_id, _ts, _account_id, _currency, equity, drawdown, period_return: (
-                callbacks.append((equity, drawdown, period_return))
-            )
-        )
+        runner._on_bar = lambda *args: callbacks.append((args[4], args[5], args[6]))
 
         runner._record_equity(
             datetime(2025, 1, 2, tzinfo=UTC),
@@ -2625,7 +2589,7 @@ class TestLiveExecutionLifecycle:
             adapter,
             state_store=store,
         )
-        runner._on_order_event = events.append
+        runner._on_order_event = lambda event, _sequence: events.append(event)
         first_frame = _make_ohlcv_df(start_hour=0)
         second_frame = _make_ohlcv_df(start_hour=1)
         runner._process_bar(
@@ -2795,7 +2759,7 @@ class TestLiveExecutionLifecycle:
         )
 
 
-class TestCryptoLiveAutoWiring:
+class TestCryptoLiveFactory:
     """LiveTrader without an explicit adapter= override (the real code path
     used in production) for crypto (non-tw_futures) live mode.
 
@@ -2803,23 +2767,23 @@ class TestCryptoLiveAutoWiring:
     entirely — so it never covered the auto-wiring that replaced the old
     unconditional NotImplementedError for crypto live mode."""
 
-    def _build(self, monkeypatch, **kwargs):
+    def _build(self, monkeypatch):
         monkeypatch.setenv("BINANCE_API_KEY", "k")
         monkeypatch.setenv("BINANCE_API_SECRET", "s")
-        with patch("brokers.crypto_adapter.CryptoAdapter") as mock_cls:
+        with (
+            patch("brokers.crypto_adapter.CryptoAdapter") as mock_cls,
+            patch(
+                "orchestration.live._build_state_store",
+                return_value=MemoryLiveStateStore(),
+            ),
+            patch("orchestration.live._build_notifier", return_value=None),
+            patch("orchestration.live._TimescaleCallbacks"),
+        ):
             mock_cls.return_value = MagicMock()
-            trader = LiveTrader(
+            trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                config=_test_cfg(mode="live", broker="binance"),
-                cost_model=_zero_cost_model(),
-                on_bar=None,
-                on_order_event=None,
-                on_ohlcv=None,
-                on_heartbeat=None,
-                on_signal_outcome=None,
-                state_store=MemoryLiveStateStore(),
-                **kwargs,
+                config=_test_cfg(mode="live", broker="binance", no_db=False),
             )
         return trader, mock_cls
 
@@ -2828,12 +2792,6 @@ class TestCryptoLiveAutoWiring:
         adapter_cls.assert_called_once()
         assert adapter_cls.call_args.kwargs["credentials"].exchange_id == "binance"
         assert trader._executor.get_order_adapter("BTCUSDT") is adapter_cls.return_value
-
-    def test_explicit_order_adapter_not_overridden(self, monkeypatch):
-        explicit = MagicMock()
-        trader, adapter_cls = self._build(monkeypatch, order_adapter=explicit)
-        adapter_cls.assert_called_once_with(credentials=None)
-        assert trader._executor.get_order_adapter("BTCUSDT") is explicit
 
 
 class TestMultiAdapterRouting:
@@ -2881,11 +2839,19 @@ class TestMultiAdapterRouting:
         assert trader._get_cost_model("MU").short_margin_rate == 0.5
 
 
-class TestIBKRLiveAutoWiring:
+class TestIBKRLiveFactory:
     def test_us_equity_builds_ibkr_instead_of_crypto(self):
-        with patch("brokers.ibkr_adapter.IBKRAdapter") as mock_cls:
+        with (
+            patch("brokers.ibkr_adapter.IBKRAdapter") as mock_cls,
+            patch(
+                "orchestration.live._build_state_store",
+                return_value=MemoryLiveStateStore(),
+            ),
+            patch("orchestration.live._build_notifier", return_value=None),
+            patch("orchestration.live._TimescaleCallbacks"),
+        ):
             mock_cls.return_value = _mock_order_adapter()
-            trader = LiveTrader(
+            trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,
                 config=_test_cfg(
@@ -2894,22 +2860,15 @@ class TestIBKRLiveAutoWiring:
                     market="us_equity",
                     data_source="ibkr",
                     broker="ibkr",
+                    no_db=False,
                 ),
-                cost_model=_zero_cost_model(),
-                on_bar=None,
-                on_order_event=None,
-                on_ohlcv=None,
-                on_heartbeat=None,
-                on_signal_outcome=None,
-                state_store=MemoryLiveStateStore(),
-                clock=lambda: TEST_CLOCK_NOW,
             )
 
         mock_cls.assert_called_once_with(trading_enabled=True)
         assert trader._executor.get_order_adapter("MU") is mock_cls.return_value
 
 
-class TestShioajiLiveAutoWiring:
+class TestShioajiLiveFactory:
     """tw_futures live mode: engine.py reuses the single authenticated
     ShioajiAdapter for both fetching and order placement (order_adapter=None
     auto-wires to the same instance as the fetcher) — never covered
@@ -2923,19 +2882,20 @@ class TestShioajiLiveAutoWiring:
         return _test_cfg(**overrides)
 
     def test_auto_builds_order_adapter_from_shioaji(self):
-        with patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls:
+        with (
+            patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
+            patch(
+                "orchestration.live._build_state_store",
+                return_value=MemoryLiveStateStore(),
+            ),
+            patch("orchestration.live._build_notifier", return_value=None),
+            patch("orchestration.live._TimescaleCallbacks"),
+        ):
             mock_cls.return_value = MagicMock()
-            trader = LiveTrader(
+            trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,
-                config=self._shioaji_cfg(mode="live"),
-                cost_model=_zero_cost_model(),
-                on_bar=None,
-                on_order_event=None,
-                on_ohlcv=None,
-                on_heartbeat=None,
-                on_signal_outcome=None,
-                state_store=MemoryLiveStateStore(),
+                config=self._shioaji_cfg(mode="live", no_db=False),
             )
 
         # Same authenticated session used for fetching and for order placement.
@@ -2951,7 +2911,15 @@ class TestShioajiLiveAutoWiring:
             call_num += 1
             return _make_ohlcv_df(n=5, start_hour=call_num)
 
-        with patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls:
+        with (
+            patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
+            patch(
+                "orchestration.live._build_state_store",
+                return_value=MemoryLiveStateStore(),
+            ),
+            patch("orchestration.live._build_notifier", return_value=None),
+            patch("orchestration.live._TimescaleCallbacks"),
+        ):
             mock_shioaji = _mock_order_adapter()
             mock_shioaji.place_order.side_effect = lambda signal: _broker_report(
                 quantity=signal["quantity"],
@@ -2964,19 +2932,12 @@ class TestShioajiLiveAutoWiring:
             )
             mock_cls.return_value = mock_shioaji
 
-            trader = LiveTrader(
+            trader = build_live_trader(
                 _AlwaysBuyStrategy(),
                 _simple_feature_fn,
-                config=self._shioaji_cfg(mode="live"),
-                cost_model=_zero_cost_model(),
-                on_bar=None,
-                on_order_event=None,
-                on_ohlcv=None,
-                on_heartbeat=None,
-                on_signal_outcome=None,
-                state_store=MemoryLiveStateStore(),
-                clock=lambda: TEST_CLOCK_NOW,
+                config=self._shioaji_cfg(mode="live", no_db=False),
             )
+            trader._clock = lambda: TEST_CLOCK_NOW
             trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
 
