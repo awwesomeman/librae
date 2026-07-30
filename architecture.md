@@ -29,10 +29,46 @@ contract change is treated as breaking:
 After either gate, compatibility, deprecation, and migration requirements must
 be defined explicitly before further breaking changes.
 
-## System layering overview
+## Product position and system boundaries
+
+Librae is a dependency-light, bar-based strategy engine with two first-class
+workflows:
+
+1. deterministic in-memory backtests from caller-prepared point-in-time data;
+2. restartable polling runtimes whose live portfolio state changes only from
+   broker-confirmed execution reports.
+
+The shared kernel owns strategy decisions, positions, accounting, simulated
+execution, risk checks, and result schemas. It deliberately does not own data
+vendor ingestion, strategy-specific feature engineering, broker-native product
+semantics, infrastructure selection, or operator policy. A caller may use only
+the backtest engine, or compose live adapters and optional infrastructure
+through explicit constructor injection.
+
+| Layer | Owns | Extension boundary |
+|---|---|---|
+| `librae/core`, `backtest`, `live` | Canonical bars, strategy decisions, accounting, execution state, risk, results | Stable Python types and small call-site protocols |
+| Caller/strategy project | Point-in-time data preparation, features, strategy semantics, instrument and cost configuration | Prepared DataFrames, strategy classes, injected callables and adapters |
+| Reference integrations | Broker SDKs, TimescaleDB, Telegram, Grafana, CLI and deployment examples | Optional extras that may be used, replaced, or omitted |
+
+Librae is not a general ingestion platform, streaming/tick engine, broker
+abstraction framework, cross-account ledger, or hosted trading platform.
+Supporting those concerns would require different clocks, data semantics, and
+operational guarantees; they stay outside the kernel until a concrete engine
+contract exists. Strict canonical inputs are intentional: extensibility means
+normalizing at an explicit boundary, not making the engine guess arbitrary
+data or broker shapes.
+
+The dependency direction is:
 
 ```
-brokers (broker/exchange adapters)  →  librae (core → backtest / live)  →  db (timescale_writer / timescale_reader)
+orchestration ──→ librae
+      ├─────────→ brokers ───────┐
+      ├─────────→ db ────────────┼──→ librae public contracts
+      └─────────→ notifications ─┘
+
+librae/backtest ──→ librae/core
+librae/live     ──→ librae/core
 ```
 
 - `brokers/`: one flat adapter per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), exposing market/account methods plus the live order lifecycle described below.
@@ -41,7 +77,9 @@ brokers (broker/exchange adapters)  →  librae (core → backtest / live)  → 
 - `librae/live/engine.py`: the real-time polling engine for sim/live mode — sim uses deterministic bar fills; live submits through a broker adapter and applies normalized execution reports.
 - `db/timescale_writer.py` / `db/timescale_reader.py` / `db/timescale_state.py`: the sole DB access layer — upper layers use analytics helpers or the runtime store, never raw SQL; schema is defined in `db/timescale_init.sql`.
 
-Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a historical decision doc — the current state has since replaced the old execution layer it describes with librae).
+Layering details in `docs/decisions/2026-03-26-platform-architecture.md`
+describe the historical decision; this document remains the current source of
+truth.
 
 ## Data acquisition and ownership boundary
 
@@ -176,9 +214,7 @@ Librae owns compatibility of its adapters with the declared SDK and broker API
 contracts. Users own credentials, account permissions, jurisdiction/product
 eligibility, broker-side enablement, and upgrades made outside the lockfile.
 
-## Backtest Engine Design (`librae/`)
-
-Backtest and live-trading engine. Provides one strategy decision interface, position management, cost simulation, and performance metrics. Backtest/sim share deterministic bar-fill logic; live shares sizing and portfolio state types but applies only confirmed external execution fills.
+## Engine design (`librae/`)
 
 ### Layout
 
@@ -973,7 +1009,7 @@ financial/execution fact.
 | Type | Description |
 |------|------|
 | `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioTargets \| MultiLegOrder` |
-| `Context` | immutable event snapshot: market data, positions, accounts, symbol-to-account mapping, and callback period index; cash/equity aliases are single-account only |
+| `Context` | immutable event snapshot: current bars, positions, one account snapshot, and callback period index |
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioTargets \| MultiLegOrder`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close |

@@ -87,7 +87,7 @@ state, costs, and output. The [examples](examples/README.md) show the complete
   [artifact tables](docs/guides/local-artifacts.md).
 
 The exact validation, fill, liquidity, margin, reconciliation, and state
-semantics are documented in the [engine architecture](architecture.md#backtest-engine-design-librae).
+semantics are documented in the [engine architecture](architecture.md#engine-design-librae).
 For custom broker fetches and third-party factors, see
 [External market data and factors](docs/guides/external-data.md).
 
