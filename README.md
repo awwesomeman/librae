@@ -62,6 +62,13 @@ state, costs, and output. The [examples](examples/README.md) show the complete
 
 ## Engine contract
 
+- **Data acquisition:** `Backtest` only consumes the DataFrame you pass; it
+  never reads a DB or calls an API. Sim/live polls completed-bar snapshots
+  through a broker adapter or injected callable; streaming data is not yet
+  supported.
+- **Runtime polling:** `poll_seconds` is user-controlled and runs market-data,
+  active-order, heartbeat, and due-reconciliation checks. It does not create
+  intrabar strategy decisions or quote-based PnL marks.
 - **Backtest input:** a `DataFrame` indexed exactly by
   `(symbol, datetime)`, with valid OHLCV and any precomputed feature columns.
 - **Decision timing:** the strategy observes completed data; the engine owns
@@ -76,6 +83,8 @@ state, costs, and output. The [examples](examples/README.md) show the complete
 
 The exact validation, fill, liquidity, margin, reconciliation, and state
 semantics are documented in the [engine architecture](architecture.md#backtest-engine-design-librae).
+For custom broker fetches and third-party factors, see
+[External market data and factors](docs/guides/external-data.md).
 
 ## Scope at a glance
 

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
+DEFAULT_POLL_SECONDS = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,7 +282,7 @@ class RunConfig:
     periods_per_year: int = 365
 
     # === Operational behavior (excluded from config_hash) ===
-    poll_seconds: int = 60
+    poll_seconds: int = DEFAULT_POLL_SECONDS
     reconciliation_interval_seconds: int = 300
     market_data_workers: int = 1
     no_db: bool = False

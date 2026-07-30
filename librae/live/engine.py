@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import pandas as pd
 
@@ -70,13 +70,30 @@ from .state import (
 )
 
 if TYPE_CHECKING:
+    from librae.config.symbols import SymbolInfo
     from librae.core.cost_model import CostModel
     from librae.core.executor import OrderEvent, TradeResult
     from librae.core.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
 
-OHLCVFetcher = Callable[..., pd.DataFrame]
+
+class BarDataFetcher(Protocol):
+    """Callable market-data boundary used by ``LiveTrader``.
+
+    Extra point-in-time columns may accompany the required UTC ``ts`` and
+    OHLCV columns. The engine preserves them for ``feature_fn``.
+    """
+
+    def __call__(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        *,
+        drop_incomplete: bool = False,
+    ) -> pd.DataFrame: ...
+
 
 _UNSET = object()  # sentinel: distinguish "not passed" from "explicitly passed None"
 _REASON_MULTI_LEG_RESTORE = "multi_leg_restore"
@@ -126,6 +143,54 @@ def _build_builtin_adapter(name: str, *, trading: bool) -> object:
     raise ValueError(f"Unsupported adapter: {name!r}")
 
 
+def _bind_market_data_source(
+    source: object,
+    instrument: SymbolInfo,
+    *,
+    prefer_fetch_method: bool = False,
+) -> BarDataFetcher:
+    """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
+    if callable(source) and not prefer_fetch_method:
+        return source
+
+    fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
+    if not callable(fetch_ohlcv):
+        raise TypeError(
+            "adapter must be a bar-data callable or expose a callable fetch_ohlcv method"
+        )
+
+    if instrument.data_adapter == "ibkr":
+        return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
+            instrument.venue_symbol,
+            tf,
+            limit=limit,
+            security_type=instrument.security_type,
+            exchange=instrument.exchange,
+            currency=instrument.currency,
+            continuous_alias=instrument.continuous_alias,
+            contract_month=instrument.contract_month,
+            drop_incomplete=drop_incomplete,
+        )
+    if instrument.data_adapter == "shioaji":
+        return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
+            instrument.venue_symbol,
+            tf,
+            limit=limit,
+            calendar_id=instrument.calendar_id,
+            continuous_alias=instrument.continuous_alias,
+            contract_month=instrument.contract_month,
+            drop_incomplete=drop_incomplete,
+        )
+    return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
+        instrument.venue_symbol,
+        tf,
+        limit=limit,
+        continuous_alias=instrument.continuous_alias,
+        contract_month=instrument.contract_month,
+        drop_incomplete=drop_incomplete,
+    )
+
+
 class LiveTrader:
     """Polling-based runner for sim/live modes.
 
@@ -133,8 +198,9 @@ class LiveTrader:
         strategy: Strategy instance (same as backtest).
         feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
         config: RunConfig — the sole configuration source.
-        adapter: Market-data fetcher override. None builds the data adapter
-            from each symbol's explicit data_source route.
+        adapter: Callable bar fetcher, concrete adapter with ``fetch_ohlcv``,
+            or per-symbol mapping. None builds adapters from the configured
+            data routes. Extra point-in-time columns reach ``feature_fn``.
         order_adapter: Order gateway override. In live mode, omitting it
             requires an explicit config.broker or per-symbol broker route;
             execution is never inferred from the symbol or market.
@@ -161,7 +227,7 @@ class LiveTrader:
         feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
         *,
         config: RunConfig,
-        adapter: OHLCVFetcher | Mapping[str, OHLCVFetcher] | None = None,
+        adapter: object | Mapping[str, object] | None = None,
         order_adapter: object | Mapping[str, object] | None = None,
         cost_model: CostModel | Mapping[str, CostModel] | None = None,
         notifier: object | None = _UNSET,
@@ -186,6 +252,14 @@ class LiveTrader:
         self._timeframe = to_ccxt(config.timeframe)
         self._interval_delta = interval_to_timedelta(self._timeframe)
         self._poll_seconds = config.poll_seconds
+        if self._poll_seconds > 0 and self._poll_seconds > self._interval_delta.total_seconds():
+            logger.warning(
+                "poll_seconds=%s exceeds timeframe=%s (%s seconds); "
+                "runtime polling may observe bars late",
+                self._poll_seconds,
+                config.timeframe,
+                int(self._interval_delta.total_seconds()),
+            )
         self._reconciliation_interval_seconds = config.reconciliation_interval_seconds
         self._market_data_workers = config.market_data_workers
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -240,12 +314,16 @@ class LiveTrader:
                 missing = set(self._symbols) - set(adapter)
                 if missing:
                     raise ValueError(f"Missing market-data adapters for symbols: {sorted(missing)}")
-                self._fetchers = dict(adapter)
+                sources = dict(adapter)
             else:
-                self._fetchers = {symbol: adapter for symbol in self._symbols}
+                sources = {symbol: adapter for symbol in self._symbols}
+            self._fetchers = {
+                symbol: _bind_market_data_source(sources[symbol], self._instruments[symbol])
+                for symbol in self._symbols
+            }
         else:
             adapter_instances: dict[tuple[str, str], object] = {}
-            self._fetchers: dict[str, OHLCVFetcher] = {}
+            self._fetchers: dict[str, BarDataFetcher] = {}
             for symbol, instrument in self._instruments.items():
                 key = (instrument.data_adapter, instrument.data_source)
                 instance = adapter_instances.get(key)
@@ -268,50 +346,11 @@ class LiveTrader:
                     )
                 adapter_instances[key] = instance
                 data_adapters[symbol] = instance
-
-                if instrument.data_adapter == "ibkr":
-                    self._fetchers[symbol] = (
-                        lambda _symbol, tf, limit, *, drop_incomplete=False, _adapter=instance, _instrument=instrument: (
-                            _adapter.fetch_ohlcv(
-                                _instrument.venue_symbol,
-                                tf,
-                                limit=limit,
-                                security_type=_instrument.security_type,
-                                exchange=_instrument.exchange,
-                                currency=_instrument.currency,
-                                continuous_alias=_instrument.continuous_alias,
-                                contract_month=_instrument.contract_month,
-                                drop_incomplete=drop_incomplete,
-                            )
-                        )
-                    )
-                elif instrument.data_adapter == "shioaji":
-                    self._fetchers[symbol] = (
-                        lambda _symbol, tf, limit, *, drop_incomplete=False, _adapter=instance, _instrument=instrument: (
-                            _adapter.fetch_ohlcv(
-                                _instrument.venue_symbol,
-                                tf,
-                                limit=limit,
-                                calendar_id=_instrument.calendar_id,
-                                continuous_alias=_instrument.continuous_alias,
-                                contract_month=_instrument.contract_month,
-                                drop_incomplete=drop_incomplete,
-                            )
-                        )
-                    )
-                else:
-                    self._fetchers[symbol] = (
-                        lambda _symbol, tf, limit, *, drop_incomplete=False, _adapter=instance, _instrument=instrument: (
-                            _adapter.fetch_ohlcv(
-                                _instrument.venue_symbol,
-                                tf,
-                                limit=limit,
-                                continuous_alias=_instrument.continuous_alias,
-                                contract_month=_instrument.contract_month,
-                                drop_incomplete=drop_incomplete,
-                            )
-                        )
-                    )
+                self._fetchers[symbol] = _bind_market_data_source(
+                    instance,
+                    instrument,
+                    prefer_fetch_method=True,
+                )
 
         if config.mode == "live":
             if isinstance(order_adapter, Mapping):

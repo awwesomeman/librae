@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
-from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
+from librae.core.run_config import (
+    DEFAULT_POLL_SECONDS,
+    AccountConfig,
+    ExecutionPolicy,
+    RiskPolicy,
+    RunConfig,
+)
 from librae.core.utils import to_canonical
 
 if TYPE_CHECKING:
@@ -61,8 +67,8 @@ def base_parser(description: str) -> argparse.ArgumentParser:
         "--poll-seconds",
         type=int,
         default=None,
-        help="seconds between poll cycles (required for sim/live mode — "
-        "no implicit default, must match the strategy's timeframe)",
+        help="seconds between runtime poll cycles (required for sim/live; "
+        "independent of the strategy bar timeframe)",
     )
     p.add_argument(
         "--reconciliation-interval-seconds",
@@ -356,17 +362,15 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
     dry_run = args.dry_run
     no_db = args.no_db or dry_run
 
-    # poll_seconds has no implicit default in sim/live — must be set explicitly
-    # so it's a deliberate choice matched to the strategy's timeframe, not a
-    # silently-inherited 60s that may poll too slowly (missed bars) or too
-    # fast (wasted API calls) for whatever timeframe this strategy uses.
+    # poll_seconds has no implicit default in sim/live: it is an API polling
+    # cadence, not the strategy's bar timeframe, and must be chosen explicitly.
     if args.mode in ("sim", "live") and args.poll_seconds is None:
         raise ValueError(
             "--poll-seconds is required for sim/live mode. "
-            f"Set it explicitly to match timeframe={timeframe!r} "
-            "(e.g. <= one bar's worth of seconds)."
+            f"Set it explicitly for timeframe={timeframe!r}; it should normally "
+            "be no slower than one completed bar."
         )
-    poll_seconds = args.poll_seconds if args.poll_seconds is not None else 60
+    poll_seconds = args.poll_seconds if args.poll_seconds is not None else DEFAULT_POLL_SECONDS
     reconciliation_interval_seconds = (
         args.reconciliation_interval_seconds
         if args.reconciliation_interval_seconds is not None

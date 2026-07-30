@@ -540,6 +540,60 @@ class TestLiveTrader:
         assert list(frames) == ["AAA", "BBB"]
         assert set(runner._cycle_fetch_seconds) == {"AAA", "BBB"}
 
+    def test_concrete_market_data_adapter_uses_resolved_route(self):
+        calls: list[tuple[tuple, dict]] = []
+
+        class Adapter:
+            def fetch_ohlcv(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return _make_ohlcv_df()
+
+        runner = self._make_runner(fetcher=Adapter())
+
+        frame = runner._fetch_with_cache("BTCUSDT")
+
+        assert frame is not None
+        assert calls == [
+            (
+                ("BTC/USDT", "1h"),
+                {
+                    "limit": 5,
+                    "continuous_alias": False,
+                    "contract_month": None,
+                    "drop_incomplete": True,
+                },
+            )
+        ]
+
+    def test_invalid_market_data_adapter_fails_at_construction(self):
+        with pytest.raises(TypeError, match=r"bar-data callable.*fetch_ohlcv"):
+            self._make_runner(fetcher=object())
+
+    def test_enriched_market_data_columns_reach_feature_and_strategy(self):
+        frame = _make_ohlcv_df()
+        frame["factor_score"] = 0.75
+        observed: list[float] = []
+
+        class CaptureFactor(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                observed.append(float(ctx.bar["factor_score"]))
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureFactor(),
+            fetcher=lambda *_args, **_kwargs: frame,
+        )
+
+        runner.run(max_iterations=1)
+
+        assert observed == [0.75]
+
+    def test_poll_slower_than_timeframe_warns(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
+            self._make_runner(config=_test_cfg(poll_seconds=3601))
+
+        assert "poll_seconds=3601 exceeds timeframe=H1" in caplog.text
+
     def test_cycle_diagnostics_marks_poll_deadline_miss(self):
         runner = self._make_runner(config=_test_cfg(poll_seconds=1))
 

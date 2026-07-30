@@ -43,6 +43,31 @@ brokers (broker/exchange adapters)  →  librae (core → backtest / live)  → 
 
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a historical decision doc — the current state has since replaced the old execution layer it describes with librae).
 
+## Data acquisition and ownership boundary
+
+| Mode | Supplied by | Librae does | Librae does not |
+|---|---|---|---|
+| Backtest | Caller-prepared DataFrame | Validate OHLCV/features and run deterministic events | Read TimescaleDB or call a broker/vendor API |
+| Sim | `LiveTrader.adapter` or configured broker adapter | Poll completed-bar snapshots and retain a rolling history | Subscribe to streaming ticks or ingest third-party factors |
+| Live | Same as sim | Poll bars, submit orders, and require durable runtime state | Treat analytics storage as execution state |
+
+The default sim/live warm-up calls the selected API adapter directly. DB-first
+history plus API gap filling is a caller-owned policy injected through
+`warmup_fetcher`; it is not a hidden engine fallback. `no_db=True` disables
+default TimescaleDB callbacks/state. Sim may then run in memory, while live
+still requires an explicitly injected durable `state_store`.
+
+`timeframe` defines the completed strategy bar and data-event clock.
+`poll_seconds` independently defines the runtime loop cadence: each cycle may
+refresh active orders, run due reconciliation/heartbeat work, and check the
+completed-bar endpoint. Sim/live makes it explicit and warns when it is slower
+than one bar. A faster poll does not create a strategy event or an intrabar
+PnL/risk mark; only a newly completed bar does. Streaming market-data
+subscriptions and an independent quote-driven risk clock are not implemented.
+Third-party data is joined point-in-time by the caller and returned as extra
+columns from the same adapter snapshot; see
+[External market data and factors](docs/guides/external-data.md).
+
 ## Broker Adapter Design (`brokers/`)
 
 - One flat adapter class per observed broker-product protocol
@@ -1119,6 +1144,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 | Param | Called as |
 |---|---|
+| `adapter` | callable `adapter(symbol, timeframe, limit, *, drop_incomplete=False) -> pd.DataFrame`, a concrete object with `fetch_ohlcv`, or a per-symbol mapping; UTC `ts` + OHLCV are required and extra point-in-time columns are preserved |
 | `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return)` — once per account for each processed market-data event |
 | `on_order_event` | `on_order_event(event)` — an `OrderEventRecord`; fires on open/add/reduce/close |
 | `on_funding_cash_flow` | `on_funding_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
@@ -1157,9 +1183,13 @@ args = parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
 # args.telegram                ← dict from config.yaml's telegram: block
 ```
 
-## Data flow
+## Optional reference database flows
 
-Three independent data flows, each drawn as its own subgraph (a node with the same name in different subgraphs represents the same table — they're split apart just to avoid crossing lines; the actual schema is defined by "Database design conventions" below). `get_ohlcv()`/`get_factor()` are external callers (not in this repo) — this only diagrams their read/write interface against `db/`.
+These are optional persistence integrations, not the engine's acquisition
+path. `get_ohlcv()`/`get_factor()` are external, caller-owned functions (not
+shipped by Librae); the first subgraph only illustrates how such a data layer
+could use the reference `db/` primitives. The other subgraphs show optional
+engine result/runtime writes.
 
 ```mermaid
 flowchart TD

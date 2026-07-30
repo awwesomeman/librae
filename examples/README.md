@@ -16,6 +16,7 @@ key, database, or external data service.
 | [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select Top K | `PortfolioTargets` | backtest |
 | [`minimum_variance/`](minimum_variance/) | Keep a diagonal risk model and optimizer inside the strategy | `PortfolioTargets` | backtest |
 | [`multi_leg_spread/`](multi_leg_spread/) | Open and close an explicitly sized relative-value spread | `MultiLegOrder` | backtest |
+| [`custom_data_provider.py`](custom_data_provider.py) | Point-in-time third-party factor enrichment | data-provider callable | sim/live adapter boundary |
 
 Run the backtests from the repository root:
 
@@ -25,6 +26,7 @@ uv run python -m examples.target_weights.run --mode backtest --no-db
 uv run python -m examples.topk_selection.run --mode backtest --no-db
 uv run python -m examples.minimum_variance.run --mode backtest --no-db
 uv run python -m examples.multi_leg_spread.run --mode backtest --no-db
+uv run python -m examples.custom_data_provider
 ```
 
 Start with `simple_sma` to learn the basic contract. Use `target_weights` when

@@ -93,6 +93,11 @@ bars come from; live execution needs an explicit `broker`,
 per-instrument broker override, or injected `order_adapter`. Librae does not
 infer an execution venue from a symbol.
 
+Adapters and credentials can be imported from `brokers` for caller-owned
+research or custom wiring. See
+[External market data and factors](external-data.md) for the polling callable,
+DB warm-up, and third-party factor boundaries.
+
 Paper trading uses `mode=live` with a broker's paper endpoint. `mode=sim` is a
 local shadow simulation and does not exercise acknowledgements, partial fills,
 rejections, or broker fees.
