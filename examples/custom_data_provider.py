@@ -14,7 +14,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pandas as pd
-from librae import AccountConfig, Backtest, CostModel, ExecutionPolicy, OrderIntent, RunConfig
+from librae import (
+    AccountConfig,
+    Backtest,
+    CostModel,
+    ExecutionPolicy,
+    OrderIntent,
+    RunConfig,
+    RuntimePolicy,
+)
 from librae.core.strategy import Context, Strategy
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
@@ -148,7 +156,7 @@ def main() -> None:
             max_bar_volume_participation_rate=None,
             warmup_periods=5,
         ),
-        poll_seconds=0,
+        runtime=RuntimePolicy(poll_seconds=0),
         no_db=True,
     )
     trader = LiveTrader(

@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import pytest
-from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
+from librae.core.run_config import (
+    AccountConfig,
+    ExecutionPolicy,
+    ReportingPolicy,
+    RiskPolicy,
+    RunConfig,
+    RuntimePolicy,
+)
 
 
 def _config(**overrides: object) -> RunConfig:
@@ -60,16 +67,39 @@ def test_run_owns_exactly_one_account() -> None:
 
 def test_runtime_operational_settings_are_validated_but_do_not_change_config_hash() -> None:
     default = _config()
-    tuned = _config(reconciliation_interval_seconds=30, market_data_workers=4)
+    tuned = _config(
+        runtime=RuntimePolicy(
+            reconciliation_interval_seconds=30,
+            market_data_workers=4,
+        )
+    )
 
-    assert tuned.reconciliation_interval_seconds == 30
-    assert tuned.market_data_workers == 4
+    assert tuned.runtime.reconciliation_interval_seconds == 30
+    assert tuned.runtime.market_data_workers == 4
     assert tuned.config_hash == default.config_hash
     for field in ("reconciliation_interval_seconds", "market_data_workers"):
         with pytest.raises(ValueError, match=field):
-            _config(**{field: 0})
+            RuntimePolicy(**{field: 0})
         with pytest.raises(ValueError, match=field):
-            _config(**{field: True})
+            RuntimePolicy(**{field: True})
+
+
+def test_reporting_policy_is_validated_and_excluded_from_config_hash() -> None:
+    default = _config()
+    weekly = _config(
+        reporting=ReportingPolicy(
+            annualize=False,
+            risk_free_rate=0.01,
+            periods_per_year=52,
+        )
+    )
+
+    assert weekly.perf_params == {
+        "annualize": False,
+        "risk_free_rate": 0.01,
+        "periods_per_year": 52,
+    }
+    assert weekly.config_hash == default.config_hash
 
 
 def test_execution_policy_is_validated_and_part_of_config_hash() -> None:

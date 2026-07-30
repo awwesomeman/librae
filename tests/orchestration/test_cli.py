@@ -356,7 +356,7 @@ class TestBuildConfig:
 
         assert cfg.symbol_cost_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
-        assert cfg.periods_per_year == 252
+        assert cfg.reporting.periods_per_year == 252
         assert cfg.instrument_overrides == {
             "AAPL": {
                 "data_adapter": "ibkr",
@@ -449,7 +449,7 @@ class TestBuildConfig:
 
         cfg = build_config("test_strat", str(tmp_path / "run.py"))
 
-        assert cfg.annualize is False
+        assert cfg.reporting.annualize is False
 
     def test_periods_per_year_must_be_positive(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -527,7 +527,7 @@ class TestCheckExistingRun:
         )
         existing = {
             "run_id": "existing-run",
-            "perf_params": {"annualize": not config.annualize},
+            "perf_params": {"annualize": not config.reporting.annualize},
         }
 
         with (

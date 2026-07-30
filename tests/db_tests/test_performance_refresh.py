@@ -9,7 +9,7 @@ import pytest
 from db.timescale_writer import refresh_performance
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 from librae.backtest.schema import StrategyMetrics
-from librae.core.run_config import AccountConfig, RunConfig
+from librae.core.run_config import AccountConfig, ReportingPolicy, RunConfig
 
 
 def _config(
@@ -25,7 +25,7 @@ def _config(
         data_source="test",
         accounts={account_id: AccountConfig(currency="USD", initial_cash=initial_cash)},
         mode="backtest",
-        annualize=False,
+        reporting=ReportingPolicy(annualize=False),
     )
 
 

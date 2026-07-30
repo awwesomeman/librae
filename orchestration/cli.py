@@ -28,8 +28,10 @@ from librae.core.run_config import (
     DEFAULT_POLL_SECONDS,
     AccountConfig,
     ExecutionPolicy,
+    ReportingPolicy,
     RiskPolicy,
     RunConfig,
+    RuntimePolicy,
 )
 from librae.core.utils import to_canonical
 
@@ -421,12 +423,16 @@ def build_config(strategy_name: str, run_file: str) -> RunConfig:
         cost_overrides=cost_overrides,
         symbol_cost_overrides=symbol_cost_overrides,
         instrument_overrides=instrument_overrides,
-        annualize=annualize,
-        risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
-        periods_per_year=periods_per_year,
-        poll_seconds=poll_seconds,
-        reconciliation_interval_seconds=reconciliation_interval_seconds,
-        market_data_workers=market_data_workers,
+        reporting=ReportingPolicy(
+            annualize=annualize,
+            risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
+            periods_per_year=periods_per_year,
+        ),
+        runtime=RuntimePolicy(
+            poll_seconds=poll_seconds,
+            reconciliation_interval_seconds=reconciliation_interval_seconds,
+            market_data_workers=market_data_workers,
+        ),
         no_db=no_db,
         dry_run=dry_run,
         force=args.force,

@@ -1008,7 +1008,7 @@ class Backtest:
         - timeframe: inferred from data index
 
         When config is provided, perf_params come from config.
-        annualize kwarg overrides config.annualize if explicitly passed.
+        annualize kwarg overrides config.reporting.annualize if explicitly passed.
 
         Raises RuntimeError if called before run().
         """

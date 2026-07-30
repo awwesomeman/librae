@@ -130,7 +130,7 @@ class _TimescaleCallbacks:
             mode=self._config.mode,
             started_at=datetime.now(tz=UTC),
             data_source=self._config.data_source,
-            poll_seconds=self._config.poll_seconds,
+            poll_seconds=self._config.runtime.poll_seconds,
             params=self._config.params,
             execution_policy=asdict(self._config.execution),
             risk_policy=asdict(self._config.risk),

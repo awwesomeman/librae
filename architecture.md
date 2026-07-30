@@ -662,13 +662,14 @@ config = RunConfig(
 risk keys in `params` raises immediately; the engine never reparses a
 free-form strategy dictionary for portfolio controls.
 
-`reconciliation_interval_seconds` and `market_data_workers` are operational
-runtime settings rather than strategy semantics, so they do not change
-`config_hash`. Fetching is sequential by default because many vendor SDK
+`RunConfig.runtime.reconciliation_interval_seconds` and
+`RunConfig.runtime.market_data_workers` are operational settings rather than
+strategy semantics, so they do not change `config_hash`. Fetching is sequential
+by default because many vendor SDK
 clients are not thread-safe; a value above one opts into bounded per-cycle
 concurrency. `LiveTrader.last_cycle_diagnostics` reports per-symbol fetch time,
 strategy time, broker-order time, total cycle time, and whether the cycle
-exceeded `poll_seconds`.
+exceeded `RunConfig.runtime.poll_seconds`.
 
 - `default_fill_price`: backtest/sim fallback for decisions without an
   explicit fill field. It is not used to manufacture live executions.
@@ -737,12 +738,12 @@ aligned to that interval. The union event clock is never used to infer a
 faster, synthetic timeframe for staggered markets.
 
 Performance annualization has a separate explicit SSOT:
-`RunConfig.periods_per_year` is the number of return observations per year
+`RunConfig.reporting.periods_per_year` is the number of return observations per year
 (for example, 252 for daily US-equity bars or 8760 for hourly 24/7 bars).
 `build_config()` supplies data-source defaults only for D1. Annualized intraday
 or unknown-source runs must set `strategy.perf.periods_per_year`; the engine
 never guesses it from sample density.
-`RunConfig.risk_free_rate` is an annual effective rate greater than `-1`.
+`RunConfig.reporting.risk_free_rate` is an annual effective rate greater than `-1`.
 Performance metrics deannualize positive, zero, and negative rates with the
 same compounded-return formula before comparing period returns.
 
@@ -989,6 +990,8 @@ financial/execution fact.
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
 | `ExecutionPolicy` | run-wide default fill field, liquidity caps, validated warmup retention, and optional local live-order timeout |
 | `RiskPolicy` | optional engine-level position, exposure, drawdown, order-notional, and live limit-price controls |
+| `ReportingPolicy` | annualization, annual risk-free rate, and observations per year; excluded from execution identity |
+| `RuntimePolicy` | sim/live polling cadence, reconciliation cadence, and market-data worker count; excluded from execution identity |
 
 #### Output layer
 

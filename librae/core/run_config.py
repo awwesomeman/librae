@@ -1,11 +1,12 @@
 """Unified run configuration — single source of truth for all execution paths.
 
-RunConfig is a frozen dataclass that holds all parameters for a run:
+RunConfig is a frozen dataclass that holds result-affecting run parameters and
+two explicit non-result policies:
 - Strategy params (stored in DB backtest_runs.params)
 - Execution policy (typed fill and liquidity assumptions)
 - Risk policy (typed engine-level portfolio limits)
-- Perf params (stored in DB backtest_runs.perf_params, display only)
-- Behavior params (not stored in DB)
+- Reporting policy (stored in DB backtest_runs.perf_params)
+- Runtime polling policy (not stored in DB)
 
 CLI workflows use ``build_config()`` in ``orchestration/cli.py``; library
 callers may construct the validated dataclass directly.
@@ -133,6 +134,61 @@ class ExecutionPolicy:
             raise ValueError(
                 f"warmup_periods must be a positive integer, got {self.warmup_periods}"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ReportingPolicy:
+    """Metric presentation settings that do not change execution results."""
+
+    annualize: bool = True
+    risk_free_rate: float = 0.0
+    periods_per_year: int = 365
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.annualize, bool):
+            raise TypeError("annualize must be a bool")
+        if (
+            isinstance(self.risk_free_rate, bool)
+            or not isinstance(self.risk_free_rate, Real)
+            or not isfinite(self.risk_free_rate)
+            or self.risk_free_rate <= -1.0
+        ):
+            raise ValueError("risk_free_rate must be finite and greater than -1")
+        if (
+            isinstance(self.periods_per_year, bool)
+            or not isinstance(self.periods_per_year, int)
+            or self.periods_per_year <= 0
+        ):
+            raise ValueError("periods_per_year must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePolicy:
+    """Operational cadence and concurrency for sim/live polling."""
+
+    poll_seconds: int = DEFAULT_POLL_SECONDS
+    reconciliation_interval_seconds: int = 300
+    market_data_workers: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.poll_seconds, bool)
+            or not isinstance(self.poll_seconds, int)
+            or self.poll_seconds < 0
+        ):
+            raise ValueError("poll_seconds must be a non-negative integer")
+        if (
+            isinstance(self.reconciliation_interval_seconds, bool)
+            or not isinstance(self.reconciliation_interval_seconds, int)
+            or self.reconciliation_interval_seconds <= 0
+        ):
+            raise ValueError("reconciliation_interval_seconds must be a positive integer")
+        if (
+            isinstance(self.market_data_workers, bool)
+            or not isinstance(self.market_data_workers, int)
+            or self.market_data_workers <= 0
+        ):
+            raise ValueError("market_data_workers must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,15 +333,11 @@ class RunConfig:
     # accidentally mixed into CostModel construction.
     instrument_overrides: dict[str, dict[str, object]] | None = None
 
-    # === Perf params (stored in DB backtest_runs.perf_params, display only) ===
-    annualize: bool = True
-    risk_free_rate: float = 0.0
-    periods_per_year: int = 365
+    # === Non-result policies (excluded from config_hash) ===
+    reporting: ReportingPolicy = field(default_factory=ReportingPolicy)
+    runtime: RuntimePolicy = field(default_factory=RuntimePolicy)
 
-    # === Operational behavior (excluded from config_hash) ===
-    poll_seconds: int = DEFAULT_POLL_SECONDS
-    reconciliation_interval_seconds: int = 300
-    market_data_workers: int = 1
+    # === Deployment behavior (excluded from config_hash) ===
     no_db: bool = False
     dry_run: bool = False
     force: bool = False
@@ -297,6 +349,10 @@ class RunConfig:
             raise TypeError("execution must be an ExecutionPolicy")
         if not isinstance(self.risk, RiskPolicy):
             raise TypeError("risk must be a RiskPolicy")
+        if not isinstance(self.reporting, ReportingPolicy):
+            raise TypeError("reporting must be a ReportingPolicy")
+        if not isinstance(self.runtime, RuntimePolicy):
+            raise TypeError("runtime must be a RuntimePolicy")
         if isinstance(self.symbols, str):
             raise ValueError("symbols must be a collection of identifiers, not one string")
         object.__setattr__(self, "symbols", tuple(self.symbols))
@@ -340,41 +396,9 @@ class RunConfig:
                 raise ValueError(f"{field_name} must be a non-empty string")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
-        if (
-            isinstance(self.risk_free_rate, bool)
-            or not isinstance(self.risk_free_rate, Real)
-            or not isfinite(self.risk_free_rate)
-            or self.risk_free_rate <= -1.0
-        ):
-            raise ValueError("risk_free_rate must be finite and greater than -1")
-        for field_name in ("annualize", "no_db", "dry_run", "force"):
+        for field_name in ("no_db", "dry_run", "force"):
             if not isinstance(getattr(self, field_name), bool):
                 raise TypeError(f"{field_name} must be a bool")
-        if (
-            isinstance(self.periods_per_year, bool)
-            or not isinstance(self.periods_per_year, int)
-            or self.periods_per_year <= 0
-        ):
-            raise ValueError("periods_per_year must be a positive integer")
-        if (
-            isinstance(self.poll_seconds, bool)
-            or not isinstance(self.poll_seconds, int)
-            or self.poll_seconds < 0
-        ):
-            raise ValueError("poll_seconds must be a non-negative integer")
-        reconciliation_interval = self.reconciliation_interval_seconds
-        if (
-            isinstance(reconciliation_interval, bool)
-            or not isinstance(reconciliation_interval, int)
-            or reconciliation_interval <= 0
-        ):
-            raise ValueError("reconciliation_interval_seconds must be a positive integer")
-        if (
-            isinstance(self.market_data_workers, bool)
-            or not isinstance(self.market_data_workers, int)
-            or self.market_data_workers <= 0
-        ):
-            raise ValueError("market_data_workers must be a positive integer")
         if self.dry_run and not self.no_db:
             raise ValueError("dry_run=True requires no_db=True; use build_config()")
         legacy_execution_keys = {
@@ -429,11 +453,7 @@ class RunConfig:
     @cached_property
     def perf_params(self) -> dict[str, Any]:
         """Perf params dict, stored in DB backtest_runs.perf_params."""
-        return {
-            "annualize": self.annualize,
-            "risk_free_rate": self.risk_free_rate,
-            "periods_per_year": self.periods_per_year,
-        }
+        return asdict(self.reporting)
 
     @cached_property
     def config_hash(self) -> str:
@@ -506,16 +526,12 @@ class RunConfig:
             f"  execution:   {self.execution}",
             f"  risk:        {self.risk}",
             "  --- perf params (stored in DB, display only) ---",
-            f"  annualize:   {self.annualize}",
-            f"  risk_free_rate: {self.risk_free_rate}",
-            f"  periods_per_year: {self.periods_per_year}",
+            f"  reporting:   {self.reporting}",
             "  --- operational behavior (excluded from config_hash) ---",
             f"  no_db:       {self.no_db}",
             f"  dry_run:     {self.dry_run}",
             f"  force:       {self.force}",
-            f"  poll_seconds: {self.poll_seconds}",
-            f"  reconcile:    {self.reconciliation_interval_seconds}",
-            f"  data_workers: {self.market_data_workers}",
+            f"  runtime:     {self.runtime}",
             f"  telegram:    {masked_tg}",
             "=" * 60,
         ]
