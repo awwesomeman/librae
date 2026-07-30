@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pandas as pd
 
@@ -33,6 +36,35 @@ _DATA_ADAPTER_BY_BROKER = {
     "shioaji": "shioaji",
 }
 _DB_FAILURE_ALERT_THRESHOLD = 3
+_READY_FILE_ENV = "LIBRAE_READY_FILE"
+
+
+def _ready_callback_from_env() -> Callable[[str], None] | None:
+    ready_file = os.environ.get(_READY_FILE_ENV)
+    if not ready_file:
+        return None
+    path = Path(ready_file)
+
+    def mark_ready(run_id: str) -> None:
+        path.write_text(f"{run_id}:{uuid4().hex}\n", encoding="utf-8")
+
+    return mark_ready
+
+
+def _combine_ready_callbacks(
+    callback: Callable[[str], None] | None,
+) -> Callable[[str], None] | None:
+    deployment_callback = _ready_callback_from_env()
+    if callback is None:
+        return deployment_callback
+    if deployment_callback is None:
+        return callback
+
+    def notify_ready(run_id: str) -> None:
+        callback(run_id)
+        deployment_callback(run_id)
+
+    return notify_ready
 
 
 def _build_adapter(
@@ -304,6 +336,7 @@ def build_live_trader(
     notifier: Notifier | None = None,
     status_interval_periods: int | None = None,
     state_store: LiveStateStore | None = None,
+    on_ready: Callable[[str], None] | None = None,
 ) -> LiveTrader:
     """Build a sim/live deployment from built-in or caller-registered factories."""
     factories = dict(adapter_factories or {})
@@ -406,6 +439,7 @@ def build_live_trader(
         on_signal_outcome=callbacks.on_signal_outcome if callbacks else None,
         on_funding_cash_flow=callbacks.on_funding_cash_flow if callbacks else None,
         on_performance=callbacks.on_performance if callbacks else None,
+        on_ready=_combine_ready_callbacks(on_ready),
     )
     if callbacks is not None:
         callbacks.register_run(trader.run_id)
