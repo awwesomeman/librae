@@ -956,7 +956,7 @@ def resolve_fill_price(
     *,
     position_side: PositionSide | None = None,
 ) -> float | None:
-    """Resolve actual fill price from ``intent.fill_price`` or engine default.
+    """Resolve a limit price or the engine's simulated market fill field.
 
     Args:
         bar: Next bar's OHLCV dict (the bar where the fill happens).
@@ -973,7 +973,7 @@ def resolve_fill_price(
     A gap through the limit receives the opening price, otherwise the limit.
     The intent is good for this eligible bar only.
     """
-    fill_spec = intent.fill_price if intent.fill_price is not None else default_fill
+    fill_spec: float | str = intent.limit_price if intent.limit_price is not None else default_fill
     order_side = _intent_order_side(intent, position_side)
     if order_side is None:
         logger.warning("Order rejected: cannot infer order side for %s", intent.action)
@@ -1623,7 +1623,7 @@ def _scale_additions_to_cash(
             symbol=action.symbol,
             quantity=(action.quantity or 0.0) * low,
             reason=action.reason,
-            fill_price=action.fill_price,
+            limit_price=action.limit_price,
         )
         for action in actions
     ]
@@ -1675,7 +1675,6 @@ def execute_portfolio_targets(
             action=action_type,
             symbol=symbol,
             reason=targets.reason,
-            fill_price=targets.fill_price,
         )
         raw_price = get_price(symbol, price_action)
         if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
@@ -1719,7 +1718,6 @@ def execute_portfolio_targets(
                         symbol=symbol,
                         quantity=-quantity_delta,
                         reason=targets.reason,
-                        fill_price=targets.fill_price,
                     )
                 )
             elif quantity_delta > EPSILON:
@@ -1729,7 +1727,6 @@ def execute_portfolio_targets(
                         symbol=symbol,
                         quantity=quantity_delta,
                         reason=targets.reason,
-                        fill_price=targets.fill_price,
                     )
                 )
             continue
@@ -1739,7 +1736,6 @@ def execute_portfolio_targets(
                 action="close",
                 symbol=symbol,
                 reason=targets.reason,
-                fill_price=targets.fill_price,
             )
         )
         additions.append(
@@ -1748,7 +1744,6 @@ def execute_portfolio_targets(
                 symbol=symbol,
                 quantity=abs(target_signed_quantity),
                 reason=targets.reason,
-                fill_price=targets.fill_price,
             )
         )
 
@@ -1840,15 +1835,14 @@ def _intent_executes_at_open(
     default_fill: str,
 ) -> bool:
     """Return whether an entry is causally known to exist from bar open."""
-    fill_spec = intent.fill_price if intent.fill_price is not None else default_fill
-    if isinstance(fill_spec, str):
-        return fill_spec == "open"
+    if intent.limit_price is None:
+        return default_fill == "open"
 
     open_raw = bar.get("open")
     if open_raw is None:
         return False
     open_price = float(open_raw)
-    limit_price = float(fill_spec)
+    limit_price = intent.limit_price
     if intent.action == "long":
         return open_price <= limit_price
     if intent.action == "short":
@@ -1971,8 +1965,7 @@ def execute_pending_decision_and_stops(
         )
 
         if isinstance(pending_decision, PortfolioTargets):
-            effective_fill = pending_decision.fill_price or default_fill
-            if effective_fill == "open":
+            if default_fill == "open":
                 same_bar_protection_symbols.update(pending_decision.weights)
         else:
             intents = (

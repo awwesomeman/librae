@@ -2377,7 +2377,7 @@ class TestLiveExecutionLifecycle:
                         action="long",
                         symbol="BTCUSDT",
                         quantity=500.0,
-                        fill_price=120.0,
+                        limit_price=120.0,
                     )
                 ],
                 {
@@ -2984,7 +2984,7 @@ class TestLiveExecutionLifecycle:
                         action="long",
                         symbol=ctx.symbol,
                         quantity=1.0,
-                        fill_price=99.5,
+                        limit_price=99.5,
                     )
                 ]
 
@@ -3006,7 +3006,7 @@ class TestLiveExecutionLifecycle:
                         action="long",
                         symbol=ctx.symbol,
                         quantity=1.0,
-                        fill_price=50.0,
+                        limit_price=50.0,
                     )
                 ]
 
@@ -3051,7 +3051,7 @@ class TestLiveExecutionLifecycle:
                         action="long",
                         symbol=ctx.symbol,
                         quantity=1.9,
-                        fill_price=99.57,
+                        limit_price=99.57,
                     )
                 ]
 
@@ -3089,21 +3089,14 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
         adapter.place_order.assert_not_called()
 
-    @pytest.mark.parametrize(
-        "action,match",
-        [
-            (
-                OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0, fill_price="close"),
-                "historical bar field",
-            ),
-            (
-                OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0, stop_price=95.0),
-                "broker-native protective orders",
-            ),
-        ],
-    )
-    def test_noncausal_live_intent_fails_closed(self, action, match):
+    def test_simulation_only_protection_fails_closed(self):
         adapter = _mock_order_adapter()
+        action = OrderIntent(
+            action="long",
+            symbol="BTCUSDT",
+            quantity=1.0,
+            stop_price=95.0,
+        )
 
         class InvalidIntent(Strategy):
             def on_bar(self, ctx):
@@ -3116,7 +3109,9 @@ class TestLiveExecutionLifecycle:
 
         assert runner._halted is True
         assert adapter.place_order.call_count == 0
-        assert any(match in kwargs.get("message", "") for _, kwargs in alerts)
+        assert any(
+            "broker-native protective orders" in kwargs.get("message", "") for _, kwargs in alerts
+        )
 
 
 class TestCryptoLiveAutoWiring:

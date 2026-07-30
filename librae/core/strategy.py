@@ -133,13 +133,12 @@ class OrderIntent:
             symbols at once), leaving quantity=None on more than one of them
             lets the first-processed OrderIntent consume all cash and starves the
             rest — set explicit per-symbol quantity (e.g. equal-weight sizing).
-        fill_price: In backtest/sim, how to resolve execution on the next bar.
-            str   — bar dict key (e.g. "open", "vwap"); uses that field's value.
-            float — one-bar limit order. Buys fill when low reaches the limit;
-                sells fill when high reaches it. Gap-through fills at open.
-            None  — use ``RunConfig.execution.default_fill_price``.
-            In live, None submits a market order and a float submits a broker
-            limit order; bar-field strings are rejected as non-causal.
+        limit_price: Optional one-event limit price. Buys fill when the next
+            eligible bar reaches the limit; sells fill when it reaches the
+            limit. Gap-through simulation fills at the next bar open. In live,
+            the same value submits a broker limit order. ``None`` means the
+            execution policy's simulated market fill field in backtest/sim and
+            a broker market order in live.
         stop_price: Absolute price that force-closes the position (stop-market
             order — fills at the worse of stop_price/bar-open on gap-through).
             Only applied on open/scale of a "long"/"short" action; the engine
@@ -158,7 +157,7 @@ class OrderIntent:
     symbol: str = ""
     quantity: float | None = None
     reason: str = ""
-    fill_price: str | float | None = None
+    limit_price: float | None = None
     stop_price: float | None = None
     take_profit_price: float | None = None
 
@@ -173,12 +172,8 @@ class OrderIntent:
         if self.quantity is not None:
             _validate_positive_finite_number(self.quantity, "OrderIntent.quantity")
 
-        fill_price = self.fill_price
-        if isinstance(fill_price, str):
-            if not fill_price:
-                raise ValueError("OrderIntent.fill_price must be a non-empty bar field name")
-        elif fill_price is not None:
-            _validate_positive_finite_number(fill_price, "OrderIntent.fill_price")
+        if self.limit_price is not None:
+            _validate_positive_finite_number(self.limit_price, "OrderIntent.limit_price")
 
         for field_name in ("stop_price", "take_profit_price"):
             value = getattr(self, field_name)
@@ -200,21 +195,15 @@ class PortfolioTargets:
     sizes at the latest completed close and immediately submits market orders;
     live ``fill_price`` is therefore unsupported.
 
-    Target weights need not sum to one; any remainder stays in cash.
+    Target weights need not sum to one; any remainder stays in cash. Simulated
+    execution uses ``RunConfig.execution.default_fill_price``. Live target
+    rebalances submit market orders after the completed-bar decision.
     """
 
     weights: Mapping[str, float]
-    fill_price: str | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
-        if self.fill_price is not None and (
-            not isinstance(self.fill_price, str) or not self.fill_price
-        ):
-            raise ValueError(
-                "PortfolioTargets.fill_price must be a non-empty bar field name; "
-                "use per-symbol OrderIntent values for limit orders"
-            )
         if not isinstance(self.reason, str):
             raise TypeError("PortfolioTargets.reason must be a string")
 

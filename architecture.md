@@ -314,12 +314,13 @@ operations can change the point-in-time research sample and must remain
 explicit ETL decisions. Runtime frames use the same OHLCV value validator before
 entering the cache; an invalid refresh is logged and cannot create a new event.
 
-For an `OrderIntent`, a numeric `fill_price` is a one-eligible-bar limit order. A
+For an `OrderIntent`, `limit_price` is a one-eligible-bar limit order. A
 buy fills when the bar's low reaches the limit and a sell fills when its high
 does; a gap through receives the opening price. An unreached limit expires
-after that bar and is logged. `PortfolioTargets.fill_price` accepts only a bar
-field name because one numeric price cannot describe a multi-symbol basket;
-use per-symbol `OrderIntent`s for limits.
+after that bar and is logged. Simulated market orders use
+`ExecutionPolicy.default_fill_price`; a strategy never embeds a historical bar
+field in its decision. `PortfolioTargets` always uses that run-wide simulated
+market-fill policy; use per-symbol `OrderIntent`s for limits.
 
 Historical data may additionally provide non-null boolean `can_buy` and
 `can_sell` columns as a required pair. The data adapter must normalize
@@ -336,7 +337,8 @@ cross-market backtest rule.
 
 OHLCV cannot determine whether an intrabar high or low happened first. A new
 position therefore receives same-bar stop/take-profit processing only when its
-entry is known at the bar open (`fill_price="open"` or a limit gapped through at
+entry is known at the bar open (the execution policy selects `"open"` or a
+limit gaps through at
 open). Protection for a resting limit or another non-open field begins on the
 next observed bar. This conservative rule prevents a target reached before the
 entry from being recorded as profit without introducing an invented intrabar
@@ -553,11 +555,9 @@ issuing duplicate cancel requests. Operational/error
 halts cancel tracked strategy orders. A drawdown
 breach instead clears the pending strategy decision and keeps its emergency
 reduce/close queue active until broker reports reach a terminal state,
-including across restart. The runtime also rejects live bar-field fills
-(`"open"`/`"close"`),
-`PortfolioTargets.fill_price`, and local stop/take-profit parameters; those
-cannot be inferred later from a completed range. Protective orders require a
-broker-native implementation.
+including across restart. Local stop/take-profit parameters remain
+simulation-only because they cannot be inferred later from a completed range.
+Protective live orders require a broker-native implementation.
 
 Every exposure-increasing live fill is checked again against confirmed
 position and gross limits. Net exposure is checked after a multi-leg group

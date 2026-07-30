@@ -47,7 +47,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 12
+_STATE_SCHEMA_VERSION = 13
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -56,7 +56,6 @@ def _decision_to_dict(decision: StrategyDecision) -> dict:
             "kind": "portfolio_targets",
             "value": {
                 "weights": dict(decision.weights),
-                "fill_price": decision.fill_price,
                 "reason": decision.reason,
             },
         }

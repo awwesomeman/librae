@@ -35,37 +35,37 @@ def _bar(
     ("action", "position_side", "bar", "expected"),
     [
         (
-            OrderIntent(action="long", symbol="X", fill_price=100.0),
+            OrderIntent(action="long", symbol="X", limit_price=100.0),
             None,
             _bar(open_=105, high=106, low=99),
             100.0,
         ),
         (
-            OrderIntent(action="long", symbol="X", fill_price=100.0),
+            OrderIntent(action="long", symbol="X", limit_price=100.0),
             None,
             _bar(open_=95, high=98, low=94),
             95.0,
         ),
         (
-            OrderIntent(action="short", symbol="X", fill_price=100.0),
+            OrderIntent(action="short", symbol="X", limit_price=100.0),
             None,
             _bar(open_=95, high=101, low=94),
             100.0,
         ),
         (
-            OrderIntent(action="short", symbol="X", fill_price=100.0),
+            OrderIntent(action="short", symbol="X", limit_price=100.0),
             None,
             _bar(open_=105, high=106, low=104),
             105.0,
         ),
         (
-            OrderIntent(action="close", symbol="X", fill_price=100.0),
+            OrderIntent(action="close", symbol="X", limit_price=100.0),
             "long",
             _bar(open_=105, high=106, low=104),
             105.0,
         ),
         (
-            OrderIntent(action="close", symbol="X", fill_price=100.0),
+            OrderIntent(action="close", symbol="X", limit_price=100.0),
             "short",
             _bar(open_=95, high=98, low=94),
             95.0,
@@ -82,7 +82,7 @@ def test_limit_fill_is_side_correct(action, position_side, bar, expected) -> Non
 
 
 def test_unreached_limit_expires_with_observable_log(caplog) -> None:
-    action = OrderIntent(action="long", symbol="X", fill_price=100.0)
+    action = OrderIntent(action="long", symbol="X", limit_price=100.0)
 
     with caplog.at_level(logging.INFO, logger="librae.core.executor"):
         fill = resolve_fill_price(
@@ -204,7 +204,7 @@ def test_unfilled_limit_does_not_roll_to_a_later_bar(caplog) -> None:
     class SubmitOnce(Strategy):
         def on_bar(self, ctx):
             if ctx.period_index == 0:
-                return [OrderIntent(action="long", symbol="X", quantity=1.0, fill_price=100.0)]
+                return [OrderIntent(action="long", symbol="X", quantity=1.0, limit_price=100.0)]
             return []
 
     with caplog.at_level(logging.INFO, logger="librae.core.executor"):
@@ -244,7 +244,7 @@ def test_resting_limit_protection_starts_on_next_bar() -> None:
                         action="long",
                         symbol="X",
                         quantity=1.0,
-                        fill_price=95.0,
+                        limit_price=95.0,
                         take_profit_price=105.0,
                     )
                 ]

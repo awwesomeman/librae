@@ -81,15 +81,11 @@ class OneRebalance(Strategy):
     def on_bar(self, ctx: Context) -> StrategyDecision:
         self.seen_equity.append(ctx.equity)
         if ctx.period_index == 0:
-            return PortfolioTargets(weights={"A": 0.5, "B": 0.5}, fill_price="open")
+            return PortfolioTargets(weights={"A": 0.5, "B": 0.5})
         return []
 
 
 class TestPortfolioTargetsValidation:
-    def test_numeric_fill_price_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="per-symbol OrderIntent"):
-            PortfolioTargets(weights={"A": 1.0}, fill_price=100.0)
-
     def test_rejects_non_finite_weight(self) -> None:
         with pytest.raises(ValueError, match="finite"):
             PortfolioTargets(weights={"A": float("nan")})

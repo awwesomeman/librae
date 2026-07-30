@@ -130,16 +130,10 @@ market-data, broker, and state wiring. In real-time use, `PortfolioTargets`
 waits for a complete required basket; per-symbol `OrderIntent` decisions can
 execute asynchronously.
 
-`PortfolioTargets.fill_price` is mode-sensitive:
-
-- backtest/sim accepts a bar field such as `"open"` and resolves it on the next
-  observed bar;
-- live requires `None`, sizes from the latest completed close, and submits
-  market orders whose fills come only from broker reports.
-
-The bundled allocation strategies leave `fill_price=None`, so the configured
-backtest fill field applies without embedding a simulation-only price name in
-strategy code.
+`PortfolioTargets` uses the configured next-bar fill field in backtest/sim.
+Live sizes from the latest completed close and submits market orders whose
+fills come only from broker reports. A per-symbol `OrderIntent.limit_price`
+has the same limit-order meaning in every mode.
 
 The SMA example also exposes the shadow-simulation path:
 

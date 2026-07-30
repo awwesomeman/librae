@@ -1715,11 +1715,6 @@ class LiveTrader:
         lagged_adv = lagged_adv_by_symbol or {}
 
         if isinstance(intent, PortfolioTargets):
-            if intent.fill_price is not None:
-                raise ValueError(
-                    "Live PortfolioTargets.fill_price is unsupported; "
-                    "target rebalances submit market orders after the completed-bar decision"
-                )
             account_ids = {self._account_id_by_symbol[symbol] for symbol in intent.weights}
             if not account_ids:
                 account_ids = {self._account_id_by_symbol[primary_symbol]}
@@ -1839,15 +1834,9 @@ class LiveTrader:
                     "Live stop-loss/take-profit requires broker-native protective orders; "
                     "completed-bar range checks are simulation-only"
                 )
-            if isinstance(action.fill_price, str):
-                raise ValueError(
-                    "Live OrderIntent.fill_price cannot name a historical bar field; "
-                    "use None for market or a numeric price for a broker limit order"
-                )
-
-            order_type = "limit" if isinstance(action.fill_price, (int, float)) else "market"
-            limit_price = float(action.fill_price) if order_type == "limit" else None
-            planning_action = replace(action, fill_price="close")
+            order_type = "limit" if action.limit_price is not None else "market"
+            limit_price = action.limit_price
+            planning_action = replace(action, limit_price=None)
             symbol = action.symbol or primary_symbol
             account_id = self._account_id_by_symbol[symbol]
             positions_before_action = {

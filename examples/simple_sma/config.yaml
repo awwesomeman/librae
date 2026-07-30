@@ -5,8 +5,8 @@ strategy:
   initial_cash: 100000
   # broker: binance  # required only for live; never inferred from symbol/data_source
   execution:
-    # Backtest/sim: use the next eligible bar's open when a decision does not
-    # set fill_price. Live market fills always come from the broker report.
+    # Backtest/sim market orders use the next eligible bar's open. Live market
+    # fills always come from the broker report.
     default_fill_price: open
     # At most 10% of one symbol's bar volume may fill in that bar. Use null
     # only for deliberately unlimited-liquidity research.

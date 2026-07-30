@@ -97,8 +97,8 @@ account and therefore follows the broker-confirmed execution path.
 
 | Decision | Backtest / shadow sim | Broker-confirmed live |
 |---|---|---|
-| `OrderIntent` | `fill_price` may be a configured bar field or a numeric one-bar limit | `None` submits market; numeric submits limit; bar-field strings are rejected |
-| `PortfolioTargets` | Complete one-account target state, resolved on the next observed bar | `fill_price` must be `None`; the engine sizes from the latest completed close and replans from confirmed fills |
+| `OrderIntent` | `limit_price=None` uses the configured next-bar market fill; a numeric limit is valid for one eligible bar | `None` submits market; numeric `limit_price` submits limit |
+| `PortfolioTargets` | Complete one-account target state, resolved with the configured next-bar fill | The engine sizes from the latest completed close and replans from confirmed fills |
 | `MultiLegOrder` | Explicit quantities execute as one synchronous OHLCV approximation | Legs execute serially with a deadline and durable baseline restoration; no atomic guarantee |
 
 The runnable [minimum-variance example](../../examples/minimum_variance/)
