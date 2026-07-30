@@ -74,17 +74,6 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
     logger.info("Updated DATASOURCE uid=%s type=%s", uid, ds_type)
 
 
-def delete_old_dashboards(base_url: str, auth: tuple[str, str]) -> None:
-    """Remove legacy per-mode dashboards from Grafana."""
-    old_uids = ["backtest_dashboard", "sim_dashboard", "live_dashboard"]
-    for uid in old_uids:
-        r = httpx.delete(f"{base_url}/api/dashboards/uid/{uid}", auth=auth, timeout=10)
-        if r.status_code == 404:
-            continue
-        r.raise_for_status()
-        logger.info("Deleted old dashboard: %s", uid)
-
-
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Re-generate dashboard JSON and deploy to Grafana."""
     subprocess.run([sys.executable, "app/grafana/generate_dashboards.py"], check=True)
@@ -116,7 +105,6 @@ def main() -> None:
         sys.exit(1)
 
     update_generate_dashboards(uid, ds_type)
-    delete_old_dashboards(args.grafana_url, auth)
     deploy_dashboards(args.grafana_url, auth)
     logger.info("Grafana setup complete")
 
