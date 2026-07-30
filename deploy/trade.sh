@@ -15,10 +15,10 @@
 #   ./deploy/trade.sh start <strategy> live 30
 #   ./deploy/trade.sh stop <strategy> live
 #
-# Local dev (no TRADE_IMAGE set in .env): builds the image from this checkout,
+# Local dev (no TRADE_IMAGE_REF set in .env): builds from this checkout,
 # needs the full repo — same as always.
-# On a no-repo VM: set TRADE_IMAGE in .env (e.g. ghcr.io/<user>/quant-trade) and
-# `start` pulls that image instead of building — run build_push.sh locally
+# On a no-repo VM, set the digest-qualified TRADE_IMAGE_REF printed by
+# build_push.sh; `start` pulls that image instead of building. Run it locally
 # first whenever the code changes. Either way this script itself still needs
 # to exist on whichever machine runs it (already true via cloud_deploy.sh,
 # which syncs deploy/).
@@ -38,32 +38,32 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NETWORK="quant_network"
 
-# Derive container name from strategy config + mode.
+# Derive a stable container name without requiring strategy source on the VM.
 container_name() {
     local strategy="$1" mode="$2"
-    local config="${PROJECT_ROOT}/../strategies/${strategy}/config.yaml"
-    # On a no-repo VM there's no strategies/ tree to read symbol from —
-    # fall back to strategy name alone (still unique per running strategy+mode).
-    if [[ ! -f "${config}" ]]; then
-        echo "quant_${mode}_${strategy}"
-        return
+    echo "quant_${mode}_${strategy}"
+}
+
+validate_strategy_name() {
+    local strategy="$1"
+    if [[ ! "${strategy}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        echo "strategy must be a Python package name, got: ${strategy}" >&2
+        exit 1
     fi
-    local symbol
-    symbol=$(grep 'symbol:' "${config}" | head -1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
-    echo "quant_${mode}_${strategy}_${symbol}"
 }
 
 cmd_start() {
     local strategy="${1:?Usage: trade.sh start <strategy> [mode] [poll_seconds]}"
     local mode="${2:-sim}"
     local poll_seconds="${3:-60}"
-    local image="${TRADE_IMAGE:-quant-trade}"
+    local image=""
     local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env}"
 
     if [[ "${mode}" != "sim" && "${mode}" != "live" ]]; then
         echo "mode must be 'sim' or 'live', got: ${mode}" >&2
         exit 1
     fi
+    validate_strategy_name "${strategy}"
 
     local container
     container=$(container_name "${strategy}" "${mode}")
@@ -83,16 +83,37 @@ cmd_start() {
         exit 1
     fi
 
-    if [[ -n "${TRADE_IMAGE:-}" ]]; then
-        echo "Pulling ${image}:latest..."
-        docker pull -q "${image}:latest" >/dev/null
-    else
-        local build_context
-        build_context="$(cd "${PROJECT_ROOT}/.." && pwd)"
-        if [[ ! -d "${build_context}/strategies" ]]; then
-            echo "Missing sibling strategy repository: ${build_context}/strategies" >&2
+    if [[ -n "${TRADE_IMAGE_REF:-}" ]]; then
+        if [[ ! "${TRADE_IMAGE_REF}" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "TRADE_IMAGE_REF must be digest-qualified: <repository>@sha256:<64 hex>" >&2
             exit 1
         fi
+        image="${TRADE_IMAGE_REF}"
+        echo "Pulling immutable trade image ${image}..."
+        docker pull -q "${image}" >/dev/null
+    elif [[ -n "${TRADE_IMAGE:-}" ]]; then
+        echo "TRADE_IMAGE is a publish repository, not a deployable reference." >&2
+        echo "Set TRADE_IMAGE_REF to the digest printed by build_push.sh." >&2
+        exit 1
+    else
+        image="quant-trade:local"
+        local strategy_source
+        strategy_source="${TRADE_STRATEGY_PATH:-../strategies}"
+        if [[ "${strategy_source}" != /* ]]; then
+            strategy_source="${PROJECT_ROOT}/${strategy_source}"
+        fi
+        if [[ ! -d "${strategy_source}" ]]; then
+            echo "Strategy source directory not found: ${strategy_source}" >&2
+            echo "Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py." >&2
+            exit 1
+        fi
+        strategy_source="$(cd "${strategy_source}" && pwd)"
+        for required_file in __init__.py run.py config.yaml; do
+            if [[ ! -f "${strategy_source}/${strategy}/${required_file}" ]]; then
+                echo "Missing strategy file: ${strategy_source}/${strategy}/${required_file}" >&2
+                exit 1
+            fi
+        done
         local librae_revision librae_version
         librae_revision="$(git -C "${PROJECT_ROOT}" rev-parse --verify HEAD)"
         librae_version="0+g${librae_revision:0:12}"
@@ -101,17 +122,30 @@ cmd_start() {
         fi
         echo "Building trade image locally (librae=${librae_version})..."
         docker build -q \
+            --build-context "strategy_source=${strategy_source}" \
             --build-arg LIBRAE_VERSION="${librae_version}" \
             --build-arg LIBRAE_REVISION="${librae_revision}" \
-            -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${build_context}" >/dev/null
+            -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}" >/dev/null
+    fi
+
+    local selected_revision
+    selected_revision="$(
+        docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${image}"
+    )"
+    echo "Selected trade image: ${image}"
+    if [[ -n "${selected_revision}" && "${selected_revision}" != "<no value>" ]]; then
+        echo "Librae revision: ${selected_revision}"
     fi
 
     echo "Checking TimescaleDB connectivity from ${image} on ${NETWORK}..."
     docker run --rm \
         --network "${NETWORK}" \
         -e TIMESCALE_DSN="${trade_timescale_dsn}" \
+        -e TRADE_RUN_MODULE="strategies.${strategy}.run" \
         "${image}" \
-        python -c 'import os, psycopg2; connection = psycopg2.connect(os.environ["TIMESCALE_DSN"]); cursor = connection.cursor(); cursor.execute("SELECT 1"); assert cursor.fetchone() == (1,); connection.close()'
+        python -c 'import importlib.util, os, psycopg2; module = os.environ["TRADE_RUN_MODULE"]; assert importlib.util.find_spec(module) is not None, f"missing strategy module: {module}"; connection = psycopg2.connect(os.environ["TIMESCALE_DSN"]); cursor = connection.cursor(); cursor.execute("SELECT 1"); assert cursor.fetchone() == (1,); connection.close()'
 
     local env_args=(
         -e TIMESCALE_DSN="${trade_timescale_dsn}"
@@ -192,6 +226,7 @@ cmd_stop() {
 
     local strategy="${1:?Usage: trade.sh stop <strategy> [mode] | --all}"
     local mode="${2:-sim}"
+    validate_strategy_name "${strategy}"
     local container
     container=$(container_name "${strategy}" "${mode}")
     if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then

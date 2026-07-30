@@ -1,7 +1,11 @@
-"""Static checks for deployment files that cannot be exercised in unit tests."""
+"""Deployment contract checks that do not require a Docker daemon."""
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,10 +27,13 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
     dockerignore = (DEPLOY / "Dockerfile.dockerignore").read_text(encoding="utf-8")
 
     assert '".[calendars,cli,db,crypto-live,telegram,tw-live,us-live]"' in dockerfile
+    assert "COPY --from=strategy_source . strategies/" in dockerfile
     assert "COPY orchestration_helpers.py" not in dockerfile
     assert "**/.git" in dockerignore
     assert "**/.env.*" in dockerignore
     assert "**/.secrets" in dockerignore
+    assert "\ntests\n" in dockerignore
+    assert "\ndocs\n" in dockerignore
 
 
 def test_trade_image_build_receives_explicit_source_identity() -> None:
@@ -50,14 +57,117 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
 
     assert workflow.count('- "deploy/**"') == 2
+    assert "bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh" in workflow
     assert "docker build" in workflow
     assert "docker image inspect" in workflow
     assert "docker run --rm" in workflow
     assert "EXPECTED_VERSION" in workflow
-    assert "strategies/smoke/run.py" in workflow
+    assert "strategy-fixture/smoke/run.py" in workflow
+    assert "--build-context strategy_source=../strategy-fixture" in workflow
     assert "TRADE_TIMESCALE_DSN" in workflow
     assert "--network quant_network" in workflow
     assert "host.docker.internal:host-gateway" in workflow
+
+
+def test_registry_trade_deploy_uses_one_immutable_image_reference() -> None:
+    public_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    build_script = (DEPLOY / "build_push.sh").read_text(encoding="utf-8")
+    trade_script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
+
+    assert "TRADE_IMAGE_REF=ghcr.io/<github-user>/quant-trade@sha256:" in public_env
+    assert '--metadata-file "${METADATA_FILE}"' in build_script
+    assert '"containerimage.digest"' in build_script
+    assert 'echo "TRADE_IMAGE_REF=${IMAGE}@${DIGEST}"' in build_script
+    assert "${IMAGE}:latest" not in build_script
+    assert 'SOURCE_TAG="librae-${LIBRAE_REVISION:0:12}"' in build_script
+    assert 'git -C "${STRATEGIES_DIR}"' not in build_script
+
+    assert "@sha256:[0-9a-f]{64}" in trade_script
+    assert 'docker pull -q "${image}"' in trade_script
+    assert "${image}:latest" not in trade_script
+    assert "TRADE_IMAGE is a publish repository, not a deployable reference." in trade_script
+    assert 'image="quant-trade:local"' in trade_script
+    assert 'org.opencontainers.image.revision" }}' in trade_script
+
+    database_preflight = trade_script.index('echo "Checking TimescaleDB connectivity')
+    container_replacement = trade_script.index('docker rm -f "${container}"')
+    assert trade_script.index('image="${TRADE_IMAGE_REF}"') < database_preflight
+    assert database_preflight < container_replacement
+    assert trade_script[database_preflight:].count('"${image}"') >= 2
+
+
+def _run_trade_script(
+    tmp_path: Path,
+    *,
+    image_reference: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    bash = shutil.which("bash")
+    if bash is None and os.name == "nt":
+        git_bash = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git/bin/bash.exe"
+        if git_bash.is_file():
+            bash = str(git_bash)
+    if bash is None:
+        pytest.skip("bash is required for deployment script behavior tests")
+
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${DOCKER_LOG}"
+if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+    printf '%s\\n' "<no value>"
+fi
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_docker.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "DOCKER_LOG": docker_log.as_posix(),
+            "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
+            "TRADE_IMAGE_REF": image_reference,
+            "TRADE_TIMESCALE_DSN": ("postgresql://quant_app:secret@quant_timescaledb:5432/quant"),
+        }
+    )
+    result = subprocess.run(
+        [bash, str(DEPLOY / "trade.sh"), "start", "smoke", "sim", "60"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = docker_log.read_text(encoding="utf-8").splitlines() if docker_log.exists() else []
+    return result, calls
+
+
+def test_trade_script_rejects_mutable_image_before_docker(tmp_path: Path) -> None:
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference="registry.example/librae-trade:latest",
+    )
+
+    assert result.returncode != 0
+    assert "TRADE_IMAGE_REF must be digest-qualified" in result.stderr
+    assert docker_calls == []
+
+
+def test_trade_script_reuses_exact_digest_reference(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'a' * 64}"
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert any(call.startswith(f"pull -q {image_reference}") for call in docker_calls)
+    assert any(call.startswith("run --rm ") and image_reference in call for call in docker_calls)
+    assert any(call.startswith("run -d ") and image_reference in call for call in docker_calls)
+    assert all(":latest" not in call for call in docker_calls)
 
 
 def test_trade_container_uses_reachable_service_endpoints() -> None:
@@ -156,9 +266,10 @@ def test_backtest_cache_identity_is_separate_from_config_hash() -> None:
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash" not in schema
 
 
-def test_local_trade_build_uses_workspace_context_and_checks_strategies() -> None:
+def test_local_trade_build_uses_explicit_strategy_context() -> None:
     script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
 
-    assert 'build_context="$(cd "${PROJECT_ROOT}/.." && pwd)"' in script
-    assert '[[ ! -d "${build_context}/strategies" ]]' in script
-    assert '"${SCRIPT_DIR}/.." >/dev/null' not in script
+    assert 'strategy_source="${TRADE_STRATEGY_PATH:-../strategies}"' in script
+    assert '--build-context "strategy_source=${strategy_source}"' in script
+    assert '"${strategy_source}/${strategy}/${required_file}"' in script
+    assert '-f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"' in script

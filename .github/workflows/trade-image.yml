@@ -30,11 +30,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate deployment scripts
+        run: bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh
+
       - name: Prepare strategy fixture
         run: |
-          mkdir -p ../strategies/smoke
-          touch ../strategies/__init__.py ../strategies/smoke/__init__.py
-          printf '%s\n' 'print("strategy fixture ready")' > ../strategies/smoke/run.py
+          mkdir -p ../strategy-fixture/smoke
+          touch ../strategy-fixture/smoke/__init__.py
+          printf '%s\n' 'print("strategy fixture ready")' > ../strategy-fixture/smoke/run.py
+          printf '%s\n' 'strategy:' '  symbol: MU' '  timeframe: D1' > ../strategy-fixture/smoke/config.yaml
 
       - name: Build clean trade image
         id: image
@@ -42,11 +46,12 @@ jobs:
           revision="$(git rev-parse --verify HEAD)"
           version="0+g${revision:0:12}"
           docker build \
+            --build-context strategy_source=../strategy-fixture \
             --build-arg LIBRAE_VERSION="${version}" \
             --build-arg LIBRAE_REVISION="${revision}" \
             --tag librae-trade:ci \
             --file deploy/Dockerfile \
-            ..
+            .
           echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
