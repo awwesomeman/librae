@@ -115,9 +115,10 @@ columns from the same adapter snapshot; see
   ABC**. A genuinely separate product API may have a focused adapter:
   `BinanceStocksAdapter` exposes only its currently implemented catalog/quote
   capabilities and is not presented as an OHLCV/order adapter. Market/account
-  signatures include `fetch_ohlcv`, `get_position(PositionRequest)`, and
-  `info`; live order lifecycle signatures are `prepare_order`, `place_order`,
-  `find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
+  signatures include `fetch_ohlcv` and `info`; the public live
+  `OrderAdapter` contract includes `get_position(PositionRequest)` plus
+  `prepare_order`, `place_order`, `find_order`, `get_order`,
+  `list_open_orders`, and `cancel_order`.
 - `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, a per-symbol `instrument_overrides[symbol]["broker"]`, or an injected `order_adapter`; an unresolved route fails at startup. An explicitly selected broker may reuse the same adapter session as market data.
 - Cross-broker behavior is generalized only at an observed engine boundary. `LiveExecutor` builds one broker-neutral `PositionRequest` from the configured canonical/venue identity, currency, security type, exchange, `contract_month`/`continuous_alias`, and `CostModel.multiplier`; every adapter accepts that request and returns the same position shape. Contract lookup, broker-native symbol syntax, CCXT balance conventions, Shioaji direction enums, and IBKR `conId`/`avgCost` handling stay inside the concrete adapter. Add a shared field or helper only when more than one real adapter needs the same semantic; do not create broker hierarchies or speculative capability abstractions.
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
@@ -125,7 +126,10 @@ columns from the same adapter snapshot; see
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as the UTC-aware bar-start datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
-- Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the six lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
+- Where a type constraint is needed, use `typing.Protocol`, **declared minimally
+  at the call site** rather than a hierarchy covering unrelated capabilities.
+  Third-party packages import the stable façade in `librae.integrations`;
+  optional balance reconciliation is a separate `BalanceReader` capability.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
 - Futures have one broker-neutral selection rule: a dated monthly/quarterly instrument must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract). `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
 - IBKR consumes a product root in `venue_symbol` plus the separate `contract_month`. Shioaji and CCXT may instead require an exact broker-native contract code in `venue_symbol`; they still receive the common month/alias identity, but the adapter does not parse or reconstruct proprietary symbol syntax. This is one semantic interface with broker-specific resolution, not one universal ticker format.
@@ -229,6 +233,7 @@ librae/
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── artifacts.py              format-neutral manifest + tabular research/export boundary
+├── integrations.py           stable public protocols and broker value types
 │
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()

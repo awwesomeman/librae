@@ -19,6 +19,8 @@ execution, notifications, monitoring, or deployment.
 These are replaceable integrations, not required dependencies of the
 calculation core. The exact callback and adapter signatures are in the
 [Config API and callback reference](../../architecture.md#config-api).
+Third-party packages should import engine-facing contracts from
+`librae.integrations`.
 `orchestration.live.build_live_trader()` is the convenience factory for the
 repository implementations. Construct `LiveTrader` directly when injecting
 different adapters, callbacks, notifier, or durable state.

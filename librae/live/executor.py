@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
 from numbers import Real
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
@@ -38,6 +38,71 @@ OrderStatus = Literal[
     "cancelled",
     "rejected",
 ]
+
+
+class OrderSignal(TypedDict):
+    """Canonical mapping passed from Librae to an order adapter."""
+
+    symbol: str
+    canonical_symbol: str
+    side: OrderSide
+    quantity: float
+    order_type: OrderType
+    client_order_id: str
+    position_effect: PositionEffect
+    continuous_alias: bool
+    reason: NotRequired[str]
+    price: NotRequired[float]
+    reference_price: NotRequired[float]
+    tick_size: NotRequired[float | None]
+    security_type: NotRequired[str]
+    exchange: NotRequired[str]
+    currency: NotRequired[str]
+    contract_month: NotRequired[str]
+
+
+class BrokerOrderReport(TypedDict, total=False):
+    """Cumulative broker order facts accepted by ``LiveExecutor``.
+
+    ``id``/``order_id`` and the snake/camel-case aliases reflect common SDK
+    response shapes. A filled quantity requires average price, commission, and
+    execution time; ``LiveExecutor`` validates those semantic requirements.
+    """
+
+    id: str
+    order_id: str
+    clientOrderId: str
+    client_order_id: str
+    symbol: str
+    side: str
+    status: object
+    amount: float
+    requested_quantity: float
+    filled: float
+    filled_quantity: float
+    average: float
+    average_price: float
+    commission: float
+    slippage: float
+    tax: float
+    executed_at: datetime
+
+
+class BrokerPosition(TypedDict):
+    """Canonical current-position snapshot returned by an order adapter."""
+
+    symbol: str
+    size: float
+    avg_price: float
+    unrealized_pnl: float
+
+
+class BrokerBalance(TypedDict):
+    """Canonical cash-currency balance returned by a balance reader."""
+
+    free: float
+    used: float
+    total: float
 
 
 @dataclass(frozen=True)
@@ -90,8 +155,8 @@ class OrderRequest:
         elif self.limit_price is not None:
             raise ValueError("market orders cannot have a limit_price")
 
-    def to_signal(self) -> dict:
-        signal = {
+    def to_signal(self) -> OrderSignal:
+        signal: OrderSignal = {
             "symbol": self.venue_symbol or self.symbol,
             "canonical_symbol": self.symbol,
             "side": self.side,
@@ -190,19 +255,31 @@ class ExecutionReport:
 
 
 class OrderAdapter(Protocol):
-    """Duck-typed gateway implemented by the built-in broker adapters."""
+    """Required live order lifecycle and position-reconciliation gateway."""
 
-    def prepare_order(self, signal: dict) -> dict: ...
+    def prepare_order(self, signal: OrderSignal) -> OrderSignal: ...
 
-    def place_order(self, signal: dict) -> dict: ...
+    def place_order(self, signal: OrderSignal) -> BrokerOrderReport: ...
 
-    def find_order(self, client_order_id: str, symbol: str) -> dict | None: ...
+    def find_order(
+        self,
+        client_order_id: str,
+        symbol: str,
+    ) -> BrokerOrderReport | None: ...
 
-    def get_order(self, order_id: str, symbol: str) -> dict: ...
+    def get_order(self, order_id: str, symbol: str) -> BrokerOrderReport: ...
 
-    def list_open_orders(self, symbol: str) -> list[dict]: ...
+    def list_open_orders(self, symbol: str) -> list[BrokerOrderReport]: ...
 
-    def cancel_order(self, order_id: str, symbol: str) -> dict: ...
+    def cancel_order(self, order_id: str, symbol: str) -> BrokerOrderReport: ...
+
+    def get_position(self, request: PositionRequest) -> BrokerPosition: ...
+
+
+class BalanceReader(Protocol):
+    """Optional account-balance capability used for live reconciliation."""
+
+    def get_balance(self, currency: str) -> BrokerBalance: ...
 
 
 class LiveExecutor:
