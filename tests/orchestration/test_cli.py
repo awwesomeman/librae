@@ -210,9 +210,48 @@ class TestBuildRun:
 
         assert options.backtest_revision == "strategy-a:data-2026-07-30"
 
+    def test_runtime_revision_is_normalized_from_yaml(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                runtime-revision: " image-a "
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                """
+            )
+        )
+
+        _, options = build_run("test_strat", str(tmp_path / "run.py"))
+
+        assert options.runtime_revision == "image-a"
+
     def test_empty_backtest_revision_is_rejected(self):
         with pytest.raises(ValueError, match="backtest_revision"):
             RunOptions(backtest_revision="  ")
+
+    def test_empty_runtime_revision_is_rejected(self):
+        with pytest.raises(ValueError, match="runtime_revision"):
+            RunOptions(runtime_revision="  ")
+
+    def test_live_requires_runtime_revision(self, tmp_path, monkeypatch):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                """
+            )
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["test", "--mode", "live", "--poll-seconds", "60"],
+        )
+
+        with pytest.raises(ValueError, match="--runtime-revision is required"):
+            build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_force_requires_backtest_revision(self):
         with pytest.raises(ValueError, match="requires backtest_revision"):
@@ -626,5 +665,6 @@ class TestRunDispatch:
             config=config,
             database_enabled=False,
             telegram_config=None,
+            runtime_revision=None,
         )
         trader.run.assert_called_once_with()

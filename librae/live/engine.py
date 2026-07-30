@@ -74,6 +74,7 @@ from .state import (
     LiveRuntimeState,
     LiveStateStore,
     TrackedOrder,
+    normalize_runtime_revision,
 )
 
 if TYPE_CHECKING:
@@ -166,6 +167,8 @@ class LiveTrader:
             market-data adapter is used.
         state_store: Optional checkpoint store. Live mode requires a durable
             store so placement attempts and fills survive process restarts.
+        runtime_revision: Caller-owned opaque runtime identity. Live mode
+            requires it so checkpoints cannot cross code or image revisions.
         notifier: Optional operational notifier implementing ``Notifier``.
         status_interval_periods: Optional polling-period cadence for status
             notifications. Scheduling is separate from the transport.
@@ -194,6 +197,7 @@ class LiveTrader:
         on_ready: Callable[[str], None] | None = None,
         warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
+        runtime_revision: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         from librae.config.symbols import resolve_symbol
@@ -315,6 +319,10 @@ class LiveTrader:
         # --- Restore restart-critical state before callbacks capture run_id ---
         self._state_key = f"{config.mode}:{config.config_hash}"
         self._account_lease_key = f"live-account:{self._account_id}"
+        self._runtime_revision = normalize_runtime_revision(
+            runtime_revision,
+            required=is_live,
+        )
         self._state_store = state_store
         if is_live and self._state_store is None:
             raise ValueError("live mode requires an explicit durable state_store")
@@ -409,6 +417,7 @@ class LiveTrader:
             config_hash=self._config.config_hash,
             mode=self._config.mode,
             account_id=self._account_id,
+            runtime_revision=self._runtime_revision,
             cash=self._cash,
             positions=deepcopy(self._positions),
             last_prices=dict(self._last_prices),
@@ -434,6 +443,13 @@ class LiveTrader:
             raise ValueError("runtime state key does not match this configuration")
         if state.config_hash != self._config.config_hash or state.mode != self._config.mode:
             raise ValueError("runtime state configuration does not match this run")
+        if not self._executor.simulation and state.runtime_revision != self._runtime_revision:
+            raise RuntimeError(
+                "live checkpoint runtime revision mismatch: "
+                f"checkpoint={state.runtime_revision!r}, requested={self._runtime_revision!r}; "
+                "select the matching runtime revision or perform an explicit "
+                "checkpoint migration or flat-account reset"
+            )
         self._run_id = state.run_id
         if state.account_id != self._account_id:
             raise ValueError("runtime state account does not match this run")

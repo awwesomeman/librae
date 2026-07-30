@@ -122,6 +122,13 @@ the backtest executes and persists as a new run; this is a first-class
 no-cache mode, not a legacy compatibility path. Librae does not inspect Git or
 hash caller data implicitly.
 
+Live checkpoint compatibility follows the same ownership boundary but uses a
+separate `runtime_revision`. It is an opaque identity supplied by the caller's
+orchestration and is not part of `RunConfig` or `config_hash`. Live mode
+requires it, persists it in the checkpoint, and rejects a missing or different
+identity before broker reconciliation or order work. The engine does not
+inspect Git, package metadata, or container images to derive it.
+
 Backtest callers may use `librae.normalize_bars()` to explicitly map common
 DataFrame layouts into the canonical `(symbol, datetime)` UTC index. The
 helper preserves feature columns; `Backtest` itself does not infer column
@@ -457,6 +464,16 @@ account-specific fact and cannot change the lifecycle of another deployment.
 Readiness is published only after restored state, durable ownership, and
 startup broker reconciliation have completed. Normal stop is bounded and
 graceful; forced termination is an explicit operator action.
+
+These identities have deliberately separate meanings:
+
+| Identity | Meaning |
+|---|---|
+| `config_hash` | Resolved engine configuration; excludes orchestration and source revision |
+| `runtime_revision` | Caller-owned code/image identity accepted by one live checkpoint |
+| Image digest or image ID | Deployment artifact identity; the reference Docker flow passes the selected image ID as `runtime_revision` |
+| `deployment_id` | Stable external process slot across restarts and revisions |
+| `run_id` | Engine run identity restored from the accepted checkpoint |
 
 Within an account the engine is portfolio-level. `on_bar()` can return
 `OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends the
@@ -928,10 +945,11 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance lifecycle, funding
-watermarks, and active order queue. Runtime-state schema v15 persists scalar
-account state together with exact/rolling contract identity nested in active
-`OrderRequest` values. Only the current v15 checkpoint is accepted; every older
-schema requires an explicit external migration or removal.
+watermarks, and active order queue. Runtime-state schema v16 persists scalar
+account state, the caller-owned `runtime_revision`, and exact/rolling contract
+identity nested in active `OrderRequest` values. Only the current v16
+checkpoint is accepted; every older schema requires an explicit external
+migration or removal.
 `_STATE_SCHEMA_VERSION` is the single code-level version constant and must be
 bumped whenever the checkpoint or any persisted nested dataclass changes
 shape; it is not a business/domain version.
@@ -941,7 +959,13 @@ Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
 retried, and local order age survives restart. Analytics callbacks remain
 projections; they are not broker fill truth. The checkpoint key is
-`mode:config_hash`. Live mode first holds a PostgreSQL session advisory lock
+`mode:config_hash`; `runtime_revision` deliberately does not change that key.
+An existing live checkpoint with a missing or different revision is rejected
+without conversion, discard, or overwrite. Selecting its matching old
+revision is therefore a valid rollback; adopting a new revision requires an
+explicit checkpoint migration or a flat-account reset. This compatibility
+check happens during state restoration, before broker reconciliation, order
+lookup, or submission. Live mode first holds a PostgreSQL session advisory lock
 for `live-account:<account_id>`, then one for the checkpoint key, for the
 process lifetime. The account lease prevents a different strategy or
 configuration from controlling the same declared account; the checkpoint
@@ -1286,6 +1310,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
 | `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`, plus mandatory live reconciliation `get_position(PositionRequest)`; all order results follow the cumulative execution-report contract above |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
+| `runtime_revision` | caller-owned opaque code/image identity; required in live mode and checked against restored state before broker access |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 | `status_interval_periods` | optional positive polling-period count for status notifications; scheduling is independent of notifier transport configuration |
 

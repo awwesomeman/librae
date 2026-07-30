@@ -47,7 +47,25 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 15
+_STATE_SCHEMA_VERSION = 16
+
+
+def normalize_runtime_revision(
+    runtime_revision: str | None,
+    *,
+    required: bool = False,
+) -> str | None:
+    """Normalize one caller-owned opaque runtime identity."""
+    if runtime_revision is None:
+        if required:
+            raise ValueError("live mode requires a non-empty runtime_revision")
+        return None
+    if not isinstance(runtime_revision, str):
+        raise TypeError("runtime_revision must be a string or None")
+    normalized = runtime_revision.strip()
+    if not normalized:
+        raise ValueError("runtime_revision must be a non-empty string or None")
+    return normalized
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -210,6 +228,7 @@ class LiveRuntimeState:
     mode: LiveMode
     account_id: str
     cash: float
+    runtime_revision: str | None = None
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
@@ -231,6 +250,10 @@ class LiveRuntimeState:
     def __post_init__(self) -> None:
         if not isinstance(self.account_id, str) or not self.account_id:
             raise ValueError("live runtime state requires a non-empty account_id")
+        self.runtime_revision = normalize_runtime_revision(
+            self.runtime_revision,
+            required=self.mode == "live",
+        )
         if any(not isfinite(value) for value in (self.cash, self.equity_peak, self.prev_equity)):
             raise ValueError("live runtime account values must be finite")
 
@@ -247,6 +270,7 @@ class LiveRuntimeState:
             "config_hash": self.config_hash,
             "mode": self.mode,
             "account_id": self.account_id,
+            "runtime_revision": self.runtime_revision,
             "cash": self.cash,
             "positions": positions,
             "last_prices": self.last_prices,
@@ -290,6 +314,7 @@ class LiveRuntimeState:
             config_hash=str(raw["config_hash"]),
             mode=raw["mode"],
             account_id=str(raw["account_id"]),
+            runtime_revision=raw["runtime_revision"],
             cash=float(raw["cash"]),
             positions=positions,
             last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},

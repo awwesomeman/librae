@@ -41,6 +41,7 @@ from librae.core.run_config import (
     RunConfig,
     RuntimePolicy,
 )
+from librae.live.state import normalize_runtime_revision
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -58,6 +59,7 @@ class RunOptions:
     dry_run: bool = False
     replace_existing: bool = False
     backtest_revision: str | None = None
+    runtime_revision: str | None = None
     telegram_config: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
@@ -70,6 +72,11 @@ class RunOptions:
             self,
             "backtest_revision",
             revision,
+        )
+        object.__setattr__(
+            self,
+            "runtime_revision",
+            normalize_runtime_revision(self.runtime_revision),
         )
 
 
@@ -111,6 +118,11 @@ def base_parser(description: str) -> argparse.ArgumentParser:
         "--backtest-revision",
         default=None,
         help="caller-owned strategy-code and input-data revision used for backtest caching",
+    )
+    p.add_argument(
+        "--runtime-revision",
+        default=None,
+        help="caller-owned runtime identity required for live checkpoint compatibility",
     )
     p.add_argument(
         "--force",
@@ -420,8 +432,11 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         dry_run=dry_run,
         replace_existing=args.force,
         backtest_revision=args.backtest_revision,
+        runtime_revision=args.runtime_revision,
         telegram_config=getattr(args, "telegram", None),
     )
+    if config.mode == "live" and options.runtime_revision is None:
+        raise ValueError("--runtime-revision is required for live mode")
     return config, options
 
 
@@ -555,6 +570,7 @@ def run_realtime_generic(
         config=config,
         database_enabled=options.database_enabled,
         telegram_config=None if options.dry_run else options.telegram_config,
+        runtime_revision=options.runtime_revision,
     )
     trader.run()
 
@@ -614,6 +630,7 @@ def log_run_summary(config: RunConfig, options: RunOptions) -> None:
         f"  dry_run:     {options.dry_run}",
         f"  replace_existing: {options.replace_existing}",
         f"  backtest_revision: {options.backtest_revision}",
+        f"  runtime_revision: {options.runtime_revision}",
         f"  runtime:     {config.runtime}",
         f"  telegram:    {masked_telegram}",
         "=" * 60,

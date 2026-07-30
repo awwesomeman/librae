@@ -161,10 +161,28 @@ def test_factory_reuses_external_adapter_for_live_orders() -> None:
         database_enabled=False,
         adapter_factories={"vendor_plugin": factory},
         state_store=MemoryLiveStateStore(),
+        runtime_revision="test-runtime",
     )
 
     factory.assert_called_once_with(trading=True)
     assert trader._executor.get_order_adapter("BTCUSDT") is adapter
+
+
+def test_factory_rejects_missing_live_revision_before_building_adapters() -> None:
+    config = make_test_cfg(mode="live")
+
+    with (
+        patch("librae.orchestration.live._build_adapter") as build_adapter,
+        pytest.raises(ValueError, match="runtime_revision"),
+    ):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            state_store=MemoryLiveStateStore(),
+        )
+
+    build_adapter.assert_not_called()
 
 
 def test_factory_accepts_injected_notifier_and_state_store() -> None:
