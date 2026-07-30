@@ -22,7 +22,7 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
     dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
     dockerignore = (DEPLOY / "Dockerfile.dockerignore").read_text(encoding="utf-8")
 
-    assert '".[db,crypto-live,tw-live,us-live]"' in dockerfile
+    assert '".[calendars,cli,db,crypto-live,telegram,tw-live,us-live]"' in dockerfile
     assert "COPY orchestration_helpers.py" not in dockerfile
     assert "**/.env.*" in dockerignore
     assert "**/.secrets" in dockerignore
