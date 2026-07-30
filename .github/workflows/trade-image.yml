@@ -1,0 +1,69 @@
+name: trade-image
+
+on:
+  push:
+    paths:
+      - "deploy/**"
+      - "librae/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/trade-image.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "librae/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/trade-image.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare strategy fixture
+        run: |
+          mkdir -p ../strategies/smoke
+          touch ../strategies/__init__.py ../strategies/smoke/__init__.py
+          printf '%s\n' 'print("strategy fixture ready")' > ../strategies/smoke/run.py
+
+      - name: Build clean trade image
+        id: image
+        run: |
+          revision="$(git rev-parse --verify HEAD)"
+          version="0+g${revision:0:12}"
+          docker build \
+            --build-arg LIBRAE_VERSION="${version}" \
+            --build-arg LIBRAE_REVISION="${revision}" \
+            --tag librae-trade:ci \
+            --file deploy/Dockerfile \
+            ..
+          echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify package and image identity
+        env:
+          EXPECTED_REVISION: ${{ steps.image.outputs.revision }}
+          EXPECTED_VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          actual_revision="$(
+            docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              librae-trade:ci
+          )"
+          test "${actual_revision}" = "${EXPECTED_REVISION}"
+          docker run --rm \
+            --env EXPECTED_VERSION="${EXPECTED_VERSION}" \
+            librae-trade:ci \
+            python -c \
+            'import importlib.metadata as m, os; import librae; assert m.version("librae") == os.environ["EXPECTED_VERSION"]'
+          docker run --rm librae-trade:ci python -m strategies.smoke.run

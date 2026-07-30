@@ -37,14 +37,21 @@ if [[ -f "${LIBRAE_ROOT}/.env" ]]; then
 fi
 
 IMAGE="${TRADE_IMAGE:?Set TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade}"
+LIBRAE_REVISION="$(git -C "${LIBRAE_ROOT}" rev-parse --verify HEAD)"
+LIBRAE_VERSION="0+g${LIBRAE_REVISION:0:12}"
+if [[ -n "$(git -C "${LIBRAE_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+    LIBRAE_VERSION="${LIBRAE_VERSION}.dirty"
+fi
 
-echo "Building + pushing ${IMAGE}:latest (linux/amd64 + linux/arm64)..."
+echo "Building + pushing ${IMAGE}:latest (librae=${LIBRAE_VERSION}, linux/amd64 + linux/arm64)..."
 # Multi-arch manifest under one tag: cloud VMs are almost always x86_64,
 # but this same image is also pulled straight from a dev machine (e.g.
 # Apple Silicon Macs) to run trade.sh locally against a sandbox. docker
 # pull/run auto-selects the layer matching the puller's own host arch --
 # no per-machine detection logic needed on our side, just publish both.
 docker buildx build --platform linux/amd64,linux/arm64 \
+    --build-arg LIBRAE_VERSION="${LIBRAE_VERSION}" \
+    --build-arg LIBRAE_REVISION="${LIBRAE_REVISION}" \
     -t "${IMAGE}:latest" -f "${SCRIPT_DIR}/Dockerfile" --push "${BUILD_CONTEXT}"
 
 echo "Done. On the VM: cd deploy && ./trade.sh start <strategy> [sim|live] [poll_seconds]"

@@ -85,8 +85,17 @@ cmd_start() {
             echo "Missing sibling strategy repository: ${build_context}/strategies" >&2
             exit 1
         fi
-        echo "Building trade image locally..."
-        docker build -q -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${build_context}" >/dev/null
+        local librae_revision librae_version
+        librae_revision="$(git -C "${PROJECT_ROOT}" rev-parse --verify HEAD)"
+        librae_version="0+g${librae_revision:0:12}"
+        if [[ -n "$(git -C "${PROJECT_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+            librae_version="${librae_version}.dirty"
+        fi
+        echo "Building trade image locally (librae=${librae_version})..."
+        docker build -q \
+            --build-arg LIBRAE_VERSION="${librae_version}" \
+            --build-arg LIBRAE_REVISION="${librae_revision}" \
+            -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${build_context}" >/dev/null
     fi
 
     if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then

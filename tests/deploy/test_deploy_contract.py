@@ -24,8 +24,37 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
 
     assert '".[calendars,cli,db,crypto-live,telegram,tw-live,us-live]"' in dockerfile
     assert "COPY orchestration_helpers.py" not in dockerfile
+    assert "**/.git" in dockerignore
     assert "**/.env.*" in dockerignore
     assert "**/.secrets" in dockerignore
+
+
+def test_trade_image_build_receives_explicit_source_identity() -> None:
+    dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "ARG LIBRAE_VERSION" in dockerfile
+    assert "ARG LIBRAE_REVISION" in dockerfile
+    assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIBRAE=" in dockerfile
+    assert 'org.opencontainers.image.version="${LIBRAE_VERSION}"' in dockerfile
+    assert 'org.opencontainers.image.revision="${LIBRAE_REVISION}"' in dockerfile
+
+    for script_name in ("build_push.sh", "trade.sh"):
+        script = (DEPLOY / script_name).read_text(encoding="utf-8")
+        assert '--build-arg LIBRAE_VERSION="' in script
+        assert '--build-arg LIBRAE_REVISION="' in script
+        assert "git -C " in script
+        assert "rev-parse --verify HEAD" in script
+
+
+def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
+    workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
+
+    assert workflow.count('- "deploy/**"') == 2
+    assert "docker build" in workflow
+    assert "docker image inspect" in workflow
+    assert "docker run --rm" in workflow
+    assert "EXPECTED_VERSION" in workflow
+    assert "strategies/smoke/run.py" in workflow
 
 
 def test_remote_schema_path_matches_compose_source() -> None:
