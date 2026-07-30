@@ -25,6 +25,15 @@ Third-party packages should import engine-facing contracts from
 repository implementations. Construct `LiveTrader` directly when injecting
 different adapters, callbacks, notifier, or durable state.
 
+Integration registration is deliberately explicit. Librae does not scan
+installed modules, namespace packages, or entry points, so installing an
+unused provider cannot execute its code or break the base engine. The generic
+repository-level import paths in the component map are the current pre-1.0
+paths, not compatibility aliases. The accepted packaging direction is to move
+them under the regular `librae.*` package in one breaking change before a
+public PyPI release; see
+`docs/decisions/2026-07-30-integration-discovery-and-packaging.md`.
+
 ## TimescaleDB
 
 Install the database extra when using the reference writer or live state store:

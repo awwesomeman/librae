@@ -76,6 +76,23 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md`
 describe the historical decision; this document remains the current source of
 truth.
 
+### Integration registration and package ownership
+
+Automatic plugin discovery is not a supported extension boundary. Installing
+an integration does not import or register it: caller-owned orchestration
+explicitly imports the selected package and passes a factory, callback,
+notifier, or state store. An unused integration therefore cannot break
+`import librae`, and a selected integration's import or construction failure
+stays at the composition boundary.
+
+Static integration contracts live in `librae.integrations`; offline bar,
+order-adapter, and execution-report checks live in `librae.testing`. The
+reference implementations currently remain in the repository-level
+`brokers`, `db`, `notifications`, `orchestration`, and `app` packages. Those
+generic import paths are not frozen before 1.0. The accepted namespace
+direction and migration constraints are recorded in
+`docs/decisions/2026-07-30-integration-discovery-and-packaging.md`.
+
 ## Data acquisition and ownership boundary
 
 | Mode | Supplied by | Librae does | Librae does not |
