@@ -352,13 +352,23 @@ cmd_start() {
             -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}" >/dev/null
     fi
 
-    local selected_revision
+    local selected_revision runtime_revision
     selected_revision="$(
         docker image inspect \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
             "${image}"
     )"
+    runtime_revision="$(
+        docker image inspect \
+            --format '{{.Id}}' \
+            "${image}"
+    )"
+    if [[ -z "${runtime_revision}" ]]; then
+        echo "Cannot resolve runtime revision from selected image: ${image}" >&2
+        exit 1
+    fi
     echo "Selected trade image: ${image}"
+    echo "Runtime revision: ${runtime_revision}"
     if [[ -n "${selected_revision}" && "${selected_revision}" != "<no value>" ]]; then
         echo "Librae revision: ${selected_revision}"
     fi
@@ -490,6 +500,11 @@ finally:
         docker rm "${container}" >/dev/null
     fi
 
+    local runtime_revision_args=()
+    if [[ "${mode}" == "live" ]]; then
+        runtime_revision_args+=(--runtime-revision "${runtime_revision}")
+    fi
+
     echo "Starting ${container}: account=${account_id}, currency=${currency}, strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
 
     docker run -d \
@@ -502,6 +517,7 @@ finally:
         --label "io.librae.currency=${currency}" \
         --label "io.librae.strategy=${strategy}" \
         --label "io.librae.mode=${mode}" \
+        --label "io.librae.runtime_revision=${runtime_revision}" \
         "${credential_args[@]}" \
         "${env_args[@]}" \
         "${config_mount_args[@]}" \
@@ -511,6 +527,7 @@ finally:
         python -m "strategies.${strategy}.run" \
         --mode "${mode}" \
         --poll-seconds "${poll_seconds}" \
+        "${runtime_revision_args[@]}" \
         "${runner_config_args[@]}"
 
     wait_until_ready "${container}" ""

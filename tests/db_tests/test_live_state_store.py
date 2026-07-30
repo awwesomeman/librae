@@ -17,6 +17,7 @@ def _state() -> LiveRuntimeState:
         config_hash="abc",
         mode="live",
         account_id="default",
+        runtime_revision="revision-a",
         cash=1_000.0,
         equity_peak=1_000.0,
         prev_equity=1_000.0,

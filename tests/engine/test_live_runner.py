@@ -29,7 +29,7 @@ from librae.core.strategy import (
 )
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
-from librae.live.state import MemoryLiveStateStore
+from librae.live.state import MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import build_live_trader
 from tests.conftest import make_test_cfg
 
@@ -452,6 +452,8 @@ class TestLiveTrader:
         test_config = config or _test_cfg()
         kwargs.setdefault("state_store", MemoryLiveStateStore())
         kwargs.setdefault("clock", lambda: TEST_CLOCK_NOW)
+        if test_config.mode == "live":
+            kwargs.setdefault("runtime_revision", "test-runtime")
         runner = LiveTrader(
             strategy or _HoldStrategy(),
             feature_fn or _simple_feature_fn,
@@ -571,6 +573,7 @@ class TestLiveTrader:
                 adapter=lambda *args, **kwargs: _make_ohlcv_df(),
                 order_adapter=_mock_order_adapter(),
                 cost_model=_zero_cost_model(),
+                runtime_revision="test-runtime",
             )
 
     def test_same_bar_not_processed_twice(self):
@@ -1791,6 +1794,7 @@ class TestLiveExecutionLifecycle:
         *,
         state_store: MemoryLiveStateStore | None = None,
         config: RunConfig | None = None,
+        runtime_revision: str = "test-runtime",
         clock=None,
         on_ready=None,
     ) -> LiveTrader:
@@ -1807,9 +1811,90 @@ class TestLiveExecutionLifecycle:
             on_heartbeat=None,
             on_signal_outcome=None,
             state_store=state_store or MemoryLiveStateStore(),
+            runtime_revision=runtime_revision,
             clock=clock or (lambda: TEST_CLOCK_NOW),
             on_ready=on_ready,
         )
+
+    def test_live_runtime_revision_is_required_before_checkpoint_or_broker_access(self):
+        adapter = _mock_order_adapter()
+        store = MagicMock()
+
+        with pytest.raises(ValueError, match="runtime_revision"):
+            LiveTrader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=_test_cfg(mode="live"),
+                adapter=lambda *args, **kwargs: _make_ohlcv_df(),
+                order_adapter=adapter,
+                cost_model=_zero_cost_model(),
+                state_store=store,
+            )
+
+        store.load.assert_not_called()
+        adapter.get_position.assert_not_called()
+        adapter.get_balance.assert_not_called()
+        adapter.find_order.assert_not_called()
+        adapter.list_open_orders.assert_not_called()
+        adapter.place_order.assert_not_called()
+
+    def test_runtime_revision_mismatch_preserves_checkpoint_and_old_revision_rolls_back(self):
+        store = MemoryLiveStateStore()
+        first = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+            runtime_revision="revision-a",
+        )
+        first._active_orders = [
+            TrackedOrder(
+                request=OrderRequest(
+                    client_order_id="pending-1",
+                    symbol="BTCUSDT",
+                    side="buy",
+                    quantity=1.0,
+                    order_type="market",
+                    submitted_at=TEST_CLOCK_NOW,
+                ),
+                placement_attempted=True,
+                placement_attempted_at=TEST_CLOCK_NOW,
+                order_id="broker-1",
+                status="submitted",
+            )
+        ]
+        first._persist_state()
+        checkpoint_before = store.load(first._state_key)
+        assert checkpoint_before is not None
+
+        new_adapter = _mock_order_adapter()
+        with pytest.raises(RuntimeError, match=r"checkpoint='revision-a'.*requested='revision-b'"):
+            self._make_trader(
+                _HoldStrategy(),
+                new_adapter,
+                state_store=store,
+                runtime_revision="revision-b",
+            )
+
+        checkpoint_after = store.load(first._state_key)
+        assert checkpoint_after == checkpoint_before
+        assert first._state_key.endswith(first._config.config_hash)
+        new_adapter.get_position.assert_not_called()
+        new_adapter.get_balance.assert_not_called()
+        new_adapter.find_order.assert_not_called()
+        new_adapter.list_open_orders.assert_not_called()
+        new_adapter.place_order.assert_not_called()
+
+        rollback = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+            runtime_revision="revision-a",
+        )
+
+        assert rollback.run_id == first.run_id
+        assert rollback._active_orders == first._active_orders
+        assert rollback._snapshot_state().runtime_revision == "revision-a"
+        assert store.load(first._state_key) == checkpoint_before
 
     def test_partial_fill_commits_only_confirmed_quantity_and_stays_open(self):
         adapter = _mock_order_adapter()
@@ -2251,6 +2336,7 @@ class TestLiveExecutionLifecycle:
             on_heartbeat=None,
             on_signal_outcome=None,
             state_store=MemoryLiveStateStore(),
+            runtime_revision="test-runtime",
             clock=lambda: TEST_CLOCK_NOW,
         )
 
@@ -2877,6 +2963,7 @@ class TestCryptoLiveFactory:
                 _HoldStrategy(),
                 _simple_feature_fn,
                 config=_test_cfg(mode="live", broker="binance"),
+                runtime_revision="test-runtime",
             )
         return trader, mock_cls
 
@@ -2954,6 +3041,7 @@ class TestIBKRLiveFactory:
                     data_source="ibkr",
                     broker="ibkr",
                 ),
+                runtime_revision="test-runtime",
             )
 
         mock_cls.assert_called_once_with(trading_enabled=True)
@@ -2988,6 +3076,7 @@ class TestShioajiLiveFactory:
                 _HoldStrategy(),
                 _simple_feature_fn,
                 config=self._shioaji_cfg(mode="live"),
+                runtime_revision="test-runtime",
             )
 
         # Same authenticated session used for fetching and for order placement.
@@ -3028,6 +3117,7 @@ class TestShioajiLiveFactory:
                 _AlwaysBuyStrategy(),
                 _simple_feature_fn,
                 config=self._shioaji_cfg(mode="live"),
+                runtime_revision="test-runtime",
             )
             trader._clock = lambda: TEST_CLOCK_NOW
             trader._sleep = lambda _seconds: None  # no real delays in unit tests

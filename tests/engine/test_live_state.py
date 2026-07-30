@@ -60,6 +60,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         config_hash="abc",
         mode="live",
         account_id="default",
+        runtime_revision="revision-a",
         cash=800.0,
         positions={"BTC/USDT": _position()},
         last_prices={"BTC/USDT": 101.0},
@@ -82,6 +83,20 @@ def test_runtime_state_round_trip_preserves_restart_fields():
     restored = LiveRuntimeState.from_dict(state.to_dict())
 
     assert restored == state
+
+
+@pytest.mark.parametrize("runtime_revision", [None, "", "   "])
+def test_live_runtime_state_requires_non_empty_runtime_revision(runtime_revision):
+    with pytest.raises(ValueError, match="runtime_revision"):
+        LiveRuntimeState(
+            state_key="live:abc",
+            run_id="run-1",
+            config_hash="abc",
+            mode="live",
+            account_id="default",
+            runtime_revision=runtime_revision,
+            cash=1_000.0,
+        )
 
 
 def test_exact_future_order_identity_survives_checkpoint_round_trip():
@@ -231,6 +246,22 @@ def test_runtime_state_rejects_missing_required_fact_instead_of_defaulting():
         LiveRuntimeState.from_dict(raw)
 
 
+def test_live_runtime_state_rejects_missing_revision_in_current_schema():
+    raw = LiveRuntimeState(
+        state_key="live:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="live",
+        account_id="default",
+        runtime_revision="revision-a",
+        cash=1_000.0,
+    ).to_dict()
+    del raw["runtime_revision"]
+
+    with pytest.raises(KeyError, match="runtime_revision"):
+        LiveRuntimeState.from_dict(raw)
+
+
 def test_runtime_state_rejects_attempted_order_without_attempt_time():
     state = LiveRuntimeState(
         state_key="live:abc",
@@ -238,6 +269,7 @@ def test_runtime_state_rejects_attempted_order_without_attempt_time():
         config_hash="abc",
         mode="live",
         account_id="default",
+        runtime_revision="revision-a",
         cash=1_000.0,
         active_orders=[_order()],
         equity_peak=1_000.0,

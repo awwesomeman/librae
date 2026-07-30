@@ -86,7 +86,8 @@ reconciliation_interval_seconds: 300
 ```
 
 ```bash
-python -m my_strategy.run --mode live --poll-seconds 60
+python -m my_strategy.run --mode live --poll-seconds 60 \
+    --runtime-revision strategy-package-sha256-or-clean-source-revision
 ```
 
 Closed-market suppression is not built into the runtime today. Do not stop the

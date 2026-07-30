@@ -137,7 +137,11 @@ def _run_trade_script(
         """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "${DOCKER_LOG}"
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
-    printf '%s\\n' "<no value>"
+    if [[ "$*" == *"{{.Id}}"* ]]; then
+        printf '%s\\n' "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    else
+        printf '%s\\n' "<no value>"
+    fi
 elif [[ "$1" == "ps" && "${2:-}" == "-a" ]]; then
     printf '%s\\n' "${FAKE_DOCKER_ALL_CONTAINERS}"
 elif [[ "$1" == "ps" && "$*" == *"name=quant_live_"* ]]; then
@@ -339,6 +343,8 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert "--label io.librae.currency=USD" in final_run
     assert "--label io.librae.strategy=momentum" in final_run
     assert "--label io.librae.mode=live" in final_run
+    assert "--label io.librae.runtime_revision=sha256:" in final_run
+    assert "--runtime-revision sha256:" in final_run
     assert "--config /app/deployment/config.yaml" in final_run
     assert "--add-host host.docker.internal:host-gateway" in final_run
     assert ".secrets:/app/.secrets:ro" not in final_run

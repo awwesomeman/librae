@@ -166,6 +166,7 @@ trader = build_live_trader(
     },
     notifier=my_notifier,
     state_store=my_state_store,
+    runtime_revision=my_runtime_revision,
 )
 ```
 
@@ -262,11 +263,15 @@ script publishes a Librae-revision candidate tag and prints
 target's operator-managed environment before starting a registry deployment.
 `trade.sh` rejects mutable tags and uses the same digest-qualified reference
 for pull, database preflight, and the running container. It does not edit the
-environment automatically.
+environment automatically. After selecting either a registry or locally built
+image, it reads that image's immutable Docker image ID, records it as a
+container label, and passes it to the runner as `--runtime-revision`.
 
 Keep the previous digest when promoting a new image. Rollback selects that
-previous `TRADE_IMAGE_REF`; it does not make an incompatible live checkpoint
-safe. Apply the reconciliation procedure below before changing revisions.
+previous `TRADE_IMAGE_REF`; because the checkpoint retains the accepted image
+ID, selecting the matching old image can restore it without rewriting state.
+A different image remains blocked until the operator completes the migration
+or flat-account reset procedure below.
 
 ### Reference VM flow
 
@@ -371,13 +376,24 @@ explicit `reset_halt()` after reconciliation.
 
 ### Development checkpoint compatibility
 
-Checkpoints written by untagged development revisions are not guaranteed to
-load in another revision. The runtime accepts only its current checkpoint
-schema and does not convert older payloads implicitly. A shadow-simulation
-checkpoint may be discarded and recreated.
+The relevant identities are intentionally not interchangeable:
 
-For live deployments, pin a full commit SHA and treat a revision change as an
-operational migration:
+| Identity | Purpose |
+|---|---|
+| `config_hash` | Resolved engine configuration |
+| `runtime_revision` | Caller-owned code or image identity stored in a live checkpoint |
+| Image digest or image ID | Selected deployment artifact; `trade.sh` uses the actual image ID as `runtime_revision` |
+| `deployment_id` | Stable container/process slot |
+| `run_id` | Engine run restored from the checkpoint |
+
+The live runtime requires a non-empty `runtime_revision`. It accepts only the
+current checkpoint schema and an exact revision match; it does not convert,
+discard, adopt, or overwrite incompatible state. The compatibility check runs
+before broker reconciliation, order lookup, or submission. A
+shadow-simulation checkpoint may be discarded and recreated.
+
+For live deployments, treat a runtime revision change as an operational
+migration:
 
 1. Stop the existing runner.
 2. Reconcile broker positions, open orders, and balance against the stored
@@ -387,7 +403,24 @@ operational migration:
 4. Start the new revision with fresh state only after the broker account is
    confirmed flat, and retain the old checkpoint for audit.
 
+A pre-v16 checkpoint requires explicit external migration or removal before
+this version can run. Re-running database initialization does not transform a
+stored JSON checkpoint.
+
 A configuration-shape change may also produce a different `config_hash` and
 therefore a different `state_key`, making the new runner appear to have no
 matching checkpoint. Startup reconciliation remains a safety check, not a
 replacement for the operator procedure above.
+
+For a direct non-container launch, the caller must provide an equivalent
+immutable identity:
+
+```bash
+python -m my_strategy.run --mode live --poll-seconds 60 \
+    --runtime-revision strategy-package-sha256-or-clean-source-revision
+```
+
+A clean full commit SHA is acceptable when it identifies all strategy and
+Librae code used by the process. A dirty checkout needs a content or package
+digest instead. Librae deliberately does not inspect the checkout or choose
+this identity.

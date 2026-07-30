@@ -19,6 +19,7 @@ from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
 from librae.live.engine import LiveTrader
 from librae.live.interfaces import Notifier
+from librae.live.state import normalize_runtime_revision
 
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
@@ -336,9 +337,14 @@ def build_live_trader(
     notifier: Notifier | None = None,
     status_interval_periods: int | None = None,
     state_store: LiveStateStore | None = None,
+    runtime_revision: str | None = None,
     on_ready: Callable[[str], None] | None = None,
 ) -> LiveTrader:
     """Build a sim/live deployment from built-in or caller-registered factories."""
+    resolved_runtime_revision = normalize_runtime_revision(
+        runtime_revision,
+        required=config.mode == "live",
+    )
     factories = dict(adapter_factories or {})
     if notifier is not None and telegram_config:
         raise ValueError("inject notifier or configure Telegram, not both")
@@ -432,6 +438,7 @@ def build_live_trader(
         notifier=resolved_notifier,
         status_interval_periods=resolved_status_interval,
         state_store=resolved_state_store,
+        runtime_revision=resolved_runtime_revision,
         on_bar=callbacks.on_bar if callbacks else None,
         on_order_event=callbacks.on_order_event if callbacks else None,
         on_ohlcv=callbacks.on_ohlcv if callbacks else None,
