@@ -213,8 +213,10 @@ not engine APIs. They show one Docker/Grafana/VM arrangement and can be used,
 replaced, or ignored. Read `SECURITY.md` before
 deploying them to a host with a public IP.
 
-The trade image intentionally combines this engine repository with a separate
-`strategies/` repository in the same parent workspace:
+The reference builder combines this engine checkout with caller-owned strategy
+source. `TRADE_STRATEGY_PATH` selects that source directory; relative paths
+resolve from the Librae checkout. Its default, `../strategies`, gives this
+convenient layout but is not required:
 
 ```text
 workspace/
@@ -222,12 +224,61 @@ workspace/
 └── strategies/
 ```
 
+The selected directory is mapped to the container's `strategies` import
+package. Each deployable name has one explicit entry contract:
+
+```text
+<TRADE_STRATEGY_PATH>/
+└── my_strategy/
+    ├── __init__.py
+    ├── run.py
+    └── config.yaml
+```
+
+`trade.sh start my_strategy` runs `python -m strategies.my_strategy.run`.
+Strategy helpers may live beside those required files. The source directory
+does not have to use Git; it should have its own `.dockerignore` when it
+contains files that must not enter the image.
+
 Run `deploy/build_push.sh` from `librae/`; it fails before invoking Docker when
-that sibling repository is absent. The shared image installs the `calendars`,
-`cli`, `db`, `crypto-live`, `telegram`, `tw-live`, and `us-live` extras.
+the selected source directory is absent. The shared image installs the
+`calendars`, `cli`, `db`, `crypto-live`, `telegram`, `tw-live`, and `us-live`
+extras.
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
 application repository; it syncs the compose file, `librae/db/timescale_init.sql`,
 Grafana provisioning, and `.env`.
+
+This combined-source builder is optional. A caller-owned image may instead
+install a pinned Librae distribution and copy its own strategy package, as
+long as it provides the `strategies.<name>.run` module invoked by `trade.sh`.
+The final image digest, rather than the package installation source, is the
+deployment identity.
+
+`TRADE_IMAGE` names the registry repository used only by `build_push.sh`. The
+script publishes a Librae-revision candidate tag and prints
+`TRADE_IMAGE_REF=<repository>@sha256:<digest>`. Copy that exact value into the
+target's operator-managed environment before starting a registry deployment.
+`trade.sh` rejects mutable tags and uses the same digest-qualified reference
+for pull, database preflight, and the running container. It does not edit the
+environment automatically.
+
+Keep the previous digest when promoting a new image. Rollback selects that
+previous `TRADE_IMAGE_REF`; it does not make an incompatible live checkpoint
+safe. Apply the reconciliation procedure below before changing revisions.
+
+### Reference VM flow
+
+1. On the build machine, set `TRADE_STRATEGY_PATH` and `TRADE_IMAGE` in the
+   Librae checkout's `.env`.
+2. Run `deploy/build_push.sh` and copy its printed `TRADE_IMAGE_REF` into the
+   `.env` that `cloud_deploy.sh` will sync.
+3. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
+   start TimescaleDB and Grafana. It does not start a strategy.
+4. Create `.env.secrets` directly on the VM; deployment scripts never sync
+   broker credentials.
+5. On the VM, run
+   `./deploy/trade.sh start my_strategy sim 60`. Use `live` only after broker
+   and checkpoint procedures are satisfied.
 
 `LiveTrader.run()` is a blocking polling loop. A deployment should run it
 under a supervisor appropriate to the environment and must provide durable

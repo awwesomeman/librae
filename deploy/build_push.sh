@@ -1,33 +1,18 @@
 #!/usr/bin/env bash
-# Build the trade image locally and push it to a registry, so the VM can
-# `docker pull` it in trade.sh instead of building from source — the VM
-# never needs either repo. Run this locally whenever strategy/librae code
-# changes. Same image serves both sim and live mode (trade.sh start picks
-# the mode).
+# Build the trade image locally and push an immutable source-revision tag to a
+# registry. The script prints the digest-qualified TRADE_IMAGE_REF selected by
+# trade.sh; it never updates deployment configuration automatically.
 #
-# Build context is the workspace root (one level above librae/, where
-# strategies/ lives as a sibling) — see Dockerfile's COPY layout.
+# TRADE_STRATEGY_PATH selects the caller-owned source directory. Relative
+# paths resolve from the Librae checkout; the default is ../strategies.
 #
 # Usage: ./deploy/build_push.sh
-# Requires TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade
+# Requires TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade.
 # One-time: docker login ghcr.io -u <github-user> (use a PAT with write:packages)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIBRAE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# librae and strategies/ are separate git repos as of 2026-07-25 — the image
-# needs both, so the build context is the workspace root one level above
-# librae/ (where strategies/ lives as a sibling). .env stays in librae/ —
-# this script sources it below, and trade.sh/docker-compose do the same at
-# container start; librae's own code never reads .env off disk itself.
-BUILD_CONTEXT="$(cd "${LIBRAE_ROOT}/.." && pwd)"
-STRATEGIES_DIR="${BUILD_CONTEXT}/strategies"
-
-if [[ ! -d "${STRATEGIES_DIR}" ]]; then
-    echo "Missing sibling strategy repository: ${STRATEGIES_DIR}" >&2
-    echo "Place strategies/ next to librae/ before building the trade image." >&2
-    exit 1
-fi
 
 if [[ -f "${LIBRAE_ROOT}/.env" ]]; then
     set -a
@@ -36,22 +21,60 @@ if [[ -f "${LIBRAE_ROOT}/.env" ]]; then
     set +a
 fi
 
+STRATEGY_SOURCE="${TRADE_STRATEGY_PATH:-../strategies}"
+if [[ "${STRATEGY_SOURCE}" != /* ]]; then
+    STRATEGY_SOURCE="${LIBRAE_ROOT}/${STRATEGY_SOURCE}"
+fi
+if [[ ! -d "${STRATEGY_SOURCE}" ]]; then
+    echo "Strategy source directory not found: ${STRATEGY_SOURCE}" >&2
+    echo "Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py." >&2
+    exit 1
+fi
+STRATEGY_SOURCE="$(cd "${STRATEGY_SOURCE}" && pwd)"
+
 IMAGE="${TRADE_IMAGE:?Set TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade}"
-LIBRAE_REVISION="$(git -C "${LIBRAE_ROOT}" rev-parse --verify HEAD)"
-LIBRAE_VERSION="0+g${LIBRAE_REVISION:0:12}"
-if [[ -n "$(git -C "${LIBRAE_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
-    LIBRAE_VERSION="${LIBRAE_VERSION}.dirty"
+if [[ "${IMAGE}" == *@* || "${IMAGE##*/}" == *:* ]]; then
+    echo "TRADE_IMAGE must be a repository without a tag or digest: ${IMAGE}" >&2
+    exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to read the Docker build metadata." >&2
+    exit 1
 fi
 
-echo "Building + pushing ${IMAGE}:latest (librae=${LIBRAE_VERSION}, linux/amd64 + linux/arm64)..."
-# Multi-arch manifest under one tag: cloud VMs are almost always x86_64,
-# but this same image is also pulled straight from a dev machine (e.g.
-# Apple Silicon Macs) to run trade.sh locally against a sandbox. docker
-# pull/run auto-selects the layer matching the puller's own host arch --
-# no per-machine detection logic needed on our side, just publish both.
+LIBRAE_REVISION="$(git -C "${LIBRAE_ROOT}" rev-parse --verify HEAD)"
+LIBRAE_VERSION="0+g${LIBRAE_REVISION:0:12}"
+SOURCE_TAG="librae-${LIBRAE_REVISION:0:12}"
+if [[ -n "$(git -C "${LIBRAE_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+    LIBRAE_VERSION="${LIBRAE_VERSION}.dirty"
+    SOURCE_TAG="${SOURCE_TAG}-dirty"
+fi
+IMAGE_TAG="${IMAGE}:${SOURCE_TAG}"
+METADATA_FILE="$(mktemp)"
+trap 'rm -f "${METADATA_FILE}"' EXIT
+
+echo "Building + pushing ${IMAGE_TAG} (linux/amd64 + linux/arm64)..."
+echo "Librae revision: ${LIBRAE_REVISION}"
+# Publish both architectures under one source-revision tag. Docker pull/run
+# later selects the matching platform from the digest-pinned manifest.
 docker buildx build --platform linux/amd64,linux/arm64 \
+    --build-context "strategy_source=${STRATEGY_SOURCE}" \
     --build-arg LIBRAE_VERSION="${LIBRAE_VERSION}" \
     --build-arg LIBRAE_REVISION="${LIBRAE_REVISION}" \
-    -t "${IMAGE}:latest" -f "${SCRIPT_DIR}/Dockerfile" --push "${BUILD_CONTEXT}"
+    --metadata-file "${METADATA_FILE}" \
+    -t "${IMAGE_TAG}" -f "${SCRIPT_DIR}/Dockerfile" --push "${LIBRAE_ROOT}"
 
-echo "Done. On the VM: cd deploy && ./trade.sh start <strategy> [sim|live] [poll_seconds]"
+DIGEST="$(
+    python3 -c \
+        'import json, sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' \
+        "${METADATA_FILE}"
+)"
+if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Build did not return a valid image digest: ${DIGEST}" >&2
+    exit 1
+fi
+
+echo "Published immutable trade image:"
+echo "TRADE_IMAGE_REF=${IMAGE}@${DIGEST}"
+echo "Set that value on the target, then run:"
+echo "  cd deploy && ./trade.sh start <strategy> [sim|live] [poll_seconds]"

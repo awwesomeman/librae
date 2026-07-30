@@ -7,7 +7,7 @@
 **/.env.*
 **/.secrets
 
-librae/tests
-librae/docs
-librae/data
-librae/logs
+tests
+docs
+data
+logs

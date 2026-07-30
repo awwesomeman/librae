@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -8,7 +9,7 @@ ENV PYTHONUNBUFFERED=1
 # so the build caller injects the source identity used by setuptools_scm.
 ARG LIBRAE_VERSION
 ARG LIBRAE_REVISION
-COPY librae/ .
+COPY . .
 RUN test -n "${LIBRAE_VERSION}" \
     && test -n "${LIBRAE_REVISION}" \
     && SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIBRAE="${LIBRAE_VERSION}" \
@@ -16,8 +17,8 @@ RUN test -n "${LIBRAE_VERSION}" \
 LABEL org.opencontainers.image.version="${LIBRAE_VERSION}" \
       org.opencontainers.image.revision="${LIBRAE_REVISION}"
 
-# Copy source. Build context is the workspace root (see build_push.sh) —
-# Strategies remain a separate sibling repository.
-COPY strategies/ strategies/
+# The caller selects this named context explicitly. Its contents become the
+# stable `strategies` import package used by trade.sh.
+COPY --from=strategy_source . strategies/
 
 # No CMD: trade.sh passes the strategy command via docker run.
