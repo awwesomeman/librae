@@ -100,8 +100,6 @@ class TestRunIdContract:
         valid_ids = [
             "sma_crossover-btcusdt-h1-20240101t0000-abcd12",
             "mean_reversion-ethusdt-m5-20260325t1200-deadbe",
-            "sma_crossover-btcusdt-20240101t0000-abcd12",
-            "sma_crossover-btcusdt-20240101t000000-abcd1234",  # old format
         ]
         for rid in valid_ids:
             assert RUN_ID_PATTERN.match(rid), f"Should match: {rid}"
@@ -112,6 +110,7 @@ class TestRunIdContract:
             "no-timestamp-here",
             "",
             "sma-btcusdt-2024-abcd1234",
+            "sma_crossover-btcusdt-20240101t000000-abcd1234",
         ]
         for rid in invalid_ids:
             assert not RUN_ID_PATTERN.match(rid), f"Should not match: {rid}"

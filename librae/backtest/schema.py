@@ -31,9 +31,7 @@ from librae.core.strategy import PositionEventType, PositionSide
 
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# WHY {4,6} and {6,8}: generator now produces %H%M (4-digit) + hex6,
-# but we accept old IDs with %H%M%S (6-digit) + hex8 still in the DB.
-RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4,6}-[a-f0-9]{6,8}$")
+RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]*-\d{8}t\d{4}-[a-f0-9]{6}$")
 
 REQUIRED_BACKTEST_TOP_LEVEL_KEYS: tuple[str, ...] = (
     "run_metadata",
@@ -275,7 +273,7 @@ class BacktestOutput:
         if not RUN_ID_PATTERN.match(self.run_metadata.run_id):
             raise ValueError(
                 f"run_metadata.run_id must match pattern "
-                f"'<strategy>-<symbol>[-<timeframe>]-<YYYYMMDDThhmm>-<hex6>', "
+                f"'<strategy>-<symbol>-<timeframe>-<YYYYMMDDThhmm>-<hex6>', "
                 f"got {self.run_metadata.run_id!r}"
             )
         if not self.run_metadata.strategy:

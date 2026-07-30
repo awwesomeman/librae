@@ -25,12 +25,14 @@ def _sanitize_slug(name: str) -> str:
     return name.lower().replace(" ", "_")
 
 
-def generate_run_id(strategy: str, symbol: str, timeframe: str | None = None) -> str:
-    """Deterministic-prefix run_id: <strategy>-<symbol>[-<timeframe>]-<ts>-<short_uuid>."""
+def generate_run_id(strategy: str, symbol: str, timeframe: str) -> str:
+    """Build ``<strategy>-<symbol>-<timeframe>-<ts>-<short_uuid>``."""
     ts = datetime.now(tz=UTC).strftime("%Y%m%dt%H%M")
     short = uuid.uuid4().hex[:6]
-    tf = f"-{_sanitize_slug(timeframe)}" if timeframe is not None else ""
-    return f"{_sanitize_slug(strategy)}-{_sanitize_slug(symbol)}{tf}-{ts}-{short}"
+    return (
+        f"{_sanitize_slug(strategy)}-{_sanitize_slug(symbol)}-"
+        f"{_sanitize_slug(timeframe)}-{ts}-{short}"
+    )
 
 
 def make_event_id(run_id: str, index: int) -> str:

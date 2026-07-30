@@ -21,7 +21,7 @@ END = datetime(2026, 3, 5, 23, 59, 0, tzinfo=UTC)
 
 def _make_run_metadata(**kwargs) -> RunMetadata:
     defaults = dict(
-        run_id="demobreakout_v1-mxfr1-20260306t120000-abcd1234",
+        run_id="demobreakout_v1-mxfr1-h1-20260306t1200-abcd12",
         strategy="DemoBreakout_v1",
         symbols=("MXFR1",),
         timeframe="H1",

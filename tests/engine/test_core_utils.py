@@ -91,12 +91,6 @@ class TestGenerateRunId:
         parts = rid.split("-")
         assert len(parts) == 5
 
-    def test_format_no_timeframe(self) -> None:
-        rid = generate_run_id("MyStrategy", "BTCUSDT")
-        assert rid.startswith("mystrategy-btcusdt-")
-        parts = rid.split("-")
-        assert len(parts) == 4
-
     def test_uniqueness(self) -> None:
         ids = {generate_run_id("s", "x", "M5") for _ in range(50)}
         assert len(ids) == 50
