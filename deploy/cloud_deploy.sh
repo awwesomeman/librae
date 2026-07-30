@@ -4,11 +4,10 @@
 # then running that same file remotely. This script does not redefine the
 # containers; it only controls how the required files reach the host.
 #
-# Deliberately only syncs .env, never .env.secrets (trading-enabled API
-# keys) — that file must be created directly on the remote host (see
-# .env.secrets.example) so a re-run of this script can never clobber a live
-# key with an empty local value, and the key never has to exist on the dev
-# machine at all.
+# Deliberately syncs only .env and the empty credential template, never account
+# credential files. Copy the template to .credentials/<account>.env directly
+# on the remote host, so a re-run cannot clobber a live key and the key never
+# has to exist on the development machine.
 #
 # Usage: ./deploy/cloud_deploy.sh <user>@<host>
 # Requires locally: rsync, ssh, curl, python3 (scripts/dev_push_dashboard.py).
@@ -45,7 +44,10 @@ ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/librae/db ${REMOTE_
 rsync -az "${SCRIPT_DIR}/" "${TARGET}:${REMOTE_DIR}/deploy/"
 rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql" "${TARGET}:${REMOTE_DIR}/librae/db/timescale_init.sql"
 rsync -az "${PROJECT_ROOT}/librae/app/grafana/provisioning/" "${TARGET}:${REMOTE_DIR}/librae/app/grafana/provisioning/"
-scp -q "${PROJECT_ROOT}/.env" "${TARGET}:${REMOTE_DIR}/.env"
+scp -q \
+    "${PROJECT_ROOT}/.env" \
+    "${PROJECT_ROOT}/.env.secrets.example" \
+    "${TARGET}:${REMOTE_DIR}/"
 
 echo "[2/4] Starting timescaledb + grafana (same docker-compose.yml as VPS-native deploy)..."
 ssh "${TARGET}" "cd ${REMOTE_DIR}/deploy && docker compose --env-file ../.env up -d timescaledb grafana"
@@ -75,6 +77,6 @@ fi
     --grafana-password "${GF_SECURITY_ADMIN_PASSWORD}"
 
 echo ""
-echo "Done. Remote host only has deploy/ + librae integration assets + .env — not the app code."
+echo "Done. Remote host only has deploy/ + librae integration assets + environment templates — not the app code."
 echo "  TimescaleDB: reachable from the host itself, or via SSH tunnel."
 echo "  Grafana: ssh -L 3000:localhost:3000 ${TARGET}   then open http://localhost:3000"

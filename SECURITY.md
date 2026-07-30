@@ -66,6 +66,8 @@ Do not expose Grafana (3000) or PostgreSQL (5432) to `0.0.0.0/0`.
 
 ## Trading credentials (a separate risk tier)
 
-Trading credentials stay in `.env.secrets`, which deployment scripts never
-sync. Disable withdrawal and transfer permissions, restrict keys by source IP,
-and use sandbox or paper endpoints for end-to-end tests.
+Trading credentials stay in account-specific `.credentials/*.env` files,
+which deployment scripts never sync. `trade.sh` passes one selected file
+directly to Docker and never sources it as shell code. Disable withdrawal and
+transfer permissions, restrict keys by source IP, and use sandbox or paper
+endpoints for end-to-end tests.

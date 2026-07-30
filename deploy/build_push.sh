@@ -77,4 +77,4 @@ fi
 echo "Published immutable trade image:"
 echo "TRADE_IMAGE_REF=${IMAGE}@${DIGEST}"
 echo "Set that value on the target, then run:"
-echo "  cd deploy && ./trade.sh start <strategy> [sim|live] [poll_seconds]"
+echo "  cd deploy && ./trade.sh start <deployment_id> <account_id> <strategy> [sim|live] [poll_seconds]"

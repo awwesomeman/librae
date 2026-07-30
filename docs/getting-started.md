@@ -90,12 +90,16 @@ When working from a clone:
 
 ```bash
 cp .env.example .env
-cp .env.secrets.example .env.secrets
+mkdir -p .credentials
+cp .env.secrets.example .credentials/ibkr-main.env
+chmod 600 .credentials/ibkr-main.env
 ```
 
-Keep real trading/signing secrets in `.env.secrets`; the deployment scripts do
-not sync that file. Placeholder values are sufficient for the test suite
-because external broker and database calls are mocked.
+Keep real trading/signing secrets in account-specific files under
+`.credentials/`; the deployment scripts do not sync that directory.
+`trade.sh` passes one explicitly selected file to Docker with `--env-file`.
+Placeholder values are sufficient for the test suite because external broker
+and database calls are mocked.
 
 If you installed the package without cloning the repository, scaffold the
 minimal template with:
