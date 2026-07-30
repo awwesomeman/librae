@@ -47,7 +47,7 @@ through explicit constructor injection.
 
 | Layer | Owns | Extension boundary |
 |---|---|---|
-| `librae/core`, `backtest`, `live` | Canonical bars, strategy decisions, accounting, execution state, risk, results | Stable Python types and small call-site protocols |
+| `librae/core`, `backtest`, `live` | Canonical bars, strategy decisions, accounting, execution state, risk, results | Documented public types and small call-site protocols |
 | Caller/strategy project | Point-in-time data preparation, features, strategy semantics, instrument and cost configuration | Prepared DataFrames, strategy classes, injected callables and adapters |
 | Reference integrations | Broker SDKs, TimescaleDB, Telegram, Grafana, CLI and deployment examples | Optional extras that may be used, replaced, or omitted |
 
@@ -62,20 +62,13 @@ data or broker shapes.
 The dependency direction is:
 
 ```
-orchestration ──→ librae
-      ├─────────→ brokers ───────┐
-      ├─────────→ db ────────────┼──→ librae public contracts
-      └─────────→ notifications ─┘
-
-librae/backtest ──→ librae/core
-librae/live     ──→ librae/core
+orchestration -> librae
+orchestration -> brokers       -> librae public contracts
+orchestration -> db            -> librae public contracts
+orchestration -> notifications -> librae public contracts
+librae/backtest -> librae/core
+librae/live     -> librae/core
 ```
-
-- `brokers/`: one flat adapter per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), exposing market/account methods plus the live order lifecycle described below.
-- `librae/core/`: shared strategy/portfolio types and pure execution functions. Deterministic bar matching serves backtest/sim; `apply_execution_fill` serves confirmed live fills.
-- `librae/backtest/engine.py`: bar-by-bar execution only; raw result models live in `librae/backtest/result.py`, while persistence records live in `librae/backtest/schema.py`.
-- `librae/live/engine.py`: the real-time polling engine for sim/live mode — sim uses deterministic bar fills; live submits through a broker adapter and applies normalized execution reports.
-- `db/timescale_writer.py` / `db/timescale_reader.py` / `db/timescale_state.py`: the sole DB access layer — upper layers use analytics helpers or the runtime store, never raw SQL; schema is defined in `db/timescale_init.sql`.
 
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md`
 describe the historical decision; this document remains the current source of
@@ -257,30 +250,13 @@ librae/
 └── config/                   configuration management
     ├── market_config.py      MarketConfig dataclass + built-in market registry (costs, tick size, margin rates)
     └── symbols.py            SymbolInfo dataclass + built-in symbol registry (symbol → market/data_source/multiplier)
-
-# Outside librae, at the same level as db/ and brokers/ — reference implementations (swappable, see "Dependency direction" below)
-notifications/                Telegram push notifications (TelegramAdapter + TelegramCredentials)
-orchestration/cli.py          shared CLI parser + config YAML merging (build_run/run_dispatch)
 ```
 
 `librae/core/trading_calendar.py` owns session labels and session-aligned
 resampling; `librae/core/liquidity.py` owns lagged completed-session ADV.
 Neither belongs in a broker adapter or strategy. `librae/config/symbols.py`
-owns each instrument's `calendar_id`.
-
-### Dependency direction
-
-```
-backtest/ ──→ core/
-live/     ──→ core/
-```
-
-`backtest/` and `live/` have no direct dependency on each other; shared
-execution logic lives in `core/`. `LiveTrader` accepts broker, persistence,
-notification, and analytics implementations only through constructor
-injection. `orchestration/live.py` owns the repository's optional default
-wiring. Simulation can run standalone; live additionally requires an explicit
-order adapter and durable state store.
+owns each instrument's `calendar_id`. Package dependencies follow
+[Product position and system boundaries](#product-position-and-system-boundaries).
 
 ### Execution flow (strategy → engine → output)
 
@@ -971,17 +947,6 @@ data, order, and restart synchronization requirements. The observed-data event
 clock remains the boundary: calendars label supplied bars but do not generate
 events.
 
-#### Ownership and capability boundaries
-
-| Concern | Current owner | Boundary |
-|---|---|---|
-| Alpha, covariance, objective, optimizer, and rebalance schedule | Strategy | These define strategy semantics. The engine does not hide a default optimizer. |
-| Target validation, cash scaling, reduce-before-add ordering, broker outcomes, and diagnostics | Engine | Execution correctness is shared across strategies and is not delegated to user code. |
-| Point-in-time membership, eligibility, corporate actions, and adjusted inputs | Upstream data pipeline | The engine validates supplied observations but does not invent historical facts; see [Static candidate universe and point-in-time selection](#static-candidate-universe-and-point-in-time-selection). |
-| Runtime symbol discovery and market-data subscription changes | Not implemented | Reconfigure and restart when the predeclared candidate universe changes. |
-| Research multi-leg approximation | Engine | `MultiLegOrder` owns explicit quantities and declared simulation order within one observed-data event. |
-| Live multi-leg execution | Adapter or deployment | Generic live execution fails closed; venue-native atomicity is explicit and cross-venue recovery policy remains strategy-owned. |
-
 #### Intentional defaults and resiliency fallbacks
 
 The repository-wide fallback rule is: defaults may express an explicit
@@ -1084,8 +1049,8 @@ financial/execution fact.
 - **Primitive signature**: `compute_all()` accepts `Sequence[float]` / `Sequence[datetime]` rather than depending on `BacktestResult`, so the live engine can call it directly too.
 - **Optional reports and integrations**: core metrics use NumPy; QuantStats,
   Matplotlib, exchange calendars, CLI YAML, DB, broker, notification, and UI
-  dependencies are loaded only by their opt-in features. See "Dependency
-  direction" above.
+  dependencies are loaded only by their opt-in features. See
+  [Product position and system boundaries](#product-position-and-system-boundaries).
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.
 - **Immutable engine output**: frozen result dataclasses use tuple collections in engine-produced `BacktestOutput`; `Context` and `PortfolioTargets.weights` expose read-only mappings. Mutable `PositionState` remains internal.
