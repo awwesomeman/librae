@@ -36,8 +36,7 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
         import exchange_calendars as xcals
     except ImportError as exc:  # pragma: no cover - package dependency contract
         raise RuntimeError(
-            "Trading calendars require the 'calendars' extra: "
-            "pip install 'librae[calendars]'"
+            "Trading calendars require the 'calendars' extra: pip install 'librae[calendars]'"
         ) from exc
 
     exchange_id = "XTAI" if calendar_id in _TAIFEX_CALENDARS else calendar_id
