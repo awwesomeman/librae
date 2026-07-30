@@ -79,7 +79,6 @@ def compute_all(
     annualize: bool = False,
     benchmark_values: Sequence[float] | None = None,
     exposed_periods: int | None = None,
-    trade_quantities: Sequence[float] | None = None,
     trade_notionals: Sequence[float] | None = None,
     turnover_values: Sequence[float] | None = None,
     gross_exposure_values: Sequence[float] | None = None,
@@ -99,10 +98,8 @@ def compute_all(
         benchmark_values: Finite, strictly positive buy-and-hold equity values
             aligned one-to-one with equity_values.
         exposed_periods: Number of bars with at least one open position.
-        trade_quantities: Finite, positive per-trade closed quantity (for
-            quantity-weighted avg return).
-        trade_notionals: Per-trade absolute notional weight. Preferred over quantity for
-            weighting returns across instruments with different prices/multipliers.
+        trade_notionals: Per-trade absolute notional weight for averaging returns
+            across instruments with different prices or multipliers.
         turnover_values: Per-event absolute traded notional divided by equity.
         gross_exposure_values: Per-event sum of absolute realized weights.
         net_exposure_values: Per-event sum of signed realized weights.
@@ -198,21 +195,8 @@ def compute_all(
 
     # WHY: TradePnL.net_return is percentage (*100); convert to ratio
     # for consistency with other StrategyMetrics return fields.
-    # Prefer notional weights across instruments; quantity remains a
-    # backward-compatible fallback for single-instrument partial closes.
     trade_returns = np.array([t.net_return for t in trade_pnls], dtype=np.float64)
     avg_trade_return: float | None = None
-    qty_weights: np.ndarray | None = None
-    if trade_quantities is not None and len(trade_quantities) != n_trades:
-        raise ValueError(
-            f"trade_quantities length ({len(trade_quantities)}) "
-            f"must match trade_pnls length ({n_trades})"
-        )
-    if trade_quantities is not None:
-        qty_weights = np.asarray(trade_quantities, dtype=np.float64)
-        if not np.isfinite(qty_weights).all() or np.any(qty_weights <= 0):
-            raise ValueError("trade_quantities must be finite and positive")
-
     notional_weights: np.ndarray | None = None
     if trade_notionals is not None and len(trade_notionals) != n_trades:
         raise ValueError(
@@ -226,8 +210,6 @@ def compute_all(
 
     if n_trades > 0 and notional_weights is not None:
         avg_trade_return = float(np.average(trade_returns, weights=notional_weights)) / 100.0
-    elif n_trades > 0 and qty_weights is not None:
-        avg_trade_return = float(np.average(trade_returns, weights=qty_weights)) / 100.0
     elif n_trades > 0:
         avg_trade_return = float(np.mean(trade_returns)) / 100.0
 

@@ -825,7 +825,6 @@ class Backtest:
             total_periods=len(account.equity_curve),
             benchmark_values=benchmark_curve,
             exposed_periods=account.exposed_periods,
-            trade_quantities=[trade.quantity for trade in result.trades],
             trade_notionals=[
                 abs(
                     trade.entry_price

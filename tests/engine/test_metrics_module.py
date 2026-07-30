@@ -242,7 +242,7 @@ class TestComputeAllMetrics:
         assert np.isclose(m.total_commission, 2.0)
         assert np.isclose(m.total_slippage, 1.0)
 
-    def test_avg_trade_return_prefers_notional_weights(self) -> None:
+    def test_avg_trade_return_uses_notional_weights(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
         trades = [
             _make_trade_pnl(net_pnl=10.0, net_return=10.0),
@@ -254,25 +254,24 @@ class TestComputeAllMetrics:
             timestamps=timestamps,
             trade_pnls=trades,
             total_periods=3,
-            trade_quantities=[100.0, 1.0],
             trade_notionals=[100.0, 900.0],
         )
 
         assert metrics.avg_trade_return == pytest.approx(0.019)
 
-    @pytest.mark.parametrize("invalid_quantity", [0.0, -1.0, np.nan, np.inf])
-    def test_trade_quantity_weights_must_be_finite_and_positive(
-        self, invalid_quantity: float
+    @pytest.mark.parametrize("invalid_notional", [0.0, -1.0, np.nan, np.inf])
+    def test_trade_notional_weights_must_be_finite_and_positive(
+        self, invalid_notional: float
     ) -> None:
         timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
 
-        with pytest.raises(ValueError, match="trade_quantities"):
+        with pytest.raises(ValueError, match="trade_notionals"):
             compute_all(
                 equity_values=[100.0, 101.0],
                 timestamps=timestamps,
                 trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
                 total_periods=2,
-                trade_quantities=[invalid_quantity],
+                trade_notionals=[invalid_notional],
             )
 
     def test_portfolio_diagnostics(self) -> None:

@@ -1176,7 +1176,6 @@ def refresh_performance(
         )
         for r in trade_rows
     ]
-    trade_quantities = [float(r["fill_quantity"]) for r in trade_rows]
     trade_notionals = [
         abs(float(r["notional"] * r["entry_price"] / r["price"])) for r in trade_rows
     ]
@@ -1205,7 +1204,6 @@ def refresh_performance(
         total_periods=len(equity_values),
         benchmark_values=complete_optional_series("benchmark_equity"),
         exposed_periods=exposed_periods,
-        trade_quantities=trade_quantities,
         trade_notionals=trade_notionals,
         turnover_values=complete_optional_series("turnover"),
         gross_exposure_values=complete_optional_series("gross_exposure"),
