@@ -1,4 +1,4 @@
-"""Tests for db/__init__.py — connection pool lifecycle.
+"""Tests for librae/db/__init__.py — connection pool lifecycle.
 
 No existing test exercised get_conn/get_pool directly (every consumer test
 mocks get_conn away), which is how a real bug shipped: SimpleConnectionPool
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import db
+import librae.db as db
 import pytest
 
 

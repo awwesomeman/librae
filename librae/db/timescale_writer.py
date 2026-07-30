@@ -30,14 +30,15 @@ import psycopg2
 import psycopg2.extras
 
 if TYPE_CHECKING:
-    from librae.core.run_config import RunConfig
     from psycopg2.extensions import cursor as PgCursor
 
+    from librae.core.run_config import RunConfig
+
 import pandas as pd
+
 from librae.backtest.schema import BacktestOutput
 from librae.core.utils import to_canonical
-
-from db import get_conn
+from librae.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -1079,7 +1080,7 @@ def refresh_performance(
     """
     from types import SimpleNamespace as _NS
 
-    from db.timescale_reader import load_equity_curve, load_trade_events
+    from librae.db.timescale_reader import load_equity_curve, load_trade_events
 
     _CLOSE_TYPES = ["close", "reduce"]
     from librae.core.metrics import compute_all

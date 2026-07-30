@@ -7,8 +7,7 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-
-from brokers.base import drop_incomplete_ohlcv, validate_order_signal
+from librae.brokers.base import drop_incomplete_ohlcv, validate_order_signal
 
 
 def test_drop_incomplete_uses_calendar_session_close() -> None:
@@ -17,7 +16,7 @@ def test_drop_incomplete_uses_calendar_session_close() -> None:
 
     with (
         patch("librae.core.trading_calendar.bar_close", return_value=session_close),
-        patch("brokers.base.datetime") as mocked_datetime,
+        patch("librae.brokers.base.datetime") as mocked_datetime,
     ):
         mocked_datetime.now.return_value = datetime(2026, 4, 13, 4, 0, tzinfo=UTC)
         result = drop_incomplete_ohlcv(

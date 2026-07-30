@@ -1,6 +1,6 @@
 """Runnable example: the "run.py" a strategy repo is expected to write —
 librae itself doesn't ship one (see architecture.md). Wires SmaCrossover
-through librae's backtest and sim/live modes via orchestration/cli.py.
+through librae's backtest and sim/live modes via librae/orchestration/cli.py.
 
     uv run python -m examples.simple_sma.run --mode backtest
     uv run python -m examples.simple_sma.run --mode sim --poll-seconds 5
@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from librae import Backtest, RunConfig
-from orchestration.cli import RunOptions, run_dispatch, run_realtime_generic
+from librae.orchestration.cli import RunOptions, run_dispatch, run_realtime_generic
 
 from .strategy import SmaCrossover, prepare_signals
 
@@ -48,7 +48,7 @@ def run_backtest(config: RunConfig, _options: RunOptions) -> None:
     output = bt.build_output()
     print(
         output.metrics
-    )  # swap for db.timescale_writer.save_strategy_results(output, df, config), a file, etc.
+    )  # swap for librae.db.timescale_writer.save_strategy_results(...), a file, etc.
 
 
 def run_realtime(config: RunConfig, options: RunOptions) -> None:

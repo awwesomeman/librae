@@ -19,6 +19,7 @@ from math import isfinite
 from typing import Any
 
 import pandas as pd
+
 from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,

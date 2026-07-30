@@ -34,6 +34,7 @@ from datetime import UTC, date, datetime
 from math import isclose, isfinite
 
 import pandas as pd
+
 from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,

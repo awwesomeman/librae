@@ -3,14 +3,14 @@ name: optional-sdk-tests
 on:
   push:
     paths:
-      - "brokers/**"
+      - "librae/brokers/**"
       - "tests/sdk_contracts/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/optional-sdk-tests.yml"
   pull_request:
     paths:
-      - "brokers/**"
+      - "librae/brokers/**"
       - "tests/sdk_contracts/**"
       - "pyproject.toml"
       - "uv.lock"

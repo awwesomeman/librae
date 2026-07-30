@@ -43,6 +43,7 @@ from librae.core.run_config import (
 
 if TYPE_CHECKING:
     import pandas as pd
+
     from librae.core.strategy import Strategy
 
 logger = logging.getLogger(__name__)
@@ -437,7 +438,7 @@ def check_existing_run(config: RunConfig) -> str | None:
     Shared by strategy backtest + signal backtest.
     """
     try:
-        from db.timescale_reader import get_run_by_config_hash
+        from librae.db.timescale_reader import get_run_by_config_hash
     except ImportError as exc:
         logger.warning(
             "Database dedup is unavailable because the optional 'db' dependencies "
@@ -517,7 +518,7 @@ def run_realtime_generic(
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> None:
     """Run the repository's default sim/live deployment wiring."""
-    from orchestration.live import build_live_trader
+    from librae.orchestration.live import build_live_trader
 
     trader = build_live_trader(
         strategy,

@@ -3,9 +3,9 @@
 > **Document purpose**: this is a **living, current-state document** — it reflects the system's architecture and naming conventions as they are today, and gets edited in place as the code evolves.
 > This is the opposite of `docs/decisions/` (a point-in-time record of a decision, never rewritten after the fact) — this file only ever carries "what is true now"; the *why* behind a naming rule lives in the corresponding decision doc, cross-referenced from here.
 >
-> When you add/change a table, column, or a `db/` read/write function, **you must update this document in the same change**. If a naming rule itself changes (as opposed to adding a new entry), add a new decision doc under `docs/decisions/` explaining why, as appropriate.
+> When you add/change a table, column, or a `librae/db/` read/write function, **you must update this document in the same change**. If a naming rule itself changes (as opposed to adding a new entry), add a new decision doc under `docs/decisions/` explaining why, as appropriate.
 >
-> **Scope**: engine layering, the DB access layer, and naming conventions — not deployment/ops. `scripts/`/`app/`/`deploy/` are optional ops tooling (Grafana, Docker, VM scripts), deliberately not architecture; see [Optional infrastructure](docs/guides/optional-infrastructure.md) instead.
+> **Scope**: engine layering, the DB access layer, and naming conventions — not deployment/ops. `scripts/`, `librae/app/`, and `deploy/` are optional ops tooling (Grafana, Docker, VM scripts), deliberately not architecture; see `docs/guides/optional-infrastructure.md` instead.
 >
 > **Language**: this repo is English-only outside `docs/` (which stays in the language it was originally written in — mixing languages mid-document isn't worth the churn). Keep descriptions concise and to the point — a one-line WHY beats a paragraph; link to `docs/decisions/` for the full history instead of re-explaining it here.
 
@@ -64,12 +64,13 @@ data or broker shapes.
 The dependency direction is:
 
 ```
-orchestration -> librae
-orchestration -> brokers       -> librae public contracts
-orchestration -> db            -> librae public contracts
-orchestration -> notifications -> librae public contracts
-librae/backtest -> librae/core
-librae/live     -> librae/core
+librae/orchestration -> librae public contracts
+librae/orchestration -> librae/brokers       -> librae public contracts
+librae/orchestration -> librae/db            -> librae public contracts
+librae/orchestration -> librae/notifications -> librae public contracts
+librae/app           -> librae/db schema
+librae/backtest      -> librae/core
+librae/live          -> librae/core
 ```
 
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md`
@@ -86,11 +87,13 @@ notifier, or state store. An unused integration therefore cannot break
 stays at the composition boundary.
 
 Static integration contracts live in `librae.integrations`; offline bar,
-order-adapter, and execution-report checks live in `librae.testing`. The
-reference implementations currently remain in the repository-level
-`brokers`, `db`, `notifications`, `orchestration`, and `app` packages. Those
-generic import paths are not frozen before 1.0. The accepted namespace
-direction and migration constraints are recorded in
+order-adapter, and execution-report checks live in `librae.testing`. Reference
+implementations live in the regular `librae.brokers`, `librae.db`,
+`librae.notifications`, `librae.orchestration`, and `librae.app` packages.
+The distribution exposes only the `librae` top-level namespace. The former
+repository-level imports are intentionally unsupported and have no
+compatibility aliases. The ownership decision and migration constraints are
+recorded in
 `docs/decisions/2026-07-30-integration-discovery-and-packaging.md`.
 
 ## Data acquisition and ownership boundary
@@ -104,7 +107,7 @@ direction and migration constraints are recorded in
 The engine's default sim/live warm-up calls its injected adapter directly.
 DB-first history plus API gap filling is a caller-owned policy injected through
 `warmup_fetcher`; it is not a hidden engine fallback. The repository's
-`orchestration.live.build_live_trader()` factory supplies the built-in broker,
+`librae.orchestration.live.build_live_trader()` factory supplies the built-in broker,
 TimescaleDB, and Telegram integrations and accepts explicit third-party
 adapter factories, notifier, and state store instances. Direct `LiveTrader`
 construction never imports reference integrations. Sim may run in memory,
@@ -126,7 +129,7 @@ Third-party data is joined point-in-time by the caller and returned as extra
 columns from the same adapter snapshot; see
 [External market data and factors](docs/guides/external-data.md).
 
-## Broker Adapter Design (`brokers/`)
+## Broker Adapter Design (`librae/brokers/`)
 
 - One flat adapter class per observed broker-product protocol
   (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared
@@ -142,7 +145,7 @@ columns from the same adapter snapshot; see
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A non-flat position snapshot must provide finite side/quantity and a positive average price; missing fields never mean flat or zero. A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
-- `brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
+- `librae/brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as the UTC-aware bar-start datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
 - Where a type constraint is needed, use `typing.Protocol`, **declared minimally
   at the call site** rather than a hierarchy covering unrelated capabilities.
@@ -190,7 +193,7 @@ discovery convenience from silently changing live exposure.
 Discovery can feed an adapter directly without YAML:
 
 ```python
-from brokers.crypto_adapter import CryptoAdapter
+from librae.brokers.crypto_adapter import CryptoAdapter
 from librae import available_symbols
 
 binance = CryptoAdapter(exchange_id="binance")
@@ -316,7 +319,7 @@ class MyStrategy(Strategy):
         return []
 
 
-# 2. Run the engine (a RunConfig is usually built via orchestration.cli.build_run())
+# 2. Run the engine (a RunConfig is usually built via librae.orchestration.cli.build_run())
 df = fetch_and_prepare(symbol, months)  # your own ETL
 bt = Backtest(data=df, strategy=MyStrategy(), config=config)
 bt.run()
@@ -615,7 +618,7 @@ records directly, while aggregate metrics remain owned by
 `librae/core/metrics.py`.
 
 ```python
-from db.charts import plot_trades_by_run_id
+from librae.db.charts import plot_trades_by_run_id
 from librae.backtest.charts import plot_trades
 
 ohlcv = df.xs(symbol, level="symbol")  # a single symbol's OHLCV
@@ -628,8 +631,8 @@ plot_trades_by_run_id(
 )  # or: skip rerunning the backtest, read a persisted run straight from the DB
 ```
 
-`db.charts.plot_trades_by_run_id` reads persisted `trade_events` and `ohlcv`
-rows through `db.timescale_reader`. The database adapter then calls the same
+`librae.db.charts.plot_trades_by_run_id` reads persisted `trade_events` and `ohlcv`
+rows through `librae.db.timescale_reader`. The database adapter then calls the same
 format-neutral renderer as the in-memory form and does not rerun the strategy.
 
 #### Trade outcome analysis
@@ -912,12 +915,12 @@ time-based integrations deterministic; production defaults to UTC now.
 #### Sim monitoring
 
 ```python
-from orchestration.live import build_live_trader
+from librae.orchestration.live import build_live_trader
 
 trader = build_live_trader(
     strategy=MyStrategy(),
     feature_fn=prepare_signals,  # the same ETL pipeline
-    config=config,  # a RunConfig (usually built via orchestration.cli.build_run())
+    config=config,  # a RunConfig (usually built via librae.orchestration.cli.build_run())
     # options is the companion RunOptions returned by build_run().
     database_enabled=options.database_enabled,
     telegram_config=options.telegram_config,
@@ -1083,7 +1086,7 @@ financial/execution fact.
 #### Engine configuration and repository options
 
 `RunConfig` contains only inputs that define engine behavior, results, or live
-runtime policy. `orchestration.cli.build_run()` returns it together with a
+runtime policy. `librae.orchestration.cli.build_run()` returns it together with a
 `RunOptions` value for repository-owned behavior such as TimescaleDB wiring,
 dry-run notification suppression, and replacement of an existing persisted
 run. Direct library users can construct `RunConfig` without importing the
@@ -1189,19 +1192,19 @@ drawdown, and reporting-currency conversion remain caller-owned.
 Source: behavior is configured from the caller's `config.yaml` `telegram:`
 block (held by `RunOptions.telegram_config` and passed explicitly to the
 orchestration factory), and secrets come from environment variables.
-`orchestration.live.build_live_trader()` builds this reference notifier;
+`librae.orchestration.live.build_live_trader()` builds this reference notifier;
 `LiveTrader` only receives the resulting object.
 
 ```python
-from notifications.config import TelegramConfig
-from notifications.telegram import TelegramAdapter, TelegramCredentials
+from librae.notifications.config import TelegramConfig
+from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
 
 config = TelegramConfig.from_dict(yaml_dict.get("telegram", {}))
 creds = TelegramCredentials.from_env("TELEGRAM")
 adapter = TelegramAdapter(config=config, credentials=creds)
 ```
 
-`TelegramAdapter` methods and their corresponding flags (defined in `notifications/config.py`):
+`TelegramAdapter` methods and their corresponding flags (defined in `librae/notifications/config.py`):
 
 | Method | Flag | Default |
 |------|------|------|
@@ -1212,7 +1215,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 #### LiveTrader callback signatures (writing your own db sink or notifier)
 
-`LiveTrader`'s constructor injection points (summarized in [Optional infrastructure](docs/guides/optional-infrastructure.md)) use small protocols or exact callback aliases. They are defined in `librae/live/interfaces.py`, `librae/live/executor.py`, and `librae/live/state.py`. This table is the actual call signature for each.
+`LiveTrader`'s constructor injection points (summarized in `docs/guides/optional-infrastructure.md`) use small protocols or exact callback aliases. They are defined in `librae/live/interfaces.py`, `librae/live/executor.py`, and `librae/live/state.py`. This table is the actual call signature for each.
 
 | Param | Called as |
 |---|---|
@@ -1251,7 +1254,7 @@ A strategy's `run.py` uses this set of functions to merge CLI args with config.y
 Nested blocks like `telegram` are automatically split off as a dict, bypassing argparse.
 
 ```python
-from orchestration.cli import base_parser, parse_with_config, setup_logging
+from librae.orchestration.cli import base_parser, parse_with_config, setup_logging
 
 p = base_parser("My strategy")
 args = parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
@@ -1265,7 +1268,7 @@ args = parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
 These are optional persistence integrations, not the engine's acquisition
 path. `get_ohlcv()`/`get_factor()` are external, caller-owned functions (not
 shipped by Librae); the first subgraph only illustrates how such a data layer
-could use the reference `db/` primitives. The other subgraphs show optional
+could use the reference `librae/db/` primitives. The other subgraphs show optional
 engine result/runtime writes.
 
 ```mermaid
@@ -1385,7 +1388,7 @@ must not imply a daily or annual convention.
 
 ## Python function naming conventions
 
-### `db/timescale_writer.py` (five verb categories, documented in that file's module docstring)
+### `librae/db/timescale_writer.py` (five verb categories, documented in that file's module docstring)
 
 ```
 write_*   — single-table INSERT/UPSERT (may include type/timezone normalization), writes a full row
@@ -1406,9 +1409,9 @@ without writing partial child rows. An explicit force recompute deletes and
 replaces the prior canonical run in the same transaction, so rollback restores
 the prior run if the replacement fails.
 
-**Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate: a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot — the same point-in-time-correctness principle applies to any ingestion layer built on top of `db/` (e.g. fundamentals data, where the earliest-disclosed value should win the same way).
+**Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate: a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot — the same point-in-time-correctness principle applies to any ingestion layer built on top of `librae/db/` (e.g. fundamentals data, where the earliest-disclosed value should win the same way).
 
-### `db/timescale_reader.py` (three verb categories, documented in that file's module docstring)
+### `librae/db/timescale_reader.py` (three verb categories, documented in that file's module docstring)
 
 ```
 get_*    — a single scalar / small object query (an id, a dict, a list of tuples)
@@ -1420,6 +1423,6 @@ Examples: `get_run_by_config_hash` (returns a dict), `load_trade_events` (return
 
 ## Maintenance rules
 
-1. When adding/changing a table, column, or a read/write function in `db/timescale_writer.py`/`db/timescale_reader.py`, update the corresponding section of this document in the same change.
+1. When adding/changing a table, column, or a read/write function in `librae/db/timescale_writer.py` or `librae/db/timescale_reader.py`, update the corresponding section of this document in the same change.
 2. When a new field raises a boundary judgment call ("is this name ambiguous," "should this use `_at`"), follow the criteria in "Handling quantity ambiguity" / "Timestamp naming rules" above rather than deciding case by case.
 3. If a naming rule itself needs to change (as opposed to simply adding an entry), open a new decision doc under `docs/decisions/` explaining why; once this file is updated it should only reflect the final current state, with no explanation of the old rule retained.

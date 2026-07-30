@@ -5,7 +5,7 @@ Unit fields stored alongside values for multi-market support (USDT, TWD, contrac
 Cost/slippage fields are optional (may be None for simple backtests).
 
 Persistence is caller-selected. ``librae.artifacts`` can flatten engine output
-into format-neutral tables; ``db.timescale_writer`` is the reference database
+into format-neutral tables; ``librae.db.timescale_writer`` is the reference database
 integration.
 """
 

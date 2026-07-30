@@ -7,7 +7,7 @@ one explicit non-result policy:
 - Risk policy (typed engine-level portfolio limits)
 - Runtime polling policy (not stored in DB)
 
-CLI workflows use ``build_run()`` in ``orchestration/cli.py``; library
+CLI workflows use ``build_run()`` in ``librae/orchestration/cli.py``; library
 callers may construct the validated dataclass directly.
 """
 

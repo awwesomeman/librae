@@ -2,7 +2,7 @@
 """Grafana Dashboard Generator.
 
 Produces a single unified Strategy Dashboard with mode filtering.
-Usage: python app/grafana/generate_dashboards.py
+Usage: python -m librae.app.grafana.generate_dashboards
 """
 
 from __future__ import annotations

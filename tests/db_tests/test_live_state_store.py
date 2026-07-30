@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-from db.timescale_state import TimescaleLiveStateStore
+from librae.db.timescale_state import TimescaleLiveStateStore
 from librae.live.executor import OrderRequest
 from librae.live.state import LiveRuntimeState, TrackedOrder
 
@@ -23,8 +23,8 @@ def _state() -> LiveRuntimeState:
     )
 
 
-@patch("db.timescale_state.psycopg2.extras.execute_values")
-@patch("db.timescale_state.get_conn")
+@patch("librae.db.timescale_state.psycopg2.extras.execute_values")
+@patch("librae.db.timescale_state.get_conn")
 def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_execute_values):
     conn = MagicMock()
     mock_get_conn.return_value.__enter__.return_value = conn
@@ -53,7 +53,7 @@ def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_
     assert rows[0][8] == datetime(2025, 1, 1, tzinfo=UTC)
 
 
-@patch("db.timescale_state.get_conn")
+@patch("librae.db.timescale_state.get_conn")
 def test_load_restores_json_checkpoint(mock_get_conn):
     conn = MagicMock()
     mock_get_conn.return_value.__enter__.return_value = conn
@@ -64,7 +64,7 @@ def test_load_restores_json_checkpoint(mock_get_conn):
     assert restored == _state()
 
 
-@patch("db.timescale_state.get_pool")
+@patch("librae.db.timescale_state.get_pool")
 def test_advisory_lease_holds_connection_until_release(mock_get_pool):
     pool = MagicMock()
     conn = MagicMock()

@@ -1141,7 +1141,7 @@ def summarize_trade_entry_outcomes(outcomes: pd.DataFrame) -> pd.DataFrame:
 
 # WHY these two colors specifically: matches the green=favorable/red=adverse
 # threshold-coloring convention already used in the Grafana strategy_dashboard
-# (app/grafana/generate_dashboards.py) — local HTML reports and Grafana panels
+# (librae/app/grafana/generate_dashboards.py) — local HTML reports and Grafana panels
 # read as the same visual system instead of picking an arbitrary new palette.
 _FAVORABLE = "#2a9d8f"
 _ADVERSE = "#e63946"

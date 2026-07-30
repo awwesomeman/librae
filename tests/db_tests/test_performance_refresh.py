@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-from db.timescale_writer import refresh_performance
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 from librae.backtest.schema import StrategyMetrics
 from librae.core.run_config import AccountConfig, RunConfig
+from librae.db.timescale_writer import refresh_performance
 
 
 def _config(
@@ -80,9 +80,9 @@ def test_refresh_performance_matches_in_memory_backtest_metrics() -> None:
     config = _config(account_id="default", initial_cash=1_000.0)
 
     with (
-        patch("db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("db.timescale_reader.load_trade_events", return_value=closed),
-        patch("db.timescale_writer.write_strategy_performance") as write,
+        patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
+        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_writer.write_strategy_performance") as write,
     ):
         refresh_performance(output.run_metadata.run_id, "default", config=config)
 
@@ -133,10 +133,10 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
     metrics = StrategyMetrics(total_return=0.2)
 
     with (
-        patch("db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
+        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
         patch("librae.core.metrics.compute_all", return_value=metrics) as compute,
-        patch("db.timescale_writer.write_strategy_performance") as write,
+        patch("librae.db.timescale_writer.write_strategy_performance") as write,
     ):
         refresh_performance("run-1", "alpha", config=_config())
 
@@ -186,8 +186,8 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
     )
 
     with (
-        patch("db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
+        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
         pytest.raises(ValueError, match="entry_commission"),
     ):
         refresh_performance("run-1", "alpha", config=_config())

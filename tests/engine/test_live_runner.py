@@ -30,7 +30,7 @@ from librae.core.strategy import (
 from librae.live.engine import LiveTrader
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
 from librae.live.state import MemoryLiveStateStore
-from orchestration.live import build_live_trader
+from librae.orchestration.live import build_live_trader
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------
@@ -2768,13 +2768,13 @@ class TestCryptoLiveFactory:
         monkeypatch.setenv("BINANCE_API_KEY", "k")
         monkeypatch.setenv("BINANCE_API_SECRET", "s")
         with (
-            patch("brokers.crypto_adapter.CryptoAdapter") as mock_cls,
+            patch("librae.brokers.crypto_adapter.CryptoAdapter") as mock_cls,
             patch(
-                "orchestration.live._build_state_store",
+                "librae.orchestration.live._build_state_store",
                 return_value=MemoryLiveStateStore(),
             ),
-            patch("orchestration.live._build_notifier", return_value=None),
-            patch("orchestration.live._TimescaleCallbacks"),
+            patch("librae.orchestration.live._build_notifier", return_value=None),
+            patch("librae.orchestration.live._TimescaleCallbacks"),
         ):
             mock_cls.return_value = MagicMock()
             trader = build_live_trader(
@@ -2839,13 +2839,13 @@ class TestMultiAdapterRouting:
 class TestIBKRLiveFactory:
     def test_us_equity_builds_ibkr_instead_of_crypto(self):
         with (
-            patch("brokers.ibkr_adapter.IBKRAdapter") as mock_cls,
+            patch("librae.brokers.ibkr_adapter.IBKRAdapter") as mock_cls,
             patch(
-                "orchestration.live._build_state_store",
+                "librae.orchestration.live._build_state_store",
                 return_value=MemoryLiveStateStore(),
             ),
-            patch("orchestration.live._build_notifier", return_value=None),
-            patch("orchestration.live._TimescaleCallbacks"),
+            patch("librae.orchestration.live._build_notifier", return_value=None),
+            patch("librae.orchestration.live._TimescaleCallbacks"),
         ):
             mock_cls.return_value = _mock_order_adapter()
             trader = build_live_trader(
@@ -2879,13 +2879,13 @@ class TestShioajiLiveFactory:
 
     def test_auto_builds_order_adapter_from_shioaji(self):
         with (
-            patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
+            patch("librae.brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
             patch(
-                "orchestration.live._build_state_store",
+                "librae.orchestration.live._build_state_store",
                 return_value=MemoryLiveStateStore(),
             ),
-            patch("orchestration.live._build_notifier", return_value=None),
-            patch("orchestration.live._TimescaleCallbacks"),
+            patch("librae.orchestration.live._build_notifier", return_value=None),
+            patch("librae.orchestration.live._TimescaleCallbacks"),
         ):
             mock_cls.return_value = MagicMock()
             trader = build_live_trader(
@@ -2908,13 +2908,13 @@ class TestShioajiLiveFactory:
             return _make_ohlcv_df(n=5, start_hour=call_num)
 
         with (
-            patch("brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
+            patch("librae.brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
             patch(
-                "orchestration.live._build_state_store",
+                "librae.orchestration.live._build_state_store",
                 return_value=MemoryLiveStateStore(),
             ),
-            patch("orchestration.live._build_notifier", return_value=None),
-            patch("orchestration.live._TimescaleCallbacks"),
+            patch("librae.orchestration.live._build_notifier", return_value=None),
+            patch("librae.orchestration.live._TimescaleCallbacks"),
         ):
             mock_shioaji = _mock_order_adapter()
             mock_shioaji.place_order.side_effect = lambda signal: _broker_report(

@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from db.timescale_writer import save_backtest_output, write_funding_cash_flow
 from librae.backtest.schema import (
     AccountPerformance,
     BacktestOutput,
@@ -14,17 +13,18 @@ from librae.backtest.schema import (
     RunMetadata,
     StrategyMetrics,
 )
+from librae.db.timescale_writer import save_backtest_output, write_funding_cash_flow
 
 
 def test_schema_defines_idempotent_funding_event_key() -> None:
-    sql = Path("db/timescale_init.sql").read_text(encoding="utf-8")
+    sql = Path("librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
     assert "CREATE TABLE IF NOT EXISTS funding_cash_flows" in sql
     assert "ON funding_cash_flows(run_id, account_id, symbol, ts)" in sql
     assert "REFERENCES backtest_runs(run_id) ON DELETE CASCADE" in sql
 
 
-@patch("db.timescale_writer.get_conn")
+@patch("librae.db.timescale_writer.get_conn")
 def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) -> None:
     connection = MagicMock()
     connection.__enter__.return_value = connection
@@ -63,10 +63,10 @@ def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) 
     )
 
 
-@patch("db.timescale_writer.write_run_metadata")
-@patch("db.timescale_writer._claim_config_hash", return_value=True)
-@patch("db.timescale_writer.psycopg2.extras.execute_values")
-@patch("db.timescale_writer.get_conn")
+@patch("librae.db.timescale_writer.write_run_metadata")
+@patch("librae.db.timescale_writer._claim_config_hash", return_value=True)
+@patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+@patch("librae.db.timescale_writer.get_conn")
 def test_save_backtest_output_batches_funding_diagnostics(
     mock_get_conn: MagicMock,
     mock_execute_values: MagicMock,

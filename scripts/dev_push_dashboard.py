@@ -3,7 +3,7 @@
 
 Writes to Grafana's internal DB (not provisioning files).
 Changes are overwritten on Grafana restart by provisioning.
-Source of truth: app/grafana/provisioning/dashboards/json/*.json
+Source of truth: librae/app/grafana/provisioning/dashboards/json/*.json
 
 Usage:
     python scripts/dev_push_dashboard.py
@@ -55,8 +55,8 @@ def get_timescaledb_uid(base_url: str, auth: tuple[str, str]) -> tuple[str | Non
 
 
 def update_generate_dashboards(uid: str, ds_type: str) -> None:
-    """Update DATASOURCE dict in app/grafana/generate_dashboards.py."""
-    path = "app/grafana/generate_dashboards.py"
+    """Update DATASOURCE dict in librae/app/grafana/generate_dashboards.py."""
+    path = "librae/app/grafana/generate_dashboards.py"
     with open(path) as f:
         content = f.read()
     new_ds = json.dumps({"type": ds_type, "uid": uid})
@@ -76,8 +76,11 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
 
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Re-generate dashboard JSON and deploy to Grafana."""
-    subprocess.run([sys.executable, "app/grafana/generate_dashboards.py"], check=True)
-    dashboard_dir = "app/grafana/provisioning/dashboards/json"
+    subprocess.run(
+        [sys.executable, "-m", "librae.app.grafana.generate_dashboards"],
+        check=True,
+    )
+    dashboard_dir = "librae/app/grafana/provisioning/dashboards/json"
     for fpath in sorted(pathlib.Path(dashboard_dir).glob("*.json")):
         with open(fpath) as f:
             d = json.load(f)

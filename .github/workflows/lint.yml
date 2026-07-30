@@ -4,11 +4,6 @@ on:
   push:
     paths:
       - "librae/**"
-      - "notifications/**"
-      - "orchestration/**"
-      - "db/**"
-      - "brokers/**"
-      - "app/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"
@@ -17,11 +12,6 @@ on:
   pull_request:
     paths:
       - "librae/**"
-      - "notifications/**"
-      - "orchestration/**"
-      - "db/**"
-      - "brokers/**"
-      - "app/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"

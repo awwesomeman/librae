@@ -22,9 +22,9 @@ import argparse
 import logging
 import time
 
-from db import get_conn
-from notifications.config import TelegramConfig
-from notifications.telegram import EMOJI_WARNING, TelegramAdapter, TelegramCredentials
+from librae.db import get_conn
+from librae.notifications.config import TelegramConfig
+from librae.notifications.telegram import EMOJI_WARNING, TelegramAdapter, TelegramCredentials
 
 logger = logging.getLogger(__name__)
 

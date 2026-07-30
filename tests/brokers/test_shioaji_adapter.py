@@ -12,9 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.brokers.shioaji_adapter import _require_shioaji
 from librae.live.executor import PositionRequest
-
-from brokers.shioaji_adapter import _require_shioaji
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -114,7 +113,7 @@ def test_available_symbols_lists_tmf_exact_front_and_next_contracts():
 
 def _make_adapter(*, ca_activated: bool = False):
     """Build a ShioajiAdapter with mocked internals (no real login)."""
-    from brokers.shioaji_adapter import ShioajiAdapter
+    from librae.brokers.shioaji_adapter import ShioajiAdapter
 
     adapter = ShioajiAdapter.__new__(ShioajiAdapter)
     adapter._api = MagicMock()
@@ -202,7 +201,7 @@ class TestFetchOhlcv:
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
         with patch(
-            "brokers.shioaji_adapter.drop_incomplete_ohlcv",
+            "librae.brokers.shioaji_adapter.drop_incomplete_ohlcv",
             side_effect=lambda df, _timeframe, **_kwargs: df.iloc[:-1],
         ) as drop_incomplete:
             df = adapter.fetch_ohlcv(
@@ -230,7 +229,7 @@ class TestFetchOhlcv:
         adapter._resolve_contract = MagicMock(return_value=contract)
 
         with patch(
-            "brokers.shioaji_adapter.resample_session_ohlcv",
+            "librae.brokers.shioaji_adapter.resample_session_ohlcv",
             side_effect=lambda frame, _seconds, _calendar: frame,
         ) as resample:
             adapter.fetch_ohlcv(
@@ -247,7 +246,7 @@ class TestFetchOhlcv:
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract("GDFR1", "GDF202608"))
 
         with patch(
-            "brokers.shioaji_adapter.resample_session_ohlcv",
+            "librae.brokers.shioaji_adapter.resample_session_ohlcv",
             side_effect=lambda frame, _seconds, _calendar: frame,
         ) as resample:
             adapter.fetch_ohlcv(
@@ -343,7 +342,7 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
 
         mock_sj = self._mock_shioaji_module()
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             result = adapter.place_order(
                 {
                     "symbol": "TXFR1",
@@ -375,7 +374,7 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
 
         mock_sj = self._mock_shioaji_module()
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             adapter.place_order(
                 {
                     "symbol": "2330",
@@ -402,7 +401,7 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
         mock_sj = self._mock_shioaji_module()
 
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             adapter.place_order(
                 {
                     "symbol": "TXFR1",
@@ -430,7 +429,7 @@ class TestPlaceOrder:
         adapter._api.place_order.return_value = mock_trade
 
         mock_sj = self._mock_shioaji_module()
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             adapter.place_order(
                 {
                     "symbol": "TMFR1",
@@ -451,7 +450,7 @@ class TestPlaceOrder:
 
 
 def test_trade_normalization_uses_cumulative_deals():
-    from brokers.shioaji_adapter import ShioajiAdapter
+    from librae.brokers.shioaji_adapter import ShioajiAdapter
 
     trade = SimpleNamespace(
         order=SimpleNamespace(id="ord-1", quantity=2, custom_field="ABC123"),
@@ -513,7 +512,7 @@ def test_position_lookup_preserves_broker_direction(direction_name, expected_siz
         )
     ]
 
-    with patch("brokers.shioaji_adapter._require_shioaji", return_value=sj):
+    with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=sj):
         result = adapter.get_position(_position_request("TXFR1"))
 
     assert result == {
@@ -552,7 +551,7 @@ def test_exact_future_uses_shioaji_native_contract_code():
         contract_month="202608",
     )
 
-    with patch("brokers.shioaji_adapter._require_shioaji", return_value=sj):
+    with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=sj):
         result = adapter.get_position(request)
 
     assert result["symbol"] == "TXF_202608"
@@ -610,7 +609,7 @@ def test_position_lookup_rejects_multiple_matching_native_positions():
     ]
 
     with (
-        patch("brokers.shioaji_adapter._require_shioaji", return_value=sj),
+        patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=sj),
         pytest.raises(ValueError, match="ambiguous broker positions"),
     ):
         adapter.get_position(_position_request("TXFR1"))
@@ -631,7 +630,7 @@ def test_position_lookup_rejects_unknown_direction():
     ]
 
     with (
-        patch("brokers.shioaji_adapter._require_shioaji", return_value=sj),
+        patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=sj),
         pytest.raises(ValueError, match="unknown Shioaji position direction"),
     ):
         adapter.get_position(_position_request("TXFR1"))
@@ -721,20 +720,20 @@ class TestInit:
         return mock_sj
 
     def test_missing_credentials_raises(self):
-        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 
         with (
-            patch("brokers.shioaji_adapter._require_shioaji"),
+            patch("librae.brokers.shioaji_adapter._require_shioaji"),
             pytest.raises(ValueError, match="credentials"),
         ):
             ShioajiAdapter(credentials=ShioajiCredentials(api_key="", secret_key=""))
 
     def test_login_without_ca_path_is_read_only(self):
-        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 
         mock_api = MagicMock()
         with patch(
-            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
         ):
             adapter = ShioajiAdapter(
                 credentials=ShioajiCredentials(api_key="k", secret_key="s", person_id="p"),
@@ -744,11 +743,11 @@ class TestInit:
         assert adapter._read_only is True
 
     def test_login_with_ca_path_enables_trading(self):
-        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 
         mock_api = MagicMock()
         with patch(
-            "brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
         ):
             adapter = ShioajiAdapter(
                 credentials=ShioajiCredentials(
@@ -765,11 +764,11 @@ class TestInit:
         assert adapter._read_only is False
 
     def test_simulation_flag_passed_through(self):
-        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 
         mock_api = MagicMock()
         mock_sj = self._mock_sj(mock_api)
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             ShioajiAdapter(
                 credentials=ShioajiCredentials(api_key="k", secret_key="s"), simulation=True
             )
@@ -779,11 +778,11 @@ class TestInit:
         """ShioajiCredentials.sandbox (SHIOAJI_SANDBOX) takes precedence,
         mirroring CryptoCredentials.sandbox — orthogonal to RunConfig.mode,
         deliberately not derived from it (see librae/live/engine.py)."""
-        from brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 
         mock_api = MagicMock()
         mock_sj = self._mock_sj(mock_api)
-        with patch("brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
             ShioajiAdapter(
                 credentials=ShioajiCredentials(api_key="k", secret_key="s", sandbox=True),
                 simulation=False,
@@ -791,7 +790,7 @@ class TestInit:
         mock_sj.Shioaji.assert_called_once_with(simulation=True)
 
     def test_sandbox_string_env_value_coerced_to_bool(self):
-        from brokers.shioaji_adapter import ShioajiCredentials
+        from librae.brokers.shioaji_adapter import ShioajiCredentials
 
         creds = ShioajiCredentials(api_key="k", secret_key="s", sandbox="true")
         assert creds.sandbox is True

@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pandas as pd
-from db.charts import _df_to_order_events
 from librae.backtest.charts import _build_markers
+from librae.db.charts import _df_to_order_events
 
 
 def test_df_to_order_events_matches_reader_shape() -> None:

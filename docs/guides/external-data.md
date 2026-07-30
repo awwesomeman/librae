@@ -39,7 +39,7 @@ not localize naive timestamps or infer vendor-specific fields.
 Broker adapters and credential types are public:
 
 ```python
-from brokers import CryptoAdapter, IBKRAdapter, ShioajiAdapter
+from librae.brokers import CryptoAdapter, IBKRAdapter, ShioajiAdapter
 
 adapter = CryptoAdapter(exchange_id="binance")
 bars = adapter.fetch_ohlcv("BTC/USDT", "1h", limit=500)

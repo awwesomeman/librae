@@ -15,7 +15,7 @@ from typing import Any
 
 import pandas as pd
 
-from db import get_conn
+from librae.db import get_conn
 
 
 def get_run_by_config_hash(

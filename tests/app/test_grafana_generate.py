@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+from librae.app.grafana.generate_dashboards import (
+    render_signal_monitor,
+    render_unified_dashboard,
+)
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     make_signal_outcome_contract_ohlcv,
-)
-
-from app.grafana.generate_dashboards import (
-    render_signal_monitor,
-    render_unified_dashboard,
 )
 
 

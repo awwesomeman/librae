@@ -41,10 +41,10 @@ fi
 : "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env}"
 
 echo "[1/4] Syncing deployment files to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
-ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/db ${REMOTE_DIR}/app/grafana"
+ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/librae/db ${REMOTE_DIR}/librae/app/grafana"
 rsync -az "${SCRIPT_DIR}/" "${TARGET}:${REMOTE_DIR}/deploy/"
-rsync -az "${PROJECT_ROOT}/db/timescale_init.sql" "${TARGET}:${REMOTE_DIR}/db/timescale_init.sql"
-rsync -az "${PROJECT_ROOT}/app/grafana/provisioning/" "${TARGET}:${REMOTE_DIR}/app/grafana/provisioning/"
+rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql" "${TARGET}:${REMOTE_DIR}/librae/db/timescale_init.sql"
+rsync -az "${PROJECT_ROOT}/librae/app/grafana/provisioning/" "${TARGET}:${REMOTE_DIR}/librae/app/grafana/provisioning/"
 scp -q "${PROJECT_ROOT}/.env" "${TARGET}:${REMOTE_DIR}/.env"
 
 echo "[2/4] Starting timescaledb + grafana (same docker-compose.yml as VPS-native deploy)..."
@@ -52,7 +52,7 @@ ssh "${TARGET}" "cd ${REMOTE_DIR}/deploy && docker compose --env-file ../.env up
 
 echo "[3/4] Waiting for TimescaleDB, loading schema..."
 ssh "${TARGET}" "until docker exec quant_timescaledb pg_isready -U quant -d quant >/dev/null 2>&1; do sleep 2; done"
-ssh "${TARGET}" "docker exec -i quant_timescaledb psql -U quant -d quant < ${REMOTE_DIR}/db/timescale_init.sql" >/dev/null
+ssh "${TARGET}" "docker exec -i quant_timescaledb psql -U quant -d quant < ${REMOTE_DIR}/librae/db/timescale_init.sql" >/dev/null
 
 echo "[4/4] Pushing dashboards via a temporary SSH tunnel..."
 ssh -N -L 3000:localhost:3000 "${TARGET}" &
@@ -62,7 +62,7 @@ until curl -sf http://localhost:3000/api/health >/dev/null 2>&1; do
     sleep 2
 done
 
-# Datasource is auto-provisioned from app/grafana/provisioning/ (same as
+# Datasource is auto-provisioned from librae/app/grafana/provisioning/ (same as
 # VPS-native deploy) — no separate API call needed here.
 # Prefer the project venv (has `requests` etc. via pyproject deps) over
 # system python3, which may not have it installed at all.
@@ -75,6 +75,6 @@ fi
     --grafana-password "${GF_SECURITY_ADMIN_PASSWORD}"
 
 echo ""
-echo "Done. Remote host only has deploy/ + app/grafana/provisioning/ + .env — not the app code."
+echo "Done. Remote host only has deploy/ + librae integration assets + .env — not the app code."
 echo "  TimescaleDB: reachable from the host itself, or via SSH tunnel."
 echo "  Grafana: ssh -L 3000:localhost:3000 ${TARGET}   then open http://localhost:3000"

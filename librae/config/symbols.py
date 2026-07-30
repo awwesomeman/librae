@@ -54,7 +54,7 @@ _ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
 # the derivative family is filterable/greppable as a group, and so the
 # multiplier-defaulting rule below (spot=1.0 automatic, contract_*
 # explicit-required) can key off the prefix. Extend this set (and the
-# matching DB CHECK constraint in db/timescale_init.sql) when a new type is
+# matching DB CHECK constraint in librae/db/timescale_init.sql) when a new type is
 # actually needed — don't pre-enumerate speculative ones.
 ALLOWED_INSTRUMENT_TYPES = frozenset(
     {
@@ -459,7 +459,7 @@ def available_symbols(
     created_adapter = adapter is None
     if adapter is None:
         if broker == "binance" and kind == "spot" and asset_class == "equity":
-            from brokers.binance_stocks_adapter import (
+            from librae.brokers.binance_stocks_adapter import (
                 BinanceStocksAdapter,
                 BinanceStocksCredentials,
             )
@@ -467,15 +467,15 @@ def available_symbols(
             credentials = BinanceStocksCredentials.from_env("BINANCE")
             adapter = BinanceStocksAdapter(credentials=credentials)
         elif broker == "binance":
-            from brokers.crypto_adapter import CryptoAdapter
+            from librae.brokers.crypto_adapter import CryptoAdapter
 
             adapter = CryptoAdapter(exchange_id="binance")
         elif broker == "shioaji":
-            from brokers.shioaji_adapter import ShioajiAdapter
+            from librae.brokers.shioaji_adapter import ShioajiAdapter
 
             adapter = ShioajiAdapter()
         else:
-            from brokers.ibkr_adapter import IBKRAdapter
+            from librae.brokers.ibkr_adapter import IBKRAdapter
 
             adapter = IBKRAdapter()
 

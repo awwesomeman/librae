@@ -12,7 +12,7 @@ pytestmark = pytest.mark.sdk_contract
 
 
 def test_ccxt_contract() -> None:
-    from brokers.crypto_adapter import _require_ccxt
+    from librae.brokers.crypto_adapter import _require_ccxt
 
     ccxt = _require_ccxt()
     exchange = ccxt.binance()
@@ -27,7 +27,7 @@ def test_ccxt_contract() -> None:
 
 
 def test_shioaji_contract() -> None:
-    from brokers.shioaji_adapter import _require_shioaji
+    from librae.brokers.shioaji_adapter import _require_shioaji
 
     sj = _require_shioaji()
     common = {
@@ -57,7 +57,7 @@ def test_shioaji_contract() -> None:
 
 
 def test_ib_async_contract() -> None:
-    from brokers.ibkr_adapter import _require_ib_async
+    from librae.brokers.ibkr_adapter import _require_ib_async
 
     ib_async = _require_ib_async()
     market_order = ib_async.MarketOrder("BUY", 1)

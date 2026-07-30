@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from librae import Backtest, RunConfig
-from orchestration.cli import RunOptions, run_dispatch
+from librae.orchestration.cli import RunOptions, run_dispatch
 
 from .strategy import DiagonalMinimumVarianceStrategy, prepare_signals
 

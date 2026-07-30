@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
-
-from brokers.shioaji_time import shioaji_ts_ns_to_epoch
+from librae.brokers.shioaji_time import shioaji_ts_ns_to_epoch
 
 
 def test_corrects_fake_utc_taipei_wall_clock() -> None:

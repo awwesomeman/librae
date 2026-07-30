@@ -14,7 +14,7 @@ def test_compose_database_init_mount_exists() -> None:
     init_mount = next(mount for mount in mounts if "docker-entrypoint-initdb.d" in mount)
     source = init_mount.split(":", maxsplit=1)[0]
 
-    assert (DEPLOY / source).resolve() == (ROOT / "db" / "timescale_init.sql").resolve()
+    assert (DEPLOY / source).resolve() == (ROOT / "librae" / "db" / "timescale_init.sql").resolve()
     assert (DEPLOY / source).is_file()
 
 
@@ -31,8 +31,8 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
 def test_remote_schema_path_matches_compose_source() -> None:
     script = (DEPLOY / "cloud_deploy.sh").read_text(encoding="utf-8")
 
-    assert 'rsync -az "${PROJECT_ROOT}/db/timescale_init.sql"' in script
-    assert "${REMOTE_DIR}/db/timescale_init.sql" in script
+    assert 'rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql"' in script
+    assert "${REMOTE_DIR}/librae/db/timescale_init.sql" in script
     assert "${REMOTE_DIR}/deploy/timescale_init.sql" not in script
     for variable in (
         "POSTGRES_PASSWORD",
@@ -67,9 +67,11 @@ def test_reference_services_use_private_bindings_and_versioned_images() -> None:
 
 
 def test_database_roles_match_runtime_boundaries() -> None:
-    schema = (ROOT / "db" / "timescale_init.sql").read_text(encoding="utf-8")
+    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
     datasource = yaml.safe_load(
-        (ROOT / "app/grafana/provisioning/datasources/timescaledb.yaml").read_text(encoding="utf-8")
+        (ROOT / "librae/app/grafana/provisioning/datasources/timescaledb.yaml").read_text(
+            encoding="utf-8"
+        )
     )
 
     assert datasource["datasources"][0]["user"] == "grafana_reader"
@@ -82,7 +84,7 @@ def test_database_roles_match_runtime_boundaries() -> None:
 
 
 def test_database_schema_does_not_embed_migrations() -> None:
-    schema = (ROOT / "db" / "timescale_init.sql").read_text(encoding="utf-8")
+    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
     assert r"\set ON_ERROR_STOP on" in schema
     assert "ALTER TABLE" not in schema

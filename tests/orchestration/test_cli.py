@@ -9,8 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from librae.core.run_config import AccountConfig, RunConfig
-
-from orchestration.cli import (
+from librae.orchestration.cli import (
     RunOptions,
     _resolve_market_and_data_source,
     base_parser,
@@ -438,7 +437,7 @@ class TestCheckExistingRun:
     def test_timescale_dsn_unset_returns_none(self, monkeypatch):
         monkeypatch.delenv("TIMESCALE_DSN", raising=False)
         monkeypatch.delitem(sys.modules, "db", raising=False)
-        monkeypatch.delitem(sys.modules, "db.timescale_reader", raising=False)
+        monkeypatch.delitem(sys.modules, "librae.db.timescale_reader", raising=False)
 
         assert check_existing_run(_make_cfg()) is None
 
@@ -446,7 +445,7 @@ class TestCheckExistingRun:
         real_import = __import__
 
         def missing_db_dependency(name, *args, **kwargs):
-            if name == "db.timescale_reader":
+            if name == "librae.db.timescale_reader":
                 raise ModuleNotFoundError("No module named 'psycopg2'", name="psycopg2")
             return real_import(name, *args, **kwargs)
 
@@ -459,10 +458,10 @@ class TestCheckExistingRun:
     def test_db_unreachable_skips_dedup_instead_of_raising(self, monkeypatch):
         monkeypatch.setenv("TIMESCALE_DSN", "postgresql://localhost:1/nonexistent")
         monkeypatch.delitem(sys.modules, "db", raising=False)
-        monkeypatch.delitem(sys.modules, "db.timescale_reader", raising=False)
+        monkeypatch.delitem(sys.modules, "librae.db.timescale_reader", raising=False)
 
         with patch(
-            "db.timescale_reader.get_run_by_config_hash",
+            "librae.db.timescale_reader.get_run_by_config_hash",
             side_effect=OSError("connection refused"),
         ):
             assert check_existing_run(_make_cfg()) is None
@@ -479,10 +478,10 @@ class TestCheckExistingRun:
 
         with (
             patch(
-                "db.timescale_reader.get_run_by_config_hash",
+                "librae.db.timescale_reader.get_run_by_config_hash",
                 return_value=existing,
             ),
-            patch("db.timescale_writer.refresh_performance") as refresh,
+            patch("librae.db.timescale_writer.refresh_performance") as refresh,
         ):
             assert check_existing_run(config) == "existing-run"
 
@@ -496,8 +495,8 @@ class TestRunDispatch:
         run_backtest = MagicMock()
 
         with (
-            patch("orchestration.cli.build_run", return_value=(config, options)),
-            patch("orchestration.cli.log_run_summary") as log_summary,
+            patch("librae.orchestration.cli.build_run", return_value=(config, options)),
+            patch("librae.orchestration.cli.log_run_summary") as log_summary,
             pytest.raises(
                 ValueError,
                 match=r"does not support mode='sim'.*Use --mode backtest",
@@ -514,8 +513,8 @@ class TestRunDispatch:
         run_backtest = MagicMock()
 
         with (
-            patch("orchestration.cli.build_run", return_value=(config, options)),
-            patch("orchestration.cli.log_run_summary"),
+            patch("librae.orchestration.cli.build_run", return_value=(config, options)),
+            patch("librae.orchestration.cli.log_run_summary"),
         ):
             run_dispatch("research_only", "run.py", run_backtest)
 
@@ -528,7 +527,7 @@ class TestRunDispatch:
         strategy = MagicMock()
         feature_fn = MagicMock()
 
-        with patch("orchestration.live.build_live_trader", return_value=trader) as build:
+        with patch("librae.orchestration.live.build_live_trader", return_value=trader) as build:
             run_realtime_generic(config, options, strategy, feature_fn)
 
         build.assert_called_once_with(

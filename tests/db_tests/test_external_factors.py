@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-from db.timescale_reader import get_external_factor_coverage_ranges, load_external_factor
-from db.timescale_writer import merge_external_factor_coverage_ranges, write_external_factor
+from librae.db.timescale_reader import get_external_factor_coverage_ranges, load_external_factor
+from librae.db.timescale_writer import merge_external_factor_coverage_ranges, write_external_factor
 
 
 def _mock_conn(mock_cur: MagicMock) -> MagicMock:
@@ -23,7 +23,7 @@ def _mock_conn(mock_cur: MagicMock) -> MagicMock:
 
 
 class TestGetExternalFactorCoverage:
-    @patch("db.timescale_reader.get_conn")
+    @patch("librae.db.timescale_reader.get_conn")
     def test_returns_sorted_ranges(self, mock_conn_ctx):
         mock_cur = MagicMock()
         r1 = (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
@@ -38,8 +38,8 @@ class TestGetExternalFactorCoverage:
 
 
 class TestMergeExternalFactorCoverage:
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_merges_touching_ranges(self, mock_conn_ctx, mock_exec_values):
         mock_cur = MagicMock()
         existing = (1, datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
@@ -63,8 +63,8 @@ class TestMergeExternalFactorCoverage:
         assert inserted_rows[0][4] == datetime(2024, 1, 1, tzinfo=UTC)
         assert inserted_rows[0][5] == datetime(2024, 1, 3, tzinfo=UTC)
 
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_keeps_disjoint_ranges_separate(self, mock_conn_ctx, mock_exec_values):
         mock_cur = MagicMock()
         existing = (1, datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
@@ -94,8 +94,8 @@ class TestWriteExternalFactor:
         with pytest.raises(ValueError, match="timezone-naive"):
             write_external_factor(df, "BTCUSDT", "funding_rate", "binanceusdm")
 
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_writes_expected_rows(self, mock_conn_ctx, mock_exec_values):
         mock_cur = MagicMock()
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
@@ -114,10 +114,10 @@ class TestWriteExternalFactor:
 
 
 class TestLoadExternalFactor:
-    @patch("db.timescale_reader.get_conn")
+    @patch("librae.db.timescale_reader.get_conn")
     def test_returns_tz_aware_frame(self, mock_conn_ctx):
         mock_conn_ctx.return_value.__enter__.return_value = MagicMock()
-        with patch("db.timescale_reader.pd.read_sql") as mock_read_sql:
+        with patch("librae.db.timescale_reader.pd.read_sql") as mock_read_sql:
             mock_read_sql.return_value = pd.DataFrame(
                 {
                     "timestamp": pd.to_datetime(["2024-01-01T00:00:00"]),

@@ -215,7 +215,7 @@ class Backtest:
       - config=RunConfig: derives cost model/initial_balance/data_source
         from config and additionally resolves a per-symbol CostModel for every
         symbol in a multi-asset run — required when running through the
-        CLI/DB pipeline (orchestration/cli.py), which builds a RunConfig.
+        CLI/DB pipeline (librae/orchestration/cli.py), which builds a RunConfig.
     Both are first-class; neither is deprecated.
 
     Args:

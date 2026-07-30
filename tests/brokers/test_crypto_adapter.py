@@ -9,9 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 from librae.live.executor import PositionRequest
-
-from brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -190,7 +189,7 @@ def mock_ccxt_exchange():
 @pytest.fixture
 def readonly_adapter(mock_ccxt_exchange):
     """CryptoAdapter in read-only mode (no API key) with mocked exchange."""
-    with patch("brokers.crypto_adapter._require_ccxt") as mock_ccxt:
+    with patch("librae.brokers.crypto_adapter._require_ccxt") as mock_ccxt:
         mock_exchange_cls = MagicMock(return_value=mock_ccxt_exchange)
         mock_ccxt.return_value = MagicMock(**{"binance": mock_exchange_cls})
         # Manually construct to bypass __init__ ccxt lookup
@@ -675,7 +674,7 @@ def test_cancel_order_returns_refreshed_cumulative_state(authed_adapter, mock_cc
 
 
 def _build_adapter_via_init(exchange_id: str, mock_exchange: MagicMock, **kwargs) -> CryptoAdapter:
-    with patch("brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
+    with patch("librae.brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
         mock_exchange_cls = MagicMock(return_value=mock_exchange)
         mock_require_ccxt.return_value = MagicMock(**{exchange_id: mock_exchange_cls})
         return CryptoAdapter(

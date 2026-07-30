@@ -9,7 +9,7 @@ from pathlib import Path
 def _load_dotenv_for_tests() -> None:
     """Load .env from the repo root for local `pytest` runs, without overwriting existing env vars.
 
-    librae itself never does this (see db/__init__.py) — loading .env is an
+    librae itself never does this (see librae/db/__init__.py) — loading .env is an
     application's responsibility, and the test suite is the application here.
     CI sets env vars directly and has no .env file, so this is a no-op there.
     """

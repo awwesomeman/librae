@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pandas as pd
+
 from librae.backtest.charts import plot_trades
 from librae.backtest.schema import OrderEventRecord
-
-from db.timescale_reader import load_ohlcv, load_trade_events
+from librae.db.timescale_reader import load_ohlcv, load_trade_events
 
 
 def _df_to_order_events(df: pd.DataFrame) -> list[OrderEventRecord]:

@@ -4,7 +4,7 @@ Secrets (bot_token, chat_id): loaded via TelegramCredentials.from_env("TELEGRAM"
 Behavior (enabled, notification toggles): loaded via TelegramConfig.from_dict().
 
 Usage:
-    from notifications.config import TelegramConfig
+    from librae.notifications.config import TelegramConfig
     config = TelegramConfig.from_dict({"enabled": True})
     creds = TelegramCredentials.from_env("TELEGRAM")
     adapter = TelegramAdapter(config=config, credentials=creds)
@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from notifications.config import NotificationConfig, TelegramConfig
+from librae.notifications.config import NotificationConfig, TelegramConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class TelegramCredentials:
     def from_env(cls, prefix: str, **overrides: str) -> TelegramCredentials:
         """Build from env vars ``{prefix}_{FIELD_UPPER}``; overrides win.
 
-        Self-contained on purpose (not brokers/base.py's CredentialConfig)
+        Self-contained on purpose (not librae/brokers/base.py's CredentialConfig)
         — a notification adapter has no business depending on brokers.
         """
         kwargs: dict[str, str] = {}

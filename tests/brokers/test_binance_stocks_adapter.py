@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
-
-from brokers.binance_stocks_adapter import (
+from librae.brokers.binance_stocks_adapter import (
     BINANCE_STOCKS_API_SCHEMA_VERSION,
     BinanceStocksAdapter,
 )

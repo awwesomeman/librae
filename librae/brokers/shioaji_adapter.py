@@ -25,6 +25,7 @@ from math import isfinite
 from numbers import Real
 
 import pandas as pd
+
 from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,

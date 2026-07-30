@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from notifications.config import NotificationConfig, StatusConfig, TelegramConfig
+from librae.notifications.config import NotificationConfig, StatusConfig, TelegramConfig
 
 
 class TestStatusConfig:

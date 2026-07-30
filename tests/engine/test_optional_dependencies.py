@@ -45,7 +45,7 @@ metrics = librae.compute_all(
 )
 assert metrics.period_sharpe is not None
 
-from brokers import (
+from librae.brokers import (
     BinanceStocksAdapter,
     CryptoAdapter,
     IBKRAdapter,

@@ -257,7 +257,7 @@ class LiveTrader:
         if adapter is None:
             raise ValueError(
                 "LiveTrader requires an explicit market-data adapter; use "
-                "orchestration.live.build_live_trader() for built-in wiring"
+                "librae.orchestration.live.build_live_trader() for built-in wiring"
             )
         if isinstance(adapter, Mapping):
             missing = set(self._symbols) - set(adapter)
@@ -279,7 +279,7 @@ class LiveTrader:
             else:
                 raise ValueError(
                     "live mode requires an explicit order_adapter; use "
-                    "orchestration.live.build_live_trader() for built-in wiring"
+                    "librae.orchestration.live.build_live_trader() for built-in wiring"
                 )
             missing = set(self._symbols) - set(order_adapters)
             if missing:

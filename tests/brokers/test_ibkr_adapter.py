@@ -12,9 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.brokers.ibkr_adapter import _require_ib_async
 from librae.live.executor import PositionRequest
-
-from brokers.ibkr_adapter import _require_ib_async
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,7 +53,7 @@ def test_missing_ib_async_names_install_extra():
 
 def _make_adapter(*, trading_enabled: bool = False):
     """Build an IBKRAdapter with mocked internals (no real connect())."""
-    from brokers.ibkr_adapter import IBKRAdapter
+    from librae.brokers.ibkr_adapter import IBKRAdapter
 
     adapter = IBKRAdapter.__new__(IBKRAdapter)
     adapter._ib = MagicMock()
@@ -129,8 +128,8 @@ def test_available_symbols_lists_mnq_front_and_next_exact_contracts():
     mock_ib_async.Future.return_value = "mnq-chain-query"
 
     with (
-        patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
-        patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 7, 30)),
+        patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+        patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 7, 30)),
     ):
         results = adapter.available_symbols(
             query="MNQ",
@@ -165,7 +164,7 @@ def test_available_symbols_resolves_nvda_spot():
     mock_ib_async = MagicMock()
     mock_ib_async.Stock.return_value = "nvda-query"
 
-    with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+    with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
         results = adapter.available_symbols(
             query="NVDA",
             kind="spot",
@@ -190,7 +189,7 @@ class TestFetchOhlcv:
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async",
+            "librae.brokers.ibkr_adapter._require_ib_async",
             return_value=_mock_ib_async_module(_make_bars_df()),
         ):
             df = adapter.fetch_ohlcv("MU", "1m")
@@ -205,7 +204,7 @@ class TestFetchOhlcv:
         adapter._ib.reqHistoricalData.return_value = []
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async",
+            "librae.brokers.ibkr_adapter._require_ib_async",
             return_value=_mock_ib_async_module(pd.DataFrame()),
         ):
             df = adapter.fetch_ohlcv("MU", "1m")
@@ -219,7 +218,7 @@ class TestFetchOhlcv:
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async",
+            "librae.brokers.ibkr_adapter._require_ib_async",
             return_value=_mock_ib_async_module(_make_bars_df()),
         ):
             adapter.fetch_ohlcv("MU", "1m")
@@ -234,7 +233,7 @@ class TestFetchOhlcv:
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async",
+            "librae.brokers.ibkr_adapter._require_ib_async",
             return_value=_mock_ib_async_module(_make_bars_df()),
         ):
             df = adapter.fetch_ohlcv("MU", "1m", limit=2)
@@ -248,11 +247,11 @@ class TestFetchOhlcv:
 
         with (
             patch(
-                "brokers.ibkr_adapter._require_ib_async",
+                "librae.brokers.ibkr_adapter._require_ib_async",
                 return_value=_mock_ib_async_module(_make_bars_df()),
             ),
             patch(
-                "brokers.ibkr_adapter.drop_incomplete_ohlcv",
+                "librae.brokers.ibkr_adapter.drop_incomplete_ohlcv",
                 side_effect=lambda df, _timeframe: df.iloc[:-1],
             ) as drop_incomplete,
         ):
@@ -274,7 +273,7 @@ class TestFetchOhlcv:
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async",
+            "librae.brokers.ibkr_adapter._require_ib_async",
             return_value=_mock_ib_async_module(_make_bars_df()),
         ):
             df = adapter.fetch_ohlcv(
@@ -366,7 +365,8 @@ class TestPlaceOrder:
         adapter._ib.placeOrder.return_value = mock_trade
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()
+            "librae.brokers.ibkr_adapter._require_ib_async",
+            return_value=self._mock_ib_async_module(),
         ):
             result = adapter.place_order(
                 {
@@ -402,7 +402,8 @@ class TestPlaceOrder:
         adapter._ib.placeOrder.return_value = mock_trade
 
         with patch(
-            "brokers.ibkr_adapter._require_ib_async", return_value=self._mock_ib_async_module()
+            "librae.brokers.ibkr_adapter._require_ib_async",
+            return_value=self._mock_ib_async_module(),
         ):
             result = adapter.place_order(
                 {
@@ -434,7 +435,7 @@ class TestPlaceOrder:
         adapter._ib.placeOrder.return_value = mock_trade
         mock_ib_async = MagicMock()  # MarketOrder() returns a MagicMock -- orderRef assignable
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             adapter.place_order(
                 {
                     "symbol": "MU",
@@ -452,7 +453,7 @@ class TestPlaceOrder:
 
 
 def test_trade_normalization_uses_ibkr_cumulative_fill_and_commission():
-    from brokers.ibkr_adapter import IBKRAdapter
+    from librae.brokers.ibkr_adapter import IBKRAdapter
 
     trade = SimpleNamespace(
         order=SimpleNamespace(
@@ -703,7 +704,7 @@ class TestResolveContract:
         mock_ib_async = MagicMock()
         mock_ib_async.Stock.return_value = "unqualified_stock"
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             result = adapter._resolve_contract("MU")
 
         assert result is mock_contract
@@ -715,7 +716,7 @@ class TestResolveContract:
         mock_ib_async = MagicMock()
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="Unknown symbol"),
         ):
             adapter._resolve_contract("NOTREAL")
@@ -730,7 +731,7 @@ class TestResolveContract:
         mock_ib_async = MagicMock()
         mock_ib_async.Stock.return_value = "unqualified_stock"
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             first = adapter._resolve_contract("MU")
             second = adapter._resolve_contract("MU")
 
@@ -742,7 +743,7 @@ class TestResolveContract:
 class TestResolveContractFutures:
     @pytest.fixture(autouse=True)
     def _fixed_today(self):
-        with patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)):
+        with patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)):
             yield
 
     def _detail(self, expiry: str, contract):
@@ -761,7 +762,7 @@ class TestResolveContractFutures:
         mock_ib_async = MagicMock()
         mock_ib_async.Future.return_value = "unqualified_future"
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             result = adapter._resolve_contract(
                 "ES", security_type="FUT", exchange="CME", continuous_alias=True
             )
@@ -779,7 +780,7 @@ class TestResolveContractFutures:
         mock_ib_async = MagicMock()
         mock_ib_async.Future.return_value = "unqualified_future"
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             result = adapter._resolve_contract(
                 "ES",
                 security_type="FUT",
@@ -804,7 +805,7 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="contract_month=202609"),
         ):
             adapter._resolve_contract(
@@ -842,7 +843,7 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="Ambiguous IBKR future"),
         ):
             adapter._resolve_contract(
@@ -863,7 +864,7 @@ class TestResolveContractFutures:
         mock_ib_async = MagicMock()
         mock_ib_async.Future.return_value = "unqualified_future"
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             result = adapter._resolve_contract(
                 "ES", security_type="FUT", exchange="CME", continuous_alias=True
             )
@@ -881,15 +882,15 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
-            patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)),
         ):
             first = adapter._resolve_contract(
                 "ES", security_type="FUT", exchange="CME", continuous_alias=True
             )
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
-            patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
         ):
             second = adapter._resolve_contract(
                 "ES", security_type="FUT", exchange="CME", continuous_alias=True
@@ -912,8 +913,8 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
-            patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
         ):
             result = adapter._contract_details(
                 "ES",
@@ -936,7 +937,7 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="No non-expired future"),
         ):
             adapter._resolve_contract(
@@ -955,7 +956,7 @@ class TestResolveContractFutures:
         mock_ib_async = MagicMock()
 
         with (
-            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="Unknown future"),
         ):
             adapter._resolve_contract(
@@ -981,7 +982,7 @@ class TestResolveContractFutures:
         mock_ib_async.Stock.return_value = "unqualified_stock"
         mock_ib_async.Future.return_value = "unqualified_future"
 
-        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             stock_result = adapter._resolve_contract("ES", security_type="STK")
             future_result = adapter._resolve_contract(
                 "ES", security_type="FUT", exchange="CME", continuous_alias=True

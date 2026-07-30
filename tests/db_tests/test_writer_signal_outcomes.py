@@ -8,7 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-from db.timescale_writer import (
+from librae.backtest.schema import StrategyMetrics
+from librae.core.run_config import RunConfig
+from librae.db.timescale_writer import (
     _claim_config_hash,
     save_backtest_output,
     save_signal_results,
@@ -20,8 +22,6 @@ from db.timescale_writer import (
     write_strategy_performance,
     write_trade_event,
 )
-from librae.backtest.schema import StrategyMetrics
-from librae.core.run_config import RunConfig
 from tests.conftest import make_test_cfg
 
 
@@ -109,9 +109,9 @@ class TestConfigHashClaim:
             is True
         )
 
-    @patch("db.timescale_writer.write_run_metadata")
-    @patch("db.timescale_writer._claim_config_hash", return_value=False)
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.write_run_metadata")
+    @patch("librae.db.timescale_writer._claim_config_hash", return_value=False)
+    @patch("librae.db.timescale_writer.get_conn")
     def test_losing_backtest_writer_exits_without_partial_rows(
         self,
         mock_conn_ctx,
@@ -160,7 +160,7 @@ def test_strategy_performance_sql_matches_account_metric_values() -> None:
 class TestWriteEquityCurvePoint:
     """write_equity_curve_point single-row upsert."""
 
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_on_conflict_updates_every_inserted_column(self, mock_conn_ctx):
         """Every mutable engine-owned equity field is updated on conflict."""
         mock_conn = MagicMock()
@@ -198,7 +198,7 @@ class TestWriteEquityCurvePoint:
             assert f"{col}=EXCLUDED.{col}" in sql
 
 
-@patch("db.timescale_writer.get_conn")
+@patch("librae.db.timescale_writer.get_conn")
 def test_write_trade_event_sql_matches_persisted_cost_fields(mock_conn_ctx) -> None:
     mock_conn = MagicMock()
     mock_cur = MagicMock()
@@ -252,7 +252,7 @@ def test_write_ohlcv_requires_real_volume() -> None:
 class TestWriteSignalEvent:
     """write_signal_event single-row upsert."""
 
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_inserts_row(self, mock_conn_ctx):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
@@ -283,7 +283,7 @@ class TestWriteSignalEvent:
         # would collide and silently drop one run's row.
         assert "ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)" in sql
 
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_accepts_cursor(self, mock_conn_ctx):
         """When cur is provided, uses it directly without opening connection."""
         mock_cur = MagicMock()
@@ -328,8 +328,8 @@ class TestPersistBacktest:
         )
         return df, symbol
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=20)
-    @patch("db.timescale_writer.save_backtest_output", return_value={"backtest_runs": 1})
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
+    @patch("librae.db.timescale_writer.save_backtest_output", return_value={"backtest_runs": 1})
     def test_extracts_signals_and_calls_writer(self, mock_write_bt, mock_write_ohlcv):
         df, _symbol = self._make_featured_df()
         mock_output = MagicMock()
@@ -355,8 +355,8 @@ class TestPersistBacktest:
 
         assert counts["ohlcv"] == 20
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=20)
-    @patch("db.timescale_writer.save_backtest_output", return_value={})
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
+    @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
     def test_force_recompute_replaces_existing_hash(self, mock_write_bt, mock_write_ohlcv):
         df, _symbol = self._make_featured_df()
 
@@ -364,8 +364,8 @@ class TestPersistBacktest:
 
         assert mock_write_bt.call_args.kwargs["replace_existing"] is True
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=20)
-    @patch("db.timescale_writer.save_backtest_output", return_value={})
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
+    @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
     def test_excludes_nan_and_zero_signals(self, mock_write_bt, mock_write_ohlcv):
         """NaN and 0 values are excluded from signal_series."""
         symbol = "BTCUSDT"
@@ -392,8 +392,8 @@ class TestPersistBacktest:
         assert len(signal_series) == 5
         assert 0.0 not in signal_series.values
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=10)
-    @patch("db.timescale_writer.save_backtest_output", return_value={})
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
+    @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
     def test_persists_every_configured_symbol(self, mock_write_bt, mock_write_ohlcv):
         timestamps = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
         index = pd.MultiIndex.from_product(
@@ -430,11 +430,11 @@ class TestPersistBacktest:
 class TestSaveSignalResults:
     """save_signal_results writes signals independently of backtest."""
 
-    @patch("db.timescale_writer.write_run_metadata")
-    @patch("db.timescale_writer._claim_config_hash", return_value=False)
-    @patch("db.timescale_writer.write_ohlcv")
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.write_run_metadata")
+    @patch("librae.db.timescale_writer._claim_config_hash", return_value=False)
+    @patch("librae.db.timescale_writer.write_ohlcv")
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_losing_config_hash_writer_exits_without_partial_rows(
         self,
         mock_conn_ctx,
@@ -482,9 +482,9 @@ class TestSaveSignalResults:
         mock_exec_values.assert_not_called()
         mock_ohlcv.assert_not_called()
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=10)
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_writes_signal_events_without_backtest(
         self, mock_conn_ctx, mock_exec_values, mock_ohlcv
     ):
@@ -519,9 +519,9 @@ class TestSaveSignalResults:
         # Verify batch INSERT was called
         mock_exec_values.assert_called_once()
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=10)
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_delete_scoped_to_own_run_id(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
         """Regression test: re-running save_signal_results for the same
         (strategy, symbol, timeframe) over an overlapping date range must
@@ -557,9 +557,9 @@ class TestSaveSignalResults:
         assert "run_id IS NOT DISTINCT FROM" in sql
         assert params[0] == "run-A"
 
-    @patch("db.timescale_writer.write_ohlcv", return_value=0)
-    @patch("db.timescale_writer.psycopg2.extras.execute_values")
-    @patch("db.timescale_writer.get_conn")
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=0)
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
     def test_handles_multiindex_df(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
         """Works with MultiIndex (symbol, datetime) DataFrames."""
         mock_conn = MagicMock()

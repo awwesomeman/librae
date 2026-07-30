@@ -6,18 +6,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from librae.live.state import MemoryLiveStateStore
-from tests.conftest import make_test_cfg
-
-from orchestration.live import (
+from librae.orchestration.live import (
     _status_interval_periods,
     _TimescaleCallbacks,
     build_live_trader,
 )
+from tests.conftest import make_test_cfg
 
 
 def test_disabled_notifier_does_not_load_optional_integration() -> None:
-    with patch.dict("sys.modules", {"notifications.telegram": None}):
-        from orchestration.live import _build_notifier
+    with patch.dict("sys.modules", {"librae.notifications.telegram": None}):
+        from librae.orchestration.live import _build_notifier
 
         assert _build_notifier(None) is None
         assert _build_notifier({"enabled": False}) is None
@@ -42,9 +41,9 @@ def test_missing_db_dependency_is_reported_by_deployment_factory() -> None:
     config = make_test_cfg(mode="sim")
 
     with (
-        patch("orchestration.live._build_adapter", return_value=MagicMock()),
-        patch("orchestration.live._build_notifier", return_value=None),
-        patch.dict("sys.modules", {"db.timescale_state": None}),
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch.dict("sys.modules", {"librae.db.timescale_state": None}),
         pytest.raises(ModuleNotFoundError, match="Install Librae's 'db' extra"),
     ):
         build_live_trader(MagicMock(), lambda frame: frame, config=config)
@@ -55,13 +54,13 @@ def test_factory_registers_timescale_callbacks() -> None:
     callbacks = MagicMock()
 
     with (
-        patch("orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
         patch(
-            "orchestration.live._build_state_store",
+            "librae.orchestration.live._build_state_store",
             return_value=MemoryLiveStateStore(),
         ),
-        patch("orchestration.live._build_notifier", return_value=None),
-        patch("orchestration.live._TimescaleCallbacks", return_value=callbacks),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=callbacks),
     ):
         trader = build_live_trader(MagicMock(), lambda frame: frame, config=config)
 
@@ -73,10 +72,10 @@ def test_database_and_telegram_wiring_are_independent() -> None:
     notifier = MagicMock(enabled=True)
 
     with (
-        patch("orchestration.live._build_adapter", return_value=MagicMock()),
-        patch("orchestration.live._build_state_store") as build_state_store,
-        patch("orchestration.live._build_notifier", return_value=notifier) as build_notifier,
-        patch("orchestration.live._TimescaleCallbacks") as build_callbacks,
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_state_store") as build_state_store,
+        patch("librae.orchestration.live._build_notifier", return_value=notifier) as build_notifier,
+        patch("librae.orchestration.live._TimescaleCallbacks") as build_callbacks,
     ):
         trader = build_live_trader(
             MagicMock(),

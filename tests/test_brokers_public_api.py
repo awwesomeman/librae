@@ -14,7 +14,7 @@ def test_public_broker_api_exports_adapters_and_credentials():
             sys.executable,
             "-c",
             (
-                "from brokers import ("
+                "from librae.brokers import ("
                 "BinanceStocksAdapter, BinanceStocksCredentials, CredentialConfig, "
                 "CryptoAdapter, CryptoCredentials, IBKRAdapter, IBKRCredentials, "
                 "ShioajiAdapter, ShioajiCredentials"

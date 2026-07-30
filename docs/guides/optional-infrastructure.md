@@ -8,30 +8,28 @@ execution, notifications, monitoring, or deployment.
 
 | Component | Directory | Engine boundary |
 |---|---|---|
-| TimescaleDB analytics and runtime state | [`db/`](../../db/) | callbacks and `state_store` |
-| Local research artifacts | [`librae/artifacts.py`](../../librae/artifacts.py) | format-neutral manifest and tables |
-| Broker market data and order routing | [`brokers/`](../../brokers/) | `adapter` and `order_adapter` |
-| Telegram notifications | [`notifications/`](../../notifications/) | `notifier` |
-| Strategy CLI/config wiring | [`orchestration/`](../../orchestration/) | strategy-owned `run.py` helpers |
-| Grafana dashboards | [`app/grafana/`](../../app/grafana/) | queries the reference DB schema |
-| Docker and VM scripts | [`deploy/`](../../deploy/) | process/infrastructure examples |
+| TimescaleDB analytics and runtime state | `librae/db/` | callbacks and `state_store` |
+| Local research artifacts | `librae/artifacts.py` | format-neutral manifest and tables |
+| Broker market data and order routing | `librae/brokers/` | `adapter` and `order_adapter` |
+| Telegram notifications | `librae/notifications/` | `notifier` |
+| Strategy CLI/config wiring | `librae/orchestration/` | strategy-owned `run.py` helpers |
+| Grafana dashboards | `librae/app/grafana/` | queries the reference DB schema |
+| Docker and VM scripts | `deploy/` | process/infrastructure examples |
 
 These are replaceable integrations, not required dependencies of the
-calculation core. The exact callback and adapter signatures are in the
-[Config API and callback reference](../../architecture.md#config-api).
+calculation core. The exact callback and adapter signatures are in the Config
+API and callback reference in `architecture.md`.
 Third-party packages should import engine-facing contracts from
 `librae.integrations`.
-`orchestration.live.build_live_trader()` is the convenience factory for the
+`librae.orchestration.live.build_live_trader()` is the convenience factory for the
 repository implementations. Construct `LiveTrader` directly when injecting
 different adapters, callbacks, notifier, or durable state.
 
 Integration registration is deliberately explicit. Librae does not scan
 installed modules, namespace packages, or entry points, so installing an
-unused provider cannot execute its code or break the base engine. The generic
-repository-level import paths in the component map are the current pre-1.0
-paths, not compatibility aliases. The accepted packaging direction is to move
-them under the regular `librae.*` package in one breaking change before a
-public PyPI release; see
+unused provider cannot execute its code or break the base engine. Reference
+implementations use regular `librae.*` packages, and no repository-level
+compatibility aliases are provided. The ownership decision is recorded in
 `docs/decisions/2026-07-30-integration-discovery-and-packaging.md`.
 
 ## TimescaleDB
@@ -48,7 +46,7 @@ one. Re-running it is supported only when the database already matches the
 current revision, for example when refreshing role grants:
 
 ```bash
-docker exec -i quant_timescaledb psql -U quant -d quant < db/timescale_init.sql
+docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_init.sql
 ```
 
 When a revision changes the schema, recreate disposable development data or
@@ -59,7 +57,7 @@ database-owner connection and set `POSTGRES_APP_PASSWORD` and
 the non-admin `quant_app` role and must not be used for schema administration.
 
 Normal integrations call the high-level functions in
-`db.timescale_writer` and `db.timescale_reader`; upper layers should not issue
+`librae.db.timescale_writer` and `librae.db.timescale_reader`; upper layers should not issue
 ad hoc SQL. The repository runner skips database writes when
 `RunOptions.database_enabled` is false.
 
@@ -67,7 +65,7 @@ With repository database wiring disabled, local research remains free of
 implicit persistence. Call
 `build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then
 use pandas to write the returned tables to Parquet, SQLite, DuckDB, or another
-format. See [Local artifacts](local-artifacts.md). Librae defines the table and
+format. See `docs/guides/local-artifacts.md`. Librae defines the table and
 manifest shape; the caller owns file paths, overwrite policy, transactions,
 partitioning, and retention.
 
@@ -77,11 +75,11 @@ in-memory implementation is intended for deterministic tests only.
 
 ## Grafana
 
-Grafana provisioning lives under `app/grafana/provisioning/`. Dashboard JSON
+Grafana provisioning lives under `librae/app/grafana/provisioning/`. Dashboard JSON
 is generated with:
 
 ```bash
-uv run python -m app.grafana.generate_dashboards
+uv run python -m librae.app.grafana.generate_dashboards
 ```
 
 The strategy dashboard selects both `run_id` and `account_id`. Equity, PnL,
@@ -93,7 +91,7 @@ written data. To inspect the panels before running a real strategy, load the
 bundled fake rows:
 
 ```bash
-psql "$TIMESCALE_DSN" -f db/seed_fake_data.sql
+psql "$TIMESCALE_DSN" -f librae/db/seed_fake_data.sql
 ```
 
 For a local Grafana instance connected to an existing database:
@@ -121,17 +119,17 @@ bars come from; live execution needs an explicit `broker`,
 per-instrument broker override, or injected `order_adapter`. Librae does not
 infer an execution venue from a symbol.
 
-Adapters and credentials can be imported from `brokers` for caller-owned
-research or custom wiring. See
-[External market data and factors](external-data.md) for the polling callable,
-DB warm-up, and third-party factor boundaries.
+Adapters and credentials can be imported from `librae.brokers` for
+caller-owned research or custom wiring. See
+`docs/guides/external-data.md` for the polling callable, DB warm-up, and
+third-party factor boundaries.
 
 A third-party package can register explicit factories in the strategy-owned
 runner without modifying Librae:
 
 ```python
 from my_broker import MyBroker
-from orchestration.live import build_live_trader
+from librae.orchestration.live import build_live_trader
 
 trader = build_live_trader(
     strategy,
@@ -175,9 +173,8 @@ secrets from environment variables and behavior from
 independent options. You can instead inject your own notifier or persistence
 callbacks without installing that extra.
 
-See
-[LiveTrader callback signatures](../../architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier)
-for the exact callable contracts. When Grafana is unnecessary, callbacks such
+See the LiveTrader callback signatures in `architecture.md` for the exact
+callable contracts. When Grafana is unnecessary, callbacks such
 as `on_bar`, `on_order_event`, and `on_heartbeat` can feed an existing
 observability stack.
 `on_funding_cash_flow` receives each applied shadow-simulation funding event;
@@ -185,9 +182,9 @@ live broker balances remain authoritative.
 
 ## Deployment examples
 
-The `deploy/`, `app/`, and `scripts/` directories are operational examples,
+The `deploy/`, `librae/app/`, and `scripts/` directories are operational examples,
 not engine APIs. They show one Docker/Grafana/VM arrangement and can be used,
-replaced, or ignored. Read the root [security policy](../../SECURITY.md) before
+replaced, or ignored. Read `SECURITY.md` before
 deploying them to a host with a public IP.
 
 The trade image intentionally combines this engine repository with a separate
@@ -203,7 +200,7 @@ Run `deploy/build_push.sh` from `librae/`; it fails before invoking Docker when
 that sibling repository is absent. The shared image installs the `calendars`,
 `cli`, `db`, `crypto-live`, `telegram`, `tw-live`, and `us-live` extras.
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
-application repository; it syncs the compose file, `db/timescale_init.sql`,
+application repository; it syncs the compose file, `librae/db/timescale_init.sql`,
 Grafana provisioning, and `.env`.
 
 `LiveTrader.run()` is a blocking polling loop. A deployment should run it
