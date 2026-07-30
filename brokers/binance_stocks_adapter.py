@@ -14,14 +14,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-try:
+if TYPE_CHECKING:
     import httpx
-except ModuleNotFoundError as exc:
-    raise ModuleNotFoundError(
-        "Binance Stocks data requires the 'stocks-data' extra: pip install 'librae[stocks-data]'"
-    ) from exc
 
 from librae.config.symbols import AssetClass, AvailableSymbol, InstrumentKind
 
@@ -61,10 +57,17 @@ class BinanceStocksAdapter:
             )
         self._headers = {"X-MBX-APIKEY": api_key}
         self._owns_client = client is None
-        self._client = client or httpx.Client(
-            base_url=base_url,
-            timeout=10.0,
-        )
+        if client is not None:
+            self._client = client
+        else:
+            try:
+                import httpx
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "Binance Stocks data requires the 'stocks-data' extra: "
+                    "pip install 'librae[stocks-data]'"
+                ) from exc
+            self._client = httpx.Client(base_url=base_url, timeout=10.0)
 
     def info(self) -> AdapterInfo:
         return AdapterInfo(

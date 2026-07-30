@@ -47,6 +47,18 @@ metrics = librae.compute_all(
     periods_per_year=252,
 )
 assert metrics.sharpe is not None
+
+from brokers import (
+    BinanceStocksAdapter,
+    CryptoAdapter,
+    IBKRAdapter,
+    ShioajiAdapter,
+)
+
+assert BinanceStocksAdapter
+assert CryptoAdapter
+assert IBKRAdapter
+assert ShioajiAdapter
 assert blocked.isdisjoint(sys.modules)
 """
 

@@ -145,10 +145,11 @@ workspace/
 ```
 
 Run `deploy/build_push.sh` from `librae/`; it fails before invoking Docker when
-that sibling repository is absent. The shared image installs the `db`,
-`crypto-live`, `tw-live`, and `us-live` extras. Infrastructure-only deployment
-via `cloud_deploy.sh` does not copy either application repository; it syncs the
-compose file, `db/timescale_init.sql`, Grafana provisioning, and `.env`.
+that sibling repository is absent. The shared image installs the `calendars`,
+`cli`, `db`, `crypto-live`, `telegram`, `tw-live`, and `us-live` extras.
+Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
+application repository; it syncs the compose file, `db/timescale_init.sql`,
+Grafana provisioning, and `.env`.
 
 `LiveTrader.run()` is a blocking polling loop. A deployment should run it
 under a supervisor appropriate to the environment and must provide durable
