@@ -150,7 +150,7 @@ def main() -> None:
         timeframe="H1",
         market="crypto",
         data_source="binance_spot",
-        accounts={"default": AccountConfig(currency="USDT", initial_cash=100_000.0)},
+        account=AccountConfig(currency="USDT", initial_cash=100_000.0),
         mode="sim",
         execution=ExecutionPolicy(
             max_bar_volume_participation_rate=None,

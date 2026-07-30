@@ -775,7 +775,7 @@ class TestMultiAsset:
             timeframe="1h",
             market="tw_futures",
             data_source="shioaji",
-            accounts={"default": AccountConfig(currency="TWD", initial_cash=100_000.0)},
+            account=AccountConfig(currency="TWD", initial_cash=100_000.0),
             mode="backtest",
         )
         bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
@@ -797,7 +797,7 @@ class TestMultiAsset:
             timeframe="1d",
             market="multi",
             data_source="multi",
-            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
             mode="backtest",
             symbol_cost_overrides={"CRYPTO": {"multiplier": 1.0}},
             instrument_overrides={
@@ -829,7 +829,7 @@ class TestMultiAsset:
             timeframe="1h",
             market="crypto",
             data_source="x",
-            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
             mode="backtest",
             symbol_cost_overrides={"MY_CUSTOM_SYMBOL": {"multiplier": 1.0}},
             instrument_overrides={

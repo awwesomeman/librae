@@ -31,16 +31,18 @@ DEFAULT_POLL_SECONDS = 60
 class AccountConfig:
     """The single cash and PnL ledger used by one engine run.
 
-    ``account_id`` remains the key in ``RunConfig.accounts`` so persisted facts
-    retain a stable account identity. A run owns exactly one account; callers
-    coordinate multiple accounts as separate runs because Librae does not
-    provide FX, transfers, settlement, or cross-account netting.
+    A run owns exactly one account; callers coordinate multiple accounts as
+    separate runs because Librae does not provide FX, transfers, settlement,
+    or cross-account netting.
     """
 
     currency: str
     initial_cash: float
+    account_id: str = "default"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.account_id, str) or not self.account_id:
+            raise ValueError("account_id must be a non-empty string")
         if not isinstance(self.currency, str) or not self.currency:
             raise ValueError("account currency must be a non-empty string")
         if (
@@ -282,7 +284,7 @@ class RunConfig:
     timeframe: str
     market: str
     data_source: str
-    accounts: dict[str, AccountConfig]
+    account: AccountConfig
     mode: RunMode
     execution: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     risk: RiskPolicy = field(default_factory=RiskPolicy)
@@ -325,21 +327,8 @@ class RunConfig:
         if isinstance(self.symbols, str):
             raise ValueError("symbols must be a collection of identifiers, not one string")
         object.__setattr__(self, "symbols", tuple(self.symbols))
-        if not isinstance(self.accounts, dict) or not self.accounts:
-            raise ValueError("accounts must be a non-empty mapping")
-        if len(self.accounts) != 1:
-            raise ValueError(
-                "one run must own exactly one account; coordinate multiple accounts "
-                "as separate Librae runs"
-            )
-        normalized_accounts: dict[str, AccountConfig] = {}
-        for account_id, account in self.accounts.items():
-            if not isinstance(account_id, str) or not account_id:
-                raise ValueError("account ids must be non-empty strings")
-            if not isinstance(account, AccountConfig):
-                raise TypeError("accounts values must be AccountConfig")
-            normalized_accounts[account_id] = account
-        object.__setattr__(self, "accounts", _freeze(normalized_accounts))
+        if not isinstance(self.account, AccountConfig):
+            raise TypeError("account must be an AccountConfig")
         for field_name in (
             "params",
             "cost_overrides",
@@ -406,12 +395,7 @@ class RunConfig:
     @property
     def account_id(self) -> str:
         """Stable identity of this run's single account."""
-        return next(iter(self.accounts))
-
-    @property
-    def account(self) -> AccountConfig:
-        """Configuration of this run's single account."""
-        return self.accounts[self.account_id]
+        return self.account.account_id
 
     @cached_property
     def perf_params(self) -> dict[str, Any]:
@@ -423,7 +407,7 @@ class RunConfig:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
-        accounts, start, end, params, cost_overrides, symbol_cost_overrides,
+        account, start, end, params, cost_overrides, symbol_cost_overrides,
         instrument_overrides, execution, risk.
         Excludes: perf params, behavior params.
         """
@@ -438,9 +422,7 @@ class RunConfig:
                     "data_source": self.data_source,
                     "mode": self.mode,
                     "broker": self.broker,
-                    "accounts": {
-                        account_id: asdict(account) for account_id, account in self.accounts.items()
-                    },
+                    "account": asdict(self.account),
                     "start": self.start,
                     "end": self.end,
                     "params": self.params,

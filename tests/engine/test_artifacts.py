@@ -44,23 +44,21 @@ def _backtest_output() -> BacktestOutput:
             ended_at=now,
             run_at=now,
         ),
-        accounts=(
-            AccountPerformance(
-                account_id="main",
-                currency="USDT",
-                initial_cash=10_000.0,
-                final_equity=10_100.0,
-                net_pnl=100.0,
-                equity_curve=(
-                    EquityCurvePoint(
-                        ts=now,
-                        equity=10_100.0,
-                        period_return=0.01,
-                        drawdown=0.0,
-                    ),
+        account=AccountPerformance(
+            account_id="main",
+            currency="USDT",
+            initial_cash=10_000.0,
+            final_equity=10_100.0,
+            net_pnl=100.0,
+            equity_curve=(
+                EquityCurvePoint(
+                    ts=now,
+                    equity=10_100.0,
+                    period_return=0.01,
+                    drawdown=0.0,
                 ),
-                metrics=StrategyMetrics(total_return=0.01),
             ),
+            metrics=StrategyMetrics(total_return=0.01),
         ),
         order_events=(),
         position_snapshots=(),

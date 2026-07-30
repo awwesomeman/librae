@@ -66,7 +66,7 @@ def make_test_cfg(**overrides) -> RunConfig:
         timeframe="H1",
         market="crypto",
         data_source="binance_spot",
-        accounts={"default": AccountConfig(currency="USDT", initial_cash=100_000.0)},
+        account=AccountConfig(currency="USDT", initial_cash=100_000.0),
         mode="sim",
         reporting=reporting or ReportingPolicy(**reporting_values),
         runtime=runtime or RuntimePolicy(**{"poll_seconds": 0, **runtime_values}),
@@ -80,8 +80,9 @@ def make_test_cfg(**overrides) -> RunConfig:
     if runtime is not None and runtime_values:
         raise ValueError("pass runtime or runtime fields, not both")
     if initial_balance is not None:
-        defaults["accounts"] = {
-            "default": AccountConfig(currency="USDT", initial_cash=initial_balance)
-        }
+        defaults["account"] = AccountConfig(
+            currency="USDT",
+            initial_cash=initial_balance,
+        )
     defaults.update(overrides)
     return RunConfig(**defaults)

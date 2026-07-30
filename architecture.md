@@ -353,17 +353,16 @@ next observed bar. This conservative rule prevents a target reached before the
 entry from being recorded as profit without introducing an invented intrabar
 path model.
 
-#### Accounts and multi-asset / stock-picking strategies
+#### Account and multi-asset / stock-picking strategies
 
 Each run owns exactly one named account, which is the cash and PnL SSOT for
 every configured symbol. The account has one currency and one
-cash/equity/risk ledger. `RunConfig.accounts` and `BacktestOutput.accounts`
-retain the account id as a stable persistence and reporting key, but both
-contain exactly one entry.
+cash/equity/risk ledger. `RunConfig.account` and `BacktestOutput.account` are
+scalar values; `account_id` remains a stable persistence and reporting key.
 
-Strategies normally use `ctx.cash` and `ctx.equity`; `ctx.accounts` and
-`ctx.account_id_by_symbol` expose the same single account when an explicit id
-is useful. A deployment with separate broker accounts or currencies runs one
+Strategies normally use `ctx.cash` and `ctx.equity`; `ctx.account` and
+`ctx.account_id` expose the same ledger when its currency or explicit id is
+useful. A deployment with separate broker accounts or currencies runs one
 Librae engine per account and coordinates them outside the engine. Librae does
 not provide FX conversion, transfer, borrowing, settlement, cross-account
 netting, or atomic execution across runs.
@@ -1093,10 +1092,10 @@ Routing metadata is intentionally separate from accounting overrides:
 ```yaml
 strategy:
   symbols: [MU]
-  accounts:
-    ibkr_main:
-      currency: USD
-      initial_cash: 100000
+  account:
+    account_id: ibkr_main
+    currency: USD
+    initial_cash: 100000
   market: us_equity
   data_source: ibkr
   broker: ibkr              # explicit execution choice; no symbol fallback

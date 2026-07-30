@@ -23,7 +23,11 @@ def _config(
         timeframe="H1",
         market="test",
         data_source="test",
-        accounts={account_id: AccountConfig(currency="USD", initial_cash=initial_cash)},
+        account=AccountConfig(
+            account_id=account_id,
+            currency="USD",
+            initial_cash=initial_cash,
+        ),
         mode="backtest",
         reporting=ReportingPolicy(annualize=False),
     )

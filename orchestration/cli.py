@@ -310,13 +310,9 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         instrument_overrides,
     )
     if "initial_balance" in scfg:
-        raise ValueError(
-            "strategy.initial_balance was replaced by strategy.accounts; "
-            "configure {account_id: {currency, initial_cash}}"
-        )
-    accounts_raw = scfg.get("accounts")
-    accounts: dict[str, AccountConfig] = {}
-    if accounts_raw is None:
+        raise ValueError("strategy.initial_balance was replaced by strategy.account.initial_cash")
+    account_raw = scfg.get("account")
+    if account_raw is None:
         from librae.config.symbols import load_symbol_registry
 
         registry = load_symbol_registry()
@@ -327,39 +323,33 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         }
         if None in currencies or len(currencies) != 1:
             raise ValueError(
-                "strategy.accounts is required when account currency cannot be "
+                "strategy.account is required when account currency cannot be "
                 "inferred as one value for all symbols"
             )
-        accounts["default"] = AccountConfig(
+        account = AccountConfig(
             currency=str(next(iter(currencies))),
             initial_cash=scfg.get("initial_cash", 100_000),
         )
     else:
-        if not isinstance(accounts_raw, dict) or not accounts_raw:
-            raise ValueError(
-                "strategy.accounts must be a non-empty mapping of "
-                "account_id to {currency, initial_cash}"
-            )
+        if not isinstance(account_raw, dict) or not account_raw:
+            raise ValueError("strategy.account must be a mapping")
         if "initial_cash" in scfg:
             raise ValueError("strategy.initial_cash is only valid for an inferred single account")
-        for account_id, raw_account in accounts_raw.items():
-            if not isinstance(raw_account, dict):
-                raise ValueError(f"strategy.accounts.{account_id} must be a mapping")
-            unknown_account_keys = set(raw_account) - {"currency", "initial_cash"}
-            if unknown_account_keys:
-                raise ValueError(
-                    f"unknown strategy.accounts.{account_id} settings: "
-                    f"{sorted(unknown_account_keys)}"
-                )
-            try:
-                accounts[str(account_id)] = AccountConfig(
-                    currency=raw_account["currency"],
-                    initial_cash=raw_account["initial_cash"],
-                )
-            except KeyError as exc:
-                raise ValueError(
-                    f"strategy.accounts.{account_id} requires currency and initial_cash"
-                ) from exc
+        unknown_account_keys = set(account_raw) - {
+            "account_id",
+            "currency",
+            "initial_cash",
+        }
+        if unknown_account_keys:
+            raise ValueError(f"unknown strategy.account settings: {sorted(unknown_account_keys)}")
+        try:
+            account = AccountConfig(
+                account_id=account_raw.get("account_id", "default"),
+                currency=account_raw["currency"],
+                initial_cash=account_raw["initial_cash"],
+            )
+        except KeyError as exc:
+            raise ValueError("strategy.account requires currency and initial_cash") from exc
 
     # 1. Parse start/end (pop from params so they don't enter config_hash via params)
     start = params.pop("start", None)
@@ -434,7 +424,7 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         timeframe=timeframe,
         market=market,
         data_source=data_source,
-        accounts=accounts,
+        account=account,
         mode=args.mode,
         execution=execution,
         risk=risk,
@@ -524,12 +514,11 @@ def check_existing_run(config: RunConfig) -> str | None:
         try:
             from db.timescale_writer import _update_perf_params, refresh_performance
 
-            for account_id in config.accounts:
-                refresh_performance(
-                    existing["run_id"],
-                    account_id=account_id,
-                    config=config,
-                )
+            refresh_performance(
+                existing["run_id"],
+                account_id=config.account_id,
+                config=config,
+            )
             _update_perf_params(existing["run_id"], config.perf_params)
             logger.info(
                 "Recomputed metrics for run_id=%s (perf_params changed)", existing["run_id"]
@@ -650,7 +639,7 @@ def log_run_summary(config: RunConfig, options: RunOptions) -> None:
         f"  config_hash: {config.config_hash}",
         f"  code_rev:    {_get_code_rev()}",
         "  --- strategy params (stored in DB) ---",
-        f"  accounts:    {dict(config.accounts)}",
+        f"  account:     {config.account}",
         f"  params:      {config.params}",
         f"  cost_overrides: {config.cost_overrides}",
         f"  symbol_cost_overrides: {config.symbol_cost_overrides}",

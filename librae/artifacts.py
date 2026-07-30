@@ -160,29 +160,27 @@ def build_backtest_artifact(
     output.validate()
     run_id = output.run_metadata.run_id
 
-    account_rows: list[dict[str, object]] = []
-    equity_rows: list[dict[str, object]] = []
-    for account in output.accounts:
-        account_rows.append(
-            {
-                "run_id": run_id,
-                "account_id": account.account_id,
-                "currency": account.currency,
-                "initial_cash": account.initial_cash,
-                "final_equity": account.final_equity,
-                "net_pnl": account.net_pnl,
-                **asdict(account.metrics),
-            }
-        )
-        equity_rows.extend(
-            {
-                "run_id": run_id,
-                "account_id": account.account_id,
-                "currency": account.currency,
-                **asdict(point),
-            }
-            for point in account.equity_curve
-        )
+    account = output.account
+    account_rows = [
+        {
+            "run_id": run_id,
+            "account_id": account.account_id,
+            "currency": account.currency,
+            "initial_cash": account.initial_cash,
+            "final_equity": account.final_equity,
+            "net_pnl": account.net_pnl,
+            **asdict(account.metrics),
+        }
+    ]
+    equity_rows = [
+        {
+            "run_id": run_id,
+            "account_id": account.account_id,
+            "currency": account.currency,
+            **asdict(point),
+        }
+        for point in account.equity_curve
+    ]
 
     tables = {
         "accounts": pd.DataFrame(

@@ -47,7 +47,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 14
+_STATE_SCHEMA_VERSION = 15
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -208,7 +208,8 @@ class LiveRuntimeState:
     run_id: str
     config_hash: str
     mode: LiveMode
-    cash_by_account: dict[str, float]
+    account_id: str
+    cash: float
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
@@ -217,33 +218,20 @@ class LiveRuntimeState:
     pending_decision: StrategyDecision = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
-    equity_peak_by_account: dict[str, float] = field(default_factory=dict)
-    prev_equity_by_account: dict[str, float] = field(default_factory=dict)
+    equity_peak: float = 0.0
+    prev_equity: float = 0.0
     trade_count: int = 0
     event_sequence: int = 0
     period_index: int = 0
     status_period_count: int = 0
     halted: bool = False
-    halted_accounts: set[str] = field(default_factory=set)
     adv_session_labels: dict[str, str] = field(default_factory=dict)
     adv_filled_quantities: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        account_ids = set(self.cash_by_account)
-        if not account_ids or any(not account_id for account_id in account_ids):
-            raise ValueError("live runtime state requires non-empty account ids")
-        if account_ids != set(self.equity_peak_by_account) or account_ids != set(
-            self.prev_equity_by_account
-        ):
-            raise ValueError("live runtime account cash/equity keys must match")
-        if not self.halted_accounts <= account_ids:
-            raise ValueError("halted accounts must belong to the runtime state")
-        values = (
-            *self.cash_by_account.values(),
-            *self.equity_peak_by_account.values(),
-            *self.prev_equity_by_account.values(),
-        )
-        if any(not isfinite(value) for value in values):
+        if not isinstance(self.account_id, str) or not self.account_id:
+            raise ValueError("live runtime state requires a non-empty account_id")
+        if any(not isfinite(value) for value in (self.cash, self.equity_peak, self.prev_equity)):
             raise ValueError("live runtime account values must be finite")
 
     def to_dict(self) -> dict:
@@ -258,7 +246,8 @@ class LiveRuntimeState:
             "run_id": self.run_id,
             "config_hash": self.config_hash,
             "mode": self.mode,
-            "cash_by_account": self.cash_by_account,
+            "account_id": self.account_id,
+            "cash": self.cash,
             "positions": positions,
             "last_prices": self.last_prices,
             "last_cycle_ts": self.last_cycle_ts.isoformat() if self.last_cycle_ts else None,
@@ -271,14 +260,13 @@ class LiveRuntimeState:
             "pending_decision": _decision_to_dict(self.pending_decision),
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
-            "equity_peak_by_account": self.equity_peak_by_account,
-            "prev_equity_by_account": self.prev_equity_by_account,
+            "equity_peak": self.equity_peak,
+            "prev_equity": self.prev_equity,
             "trade_count": self.trade_count,
             "event_sequence": self.event_sequence,
             "period_index": self.period_index,
             "status_period_count": self.status_period_count,
             "halted": self.halted,
-            "halted_accounts": sorted(self.halted_accounts),
             "adv_session_labels": self.adv_session_labels,
             "adv_filled_quantities": self.adv_filled_quantities,
         }
@@ -301,9 +289,8 @@ class LiveRuntimeState:
             run_id=str(raw["run_id"]),
             config_hash=str(raw["config_hash"]),
             mode=raw["mode"],
-            cash_by_account={
-                str(account_id): float(cash) for account_id, cash in raw["cash_by_account"].items()
-            },
+            account_id=str(raw["account_id"]),
+            cash=float(raw["cash"]),
             positions=positions,
             last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},
             last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
@@ -319,20 +306,13 @@ class LiveRuntimeState:
                 if raw["live_rebalance"] is not None
                 else None
             ),
-            equity_peak_by_account={
-                str(account_id): float(equity)
-                for account_id, equity in raw["equity_peak_by_account"].items()
-            },
-            prev_equity_by_account={
-                str(account_id): float(equity)
-                for account_id, equity in raw["prev_equity_by_account"].items()
-            },
+            equity_peak=float(raw["equity_peak"]),
+            prev_equity=float(raw["prev_equity"]),
             trade_count=int(raw["trade_count"]),
             event_sequence=int(raw["event_sequence"]),
             period_index=int(raw["period_index"]),
             status_period_count=int(raw["status_period_count"]),
             halted=bool(raw["halted"]),
-            halted_accounts={str(account_id) for account_id in raw["halted_accounts"]},
             adv_session_labels={
                 str(symbol): str(label) for symbol, label in raw["adv_session_labels"].items()
             },

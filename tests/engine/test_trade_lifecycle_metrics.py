@@ -565,20 +565,18 @@ def test_trade_tearsheet_uses_lifecycle_and_anchor_populations(tmp_path: Path) -
             ended_at=T0 + timedelta(hours=7),
             run_at=T0 + timedelta(hours=8),
         ),
-        accounts=(
-            AccountPerformance(
-                account_id="default",
-                currency="USD",
-                initial_cash=100.0,
-                final_equity=100.0,
-                net_pnl=0.0,
-                equity_curve=(),
-                metrics=StrategyMetrics(
-                    total_return=0.0,
-                    trades=2,
-                    win_rate=0.5,
-                    profit_factor=2.0,
-                ),
+        account=AccountPerformance(
+            account_id="default",
+            currency="USD",
+            initial_cash=100.0,
+            final_equity=100.0,
+            net_pnl=0.0,
+            equity_curve=(),
+            metrics=StrategyMetrics(
+                total_return=0.0,
+                trades=2,
+                win_rate=0.5,
+                profit_factor=2.0,
             ),
         ),
         order_events=events,

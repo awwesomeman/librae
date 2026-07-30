@@ -218,7 +218,6 @@ class SymbolInfo:
     data_adapter: AdapterName
     venue_symbol: str
     currency: str
-    account_id: str | None = None
     continuous_alias: bool = False
     contract_month: str | None = None
     tick_size: float | None = None
@@ -240,8 +239,6 @@ class SymbolInfo:
             raise ValueError(f"{self.symbol!r} venue_symbol must be non-empty")
         if not self.currency:
             raise ValueError(f"{self.symbol!r} currency must be non-empty")
-        if self.account_id is not None and not self.account_id:
-            raise ValueError(f"{self.symbol!r} account_id must be non-empty or None")
         if self.calendar_id is not None and not self.calendar_id:
             raise ValueError(f"{self.symbol!r} calendar_id must be non-empty or None")
         if not isinstance(self.continuous_alias, bool):
@@ -296,7 +293,6 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             data_adapter=str(data["data_adapter"]),
             venue_symbol=str(data.get("venue_symbol", symbol)),
             currency=str(data["currency"]),
-            account_id=None,
             continuous_alias=data.get("continuous_alias", False),
             contract_month=validate_contract_month(data.get("contract_month")),
             tick_size=float(raw_tick_size) if raw_tick_size is not None else None,
@@ -566,17 +562,16 @@ def resolve_symbol(
         raise ValueError(
             f"No currency for symbol={symbol!r}; set instrument_overrides[symbol]['currency']"
         )
-    account_id = route.get("account_id", config.account_id)
-    if account_id != config.account_id:
+    if "account_id" in route:
         raise ValueError(
-            f"symbol={symbol!r} routes to account_id={account_id!r}, but one run "
-            f"owns only account_id={config.account_id!r}"
+            f"instrument_overrides[{symbol!r}].account_id is not supported; "
+            "one run owns exactly RunConfig.account"
         )
     account_currency = config.account.currency
     if currency != account_currency:
         raise ValueError(
             f"Currency mismatch for symbol={symbol!r}: instrument={currency!r}, "
-            f"account {account_id!r}={account_currency!r}"
+            f"account {config.account_id!r}={account_currency!r}"
         )
     security_type = route.get("security_type") or (registered.security_type if registered else None)
     exchange = route.get("exchange") or (registered.exchange if registered else None)
@@ -612,7 +607,6 @@ def resolve_symbol(
         venue_symbol=route.get("venue_symbol")
         or (registered.venue_symbol if registered else symbol),
         currency=currency,
-        account_id=account_id,
         continuous_alias=continuous_alias_raw,
         contract_month=contract_month,
         tick_size=float(tick_size) if tick_size is not None else None,

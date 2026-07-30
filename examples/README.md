@@ -182,10 +182,10 @@ All legs in one runner use its single account:
 ```yaml
 strategy:
   symbols: [NEAR_FUTURE, NEXT_FUTURE]
-  accounts:
-    futures:
-      currency: TWD
-      initial_cash: 100000
+  account:
+    account_id: futures
+    currency: TWD
+    initial_cash: 100000
 ```
 
 Use separate `RunConfig` and runner instances for separate broker accounts or

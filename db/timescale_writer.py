@@ -303,7 +303,8 @@ def save_backtest_output(
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
         # equity_curve (batch)
-        if any(account.equity_curve for account in output.accounts):
+        account = output.account
+        if account.equity_curve:
             eq_rows = [
                 (
                     _to_dt(eq.ts),
@@ -322,7 +323,6 @@ def save_backtest_output(
                     eq.exposed,
                     meta.strategy,
                 )
-                for account in output.accounts
                 for eq in account.equity_curve
             ]
             psycopg2.extras.execute_values(
@@ -497,18 +497,17 @@ def save_backtest_output(
         if sig_count:
             counts["signal_events"] = sig_count
 
-        for account in output.accounts:
-            write_strategy_performance(
-                meta.run_id,
-                account.account_id,
-                account.currency,
-                account.initial_cash,
-                account.final_equity,
-                account.net_pnl,
-                account.metrics,
-                cur=cur,
-            )
-        counts["strategy_performance"] = len(output.accounts)
+        write_strategy_performance(
+            meta.run_id,
+            account.account_id,
+            account.currency,
+            account.initial_cash,
+            account.final_equity,
+            account.net_pnl,
+            account.metrics,
+            cur=cur,
+        )
+        counts["strategy_performance"] = 1
 
         cur.close()
 
@@ -1216,7 +1215,9 @@ def refresh_performance(
     )
     if config is None:
         raise ValueError("config is required to refresh account performance")
-    account = config.accounts[account_id]
+    if account_id != config.account_id:
+        raise ValueError(f"unknown account_id: {account_id!r}")
+    account = config.account
     final_equity = equity_values[-1]
     write_strategy_performance(
         run_id,

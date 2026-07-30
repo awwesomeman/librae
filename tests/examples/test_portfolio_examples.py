@@ -52,14 +52,12 @@ def _context(
         bar=bars.get(configured_symbols[0], {}),
         bars=bars,
         positions=positions or {},
-        accounts={
-            "default": AccountSnapshot(
-                currency="USD",
-                cash=100_000.0,
-                equity=100_000.0,
-            )
-        },
-        account_id_by_symbol={symbol: "default" for symbol in configured_symbols},
+        account_id="default",
+        account=AccountSnapshot(
+            currency="USD",
+            cash=100_000.0,
+            equity=100_000.0,
+        ),
         period_index=period_index,
     )
 

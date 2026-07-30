@@ -402,18 +402,9 @@ class TestBuildRun:
                 strategy:
                   symbols: [MU, BTCUSDT]
                   timeframe: 1d
-                  accounts:
-                    ibkr:
-                      currency: USD
-                      initial_cash: 100000
-                    binance:
-                      currency: USDT
-                      initial_cash: 100000
-                  instrument_overrides:
-                    MU:
-                      account_id: ibkr
-                    BTCUSDT:
-                      account_id: binance
+                  account:
+                    currency: USD
+                    initial_cash: 100000
                 """
             )
         )
@@ -444,10 +435,9 @@ class TestBuildRun:
                   timeframe: 1d
                   market: test
                   data_source: custom
-                  accounts:
-                    default:
-                      currency: USD
-                      initial_cash: 100000
+                  account:
+                    currency: USD
+                    initial_cash: 100000
                   symbol_cost_overrides:
                     TEST:
                       multiplier: 1.0
@@ -467,10 +457,9 @@ class TestBuildRun:
                   timeframe: 1d
                   market: test
                   data_source: custom
-                  accounts:
-                    default:
-                      currency: USD
-                      initial_cash: 100000
+                  account:
+                    currency: USD
+                    initial_cash: 100000
                   perf:
                     annualize: false
                 """
@@ -505,7 +494,7 @@ def _make_cfg(**overrides) -> RunConfig:
         timeframe="1d",
         market="us_equity",
         data_source="local",
-        accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
+        account=AccountConfig(currency="USD", initial_cash=100_000.0),
         mode="backtest",
     )
     defaults.update(overrides)
@@ -551,9 +540,11 @@ class TestCheckExistingRun:
 
     def test_changed_perf_params_refreshes_run_account(self):
         config = _make_cfg(
-            accounts={
-                "alpha": AccountConfig(currency="USD", initial_cash=100_000.0),
-            }
+            account=AccountConfig(
+                account_id="alpha",
+                currency="USD",
+                initial_cash=100_000.0,
+            )
         )
         existing = {
             "run_id": "existing-run",

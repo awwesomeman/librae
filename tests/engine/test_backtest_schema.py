@@ -98,7 +98,7 @@ def test_run_metadata_defaults() -> None:
 def test_backtest_output_validate_passes() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
-        accounts=(_make_account(_make_equity_curve()),),
+        account=_make_account(_make_equity_curve()),
         order_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
@@ -110,7 +110,7 @@ def test_backtest_output_validate_empty_run_id_raises() -> None:
     meta = _make_run_metadata(run_id="")
     output = BacktestOutput(
         run_metadata=meta,
-        accounts=(_make_account(),),
+        account=_make_account(),
         order_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
@@ -123,7 +123,7 @@ def test_backtest_output_validate_empty_strategy_raises() -> None:
     meta = _make_run_metadata(strategy="")
     output = BacktestOutput(
         run_metadata=meta,
-        accounts=(_make_account(),),
+        account=_make_account(),
         order_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
@@ -132,18 +132,17 @@ def test_backtest_output_validate_empty_strategy_raises() -> None:
         output.validate()
 
 
-def test_backtest_output_validate_rejects_duplicate_account_id() -> None:
+def test_backtest_output_exposes_single_account() -> None:
     account = _make_account()
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
-        accounts=(account, account),
+        account=account,
         order_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
 
-    with pytest.raises(ValueError, match="unique account_id"):
-        output.validate()
+    assert output.account is account
 
 
 def test_strategy_metrics_cost_fields_optional() -> None:

@@ -294,7 +294,7 @@ class TestFromConfig:
             timeframe="5m",
             market=market,
             data_source=data_source,
-            accounts={"default": AccountConfig(currency=currency, initial_cash=100_000.0)},
+            account=AccountConfig(currency=currency, initial_cash=100_000.0),
             mode="backtest",
             **kwargs,
         )
@@ -362,7 +362,7 @@ class TestFromConfig:
             timeframe="1d",
             market="multi",
             data_source="multi",
-            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
             mode="backtest",
         )
 
@@ -418,7 +418,7 @@ class TestDescribeSymbols:
             timeframe="5m",
             market=market,
             data_source=data_source,
-            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
             mode="backtest",
             **kwargs,
         )

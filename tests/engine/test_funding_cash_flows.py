@@ -152,7 +152,7 @@ def test_backtest_applies_only_same_timestamp_observations() -> None:
 
     assert [item.cash_flow for item in result.funding_cash_flows] == pytest.approx([-20.0, 10.0])
     assert result.final_equity == pytest.approx(9_990.0)
-    assert output.accounts[0].net_pnl == pytest.approx(-10.0)
+    assert output.account.net_pnl == pytest.approx(-10.0)
     assert output.metrics.total_return == pytest.approx(-0.001)
     assert [item.cash_flow for item in output.funding_cash_flows] == pytest.approx([-20.0, 10.0])
     assert all(event.price == 100.0 for event in output.order_events)
@@ -226,7 +226,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
     runner._sleep = lambda _seconds: None
     runner.run(max_iterations=3)
 
-    assert runner._cash_by_account["default"] == pytest.approx(99_790.0)
+    assert runner._cash == pytest.approx(99_790.0)
     assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
 
     restored = LiveTrader(
@@ -249,5 +249,5 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
     restored._sleep = lambda _seconds: None
     restored.run(max_iterations=1)
 
-    assert restored._cash_by_account["default"] == pytest.approx(99_790.0)
+    assert restored._cash == pytest.approx(99_790.0)
     assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])

@@ -4,10 +4,9 @@ strategy:
   timeframe: D1
   market: us_equity
   data_source: synthetic
-  accounts:
-    default:
-      currency: USD
-      initial_cash: 100000
+  account:
+    currency: USD
+    initial_cash: 100000
   instrument_overrides:
     SPREAD_NEAR:
       data_adapter: ibkr

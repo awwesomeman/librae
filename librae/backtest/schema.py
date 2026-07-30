@@ -240,29 +240,19 @@ class BacktestOutput:
     """
 
     run_metadata: RunMetadata
-    accounts: Sequence[AccountPerformance]
+    account: AccountPerformance
     order_events: Sequence[OrderEventRecord]
     position_snapshots: Sequence[PositionSnapshotPoint]
     allocation_snapshots: Sequence[AllocationSnapshotPoint]
     funding_cash_flows: Sequence[FundingCashFlowRecord] = ()
 
-    def _single_account(self) -> AccountPerformance:
-        if len(self.accounts) != 1:
-            raise ValueError(
-                "aggregate account values are undefined for multiple accounts; "
-                "use BacktestOutput.accounts"
-            )
-        return self.accounts[0]
-
     @property
     def equity_curve(self) -> Sequence[EquityCurvePoint]:
-        """Single-account compatibility view."""
-        return self._single_account().equity_curve
+        return self.account.equity_curve
 
     @property
     def metrics(self) -> StrategyMetrics:
-        """Single-account compatibility view."""
-        return self._single_account().metrics
+        return self.account.metrics
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict with ISO datetime strings."""
@@ -294,11 +284,6 @@ class BacktestOutput:
             raise ValueError("run_metadata.symbols must contain non-empty identifiers")
         if not self.run_metadata.timeframe:
             raise ValueError("run_metadata.timeframe is required")
-        if not self.accounts:
-            raise ValueError("accounts must contain at least one account result")
-        account_currency = {account.account_id: account.currency for account in self.accounts}
-        if len(account_currency) != len(self.accounts):
-            raise ValueError("accounts must contain unique account_id values")
         account_records = (
             *self.order_events,
             *self.position_snapshots,
@@ -306,13 +291,12 @@ class BacktestOutput:
             *self.funding_cash_flows,
         )
         for record in account_records:
-            expected_currency = account_currency.get(record.account_id)
-            if expected_currency is None:
+            if record.account_id != self.account.account_id:
                 raise ValueError(f"record references unknown account_id: {record.account_id!r}")
-            if record.currency != expected_currency:
+            if record.currency != self.account.currency:
                 raise ValueError(
                     f"record currency {record.currency!r} does not match account "
-                    f"{record.account_id!r} currency {expected_currency!r}"
+                    f"{record.account_id!r} currency {self.account.currency!r}"
                 )
 
 

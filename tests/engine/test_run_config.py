@@ -18,7 +18,7 @@ def _config(**overrides: object) -> RunConfig:
         "timeframe": "H1",
         "market": "crypto",
         "data_source": "test",
-        "accounts": {"default": AccountConfig(currency="USD", initial_cash=10_000.0)},
+        "account": AccountConfig(currency="USD", initial_cash=10_000.0),
         "mode": "backtest",
         "params": {"window": 20, "nested": {"enabled": True}},
     }
@@ -54,14 +54,9 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
     assert backtest.config_hash != simulation.config_hash
 
 
-def test_run_owns_exactly_one_account() -> None:
-    with pytest.raises(ValueError, match="exactly one account"):
-        _config(
-            accounts={
-                "a": AccountConfig(currency="USD", initial_cash=10_000.0),
-                "b": AccountConfig(currency="USD", initial_cash=10_000.0),
-            }
-        )
+def test_run_requires_account_config() -> None:
+    with pytest.raises(TypeError, match="AccountConfig"):
+        _config(account={"currency": "USD", "initial_cash": 10_000.0})
 
 
 def test_runtime_operational_settings_are_validated_but_do_not_change_config_hash() -> None:
@@ -167,7 +162,7 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
         ({"symbols": ["AAA", 1]}, "symbols"),
         ({"strategy_name": 1}, "strategy_name"),
         ({"broker": ""}, "broker"),
-        ({"accounts": True}, "accounts"),
+        ({"account": True}, "account"),
         ({"risk_free_rate": True}, "risk_free_rate"),
         ({"risk_free_rate": -1.0}, "risk_free_rate"),
         ({"annualize": 1}, "annualize"),

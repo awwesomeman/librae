@@ -16,9 +16,10 @@ def _state() -> LiveRuntimeState:
         run_id="run-1",
         config_hash="abc",
         mode="live",
-        cash_by_account={"default": 1_000.0},
-        equity_peak_by_account={"default": 1_000.0},
-        prev_equity_by_account={"default": 1_000.0},
+        account_id="default",
+        cash=1_000.0,
+        equity_peak=1_000.0,
+        prev_equity=1_000.0,
     )
 
 

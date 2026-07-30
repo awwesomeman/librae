@@ -340,7 +340,7 @@ class TestResolveSymbol:
                 currency = get_symbol(symbol).currency
             except KeyError:
                 currency = "USD"
-        values["accounts"] = {"default": AccountConfig(currency=currency, initial_cash=100_000.0)}
+        values["account"] = AccountConfig(currency=currency, initial_cash=100_000.0)
         return RunConfig(**values)
 
     def test_registered_symbol_uses_venue_metadata(self):
