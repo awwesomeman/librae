@@ -54,7 +54,7 @@ SeriesMetric = Literal[
     "drawdown",
 ]
 
-DEFAULT_SUMMARY_METRICS: tuple[SummaryMetric, ...] = (
+_AVAILABLE_SUMMARY_METRICS: tuple[SummaryMetric, ...] = (
     "total_return",
     "mean_period_return",
     "period_volatility",
@@ -64,12 +64,28 @@ DEFAULT_SUMMARY_METRICS: tuple[SummaryMetric, ...] = (
     "max_drawdown",
     "positive_period_rate",
 )
-DEFAULT_SERIES_METRICS: tuple[SeriesMetric, ...] = (
+_AVAILABLE_SERIES_METRICS: tuple[SeriesMetric, ...] = (
     "period_return",
     "wealth_index",
     "cumulative_return",
     "drawdown",
 )
+DEFAULT_SUMMARY_METRICS: tuple[SummaryMetric, ...] = _AVAILABLE_SUMMARY_METRICS
+DEFAULT_SERIES_METRICS: tuple[SeriesMetric, ...] = _AVAILABLE_SERIES_METRICS
+
+
+def available_metrics(
+    *,
+    kind: Literal["summary", "series"] | None = None,
+) -> tuple[SummaryMetric | SeriesMetric, ...]:
+    """Return supported metric names without computing data or loading plugins."""
+    if kind is None:
+        return (*_AVAILABLE_SUMMARY_METRICS, *_AVAILABLE_SERIES_METRICS)
+    if kind == "summary":
+        return _AVAILABLE_SUMMARY_METRICS
+    if kind == "series":
+        return _AVAILABLE_SERIES_METRICS
+    raise ValueError(f"unsupported metric kind: {kind!r}")
 
 
 def _validated_period_returns(period_returns: pd.DataFrame) -> pd.DataFrame:
@@ -144,7 +160,7 @@ def compute_performance_series(
     returns = _validated_period_returns(period_returns)
     selected = _validated_metrics(
         metrics,
-        supported=frozenset(DEFAULT_SERIES_METRICS),
+        supported=frozenset(_AVAILABLE_SERIES_METRICS),
     )
     wealth = (1.0 + returns).cumprod()
     # WHY: Initial capital is a peak even though the input starts at the first
@@ -187,7 +203,7 @@ def summarize_performance(
     returns = _validated_period_returns(period_returns)
     selected = _validated_metrics(
         metrics,
-        supported=frozenset(DEFAULT_SUMMARY_METRICS),
+        supported=frozenset(_AVAILABLE_SUMMARY_METRICS),
     )
     path = compute_performance_series(
         returns,

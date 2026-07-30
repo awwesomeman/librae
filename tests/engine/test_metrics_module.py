@@ -17,7 +17,10 @@ from librae.backtest.engine import Backtest
 from librae.backtest.schema import StrategyMetrics
 from librae.core.cost_model import CostModel
 from librae.core.metrics import (
+    DEFAULT_SERIES_METRICS,
+    DEFAULT_SUMMARY_METRICS,
     PERCENTAGE_POINTS_PER_FRACTION,
+    available_metrics,
     compute_all,
     compute_performance_series,
     compute_signal_outcomes,
@@ -48,8 +51,23 @@ def test_signal_outcome_functions_are_public() -> None:
 def test_performance_functions_are_public() -> None:
     import librae
 
+    assert librae.available_metrics is available_metrics
     assert librae.summarize_performance is summarize_performance
     assert librae.compute_performance_series is compute_performance_series
+
+
+def test_available_metrics_lists_supported_names_by_kind() -> None:
+    summary = available_metrics(kind="summary")
+    series = available_metrics(kind="series")
+
+    assert set(DEFAULT_SUMMARY_METRICS) <= set(summary)
+    assert set(DEFAULT_SERIES_METRICS) <= set(series)
+    assert available_metrics() == (*summary, *series)
+
+
+def test_available_metrics_rejects_unknown_kind() -> None:
+    with pytest.raises(ValueError, match="unsupported metric kind"):
+        available_metrics(kind="report")
 
 
 @pytest.fixture

@@ -830,6 +830,13 @@ optional-reporting policy. This avoids engine APIs that name a benchmark while
 leaving its economically important policies implicit. Examples are in the
 [performance analysis guide](docs/guides/performance-analysis.md).
 
+`available_metrics()` returns the static metric names supported by those two
+APIs, optionally filtered with `kind="summary"` or `kind="series"`. It performs
+no calculation, network discovery, plugin scan, or import of an optional
+reporting package. The `DEFAULT_*_METRICS` tuples remain selection defaults,
+not the capability boundary, so defaults may later become a supported subset
+without making other metrics invalid.
+
 #### Perpetual funding cash flows
 
 Backtest and shadow-simulation bars may contain a `funding_rate` observation,
@@ -1081,6 +1088,7 @@ financial/execution fact.
 | `execute_portfolio_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
 | `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
+| `available_metrics(kind=...)` | list supported summary or series metric names without computing them |
 | `summarize_performance(period_returns, ...)` | selectable full-sample metrics over caller-aligned return columns; no annualization |
 | `compute_performance_series(period_returns, ...)` | selectable return, wealth, cumulative-return, and drawdown paths |
 | `queue_market_exit_all(positions, reason=...)` | queues completed-bar risk decisions for the next observed open |
