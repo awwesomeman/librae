@@ -9,6 +9,26 @@
 >
 > **Language**: this repo is English-only outside `docs/` (which stays in the language it was originally written in — mixing languages mid-document isn't worth the churn). Keep descriptions concise and to the point — a one-line WHY beats a paragraph; link to `docs/decisions/` for the full history instead of re-explaining it here.
 
+## Compatibility Policy Before 1.0
+
+Until either Librae 1.0.0 is released or an interface freeze is explicitly
+declared, every functional, API, configuration, persistence-shape, and test
+contract change is treated as breaking:
+
+- Keep only the current contract in production code and `tests/`. Update or
+  remove stale expectations instead of adding deprecated aliases, dual-format
+  parsers, compatibility branches, or migration shims.
+- Tests may assert that an obsolete or malformed shape is rejected, but must
+  not preserve the obsolete behavior as a supported path. Generate
+  non-current-version cases relative to the current serialized version rather
+  than maintaining a historical version list.
+- Persisted development data and runtime checkpoints may require explicit
+  external migration or removal. Never silently default a missing field from
+  an older shape.
+
+After either gate, compatibility, deprecation, and migration requirements must
+be defined explicitly before further breaking changes.
+
 ## System layering overview
 
 ```
@@ -25,16 +45,109 @@ Layering details in `docs/decisions/2026-03-26-platform-architecture.md` (a hist
 
 ## Broker Adapter Design (`brokers/`)
 
-- One flat adapter class per broker/exchange (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared ABC**. Market/account signatures include `fetch_ohlcv`, `get_position`, and `info`; live order lifecycle signatures are `prepare_order`, `place_order`, `find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
+- One flat adapter class per observed broker-product protocol
+  (`ShioajiAdapter`, `CryptoAdapter`, `IBKRAdapter`), **duck-typed, no shared
+  ABC**. A genuinely separate product API may have a focused adapter:
+  `BinanceStocksAdapter` exposes only its currently implemented catalog/quote
+  capabilities and is not presented as an OHLCV/order adapter. Market/account
+  signatures include `fetch_ohlcv`, `get_position(PositionRequest)`, and
+  `info`; live order lifecycle signatures are `prepare_order`, `place_order`,
+  `find_order`, `get_order`, `list_open_orders`, and `cancel_order`.
 - `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, a per-symbol `instrument_overrides[symbol]["broker"]`, or an injected `order_adapter`; an unresolved route fails at startup. An explicitly selected broker may reuse the same adapter session as market data.
+- Cross-broker behavior is generalized only at an observed engine boundary. `LiveExecutor` builds one broker-neutral `PositionRequest` from the configured canonical/venue identity, currency, security type, exchange, `contract_month`/`continuous_alias`, and `CostModel.multiplier`; every adapter accepts that request and returns the same position shape. Contract lookup, broker-native symbol syntax, CCXT balance conventions, Shioaji direction enums, and IBKR `conId`/`avgCost` handling stay inside the concrete adapter. Add a shared field or helper only when more than one real adapter needs the same semantic; do not create broker hierarchies or speculative capability abstractions.
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
-- `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
+- `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A non-flat position snapshot must provide finite side/quantity and a positive average price; missing fields never mean flat or zero. A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
 - OHLCV returns a uniform schema: `[ts, open, high, low, close, volume]`, with `ts` as the UTC-aware bar-start datetime; timeframe-string conversion is shared via `librae/core/utils.py` (`interval_to_timedelta` etc.), not reimplemented per adapter.
 - Where a type constraint is needed, use `typing.Protocol`, **declared minimally at the call site** rather than a hierarchy covering unrelated capabilities. `librae/live/executor.py`'s `OrderAdapter` contains only the six lifecycle calls the executor uses; market data/account methods remain separately duck-typed.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
-- `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). Resolves to the nearest non-expired contract month via `reqContractDetails` (front month, not back-adjusted) — same "always trade/quote whatever's current" behavior as `ShioajiAdapter`'s `TXFR1`-style rolling alias. Cached futures contracts and contract details are revalidated against their IBKR expiry before reuse so a long-running process rolls after expiry rather than continuing to quote or trade the stale month.
+- Futures have one broker-neutral selection rule: a dated monthly/quarterly instrument must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract). `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
+- IBKR consumes a product root in `venue_symbol` plus the separate `contract_month`. Shioaji and CCXT may instead require an exact broker-native contract code in `venue_symbol`; they still receive the common month/alias identity, but the adapter does not parse or reconstruct proprietary symbol syntax. This is one semantic interface with broker-specific resolution, not one universal ticker format.
+- `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). For an exact contract it queries the root plus `contract_month` and rejects missing or ambiguous matches; it never falls back to another month. Only `continuous_alias=True` resolves the nearest non-expired contract. Cached futures contracts and contract details are revalidated against their IBKR expiry before reuse so a long-running rolling route cannot continue quoting or trading an expired month. Position reconciliation resolves the same contract and matches its stable `conId`; a root such as `ES` alone is intentionally invalid because it cannot select one broker position. `CostModel.multiplier` remains the accounting SSOT and must match the resolved IBKR contract multiplier; IBKR `avgCost` is then divided by that verified multiplier before comparison with the engine's per-unit entry price.
+- `ShioajiAdapter` accepts native R1/R2 contracts only when `continuous_alias=True` and considers both alias `code` and resolved `target_code` during order/position reconciliation. An exact contract must use a non-alias `venue_symbol`; the adapter reads Shioaji `FuturesInfo.delivery_month` and rejects a mismatch with `contract_month`. Futures positions explicitly query `futopt_account` (Shioaji otherwise defaults `list_positions()` to the stock account).
+- `CryptoAdapter` keeps the CCXT unified symbol as `venue_symbol`. A delivery future must set `contract_month`, checked against CCXT market `expiry`; spot and perpetual markets cannot carry that field. Binance continuous klines remain a data/research API and are explicitly rejected by order/position paths instead of being mistaken for an orderable contract.
+
+### Broker symbol discovery
+
+`librae.available_symbols()` queries the selected broker's current catalog; it
+does not copy thousands of changeable venue symbols into the built-in registry.
+It returns immutable `AvailableSymbol` values with a suggested canonical key,
+the adapter-facing and native symbols, instrument/asset class, expiry, current
+contract rank, and verified multiplier/tick metadata when the venue supplies
+them. Query matching is exact against broker id, unified symbol, base, or
+base+quote so `query="MU"` cannot silently select `MUU`.
+
+- Binance crypto discovery uses public CCXT `load_markets()` data and needs no
+  API key. `asset_class="equity", kind="perpetual"` is the TradFi perpetual
+  pool. Binance Stocks is a separate `/sapi/v1/equity/*` product:
+  `kind="spot", asset_class="equity"` uses its API-key-authenticated
+  `exchangeInfo` catalog and plain tickers such as `MU`/`GOOGL` (the website's
+  `EQ_GOOGL` is a page route, not the API symbol). Its current REST API exposes
+  latest quotes but no historical OHLCV, so discovery does not fabricate a
+  built-in `RunConfig` bar route. Binance discovery requires an explicit
+  `kind`; spot discovery also requires `asset_class` so separate product
+  catalogs are never silently omitted.
+- Shioaji discovery uses the authenticated session's
+  `contracts.futures(root)` result, including exact contracts and native R1/R2
+  aliases.
+- IBKR discovery uses the connected read-only TWS/Gateway session's
+  `reqContractDetails`. Futures require an exchange.
+
+`contract_rank=0/1` identifies the current nearest/next listed exact contract
+in that catalog snapshot. Selecting such a dated result pins its
+`contract_month`; it does not roll later. A venue-native R1/R2 result has
+`continuous_alias=True` and may change its target. This distinction prevents a
+discovery convenience from silently changing live exposure.
+
+Discovery can feed an adapter directly without YAML:
+
+```python
+from brokers.crypto_adapter import CryptoAdapter
+from librae import available_symbols
+
+binance = CryptoAdapter(exchange_id="binance")
+btc = available_symbols(
+    "binance",
+    query="BTCUSDT",
+    kind="perpetual",
+    asset_class="crypto",
+    adapter=binance,
+)
+btc_perpetual = btc[0]
+bars = binance.fetch_ohlcv(
+    btc_perpetual.venue_symbol,
+    "1h",
+    limit=500,
+    **btc_perpetual.market_data_kwargs(),
+)
+```
+
+For a `RunConfig`, use `candidate.canonical_symbol`,
+`candidate.instrument_override()`, and `candidate.cost_override()` to build the
+two existing per-symbol maps programmatically. Discovery never guesses
+commission, tax, margin policy, account, or trading calendar.
+
+### Broker API compatibility
+
+Broker integration compatibility has two independently maintained boundaries:
+
+- `pyproject.toml` declares the tested SDK API family with both lower and upper
+  bounds (`ccxt`, `shioaji`, `ib-async`); `uv.lock` pins the exact repository
+  development/deployment versions. SDK contract tests construct and call the
+  concrete SDK surfaces Librae depends on. An SDK range update is therefore an
+  explicit compatibility change with tests, not an incidental install-time
+  upgrade.
+- Broker-hosted REST/socket API versions are not Python packages and do not
+  belong in TOML. Versioned endpoint paths and adapter parsers are maintained
+  in code. For example, Binance Stocks records official schema `1.0.0` and
+  calls `/sapi/v1/equity/*`; broker changelogs plus integration/contract tests
+  govern upgrades. If a broker provides no version negotiation, Librae must
+  fail on an incompatible response shape rather than silently reinterpret it.
+
+Librae owns compatibility of its adapters with the declared SDK and broker API
+contracts. Users own credentials, account permissions, jurisdiction/product
+eligibility, broker-side enablement, and upgrades made outside the lockfile.
 
 ## Backtest Engine Design (`librae/`)
 
@@ -166,6 +279,19 @@ does; a gap through receives the opening price. An unreached limit expires
 after that bar and is logged. `PortfolioTargets.fill_price` accepts only a bar
 field name because one numeric price cannot describe a multi-symbol basket;
 use per-symbol `OrderIntent`s for limits.
+
+Historical data may additionally provide non-null boolean `can_buy` and
+`can_sell` columns as a required pair. The data adapter must normalize
+market-specific price limits, halts, auctions, and empty-book states into these
+side-level facts. Entry, ordinary close, stop, liquidation, drawdown, and
+terminal fills share the rule. Triggered adverse stops/liquidations remain
+pending until the required side is tradable; a terminal backtest raises rather
+than inventing liquidity. Omitting both columns explicitly means the data
+source supplied no side-tradability state. These facts must never be inferred
+from the selected execution broker because one broker may route many markets.
+Shioaji's per-contract `limit_up`/`limit_down` fields are used only to validate
+an outgoing limit price for that resolved venue contract; they are not a
+cross-market backtest rule.
 
 OHLCV cannot determine whether an intrabar high or low happened first. A new
 position therefore receives same-bar stop/take-profit processing only when its
@@ -313,10 +439,13 @@ account separately and never assumes USD = USDT; a strategy that needs a
 common return or hedge capital base must supply its own explicit FX/valuation
 model.
 
-Continuous near/next/quarterly aliases remain research series and are not
-orderable. A live deployment supplies concrete contract symbols/expiries in
-`instrument_overrides`; contract selection and roll scheduling remain upstream
-strategy/data responsibilities.
+Continuous near/next/quarterly aliases are dynamic identities, not exact
+contracts. They are orderable only when the selected adapter implements that
+explicit route (for example Shioaji's native `TXFR1` or IBKR front-month
+resolution); Crypto auto-wiring rejects its research-only continuous series.
+A strategy that needs expiry-stable exposure supplies `contract_month` and a
+unique canonical `symbol`. Roll timing remains an upstream strategy decision;
+the engine never silently converts an exact contract into a rolling alias.
 
 Execution then deliberately diverges:
 
@@ -396,7 +525,8 @@ completes because transient legging exposure is governed by
 this entry check; applying a new-entry limit to them could prevent recovery to
 the already accepted pre-group exposure. A breach halts dependent execution.
 
-Incremental cache retention is capped by `warmup_periods` (an injected warmup
+Incremental cache retention is capped by the validated
+`ExecutionPolicy.warmup_periods` (default 720; an injected warmup
 fetcher may provide more initial history). This implementation favors
 daily/session correctness over high-frequency throughput; lower strategy
 frequency reduces load but does not remove clock/order-state synchronization
@@ -482,6 +612,7 @@ config = RunConfig(
         # Optional session-level cap; both fields must be set together.
         adv_lookback_sessions=20,
         max_adv_participation_rate=0.01,
+        warmup_periods=720,
         # Local fallback, not broker IOC/FOK/GTD.
         live_order_timeout_seconds=120,
     ),
@@ -527,8 +658,10 @@ exceeded `poll_seconds`.
   quantity is `min(bar cap - filled this bar, ADV cap - filled this session)`.
   This avoids granting the full ADV budget again on every intraday bar. No
   intraday volume-profile estimate is needed: the current-bar cap remains the
-  local liquidity constraint. Sim/live `warmup_periods` must retain enough
+  local liquidity constraint. Sim/live `ExecutionPolicy.warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
+- `warmup_periods`: positive live/sim feature-history retention count; it is
+  typed engine configuration, not a strategy `params` fallback.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
   from the persisted wall-clock placement attempt. On expiry the engine first
   refreshes the broker report, requests cancellation only if the order remains
@@ -543,12 +676,28 @@ exceeded `poll_seconds`.
   limit price whose absolute distance from the latest completed close exceeds
   this ratio. Market orders are unaffected because their execution price is
   not known before submission.
-- `max_gross_exposure` / `max_net_exposure`: validate `PortfolioTargets` before mutation and raise on a breach; targets are not implicitly normalized. These are target constraints, not guarantees against later price drift or broker slippage.
+- `max_gross_exposure` / `max_net_exposure`: backtest/sim validate every
+  complete strategy decision batch (`OrderIntent`, `PortfolioTargets`, or
+  `MultiLegOrder`) against staged post-decision positions before mutation.
+  Live validates each request in its actual submission order as well as the
+  final portfolio, so a later hedge cannot conceal a transient breach. A
+  transition that worsens an already-breached limit is rejected before
+  submission, while a risk-reducing transition remains allowed. Live
+  additionally checks confirmed fills because broker slippage and partial
+  fills can differ from the staged request.
+  `calculate_signed_position_notionals()` and
+  `calculate_position_weights()` are the shared accounting SSOT used by risk
+  validation, backtest snapshots, live post-fill checks, and live diagnostics.
 - `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position in the breached account and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes for that account and books only confirmed broker fills. The account halt persists across restart while unaffected accounts continue to be managed. Live emergency exits remain active while the account is halted and must reach a broker terminal state before `reset_halt(account_id)` is allowed. After operator review, `reset_halt(account_id)` starts a new risk epoch for that account; calling `reset_halt()` without an account also clears a system-wide halt and resets every account peak.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
   `reset_halt()` is required after review before new entries resume.
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
+
+The backtest timeframe is inferred independently for each symbol. Every symbol
+with enough observations must agree, while sparse histories must remain
+aligned to that interval. The union event clock is never used to infer a
+faster, synthetic timeframe for staggered markets.
 
 Performance annualization has a separate explicit SSOT:
 `RunConfig.periods_per_year` is the number of return observations per year
@@ -622,7 +771,7 @@ When no order or grouped execution is active, the checks repeat every
   by deterministic client id, poll tracked orders, then compare the broker's
   open orders on configured symbols. An untracked order is treated as an
   orphan: do not guess ownership or invent a fill; halt for operator review.
-- **Positions**: `get_position(symbol)` is called only for this strategy's
+- **Positions**: `get_position(PositionRequest)` is called only for this strategy's
   configured symbols; it is not described as a complete account snapshot. A
   restored checkpoint keeps its entry time and accumulated costs, while broker
   side/quantity is a reconciliation assertion. A mismatch or unreadable
@@ -637,16 +786,19 @@ When no order or grouped execution is active, the checks repeat every
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
   semantics vary by account mode, so blindly overwriting can corrupt a valid
-  ledger.
+  ledger. A missing capability or unreadable balance is logged explicitly;
+  best-effort means non-fatal, not silent.
 
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance/multi-leg lifecycle,
-funding watermarks, and active order queue. Runtime-state schema v11 adds
-funding watermarks so a retried simulation event cannot apply one payment
-twice. It accepts v9/v10 checkpoints with empty funding watermarks; older
-checkpoints are rejected and require an explicit migration or removal.
+funding watermarks, and active order queue. Runtime-state schema v12 persists
+the exact/rolling contract identity nested in active `OrderRequest` values.
+Only the current v12 checkpoint is accepted; every older schema requires an
+explicit external migration or removal. `_STATE_SCHEMA_VERSION` is the single
+code-level version constant and must be bumped whenever the checkpoint or any
+persisted nested dataclass changes shape; it is not a business/domain version.
 `broker_orders` keeps completed
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
@@ -741,6 +893,11 @@ The repository-wide fallback rule is: defaults may express an explicit
 research convention or preserve transport availability, but may not invent a
 financial/execution fact.
 
+- Every fallback must be one of: a documented domain invariant, an explicit
+  feature-off state, or a resiliency path that preserves already-confirmed
+  state and emits a diagnostic. Missing/invalid configuration and missing
+  accounting, risk, position, or execution facts raise an explicit error.
+  Catch-and-default behavior at those boundaries is prohibited.
 - Direct `Backtest(...)` construction without a config or cost model uses
   `CostModel.zero()` and next-open fills as a documented research default.
   Production-like research should pass an explicit cost model.
@@ -750,6 +907,9 @@ financial/execution fact.
 - The live OHLCV cache may serve the last successfully fetched history after a
   transient fetch error. It does not create a new bar or fill, and staleness
   monitoring remains active.
+- Omitting both `can_buy` and `can_sell` is the documented feature-off state
+  for side-tradability modeling. Providing only one, a null, or a non-boolean
+  value is invalid and never defaults to tradable.
 - Optional/not-computable analytics are `None`: Sharpe with zero sample
   volatility, Sortino without negative excess returns, Calmar with zero
   drawdown, information ratio with zero tracking error, profit factor without
@@ -782,11 +942,12 @@ financial/execution fact.
 |------|------|
 | `Fill` | fill report: price, quantity, commission, slippage, tax |
 | `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time |
+| `PositionRequest` | broker-neutral live reconciliation identity: canonical + venue symbol, currency, multiplier, and concrete routing fields |
 | `ExecutionReport` | normalized live state: submitted/accepted/partial/cancel_pending/filled/cancelled/rejected plus confirmed execution facts |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
-| `ExecutionPolicy` | run-wide default fill field, liquidity caps, and optional local live-order timeout |
+| `ExecutionPolicy` | run-wide default fill field, liquidity caps, validated warmup retention, and optional local live-order timeout |
 | `RiskPolicy` | optional engine-level position, exposure, drawdown, order-notional, and live limit-price controls |
 
 #### Output layer
@@ -888,6 +1049,33 @@ strategy:
       security_type: STK
 ```
 
+An exact IBKR future keeps engine identity separate from venue resolution:
+
+```yaml
+strategy:
+  symbols: [ES_202609]       # opaque, unique engine/position key
+  market: us_futures
+  data_source: ibkr
+  broker: ibkr
+  instrument_overrides:
+    ES_202609:
+      data_adapter: ibkr
+      venue_symbol: ES       # broker product root
+      currency: USD
+      instrument_type: contract_quarterly
+      security_type: FUT
+      exchange: CME
+      contract_month: "202609"
+  symbol_cost_overrides:
+    ES_202609:
+      multiplier: 50
+```
+
+For a rolling route, omit `contract_month` and set
+`continuous_alias: true`. For two expiries, configure two unique canonical
+symbols (for example `ES_202609` and `ES_202612`); no code infers expiry from
+those names.
+
 For a multi-broker run, omit the run-wide `broker` and set
 `instrument_overrides.<symbol>.broker` for every symbol. Registered symbol
 metadata may supply market/data identifiers and contract economics, but never
@@ -938,7 +1126,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
-| `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`; all order results follow the cumulative execution-report contract above |
+| `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`, plus mandatory live reconciliation `get_position(PositionRequest)`; all order results follow the cumulative execution-report contract above |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 
