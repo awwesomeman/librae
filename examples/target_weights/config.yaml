@@ -38,5 +38,3 @@ strategy:
     max_order_notional: 75000
   cost_overrides:
     multiplier: 1.0
-  perf:
-    periods_per_year: 252

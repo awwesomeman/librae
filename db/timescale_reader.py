@@ -27,7 +27,7 @@ def get_run_by_config_hash(
     Returns run configuration metadata, or None if not found.
     Existing old runs (config_hash=NULL) are not affected.
     """
-    sql = """SELECT run_id, params, execution_policy, risk_policy, perf_params
+    sql = """SELECT run_id, params, execution_policy, risk_policy
              FROM backtest_runs
              WHERE config_hash = %s
              ORDER BY run_at DESC LIMIT 1"""
@@ -43,7 +43,6 @@ def get_run_by_config_hash(
         "params": json.loads(row[1]) if row[1] else None,
         "execution_policy": json.loads(row[2]) if row[2] else None,
         "risk_policy": json.loads(row[3]) if row[3] else None,
-        "perf_params": json.loads(row[4]) if row[4] else None,
     }
 
 
@@ -85,8 +84,7 @@ def load_equity_curve(
 ) -> pd.DataFrame:
     sql = """
         SELECT ts AS _time, account_id, currency,
-               equity, benchmark_equity, drawdown,
-               period_return, benchmark_period_return, gross_exposure,
+               equity, drawdown, period_return, gross_exposure,
                net_exposure, concentration, turnover, exposed
         FROM equity_curve
         WHERE run_id = %s
@@ -178,10 +176,11 @@ def load_performance(
     sql = """
         SELECT sp.run_id, sp.account_id, sp.currency, sp.initial_cash,
                sp.final_equity, sp.net_pnl,
-               sp.total_return, sp.annual_return, sp.sharpe, sp.sortino,
-               sp.calmar, sp.max_drawdown, sp.win_rate, sp.profit_factor, sp.payoff_ratio,
-               sp.trades, sp.avg_trade_return, sp.exposure_ratio, sp.benchmark_return,
-               sp.tracking_error, sp.information_ratio, sp.total_turnover,
+               sp.total_return, sp.mean_period_return, sp.period_volatility,
+               sp.period_downside_deviation, sp.period_sharpe, sp.period_sortino,
+               sp.positive_period_rate, sp.max_drawdown, sp.win_rate,
+               sp.profit_factor, sp.payoff_ratio, sp.trades,
+               sp.avg_trade_return, sp.exposure_ratio, sp.total_turnover,
                sp.average_gross_exposure, sp.max_gross_exposure,
                sp.max_abs_net_exposure, sp.max_concentration,
                sp.total_commission, sp.total_slippage, sp.total_tax,

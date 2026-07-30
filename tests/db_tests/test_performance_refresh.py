@@ -9,7 +9,7 @@ import pytest
 from db.timescale_writer import refresh_performance
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 from librae.backtest.schema import StrategyMetrics
-from librae.core.run_config import AccountConfig, ReportingPolicy, RunConfig
+from librae.core.run_config import AccountConfig, RunConfig
 
 
 def _config(
@@ -29,7 +29,6 @@ def _config(
             initial_cash=initial_cash,
         ),
         mode="backtest",
-        reporting=ReportingPolicy(annualize=False),
     )
 
 
@@ -71,7 +70,6 @@ def test_refresh_performance_matches_in_memory_backtest_metrics() -> None:
         ),
         data_source="test",
     )
-    backtest.add_benchmark(pd.Series(prices, index=timestamps))
     backtest.run()
     output = backtest.build_output()
 
@@ -105,7 +103,6 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
         {
             "_time": timestamps,
             "equity": [100.0, 110.0, 120.0],
-            "benchmark_equity": [100.0, 104.0, 108.0],
             "gross_exposure": [0.0, 0.5, 0.0],
             "net_exposure": [0.0, 0.5, 0.0],
             "concentration": [0.0, 0.5, 0.0],
@@ -151,7 +148,6 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
     assert trade.slippage == pytest.approx(2.8)
     assert trade.tax == pytest.approx(1.5)
     assert kwargs["trade_notionals"] == pytest.approx([200.0])
-    assert kwargs["benchmark_values"] == pytest.approx([100.0, 104.0, 108.0])
     assert kwargs["exposed_periods"] == 2
     assert kwargs["turnover_values"] == pytest.approx([0.0, 0.5, 0.5])
     write.assert_called_once()
@@ -163,7 +159,6 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
         {
             "_time": timestamps,
             "equity": [100.0, 101.0],
-            "benchmark_equity": [None, None],
             "gross_exposure": [None, None],
             "net_exposure": [None, None],
             "concentration": [None, None],

@@ -29,10 +29,6 @@ strategy:
     # Live numeric limit orders must remain within 10% of the latest completed
     # close after broker tick-size normalization. Market orders are unaffected.
     max_limit_price_deviation_rate: 0.10
-  perf:
-    # H1 24/7 data has 24 * 365 return observations per year.
-    periods_per_year: 8760
-
 # Operational runtime settings are top-level and do not change config_hash.
 # poll_seconds is required for sim/live; concurrent fetching is opt-in because
 # some vendor SDK clients are not thread-safe.

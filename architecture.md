@@ -302,7 +302,6 @@ class MyStrategy(Strategy):
 # 2. Run the engine (a RunConfig is usually built via orchestration.cli.build_run())
 df = fetch_and_prepare(symbol, months)  # your own ETL
 bt = Backtest(data=df, strategy=MyStrategy(), config=config)
-bt.add_benchmark(df.xs(symbol, level="symbol")["close"])
 bt.run()
 
 # 3. Get the result
@@ -766,35 +765,23 @@ with enough observations must agree, while sparse histories must remain
 aligned to that interval. The union event clock is never used to infer a
 faster, synthetic timeframe for staggered markets.
 
-Performance annualization has a separate explicit SSOT:
-`RunConfig.reporting.periods_per_year` is the number of return observations per year
-(for example, 252 for daily US-equity bars or 8760 for hourly 24/7 bars).
-`build_run()` supplies data-source defaults only for D1. Annualized intraday
-or unknown-source runs must set `strategy.perf.periods_per_year`; the engine
-never guesses it from sample density.
-`RunConfig.reporting.risk_free_rate` is an annual effective rate greater than `-1`.
-Performance metrics deannualize positive, zero, and negative rates with the
-same compounded-return formula before comparing period returns.
-
 Every `EquityCurvePoint` contains gross exposure, net exposure, concentration,
 and one-way turnover (`sum(abs(traded notional)) / ending equity`) for its
 event. Gross exposure is the engine's gross-leverage measure. `StrategyMetrics`
 aggregates total turnover, average/maximum gross exposure, maximum absolute net
-exposure, and maximum concentration. With a benchmark, tracking error is the
-annualized sample standard deviation of active period returns and information
-ratio is annualized mean active return divided by that standard deviation.
+exposure, maximum concentration, and a small full-sample period-return summary.
 `AllocationSnapshotPoint` provides attribution-ready target/achieved facts;
 return attribution by factor, sector, or decision remains strategy/research
 code because the engine has no classification model.
 
-The optional benchmark is one caller-supplied positive price series. The
-engine aligns it to the run with forward fill and normalizes it to initial cash
-as a full-period buy-and-hold comparison. It does not choose the benchmark,
-define an active-period mask, or aggregate independent runs into a portfolio.
-Period active return means strategy period return minus benchmark period
-return; cumulative return gap and compounded relative wealth are separate
-caller-derived measures. Strategy-specific benchmark, attribution, and
-aggregation choices are described in the
+Performance analysis accepts an already-aligned period-return DataFrame.
+`summarize_performance()` produces selectable full-sample scalar metrics, and
+`compute_performance_series()` produces selectable path metrics. Columns have
+no engine-assigned role, so strategies and reference series use the same
+contract. Alignment, resampling, annualization, grouping, active-period
+selection, attribution, and independent-run aggregation remain caller or
+optional-reporting policy. This avoids engine APIs that name a benchmark while
+leaving its economically important policies implicit. Examples are in the
 [performance analysis guide](docs/guides/performance-analysis.md).
 
 #### Perpetual funding cash flows
@@ -983,13 +970,13 @@ financial/execution fact.
 - Omitting both `can_buy` and `can_sell` is the documented feature-off state
   for side-tradability modeling. Providing only one, a null, or a non-boolean
   value is invalid and never defaults to tradable.
-- Optional/not-computable analytics are `None`: Sharpe with zero sample
-  volatility, Sortino without negative excess returns, Calmar with zero
-  drawdown, information ratio with zero tracking error, profit factor without
-  losses, and payoff ratio without both wins and losses. A zero numerator over
-  a valid denominator remains `0.0`. Equity, benchmark, and weighting curves
-  must instead contain finite positive denominators; invalid inputs fail
-  explicitly and are never repaired with an epsilon. Missing OHLCV volume,
+- Optional/not-computable analytics are `None`: period Sharpe with zero sample
+  volatility, period Sortino with zero downside deviation, profit factor
+  without losses, and payoff ratio without both wins and losses. A zero
+  numerator over a valid denominator remains `0.0`. Equity and weighting
+  curves must contain finite positive denominators; caller-supplied period
+  returns must be finite and greater than `-1`. Invalid inputs fail explicitly
+  and are never repaired with an epsilon. Missing OHLCV volume,
   prepared order quantity/limit price, broker fill price/time/fee, or persisted
   runtime facts likewise fail instead of becoming zero or an entry-price proxy.
 
@@ -1022,7 +1009,6 @@ financial/execution fact.
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
 | `ExecutionPolicy` | run-wide default fill field, liquidity caps, validated warmup retention, and optional local live-order timeout |
 | `RiskPolicy` | optional engine-level position, exposure, drawdown, order-notional, and live limit-price controls |
-| `ReportingPolicy` | annualization, annual risk-free rate, and observations per year; excluded from execution identity |
 | `RuntimePolicy` | sim/live polling cadence, reconciliation cadence, and market-data worker count; excluded from execution identity |
 
 #### Output layer
@@ -1033,9 +1019,9 @@ financial/execution fact.
 | `TabularArtifact` | versioned manifest plus logical DataFrames for caller-selected local serialization |
 | `AccountPerformance` | one account's currency, initial cash, final equity, net PnL, equity curve, and metrics |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
-| `StrategyMetrics` | returns/risk/cost metrics plus turnover, exposure, concentration, tracking error, and information ratio |
+| `StrategyMetrics` | generic period-return, trade, risk, cost, turnover, exposure, and concentration metrics |
 | `OrderEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution, while close/reduce records also persist their prorated entry costs for exact KPI refresh |
-| `EquityCurvePoint` | per-event equity/return/drawdown/benchmark plus gross/net exposure, concentration, and turnover |
+| `EquityCurvePoint` | per-event equity, return, drawdown, gross/net exposure, concentration, and turnover |
 | `PositionSnapshotPoint` | per-bar position quantity, signed market value, and realized weight |
 | `AllocationSnapshotPoint` | per-event target weight, achieved weight, and drift for one symbol |
 
@@ -1049,6 +1035,8 @@ financial/execution fact.
 | `execute_portfolio_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
 | `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
+| `summarize_performance(period_returns, ...)` | selectable full-sample metrics over caller-aligned return columns; no annualization |
+| `compute_performance_series(period_returns, ...)` | selectable return, wealth, cumulative-return, and drawdown paths |
 | `queue_market_exit_all(positions, reason=...)` | queues completed-bar risk decisions for the next observed open |
 | `liquidate_all(positions, bars, ts, ...)` | liquidity-aware terminal close under the documented end-of-run convention |
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
@@ -1330,11 +1318,11 @@ flowchart TD
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
-| `backtest_runs` | run hub and resolved strategy/execution/performance configuration, 1 row / run | PK `run_id` | no |
+| `backtest_runs` | run hub and resolved strategy/execution/risk configuration, 1 row / run | PK `run_id` | no |
 | `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
 | `funding_cash_flows` | applied perpetual-funding rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
-| `strategy_performance` | currency-labeled performance, PnL, cost, benchmark, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
+| `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |
@@ -1347,9 +1335,8 @@ flowchart TD
 `backtest_runs.symbols` is a JSON array and is the run-universe SSOT; there is
 no separate primary-symbol column. Single-asset convenience remains
 `RunConfig.symbol` in memory. The table stores `params`, `execution_policy`,
-`risk_policy`, and `perf_params` in separate JSONB columns so strategy logic,
-fill assumptions, portfolio limits, and reporting options cannot drift into
-one untyped bag.
+and `risk_policy` in separate JSONB columns so strategy logic, fill
+assumptions, and portfolio limits cannot drift into one untyped bag.
 
 `signal_events` and `ohlcv` are the source facts for signal-quality analysis.
 Forward return, MFE, and MAE are derived on demand: local callers use
@@ -1373,7 +1360,9 @@ An integer count representing "how many bars this has been held" is always `peri
 
 ### Return-rate naming
 
-`period_return` / `benchmark_period_return`: the return for each bar, not tied to any specific frequency word (never a root like `1d`) — `timeframe` can be any frequency (1h/4h/1d), so the name shouldn't imply a fixed daily cadence.
+`period_return`: the return for each observation, not tied to any specific
+frequency word. A timeframe can be 1h, 4h, 1d, or caller-defined, so the name
+must not imply a daily or annual convention.
 
 ## Python function naming conventions
 

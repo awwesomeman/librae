@@ -43,10 +43,8 @@ metrics = librae.compute_all(
     timestamps=[start + timedelta(days=offset) for offset in range(3)],
     trade_pnls=[],
     total_periods=3,
-    annualize=True,
-    periods_per_year=252,
 )
-assert metrics.sharpe is not None
+assert metrics.period_sharpe is not None
 
 from brokers import (
     BinanceStocksAdapter,

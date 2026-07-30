@@ -76,9 +76,8 @@ read the [engine usage contract](../architecture.md#usage).
 
 ## User-controlled trading settings
 
-The examples keep strategy logic, matching, risk, and reporting in separate
-namespaces. The user-controlled trading and runtime settings are grouped as
-follows:
+The examples keep strategy logic, matching, risk, and runtime settings in
+separate namespaces:
 
 ```yaml
 strategy:
@@ -96,8 +95,6 @@ strategy:
     max_net_exposure: 1.00
     max_order_notional: 50000
     max_limit_price_deviation_rate: 0.10
-  perf:
-    periods_per_year: 8760  # H1 24/7 returns
   params:
     lookback: 20
 # Operational runtime settings (top-level, not strategy params):

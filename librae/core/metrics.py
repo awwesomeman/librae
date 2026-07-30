@@ -1,13 +1,13 @@
-"""Performance metrics and optional report generation.
+"""Period-return performance metrics and optional report generation.
 
 Core metrics are computed with NumPy so backtests do not require reporting
 packages. QuantStats and Matplotlib are only loaded by the HTML report helpers.
 Public functions accept primitive sequences and DataFrames rather than database
 dependencies.
 
-Annualized metrics use one explicit ``periods_per_year`` value. The engine does
-not infer it from sample density because short or irregular samples can turn a
-few adjacent intraday bars into an implausible 24/7 annualization factor.
+Performance summaries preserve the observation frequency supplied by the
+caller. Annualization, resampling, grouping, and reference alignment remain
+reporting or research policies.
 """
 
 from __future__ import annotations
@@ -37,6 +37,188 @@ PERCENTAGE_POINTS_PER_FRACTION = 100.0
 SignalDirection = Literal["long", "short"]
 SignalPriceColumn = Literal["open", "high", "low", "close"]
 LifecycleStatus = Literal["complete", "incomplete"]
+SummaryMetric = Literal[
+    "total_return",
+    "mean_period_return",
+    "period_volatility",
+    "period_downside_deviation",
+    "period_sharpe",
+    "period_sortino",
+    "max_drawdown",
+    "positive_period_rate",
+]
+SeriesMetric = Literal[
+    "period_return",
+    "wealth_index",
+    "cumulative_return",
+    "drawdown",
+]
+
+DEFAULT_SUMMARY_METRICS: tuple[SummaryMetric, ...] = (
+    "total_return",
+    "mean_period_return",
+    "period_volatility",
+    "period_downside_deviation",
+    "period_sharpe",
+    "period_sortino",
+    "max_drawdown",
+    "positive_period_rate",
+)
+DEFAULT_SERIES_METRICS: tuple[SeriesMetric, ...] = (
+    "period_return",
+    "wealth_index",
+    "cumulative_return",
+    "drawdown",
+)
+
+
+def _validated_period_returns(period_returns: pd.DataFrame) -> pd.DataFrame:
+    """Return a strict float64 period-return frame without changing alignment."""
+    if not isinstance(period_returns, pd.DataFrame):
+        raise TypeError("period_returns must be a pandas DataFrame")
+    if period_returns.empty:
+        raise ValueError("period_returns must contain at least one row and one column")
+    if not isinstance(period_returns.index, pd.DatetimeIndex):
+        raise ValueError("period_returns must have a DatetimeIndex")
+    if period_returns.index.tz is None:
+        raise ValueError("period_returns index must be timezone-aware")
+    if not period_returns.index.is_unique:
+        raise ValueError("period_returns index must be unique")
+    if not period_returns.index.is_monotonic_increasing:
+        raise ValueError("period_returns index must be sorted")
+    if not period_returns.columns.is_unique:
+        raise ValueError("period_returns columns must be unique")
+    if any(not isinstance(column, str) or not column for column in period_returns.columns):
+        raise ValueError("period_returns columns must be non-empty strings")
+
+    try:
+        values = period_returns.to_numpy(dtype=np.float64, copy=True)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("period_returns values must be numeric") from exc
+    if not np.isfinite(values).all():
+        raise ValueError("period_returns values must be finite")
+    if np.any(values <= -1.0):
+        raise ValueError("period_returns values must be greater than -1")
+    return pd.DataFrame(
+        values,
+        index=period_returns.index.copy(),
+        columns=period_returns.columns.copy(),
+    )
+
+
+def _validated_metrics[Metric: (SummaryMetric, SeriesMetric)](
+    metrics: Sequence[Metric],
+    *,
+    supported: frozenset[str],
+) -> tuple[Metric, ...]:
+    """Validate a requested metric sequence while preserving caller order."""
+    if isinstance(metrics, str):
+        raise TypeError("metrics must be a sequence of metric names, not one string")
+    selected = tuple(metrics)
+    if not selected:
+        raise ValueError("metrics must contain at least one metric name")
+    if len(selected) != len(set(selected)):
+        raise ValueError("metrics must not contain duplicates")
+    unsupported = [metric for metric in selected if metric not in supported]
+    if unsupported:
+        raise ValueError(f"unsupported metrics: {unsupported}")
+    return selected
+
+
+def compute_performance_series(
+    period_returns: pd.DataFrame,
+    *,
+    metrics: Sequence[SeriesMetric] = DEFAULT_SERIES_METRICS,
+) -> dict[SeriesMetric, pd.DataFrame]:
+    """Compute full-path series without alignment, grouping, or annualization.
+
+    Args:
+        period_returns: Already aligned period returns. Rows are timezone-aware
+            observations and columns are named strategies or reference curves.
+        metrics: Ordered path metrics to return.
+
+    Returns:
+        Mapping from metric name to a DataFrame with the input index and
+        columns.
+    """
+    returns = _validated_period_returns(period_returns)
+    selected = _validated_metrics(
+        metrics,
+        supported=frozenset(DEFAULT_SERIES_METRICS),
+    )
+    wealth = (1.0 + returns).cumprod()
+    # WHY: Initial capital is a peak even though the input starts at the first
+    # return observation, so a first-period loss must produce a drawdown.
+    peaks = wealth.cummax().clip(lower=1.0)
+    available: dict[SeriesMetric, pd.DataFrame] = {
+        "period_return": returns,
+        "wealth_index": wealth,
+        "cumulative_return": wealth - 1.0,
+        "drawdown": wealth / peaks - 1.0,
+    }
+    return {metric: available[metric].copy() for metric in selected}
+
+
+def summarize_performance(
+    period_returns: pd.DataFrame,
+    *,
+    metrics: Sequence[SummaryMetric] = DEFAULT_SUMMARY_METRICS,
+    period_target_return: float = 0.0,
+) -> pd.DataFrame:
+    """Summarize aligned period-return columns without annualization.
+
+    Args:
+        period_returns: Already aligned period returns. Rows are timezone-aware
+            observations and columns are named strategies or reference curves.
+        metrics: Ordered scalar metrics to return as the output index.
+        period_target_return: Finite scalar target with the same observation
+            frequency as ``period_returns``.
+
+    Returns:
+        DataFrame indexed by metric name with one column per input series.
+        Metrics that are not computable for the sample are ``NaN``.
+    """
+    if (
+        isinstance(period_target_return, bool)
+        or not isinstance(period_target_return, Real)
+        or not np.isfinite(period_target_return)
+    ):
+        raise ValueError("period_target_return must be a finite number")
+    returns = _validated_period_returns(period_returns)
+    selected = _validated_metrics(
+        metrics,
+        supported=frozenset(DEFAULT_SUMMARY_METRICS),
+    )
+    path = compute_performance_series(
+        returns,
+        metrics=("wealth_index", "drawdown"),
+    )
+    excess_returns = returns - float(period_target_return)
+    volatility = returns.std(axis="index", ddof=1)
+    excess_volatility = excess_returns.std(axis="index", ddof=1)
+    downside = excess_returns.clip(upper=0.0)
+    downside_deviation = np.sqrt(downside.pow(2).mean(axis="index"))
+
+    available: dict[SummaryMetric, pd.Series] = {
+        "total_return": path["wealth_index"].iloc[-1] - 1.0,
+        "mean_period_return": returns.mean(axis="index"),
+        "period_volatility": volatility,
+        "period_downside_deviation": downside_deviation,
+        "period_sharpe": excess_returns.mean(axis="index").div(
+            excess_volatility.where(excess_volatility > 0.0)
+        ),
+        "period_sortino": excess_returns.mean(axis="index").div(
+            downside_deviation.where(downside_deviation > 0.0)
+        ),
+        "max_drawdown": path["drawdown"].min(axis="index"),
+        "positive_period_rate": returns.gt(0.0).mean(axis="index"),
+    }
+    return pd.DataFrame(
+        [available[metric] for metric in selected],
+        index=pd.Index(selected, name="metric"),
+        columns=returns.columns,
+        dtype=np.float64,
+    )
 
 
 @dataclass(frozen=True)
@@ -76,16 +258,13 @@ def compute_all(
     timestamps: Sequence[datetime],
     trade_pnls: Sequence[TradePnL],
     total_periods: int,
-    annualize: bool = False,
-    benchmark_values: Sequence[float] | None = None,
     exposed_periods: int | None = None,
     trade_notionals: Sequence[float] | None = None,
     turnover_values: Sequence[float] | None = None,
     gross_exposure_values: Sequence[float] | None = None,
     net_exposure_values: Sequence[float] | None = None,
     concentration_values: Sequence[float] | None = None,
-    risk_free_rate: float = 0.0,
-    periods_per_year: int = 365,
+    period_target_return: float = 0.0,
 ) -> StrategyMetrics:
     """Compute all metrics from equity curve + trades.
 
@@ -94,9 +273,6 @@ def compute_all(
         timestamps: Corresponding timestamps used to index the return series.
         trade_pnls: TradePnL from core.executor.calc_trade_pnl().
         total_periods: Total bar count (for exposure_ratio).
-        annualize: If True, compute annualized metrics.
-        benchmark_values: Finite, strictly positive buy-and-hold equity values
-            aligned one-to-one with equity_values.
         exposed_periods: Number of bars with at least one open position.
         trade_notionals: Per-trade absolute notional weight for averaging returns
             across instruments with different prices or multipliers.
@@ -104,9 +280,8 @@ def compute_all(
         gross_exposure_values: Per-event sum of absolute realized weights.
         net_exposure_values: Per-event sum of signed realized weights.
         concentration_values: Per-event largest absolute realized weight.
-        risk_free_rate: Annual risk-free rate (crypto=0, TW=0.015).
-        periods_per_year: Return observations per year, such as 252 for daily
-            US-equity bars or 8760 for hourly 24/7 bars.
+        period_target_return: Finite target return with the same observation
+            frequency as the equity curve.
 
     Called once by backtest (at build_output time).
     Called periodically by live (based on monitoring frequency).
@@ -117,64 +292,28 @@ def compute_all(
         return StrategyMetrics(total_return=0.0, trades=0)
     if len(timestamps) != len(equity_values):
         raise ValueError("timestamps length must match equity_values")
-    if (
-        isinstance(risk_free_rate, bool)
-        or not isinstance(risk_free_rate, Real)
-        or not np.isfinite(risk_free_rate)
-        or risk_free_rate <= -1.0
-    ):
-        raise ValueError("risk_free_rate must be finite and greater than -1")
-    if (
-        isinstance(periods_per_year, bool)
-        or not isinstance(periods_per_year, int)
-        or periods_per_year <= 0
-    ):
-        raise ValueError("periods_per_year must be a positive integer")
-
     eq_arr = _as_positive_finite_array(equity_values, "equity_values")
-
-    benchmark_array: np.ndarray | None = None
-    if benchmark_values is not None:
-        if len(benchmark_values) != len(equity_values):
-            raise ValueError("benchmark_values length must match equity_values")
-        benchmark_array = _as_positive_finite_array(benchmark_values, "benchmark_values")
 
     with np.errstate(over="ignore", invalid="ignore"):
         returns = eq_arr[1:] / eq_arr[:-1] - 1.0
         total_ret = float(eq_arr[-1] / eq_arr[0] - 1.0)
     if not np.isfinite(returns).all() or not np.isfinite(total_ret):
         raise ValueError("equity_values produce non-finite returns")
-    drawdowns = eq_arr / np.maximum.accumulate(eq_arr) - 1.0
-    max_dd = float(np.min(drawdowns))
+    if len(returns) > 0:
+        return_frame = pd.DataFrame(
+            {"strategy": returns},
+            index=pd.DatetimeIndex(timestamps[1:]),
+        )
+        summary = summarize_performance(
+            return_frame,
+            period_target_return=period_target_return,
+        )["strategy"]
+    else:
+        summary = pd.Series(dtype=np.float64)
 
-    sharpe: float | None = None
-    sortino: float | None = None
-    calmar: float | None = None
-    ann_return: float | None = None
-    if annualize and len(returns) >= 2:
-        periodic_rf = float(np.power(1.0 + risk_free_rate, 1.0 / periods_per_year) - 1.0)
-        excess_returns = returns - periodic_rf
-        annualization_factor = float(np.sqrt(periods_per_year))
-
-        return_std = float(np.std(excess_returns, ddof=1))
-        if return_std > 0.0:
-            value = float(np.mean(excess_returns) / return_std * annualization_factor)
-            sharpe = value if np.isfinite(value) else None
-
-        downside_returns = excess_returns[excess_returns < 0.0]
-        if len(downside_returns) > 0:
-            downside_deviation = float(
-                np.sqrt(np.sum(np.square(downside_returns)) / len(excess_returns))
-            )
-            if downside_deviation > 0.0:
-                value = float(np.mean(excess_returns) / downside_deviation * annualization_factor)
-                sortino = value if np.isfinite(value) else None
-
-        with np.errstate(over="ignore", invalid="ignore"):
-            value = float(np.power(1.0 + total_ret, periods_per_year / len(returns)) - 1.0)
-        ann_return = value if np.isfinite(value) else None
-        if max_dd < 0.0 and ann_return is not None:
-            calmar = ann_return / abs(max_dd)
+    def optional_summary(name: SummaryMetric) -> float | None:
+        value = summary.get(name, np.nan)
+        return float(value) if np.isfinite(value) else None
 
     n_trades = len(trade_pnls)
     net_pnls = np.array([t.net_pnl for t in trade_pnls], dtype=np.float64)
@@ -217,21 +356,6 @@ def compute_all(
     if exposed_periods is not None and total_periods > 0:
         exposure_ratio = float(exposed_periods / total_periods)
 
-    benchmark_return: float | None = None
-    tracking_error: float | None = None
-    information_ratio: float | None = None
-    if benchmark_array is not None and len(benchmark_array) >= 2:
-        benchmark_return = float(benchmark_array[-1] / benchmark_array[0] - 1.0)
-        benchmark_returns = benchmark_array[1:] / benchmark_array[:-1] - 1.0
-        active_returns = returns - benchmark_returns
-        if len(active_returns) >= 2:
-            active_std = float(np.std(active_returns, ddof=1))
-            tracking_error = active_std * np.sqrt(periods_per_year)
-            if active_std > 0.0:
-                information_ratio = (
-                    float(np.mean(active_returns)) / active_std * np.sqrt(periods_per_year)
-                )
-
     total_turnover = _sum_optional(turnover_values)
     average_gross_exposure = _mean_optional(gross_exposure_values)
     max_gross_exposure = _max_optional(gross_exposure_values)
@@ -239,23 +363,23 @@ def compute_all(
         [abs(value) for value in net_exposure_values] if net_exposure_values is not None else None
     )
     max_concentration = _max_optional(concentration_values)
+    max_drawdown = optional_summary("max_drawdown")
 
     return StrategyMetrics(
         total_return=total_ret,
-        annual_return=ann_return,
-        sharpe=sharpe,
-        sortino=sortino,
-        calmar=calmar,
-        max_drawdown=max_dd,
+        mean_period_return=optional_summary("mean_period_return"),
+        period_volatility=optional_summary("period_volatility"),
+        period_downside_deviation=optional_summary("period_downside_deviation"),
+        period_sharpe=optional_summary("period_sharpe"),
+        period_sortino=optional_summary("period_sortino"),
+        max_drawdown=0.0 if max_drawdown is None else max_drawdown,
+        positive_period_rate=optional_summary("positive_period_rate"),
         trades=n_trades,
         win_rate=win_rate,
         profit_factor=profit_factor,
         payoff_ratio=payoff_ratio,
         avg_trade_return=avg_trade_return,
         exposure_ratio=exposure_ratio,
-        benchmark_return=benchmark_return,
-        tracking_error=tracking_error,
-        information_ratio=information_ratio,
         total_turnover=total_turnover,
         average_gross_exposure=average_gross_exposure,
         max_gross_exposure=max_gross_exposure,

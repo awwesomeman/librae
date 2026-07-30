@@ -1,11 +1,10 @@
 """Unified run configuration — single source of truth for all execution paths.
 
 RunConfig is a frozen dataclass that holds result-affecting run parameters and
-two explicit non-result policies:
+one explicit non-result policy:
 - Strategy params (stored in DB backtest_runs.params)
 - Execution policy (typed fill and liquidity assumptions)
 - Risk policy (typed engine-level portfolio limits)
-- Reporting policy (stored in DB backtest_runs.perf_params)
 - Runtime polling policy (not stored in DB)
 
 CLI workflows use ``build_run()`` in ``orchestration/cli.py``; library
@@ -132,32 +131,6 @@ class ExecutionPolicy:
             raise ValueError(
                 f"warmup_periods must be a positive integer, got {self.warmup_periods}"
             )
-
-
-@dataclass(frozen=True, slots=True)
-class ReportingPolicy:
-    """Metric presentation settings that do not change execution results."""
-
-    annualize: bool = True
-    risk_free_rate: float = 0.0
-    periods_per_year: int = 365
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.annualize, bool):
-            raise TypeError("annualize must be a bool")
-        if (
-            isinstance(self.risk_free_rate, bool)
-            or not isinstance(self.risk_free_rate, Real)
-            or not isfinite(self.risk_free_rate)
-            or self.risk_free_rate <= -1.0
-        ):
-            raise ValueError("risk_free_rate must be finite and greater than -1")
-        if (
-            isinstance(self.periods_per_year, bool)
-            or not isinstance(self.periods_per_year, int)
-            or self.periods_per_year <= 0
-        ):
-            raise ValueError("periods_per_year must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +284,6 @@ class RunConfig:
     instrument_overrides: dict[str, dict[str, object]] | None = None
 
     # === Non-result policies (excluded from config_hash) ===
-    reporting: ReportingPolicy = field(default_factory=ReportingPolicy)
     runtime: RuntimePolicy = field(default_factory=RuntimePolicy)
 
     def __post_init__(self) -> None:
@@ -320,8 +292,6 @@ class RunConfig:
             raise TypeError("execution must be an ExecutionPolicy")
         if not isinstance(self.risk, RiskPolicy):
             raise TypeError("risk must be a RiskPolicy")
-        if not isinstance(self.reporting, ReportingPolicy):
-            raise TypeError("reporting must be a ReportingPolicy")
         if not isinstance(self.runtime, RuntimePolicy):
             raise TypeError("runtime must be a RuntimePolicy")
         if isinstance(self.symbols, str):
@@ -398,18 +368,13 @@ class RunConfig:
         return self.account.account_id
 
     @cached_property
-    def perf_params(self) -> dict[str, Any]:
-        """Perf params dict, stored in DB backtest_runs.perf_params."""
-        return asdict(self.reporting)
-
-    @cached_property
     def config_hash(self) -> str:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
         account, start, end, params, cost_overrides, symbol_cost_overrides,
         instrument_overrides, execution, risk.
-        Excludes: perf params, behavior params.
+        Excludes: runtime behavior.
         """
         blob = json.dumps(
             _sanitize_for_hash(

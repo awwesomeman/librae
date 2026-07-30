@@ -301,7 +301,7 @@ class TestBuildRun:
             )
         )
 
-        with pytest.raises(ValueError, match=r"unknown strategy\.perf"):
+        with pytest.raises(ValueError, match=r"strategy\.perf was removed"):
             build_run("test_strat", str(tmp_path / "run.py"))
 
     def test_adv_execution_settings_are_typed(self, tmp_path):
@@ -386,7 +386,6 @@ class TestBuildRun:
 
         assert cfg.symbol_cost_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
-        assert cfg.reporting.periods_per_year == 252
         assert cfg.instrument_overrides == {
             "AAPL": {
                 "data_adapter": "ibkr",
@@ -395,60 +394,7 @@ class TestBuildRun:
             }
         }
 
-    def test_mixed_data_sources_require_explicit_periods_per_year(self, tmp_path):
-        (tmp_path / "config.yaml").write_text(
-            textwrap.dedent(
-                """\
-                strategy:
-                  symbols: [MU, BTCUSDT]
-                  timeframe: 1d
-                  account:
-                    currency: USD
-                    initial_cash: 100000
-                """
-            )
-        )
-
-        with pytest.raises(ValueError, match="periods_per_year"):
-            build_run("test_strat", str(tmp_path / "run.py"))
-
-    def test_intraday_annualization_requires_explicit_periods_per_year(self, tmp_path):
-        (tmp_path / "config.yaml").write_text(
-            textwrap.dedent(
-                """\
-                strategy:
-                  symbol: BTCUSDT
-                  timeframe: H1
-                """
-            )
-        )
-
-        with pytest.raises(ValueError, match="periods_per_year"):
-            build_run("test_strat", str(tmp_path / "run.py"))
-
-    def test_unknown_data_source_requires_explicit_periods_per_year(self, tmp_path):
-        (tmp_path / "config.yaml").write_text(
-            textwrap.dedent(
-                """\
-                strategy:
-                  symbol: TEST
-                  timeframe: 1d
-                  market: test
-                  data_source: custom
-                  account:
-                    currency: USD
-                    initial_cash: 100000
-                  symbol_cost_overrides:
-                    TEST:
-                      multiplier: 1.0
-                """
-            )
-        )
-
-        with pytest.raises(ValueError, match="periods_per_year"):
-            build_run("test_strat", str(tmp_path / "run.py"))
-
-    def test_unknown_data_source_without_annualization_needs_no_calendar(self, tmp_path):
+    def test_strategy_perf_is_rejected(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(
                 """\
@@ -461,29 +407,12 @@ class TestBuildRun:
                     currency: USD
                     initial_cash: 100000
                   perf:
-                    annualize: false
+                    period_target_return: 0.0
                 """
             )
         )
 
-        cfg, _ = build_run("test_strat", str(tmp_path / "run.py"))
-
-        assert cfg.reporting.annualize is False
-
-    def test_periods_per_year_must_be_positive(self, tmp_path):
-        (tmp_path / "config.yaml").write_text(
-            textwrap.dedent(
-                """\
-                strategy:
-                  symbol: MU
-                  timeframe: 1d
-                  perf:
-                    periods_per_year: 0
-                """
-            )
-        )
-
-        with pytest.raises(ValueError, match="periods_per_year must be a positive integer"):
+        with pytest.raises(ValueError, match=r"strategy\.perf was removed"):
             build_run("test_strat", str(tmp_path / "run.py"))
 
 
@@ -538,7 +467,7 @@ class TestCheckExistingRun:
         ):
             assert check_existing_run(_make_cfg()) is None
 
-    def test_changed_perf_params_refreshes_run_account(self):
+    def test_existing_run_is_returned_without_metric_refresh(self):
         config = _make_cfg(
             account=AccountConfig(
                 account_id="alpha",
@@ -546,10 +475,7 @@ class TestCheckExistingRun:
                 initial_cash=100_000.0,
             )
         )
-        existing = {
-            "run_id": "existing-run",
-            "perf_params": {"annualize": not config.reporting.annualize},
-        }
+        existing = {"run_id": "existing-run"}
 
         with (
             patch(
@@ -557,13 +483,10 @@ class TestCheckExistingRun:
                 return_value=existing,
             ),
             patch("db.timescale_writer.refresh_performance") as refresh,
-            patch("db.timescale_writer._update_perf_params") as update_params,
         ):
             assert check_existing_run(config) == "existing-run"
 
-        assert [call.kwargs["account_id"] for call in refresh.call_args_list] == ["alpha"]
-        assert all(call.kwargs["config"] is config for call in refresh.call_args_list)
-        update_params.assert_called_once_with("existing-run", config.perf_params)
+        refresh.assert_not_called()
 
 
 class TestRunDispatch:

@@ -36,28 +36,16 @@ from librae.core.run_config import (
     DEFAULT_POLL_SECONDS,
     AccountConfig,
     ExecutionPolicy,
-    ReportingPolicy,
     RiskPolicy,
     RunConfig,
     RuntimePolicy,
 )
-from librae.core.utils import to_canonical
 
 if TYPE_CHECKING:
     import pandas as pd
     from librae.core.strategy import Strategy
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Data-source -> annual trading days defaults
-# ---------------------------------------------------------------------------
-_DAILY_PERIODS_PER_YEAR: dict[str, int] = {
-    "binance_spot": 365,
-    "binance_futures_continuous": 365,
-    "ibkr": 252,
-    "shioaji": 252,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +96,6 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-db", action="store_true", help="skip writing to TimescaleDB")
-    p.add_argument(
-        "--no-annualize", action="store_true", help="skip annualized metrics (backtest mode)"
-    )
     p.add_argument(
         "--force", action="store_true", help="skip config_hash cache, force fresh computation"
     )
@@ -249,7 +234,6 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
     1. Parse start/end from params (or convert periods -> start/end)
     2. Extract per-run and per-symbol overrides
     3. Derive dry-run behavior and database wiring
-    4. Resolve an explicit return-observation annualization factor
     """
     p = base_parser(f"{strategy_name} strategy")
     config_path = Path(run_file).parent / "config.yaml"
@@ -257,16 +241,11 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
 
     scfg = getattr(args, "strategy", {})
     params = dict(scfg.get("params", {}))
-    perf = scfg.get("perf", {})
-    if not isinstance(perf, dict):
-        raise ValueError("strategy.perf must be a mapping")
-    unknown_perf_keys = set(perf) - {
-        "annualize",
-        "risk_free_rate",
-        "periods_per_year",
-    }
-    if unknown_perf_keys:
-        raise ValueError(f"unknown strategy.perf settings: {sorted(unknown_perf_keys)}")
+    if "perf" in scfg:
+        raise ValueError(
+            "strategy.perf was removed; annualization and grouped performance "
+            "belong in post-run analysis"
+        )
     if "symbol_overrides" in scfg:
         raise ValueError("strategy.symbol_overrides was renamed to strategy.symbol_cost_overrides")
     execution_raw = scfg.get("execution", {})
@@ -395,29 +374,6 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
     execution = ExecutionPolicy(**execution_raw)
     risk = RiskPolicy(**risk_raw)
 
-    # 4. Perf params (with known exchange-calendar defaults)
-    configured_periods_per_year = perf.get("periods_per_year")
-    if args.no_annualize:
-        annualize = False
-    elif perf.get("annualize") is not None:
-        annualize = perf["annualize"]
-    else:
-        annualize = True
-    default_periods_per_year = (
-        _DAILY_PERIODS_PER_YEAR.get(data_source) if to_canonical(timeframe) == "D1" else None
-    )
-    if annualize and configured_periods_per_year is None and default_periods_per_year is None:
-        raise ValueError(
-            "strategy.perf.periods_per_year is required when annualizing "
-            f"timeframe={timeframe!r}, data_source={data_source!r}; "
-            "set the number of return observations per year explicitly"
-        )
-    periods_per_year = (
-        configured_periods_per_year
-        if configured_periods_per_year is not None
-        else default_periods_per_year or 365
-    )
-
     config = RunConfig(
         strategy_name=strategy_name,
         symbols=symbols,
@@ -435,11 +391,6 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         cost_overrides=cost_overrides,
         symbol_cost_overrides=symbol_cost_overrides,
         instrument_overrides=instrument_overrides,
-        reporting=ReportingPolicy(
-            annualize=annualize,
-            risk_free_rate=float(perf.get("risk_free_rate", 0.0)),
-            periods_per_year=periods_per_year,
-        ),
         runtime=RuntimePolicy(
             poll_seconds=poll_seconds,
             reconciliation_interval_seconds=reconciliation_interval_seconds,
@@ -509,29 +460,11 @@ def check_existing_run(config: RunConfig) -> str | None:
     if not existing:
         return None
 
-    if existing["perf_params"] != config.perf_params:
-        # Lightweight path: skip backtest, only recompute metrics
-        try:
-            from db.timescale_writer import _update_perf_params, refresh_performance
-
-            refresh_performance(
-                existing["run_id"],
-                account_id=config.account_id,
-                config=config,
-            )
-            _update_perf_params(existing["run_id"], config.perf_params)
-            logger.info(
-                "Recomputed metrics for run_id=%s (perf_params changed)", existing["run_id"]
-            )
-        except Exception:
-            logger.exception("Failed to recompute metrics, will run full backtest")
-            return None
-    else:
-        logger.info(
-            "Run with config_hash=%s exists (run_id=%s), skipping",
-            config.config_hash,
-            existing["run_id"],
-        )
+    logger.info(
+        "Run with config_hash=%s exists (run_id=%s), skipping",
+        config.config_hash,
+        existing["run_id"],
+    )
     return existing["run_id"]
 
 
@@ -646,8 +579,6 @@ def log_run_summary(config: RunConfig, options: RunOptions) -> None:
         f"  instrument_overrides: {config.instrument_overrides}",
         f"  execution:   {config.execution}",
         f"  risk:        {config.risk}",
-        "  --- reporting policy ---",
-        f"  reporting:   {config.reporting}",
         "  --- orchestration options ---",
         f"  database_enabled: {options.database_enabled}",
         f"  dry_run:     {options.dry_run}",

@@ -4,7 +4,6 @@ import pytest
 from librae.core.run_config import (
     AccountConfig,
     ExecutionPolicy,
-    ReportingPolicy,
     RiskPolicy,
     RunConfig,
     RuntimePolicy,
@@ -78,24 +77,6 @@ def test_runtime_operational_settings_are_validated_but_do_not_change_config_has
             RuntimePolicy(**{field: True})
 
 
-def test_reporting_policy_is_validated_and_excluded_from_config_hash() -> None:
-    default = _config()
-    weekly = _config(
-        reporting=ReportingPolicy(
-            annualize=False,
-            risk_free_rate=0.01,
-            periods_per_year=52,
-        )
-    )
-
-    assert weekly.perf_params == {
-        "annualize": False,
-        "risk_free_rate": 0.01,
-        "periods_per_year": 52,
-    }
-    assert weekly.config_hash == default.config_hash
-
-
 def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     unlimited = _config(execution=ExecutionPolicy(max_bar_volume_participation_rate=None))
     capped = _config(execution=ExecutionPolicy(max_bar_volume_participation_rate=0.1))
@@ -163,9 +144,6 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
         ({"strategy_name": 1}, "strategy_name"),
         ({"broker": ""}, "broker"),
         ({"account": True}, "account"),
-        ({"risk_free_rate": True}, "risk_free_rate"),
-        ({"risk_free_rate": -1.0}, "risk_free_rate"),
-        ({"annualize": 1}, "annualize"),
     ],
 )
 def test_run_config_rejects_ambiguous_scalar_types(override, message: str) -> None:

@@ -6,7 +6,6 @@ timestamps, TradePnL objects).
 
 from __future__ import annotations
 
-import warnings
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -20,10 +19,12 @@ from librae.core.cost_model import CostModel
 from librae.core.metrics import (
     PERCENTAGE_POINTS_PER_FRACTION,
     compute_all,
+    compute_performance_series,
     compute_signal_outcomes,
     compute_trade_entry_outcomes,
     generate_signal_mae_mfe_report,
     generate_tearsheet,
+    summarize_performance,
     summarize_signal_mae_mfe,
 )
 from librae.core.strategy import OrderIntent, Strategy
@@ -43,6 +44,138 @@ def test_signal_outcome_functions_are_public() -> None:
     assert librae.compute_signal_outcomes is compute_signal_outcomes
     assert librae.summarize_signal_mae_mfe is summarize_signal_mae_mfe
     assert librae.generate_signal_mae_mfe_report is generate_signal_mae_mfe_report
+
+
+def test_performance_functions_are_public() -> None:
+    import librae
+
+    assert librae.summarize_performance is summarize_performance
+    assert librae.compute_performance_series is compute_performance_series
+
+
+@pytest.fixture
+def period_returns() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "strategy_a": [0.10, -0.05, 0.02],
+            "strategy_b": [0.00, 0.03, -0.01],
+        },
+        index=pd.date_range(START, periods=3, freq="D", tz="UTC"),
+    )
+
+
+class TestPerformanceAnalysis:
+    def test_summary_preserves_requested_order(self, period_returns: pd.DataFrame) -> None:
+        result = summarize_performance(
+            period_returns[["strategy_b", "strategy_a"]],
+            metrics=("max_drawdown", "total_return", "mean_period_return"),
+        )
+
+        assert result.index.name == "metric"
+        assert result.index.tolist() == [
+            "max_drawdown",
+            "total_return",
+            "mean_period_return",
+        ]
+        assert result.columns.tolist() == ["strategy_b", "strategy_a"]
+        assert result.loc["total_return", "strategy_a"] == pytest.approx((1.10 * 0.95 * 1.02) - 1.0)
+
+    def test_series_returns_requested_paths(self, period_returns: pd.DataFrame) -> None:
+        result = compute_performance_series(
+            period_returns,
+            metrics=("cumulative_return", "drawdown"),
+        )
+
+        assert list(result) == ["cumulative_return", "drawdown"]
+        assert result["cumulative_return"].index.equals(period_returns.index)
+        assert result["cumulative_return"].columns.equals(period_returns.columns)
+        assert result["cumulative_return"].iloc[-1, 0] == pytest.approx((1.10 * 0.95 * 1.02) - 1.0)
+
+    def test_first_period_loss_is_a_drawdown(self) -> None:
+        returns = pd.DataFrame(
+            {"strategy": [-0.10, 0.05]},
+            index=pd.date_range(START, periods=2, freq="D", tz="UTC"),
+        )
+
+        drawdown = compute_performance_series(returns, metrics=("drawdown",))["drawdown"]
+
+        assert drawdown.iloc[0, 0] == pytest.approx(-0.10)
+
+    def test_target_return_applies_to_period_ratios(self, period_returns: pd.DataFrame) -> None:
+        result = summarize_performance(
+            period_returns[["strategy_a"]],
+            metrics=("period_sharpe", "period_sortino"),
+            period_target_return=0.01,
+        )
+        excess = period_returns["strategy_a"] - 0.01
+        downside = np.sqrt(np.mean(np.minimum(excess, 0.0) ** 2))
+
+        assert result.loc["period_sharpe", "strategy_a"] == pytest.approx(
+            excess.mean() / excess.std(ddof=1)
+        )
+        assert result.loc["period_sortino", "strategy_a"] == pytest.approx(excess.mean() / downside)
+
+    def test_active_returns_are_composed_by_the_caller(self, period_returns: pd.DataFrame) -> None:
+        active = pd.DataFrame(
+            {"active": period_returns["strategy_a"] - period_returns["strategy_b"]}
+        )
+
+        result = summarize_performance(
+            active,
+            metrics=("period_volatility", "period_sharpe"),
+        )
+
+        assert result.loc["period_volatility", "active"] == pytest.approx(
+            active["active"].std(ddof=1)
+        )
+        assert result.loc["period_sharpe", "active"] == pytest.approx(
+            active["active"].mean() / active["active"].std(ddof=1)
+        )
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            (lambda frame: frame.set_axis(frame.index.tz_localize(None)), "timezone-aware"),
+            (lambda frame: frame.iloc[::-1], "sorted"),
+            (
+                lambda frame: frame.set_axis(
+                    pd.DatetimeIndex([frame.index[0], frame.index[0], frame.index[2]])
+                ),
+                "unique",
+            ),
+            (lambda frame: frame.rename(columns={"strategy_b": "strategy_a"}), "unique"),
+            (lambda frame: frame.rename(columns={"strategy_a": ""}), "non-empty strings"),
+            (lambda frame: frame.assign(strategy_a=np.nan), "finite"),
+            (lambda frame: frame.assign(strategy_a=-1.0), "greater than -1"),
+        ],
+    )
+    def test_period_return_contract_is_strict(
+        self,
+        period_returns: pd.DataFrame,
+        mutate,
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            summarize_performance(mutate(period_returns))
+
+    @pytest.mark.parametrize(
+        ("metrics", "error", "message"),
+        [
+            ("total_return", TypeError, "sequence"),
+            ((), ValueError, "at least one"),
+            (("total_return", "total_return"), ValueError, "duplicates"),
+            (("unknown",), ValueError, "unsupported"),
+        ],
+    )
+    def test_metric_selection_is_validated(
+        self,
+        period_returns: pd.DataFrame,
+        metrics,
+        error: type[Exception],
+        message: str,
+    ) -> None:
+        with pytest.raises(error, match=message):
+            summarize_performance(period_returns, metrics=metrics)
 
 
 def _make_trade_pnl(
@@ -72,7 +205,6 @@ def _call_compute_all(
     equity: list[float],
     trade_pnls: list | None = None,
     exposed_periods: int | None = None,
-    annualize: bool = False,
 ) -> StrategyMetrics:
     """Helper to call compute_all with timestamps derived from equity length."""
     timestamps = pd.date_range(START, periods=len(equity), freq="h", tz="UTC").tolist()
@@ -81,7 +213,6 @@ def _call_compute_all(
         timestamps=timestamps,
         trade_pnls=trade_pnls or [],
         total_periods=len(equity),
-        annualize=annualize,
         exposed_periods=exposed_periods,
     )
 
@@ -96,7 +227,7 @@ class TestComputeAllEmpty:
         m = _call_compute_all([10_000.0] * 10)
         assert m.trades == 0
 
-    def test_no_trades_keeps_time_series_and_benchmark_metrics(self) -> None:
+    def test_no_trades_keeps_period_metrics(self) -> None:
         equity = np.array([10_000.0, 10_500.0, 9_500.0, 10_000.0])
         timestamps = pd.date_range(START, periods=len(equity), freq="h", tz="UTC").tolist()
 
@@ -105,12 +236,11 @@ class TestComputeAllEmpty:
             timestamps=timestamps,
             trade_pnls=[],
             total_periods=len(equity),
-            benchmark_values=np.array([10_000.0, 10_100.0, 10_200.0, 10_300.0]),
         )
 
         assert m.trades == 0
         assert m.max_drawdown < 0
-        assert m.benchmark_return == pytest.approx(0.03)
+        assert m.period_volatility is not None
 
 
 class TestComputeAllValidation:
@@ -118,19 +248,6 @@ class TestComputeAllValidation:
     def test_equity_must_be_finite_and_positive(self, invalid_equity: float) -> None:
         with pytest.raises(ValueError, match="equity_values"):
             _call_compute_all([100.0, invalid_equity])
-
-    @pytest.mark.parametrize("invalid_benchmark", [0.0, -1.0, np.nan, np.inf])
-    def test_benchmark_must_be_finite_and_positive(self, invalid_benchmark: float) -> None:
-        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
-
-        with pytest.raises(ValueError, match="benchmark_values"):
-            compute_all(
-                equity_values=[100.0, 101.0],
-                timestamps=timestamps,
-                trade_pnls=[],
-                total_periods=2,
-                benchmark_values=[100.0, invalid_benchmark],
-            )
 
     def test_equity_and_timestamp_lengths_must_match(self) -> None:
         with pytest.raises(ValueError, match="timestamps length"):
@@ -141,43 +258,22 @@ class TestComputeAllValidation:
                 total_periods=2,
             )
 
-    def test_equity_and_benchmark_lengths_must_match(self) -> None:
+    @pytest.mark.parametrize("period_target_return", [np.nan, np.inf, True])
+    def test_period_target_return_is_validated(self, period_target_return: float) -> None:
         timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
 
-        with pytest.raises(ValueError, match="benchmark_values length"):
+        with pytest.raises(ValueError, match="period_target_return"):
             compute_all(
                 equity_values=[100.0, 101.0],
                 timestamps=timestamps,
                 trade_pnls=[],
                 total_periods=2,
-                benchmark_values=[100.0],
-            )
-
-    @pytest.mark.parametrize(
-        ("kwargs", "message"),
-        [
-            ({"risk_free_rate": np.nan}, "risk_free_rate"),
-            ({"risk_free_rate": np.inf}, "risk_free_rate"),
-            ({"risk_free_rate": True}, "risk_free_rate"),
-            ({"risk_free_rate": -1.0}, "risk_free_rate"),
-            ({"periods_per_year": 0}, "periods_per_year"),
-        ],
-    )
-    def test_temporal_metric_parameters_are_validated(self, kwargs, message: str) -> None:
-        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
-
-        with pytest.raises(ValueError, match=message):
-            compute_all(
-                equity_values=[100.0, 101.0],
-                timestamps=timestamps,
-                trade_pnls=[],
-                total_periods=2,
-                **kwargs,
+                period_target_return=period_target_return,
             )
 
 
 class TestComputeAllMetrics:
-    def test_annualization_uses_explicit_periods_per_year(self) -> None:
+    def test_period_sharpe_is_not_annualized(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
 
         metrics = compute_all(
@@ -185,13 +281,11 @@ class TestComputeAllMetrics:
             timestamps=timestamps,
             trade_pnls=[],
             total_periods=3,
-            annualize=True,
-            periods_per_year=252,
         )
 
         returns = np.array([0.01, 100.5 / 101.0 - 1.0])
-        expected = np.mean(returns) / np.std(returns, ddof=1) * np.sqrt(252)
-        assert metrics.sharpe == pytest.approx(expected)
+        expected = np.mean(returns) / np.std(returns, ddof=1)
+        assert metrics.period_sharpe == pytest.approx(expected)
 
     def test_positive_return(self) -> None:
         pnl = _make_trade_pnl(gross_pnl=100, net_pnl=100, net_return=1.0)
@@ -293,126 +387,19 @@ class TestComputeAllMetrics:
         assert m.max_abs_net_exposure == pytest.approx(0.5)
         assert m.max_concentration == pytest.approx(0.7)
 
-    def test_tracking_error_and_information_ratio_use_active_returns(self) -> None:
-        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
-        equity = [100.0, 102.0, 101.0, 104.0]
-        benchmark = [100.0, 101.0, 102.0, 103.0]
+    def test_period_ratios_are_none_when_denominators_are_zero(self) -> None:
+        m = _call_compute_all([10_000.0] * 4)
 
-        m = compute_all(
-            equity_values=equity,
-            timestamps=timestamps,
-            trade_pnls=[],
-            total_periods=4,
-            benchmark_values=benchmark,
-        )
-
-        strategy_returns = np.diff(equity) / np.asarray(equity[:-1])
-        benchmark_returns = np.diff(benchmark) / np.asarray(benchmark[:-1])
-        active_returns = strategy_returns - benchmark_returns
-        active_std = np.std(active_returns, ddof=1)
-        assert m.tracking_error == pytest.approx(active_std * np.sqrt(365))
-        assert m.information_ratio == pytest.approx(
-            np.mean(active_returns) / active_std * np.sqrt(365)
-        )
-
-    def test_zero_tracking_error_has_no_information_ratio(self) -> None:
-        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
-        equity = [100.0, 102.0, 101.0, 104.0]
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            m = compute_all(
-                equity_values=equity,
-                timestamps=timestamps,
-                trade_pnls=[],
-                total_periods=4,
-                benchmark_values=equity,
-            )
-
-        assert m.tracking_error == pytest.approx(0.0)
-        assert m.information_ratio is None
-
-    def test_sharpe_is_float(self) -> None:
-        pnls = [
-            _make_trade_pnl(net_pnl=100, net_return=1.0),
-            _make_trade_pnl(net_pnl=80, net_return=0.8),
-            _make_trade_pnl(net_pnl=50, net_return=0.5),
-        ]
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            m = _call_compute_all(
-                [10_000.0, 10_100.0, 10_180.0, 10_230.0],
-                pnls,
-                annualize=True,
-            )
-        assert isinstance(m.sharpe, float)
-        assert m.sortino is None
+        assert m.period_sharpe is None
+        assert m.period_sortino is None
         assert m.max_drawdown == pytest.approx(0.0)
-        assert m.calmar is None
-
-    def test_zero_denominator_annual_metrics_are_none_without_warning(self) -> None:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            m = _call_compute_all([10_000.0] * 4, annualize=True)
-
-        assert m.sharpe is None
-        assert m.sortino is None
-        assert m.calmar is None
-
-    def test_sortino_uses_excess_return_downside(self) -> None:
-        timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            m = compute_all(
-                equity_values=[10_000.0] * 4,
-                timestamps=timestamps,
-                trade_pnls=[],
-                total_periods=4,
-                annualize=True,
-                risk_free_rate=0.03,
-            )
-
-        assert m.sharpe is None
-        assert isinstance(m.sortino, float)
-
-    @pytest.mark.parametrize(
-        ("risk_free_rate", "period_returns", "expected_call"),
-        [
-            (-0.03, [-0.00005, -0.00004, -0.00003], False),
-            (0.0, [-0.00005, -0.00004, -0.00003], True),
-            (0.03, [0.00001, 0.00002, 0.00003], True),
-        ],
-    )
-    def test_sortino_guard_respects_signed_risk_free_rate(
-        self,
-        risk_free_rate: float,
-        period_returns: list[float],
-        expected_call: bool,
-    ) -> None:
-        equity = [100.0]
-        for period_return in period_returns:
-            equity.append(equity[-1] * (1.0 + period_return))
-        timestamps = pd.date_range(START, periods=len(equity), freq="D", tz="UTC").tolist()
-
-        metrics = compute_all(
-            equity_values=equity,
-            timestamps=timestamps,
-            trade_pnls=[],
-            total_periods=len(equity),
-            annualize=True,
-            risk_free_rate=risk_free_rate,
-            periods_per_year=252,
-        )
-
-        assert (metrics.sortino is not None) is expected_call
 
     def test_max_drawdown_negative(self) -> None:
         pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
         m = _call_compute_all([10_000.0, 10_500.0, 9_800.0, 10_200.0], [pnl])
         assert m.max_drawdown <= 0
 
-    def test_annual_metrics_share_temporal_parameters(self) -> None:
+    def test_compute_all_uses_the_period_summary_contract(self) -> None:
         timestamps = pd.date_range(START, periods=4, freq="D", tz="UTC").tolist()
         equity = np.array([10_000.0, 10_100.0, 10_050.0, 10_200.0])
         metrics = compute_all(
@@ -420,24 +407,18 @@ class TestComputeAllMetrics:
             timestamps=timestamps,
             trade_pnls=[_make_trade_pnl(net_pnl=200.0)],
             total_periods=4,
-            annualize=True,
-            risk_free_rate=0.03,
+            period_target_return=0.001,
         )
 
-        periods = 365
         returns = equity[1:] / equity[:-1] - 1.0
-        periodic_rf = (1.0 + 0.03) ** (1.0 / periods) - 1.0
-        excess = returns - periodic_rf
+        excess = returns - 0.001
         downside = np.sqrt(np.square(excess[excess < 0.0]).sum() / len(excess))
-        annual_return = (equity[-1] / equity[0]) ** (periods / len(returns)) - 1.0
         max_drawdown = np.min(equity / np.maximum.accumulate(equity) - 1.0)
 
-        assert metrics.sharpe == pytest.approx(
-            np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(periods)
-        )
-        assert metrics.sortino == pytest.approx(np.mean(excess) / downside * np.sqrt(periods))
-        assert metrics.annual_return == pytest.approx(annual_return)
-        assert metrics.calmar == pytest.approx(annual_return / abs(max_drawdown))
+        assert metrics.period_sharpe == pytest.approx(np.mean(excess) / np.std(excess, ddof=1))
+        assert metrics.period_sortino == pytest.approx(np.mean(excess) / downside)
+        assert metrics.period_volatility == pytest.approx(np.std(returns, ddof=1))
+        assert metrics.max_drawdown == pytest.approx(max_drawdown)
 
 
 class TestComputeAllWithEngine:

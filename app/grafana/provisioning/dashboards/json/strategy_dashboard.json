@@ -420,7 +420,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "qs.stats.comp(returns). Cumulative compounded return, not annualized.",
+      "description": "Compounded return over the full stored sample. Not annualized.",
       "id": 7,
       "gridPos": {
         "h": 4,
@@ -474,7 +474,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "qs.stats.max_drawdown(returns). Negative ratio ¡X largest peak-to-trough decline.",
+      "description": "Negative ratio: largest peak-to-trough decline.",
       "id": 8,
       "gridPos": {
         "h": 4,
@@ -488,11 +488,11 @@
       }
     },
     {
-      "title": "Sharpe Ratio",
+      "title": "Period Sharpe",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT sharpe FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT period_sharpe FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -511,12 +511,8 @@
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 0.5
-              },
-              {
                 "color": "green",
-                "value": 1.0
+                "value": 0
               }
             ]
           },
@@ -535,7 +531,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "qs.stats.sharpe(returns, periods=inferred). Annualized, rf=0. >1 acceptable, >2 strong.",
+      "description": "Mean period return / sample period volatility. Not annualized; compare only like-frequency observations.",
       "id": 9,
       "gridPos": {
         "h": 4,
@@ -722,11 +718,11 @@
     },
     {
       "title": "Equity Curve",
-      "description": "Portfolio equity over time vs benchmark. Divergence = strategy alpha (or negative alpha).",
+      "description": "Portfolio equity over time.",
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, equity AS \"Strategy\", benchmark_equity AS \"Benchmark\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, equity AS \"Strategy\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -755,21 +751,6 @@
                 "id": "color",
                 "value": {
                   "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Benchmark"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
                   "mode": "fixed"
                 }
               }

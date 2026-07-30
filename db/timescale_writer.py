@@ -110,7 +110,6 @@ def write_run_metadata(
     params: dict | None = None,
     execution_policy: dict | None = None,
     risk_policy: dict | None = None,
-    perf_params: dict | None = None,
     config_hash: str | None = None,
     cur: PgCursor | None = None,
     dsn: str | None = None,
@@ -123,20 +122,18 @@ def write_run_metadata(
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbols, timeframe, data_source,
                 started_at, ended_at, run_at, mode, poll_seconds,
-                params, execution_policy, risk_policy, perf_params, config_hash)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                params, execution_policy, risk_policy, config_hash)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_at=EXCLUDED.run_at,
                  mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
                  risk_policy=EXCLUDED.risk_policy,
-                 perf_params=EXCLUDED.perf_params,
                  config_hash=EXCLUDED.config_hash"""
     params_val = json.dumps(params) if params is not None else None
     execution_policy_val = json.dumps(execution_policy) if execution_policy is not None else None
     risk_policy_val = json.dumps(risk_policy) if risk_policy is not None else None
-    perf_val = json.dumps(perf_params) if perf_params is not None else None
     values = (
         run_id,
         strategy,
@@ -151,7 +148,6 @@ def write_run_metadata(
         params_val,
         execution_policy_val,
         risk_policy_val,
-        perf_val,
         config_hash,
     )
     if cur is not None:
@@ -161,21 +157,6 @@ def write_run_metadata(
             c = conn.cursor()
             c.execute(sql, values)
             c.close()
-
-
-def _update_perf_params(
-    run_id: str,
-    perf_params: dict[str, Any],
-    dsn: str | None = None,
-) -> None:
-    """Update perf_params for an existing run (lightweight recompute path)."""
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE backtest_runs SET perf_params = %s WHERE run_id = %s",
-            (json.dumps(perf_params), run_id),
-        )
-        cur.close()
 
 
 def update_heartbeat(run_id: str, dsn: str | None = None) -> None:
@@ -234,7 +215,6 @@ def save_backtest_output(
     params: dict | None = None,
     execution_policy: dict | None = None,
     risk_policy: dict | None = None,
-    perf_params: dict | None = None,
     config_hash: str | None = None,
     replace_existing: bool = False,
     dsn: str | None = None,
@@ -248,7 +228,6 @@ def save_backtest_output(
         params: Optional strategy parameters dict to store as JSONB.
         execution_policy: Resolved fill and liquidity assumptions to store.
         risk_policy: Resolved engine-level portfolio limits to store.
-        perf_params: Optional perf parameters dict to store as JSONB.
         config_hash: Optional deterministic hash for dedup.
         replace_existing: Replace the canonical run for config_hash. Used by
             the explicit force-recompute path.
@@ -288,7 +267,6 @@ def save_backtest_output(
             params=params,
             execution_policy=execution_policy,
             risk_policy=risk_policy,
-            perf_params=perf_params,
             config_hash=config_hash,
             cur=cur,
         )
@@ -312,10 +290,8 @@ def save_backtest_output(
                     account.account_id,
                     account.currency,
                     eq.equity,
-                    eq.benchmark_equity,
                     eq.drawdown,
                     eq.period_return,
-                    eq.benchmark_period_return,
                     eq.gross_exposure,
                     eq.net_exposure,
                     eq.concentration,
@@ -329,8 +305,8 @@ def save_backtest_output(
                 cur,
                 """INSERT INTO equity_curve
                    (ts, run_id, account_id, currency,
-                    equity, benchmark_equity, drawdown, period_return,
-                    benchmark_period_return, gross_exposure, net_exposure,
+                    equity, drawdown, period_return,
+                    gross_exposure, net_exposure,
                     concentration, turnover, exposed, strategy)
                    VALUES %s""",
                 eq_rows,
@@ -822,8 +798,6 @@ def write_equity_curve_point(
     equity: float,
     drawdown: float = 0.0,
     period_return: float = 0.0,
-    benchmark_equity: float | None = None,
-    benchmark_period_return: float | None = None,
     gross_exposure: float | None = None,
     net_exposure: float | None = None,
     concentration: float | None = None,
@@ -838,15 +812,13 @@ def write_equity_curve_point(
         cur.execute(
             """INSERT INTO equity_curve
                (ts, run_id, account_id, currency,
-                equity, benchmark_equity, drawdown, period_return,
-                benchmark_period_return, gross_exposure, net_exposure,
+                equity, drawdown, period_return, gross_exposure, net_exposure,
                 concentration, turnover, exposed, strategy)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, account_id, ts) DO UPDATE SET
                  currency=EXCLUDED.currency,
-                 equity=EXCLUDED.equity, benchmark_equity=EXCLUDED.benchmark_equity,
+                 equity=EXCLUDED.equity,
                  drawdown=EXCLUDED.drawdown, period_return=EXCLUDED.period_return,
-                 benchmark_period_return=EXCLUDED.benchmark_period_return,
                  gross_exposure=EXCLUDED.gross_exposure,
                  net_exposure=EXCLUDED.net_exposure,
                  concentration=EXCLUDED.concentration,
@@ -859,10 +831,8 @@ def write_equity_curve_point(
                 account_id,
                 currency,
                 equity,
-                benchmark_equity,
                 drawdown,
                 period_return,
-                benchmark_period_return,
                 gross_exposure,
                 net_exposure,
                 concentration,
@@ -1021,25 +991,28 @@ def write_strategy_performance(
     """
     sql = """INSERT INTO strategy_performance
                (run_id, account_id, currency, initial_cash, final_equity, net_pnl,
-                total_return, annual_return, sharpe, sortino, calmar,
+                total_return, mean_period_return, period_volatility,
+                period_downside_deviation, period_sharpe, period_sortino,
+                positive_period_rate,
                 max_drawdown, win_rate, profit_factor, payoff_ratio, trades,
-                avg_trade_return, exposure_ratio, benchmark_return,
-                tracking_error, information_ratio, total_turnover,
+                avg_trade_return, exposure_ratio, total_turnover,
                 average_gross_exposure, max_gross_exposure,
                 max_abs_net_exposure, max_concentration,
                 total_commission, total_slippage, total_tax)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, account_id) DO UPDATE SET
                  currency=EXCLUDED.currency,
                  initial_cash=EXCLUDED.initial_cash,
                  final_equity=EXCLUDED.final_equity,
                  net_pnl=EXCLUDED.net_pnl,
                  total_return=EXCLUDED.total_return,
-                 annual_return=EXCLUDED.annual_return,
-                 sharpe=EXCLUDED.sharpe,
-                 sortino=EXCLUDED.sortino,
-                 calmar=EXCLUDED.calmar,
+                 mean_period_return=EXCLUDED.mean_period_return,
+                 period_volatility=EXCLUDED.period_volatility,
+                 period_downside_deviation=EXCLUDED.period_downside_deviation,
+                 period_sharpe=EXCLUDED.period_sharpe,
+                 period_sortino=EXCLUDED.period_sortino,
+                 positive_period_rate=EXCLUDED.positive_period_rate,
                  max_drawdown=EXCLUDED.max_drawdown,
                  win_rate=EXCLUDED.win_rate,
                  profit_factor=EXCLUDED.profit_factor,
@@ -1047,9 +1020,6 @@ def write_strategy_performance(
                  trades=EXCLUDED.trades,
                  avg_trade_return=EXCLUDED.avg_trade_return,
                  exposure_ratio=EXCLUDED.exposure_ratio,
-                 benchmark_return=EXCLUDED.benchmark_return,
-                 tracking_error=EXCLUDED.tracking_error,
-                 information_ratio=EXCLUDED.information_ratio,
                  total_turnover=EXCLUDED.total_turnover,
                  average_gross_exposure=EXCLUDED.average_gross_exposure,
                  max_gross_exposure=EXCLUDED.max_gross_exposure,
@@ -1066,10 +1036,12 @@ def write_strategy_performance(
         final_equity,
         net_pnl,
         metrics.total_return,
-        metrics.annual_return,
-        metrics.sharpe,
-        metrics.sortino,
-        metrics.calmar,
+        metrics.mean_period_return,
+        metrics.period_volatility,
+        metrics.period_downside_deviation,
+        metrics.period_sharpe,
+        metrics.period_sortino,
+        metrics.positive_period_rate,
         metrics.max_drawdown,
         metrics.win_rate,
         metrics.profit_factor,
@@ -1077,9 +1049,6 @@ def write_strategy_performance(
         metrics.trades,
         metrics.avg_trade_return,
         metrics.exposure_ratio,
-        metrics.benchmark_return,
-        metrics.tracking_error,
-        metrics.information_ratio,
         metrics.total_turnover,
         metrics.average_gross_exposure,
         metrics.max_gross_exposure,
@@ -1107,7 +1076,6 @@ def refresh_performance(
     """Recompute KPI metrics from DB equity_curve + trade_events and upsert.
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
-    When config is provided, uses config.perf_params for annualization settings.
     """
     from types import SimpleNamespace as _NS
 
@@ -1193,23 +1161,17 @@ def refresh_performance(
         else None
     )
 
-    perf_kwargs: dict[str, Any] = {}
-    if config is not None:
-        perf_kwargs = config.perf_params
-
     metrics = compute_all(
         equity_values=equity_values,
         timestamps=timestamps,
         trade_pnls=trade_pnls,
         total_periods=len(equity_values),
-        benchmark_values=complete_optional_series("benchmark_equity"),
         exposed_periods=exposed_periods,
         trade_notionals=trade_notionals,
         turnover_values=complete_optional_series("turnover"),
         gross_exposure_values=complete_optional_series("gross_exposure"),
         net_exposure_values=complete_optional_series("net_exposure"),
         concentration_values=complete_optional_series("concentration"),
-        **perf_kwargs,
     )
     if config is None:
         raise ValueError("config is required to refresh account performance")
@@ -1244,7 +1206,7 @@ def save_signal_results(
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
     Use this for signal quality analysis without running a full backtest.
-    When config is provided, stores config_hash and perf_params.
+    When config is provided, stores its execution identity and policies.
     """
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     exit_signal_series = _extract_exit_signals(df, symbol)
@@ -1286,7 +1248,6 @@ def save_signal_results(
                     ended_at=_to_dt(ended_at),
                     data_source=data_source,
                     config_hash=config.config_hash if config else None,
-                    perf_params=config.perf_params if config else None,
                     params=config.params if config else None,
                     execution_policy=asdict(config.execution) if config else None,
                     risk_policy=asdict(config.risk) if config else None,
@@ -1360,7 +1321,6 @@ def save_strategy_results(
         params=config.params,
         execution_policy=asdict(config.execution),
         risk_policy=asdict(config.risk),
-        perf_params=config.perf_params,
         config_hash=config.config_hash,
         replace_existing=replace_existing,
     )

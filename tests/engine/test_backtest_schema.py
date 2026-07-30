@@ -41,16 +41,12 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
             equity=1_000_000.0,
             period_return=0.0,
             drawdown=0.0,
-            benchmark_equity=1_000_000.0,
-            benchmark_period_return=0.0,
         ),
         EquityCurvePoint(
             ts=datetime(2026, 3, 2, 10, 0, 0, tzinfo=UTC),
             equity=1_005_000.0,
             period_return=0.005,
             drawdown=0.0,
-            benchmark_equity=1_001_000.0,
-            benchmark_period_return=0.001,
         ),
     ]
 
@@ -58,8 +54,8 @@ def _make_equity_curve() -> list[EquityCurvePoint]:
 def _make_metrics() -> StrategyMetrics:
     return StrategyMetrics(
         total_return=0.05,
-        annual_return=0.30,
-        sharpe=1.2,
+        mean_period_return=0.001,
+        period_sharpe=1.2,
         max_drawdown=-0.03,
         win_rate=0.6,
         profit_factor=1.8,
@@ -166,12 +162,12 @@ def test_strategy_metrics_cost_fields_optional() -> None:
     assert m.total_slippage is None
 
 
-def test_equity_curve_point_benchmark_optional() -> None:
+def test_equity_curve_point_has_engine_owned_fields() -> None:
     pt = EquityCurvePoint(
         ts=NOW,
         equity=1_000_000.0,
         period_return=0.01,
         drawdown=-0.005,
     )
-    assert pt.benchmark_equity is None
-    assert pt.benchmark_period_return is None
+    assert pt.equity == 1_000_000.0
+    assert pt.period_return == 0.01

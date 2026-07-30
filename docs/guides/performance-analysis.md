@@ -1,135 +1,73 @@
 # Performance analysis
 
-`BacktestOutput` provides performance facts and a small set of metrics that
-have stable definitions. It does not prescribe one report for every strategy
-style. Benchmark construction, conditional comparisons, strategy aggregation,
-and research attribution remain explicit caller choices.
+Librae exposes engine facts plus two generic period-return APIs. It does not
+assign semantic roles such as strategy or benchmark, align unrelated data, or
+choose annualization and grouping rules:
 
-## Add a benchmark
+- `summarize_performance()` returns one full-sample DataFrame with metrics on
+  the index and input series on the columns.
+- `compute_performance_series()` returns `{metric: DataFrame}` for path
+  metrics with the input index and columns unchanged.
 
-Pass a timezone-compatible price series before building the output:
+Both functions accept an already-aligned, finite `pd.DataFrame` whose unique,
+sorted `DatetimeIndex` is timezone-aware. Every column is simply a named
+return series, so the same API supports one strategy, several strategies, or
+caller-selected reference series.
 
-```python
-backtest.add_benchmark(benchmark_prices)
-backtest.run()
-output = backtest.build_output()
-
-print(output.metrics.total_return)
-print(output.metrics.benchmark_return)
-print(output.metrics.tracking_error)
-print(output.metrics.information_ratio)
-```
-
-The built-in comparison represents full-period buy-and-hold:
-
-- the series must have a unique `DatetimeIndex` with the same timezone as the
-  backtest timeline;
-- a finite positive value must exist at or before the backtest start;
-- observations are sorted and forward-filled onto the backtest timeline;
-- the aligned series is normalized to the account's initial cash.
-
-Choose the input that matches the intended comparison. For example, use an
-adjusted-price or total-return index when distributions and corporate actions
-should count. Librae does not fetch a benchmark, select one from the strategy
-universe, or determine whether a forward-filled observation has become stale.
-
-## Build a comparison frame
-
-The equity curve contains both strategy and benchmark observations, so charts
-and additional measures do not require a new engine abstraction:
+## Analyze one run
 
 ```python
 import pandas as pd
 
-curve = pd.DataFrame(
+from librae import compute_performance_series, summarize_performance
+
+
+period_returns = pd.DataFrame(
     {
-        "equity": [point.equity for point in output.equity_curve],
-        "period_return": [
+        output.run_metadata.run_id: [
             point.period_return for point in output.equity_curve
-        ],
-        "benchmark_equity": [
-            point.benchmark_equity for point in output.equity_curve
-        ],
-        "benchmark_period_return": [
-            point.benchmark_period_return for point in output.equity_curve
-        ],
+        ]
     },
     index=pd.DatetimeIndex(point.ts for point in output.equity_curve),
 )
 
-curve["strategy_growth"] = curve["equity"] / curve["equity"].iloc[0]
-curve["benchmark_growth"] = (
-    curve["benchmark_equity"] / curve["benchmark_equity"].iloc[0]
+summary = summarize_performance(
+    period_returns,
+    metrics=(
+        "total_return",
+        "mean_period_return",
+        "period_volatility",
+        "period_sharpe",
+        "max_drawdown",
+    ),
 )
-curve["period_active_return"] = (
-    curve["period_return"] - curve["benchmark_period_return"]
-)
-curve["total_return_gap"] = (
-    curve["strategy_growth"] - curve["benchmark_growth"]
-)
-curve["relative_wealth"] = (
-    curve["strategy_growth"] / curve["benchmark_growth"] - 1.0
+paths = compute_performance_series(
+    period_returns,
+    metrics=("cumulative_return", "drawdown"),
 )
 ```
 
-`strategy_growth` and `benchmark_growth` are the two cumulative curves to
-plot. Do not use the name `active_return` without specifying which definition
-is intended:
-
-| Measure | Definition | Typical use |
-|---|---|---|
-| Period active return | `r_strategy,t - r_benchmark,t` | Tracking error and information ratio |
-| Total return gap | `R_strategy - R_benchmark` | Difference in cumulative-return percentage points |
-| Relative wealth | `(1 + R_strategy) / (1 + R_benchmark) - 1` | Compounded relative performance |
-
-Librae computes tracking error as the annualized sample standard deviation of
-period active returns. Information ratio is their annualized mean divided by
-that standard deviation. Both use
-`RunConfig.reporting.periods_per_year`; information ratio is `None` when
-tracking error is zero.
-
-## Full period versus active periods
-
-The built-in benchmark intentionally covers the full run. Comparing only
-periods in which the strategy is active requires a policy that depends on the
-strategy:
-
-- include only intervals with an open position;
-- scale benchmark returns by gross or net exposure;
-- use a cash return while unexposed;
-- compare each trade with the benchmark over its own holding interval.
-
-These choices answer different questions, so the engine does not select one.
-`EquityCurvePoint.exposed` describes the portfolio after that event; it is not
-automatically an exposure mask for the return interval that ended at the same
-event. Build interval ownership explicitly from the strategy's event,
-position, or allocation facts before conditioning returns.
-
-## Choose analysis by strategy style
-
-There is no useful universal report beyond the common return, risk, cost, and
-portfolio facts:
-
-| Strategy style | Useful analysis |
-|---|---|
-| Single-asset directional | Full-period buy-and-hold, relative wealth, drawdown, trade outcomes, costs |
-| Market-neutral or arbitrage | Absolute PnL, capital denominator, gross/net exposure, costs, and leg or spread attribution |
-| Cross-sectional selection | Caller-defined universe benchmark, active return, tracking error, turnover, concentration, IC, and quantile returns |
-| Multi-asset allocation | Caller-defined policy benchmark, allocation drift, exposure, turnover, and risk contribution |
-| Multiple independent strategies | Aligned per-run returns and drawdowns before any caller-defined portfolio aggregation |
-
-For arbitrage, a single asset's buy-and-hold return is usually not an
-economically meaningful benchmark. For selection strategies, the caller must
-define the eligible universe and weighting policy before an index comparison
-or information coefficient has a stable meaning.
-
-## Compare independent runs
-
-One Librae run represents one account. Per-run returns can be aligned for
-comparison without treating them as one portfolio:
+`period_sharpe`, `period_sortino`, volatility, and downside deviation preserve
+the input observation frequency. Pass `period_target_return` at analysis time
+when the target is already expressed at that same frequency:
 
 ```python
-def period_returns(output):
+summary = summarize_performance(
+    period_returns,
+    metrics=("period_sharpe", "period_sortino"),
+    period_target_return=0.0001,
+)
+```
+
+This keeps a run reproducible without pretending that hourly, irregular-event,
+and daily strategies share one annualization policy.
+
+## Compare strategies and reference series
+
+Build and align each return series explicitly, then pass them as columns:
+
+```python
+def returns_from_output(output):
     return pd.Series(
         [point.period_return for point in output.equity_curve],
         index=pd.DatetimeIndex(point.ts for point in output.equity_curve),
@@ -137,30 +75,110 @@ def period_returns(output):
     )
 
 
-comparison = pd.concat(
-    [period_returns(output) for output in outputs],
+strategy_returns = pd.concat(
+    [returns_from_output(output) for output in outputs],
     axis="columns",
     join="inner",
 ).sort_index()
+
+benchmark_returns = benchmark_prices.pct_change().rename("benchmark")
+comparison = pd.concat(
+    [strategy_returns, benchmark_returns],
+    axis="columns",
+    join="inner",
+).dropna()
+
+summary = summarize_performance(comparison)
+paths = compute_performance_series(
+    comparison,
+    metrics=("wealth_index", "drawdown"),
+)
 ```
 
-Combining those runs into one portfolio additionally requires capital weights,
-rebalance timing, currency conversion, calendar policy, and treatment of
-overlapping exposure. That aggregation belongs in research or optional
-orchestration, not in `BacktestOutput`.
+The caller owns the join, calendar, resampling, price adjustment, missing-data,
+and staleness policies. Librae therefore has no `add_benchmark()` or
+`add_strategies()` API: those names would add roles without removing any of the
+decisions that make the comparison valid.
 
-## Detailed analysis and reporting
+## Active-return analysis
 
-- Use `compute_trade_lifecycle_outcomes()` and
-  `compute_trade_entry_outcomes()` for realized lifecycle and hypothetical
-  post-entry analysis.
-- Use the [signal outcome guide](signal-outcome-analysis.md) for gross forward
-  return, MFE, and MAE before sizing and execution.
-- Use [local artifact tables](local-artifacts.md) for pandas, notebook,
-  Parquet, SQLite, or another caller-selected analysis workflow.
-- Install `librae[analytics]` when using the optional QuantStats equity
-  tearsheet or Matplotlib trade/signal reports.
+Period active return is ordinary column arithmetic:
 
-Reporting renders facts produced by the engine. It must not silently change
-the benchmark, annualization, active-period population, or portfolio
-aggregation policy.
+```python
+active_returns = (
+    comparison["strategy"] - comparison["benchmark"]
+).to_frame("active")
+
+active_summary = summarize_performance(
+    active_returns,
+    metrics=("mean_period_return", "period_volatility", "period_sharpe"),
+)
+```
+
+For this input, `period_volatility` is nonannualized tracking error and
+`period_sharpe` is a nonannualized information ratio. Keeping the generic names
+in the API avoids silently assuming which column is a benchmark.
+
+Do not compound arithmetic active returns to obtain relative wealth. Use the
+two wealth paths instead:
+
+```python
+wealth = compute_performance_series(
+    comparison[["strategy", "benchmark"]],
+    metrics=("wealth_index",),
+)["wealth_index"]
+relative_wealth = wealth["strategy"] / wealth["benchmark"] - 1.0
+```
+
+Full-period, active-period, exposure-scaled, and per-trade comparisons answer
+different questions. Build the intended population explicitly from order,
+position, allocation, or exposure facts before calling the generic metrics.
+
+## Grouping and annualization
+
+By-year or regime analysis is caller-side grouping:
+
+```python
+by_year = {
+    year: summarize_performance(group)
+    for year, group in period_returns.groupby(period_returns.index.year)
+}
+```
+
+Annualize only after choosing a justified `periods_per_year` for the analyzed
+series. For example:
+
+```python
+periods_per_year = 252
+annualized_volatility = (
+    summary.loc["period_volatility"] * periods_per_year**0.5
+)
+annualized_sharpe = summary.loc["period_sharpe"] * periods_per_year**0.5
+```
+
+For irregular observations or trade returns, a fixed square-root scaling may
+not be meaningful. Keep the raw period or trade metric, or implement the
+strategy-specific time convention in reporting code.
+
+## Strategy-specific analysis
+
+The generic APIs deliberately stop before economic interpretation:
+
+| Strategy style | Additional caller-owned analysis |
+|---|---|
+| Single-asset directional | buy-and-hold reference, relative wealth, trade outcomes |
+| Market-neutral or arbitrage | capital denominator, leg/spread attribution, gross/net exposure |
+| Cross-sectional selection | eligible-universe benchmark, IC, quantile returns, sector attribution |
+| Multi-asset allocation | policy benchmark, allocation drift, risk contribution |
+| Multiple independent runs | capital weights, currency conversion, rebalance and overlap policy |
+
+Trade metrics remain separate because period returns cannot reconstruct entry,
+exit, holding-period, or notional facts. Use
+`compute_trade_lifecycle_outcomes()` and `compute_trade_entry_outcomes()` for
+trade analysis, and the [signal outcome guide](signal-outcome-analysis.md) for
+gross forward return, MFE, and MAE.
+
+Install `librae[analytics]` only when using optional QuantStats or Matplotlib
+reports. Rendering may consume caller-prepared reference data, but it must not
+silently redefine alignment, annualization, active periods, or portfolio
+aggregation.

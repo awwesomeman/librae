@@ -35,7 +35,6 @@ _load_dotenv_for_tests()
 from librae.core.run_config import (  # noqa: E402
     AccountConfig,
     ExecutionPolicy,
-    ReportingPolicy,
     RunConfig,
     RuntimePolicy,
 )
@@ -44,12 +43,6 @@ from librae.core.run_config import (  # noqa: E402
 def make_test_cfg(**overrides) -> RunConfig:
     """Build a minimal RunConfig for tests."""
     initial_balance = overrides.pop("initial_balance", None)
-    reporting = overrides.pop("reporting", None)
-    reporting_values = {
-        field: overrides.pop(field)
-        for field in ("annualize", "risk_free_rate", "periods_per_year")
-        if field in overrides
-    }
     runtime = overrides.pop("runtime", None)
     runtime_values = {
         field: overrides.pop(field)
@@ -68,15 +61,12 @@ def make_test_cfg(**overrides) -> RunConfig:
         data_source="binance_spot",
         account=AccountConfig(currency="USDT", initial_cash=100_000.0),
         mode="sim",
-        reporting=reporting or ReportingPolicy(**reporting_values),
         runtime=runtime or RuntimePolicy(**{"poll_seconds": 0, **runtime_values}),
         params={},
         # Most unit tests isolate sizing/risk behavior from liquidity. Tests
         # for volume participation opt in with an explicit policy.
         execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
     )
-    if reporting is not None and reporting_values:
-        raise ValueError("pass reporting or reporting fields, not both")
     if runtime is not None and runtime_values:
         raise ValueError("pass runtime or runtime fields, not both")
     if initial_balance is not None:

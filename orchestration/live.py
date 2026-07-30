@@ -159,7 +159,6 @@ class _TimescaleCallbacks:
             params=self._config.params,
             execution_policy=asdict(self._config.execution),
             risk_policy=asdict(self._config.risk),
-            perf_params=self._config.perf_params,
         )
 
     def on_bar(

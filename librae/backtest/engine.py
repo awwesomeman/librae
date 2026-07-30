@@ -4,7 +4,6 @@ Usage:
     from librae.core.run_config import RunConfig
 
     bt = Backtest(data=df, strategy=my_strategy, config=config)
-    bt.add_benchmark(df.xs("BTCUSDT", level="symbol")["close"])
     bt.run()
     output = bt.build_output()
 
@@ -275,7 +274,6 @@ class Backtest:
         self._data = data
         self._strategy = strategy
         self._config = config
-        self._benchmark_prices: pd.Series | None = None
         self._run_id: str | None = None
         self._timeframe: str | None = None
         self._result: BacktestResult | None = None
@@ -361,18 +359,6 @@ class Backtest:
         if self._run_id is None:
             raise RuntimeError("Call run() before accessing run_id")
         return self._run_id
-
-    # --- Builder methods ---
-
-    def add_benchmark(self, prices: pd.Series) -> None:
-        """Set benchmark for comparison.
-
-        Args:
-            prices: Price series indexed by datetime. Engine computes
-                    buy-and-hold equity curve in build_output(), aligned
-                    to backtest timeline.
-        """
-        self._benchmark_prices = prices
 
     @staticmethod
     def _without_halted_account(
@@ -749,11 +735,7 @@ class Backtest:
         )
         return self._result
 
-    def build_output(
-        self,
-        *,
-        annualize: bool | None = None,
-    ) -> BacktestOutput:
+    def build_output(self) -> BacktestOutput:
         """Compute metrics + build canonical output in one call.
 
         All metadata is auto-derived from the engine state:
@@ -762,9 +744,6 @@ class Backtest:
         - symbol: from self._symbols[0]
         - strategy_name: from type(strategy).__name__
         - timeframe: inferred from data index
-
-        When config is provided, perf_params come from config.
-        annualize kwarg overrides config.reporting.annualize if explicitly passed.
 
         Raises RuntimeError if called before run().
         """
@@ -790,18 +769,6 @@ class Backtest:
         )
         timeframe = self._timeframe
 
-        # Benchmark — computed here, not in run() (analysis config, not trade facts)
-        benchmark_curve = self._compute_benchmark()
-
-        # Resolve perf params from config or explicit args
-        perf_kwargs: dict = {}
-        if self._config is not None:
-            perf_kwargs = self._config.perf_params.copy()
-        if annualize is not None:
-            perf_kwargs["annualize"] = annualize
-        elif "annualize" not in perf_kwargs:
-            perf_kwargs["annualize"] = False
-
         account = result.account
         trade_pnls = [
             TradePnL(
@@ -823,7 +790,6 @@ class Backtest:
             timestamps=[snapshot.ts for snapshot in account.equity_curve],
             trade_pnls=trade_pnls,
             total_periods=len(account.equity_curve),
-            benchmark_values=benchmark_curve,
             exposed_periods=account.exposed_periods,
             trade_notionals=[
                 abs(
@@ -841,7 +807,6 @@ class Backtest:
             concentration_values=[
                 snapshot.concentration for snapshot in account.portfolio_snapshots
             ],
-            **perf_kwargs,
         )
         account_output = AccountPerformance(
             account_id=account.account_id,
@@ -853,7 +818,6 @@ class Backtest:
                 self._enrich_equity_curve(
                     account.equity_curve,
                     account.portfolio_snapshots,
-                    benchmark_curve,
                 )
             ),
             metrics=metrics,
@@ -999,16 +963,13 @@ class Backtest:
     def _enrich_equity_curve(
         equity_curve: Sequence[EquitySnapshot],
         portfolio_snapshots: Sequence[PortfolioSnapshot],
-        benchmark_curve: list[float] | None,
     ) -> list[EquityCurvePoint]:
-        """Build EquityCurvePoints with drawdown, period_return, and benchmark alignment."""
+        """Build EquityCurvePoints with drawdown and period return."""
         from librae.backtest.schema import EquityCurvePoint
 
-        has_bm = benchmark_curve is not None and len(benchmark_curve) > 0
         equity_points: list[EquityCurvePoint] = []
         peak = 0.0
         prev_eq = equity_curve[0].equity if equity_curve else 1.0
-        prev_bm = float(benchmark_curve[0]) if has_bm else 1.0
         for i, snap in enumerate(equity_curve):
             portfolio = portfolio_snapshots[i]
             eq = snap.equity
@@ -1017,20 +978,12 @@ class Backtest:
             period_return = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
             prev_eq = eq
 
-            bm_eq, bm_ret = None, None
-            if has_bm and i < len(benchmark_curve):
-                bm_eq = float(benchmark_curve[i])
-                bm_ret = (bm_eq / prev_bm - 1.0) if prev_bm > 0 else 0.0
-                prev_bm = bm_eq
-
             equity_points.append(
                 EquityCurvePoint(
                     ts=snap.ts,
                     equity=float(eq),
                     period_return=float(period_return),
                     drawdown=float(drawdown),
-                    benchmark_equity=bm_eq,
-                    benchmark_period_return=bm_ret,
                     gross_exposure=float(portfolio.gross_exposure),
                     net_exposure=float(portfolio.net_exposure),
                     concentration=float(portfolio.concentration),
@@ -1039,31 +992,6 @@ class Backtest:
                 )
             )
         return equity_points
-
-    def _compute_benchmark(self) -> list[float] | None:
-        """Compute a timestamp-aligned benchmark buy-and-hold equity curve."""
-        if self._benchmark_prices is None:
-            return None
-        prices = self._benchmark_prices
-        if prices.empty:
-            return None
-        if not isinstance(prices.index, pd.DatetimeIndex):
-            raise ValueError("benchmark prices must have a DatetimeIndex")
-        if not prices.index.is_unique:
-            raise ValueError("benchmark prices must have a unique DatetimeIndex")
-
-        timeline = pd.DatetimeIndex(self._timeline)
-        if prices.index.tz != timeline.tz:
-            raise ValueError("benchmark timezone must match the backtest timeline")
-
-        aligned = prices.astype("float64").sort_index().reindex(timeline, method="ffill")
-        if aligned.isna().any():
-            raise ValueError("benchmark must contain a price at or before backtest start")
-        if not np.isfinite(aligned.to_numpy()).all() or (aligned <= 0).any():
-            raise ValueError("benchmark prices must be finite and positive")
-
-        initial_price = float(aligned.iloc[0])
-        return (self._initial_cash * aligned / initial_price).tolist()
 
     def _precompute_bars(self) -> dict[pd.Timestamp, dict[str, dict[str, float]]]:
         """Pre-convert all cross-sections to dicts once.

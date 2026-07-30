@@ -37,5 +37,3 @@ strategy:
     lookback: 20
     rebalance_every: 20
     target_exposure: 0.70
-  perf:
-    periods_per_year: 252

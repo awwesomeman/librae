@@ -33,5 +33,3 @@ strategy:
     quantity: 10
     entry_zscore: 1.5
     exit_zscore: 0.25
-  perf:
-    periods_per_year: 252

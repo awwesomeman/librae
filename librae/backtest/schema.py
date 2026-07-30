@@ -59,8 +59,6 @@ class EquityCurvePoint:
     equity: float
     period_return: float
     drawdown: float
-    benchmark_equity: float | None = None
-    benchmark_period_return: float | None = None
     gross_exposure: float = 0.0
     net_exposure: float = 0.0
     concentration: float = 0.0
@@ -154,7 +152,7 @@ class StrategyMetrics:
     - return fields: ratio (e.g. 0.05 = 5%)
     - max_drawdown: negative ratio (e.g. -0.15 = 15% decline)
     - win_rate/exposure_ratio: ratio 0-1
-    - sharpe/sortino/calmar/profit_factor/payoff_ratio/information_ratio:
+    - period_sharpe/period_sortino/profit_factor/payoff_ratio:
       dimensionless scores; None when their required denominator population
       is absent or zero
     - trades: count
@@ -166,11 +164,13 @@ class StrategyMetrics:
     max_drawdown: float = 0.0
     trades: int = 0
 
-    # Annualized (None when disabled, the sample is insufficient, or not computable)
-    annual_return: float | None = None
-    sharpe: float | None = None
-    sortino: float | None = None
-    calmar: float | None = None
+    # Full-sample period-return summary (never annualized)
+    mean_period_return: float | None = None
+    period_volatility: float | None = None
+    period_downside_deviation: float | None = None
+    period_sharpe: float | None = None
+    period_sortino: float | None = None
+    positive_period_rate: float | None = None
 
     # Most strategies (None if not applicable)
     win_rate: float | None = None
@@ -178,11 +178,6 @@ class StrategyMetrics:
     payoff_ratio: float | None = None
     avg_trade_return: float | None = None
     exposure_ratio: float | None = None
-
-    # Benchmark
-    benchmark_return: float | None = None
-    tracking_error: float | None = None
-    information_ratio: float | None = None
 
     # Portfolio diagnostics
     total_turnover: float | None = None

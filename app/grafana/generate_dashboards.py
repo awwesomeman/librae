@@ -180,47 +180,34 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("total_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="qs.stats.comp(returns). Cumulative compounded return, not annualized.",
+        description="Compounded return over the full stored sample. Not annualized.",
     ),
     "max_drawdown": _stat_panel(
         "Max Drawdown %",
         _account_metric_sql("max_drawdown"),
         "percentunit",
         [{"color": "red", "value": None}],
-        description="qs.stats.max_drawdown(returns). Negative ratio — largest peak-to-trough decline.",
+        description="Negative ratio: largest peak-to-trough decline.",
     ),
-    "sharpe": _stat_panel(
-        "Sharpe Ratio",
-        _account_metric_sql("sharpe"),
+    "period_sharpe": _stat_panel(
+        "Period Sharpe",
+        _account_metric_sql("period_sharpe"),
         None,
         [
             {"color": "red", "value": None},
-            {"color": "yellow", "value": 0.5},
-            {"color": "green", "value": 1.0},
+            {"color": "green", "value": 0},
         ],
-        description="qs.stats.sharpe(returns, periods=inferred). Annualized, rf=0. >1 acceptable, >2 strong.",
+        description="Mean period return / sample period volatility. Not annualized; compare only like-frequency observations.",
     ),
-    "sortino": _stat_panel(
-        "Sortino Ratio",
-        _account_metric_sql("sortino"),
+    "period_sortino": _stat_panel(
+        "Period Sortino",
+        _account_metric_sql("period_sortino"),
         None,
         [
             {"color": "red", "value": None},
-            {"color": "yellow", "value": 0.5},
-            {"color": "green", "value": 1.0},
+            {"color": "green", "value": 0},
         ],
-        description="qs.stats.sortino(returns, periods=inferred). Annualized. Penalizes downside volatility only.",
-    ),
-    "calmar": _stat_panel(
-        "Calmar Ratio",
-        _account_metric_sql("calmar"),
-        None,
-        [
-            {"color": "red", "value": None},
-            {"color": "yellow", "value": 1.0},
-            {"color": "green", "value": 3.0},
-        ],
-        description="qs.stats.calmar(returns). CAGR / max_drawdown. Higher = better return per unit of drawdown risk.",
+        description="Mean period return / period downside deviation. Not annualized.",
     ),
     "win_rate": _stat_panel(
         "Win Rate %",
@@ -252,7 +239,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("avg_trade_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="Quantity-weighted mean net return per closed trade.",
+        description="Notional-weighted mean net return per realized exit.",
     ),
     "exposure_ratio": _stat_panel(
         "Exposure %",
@@ -261,19 +248,19 @@ _KPI_CATALOGUE: dict[str, dict] = {
         [{"color": "blue", "value": None}],
         description="Bars with any open position / total bars. Multi-asset safe — overlapping positions counted once.",
     ),
-    "annual_return": _stat_panel(
-        "Annual Return %",
-        _account_metric_sql("annual_return"),
+    "mean_period_return": _stat_panel(
+        "Mean Period Return %",
+        _account_metric_sql("mean_period_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="qs.stats.cagr(returns, periods=inferred). Compound annual growth rate.",
+        description="Arithmetic mean return per stored observation. Not annualized.",
     ),
-    "benchmark_return": _stat_panel(
-        "Benchmark Return %",
-        _account_metric_sql("benchmark_return"),
+    "positive_period_rate": _stat_panel(
+        "Positive Periods %",
+        _account_metric_sql("positive_period_rate"),
         "percentunit",
-        [{"color": "orange", "value": None}],
-        description="Buy-and-hold return over the same period. Compare with Total Return for alpha.",
+        [{"color": "blue", "value": None}],
+        description="Observations with period_return > 0 divided by all observations.",
     ),
 }
 
@@ -282,7 +269,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
 DEFAULT_KPIS: list[str] = [
     "total_return",
     "max_drawdown",
-    "sharpe",
+    "period_sharpe",
     "win_rate",
     "profit_factor",
     "trades",
@@ -294,13 +281,13 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "half",
         "title": "Equity Curve",
-        "description": "Portfolio equity over time vs benchmark. Divergence = strategy alpha (or negative alpha).",
+        "description": "Portfolio equity over time.",
         "type": "timeseries",
         "h": 8,
         "w": 12,
         "targets": [
             _target(
-                'SELECT ts AS time, equity AS "Strategy", benchmark_equity AS "Benchmark"'
+                'SELECT ts AS time, equity AS "Strategy"'
                 " FROM equity_curve WHERE run_id = '${run_id}'"
                 " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
             )
@@ -316,7 +303,6 @@ BASE_PANELS_DEF: list[dict] = [
             },
             "overrides": [
                 _color_override("Strategy", "green"),
-                _color_override("Benchmark", "orange"),
             ],
         },
         "options": {

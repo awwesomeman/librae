@@ -153,7 +153,7 @@ def test_strategy_performance_sql_matches_account_metric_values() -> None:
     )
 
     sql, values = cursor.execute.call_args.args
-    assert sql.count("%s") == len(values) == 29
+    assert sql.count("%s") == len(values) == 28
     assert values[:6] == ("run-1", "account-a", "USD", 100.0, 110.0, 10.0)
 
 
@@ -162,10 +162,7 @@ class TestWriteEquityCurvePoint:
 
     @patch("db.timescale_writer.get_conn")
     def test_on_conflict_updates_every_inserted_column(self, mock_conn_ctx):
-        """Regression test: ON CONFLICT DO UPDATE previously omitted
-        benchmark_equity/benchmark_period_return, so a re-write with
-        different benchmark values would silently keep the first write's
-        (or NULL) values forever."""
+        """Every mutable engine-owned equity field is updated on conflict."""
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
@@ -181,8 +178,6 @@ class TestWriteEquityCurvePoint:
             equity=105_000.0,
             drawdown=-0.02,
             period_return=0.01,
-            benchmark_equity=101_000.0,
-            benchmark_period_return=0.005,
             strategy="test_strat",
         )
 
@@ -191,10 +186,8 @@ class TestWriteEquityCurvePoint:
         for col in (
             "currency",
             "equity",
-            "benchmark_equity",
             "drawdown",
             "period_return",
-            "benchmark_period_return",
             "gross_exposure",
             "net_exposure",
             "concentration",

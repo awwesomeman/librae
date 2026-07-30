@@ -167,85 +167,13 @@ class TestBuildOutputBeforeRun:
             _ = bt.metrics
 
 
-class TestBenchmark:
-    """add_benchmark → benchmark_return present; no call → None."""
+class TestPeriodMetrics:
+    """Engine output keeps only generic, nonannualized period metrics."""
 
-    def test_no_benchmark(self) -> None:
+    def test_build_output_contains_nonannualized_period_metrics(self) -> None:
         df = _make_df()
         bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
-        assert output.metrics.benchmark_return is None
-        for pt in output.equity_curve:
-            assert pt.benchmark_equity is None
-
-    def test_with_benchmark(self) -> None:
-        df = _make_df()
-        benchmark_prices = df.xs("BTCUSDT", level="symbol")["close"]
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
-        bt.add_benchmark(benchmark_prices)
-        bt.run()
-        output = bt.build_output()
-        assert output.metrics.benchmark_return is not None
-        assert isinstance(output.metrics.benchmark_return, float)
-        # At least some equity curve points should have benchmark values
-        bm_points = [p for p in output.equity_curve if p.benchmark_equity is not None]
-        assert len(bm_points) > 0
-
-    def test_zero_trade_run_keeps_available_benchmark_metrics(self) -> None:
-        df = _make_df()
-        benchmark_prices = df.xs("BTCUSDT", level="symbol")["close"]
-        bt = Backtest(df, HoldStrategy(), data_source="test")
-        bt.add_benchmark(benchmark_prices)
-
-        bt.run()
-        output = bt.build_output()
-
-        assert output.metrics.trades == 0
-        assert output.metrics.max_drawdown == pytest.approx(0.0)
-        assert output.metrics.benchmark_return == pytest.approx(
-            benchmark_prices.iloc[-1] / benchmark_prices.iloc[0] - 1.0
-        )
-
-    def test_benchmark_is_timestamp_aligned_without_future_backfill(self) -> None:
-        df = _make_df(n=5)
-        timeline = df.index.get_level_values("datetime").unique()
-        benchmark_prices = pd.Series(
-            [110.0, 100.0],
-            index=pd.DatetimeIndex([timeline[2], timeline[0]]),
-        )
-        bt = Backtest(df, HoldStrategy(), initial_balance=1_000.0, data_source="test")
-        bt.add_benchmark(benchmark_prices)
-
-        bt.run()
-        output = bt.build_output()
-
-        assert [point.benchmark_equity for point in output.equity_curve] == pytest.approx(
-            [1_000.0, 1_000.0, 1_100.0, 1_100.0, 1_100.0]
-        )
-
-    def test_benchmark_must_cover_backtest_start(self) -> None:
-        df = _make_df(n=5)
-        timeline = df.index.get_level_values("datetime").unique()
-        benchmark_prices = pd.Series([100.0], index=pd.DatetimeIndex([timeline[1]]))
-        bt = Backtest(df, HoldStrategy(), data_source="test")
-        bt.add_benchmark(benchmark_prices)
-        bt.run()
-
-        with pytest.raises(ValueError, match="at or before backtest start"):
-            bt.build_output()
-
-    def test_annualize_false_by_default(self) -> None:
-        df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
-        bt.run()
-        output = bt.build_output()
-        assert output.metrics.sharpe is None
-        assert output.metrics.annual_return is None
-
-    def test_annualize_true(self) -> None:
-        df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
-        bt.run()
-        output = bt.build_output(annualize=True)
-        assert output.metrics.sharpe is not None
+        assert output.metrics.mean_period_return is not None
+        assert output.metrics.period_volatility is not None
