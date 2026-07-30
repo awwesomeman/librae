@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Start/stop one account-specific sim or live trading container.
+# Supervise one account-specific sim or live trading container.
 #
 # Usage:
-#   ./deploy/trade.sh start <deployment_id> <account_id> <strategy> \
+#   ./deploy/trade.sh start <deployment_id> <account_id> <currency> <strategy> \
 #       [mode] [poll_seconds] [--config <path>] [--credentials <path>]
-#   ./deploy/trade.sh stop  <deployment_id>
-#   ./deploy/trade.sh stop  --all
+#   ./deploy/trade.sh inspect <deployment_id>
+#   ./deploy/trade.sh restart <deployment_id>
+#   ./deploy/trade.sh stop <deployment_id> [--force]
+#   ./deploy/trade.sh stop --all [--force]
 #   mode: sim (default, no real orders) | live (places real orders)
 #
 # Examples:
-#   ./deploy/trade.sh start momentum-paper paper momentum
-#   ./deploy/trade.sh start momentum-live ibkr_main momentum live 30 \
+#   ./deploy/trade.sh start momentum-paper paper USD momentum
+#   ./deploy/trade.sh start momentum-live ibkr_main USD momentum live 30 \
 #       --config configs/ibkr-main.yaml \
 #       --credentials .credentials/ibkr-main.env
+#   ./deploy/trade.sh inspect momentum-live
+#   ./deploy/trade.sh restart momentum-live
 #   ./deploy/trade.sh stop momentum-live
 #
 # Strategy code comes from the selected immutable image. Without
@@ -29,6 +33,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NETWORK="quant_network"
+READY_FILE="/tmp/librae-ready"
+START_TIMEOUT_SECONDS="${TRADE_START_TIMEOUT_SECONDS:-30}"
+STOP_TIMEOUT_SECONDS="${TRADE_STOP_TIMEOUT_SECONDS:-90}"
 
 container_name() {
     local deployment_id="$1"
@@ -51,10 +58,26 @@ validate_account_id() {
     fi
 }
 
+validate_currency() {
+    local currency="$1"
+    if [[ ! "${currency}" =~ ^[A-Z][A-Z0-9]{1,11}$ ]]; then
+        echo "currency must be an uppercase code, got: ${currency}" >&2
+        exit 1
+    fi
+}
+
 validate_strategy_name() {
     local strategy="$1"
     if [[ ! "${strategy}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
         echo "strategy must be a Python package name, got: ${strategy}" >&2
+        exit 1
+    fi
+}
+
+validate_timeout() {
+    local value="$1" name="$2"
+    if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "${name} must be a positive integer, got: ${value}" >&2
         exit 1
     fi
 }
@@ -86,6 +109,76 @@ container_exists() {
     docker ps -a --format '{{.Names}}' | grep -Fxq "${container}"
 }
 
+container_status() {
+    docker inspect --format '{{.State.Status}}' "$1"
+}
+
+container_running() {
+    [[ "$(docker inspect --format '{{.State.Running}}' "$1")" == "true" ]]
+}
+
+wait_until_stopped() {
+    local container="$1"
+    local deadline=$((SECONDS + STOP_TIMEOUT_SECONDS))
+    while container_running "${container}"; do
+        if (( SECONDS >= deadline )); then
+            echo "${container} did not stop within ${STOP_TIMEOUT_SECONDS}s." >&2
+            echo "Inspect it, then retry with --force." >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+stop_container() {
+    local container="$1" force="${2:-false}"
+    if ! container_running "${container}"; then
+        return 0
+    fi
+    if [[ "${force}" == "true" ]]; then
+        docker kill --signal KILL "${container}" >/dev/null
+        return 0
+    fi
+    docker stop --signal TERM --time -1 "${container}" >/dev/null &
+    local stop_pid=$!
+    if wait_until_stopped "${container}"; then
+        wait "${stop_pid}"
+        return 0
+    fi
+    kill "${stop_pid}" 2>/dev/null || true
+    wait "${stop_pid}" 2>/dev/null || true
+    return 1
+}
+
+wait_until_ready() {
+    local container="$1" previous_marker="${2:-}"
+    local initial_restart_count deadline status restart_count marker
+    initial_restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
+    deadline=$((SECONDS + START_TIMEOUT_SECONDS))
+    while true; do
+        status="$(container_status "${container}")"
+        restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
+        if [[ "${status}" == "running" ]]; then
+            marker="$(docker exec "${container}" cat "${READY_FILE}" 2>/dev/null || true)"
+            if [[ -n "${marker}" && "${marker}" != "${previous_marker}" ]]; then
+                return 0
+            fi
+        fi
+        if [[ "${status}" == "exited" || "${status}" == "dead" \
+            || "${status}" == "restarting" || "${restart_count}" != "${initial_restart_count}" ]]; then
+            echo "${container} failed before becoming ready (status=${status}, restarts=${restart_count})." >&2
+            docker logs --tail 50 "${container}" >&2 || true
+            return 1
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "${container} did not become ready within ${START_TIMEOUT_SECONDS}s." >&2
+            docker logs --tail 50 "${container}" >&2 || true
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 validate_existing_binding() {
     local container="$1" label="$2" expected="$3"
     local actual
@@ -102,11 +195,12 @@ validate_existing_binding() {
 }
 
 cmd_start() {
-    local usage="Usage: trade.sh start <deployment_id> <account_id> <strategy> [mode] [poll_seconds] [--config <path>] [--credentials <path>]"
+    local usage="Usage: trade.sh start <deployment_id> <account_id> <currency> <strategy> [mode] [poll_seconds] [--config <path>] [--credentials <path>]"
     local deployment_id="${1:?${usage}}"
     local account_id="${2:?${usage}}"
-    local strategy="${3:?${usage}}"
-    shift 3
+    local currency="${3:?${usage}}"
+    local strategy="${4:?${usage}}"
+    shift 4
 
     local mode="sim"
     local poll_seconds="60"
@@ -147,7 +241,10 @@ cmd_start() {
     fi
     validate_deployment_id "${deployment_id}"
     validate_account_id "${account_id}"
+    validate_currency "${currency}"
     validate_strategy_name "${strategy}"
+    validate_timeout "${START_TIMEOUT_SECONDS}" "TRADE_START_TIMEOUT_SECONDS"
+    validate_timeout "${STOP_TIMEOUT_SECONDS}" "TRADE_STOP_TIMEOUT_SECONDS"
 
     local container
     container="$(container_name "${deployment_id}")"
@@ -276,6 +373,7 @@ cmd_start() {
         -e TRADE_RUN_MODULE="strategies.${strategy}.run" \
         -e TRADE_CONFIG_PATH="${container_config}" \
         -e TRADE_ACCOUNT_ID="${account_id}" \
+        -e TRADE_CURRENCY="${currency}" \
         -e TRADE_MODE="${mode}" \
         "${image}" \
         python -c '
@@ -300,6 +398,14 @@ if actual_account_id != expected_account_id:
     raise SystemExit(
         f"strategy account_id mismatch: expected {expected_account_id!r}, "
         f"found {actual_account_id!r} in {config_path}"
+    )
+
+actual_currency = account.get("currency") if isinstance(account, dict) else None
+expected_currency = os.environ["TRADE_CURRENCY"]
+if actual_currency != expected_currency:
+    raise SystemExit(
+        f"strategy currency mismatch: expected {expected_currency!r}, "
+        f"found {actual_currency!r} in {config_path}"
     )
 
 if os.environ["TRADE_MODE"] == "live":
@@ -332,6 +438,7 @@ finally:
 
     if container_exists "${container}"; then
         validate_existing_binding "${container}" "account_id" "${account_id}"
+        validate_existing_binding "${container}" "currency" "${currency}"
         validate_existing_binding "${container}" "strategy" "${strategy}"
         validate_existing_binding "${container}" "mode" "${mode}"
     fi
@@ -375,13 +482,15 @@ finally:
         -e TIMESCALE_DSN="${trade_timescale_dsn}"
         -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
         -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+        -e LIBRAE_READY_FILE="${READY_FILE}"
     )
     if container_exists "${container}"; then
         echo "Stopping existing ${container}..."
-        docker rm -f "${container}" >/dev/null
+        stop_container "${container}"
+        docker rm "${container}" >/dev/null
     fi
 
-    echo "Starting ${container}: account=${account_id}, strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
+    echo "Starting ${container}: account=${account_id}, currency=${currency}, strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
 
     docker run -d \
         --name "${container}" \
@@ -390,6 +499,7 @@ finally:
         --label "io.librae.managed=true" \
         --label "io.librae.deployment_id=${deployment_id}" \
         --label "io.librae.account_id=${account_id}" \
+        --label "io.librae.currency=${currency}" \
         --label "io.librae.strategy=${strategy}" \
         --label "io.librae.mode=${mode}" \
         "${credential_args[@]}" \
@@ -403,10 +513,112 @@ finally:
         --poll-seconds "${poll_seconds}" \
         "${runner_config_args[@]}"
 
-    echo "Started. Logs: docker logs -f ${container}"
+    wait_until_ready "${container}" ""
+    echo "Ready. Logs: docker logs -f ${container}"
+}
+
+cmd_inspect() {
+    local deployment_id="${1:?Usage: trade.sh inspect <deployment_id>}"
+    validate_deployment_id "${deployment_id}"
+    local container
+    container="$(container_name "${deployment_id}")"
+    if ! container_exists "${container}"; then
+        echo "${container} not found." >&2
+        return 1
+    fi
+
+    local account_id currency status restart_count process_id exit_code reason ready run_id phase
+    account_id="$(docker inspect --format '{{ index .Config.Labels "io.librae.account_id" }}' "${container}")"
+    currency="$(docker inspect --format '{{ index .Config.Labels "io.librae.currency" }}' "${container}")"
+    status="$(container_status "${container}")"
+    restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
+    process_id="$(docker inspect --format '{{.State.Pid}}' "${container}")"
+    exit_code="$(docker inspect --format '{{.State.ExitCode}}' "${container}")"
+    reason="$(docker inspect --format '{{.State.Error}}' "${container}")"
+    ready="false"
+    run_id=""
+    if [[ "${status}" == "running" ]]; then
+        run_id="$(docker exec "${container}" cat "${READY_FILE}" 2>/dev/null || true)"
+        if [[ -n "${run_id}" ]]; then
+            ready="true"
+            run_id="${run_id%%:*}"
+        fi
+    fi
+
+    if [[ "${ready}" != "true" && "${restart_count}" != "0" ]]; then
+        phase="failed"
+    else
+        case "${status}" in
+            running)    [[ "${ready}" == "true" ]] && phase="running" || phase="starting" ;;
+            created)    phase="starting" ;;
+            restarting) phase="failed" ;;
+            exited)     [[ "${exit_code}" == "0" ]] && phase="stopped" || phase="failed" ;;
+            dead)       phase="failed" ;;
+            *)          phase="unknown" ;;
+        esac
+    fi
+    if [[ "${status}" == "running" || "${status}" == "created" ]]; then
+        exit_code=""
+    fi
+    if [[ "${process_id}" == "0" ]]; then
+        process_id=""
+    fi
+
+    printf '%s\n' \
+        "deployment_id=${deployment_id}" \
+        "account_id=${account_id}" \
+        "currency=${currency}" \
+        "phase=${phase}" \
+        "run_id=${run_id}" \
+        "process_id=${process_id}" \
+        "exit_code=${exit_code}" \
+        "restart_count=${restart_count}" \
+        "reason=${reason}"
+}
+
+read_ready_marker() {
+    local container="$1" marker_file marker=""
+    if container_running "${container}"; then
+        docker exec "${container}" cat "${READY_FILE}" 2>/dev/null || true
+        return 0
+    fi
+    marker_file="$(mktemp)"
+    if docker cp "${container}:${READY_FILE}" "${marker_file}" >/dev/null 2>&1; then
+        marker="$(cat "${marker_file}")"
+    fi
+    rm -f -- "${marker_file}"
+    printf '%s\n' "${marker}"
+}
+
+cmd_restart() {
+    local deployment_id="${1:?Usage: trade.sh restart <deployment_id>}"
+    validate_deployment_id "${deployment_id}"
+    validate_timeout "${START_TIMEOUT_SECONDS}" "TRADE_START_TIMEOUT_SECONDS"
+    validate_timeout "${STOP_TIMEOUT_SECONDS}" "TRADE_STOP_TIMEOUT_SECONDS"
+    local container
+    container="$(container_name "${deployment_id}")"
+    if ! container_exists "${container}"; then
+        echo "${container} not found." >&2
+        return 1
+    fi
+    validate_existing_binding "${container}" "managed" "true"
+
+    local previous_marker
+    previous_marker="$(read_ready_marker "${container}")"
+    stop_container "${container}"
+    docker start "${container}" >/dev/null
+    wait_until_ready "${container}" "${previous_marker}"
+    cmd_inspect "${deployment_id}"
 }
 
 cmd_stop() {
+    local force="false"
+    if [[ "${*: -1}" == "--force" ]]; then
+        force="true"
+        set -- "${@:1:$(($# - 1))}"
+    fi
+    validate_timeout "${STOP_TIMEOUT_SECONDS}" "TRADE_STOP_TIMEOUT_SECONDS"
+
     if [[ "${1:-}" == "--all" ]]; then
         local containers=()
         local container
@@ -423,25 +635,26 @@ cmd_stop() {
         fi
         echo "Stopping all trade containers..."
         for container in "${containers[@]}"; do
-            docker rm -f "${container}" >/dev/null
+            stop_container "${container}" "${force}"
         done
         echo "Done."
         return 0
     fi
 
-    local deployment_id="${1:?Usage: trade.sh stop <deployment_id> | --all}"
+    local deployment_id="${1:?Usage: trade.sh stop <deployment_id> [--force] | --all [--force]}"
     validate_deployment_id "${deployment_id}"
     local container
     container="$(container_name "${deployment_id}")"
     if container_exists "${container}"; then
-        docker rm -f "${container}" >/dev/null
+        stop_container "${container}" "${force}"
         echo "Stopped ${container}."
     else
-        echo "${container} not found."
+        echo "${container} not found." >&2
+        return 1
     fi
 }
 
-SUBCOMMAND="${1:?Usage: trade.sh <start|stop> ...}"
+SUBCOMMAND="${1:?Usage: trade.sh <start|stop|inspect|restart> ...}"
 shift
 
 # Load non-trading deployment settings from the project root. Live credentials
@@ -457,8 +670,10 @@ fi
 case "${SUBCOMMAND}" in
     start) cmd_start "$@" ;;
     stop)  cmd_stop "$@" ;;
+    inspect) cmd_inspect "$@" ;;
+    restart) cmd_restart "$@" ;;
     *)
-        echo "Unknown subcommand: ${SUBCOMMAND} (expected start|stop)" >&2
+        echo "Unknown subcommand: ${SUBCOMMAND} (expected start|stop|inspect|restart)" >&2
         exit 1
         ;;
 esac

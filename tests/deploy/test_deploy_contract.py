@@ -64,7 +64,10 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "EXPECTED_VERSION" in workflow
     assert "strategy-fixture/smoke/run.py" in workflow
     assert "--build-context strategy_source=../strategy-fixture" in workflow
-    assert "./deploy/trade.sh start smoke-ci ci smoke sim 60" in workflow
+    assert "./deploy/trade.sh start smoke-ci ci USD smoke sim 60" in workflow
+    assert "./deploy/trade.sh restart smoke-ci" in workflow
+    assert "./deploy/trade.sh inspect failing-ci" in workflow
+    assert "librae-account-lease-owner" in workflow
     assert 'io.librae.account_id" }}' in workflow
     assert "TRADE_TIMESCALE_DSN" in workflow
     assert "--network quant_network" in workflow
@@ -92,7 +95,7 @@ def test_registry_trade_deploy_uses_one_immutable_image_reference() -> None:
     assert 'org.opencontainers.image.revision" }}' in trade_script
 
     database_preflight = trade_script.index('echo "Checking strategy account and TimescaleDB')
-    container_replacement = trade_script.index('docker rm -f "${container}"')
+    container_replacement = trade_script.index('docker rm "${container}"')
     assert trade_script.index('image="${TRADE_IMAGE_REF}"') < database_preflight
     assert database_preflight < container_replacement
     assert trade_script[database_preflight:].count('"${image}"') >= 2
@@ -104,11 +107,13 @@ def _run_trade_script(
     image_reference: str,
     deployment_id: str = "smoke-main",
     account_id: str = "account-main",
+    currency: str = "USD",
     strategy: str = "smoke",
     mode: str = "sim",
     config_file: Path | None = None,
     credentials_file: Path | None = None,
     fake_image_account_id: str | None = None,
+    fake_image_currency: str | None = None,
     all_containers: str = "",
     running_containers: str = "",
     legacy_containers: str = "",
@@ -140,17 +145,24 @@ elif [[ "$1" == "ps" && "$*" == *"name=quant_live_"* ]]; then
 elif [[ "$1" == "ps" ]]; then
     printf '%s\\n' "${FAKE_DOCKER_RUNNING_CONTAINERS}"
 elif [[ "$1" == "inspect" ]]; then
-    case "$3" in
+    case "$*" in
         *io.librae.account_id*) printf '%s\\n' "${FAKE_EXISTING_ACCOUNT_ID}" ;;
+        *io.librae.currency*) printf '%s\\n' "${FAKE_EXISTING_CURRENCY}" ;;
         *io.librae.strategy*) printf '%s\\n' "${FAKE_EXISTING_STRATEGY}" ;;
         *io.librae.mode*) printf '%s\\n' "${FAKE_EXISTING_MODE}" ;;
         *io.librae.managed*) printf '%s\\n' "${FAKE_EXISTING_MANAGED}" ;;
+        *State.Running*) printf '%s\\n' "false" ;;
+        *State.Status*) printf '%s\\n' "running" ;;
+        *RestartCount*) printf '%s\\n' "0" ;;
     esac
 elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
     expected_account_id=""
+    expected_currency=""
     for argument in "$@"; do
         if [[ "${argument}" == TRADE_ACCOUNT_ID=* ]]; then
             expected_account_id="${argument#TRADE_ACCOUNT_ID=}"
+        elif [[ "${argument}" == TRADE_CURRENCY=* ]]; then
+            expected_currency="${argument#TRADE_CURRENCY=}"
         fi
     done
     if [[ "${expected_account_id}" != "${FAKE_IMAGE_ACCOUNT_ID}" ]]; then
@@ -159,6 +171,17 @@ elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
             >&2
         exit 1
     fi
+    if [[ "${expected_currency}" != "${FAKE_IMAGE_CURRENCY}" ]]; then
+        printf '%s\\n' \
+            "strategy currency mismatch: expected '${expected_currency}', found '${FAKE_IMAGE_CURRENCY}'" \
+            >&2
+        exit 1
+    fi
+elif [[ "$1" == "exec" ]]; then
+    if [[ "$*" == *" cat "* ]]; then
+        printf '%s\\n' "fixture-run:generation"
+    fi
+    exit 0
 fi
 """,
         encoding="utf-8",
@@ -173,11 +196,15 @@ fi
             "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
             "TRADE_IMAGE_REF": image_reference,
             "TRADE_TIMESCALE_DSN": ("postgresql://quant_app:secret@quant_timescaledb:5432/quant"),
+            "TRADE_START_TIMEOUT_SECONDS": "2",
+            "TRADE_STOP_TIMEOUT_SECONDS": "2",
             "FAKE_IMAGE_ACCOUNT_ID": fake_image_account_id or account_id,
+            "FAKE_IMAGE_CURRENCY": fake_image_currency or currency,
             "FAKE_DOCKER_ALL_CONTAINERS": all_containers,
             "FAKE_DOCKER_RUNNING_CONTAINERS": running_containers,
             "FAKE_DOCKER_LEGACY_CONTAINERS": legacy_containers,
             "FAKE_EXISTING_ACCOUNT_ID": existing_account_id,
+            "FAKE_EXISTING_CURRENCY": currency,
             "FAKE_EXISTING_STRATEGY": existing_strategy,
             "FAKE_EXISTING_MODE": existing_mode,
             "FAKE_EXISTING_MANAGED": existing_managed,
@@ -189,6 +216,7 @@ fi
         "start",
         deployment_id,
         account_id,
+        currency,
         strategy,
         mode,
         "60",
@@ -250,7 +278,26 @@ def test_trade_script_rejects_strategy_account_mismatch_before_replacement(
 
     assert result.returncode != 0
     assert "strategy account_id mismatch" in result.stderr
-    assert not any(call.startswith("rm -f ") for call in docker_calls)
+    assert not any(call.startswith("rm ") for call in docker_calls)
+    assert not any(call.startswith("run -d ") for call in docker_calls)
+
+
+def test_trade_script_rejects_strategy_currency_mismatch_before_replacement(
+    tmp_path: Path,
+) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'2' * 64}"
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        currency="USD",
+        fake_image_currency="TWD",
+        all_containers="quant_smoke-main",
+    )
+
+    assert result.returncode != 0
+    assert "strategy currency mismatch" in result.stderr
+    assert not any(call.startswith("rm ") for call in docker_calls)
     assert not any(call.startswith("run -d ") for call in docker_calls)
 
 
@@ -289,6 +336,7 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert "--name quant_momentum-main" in final_run
     assert "--label io.librae.deployment_id=momentum-main" in final_run
     assert "--label io.librae.account_id=account-main" in final_run
+    assert "--label io.librae.currency=USD" in final_run
     assert "--label io.librae.strategy=momentum" in final_run
     assert "--label io.librae.mode=live" in final_run
     assert "--config /app/deployment/config.yaml" in final_run
@@ -341,7 +389,7 @@ def test_trade_script_rejects_duplicate_running_live_account(tmp_path: Path) -> 
 
     assert result.returncode != 0
     assert "already owned by live deployment quant_momentum-first" in result.stderr
-    assert not any(call.startswith("rm -f ") for call in docker_calls)
+    assert not any(call.startswith("rm ") for call in docker_calls)
     assert not any(call.startswith("run -d ") for call in docker_calls)
 
 
@@ -367,7 +415,7 @@ def test_trade_script_rejects_unlabeled_legacy_live_container(tmp_path: Path) ->
 
     assert result.returncode != 0
     assert "legacy live container quant_live_momentum has no account binding" in result.stderr
-    assert not any(call.startswith("rm -f ") for call in docker_calls)
+    assert not any(call.startswith("rm ") for call in docker_calls)
     assert not any(call.startswith("run -d ") for call in docker_calls)
 
 
@@ -387,7 +435,7 @@ def test_trade_script_replaces_only_the_same_deployment_binding(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stderr
-    assert docker_calls.count("rm -f quant_momentum-main") == 1
+    assert docker_calls.count("rm quant_momentum-main") == 1
 
 
 def test_trade_script_rejects_rebinding_an_existing_deployment(tmp_path: Path) -> None:
@@ -407,7 +455,7 @@ def test_trade_script_rejects_rebinding_an_existing_deployment(tmp_path: Path) -
 
     assert result.returncode != 0
     assert "already bound to account_id=account-other" in result.stderr
-    assert not any(call.startswith("rm -f ") for call in docker_calls)
+    assert not any(call.startswith("rm ") for call in docker_calls)
     assert not any(call.startswith("run -d ") for call in docker_calls)
 
 
@@ -427,7 +475,7 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert "host.docker.internal" in secrets_env
 
     preflight = script.index('echo "Checking strategy account and TimescaleDB')
-    replacement = script.index('docker rm -f "${container}"')
+    replacement = script.index('docker rm "${container}"')
     assert preflight < replacement
     assert 'local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?' in script
     assert '-e TIMESCALE_DSN="${trade_timescale_dsn}"' in script
@@ -436,7 +484,12 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert 'source "${PROJECT_ROOT}/.env.secrets"' not in script
     assert 'credential_args+=(--env-file "${credentials_file}")' in script
     assert '--filter "label=io.librae.managed=true"' in script
-    assert 'local deployment_id="${1:?Usage: trade.sh stop <deployment_id> | --all}"' in script
+    assert "cmd_inspect()" in script
+    assert "cmd_restart()" in script
+    assert 'stop_container "${container}" "${force}"' in script
+    assert 'docker stop --signal TERM --time -1 "${container}"' in script
+    assert 'docker kill --signal KILL "${container}"' in script
+    assert '"${marker}" != "${previous_marker}"' in script
 
 
 def test_remote_schema_path_matches_compose_source() -> None:

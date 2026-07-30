@@ -37,7 +37,38 @@ jobs:
         run: |
           mkdir -p ../strategy-fixture/smoke
           touch ../strategy-fixture/smoke/__init__.py
-          printf '%s\n' 'print("strategy fixture ready")' > ../strategy-fixture/smoke/run.py
+          cat > ../strategy-fixture/smoke/run.py <<'PY'
+          import argparse
+          import os
+          import signal
+          import time
+          from pathlib import Path
+          from uuid import uuid4
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("--mode")
+          parser.add_argument("--poll-seconds")
+          parser.add_argument("--config")
+          parser.add_argument("--once", action="store_true")
+          options = parser.parse_args()
+          if options.once:
+              raise SystemExit(0)
+
+          running = True
+
+          def stop(*_args):
+              global running
+              running = False
+
+          signal.signal(signal.SIGTERM, stop)
+          signal.signal(signal.SIGINT, stop)
+          Path(os.environ["LIBRAE_READY_FILE"]).write_text(
+              f"fixture-run:{uuid4().hex}\n",
+              encoding="utf-8",
+          )
+          while running:
+              time.sleep(0.1)
+          PY
           printf '%s\n' \
             'strategy:' \
             '  symbol: MU' \
@@ -47,6 +78,18 @@ jobs:
             '    currency: USD' \
             '    initial_cash: 100000' \
             > ../strategy-fixture/smoke/config.yaml
+          mkdir -p ../strategy-fixture/failing
+          touch ../strategy-fixture/failing/__init__.py
+          printf '%s\n' 'raise SystemExit(3)' > ../strategy-fixture/failing/run.py
+          printf '%s\n' \
+            'strategy:' \
+            '  symbol: MU' \
+            '  timeframe: D1' \
+            '  account:' \
+            '    account_id: ci-fail' \
+            '    currency: USD' \
+            '    initial_cash: 100000' \
+            > ../strategy-fixture/failing/config.yaml
 
       - name: Build clean trade image
         id: image
@@ -79,7 +122,7 @@ jobs:
             librae-trade:ci \
             python -c \
             'import importlib.metadata as m, os; import librae; assert m.version("librae") == os.environ["EXPECTED_VERSION"]'
-          docker run --rm librae-trade:ci python -m strategies.smoke.run
+          docker run --rm librae-trade:ci python -m strategies.smoke.run --once
 
       - name: Verify TimescaleDB container endpoint
         run: |
@@ -111,7 +154,7 @@ jobs:
           source .env.example
           set +a
           TRADE_STRATEGY_PATH=../strategy-fixture \
-            ./deploy/trade.sh start smoke-ci ci smoke sim 60
+            ./deploy/trade.sh start smoke-ci ci USD smoke sim 60
           test "$(
             docker inspect \
               --format '{{ index .Config.Labels "io.librae.deployment_id" }}' \
@@ -122,7 +165,49 @@ jobs:
               --format '{{ index .Config.Labels "io.librae.account_id" }}' \
               quant_smoke-ci
           )" = "ci"
+          test "$(
+            docker inspect \
+              --format '{{ index .Config.Labels "io.librae.currency" }}' \
+              quant_smoke-ci
+          )" = "USD"
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
+          if TRADE_STRATEGY_PATH=../strategy-fixture \
+            ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then
+            echo "early-exit deployment was reported ready" >&2
+            exit 1
+          fi
+          ./deploy/trade.sh inspect failing-ci | grep -Fx "phase=failed"
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          docker rm --force quant_failing-ci
           ./deploy/trade.sh stop smoke-ci
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=stopped"
+          docker rm quant_smoke-ci
+
+      - name: Verify durable account ownership across containers
+        run: |
+          set -a
+          source .env.example
+          set +a
+          docker run --detach \
+            --name librae-account-lease-owner \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python -c \
+            'import time; from librae.db.timescale_state import TimescaleLiveStateStore; store = TimescaleLiveStateStore(); assert store.acquire_lease("live-account:shared"); print("lease-ready", flush=True); time.sleep(60)'
+          for attempt in $(seq 1 30); do
+            docker logs librae-account-lease-owner 2>&1 | grep -q lease-ready && break
+            sleep 1
+          done
+          docker logs librae-account-lease-owner 2>&1 | grep -q lease-ready
+          docker run --rm \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python -c \
+            'from librae.db.timescale_state import TimescaleLiveStateStore; assert not TimescaleLiveStateStore().acquire_lease("live-account:shared")'
+          docker rm --force librae-account-lease-owner
 
       - name: Verify backtest cache schema
         run: |

@@ -286,14 +286,14 @@ safe. Apply the reconciliation procedure below before changing revisions.
    chmod 600 .credentials/ibkr-main.env
    ```
 
-5. On the VM, start each deployment with a stable id, the account id declared
-   by its selected configuration, and a strategy name:
+5. On the VM, start each deployment with a stable id, the account id and
+   currency declared by its selected configuration, and a strategy name:
 
    ```bash
-   ./deploy/trade.sh start momentum-paper paper momentum sim 60 \
+   ./deploy/trade.sh start momentum-paper paper USD momentum sim 60 \
        --config configs/paper.yaml
 
-   ./deploy/trade.sh start momentum-live ibkr_main momentum live 60 \
+   ./deploy/trade.sh start momentum-live ibkr_main USD momentum live 60 \
        --config configs/ibkr-main.yaml \
        --credentials .credentials/ibkr-main.env
    ```
@@ -310,26 +310,52 @@ strategy:
     initial_cash: 100000
 ```
 
-The image preflight rejects a missing or different `account_id` before an
-existing container is replaced. Container names derive from `deployment_id`,
-so the same image and strategy can run for multiple accounts:
+The image preflight rejects a missing or different `account_id` or `currency`
+before an existing container is replaced. Container names derive from
+`deployment_id`, so the same image and strategy can run for multiple accounts:
 
 ```bash
-./deploy/trade.sh start momentum-main ibkr_main momentum live 60 \
+./deploy/trade.sh start momentum-main ibkr_main USD momentum live 60 \
     --config configs/ibkr-main.yaml \
     --credentials .credentials/ibkr-main.env
 
-./deploy/trade.sh start momentum-ira ibkr_ira momentum live 60 \
+./deploy/trade.sh start momentum-ira ibkr_ira USD momentum live 60 \
     --config configs/ibkr-ira.yaml \
     --credentials .credentials/ibkr-ira.env
 ```
 
 Both containers receive the same `TRADE_TIMESCALE_DSN` and use the same
 TimescaleDB. Their run and account identifiers keep persisted facts distinct.
-Starting another live deployment for an account already owned by a running
-container fails before replacement. `trade.sh stop <deployment_id>` removes
-one deployment; `trade.sh stop --all` removes all containers carrying the
-Librae managed label.
+The Docker label check rejects an obvious duplicate before replacement; the
+durable `live-account:<account_id>` database lease is authoritative across
+different strategies, configurations, and launch paths.
+
+`trade.sh start` reports success only after the runner publishes readiness.
+The repository's `build_live_trader()` wiring does this after state restore,
+durable ownership, and startup broker reconciliation. A custom runner must
+honour the same `LIBRAE_READY_FILE` contract or the launch times out without
+being reported ready.
+
+Use the lifecycle commands without relying on shell process memory:
+
+```bash
+./deploy/trade.sh inspect momentum-main
+./deploy/trade.sh restart momentum-main
+./deploy/trade.sh stop momentum-main
+./deploy/trade.sh stop momentum-main --force
+```
+
+Normal stop sends SIGTERM, waits up to `TRADE_STOP_TIMEOUT_SECONDS`, and
+preserves the stopped container for inspection or restart. `--force` is the
+explicit SIGKILL path. Starting the same deployment again validates the new
+image and configuration first, then gracefully stops and removes the old
+container. A failed new launch remains failed for diagnosis; the script does
+not blindly reactivate the old revision. `trade.sh stop --all` applies the same
+graceful behavior to all containers carrying the Librae managed label.
+The repository CI exercises this lifecycle with a long-running simulation
+fixture and verifies the durable account lease across separate containers. It
+does not claim broker API certification; real live credentials and venue
+reconciliation remain an environment-specific release gate.
 
 Before the first account-specific live launch, stop any container created by
 the older `quant_live_<strategy>` naming contract. `trade.sh` rejects an

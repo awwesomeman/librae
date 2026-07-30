@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from librae.orchestration.docker_supervisor import DockerSupervisor
 from librae.orchestration.supervisor import (
     DeploymentSpec,
     DeploymentStatus,
@@ -160,3 +163,105 @@ def test_status_requires_timezone_aware_observation() -> None:
             phase="unknown",
             observed_at=datetime.now(),
         )
+
+
+def test_docker_supervisor_uses_external_status_without_process_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    status = "\n".join(
+        (
+            "deployment_id=momentum-1",
+            "account_id=account-1",
+            "currency=USD",
+            "phase=running",
+            "run_id=run-1",
+            "process_id=42",
+            "exit_code=",
+            "restart_count=0",
+            "reason=",
+        )
+    )
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        stdout = status if command[2] == "inspect" else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    script = tmp_path / "trade.sh"
+    observed_at = datetime(2026, 7, 30, tzinfo=UTC)
+    supervisor = DockerSupervisor(script, poll_seconds=15, clock=lambda: observed_at)
+
+    started = supervisor.start(_deployment(1))
+    reconnected = DockerSupervisor(script, clock=lambda: observed_at).inspect("momentum-1")
+
+    assert started == reconnected
+    assert calls[0] == [
+        "bash",
+        str(script),
+        "start",
+        "momentum-1",
+        "account-1",
+        "USD",
+        "momentum",
+        "live",
+        "15",
+        "--config",
+        "configs/account-1.yaml",
+        "--credentials",
+        "secrets/account-1",
+    ]
+    assert calls[1][2:] == ["inspect", "momentum-1"]
+    assert calls[2][2:] == ["inspect", "momentum-1"]
+
+
+def test_docker_supervisor_passes_force_only_when_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    status = "\n".join(
+        (
+            "deployment_id=momentum-1",
+            "account_id=account-1",
+            "currency=USD",
+            "phase=stopped",
+            "run_id=",
+            "process_id=",
+            "exit_code=0",
+            "restart_count=0",
+            "reason=",
+        )
+    )
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        stdout = status if command[2] == "inspect" else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    supervisor = DockerSupervisor(tmp_path / "trade.sh")
+
+    stopped = supervisor.stop("momentum-1", force=True)
+
+    assert stopped.phase == "stopped"
+    assert calls[0][2:] == ["stop", "momentum-1", "--force"]
+
+
+def test_docker_supervisor_rejects_non_reference_entrypoint(tmp_path: Path) -> None:
+    spec = _deployment(1)
+    invalid = DeploymentSpec(
+        deployment_id=spec.deployment_id,
+        account_id=spec.account_id,
+        currency=spec.currency,
+        mode=spec.mode,
+        strategy_name=spec.strategy_name,
+        config_ref=spec.config_ref,
+        entrypoint="custom.runner",
+        credentials_ref=spec.credentials_ref,
+    )
+
+    with pytest.raises(ValueError, match="requires entrypoint"):
+        DockerSupervisor(tmp_path / "trade.sh").start(invalid)
