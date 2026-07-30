@@ -32,11 +32,12 @@ DEFAULT_POLL_SECONDS = 60
 
 @dataclass(frozen=True, slots=True)
 class AccountConfig:
-    """One isolated cash and PnL ledger.
+    """The single cash and PnL ledger used by one engine run.
 
-    ``account_id`` is the key in ``RunConfig.accounts``. Currency conversion,
-    transfers, borrowing, and netting across accounts are intentionally outside
-    this contract.
+    ``account_id`` remains the key in ``RunConfig.accounts`` so persisted facts
+    retain a stable account identity. A run owns exactly one account; callers
+    coordinate multiple accounts as separate runs because Librae does not
+    provide FX, transfers, settlement, or cross-account netting.
     """
 
     currency: str
@@ -301,6 +302,11 @@ class RunConfig:
         object.__setattr__(self, "symbols", tuple(self.symbols))
         if not isinstance(self.accounts, dict) or not self.accounts:
             raise ValueError("accounts must be a non-empty mapping")
+        if len(self.accounts) != 1:
+            raise ValueError(
+                "one run must own exactly one account; coordinate multiple accounts "
+                "as separate Librae runs"
+            )
         normalized_accounts: dict[str, AccountConfig] = {}
         for account_id, account in self.accounts.items():
             if not isinstance(account_id, str) or not account_id:
@@ -409,6 +415,16 @@ class RunConfig:
     def symbol(self) -> str:
         """Primary symbol (single-asset convenience)."""
         return self.symbols[0]
+
+    @property
+    def account_id(self) -> str:
+        """Stable identity of this run's single account."""
+        return next(iter(self.accounts))
+
+    @property
+    def account(self) -> AccountConfig:
+        """Configuration of this run's single account."""
+        return self.accounts[self.account_id]
 
     @cached_property
     def perf_params(self) -> dict[str, Any]:

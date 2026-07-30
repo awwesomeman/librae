@@ -518,11 +518,10 @@ class TestCheckExistingRun:
         ):
             assert check_existing_run(_make_cfg()) is None
 
-    def test_changed_perf_params_refresh_every_configured_account(self):
+    def test_changed_perf_params_refreshes_run_account(self):
         config = _make_cfg(
             accounts={
                 "alpha": AccountConfig(currency="USD", initial_cash=100_000.0),
-                "beta": AccountConfig(currency="USD", initial_cash=50_000.0),
             }
         )
         existing = {
@@ -540,10 +539,7 @@ class TestCheckExistingRun:
         ):
             assert check_existing_run(config) == "existing-run"
 
-        assert [call.kwargs["account_id"] for call in refresh.call_args_list] == [
-            "alpha",
-            "beta",
-        ]
+        assert [call.kwargs["account_id"] for call in refresh.call_args_list] == ["alpha"]
         assert all(call.kwargs["config"] is config for call in refresh.call_args_list)
         update_params.assert_called_once_with("existing-run", config.perf_params)
 

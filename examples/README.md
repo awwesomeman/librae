@@ -178,43 +178,21 @@ orders, not an atomic combo order. The exact validation, recovery, halt, and
 venue-native combo boundaries are defined in the
 [multi-leg engine contract](../architecture.md#related-multi-leg-order-contract).
 
-Cross-account legs use explicit accounts and currencies:
+All legs in one runner use its single account:
 
 ```yaml
 strategy:
-  symbols: [VENUE_A_SYMBOL, VENUE_B_SYMBOL]
+  symbols: [NEAR_FUTURE, NEXT_FUTURE]
   accounts:
-    venue_a:
-      currency: USDT
+    futures:
+      currency: TWD
       initial_cash: 100000
-    venue_b:
-      currency: USD
-      initial_cash: 100000
-  instrument_overrides:
-    VENUE_A_SYMBOL:
-      account_id: venue_a
-      currency: USDT
-    VENUE_B_SYMBOL:
-      account_id: venue_b
-      currency: USD
 ```
 
-`ctx.accounts["venue_a"]` and `ctx.accounts["venue_b"]` remain separate.
-Backtest/live output labels both PnLs with their currencies and does not
-produce a combined total. The same isolation applies when both accounts use
-USD. FX conversion, settlement, funding transfers, and atomic cross-venue
-fills remain outside the engine.
-
-Consume the result by account instead of summing unconverted values:
-
-```python
-for account in output.accounts:
-    print(
-        account.account_id,
-        account.net_pnl,
-        account.currency,
-    )
-```
+Use separate `RunConfig` and runner instances for separate broker accounts or
+currencies. A deployment layer may group their DB/UI output, but FX conversion,
+settlement, funding transfers, and atomic cross-run fills remain outside the
+engine.
 
 For example, `("venue_a", 125.0, "USD")` and
 `("venue_b", -80.0, "USD")` stay as two labeled results even though both

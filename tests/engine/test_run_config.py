@@ -48,6 +48,16 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
     assert backtest.config_hash != simulation.config_hash
 
 
+def test_run_owns_exactly_one_account() -> None:
+    with pytest.raises(ValueError, match="exactly one account"):
+        _config(
+            accounts={
+                "a": AccountConfig(currency="USD", initial_cash=10_000.0),
+                "b": AccountConfig(currency="USD", initial_cash=10_000.0),
+            }
+        )
+
+
 def test_runtime_operational_settings_are_validated_but_do_not_change_config_hash() -> None:
     default = _config()
     tuned = _config(reconciliation_interval_seconds=30, market_data_workers=4)

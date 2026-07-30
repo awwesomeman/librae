@@ -97,8 +97,8 @@ For custom broker fetches and third-party factors, see
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
 | Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
 | Related multi-leg execution | Explicitly sized `MultiLegOrder`; synchronous research approximation and serial live execution with a completion deadline and pre-group exposure restoration; not atomic venue execution |
-| Segregated execution accounts | Per-account cash, equity, PnL, risk metrics, persistence, and reconciliation; same-currency accounts remain separate |
-| Cross-account reporting | No implicit total; FX conversion, transfers, settlement, and cross-account netting are not modeled |
+| Execution account | One named account and currency per run; use separate runs for separate broker accounts or currencies |
+| Cross-account coordination | Caller-owned; the engine does not model FX, transfers, settlement, netting, or atomic execution across runs |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
 | Short borrow / funding | Timestamped perpetual funding is supported in backtest/sim; no engine borrow/locate ledger |
 

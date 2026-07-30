@@ -199,25 +199,17 @@ def _test_cfg(**overrides) -> RunConfig:
             route.setdefault("currency", "USDT")
     if "accounts" not in overrides:
         currencies = {
-            symbol: routes.get(symbol, {}).get("currency") or registry[symbol].currency
+            routes.get(symbol, {}).get("currency") or registry[symbol].currency
             for symbol in symbols
         }
-        unique_currencies = set(currencies.values())
-        if len(unique_currencies) == 1:
-            currency = next(iter(unique_currencies))
-            overrides["accounts"] = {
-                "default": AccountConfig(currency=currency, initial_cash=100_000.0)
-            }
-        else:
-            overrides["accounts"] = {
-                currency.lower(): AccountConfig(
-                    currency=currency,
-                    initial_cash=100_000.0,
-                )
-                for currency in sorted(unique_currencies)
-            }
-            for symbol, currency in currencies.items():
-                routes.setdefault(symbol, {})["account_id"] = currency.lower()
+        if len(currencies) != 1:
+            raise ValueError("test config symbols must share one account currency")
+        overrides["accounts"] = {
+            "default": AccountConfig(
+                currency=next(iter(currencies)),
+                initial_cash=100_000.0,
+            )
+        }
     if routes:
         overrides["instrument_overrides"] = routes
     return make_test_cfg(**overrides)
@@ -1462,26 +1454,6 @@ class TestLiveTrader:
         ]
         assert len(drift_alerts) == 1
 
-    def test_multi_currency_runtime_uses_isolated_accounts(self):
-        cfg = _test_cfg(
-            mode="live",
-            symbols=["AAA", "BBB"],
-            instrument_overrides={
-                "AAA": {"currency": "USD"},
-                "BBB": {"currency": "USDT"},
-            },
-        )
-        runner = self._make_runner(
-            config=cfg,
-            order_adapter={
-                "AAA": _mock_order_adapter(),
-                "BBB": _mock_order_adapter(),
-            },
-        )
-
-        assert runner._cash_by_account == {"usd": 100_000.0, "usdt": 100_000.0}
-        assert runner._currency_by_account == {"usd": "USD", "usdt": "USDT"}
-
     def test_adapter_without_get_balance_reports_unavailable_reconciliation(self, caplog):
         """An optional capability stays non-fatal but cannot disappear silently."""
         mock_order_adapter = _mock_order_adapter()
@@ -1829,154 +1801,6 @@ class TestLiveTrader:
         assert len(callbacks) == 1
         assert callbacks[0] == pytest.approx((50_000.0, -0.5, 0.0))
         assert runner._prev_equity_by_account["default"] == pytest.approx(50_000.0)
-
-    def test_live_drawdown_halts_only_breached_account(self):
-        alpha_adapter = _mock_order_adapter()
-        beta_adapter = _mock_order_adapter()
-        alpha_adapter.place_order.return_value = _broker_report(
-            order_id="alpha-risk-exit",
-            quantity=10.0,
-            average=50.0,
-        )
-        beta_adapter.place_order.return_value = _broker_report(
-            order_id="beta-close",
-            quantity=10.0,
-            average=100.0,
-        )
-        config = _test_cfg(
-            mode="live",
-            symbols=["AAA", "BBB"],
-            accounts={
-                "alpha": AccountConfig(currency="USD", initial_cash=1_000.0),
-                "beta": AccountConfig(currency="EUR", initial_cash=1_000.0),
-            },
-            instrument_overrides={
-                "AAA": {
-                    "account_id": "alpha",
-                    "currency": "USD",
-                    "instrument_type": "spot",
-                },
-                "BBB": {
-                    "account_id": "beta",
-                    "currency": "EUR",
-                    "instrument_type": "spot",
-                },
-            },
-            risk=RiskPolicy(max_drawdown_rate=0.2),
-        )
-        runner = self._make_runner(
-            config=config,
-            order_adapter={"AAA": alpha_adapter, "BBB": beta_adapter},
-        )
-        runner._cash_by_account = {"alpha": 0.0, "beta": 0.0}
-        runner._positions = {
-            symbol: PositionState(
-                symbol=symbol,
-                side="long",
-                entry_price=100.0,
-                quantity=10.0,
-                entry_at=datetime(2025, 1, 1, tzinfo=UTC),
-                periods_held=1,
-                entry_commission=0.0,
-                entry_slippage=0.0,
-                entry_tax=0.0,
-                total_entry_cost=1_000.0,
-            )
-            for symbol in ("AAA", "BBB")
-        }
-        runner._last_prices = {"AAA": 50.0, "BBB": 100.0}
-        runner._equity_peak_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
-        runner._prev_equity_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
-        bars = {
-            "AAA": {"close": 50.0, "volume": 1_000.0},
-            "BBB": {"close": 100.0, "volume": 1_000.0},
-        }
-
-        runner._record_equity(datetime(2025, 1, 2, tzinfo=UTC), bars)
-
-        assert runner._halted is False
-        assert runner._halted_accounts == {"alpha"}
-        assert set(runner._positions) == {"BBB"}
-        alpha_adapter.place_order.assert_called_once()
-        beta_adapter.place_order.assert_not_called()
-
-        completed = runner._execute_live_decision(
-            [
-                OrderIntent(action="long", symbol="AAA", quantity=1.0),
-                OrderIntent(action="close", symbol="BBB"),
-            ],
-            bars,
-            datetime(2025, 1, 2, 1, tzinfo=UTC),
-        )
-
-        assert completed is True
-        assert runner._positions == {}
-        alpha_adapter.place_order.assert_called_once()
-        beta_adapter.place_order.assert_called_once()
-
-    def test_simultaneous_account_breaches_share_one_recovery_queue(self):
-        alpha_adapter = _mock_order_adapter()
-        beta_adapter = _mock_order_adapter()
-        alpha_adapter.place_order.return_value = _broker_report(
-            order_id="alpha-risk-exit",
-            status="accepted",
-            quantity=10.0,
-            filled=0.0,
-        )
-        config = _test_cfg(
-            mode="live",
-            symbols=["AAA", "BBB"],
-            accounts={
-                "alpha": AccountConfig(currency="USD", initial_cash=1_000.0),
-                "beta": AccountConfig(currency="EUR", initial_cash=1_000.0),
-            },
-            instrument_overrides={
-                "AAA": {
-                    "account_id": "alpha",
-                    "currency": "USD",
-                    "instrument_type": "spot",
-                },
-                "BBB": {
-                    "account_id": "beta",
-                    "currency": "EUR",
-                    "instrument_type": "spot",
-                },
-            },
-            risk=RiskPolicy(max_drawdown_rate=0.2),
-        )
-        runner = self._make_runner(
-            config=config,
-            order_adapter={"AAA": alpha_adapter, "BBB": beta_adapter},
-        )
-        runner._cash_by_account = {"alpha": 0.0, "beta": 0.0}
-        runner._positions = {
-            symbol: PositionState(
-                symbol=symbol,
-                side="long",
-                entry_price=100.0,
-                quantity=10.0,
-                entry_at=datetime(2025, 1, 1, tzinfo=UTC),
-                periods_held=1,
-                entry_commission=0.0,
-                entry_slippage=0.0,
-                entry_tax=0.0,
-                total_entry_cost=1_000.0,
-            )
-            for symbol in ("AAA", "BBB")
-        }
-        runner._last_prices = {"AAA": 50.0, "BBB": 50.0}
-        runner._equity_peak_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
-        runner._prev_equity_by_account = {"alpha": 1_000.0, "beta": 1_000.0}
-        bars = {symbol: {"close": 50.0, "volume": 1_000.0} for symbol in ("AAA", "BBB")}
-
-        runner._record_equity(datetime(2025, 1, 2, tzinfo=UTC), bars)
-
-        assert runner._halted is False
-        assert runner._halted_accounts == {"alpha", "beta"}
-        assert len(runner._active_orders) == 2
-        assert [order.request.symbol for order in runner._active_orders] == ["AAA", "BBB"]
-        alpha_adapter.place_order.assert_called_once()
-        beta_adapter.place_order.assert_not_called()
 
 
 def _make_fill_event() -> OrderEvent:

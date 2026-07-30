@@ -346,26 +346,23 @@ path model.
 
 #### Accounts and multi-asset / stock-picking strategies
 
-`RunConfig.accounts` is the cash and PnL SSOT. Each instrument resolves one
-`instrument_overrides.<symbol>.account_id`; a single-account run may omit it.
-An account has one currency and one isolated cash/equity/risk ledger. Accounts
-are never combined merely because their currency strings match. The engine has
-no implicit FX conversion, transfer, borrowing, settlement, or cross-account
-netting.
+Each run owns exactly one named account, which is the cash and PnL SSOT for
+every configured symbol. The account has one currency and one
+cash/equity/risk ledger. `RunConfig.accounts` and `BacktestOutput.accounts`
+retain the account id as a stable persistence and reporting key, but both
+contain exactly one entry.
 
-Strategies inspect `ctx.accounts[account_id]` and
-`ctx.account_id_by_symbol`. The `ctx.cash` and `ctx.equity` conveniences work
-only for a single-account run and fail when an aggregate would be ambiguous.
-`BacktestOutput.accounts` contains one `AccountPerformance` per account with
-explicit account id, currency, initial cash, final equity, net PnL, equity
-curve, and metrics.
-Top-level `output.metrics` and `output.equity_curve` are single-account
-conveniences only.
+Strategies normally use `ctx.cash` and `ctx.equity`; `ctx.accounts` and
+`ctx.account_id_by_symbol` expose the same single account when an explicit id
+is useful. A deployment with separate broker accounts or currencies runs one
+Librae engine per account and coordinates them outside the engine. Librae does
+not provide FX conversion, transfer, borrowing, settlement, cross-account
+netting, or atomic execution across runs.
 
 Within an account the engine is portfolio-level. `on_bar()` can return
-`OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends that
-symbol's available account cash, so multi-symbol and cross-account decisions
-should normally use explicit quantities.
+`OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends the
+account's available cash, so multi-symbol decisions should normally use
+explicit quantities.
 
 For allocation strategies, return one `PortfolioTargets` instead:
 
@@ -374,26 +371,24 @@ from librae import PortfolioTargets
 
 return PortfolioTargets(
     weights={"AAA": 0.50, "BBB": 0.45},
-    fill_price="open",
     reason="monthly allocation",
 )
 ```
 
 The strategy timestamps the target implicitly by returning it for `ctx.ts`
 (bar T). The engine resolves it on T+1 using each symbol's actual fill price and
-portfolio equity at those same execution prices. The default `open` is the
-earliest next-bar execution assumption. An explicit `close` means an order
-eligible for the next bar's close; it is valid only when that order type and
-timing are intentional, and it is not interchangeable with an open fill.
+portfolio equity at those same execution prices. The run's `ExecutionPolicy`
+selects the simulated fill field; allocation intent does not override execution
+semantics.
 Positive weights are long, negative weights are short, and a held symbol
 omitted from `weights` targets zero. Reductions and closes execute first in
 symbol order, then additions. If entry costs exceed available cash, all
 addition quantities receive one common scale factor so symbol ordering does not
 starve later assets.
 
-`PortfolioTargets` must stay within one account because weights require one
-capital base. Cross-account hedges and arbitrage use explicitly sized
-`OrderIntent`s or `MultiLegOrder`; hedge ratios remain strategy-owned.
+`PortfolioTargets` uses the run's single account as its capital base. A
+cross-account hedge or arbitrage strategy must coordinate explicitly sized
+orders across separate runs; hedge ratios remain strategy-owned.
 
 Weights need not sum to one; any remainder stays in cash. When
 `Backtest(..., record_position_snapshots=True)` is enabled,
@@ -475,11 +470,10 @@ entry-notional and volume-participation limits; venue normalization, instrument
 rules, broker confirmation, durable order tracking, and manual fallback remain
 mandatory. This is best-effort recovery, not an atomicity claim.
 
-Examples include TAIFEX near/next-future/cash-proxy, Binance
-spot/perpetual/delivery-future spreads, and cross-venue instruments. Legs may
-belong to different isolated accounts and currencies. Librae reports each
-account separately and never assumes USD = USDT; a strategy that needs a
-common return or hedge capital base must supply its own explicit FX/valuation
+Examples include TAIFEX near/next-future/cash-proxy and Binance
+spot/perpetual/delivery-future spreads. Every leg in one `MultiLegOrder` belongs
+to the run's single account. Cross-account or cross-currency execution requires
+separate runs and a strategy-owned coordinator with an explicit FX/valuation
 model.
 
 Continuous near/next/quarterly aliases are dynamic identities, not exact
@@ -729,7 +723,14 @@ exceeded `poll_seconds`.
   `calculate_signed_position_notionals()` and
   `calculate_position_weights()` are the shared accounting SSOT used by risk
   validation, backtest snapshots, live post-fill checks, and live diagnostics.
-- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues a market exit for each open position in the breached account and fills it at the next observed bar open (subject to the normal volume cap); it never observes a close and fills at that same close. Live submits immediate market closes for that account and books only confirmed broker fills. The account halt persists across restart while unaffected accounts continue to be managed. Live emergency exits remain active while the account is halted and must reach a broker terminal state before `reset_halt(account_id)` is allowed. After operator review, `reset_halt(account_id)` starts a new risk epoch for that account; calling `reset_halt()` without an account also clears a system-wide halt and resets every account peak.
+- `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues
+  market exits for the run's open positions and fills them at the next observed
+  bar open (subject to the normal volume cap); it never observes a close and
+  fills at that same close. Live submits immediate market closes and books only
+  confirmed broker fills. The halt persists across restart, emergency exits
+  remain active while halted, and broker orders must reach a terminal state
+  before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
+  a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
   `reset_halt()` is required after review before new entries resume.
@@ -785,8 +786,8 @@ quantity, multiplier, side, and realized cash flow for audit.
 
 Paper and live broker modes do not apply these research observations. Broker
 balances and exchange funding records remain authoritative. This contract
-does not add rate fetching, FX conversion, settlement, transfer, or
-cross-account netting.
+does not add rate fetching, FX conversion, settlement, transfer, or cross-run
+netting.
 
 #### Margin / liquidation simulation
 
@@ -908,7 +909,7 @@ live capital.
 | Related multi-leg execution | Synchronous `MultiLegOrder` OHLCV approximation | Synchronous approximation | Best-effort serial execution, completion deadline, durable baseline restoration, and manual fallback; no atomic fill guarantee |
 | Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
 | Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
-| Cross-account arbitrage | Separate account curves/PnL; synchronous leg approximation | Separate account curves/PnL | Best-effort serial multi-leg lifecycle; no cross-account funding or atomicity |
+| Cross-account arbitrage | Separate independent runs; no synchronized engine contract | Same | Strategy-owned external orchestration; no shared funding or atomicity |
 | Dynamic stock universe | Point-in-time selection within a predeclared candidate superset | Same predeclared universe | No runtime symbol add/remove, subscription changes, or automatic warm-up |
 | Short borrow/funding | Timestamped perpetual funding; borrow costs remain upstream | Same funding contract | Broker/account responsibility; no engine borrow/locate ledger |
 
@@ -995,7 +996,7 @@ financial/execution fact.
 
 | Type | Description |
 |------|------|
-| `BacktestOutput` | run metadata, isolated account performance, currency-labelled order events, and optional position/allocation snapshots |
+| `BacktestOutput` | run metadata, one account's performance, currency-labelled order events, and optional position/allocation snapshots |
 | `TabularArtifact` | versioned manifest plus logical DataFrames for caller-selected local serialization |
 | `AccountPerformance` | one account's currency, initial cash, final equity, net PnL, equity curve, and metrics |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
@@ -1084,7 +1085,6 @@ strategy:
   broker: ibkr              # explicit execution choice; no symbol fallback
   instrument_overrides:
     MU:
-      account_id: ibkr_main
       data_adapter: ibkr
       venue_symbol: MU
       currency: USD
@@ -1126,12 +1126,11 @@ declare `instrument_type` and `currency`; an IBKR route must also declare
 `security_type` and a futures `exchange`. These are execution/accounting facts,
 so they are not guessed from multiplier, market name, or ticker shape.
 
-Multiple accounts require an explicit `account_id` for every symbol. Each live
-account maps one-to-one to an order-adapter instance so reconciliation cannot
-double-count one broker balance or sum separate broker accounts. Mixed
-currencies and same-currency separate accounts are supported as segregated
-ledgers. There is deliberately no portfolio-wide PnL, Sharpe, or drawdown
-unless a caller supplies an external reporting-currency conversion model.
+One run maps its single account to one order-adapter instance. Separate broker
+accounts or currencies require separate `RunConfig` and runner instances so
+reconciliation cannot double-count balances or imply shared funding. A caller
+may group those runs for UI or database reporting, but combined PnL, Sharpe,
+drawdown, and reporting-currency conversion remain caller-owned.
 
 #### TelegramAdapter (notifications)
 

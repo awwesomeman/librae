@@ -51,9 +51,9 @@ account and therefore follows the broker-confirmed execution path.
 
 ### Portfolio and account semantics
 
-- [ ] Each symbol has an explicit account, currency, instrument type, and
-      multiplier. Cross-account PnL is not summed without an external FX and
-      transfer model.
+- [ ] Every symbol resolves to the run's single account and currency, with an
+      explicit instrument type and multiplier. Separate accounts or currencies
+      use separate runs and an external FX and transfer model.
 - [ ] A `PortfolioTargets` decision contains one complete account-level target
       state. Omitted existing holdings intentionally target zero.
 - [ ] Optimizer inputs, covariance model, objective, optimizer-specific
@@ -126,7 +126,7 @@ promises:
 - no runtime symbol discovery, subscription mutation, or automatic warm-up for
   an undeclared universe;
 - no guarantee of atomic multi-leg or cross-venue execution;
-- no FX conversion, settlement, transfer, or cross-account netting ledger;
+- no FX conversion, settlement, transfer, or cross-run netting ledger;
 - no automatic corporate-action, borrow-locate, or revised-fundamental model.
 
 If a strategy requires one of these, implement and validate it upstream or

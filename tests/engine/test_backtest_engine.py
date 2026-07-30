@@ -787,30 +787,33 @@ class TestMultiAsset:
 
         df = pd.concat(
             [
-                _make_multiindex_df([100.0] * 5, symbol="TXFR1"),
+                _make_multiindex_df([100.0] * 5, symbol="CRYPTO"),
                 _make_multiindex_df([100.0] * 5, symbol="MU"),
             ]
         )
         cfg = RunConfig(
             strategy_name="t",
-            symbols=["TXFR1", "MU"],
+            symbols=["CRYPTO", "MU"],
             timeframe="1d",
             market="multi",
             data_source="multi",
-            accounts={
-                "futures": AccountConfig(currency="TWD", initial_cash=100_000.0),
-                "equity": AccountConfig(currency="USD", initial_cash=100_000.0),
-            },
+            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
             mode="backtest",
+            symbol_cost_overrides={"CRYPTO": {"multiplier": 1.0}},
             instrument_overrides={
-                "TXFR1": {"account_id": "futures"},
-                "MU": {"account_id": "equity"},
+                "CRYPTO": {
+                    "market": "crypto",
+                    "data_source": "binance_spot",
+                    "data_adapter": "crypto",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                },
             },
         )
 
         bt = Backtest(data=df, strategy=HoldStrategy(), config=cfg)
 
-        assert bt._get_cost_model("TXFR1").min_commission == 100.0
+        assert bt._get_cost_model("CRYPTO").commission_rate == 0.001
         assert bt._get_cost_model("MU").min_commission == 0.0
         assert bt._get_cost_model("MU").short_margin_rate == 0.5
 

@@ -566,20 +566,13 @@ def resolve_symbol(
         raise ValueError(
             f"No currency for symbol={symbol!r}; set instrument_overrides[symbol]['currency']"
         )
-    account_id = route.get("account_id")
-    if account_id is None:
-        if len(config.accounts) != 1:
-            raise ValueError(
-                f"No account_id for symbol={symbol!r}; runs with multiple accounts require "
-                "instrument_overrides[symbol]['account_id']"
-            )
-        account_id = next(iter(config.accounts))
-    if account_id not in config.accounts:
+    account_id = route.get("account_id", config.account_id)
+    if account_id != config.account_id:
         raise ValueError(
-            f"Unknown account_id={account_id!r} for symbol={symbol!r}; "
-            f"configured accounts are {sorted(config.accounts)}"
+            f"symbol={symbol!r} routes to account_id={account_id!r}, but one run "
+            f"owns only account_id={config.account_id!r}"
         )
-    account_currency = config.accounts[account_id].currency
+    account_currency = config.account.currency
     if currency != account_currency:
         raise ValueError(
             f"Currency mismatch for symbol={symbol!r}: instrument={currency!r}, "
