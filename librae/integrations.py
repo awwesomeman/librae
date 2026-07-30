@@ -4,6 +4,8 @@ Third-party packages should import protocols and value types from this module
 instead of depending on engine-private implementation details.
 """
 
+from typing import Protocol
+
 from librae.live.executor import (
     BalanceReader,
     BrokerBalance,
@@ -18,7 +20,15 @@ from librae.live.executor import (
 from librae.live.interfaces import BarDataFetcher, Notifier
 from librae.live.state import LiveStateStore
 
+
+class AdapterFactory(Protocol):
+    """Construct one data/order adapter for repository orchestration."""
+
+    def __call__(self, *, trading: bool) -> object: ...
+
+
 __all__ = [
+    "AdapterFactory",
     "BalanceReader",
     "BarDataFetcher",
     "BrokerBalance",

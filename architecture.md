@@ -93,9 +93,10 @@ The engine's default sim/live warm-up calls its injected adapter directly.
 DB-first history plus API gap filling is a caller-owned policy injected through
 `warmup_fetcher`; it is not a hidden engine fallback. The repository's
 `orchestration.live.build_live_trader()` factory supplies the built-in broker,
-TimescaleDB, and Telegram integrations. Direct `LiveTrader` construction never
-imports them. Sim may run in memory, while live always requires an explicitly
-injected durable `state_store`.
+TimescaleDB, and Telegram integrations and accepts explicit third-party
+adapter factories, notifier, and state store instances. Direct `LiveTrader`
+construction never imports reference integrations. Sim may run in memory,
+while live always requires an explicitly injected durable `state_store`.
 
 `timeframe` defines the completed strategy bar and data-event clock.
 `poll_seconds` independently defines the runtime loop cadence: each cycle may

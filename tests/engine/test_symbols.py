@@ -382,6 +382,24 @@ class TestResolveSymbol:
         assert info.exchange == "SMART"
         assert info.calendar_id == "XNYS"
 
+    def test_unregistered_symbol_accepts_external_adapter_name(self):
+        info = resolve_symbol(
+            self._cfg(
+                data_source="vendor_feed",
+                instrument_overrides={
+                    "AAPL": {
+                        "data_adapter": "vendor_plugin",
+                        "currency": "USD",
+                        "instrument_type": "spot",
+                    }
+                },
+                symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+            ),
+            "AAPL",
+        )
+
+        assert info.data_adapter == "vendor_plugin"
+
     def test_instrument_override_replaces_registered_calendar(self):
         info = resolve_symbol(
             self._cfg(

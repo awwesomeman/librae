@@ -92,6 +92,98 @@ def test_database_and_telegram_wiring_are_independent() -> None:
     assert trader._notifier is notifier
 
 
+def test_factory_builds_external_data_adapter() -> None:
+    config = make_test_cfg(
+        mode="sim",
+        data_source="vendor_feed",
+        instrument_overrides={
+            "BTCUSDT": {
+                "data_adapter": "vendor_plugin",
+                "currency": "USDT",
+                "instrument_type": "spot",
+            }
+        },
+    )
+    adapter = MagicMock()
+    factory = MagicMock(return_value=adapter)
+
+    trader = build_live_trader(
+        MagicMock(),
+        lambda frame: frame,
+        config=config,
+        database_enabled=False,
+        adapter_factories={"vendor_plugin": factory},
+    )
+
+    factory.assert_called_once_with(trading=False)
+    assert trader._fetchers
+
+
+def test_factory_reuses_external_adapter_for_live_orders() -> None:
+    config = make_test_cfg(
+        mode="live",
+        broker="vendor_plugin",
+        data_source="vendor_feed",
+        instrument_overrides={
+            "BTCUSDT": {
+                "data_adapter": "vendor_plugin",
+                "currency": "USDT",
+                "instrument_type": "spot",
+            }
+        },
+    )
+    adapter = MagicMock()
+    factory = MagicMock(return_value=adapter)
+
+    trader = build_live_trader(
+        MagicMock(),
+        lambda frame: frame,
+        config=config,
+        database_enabled=False,
+        adapter_factories={"vendor_plugin": factory},
+        state_store=MemoryLiveStateStore(),
+    )
+
+    factory.assert_called_once_with(trading=True)
+    assert trader._executor.get_order_adapter("BTCUSDT") is adapter
+
+
+def test_factory_accepts_injected_notifier_and_state_store() -> None:
+    config = make_test_cfg(mode="sim")
+    adapter = MagicMock()
+    notifier = MagicMock(enabled=True)
+    state_store = MemoryLiveStateStore()
+
+    trader = build_live_trader(
+        MagicMock(),
+        lambda frame: frame,
+        config=config,
+        database_enabled=False,
+        adapter_factories={"crypto": MagicMock(return_value=adapter)},
+        notifier=notifier,
+        status_interval_periods=5,
+        state_store=state_store,
+    )
+
+    assert trader._notifier is notifier
+    assert trader._state_store is state_store
+    assert trader._status_interval == 5
+
+
+def test_factory_rejects_two_notifier_sources() -> None:
+    config = make_test_cfg(mode="sim")
+
+    with pytest.raises(ValueError, match="notifier or configure Telegram"):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+            notifier=MagicMock(),
+            telegram_config={"enabled": True},
+        )
+
+
 def test_timescale_callbacks_alert_after_repeated_write_failures() -> None:
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)

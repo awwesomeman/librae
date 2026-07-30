@@ -113,6 +113,29 @@ research or custom wiring. See
 [External market data and factors](external-data.md) for the polling callable,
 DB warm-up, and third-party factor boundaries.
 
+A third-party package can register explicit factories in the strategy-owned
+runner without modifying Librae:
+
+```python
+from my_broker import MyBroker
+from orchestration.live import build_live_trader
+
+trader = build_live_trader(
+    strategy,
+    feature_fn,
+    config=config,
+    adapter_factories={
+        "my_broker": lambda *, trading: MyBroker(trading=trading),
+    },
+    notifier=my_notifier,
+    state_store=my_state_store,
+)
+```
+
+Use the same non-empty name in `instrument_overrides.<symbol>.data_adapter`
+or `broker`. Registration is explicit; installing a package does not execute
+or discover plugin code automatically.
+
 Paper trading uses `mode=live` with a broker's paper endpoint. `mode=sim` is a
 local shadow simulation and does not exercise acknowledgements, partial fills,
 rejections, or broker fees.

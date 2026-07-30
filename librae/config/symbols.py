@@ -38,8 +38,8 @@ if TYPE_CHECKING:
 
 from librae.core.utils import validate_contract_month
 
-AdapterName = Literal["crypto", "ibkr", "shioaji"]
-BrokerName = Literal["binance", "ibkr", "shioaji"]
+type AdapterName = str
+type BrokerName = str
 InstrumentKind = Literal["spot", "perpetual", "future"]
 AssetClass = Literal["crypto", "equity", "index", "commodity", "fx", "rate", "unknown"]
 _ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
@@ -97,8 +97,8 @@ class AvailableSymbol:
     tick_size: float | None = None
 
     def __post_init__(self) -> None:
-        if self.broker not in ("binance", "ibkr", "shioaji"):
-            raise ValueError(f"unsupported broker: {self.broker!r}")
+        if not isinstance(self.broker, str) or not self.broker:
+            raise ValueError("broker must be a non-empty string")
         if self.kind not in ("spot", "perpetual", "future"):
             raise ValueError(f"unsupported instrument kind: {self.kind!r}")
         if self.asset_class not in (
@@ -231,8 +231,8 @@ class SymbolInfo:
                 f"{self.symbol!r} has instrument_type="
                 f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
             )
-        if self.data_adapter not in _ADAPTER_BY_DATA_SOURCE.values():
-            raise ValueError(f"{self.symbol!r} has unsupported data_adapter={self.data_adapter!r}")
+        if not isinstance(self.data_adapter, str) or not self.data_adapter:
+            raise ValueError(f"{self.symbol!r} data_adapter must be a non-empty string")
         if self.multiplier <= 0:
             raise ValueError(f"{self.symbol!r} multiplier must be positive")
         if not self.venue_symbol:
@@ -533,7 +533,7 @@ def resolve_symbol(
     data_adapter = route.get("data_adapter") or (
         registered.data_adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)
     )
-    if data_adapter not in _ADAPTER_BY_DATA_SOURCE.values():
+    if not isinstance(data_adapter, str) or not data_adapter:
         raise ValueError(
             f"No data adapter route for symbol={symbol!r}, data_source={data_source!r}; "
             "set instrument_overrides[symbol]['data_adapter']"

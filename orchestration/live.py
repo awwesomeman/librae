@@ -12,6 +12,7 @@ import pandas as pd
 from librae.config.symbols import resolve_symbol
 from librae.core.cost_model import CostModel
 from librae.core.utils import make_event_id
+from librae.integrations import AdapterFactory
 from librae.live.engine import LiveTrader
 from librae.live.interfaces import Notifier
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from librae.core.funding import FundingCashFlow
     from librae.core.run_config import RunConfig
     from librae.core.strategy import Strategy
+    from librae.live.state import LiveStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +34,16 @@ _DATA_ADAPTER_BY_BROKER = {
 _DB_FAILURE_ALERT_THRESHOLD = 3
 
 
-def _build_adapter(name: str, *, trading: bool) -> object:
+def _build_adapter(
+    name: str,
+    *,
+    trading: bool,
+    factories: Mapping[str, AdapterFactory] | None = None,
+) -> object:
     """Construct one explicitly configured repository adapter."""
+    factory = (factories or {}).get(name)
+    if factory is not None:
+        return factory(trading=trading)
     if name == "shioaji":
         from brokers.shioaji_adapter import ShioajiAdapter
 
@@ -290,8 +300,21 @@ def build_live_trader(
     config: RunConfig,
     database_enabled: bool = True,
     telegram_config: Mapping[str, object] | None = None,
+    adapter_factories: Mapping[str, AdapterFactory] | None = None,
+    notifier: Notifier | None = None,
+    status_interval_periods: int | None = None,
+    state_store: LiveStateStore | None = None,
 ) -> LiveTrader:
-    """Build the repository's default sim/live deployment."""
+    """Build a sim/live deployment from built-in or caller-registered factories."""
+    factories = dict(adapter_factories or {})
+    if notifier is not None and telegram_config:
+        raise ValueError("inject notifier or configure Telegram, not both")
+    resolved_notifier = notifier or _build_notifier(telegram_config)
+    resolved_status_interval = (
+        status_interval_periods
+        if status_interval_periods is not None
+        else _status_interval_periods(telegram_config)
+    )
     cost_models = {
         symbol: CostModel.from_config(config, symbol=symbol) for symbol in config.symbols
     }
@@ -317,12 +340,16 @@ def build_live_trader(
         trading = (
             config.mode == "live"
             and broker is not None
-            and _DATA_ADAPTER_BY_BROKER.get(broker) == instrument.data_adapter
+            and _DATA_ADAPTER_BY_BROKER.get(broker, broker) == instrument.data_adapter
         )
         key = (instrument.data_adapter, instrument.data_source)
         instance = adapter_instances.get(key)
         if instance is None:
-            instance = _build_adapter(instrument.data_adapter, trading=trading)
+            instance = _build_adapter(
+                instrument.data_adapter,
+                trading=trading,
+                factories=factories,
+            )
             adapter_instances[key] = instance
         data_adapters[symbol] = instance
 
@@ -338,8 +365,8 @@ def build_live_trader(
                     f"live execution broker is not configured for {symbol!r}; "
                     "set strategy.broker or instrument_overrides"
                 )
-            adapter_name = _DATA_ADAPTER_BY_BROKER.get(broker)
-            if adapter_name is None:
+            adapter_name = _DATA_ADAPTER_BY_BROKER.get(broker, broker)
+            if adapter_name not in _DATA_ADAPTER_BY_BROKER.values() and broker not in factories:
                 raise ValueError(f"unsupported execution broker: {broker!r}")
             instance = broker_instances.get(broker)
             if instance is None:
@@ -347,14 +374,21 @@ def build_live_trader(
                 instance = (
                     data_instance
                     if adapter_name == instrument.data_adapter
-                    else _build_adapter(broker, trading=True)
+                    else _build_adapter(
+                        broker,
+                        trading=True,
+                        factories=factories,
+                    )
                 )
                 broker_instances[broker] = instance
             order_adapters[symbol] = instance
 
-    notifier = _build_notifier(telegram_config)
-    state_store = _build_state_store() if database_enabled else None
-    callbacks = _TimescaleCallbacks(config, instruments, notifier) if database_enabled else None
+    resolved_state_store = state_store
+    if resolved_state_store is None and database_enabled:
+        resolved_state_store = _build_state_store()
+    callbacks = (
+        _TimescaleCallbacks(config, instruments, resolved_notifier) if database_enabled else None
+    )
     trader = LiveTrader(
         strategy,
         feature_fn,
@@ -362,9 +396,9 @@ def build_live_trader(
         adapter=data_adapters,
         order_adapter=order_adapters,
         cost_model=cost_models,
-        notifier=notifier,
-        status_interval_periods=_status_interval_periods(telegram_config),
-        state_store=state_store,
+        notifier=resolved_notifier,
+        status_interval_periods=resolved_status_interval,
+        state_store=resolved_state_store,
         on_bar=callbacks.on_bar if callbacks else None,
         on_order_event=callbacks.on_order_event if callbacks else None,
         on_ohlcv=callbacks.on_ohlcv if callbacks else None,
