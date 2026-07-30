@@ -1792,6 +1792,7 @@ class TestLiveExecutionLifecycle:
         state_store: MemoryLiveStateStore | None = None,
         config: RunConfig | None = None,
         clock=None,
+        on_ready=None,
     ) -> LiveTrader:
         return LiveTrader(
             strategy,
@@ -1807,6 +1808,7 @@ class TestLiveExecutionLifecycle:
             on_signal_outcome=None,
             state_store=state_store or MemoryLiveStateStore(),
             clock=clock or (lambda: TEST_CLOCK_NOW),
+            on_ready=on_ready,
         )
 
     def test_partial_fill_commits_only_confirmed_quantity_and_stays_open(self):
@@ -1950,6 +1952,100 @@ class TestLiveExecutionLifecycle:
         with pytest.raises(RuntimeError, match="boom"):
             runner.run(max_iterations=1)
 
+        assert store.acquire_lease(runner._state_key) is True
+        assert store.acquire_lease(runner._account_lease_key) is True
+
+    def test_state_lease_conflict_releases_account_ownership(self):
+        store = MemoryLiveStateStore()
+        runner = self._make_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
+        assert store.acquire_lease(runner._state_key) is True
+
+        with pytest.raises(RuntimeError, match="owns state_key"):
+            runner.run(max_iterations=1)
+
+        assert store.acquire_lease(runner._account_lease_key) is True
+
+    def test_three_live_deployments_isolate_accounts_across_strategy_configs(self):
+        store = MemoryLiveStateStore()
+        shared_account = AccountConfig(
+            account_id="shared-account",
+            currency="USDT",
+            initial_cash=100_000.0,
+        )
+        first = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+            config=_test_cfg(mode="live", strategy_name="first", account=shared_account),
+        )
+        second_adapter = _mock_order_adapter()
+        second = self._make_trader(
+            _HoldStrategy(),
+            second_adapter,
+            state_store=store,
+            config=_test_cfg(mode="live", strategy_name="second", account=shared_account),
+        )
+        third = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+            config=_test_cfg(
+                mode="live",
+                strategy_name="third",
+                account=AccountConfig(
+                    account_id="independent-account",
+                    currency="USDT",
+                    initial_cash=100_000.0,
+                ),
+            ),
+        )
+
+        first._initialize_run()
+        third._initialize_run()
+        try:
+            with pytest.raises(RuntimeError, match="owns account_id='shared-account'"):
+                second.run(max_iterations=1)
+        finally:
+            first._release_lease()
+            third._release_lease()
+
+        second_adapter.get_position.assert_not_called()
+        second_adapter.get_balance.assert_not_called()
+        assert first._state_key != second._state_key
+
+    def test_ready_callback_runs_after_ownership_and_reconciliation(self):
+        store = MemoryLiveStateStore()
+        observations: list[tuple[str, bool, bool]] = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+            on_ready=lambda run_id: observations.append(
+                (
+                    run_id,
+                    runner._account_lease_acquired,
+                    runner._last_reconciliation_at is not None,
+                )
+            ),
+        )
+
+        runner.run(max_iterations=1)
+
+        assert observations == [(runner.run_id, True, True)]
+
+    def test_ready_publication_failure_releases_live_ownership(self):
+        store = MemoryLiveStateStore()
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            state_store=store,
+            on_ready=MagicMock(side_effect=OSError("read-only readiness path")),
+        )
+
+        with pytest.raises(OSError, match="read-only readiness path"):
+            runner.run(max_iterations=1)
+
+        assert store.acquire_lease(runner._account_lease_key) is True
         assert store.acquire_lease(runner._state_key) is True
 
     def test_volume_budget_is_cumulative_across_same_symbol_intents(self):

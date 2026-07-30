@@ -429,13 +429,19 @@ bound to one `account_id`, currency, mode, strategy configuration, entry point,
 and account-specific credential reference. The deployment identity survives
 process restarts and is distinct from the engine's `run_id`.
 `validate_deployments()` rejects duplicate deployment identities and rejects
-two live deployments that claim the same account.
+two live deployments that claim the same account within one submitted
+manifest. The engine independently holds a durable account lease before any
+broker reconciliation or order work, so separate manifests and launch paths
+cannot concurrently control the same declared `account_id`.
 
 The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, and
 `restart`. Docker, systemd, Kubernetes, or another concrete process manager
 implements those operations and remains the lifecycle source of truth.
 `DeploymentStatus` carries observed identity, phase, timestamp, and optional
 process, run, exit, and failure facts; it is not a second state store.
+`librae.orchestration.docker_supervisor.DockerSupervisor` is the optional
+reference adapter for `deploy/trade.sh`; it reconstructs status from Docker
+rather than retaining a coordinator cache.
 
 | Owner | Responsibility |
 |---|---|
@@ -448,6 +454,9 @@ An orchestration process that restarts must recover status by inspecting the
 external supervisor and durable engine state. It must not infer status from an
 in-memory coordinator cache. One failed or unknown deployment remains an
 account-specific fact and cannot change the lifecycle of another deployment.
+Readiness is published only after restored state, durable ownership, and
+startup broker reconciliation have completed. Normal stop is bounded and
+graceful; forced termination is an explicit operator action.
 
 Within an account the engine is portfolio-level. `on_bar()` can return
 `OrderIntent`s for multiple symbols. `OrderIntent.quantity=None` spends the
@@ -930,12 +939,16 @@ shape; it is not a business/domain version.
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
-retried, and local order age survives restart. Analytics callbacks remain projections;
-they are not broker fill truth. The state key is `mode:config_hash`. Live mode
-holds a PostgreSQL session advisory lock for that key for the process lifetime;
-a second process fails before broker reconciliation or order submission.
-Custom durable stores provide the equivalent `acquire_lease` /
-`release_lease` contract.
+retried, and local order age survives restart. Analytics callbacks remain
+projections; they are not broker fill truth. The checkpoint key is
+`mode:config_hash`. Live mode first holds a PostgreSQL session advisory lock
+for `live-account:<account_id>`, then one for the checkpoint key, for the
+process lifetime. The account lease prevents a different strategy or
+configuration from controlling the same declared account; the checkpoint
+lease prevents concurrent mutation of the same restart state. A second owner
+fails before broker reconciliation or order submission. Custom durable stores
+provide the equivalent `acquire_lease` / `release_lease` contract for both
+namespaced keys.
 
 #### Data staleness detection (live only)
 

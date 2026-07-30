@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import signal
-import time
 import types
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
+from threading import Event
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
@@ -169,6 +169,8 @@ class LiveTrader:
         notifier: Optional operational notifier implementing ``Notifier``.
         status_interval_periods: Optional polling-period cadence for status
             notifications. Scheduling is separate from the transport.
+        on_ready: Optional deployment hook called after state restoration,
+            durable ownership, and startup broker reconciliation.
     """
 
     def __init__(
@@ -189,6 +191,7 @@ class LiveTrader:
         on_signal_outcome: SignalOutcomeCallback | None = None,
         on_funding_cash_flow: FundingCashFlowCallback | None = None,
         on_performance: PerformanceCallback | None = None,
+        on_ready: Callable[[str], None] | None = None,
         warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -311,6 +314,7 @@ class LiveTrader:
 
         # --- Restore restart-critical state before callbacks capture run_id ---
         self._state_key = f"{config.mode}:{config.config_hash}"
+        self._account_lease_key = f"live-account:{self._account_id}"
         self._state_store = state_store
         if is_live and self._state_store is None:
             raise ValueError("live mode requires an explicit durable state_store")
@@ -345,6 +349,7 @@ class LiveTrader:
         self._cycle_order_seconds = 0.0
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
         self._lease_acquired = False
+        self._account_lease_acquired = False
         self._restored_state = False
         if self._state_store is not None:
             restored = self._state_store.load(self._state_key)
@@ -362,6 +367,7 @@ class LiveTrader:
         self._on_signal_outcome = on_signal_outcome
         self._on_funding_cash_flow = on_funding_cash_flow
         self._on_performance = on_performance
+        self._on_ready = on_ready
         self._warmup_fetcher = warmup_fetcher
         self._notifier = notifier
 
@@ -383,7 +389,8 @@ class LiveTrader:
         self._status_interval = status_interval_periods
 
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
-        self._sleep = time.sleep  # instance attribute so tests can skip real delays
+        self._stop_event = Event()
+        self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
         if self._state_store is not None and not self._restored_state:
             self._persist_state()
 
@@ -831,6 +838,11 @@ class LiveTrader:
     def _initialize_run(self) -> None:
         """Acquire live ownership and reconcile broker facts before polling."""
         if not self._executor.simulation:
+            if not self._state_store.acquire_lease(self._account_lease_key):
+                raise RuntimeError(
+                    f"another live process already owns account_id={self._account_id!r}"
+                )
+            self._account_lease_acquired = True
             if not self._state_store.acquire_lease(self._state_key):
                 raise RuntimeError(
                     f"another live process already owns state_key={self._state_key!r}"
@@ -861,13 +873,19 @@ class LiveTrader:
         if self._lease_acquired:
             self._state_store.release_lease(self._state_key)
             self._lease_acquired = False
+        if self._account_lease_acquired:
+            self._state_store.release_lease(self._account_lease_key)
+            self._account_lease_acquired = False
 
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
+        self._stop_event.clear()
         self._running = True
         self._setup_signal_handlers()
         try:
             self._initialize_run()
+            if self._on_ready:
+                self._on_ready(self._run_id)
         except BaseException:
             self._running = False
             self._release_lease()
@@ -944,6 +962,7 @@ class LiveTrader:
     def stop(self) -> None:
         """Signal the runner to stop after the current cycle."""
         self._running = False
+        self._stop_event.set()
 
     @property
     def last_cycle_diagnostics(self) -> CycleDiagnostics | None:

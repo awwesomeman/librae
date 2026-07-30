@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from librae.live.state import MemoryLiveStateStore
 from librae.orchestration.live import (
+    _ready_callback_from_env,
     _status_interval_periods,
     _TimescaleCallbacks,
     build_live_trader,
@@ -35,6 +37,24 @@ def test_status_schedule_is_separate_from_notifier_transport() -> None:
         )
         == 6
     )
+
+
+def test_ready_callback_publishes_run_id_to_supervisor_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ready_file = tmp_path / "ready"
+    monkeypatch.setenv("LIBRAE_READY_FILE", str(ready_file))
+
+    callback = _ready_callback_from_env()
+
+    assert callback is not None
+    callback("run-123")
+    marker = ready_file.read_text(encoding="utf-8").strip()
+    run_id, separator, generation = marker.partition(":")
+    assert run_id == "run-123"
+    assert separator == ":"
+    assert len(generation) == 32
 
 
 def test_missing_db_dependency_is_reported_by_deployment_factory() -> None:
