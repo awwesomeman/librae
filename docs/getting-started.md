@@ -23,15 +23,19 @@ GitHub:
 pip install "librae @ git+https://github.com/awwesomeman/librae.git"
 ```
 
-An unpinned Git dependency moves with the default branch. Pin a tag or commit
-for reproducible research and deployments:
+An unpinned Git dependency moves with the default branch. Pin a tag or full
+commit SHA for reproducible research and deployments:
 
 ```bash
-pip install "librae @ git+https://github.com/awwesomeman/librae.git@<tag-or-commit>"
+pip install "librae @ git+https://github.com/awwesomeman/librae.git@<tag-or-full-sha>"
 ```
 
-The version is derived from Git by `setuptools_scm`; inspect the installed
-revision with `pip show librae` or `librae.__version__`.
+The version is derived from Git by `setuptools_scm`; `pip show librae` and
+`librae.__version__` identify the installed build. In a mutable clone,
+`librae/_version.py` is generated during installation and does not update
+merely because the working tree changes. After switching revisions, rerun
+`uv sync` or reinstall the package. Use `git rev-parse HEAD` to inspect the
+working tree revision.
 
 ### Optional dependencies
 
@@ -53,7 +57,7 @@ Install only the integration you use:
 For example:
 
 ```bash
-pip install "librae[db,crypto-live] @ git+https://github.com/awwesomeman/librae.git@<tag-or-commit>"
+pip install "librae[db,crypto-live] @ git+https://github.com/awwesomeman/librae.git@<tag-or-full-sha>"
 ```
 
 ## Run the examples

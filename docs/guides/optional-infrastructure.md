@@ -199,3 +199,26 @@ state, secret management, monitoring, and recovery procedures before live
 capital is enabled. An operator can call `LiveTrader.halt(reason)` to persist a
 fail-closed halt and cancel tracked broker orders; resumption requires an
 explicit `reset_halt()` after reconciliation.
+
+### Development checkpoint compatibility
+
+Checkpoints written by untagged development revisions are not guaranteed to
+load in another revision. The runtime accepts only its current checkpoint
+schema and does not convert older payloads implicitly. A shadow-simulation
+checkpoint may be discarded and recreated.
+
+For live deployments, pin a full commit SHA and treat a revision change as an
+operational migration:
+
+1. Stop the existing runner.
+2. Reconcile broker positions, open orders, and balance against the stored
+   state.
+3. If exposure or active orders remain, keep the matching revision or close
+   them through an explicit operator procedure; do not discard the checkpoint.
+4. Start the new revision with fresh state only after the broker account is
+   confirmed flat, and retain the old checkpoint for audit.
+
+A configuration-shape change may also produce a different `config_hash` and
+therefore a different `state_key`, making the new runner appear to have no
+matching checkpoint. Startup reconciliation remains a safety check, not a
+replacement for the operator procedure above.
