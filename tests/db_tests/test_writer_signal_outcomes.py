@@ -8,10 +8,11 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.backtest.cache import build_backtest_cache_key
 from librae.backtest.schema import StrategyMetrics
 from librae.core.run_config import RunConfig
 from librae.db.timescale_writer import (
-    _claim_config_hash,
+    _claim_backtest_cache_key,
     save_backtest_output,
     save_signal_results,
     save_strategy_results,
@@ -46,6 +47,9 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
             "max_bar_volume_participation_rate": 0.1,
         },
         risk_policy={"max_drawdown_rate": 0.2},
+        config_hash="config-a",
+        backtest_revision="revision-a",
+        backtest_cache_key="cache-a",
         cur=cursor,
     )
 
@@ -56,14 +60,29 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         "max_bar_volume_participation_rate": 0.1,
     }
     assert json.loads(values[12]) == {"max_drawdown_rate": 0.2}
+    assert values[13:] == ("config-a", "revision-a", "cache-a")
 
 
-class TestConfigHashClaim:
+class TestBacktestCacheKeyClaim:
+    def test_missing_cache_key_disables_deduplication(self) -> None:
+        cursor = MagicMock()
+
+        assert (
+            _claim_backtest_cache_key(
+                cursor,
+                None,
+                "new-run",
+                replace_existing=False,
+            )
+            is True
+        )
+        cursor.execute.assert_not_called()
+
     def test_duplicate_run_is_skipped_after_transaction_lock(self) -> None:
         cursor = MagicMock()
         cursor.fetchone.return_value = ("canonical-run",)
 
-        claimed = _claim_config_hash(
+        claimed = _claim_backtest_cache_key(
             cursor,
             "same-config",
             "racing-run",
@@ -82,7 +101,7 @@ class TestConfigHashClaim:
         cursor = MagicMock()
         cursor.fetchone.return_value = ("canonical-run",)
 
-        claimed = _claim_config_hash(
+        claimed = _claim_backtest_cache_key(
             cursor,
             "same-config",
             "forced-run",
@@ -100,7 +119,7 @@ class TestConfigHashClaim:
         cursor.fetchone.return_value = ("same-run",)
 
         assert (
-            _claim_config_hash(
+            _claim_backtest_cache_key(
                 cursor,
                 "same-config",
                 "same-run",
@@ -110,7 +129,7 @@ class TestConfigHashClaim:
         )
 
     @patch("librae.db.timescale_writer.write_run_metadata")
-    @patch("librae.db.timescale_writer._claim_config_hash", return_value=False)
+    @patch("librae.db.timescale_writer._claim_backtest_cache_key", return_value=False)
     @patch("librae.db.timescale_writer.get_conn")
     def test_losing_backtest_writer_exits_without_partial_rows(
         self,
@@ -125,12 +144,17 @@ class TestConfigHashClaim:
         output = MagicMock()
         output.run_metadata.run_id = "racing-run"
 
-        counts = save_backtest_output(output, config_hash="same-config")
+        counts = save_backtest_output(
+            output,
+            config_hash="same-config",
+            backtest_revision="revision-a",
+        )
 
         assert counts == {"backtest_runs": 0}
+        cache_key = build_backtest_cache_key("same-config", "revision-a")
         mock_claim.assert_called_once_with(
             connection.cursor.return_value,
-            "same-config",
+            cache_key,
             "racing-run",
             replace_existing=False,
         )
@@ -334,7 +358,12 @@ class TestPersistBacktest:
         df, _symbol = self._make_featured_df()
         mock_output = MagicMock()
 
-        counts = save_strategy_results(mock_output, df, _test_cfg())
+        counts = save_strategy_results(
+            mock_output,
+            df,
+            _test_cfg(),
+            backtest_revision="revision-a",
+        )
 
         mock_write_bt.assert_called_once()
         call_kwargs = mock_write_bt.call_args
@@ -352,6 +381,7 @@ class TestPersistBacktest:
             "warmup_periods": 720,
         }
         assert call_kwargs.kwargs["replace_existing"] is False
+        assert call_kwargs.kwargs["backtest_revision"] == "revision-a"
 
         assert counts["ohlcv"] == 20
 
@@ -360,9 +390,26 @@ class TestPersistBacktest:
     def test_force_recompute_replaces_existing_hash(self, mock_write_bt, mock_write_ohlcv):
         df, _symbol = self._make_featured_df()
 
-        save_strategy_results(MagicMock(), df, _test_cfg(), replace_existing=True)
+        save_strategy_results(
+            MagicMock(),
+            df,
+            _test_cfg(),
+            replace_existing=True,
+            backtest_revision="revision-a",
+        )
 
         assert mock_write_bt.call_args.kwargs["replace_existing"] is True
+
+    def test_force_recompute_requires_revision(self):
+        df, _symbol = self._make_featured_df()
+
+        with pytest.raises(ValueError, match="requires backtest_revision"):
+            save_strategy_results(
+                MagicMock(),
+                df,
+                _test_cfg(),
+                replace_existing=True,
+            )
 
     @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
@@ -431,7 +478,7 @@ class TestSaveSignalResults:
     """save_signal_results writes signals independently of backtest."""
 
     @patch("librae.db.timescale_writer.write_run_metadata")
-    @patch("librae.db.timescale_writer._claim_config_hash", return_value=False)
+    @patch("librae.db.timescale_writer._claim_backtest_cache_key", return_value=False)
     @patch("librae.db.timescale_writer.write_ohlcv")
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
@@ -469,12 +516,14 @@ class TestSaveSignalResults:
             "binance_spot",
             run_id="racing-run",
             config=config,
+            backtest_revision="revision-a",
         )
 
         assert counts == {"backtest_runs": 0}
+        cache_key = build_backtest_cache_key(config.config_hash, "revision-a")
         mock_claim.assert_called_once_with(
             connection.cursor.return_value,
-            config.config_hash,
+            cache_key,
             "racing-run",
             replace_existing=False,
         )

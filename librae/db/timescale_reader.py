@@ -18,6 +18,30 @@ import pandas as pd
 from librae.db import get_conn
 
 
+def get_run_by_backtest_cache_key(
+    backtest_cache_key: str,
+    dsn: str | None = None,
+) -> dict[str, Any] | None:
+    """Find the canonical run for an explicit backtest cache identity."""
+    sql = """SELECT run_id, params, execution_policy, risk_policy
+             FROM backtest_runs
+             WHERE backtest_cache_key = %s
+             ORDER BY run_at DESC LIMIT 1"""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (backtest_cache_key,))
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None
+    return {
+        "run_id": row[0],
+        "params": json.loads(row[1]) if row[1] else None,
+        "execution_policy": json.loads(row[2]) if row[2] else None,
+        "risk_policy": json.loads(row[3]) if row[3] else None,
+    }
+
+
 def get_run_by_config_hash(
     config_hash: str,
     dsn: str | None = None,

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 import pandas as pd
 
+from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
 from librae.backtest.schema import BacktestOutput
 from librae.core.utils import to_canonical
 from librae.db import get_conn
@@ -112,6 +113,8 @@ def write_run_metadata(
     execution_policy: dict | None = None,
     risk_policy: dict | None = None,
     config_hash: str | None = None,
+    backtest_revision: str | None = None,
+    backtest_cache_key: str | None = None,
     cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> None:
@@ -123,15 +126,18 @@ def write_run_metadata(
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbols, timeframe, data_source,
                 started_at, ended_at, run_at, mode, poll_seconds,
-                params, execution_policy, risk_policy, config_hash)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                params, execution_policy, risk_policy, config_hash,
+                backtest_revision, backtest_cache_key)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy=EXCLUDED.strategy, run_at=EXCLUDED.run_at,
                  mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
                  risk_policy=EXCLUDED.risk_policy,
-                 config_hash=EXCLUDED.config_hash"""
+                 config_hash=EXCLUDED.config_hash,
+                 backtest_revision=EXCLUDED.backtest_revision,
+                 backtest_cache_key=EXCLUDED.backtest_cache_key"""
     params_val = json.dumps(params) if params is not None else None
     execution_policy_val = json.dumps(execution_policy) if execution_policy is not None else None
     risk_policy_val = json.dumps(risk_policy) if risk_policy is not None else None
@@ -150,6 +156,8 @@ def write_run_metadata(
         execution_policy_val,
         risk_policy_val,
         config_hash,
+        backtest_revision,
+        backtest_cache_key,
     )
     if cur is not None:
         cur.execute(sql, values)
@@ -171,15 +179,15 @@ def update_heartbeat(run_id: str, dsn: str | None = None) -> None:
         cur.close()
 
 
-def _claim_config_hash(
+def _claim_backtest_cache_key(
     cur: PgCursor,
-    config_hash: str | None,
+    backtest_cache_key: str | None,
     run_id: str,
     *,
     replace_existing: bool,
 ) -> bool:
-    """Serialize one config hash and decide whether this run may persist."""
-    if config_hash is None:
+    """Serialize one cache identity and decide whether this run may persist."""
+    if backtest_cache_key is None:
         return True
 
     # WHY: the CLI's pre-run dedup check cannot prevent two workers from
@@ -187,11 +195,11 @@ def _claim_config_hash(
     # race without holding a session lock after commit or rollback.
     cur.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-        (config_hash,),
+        (backtest_cache_key,),
     )
     cur.execute(
-        "SELECT run_id FROM backtest_runs WHERE config_hash = %s",
-        (config_hash,),
+        "SELECT run_id FROM backtest_runs WHERE backtest_cache_key = %s",
+        (backtest_cache_key,),
     )
     existing = cur.fetchone()
     if existing is None or existing[0] == run_id:
@@ -201,7 +209,7 @@ def _claim_config_hash(
         return True
 
     logger.info(
-        "Skipping duplicate config_hash persistence for run_id=%s; canonical run_id=%s",
+        "Skipping duplicate backtest cache persistence for run_id=%s; canonical run_id=%s",
         run_id,
         existing[0],
     )
@@ -217,6 +225,7 @@ def save_backtest_output(
     execution_policy: dict | None = None,
     risk_policy: dict | None = None,
     config_hash: str | None = None,
+    backtest_revision: str | None = None,
     replace_existing: bool = False,
     dsn: str | None = None,
 ) -> dict:
@@ -229,9 +238,10 @@ def save_backtest_output(
         params: Optional strategy parameters dict to store as JSONB.
         execution_policy: Resolved fill and liquidity assumptions to store.
         risk_policy: Resolved engine-level portfolio limits to store.
-        config_hash: Optional deterministic hash for dedup.
-        replace_existing: Replace the canonical run for config_hash. Used by
-            the explicit force-recompute path.
+        config_hash: Deterministic engine-configuration hash.
+        backtest_revision: Optional caller-owned strategy-code and input-data
+            revision. Cache reuse is disabled when omitted.
+        replace_existing: Replace the canonical run for the derived cache key.
         dsn: TimescaleDB DSN.
 
     Returns:
@@ -240,15 +250,19 @@ def save_backtest_output(
     output.validate()
     meta = output.run_metadata
     counts: dict[str, int] = {}
+    revision = normalize_backtest_revision(backtest_revision)
+    backtest_cache_key = build_backtest_cache_key(config_hash, revision)
+    if replace_existing and backtest_cache_key is None:
+        raise ValueError("replace_existing=True requires backtest_revision")
 
     # WHY: single transaction for atomicity — partial writes on failure
     # would leave DB in inconsistent state (e.g. trades without metadata).
     with get_conn(dsn) as conn:
         cur = conn.cursor()
 
-        if not _claim_config_hash(
+        if not _claim_backtest_cache_key(
             cur,
-            config_hash,
+            backtest_cache_key,
             meta.run_id,
             replace_existing=replace_existing,
         ):
@@ -269,6 +283,8 @@ def save_backtest_output(
             execution_policy=execution_policy,
             risk_policy=risk_policy,
             config_hash=config_hash,
+            backtest_revision=revision,
+            backtest_cache_key=backtest_cache_key,
             cur=cur,
         )
         counts["backtest_runs"] = 1
@@ -1203,6 +1219,7 @@ def save_signal_results(
     signal_column: str = "entry_signal",
     config: RunConfig | None = None,
     replace_existing: bool = False,
+    backtest_revision: str | None = None,
 ) -> dict:
     """Write signal history + OHLCV to DB. Independent of backtest engine.
 
@@ -1213,6 +1230,11 @@ def save_signal_results(
     exit_signal_series = _extract_exit_signals(df, symbol)
     tf = to_canonical(timeframe)
     counts: dict[str, int] = {}
+    revision = normalize_backtest_revision(backtest_revision)
+    config_hash = config.config_hash if config else None
+    backtest_cache_key = build_backtest_cache_key(config_hash, revision)
+    if replace_existing and backtest_cache_key is None:
+        raise ValueError("replace_existing=True requires backtest_revision")
 
     has_entry = not signal_series.empty
     has_exit = not exit_signal_series.empty
@@ -1231,9 +1253,9 @@ def save_signal_results(
             cur = conn.cursor()
 
             if run_id is not None:
-                if not _claim_config_hash(
+                if not _claim_backtest_cache_key(
                     cur,
-                    config.config_hash if config else None,
+                    backtest_cache_key,
                     run_id,
                     replace_existing=replace_existing,
                 ):
@@ -1248,7 +1270,9 @@ def save_signal_results(
                     started_at=_to_dt(started_at),
                     ended_at=_to_dt(ended_at),
                     data_source=data_source,
-                    config_hash=config.config_hash if config else None,
+                    config_hash=config_hash,
+                    backtest_revision=revision,
+                    backtest_cache_key=backtest_cache_key,
                     params=config.params if config else None,
                     execution_policy=asdict(config.execution) if config else None,
                     risk_policy=asdict(config.risk) if config else None,
@@ -1297,6 +1321,7 @@ def save_strategy_results(
     signal_column: str = "entry_signal",
     *,
     replace_existing: bool = False,
+    backtest_revision: str | None = None,
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 
@@ -1323,6 +1348,7 @@ def save_strategy_results(
         execution_policy=asdict(config.execution),
         risk_policy=asdict(config.risk),
         config_hash=config.config_hash,
+        backtest_revision=backtest_revision,
         replace_existing=replace_existing,
     )
 

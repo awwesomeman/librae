@@ -18,6 +18,7 @@ from librae.orchestration.cli import (
     parse_with_config,
     run_dispatch,
     run_realtime_generic,
+    with_dedup_check,
 )
 
 
@@ -193,6 +194,30 @@ class TestBuildRun:
         with pytest.raises(ValueError, match="database_enabled=False"):
             RunOptions(database_enabled=True, dry_run=True)
 
+    def test_backtest_revision_is_normalized_from_yaml(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                backtest-revision: " strategy-a:data-2026-07-30 "
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                """
+            )
+        )
+
+        _, options = build_run("test_strat", str(tmp_path / "run.py"))
+
+        assert options.backtest_revision == "strategy-a:data-2026-07-30"
+
+    def test_empty_backtest_revision_is_rejected(self):
+        with pytest.raises(ValueError, match="backtest_revision"):
+            RunOptions(backtest_revision="  ")
+
+    def test_force_requires_backtest_revision(self):
+        with pytest.raises(ValueError, match="requires backtest_revision"):
+            RunOptions(replace_existing=True)
+
     def test_deployment_options_stay_out_of_engine_config(self, tmp_path, monkeypatch):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(
@@ -205,7 +230,11 @@ class TestBuildRun:
                 """
             )
         )
-        monkeypatch.setattr(sys, "argv", ["test", "--dry-run", "--force"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["test", "--dry-run", "--force", "--backtest-revision", "revision-a"],
+        )
 
         config, options = build_run("test_strat", str(tmp_path / "run.py"))
 
@@ -215,6 +244,7 @@ class TestBuildRun:
             database_enabled=False,
             dry_run=True,
             replace_existing=True,
+            backtest_revision="revision-a",
             telegram_config={"enabled": True},
         )
 
@@ -439,7 +469,7 @@ class TestCheckExistingRun:
         monkeypatch.delitem(sys.modules, "db", raising=False)
         monkeypatch.delitem(sys.modules, "librae.db.timescale_reader", raising=False)
 
-        assert check_existing_run(_make_cfg()) is None
+        assert check_existing_run(_make_cfg(), "revision-a") is None
 
     def test_missing_db_dependency_logs_install_hint(self, caplog):
         real_import = __import__
@@ -450,7 +480,7 @@ class TestCheckExistingRun:
             return real_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=missing_db_dependency):
-            assert check_existing_run(_make_cfg()) is None
+            assert check_existing_run(_make_cfg(), "revision-a") is None
 
         assert "uv sync --extra db" in caplog.text
         assert "--no-db" in caplog.text
@@ -461,10 +491,16 @@ class TestCheckExistingRun:
         monkeypatch.delitem(sys.modules, "librae.db.timescale_reader", raising=False)
 
         with patch(
-            "librae.db.timescale_reader.get_run_by_config_hash",
+            "librae.db.timescale_reader.get_run_by_backtest_cache_key",
             side_effect=OSError("connection refused"),
         ):
-            assert check_existing_run(_make_cfg()) is None
+            assert check_existing_run(_make_cfg(), "revision-a") is None
+
+    def test_missing_revision_disables_cache_lookup(self):
+        with patch("builtins.__import__") as import_module:
+            assert check_existing_run(_make_cfg(), None) is None
+
+        import_module.assert_not_called()
 
     def test_existing_run_is_returned_without_metric_refresh(self):
         config = _make_cfg(
@@ -478,14 +514,68 @@ class TestCheckExistingRun:
 
         with (
             patch(
-                "librae.db.timescale_reader.get_run_by_config_hash",
+                "librae.db.timescale_reader.get_run_by_backtest_cache_key",
                 return_value=existing,
-            ),
+            ) as get_cached_run,
             patch("librae.db.timescale_writer.refresh_performance") as refresh,
         ):
-            assert check_existing_run(config) == "existing-run"
+            assert check_existing_run(config, "revision-a") == "existing-run"
 
+        get_cached_run.assert_called_once()
         refresh.assert_not_called()
+
+    def test_changed_revision_uses_a_different_cache_key(self):
+        config = _make_cfg()
+        with patch(
+            "librae.db.timescale_reader.get_run_by_backtest_cache_key",
+            return_value=None,
+        ) as get_cached_run:
+            check_existing_run(config, "revision-a")
+            check_existing_run(config, "revision-b")
+
+        first_key = get_cached_run.call_args_list[0].args[0]
+        second_key = get_cached_run.call_args_list[1].args[0]
+        assert first_key != second_key
+
+    def test_wrapper_runs_when_revision_is_missing(self):
+        config = _make_cfg()
+        options = RunOptions(database_enabled=True)
+        run_backtest = MagicMock()
+
+        with patch("librae.orchestration.cli.check_existing_run") as check_cache:
+            with_dedup_check(run_backtest, options)(config)
+
+        check_cache.assert_not_called()
+        run_backtest.assert_called_once_with(config, options)
+
+    def test_wrapper_skips_matching_revision(self):
+        config = _make_cfg()
+        options = RunOptions(database_enabled=True, backtest_revision="revision-a")
+        run_backtest = MagicMock()
+
+        with patch(
+            "librae.orchestration.cli.check_existing_run",
+            return_value="existing-run",
+        ) as check_cache:
+            with_dedup_check(run_backtest, options)(config)
+
+        check_cache.assert_called_once_with(config, "revision-a")
+        run_backtest.assert_not_called()
+
+    def test_force_runs_without_preflight_cache_lookup(self):
+        config = _make_cfg()
+        options = RunOptions(
+            database_enabled=True,
+            replace_existing=True,
+            backtest_revision="revision-a",
+        )
+        run_backtest = MagicMock()
+
+        with patch("librae.orchestration.cli.check_existing_run") as check_cache:
+            with_dedup_check(run_backtest, options)(config)
+
+        check_cache.assert_not_called()
+        run_backtest.assert_called_once_with(config, options)
 
 
 class TestRunDispatch:
