@@ -8,7 +8,11 @@ import pytest
 from librae.live.state import MemoryLiveStateStore
 from tests.conftest import make_test_cfg
 
-from orchestration.live import _TimescaleCallbacks, build_live_trader
+from orchestration.live import (
+    _status_interval_periods,
+    _TimescaleCallbacks,
+    build_live_trader,
+)
 
 
 def test_disabled_notifier_does_not_load_optional_integration() -> None:
@@ -17,6 +21,21 @@ def test_disabled_notifier_does_not_load_optional_integration() -> None:
 
         assert _build_notifier(None) is None
         assert _build_notifier({"enabled": False}) is None
+
+
+def test_status_schedule_is_separate_from_notifier_transport() -> None:
+    assert _status_interval_periods(None) is None
+    assert (
+        _status_interval_periods(
+            {
+                "enabled": True,
+                "notifications": {
+                    "status": {"enabled": True, "interval_periods": 6},
+                },
+            }
+        )
+        == 6
+    )
 
 
 def test_missing_db_dependency_is_reported_by_deployment_factory() -> None:
@@ -70,7 +89,7 @@ def test_database_and_telegram_wiring_are_independent() -> None:
     build_notifier.assert_called_once_with({"enabled": True})
     build_state_store.assert_not_called()
     build_callbacks.assert_not_called()
-    assert trader._executor.telegram is notifier
+    assert trader._notifier is notifier
 
 
 def test_timescale_callbacks_alert_after_repeated_write_failures() -> None:

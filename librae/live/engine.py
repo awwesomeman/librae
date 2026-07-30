@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
@@ -57,6 +57,18 @@ from librae.core.strategy import (
 from librae.core.trading_calendar import session_label, session_labels, validate_calendar_id
 
 from .executor import ExecutionReport, LiveExecutor, OrderRequest
+from .interfaces import (
+    BarCallback,
+    BarDataFetcher,
+    FundingCashFlowCallback,
+    HeartbeatCallback,
+    Notifier,
+    OhlcvCallback,
+    OrderEventCallback,
+    PerformanceCallback,
+    SignalOutcomeCallback,
+    WarmupFetcher,
+)
 from .state import (
     LiveRebalance,
     LiveRuntimeState,
@@ -71,23 +83,6 @@ if TYPE_CHECKING:
     from librae.core.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
-
-
-class BarDataFetcher(Protocol):
-    """Callable market-data boundary used by ``LiveTrader``.
-
-    Extra point-in-time columns may accompany the required UTC ``ts`` and
-    OHLCV columns. The engine preserves them for ``feature_fn``.
-    """
-
-    def __call__(
-        self,
-        symbol: str,
-        timeframe: str,
-        limit: int,
-        *,
-        drop_incomplete: bool = False,
-    ) -> pd.DataFrame: ...
 
 
 @dataclass(frozen=True)
@@ -112,12 +107,8 @@ class CycleDiagnostics:
 def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
-    *,
-    prefer_fetch_method: bool = False,
 ) -> BarDataFetcher:
     """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
-    if callable(source) and not prefer_fetch_method:
-        return source
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
     if not callable(fetch_ohlcv):
         if callable(source):
@@ -176,7 +167,9 @@ class LiveTrader:
             market-data adapter is used.
         state_store: Optional checkpoint store. Live mode requires a durable
             store so placement attempts and fills survive process restarts.
-        notifier: Optional duck-typed operational notifier.
+        notifier: Optional operational notifier implementing ``Notifier``.
+        status_interval_periods: Optional polling-period cadence for status
+            notifications. Scheduling is separate from the transport.
     """
 
     def __init__(
@@ -188,15 +181,16 @@ class LiveTrader:
         adapter: object | Mapping[str, object] | None = None,
         order_adapter: object | Mapping[str, object] | None = None,
         cost_model: CostModel | Mapping[str, CostModel] | None = None,
-        notifier: object | None = None,
-        on_bar: Callable[..., None] | None = None,
-        on_order_event: Callable[..., None] | None = None,
-        on_ohlcv: Callable[..., None] | None = None,
-        on_heartbeat: Callable[..., None] | None = None,
-        on_signal_outcome: Callable[..., None] | None = None,
-        on_funding_cash_flow: Callable[..., None] | None = None,
-        on_performance: Callable[..., None] | None = None,
-        warmup_fetcher: Callable[..., pd.DataFrame] | None = None,
+        notifier: Notifier | None = None,
+        status_interval_periods: int | None = None,
+        on_bar: BarCallback | None = None,
+        on_order_event: OrderEventCallback | None = None,
+        on_ohlcv: OhlcvCallback | None = None,
+        on_heartbeat: HeartbeatCallback | None = None,
+        on_signal_outcome: SignalOutcomeCallback | None = None,
+        on_funding_cash_flow: FundingCashFlowCallback | None = None,
+        on_performance: PerformanceCallback | None = None,
+        warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -335,7 +329,6 @@ class LiveTrader:
         self._executor = LiveExecutor(
             resolved_cost_models,
             simulation=not is_live,
-            telegram=notifier,
             strategy_name=strategy_name,
             order_adapter=order_adapters if is_live else None,
             instruments=self._instruments,
@@ -403,6 +396,7 @@ class LiveTrader:
         self._on_funding_cash_flow = on_funding_cash_flow
         self._on_performance = on_performance
         self._warmup_fetcher = warmup_fetcher
+        self._notifier = notifier
 
         self._fill_price = config.execution.default_fill_price
         self._max_bar_volume_participation_rate = config.execution.max_bar_volume_participation_rate
@@ -411,12 +405,17 @@ class LiveTrader:
         self._risk_policy = config.risk
         self._running: bool = False
 
-        # Cache status config
-        tg_obj = self._executor.telegram
-        self._status_enabled: bool = bool(tg_obj and tg_obj.notifications.status.enabled)
-        self._status_interval: int = tg_obj.notifications.status.interval_periods if tg_obj else 0
+        if status_interval_periods is not None and (
+            isinstance(status_interval_periods, bool)
+            or not isinstance(status_interval_periods, int)
+            or status_interval_periods <= 0
+        ):
+            raise ValueError("status_interval_periods must be a positive integer or None")
+        if status_interval_periods is not None and notifier is None:
+            raise ValueError("status_interval_periods requires a notifier")
+        self._status_interval = status_interval_periods
 
-        self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tg")
+        self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
         self._sleep = time.sleep  # instance attribute so tests can skip real delays
         if self._state_store is not None and not self._restored_state:
             self._persist_state()
@@ -581,11 +580,10 @@ class LiveTrader:
         return now.astimezone(UTC)
 
     def _notify(self, method: str, **kwargs: object) -> None:
-        """Submit a Telegram notification to the background thread pool."""
-        telegram = self._executor.telegram
-        if not telegram:
+        """Submit an operational notification to the background thread pool."""
+        if self._notifier is None or not self._notifier.enabled:
             return
-        fn = getattr(telegram, method)
+        fn = getattr(self._notifier, method)
         self._notify_pool.submit(fn, **kwargs)
 
     def _check_staleness(self, symbol: str, latest_ts: datetime) -> bool:
@@ -1251,10 +1249,29 @@ class LiveTrader:
                 self._on_order_event(event, self._event_sequence)
 
             if event.event_type in ("open", "add"):
-                self._executor.notify_entry(event.symbol, event.side, event.price, event.event_type)
+                label = (
+                    event.side.upper()
+                    if event.event_type == "open"
+                    else f"{event.side.upper()} ADD"
+                )
+                logger.info("SIGNAL %s %s @ %.2f", label, event.symbol, event.price)
+                self._notify(
+                    "send_signal",
+                    strategy=self._executor.strategy_name,
+                    symbol=event.symbol,
+                    side=label,
+                    price=event.price,
+                )
 
         for trade in result.trades:
-            self._executor.notify_exit(trade.symbol, trade.exit_price)
+            logger.info("SIGNAL EXIT %s @ %.2f", trade.symbol, trade.exit_price)
+            self._notify(
+                "send_signal",
+                strategy=self._executor.strategy_name,
+                symbol=trade.symbol,
+                side="EXIT",
+                price=trade.exit_price,
+            )
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
 
     def _commit_simulated_results(
@@ -2403,7 +2420,7 @@ class LiveTrader:
             self._performance_dirty = False
 
         # Periodic status notification (flags cached at init)
-        if self._status_enabled:
+        if self._status_interval is not None:
             self._status_period_count += 1
             if self._status_period_count >= self._status_interval:
                 self._status_period_count = 0

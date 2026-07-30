@@ -21,8 +21,6 @@ from librae.core.strategy import PositionEventType
 from librae.core.utils import validate_contract_month
 
 if TYPE_CHECKING:
-    from notifications.telegram import TelegramAdapter
-
     from librae.config.symbols import SymbolInfo
     from librae.core.executor import OrderEvent
 
@@ -215,7 +213,6 @@ class LiveExecutor:
         cost_model: CostModel | Mapping[str, CostModel],
         *,
         simulation: bool = True,
-        telegram: TelegramAdapter | None = None,
         strategy_name: str = "",
         order_adapter: OrderAdapter | Mapping[str, OrderAdapter] | None = None,
         instruments: Mapping[str, SymbolInfo] | None = None,
@@ -255,7 +252,6 @@ class LiveExecutor:
             dict(cost_model) if isinstance(cost_model, Mapping) else {"__default__": cost_model}
         )
         self._simulation = simulation
-        self._telegram = telegram
         self._strategy_name = strategy_name
         self._order_adapters = order_adapters
         self._instruments = dict(instruments or {})
@@ -271,10 +267,6 @@ class LiveExecutor:
     @property
     def simulation(self) -> bool:
         return self._simulation
-
-    @property
-    def telegram(self) -> TelegramAdapter | None:
-        return self._telegram
 
     @property
     def strategy_name(self) -> str:
@@ -626,24 +618,3 @@ class LiveExecutor:
             return datetime.fromtimestamp(seconds, tz=UTC)
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-
-    def notify_exit(self, symbol: str, price: float) -> None:
-        logger.info("SIGNAL EXIT %s @ %.2f", symbol, price)
-        if self._telegram and self._telegram.enabled:
-            self._telegram.send_signal(
-                strategy=self._strategy_name,
-                symbol=symbol,
-                side="EXIT",
-                price=price,
-            )
-
-    def notify_entry(self, symbol: str, side: str, price: float, event_type: str) -> None:
-        label = side.upper() if event_type == "open" else f"{side.upper()} ADD"
-        logger.info("SIGNAL %s %s @ %.2f", label, symbol, price)
-        if self._telegram and self._telegram.enabled:
-            self._telegram.send_signal(
-                strategy=self._strategy_name,
-                symbol=symbol,
-                side=label,
-                price=price,
-            )

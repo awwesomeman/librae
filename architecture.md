@@ -1177,7 +1177,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 
 #### LiveTrader callback signatures (writing your own db sink or notifier)
 
-`LiveTrader`'s constructor injection points (summarized in [Optional infrastructure](docs/guides/optional-infrastructure.md)) are duck-typed. Only the two stateful boundaries have minimal call-site `Protocol`s: `OrderAdapter` in `librae/live/executor.py` and `LiveStateStore` in `librae/live/state.py`. This table is the actual call signature for each.
+`LiveTrader`'s constructor injection points (summarized in [Optional infrastructure](docs/guides/optional-infrastructure.md)) use small protocols or exact callback aliases. They are defined in `librae/live/interfaces.py`, `librae/live/executor.py`, and `librae/live/state.py`. This table is the actual call signature for each.
 
 | Param | Called as |
 |---|---|
@@ -1193,6 +1193,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`, plus mandatory live reconciliation `get_position(PositionRequest)`; all order results follow the cumulative execution-report contract above |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
+| `status_interval_periods` | optional positive polling-period count for status notifications; scheduling is independent of notifier transport configuration |
 
 `notifier`'s 5 methods, with their exact kwargs:
 

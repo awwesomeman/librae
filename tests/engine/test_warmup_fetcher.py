@@ -78,6 +78,7 @@ class TestWarmupFetcher:
             }
         )
         mock_fetcher = MagicMock(return_value=warmup_df)
+        mock_fetcher.fetch_ohlcv = None
 
         cfg = _test_cfg(
             execution=ExecutionPolicy(
@@ -116,6 +117,8 @@ class TestWarmupFetcher:
                 "volume": [100.0, float("nan")],
             }
         )
+        mock_fetcher = MagicMock(return_value=invalid_df)
+        mock_fetcher.fetch_ohlcv = None
         trader = LiveTrader(
             MagicMock(),
             lambda x: x,
@@ -125,7 +128,7 @@ class TestWarmupFetcher:
                     warmup_periods=2,
                 )
             ),
-            adapter=MagicMock(return_value=invalid_df),
+            adapter=mock_fetcher,
             warmup_fetcher=None,
             on_bar=None,
             on_order_event=None,

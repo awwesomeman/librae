@@ -12,7 +12,8 @@ import pandas as pd
 from librae.config.symbols import resolve_symbol
 from librae.core.cost_model import CostModel
 from librae.core.utils import make_event_id
-from librae.live.engine import LiveTrader, _bind_market_data_source
+from librae.live.engine import LiveTrader
+from librae.live.interfaces import Notifier
 
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
@@ -51,7 +52,7 @@ def _build_adapter(name: str, *, trading: bool) -> object:
     raise ValueError(f"unsupported adapter: {name!r}")
 
 
-def _build_notifier(config: Mapping[str, object] | None) -> object | None:
+def _build_notifier(config: Mapping[str, object] | None) -> Notifier | None:
     if not config or not config.get("enabled", False):
         return None
 
@@ -62,6 +63,16 @@ def _build_notifier(config: Mapping[str, object] | None) -> object | None:
         config=TelegramConfig.from_dict(dict(config or {})),
         credentials=TelegramCredentials.from_env("TELEGRAM"),
     )
+
+
+def _status_interval_periods(config: Mapping[str, object] | None) -> int | None:
+    if not config or not config.get("enabled", False):
+        return None
+
+    from notifications.config import TelegramConfig
+
+    status = TelegramConfig.from_dict(dict(config)).notifications.status
+    return status.interval_periods if status.enabled else None
 
 
 def _build_state_store() -> object:
@@ -83,7 +94,7 @@ class _TimescaleCallbacks:
         self,
         config: RunConfig,
         instruments: dict[str, SymbolInfo],
-        notifier: object | None,
+        notifier: Notifier | None,
     ) -> None:
         self._config = config
         self._instruments = instruments
@@ -344,23 +355,15 @@ def build_live_trader(
     notifier = _build_notifier(telegram_config)
     state_store = _build_state_store() if database_enabled else None
     callbacks = _TimescaleCallbacks(config, instruments, notifier) if database_enabled else None
-    market_fetchers = {
-        symbol: _bind_market_data_source(
-            data_adapters[symbol],
-            instrument,
-            prefer_fetch_method=True,
-        )
-        for symbol, instrument in instruments.items()
-    }
-
     trader = LiveTrader(
         strategy,
         feature_fn,
         config=config,
-        adapter=market_fetchers,
+        adapter=data_adapters,
         order_adapter=order_adapters,
         cost_model=cost_models,
         notifier=notifier,
+        status_interval_periods=_status_interval_periods(telegram_config),
         state_store=state_store,
         on_bar=callbacks.on_bar if callbacks else None,
         on_order_event=callbacks.on_order_event if callbacks else None,

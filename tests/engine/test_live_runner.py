@@ -11,7 +11,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import perf_counter
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pandas as pd
@@ -292,37 +292,6 @@ class TestLiveExecutor:
                 simulation=False,
                 order_adapter=LifecycleOnly(),
             )
-
-    def test_notify_exit_sends_telegram(self):
-        cm = _zero_cost_model()
-        mock_telegram = MagicMock()
-        mock_telegram.enabled = True
-        ex = LiveExecutor(cm, simulation=True, telegram=mock_telegram, strategy_name="Test")
-        ex.notify_exit("BTCUSDT", 105.0)
-
-        mock_telegram.send_signal.assert_called_once_with(
-            strategy="Test",
-            symbol="BTCUSDT",
-            side="EXIT",
-            price=105.0,
-        )
-
-    def test_notify_entry_sends_telegram(self):
-        """Regression test: only notify_exit existed — an operator watching
-        Telegram would never see when a position opened, only when it
-        closed."""
-        cm = _zero_cost_model()
-        mock_telegram = MagicMock()
-        mock_telegram.enabled = True
-        ex = LiveExecutor(cm, simulation=True, telegram=mock_telegram, strategy_name="Test")
-        ex.notify_entry("BTCUSDT", "long", 100.0, "open")
-
-        mock_telegram.send_signal.assert_called_once_with(
-            strategy="Test",
-            symbol="BTCUSDT",
-            side="LONG",
-            price=100.0,
-        )
 
     def test_live_requires_order_adapter(self):
         """simulation=False without order_adapter should fail fast at construction."""
@@ -988,9 +957,9 @@ class TestLiveTrader:
         # Bar 1: held=0 (just entered). Bar 2: held=1. Bar 3: held=2.
         assert periods_held_values == [0, 1, 2]
 
-    def test_close_calls_notify_exit(self):
-        """Close action should call executor.notify_exit."""
+    def test_entry_and_exit_use_injected_notifier(self):
         call_num = 0
+        notifier = MagicMock(enabled=True)
 
         def fetcher(*args, **kwargs):
             nonlocal call_num
@@ -1000,28 +969,61 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=_AlwaysBuyStrategy(),
             fetcher=fetcher,
+            notifier=notifier,
         )
-        runner.run(max_iterations=2)
+        runner.run(max_iterations=3)
 
-        # Iteration 1: buy. Iteration 2: close (has position)
-        # notify_exit is called by LiveTrader._process_bar after trades
+        expected_calls = [
+            call(
+                strategy="test",
+                symbol="BTCUSDT",
+                side="LONG",
+                price=103.5,
+            ),
+            call(
+                strategy="test",
+                symbol="BTCUSDT",
+                side="EXIT",
+                price=103.5,
+            ),
+        ]
+        assert notifier.send_signal.call_count == len(expected_calls)
+        notifier.send_signal.assert_has_calls(expected_calls, any_order=True)
 
     def test_open_calls_notify_entry(self):
-        """Regression test: an open/add fill must notify entry, symmetric
-        with the existing close -> notify_exit wiring."""
         call_num = 0
+        notifier = MagicMock(enabled=True)
 
         def fetcher(*args, **kwargs):
             nonlocal call_num
             call_num += 1
             return _make_ohlcv_df(n=5, start_hour=call_num)
 
-        runner = self._make_runner(strategy=_AlwaysBuyStrategy(), fetcher=fetcher)
-        runner._executor.notify_entry = MagicMock()
+        runner = self._make_runner(
+            strategy=_AlwaysBuyStrategy(),
+            fetcher=fetcher,
+            notifier=notifier,
+        )
         runner.run(max_iterations=2)
 
-        # Iteration 1: buy queued. Iteration 2: buy fills at bar2's open (103.5).
-        runner._executor.notify_entry.assert_called_once_with("BTCUSDT", "long", 103.5, "open")
+        notifier.send_signal.assert_called_once_with(
+            strategy="test",
+            symbol="BTCUSDT",
+            side="LONG",
+            price=103.5,
+        )
+
+    def test_status_interval_requires_notifier(self):
+        with pytest.raises(ValueError, match="requires a notifier"):
+            self._make_runner(status_interval_periods=12)
+
+    @pytest.mark.parametrize("interval", [True, 0, -1, 1.5])
+    def test_status_interval_must_be_positive_integer(self, interval):
+        with pytest.raises(ValueError, match="positive integer"):
+            self._make_runner(
+                notifier=MagicMock(enabled=True),
+                status_interval_periods=interval,
+            )
 
     def test_cash_deducted_on_entry(self):
         """Cash should decrease after a buy."""
@@ -2142,6 +2144,7 @@ class TestLiveExecutionLifecycle:
                 return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
 
         strategy = CountingBuy()
+        fetcher.fetch_ohlcv = None
         runner = LiveTrader(
             strategy,
             _simple_feature_fn,
