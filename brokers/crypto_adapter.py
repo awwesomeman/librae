@@ -15,9 +15,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 import pandas as pd
+from librae.config.symbols import (
+    AssetClass,
+    AvailableSymbol,
+    InstrumentKind,
+)
+from librae.core.utils import validate_contract_month
+from librae.live.executor import PositionRequest
 
 from .base import (
     AdapterInfo,
@@ -134,6 +142,116 @@ class CryptoAdapter:
             market_type="spot",
         )
 
+    def available_symbols(
+        self,
+        *,
+        query: str | None = None,
+        kind: InstrumentKind | None = None,
+        asset_class: AssetClass | None = None,
+    ) -> tuple[AvailableSymbol, ...]:
+        """List active CCXT markets using current exchange metadata."""
+        markets = self._exchange.load_markets()
+        if not isinstance(markets, dict):
+            raise ValueError(f"{self._exchange_id} load_markets() did not return a mapping")
+        query_token = "".join(character for character in (query or "").upper() if character.isalnum())
+        results: list[AvailableSymbol] = []
+        for market in markets.values():
+            if not isinstance(market, dict) or market.get("active") is False:
+                continue
+            if market.get("spot") or market.get("type") == "spot":
+                resolved_kind: InstrumentKind = "spot"
+                instrument_type = "spot"
+            elif market.get("swap") or market.get("type") == "swap":
+                resolved_kind = "perpetual"
+                instrument_type = "contract_perpetual"
+            elif market.get("future") or market.get("type") == "future":
+                resolved_kind = "future"
+                instrument_type = "contract_quarterly"
+            else:
+                continue
+            if kind is not None and resolved_kind != kind:
+                continue
+
+            info = market.get("info") or {}
+            if not isinstance(info, dict):
+                info = {}
+            underlying_type = str(info.get("underlyingType") or "").upper()
+            if underlying_type in ("EQUITY", "HK_EQUITY"):
+                resolved_asset_class: AssetClass = "equity"
+            elif underlying_type == "INDEX":
+                resolved_asset_class = "index"
+            else:
+                resolved_asset_class = "crypto"
+            if asset_class is not None and resolved_asset_class != asset_class:
+                continue
+
+            venue_symbol = str(market.get("symbol") or "")
+            native_symbol = str(market.get("id") or venue_symbol)
+            base = str(market.get("base") or "")
+            quote = str(market.get("quote") or "")
+            search_tokens = {
+                "".join(character for character in value.upper() if character.isalnum())
+                for value in (
+                    venue_symbol,
+                    native_symbol,
+                    base,
+                    f"{base}{quote}",
+                )
+            }
+            if query_token and query_token not in search_tokens:
+                continue
+
+            expiry = market.get("expiry")
+            delivery_month = None
+            if isinstance(expiry, (int, float)) and not isinstance(expiry, bool):
+                delivery_month = pd.to_datetime(expiry, unit="ms", utc=True).strftime("%Y%m")
+            contract_type = str(info.get("contractType") or "")
+            if resolved_kind == "future" and "QUARTER" not in contract_type:
+                instrument_type = "contract_monthly"
+            contract_rank = {
+                "CURRENT_QUARTER": 0,
+                "NEXT_QUARTER": 1,
+            }.get(contract_type)
+            if resolved_kind == "spot":
+                canonical_symbol = f"{base}{quote}_SPOT"
+                multiplier = 1.0
+            elif resolved_kind == "perpetual":
+                canonical_symbol = f"{base}{quote}_PERP"
+                multiplier = market.get("contractSize")
+            else:
+                canonical_symbol = native_symbol
+                multiplier = market.get("contractSize")
+            tick_size = (market.get("precision") or {}).get("price")
+            currency = str(market.get("settle") or quote)
+            results.append(
+                AvailableSymbol(
+                    broker="binance",
+                    canonical_symbol=canonical_symbol,
+                    venue_symbol=venue_symbol,
+                    native_symbol=native_symbol,
+                    name=str(info.get("pair") or native_symbol),
+                    kind=resolved_kind,
+                    asset_class=resolved_asset_class,
+                    currency=currency,
+                    instrument_type=instrument_type,
+                    contract_month=delivery_month,
+                    delivery_month=delivery_month,
+                    contract_rank=contract_rank,
+                    multiplier=float(multiplier) if multiplier is not None else None,
+                    tick_size=float(tick_size) if tick_size is not None else None,
+                )
+            )
+        return tuple(
+            sorted(
+                results,
+                key=lambda item: (
+                    item.kind,
+                    item.canonical_symbol,
+                    item.delivery_month or "",
+                ),
+            )
+        )
+
     # ------------------------------------------------------------------
     # Market data
     # ------------------------------------------------------------------
@@ -146,6 +264,8 @@ class CryptoAdapter:
         *,
         since: int | None = None,
         drop_incomplete: bool = False,
+        continuous_alias: bool = False,
+        contract_month: str | None = None,
     ) -> pd.DataFrame:
         """Fetch OHLCV candles and return a standardised DataFrame.
 
@@ -157,10 +277,21 @@ class CryptoAdapter:
             drop_incomplete: If True, drop the last candle which may still
                 be forming. Essential for live monitoring to avoid computing
                 indicators on partial data.
+            continuous_alias: Unsupported for this CCXT path; continuous
+                klines are research data, not an orderable identity.
+            contract_month: Expected ``YYYYMM`` for a delivery-future symbol.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is the UTC-aware bar-start ``datetime``.
         """
+        if continuous_alias or contract_month is not None:
+            self._exchange.load_markets()
+            self._validate_contract_selection(
+                symbol,
+                self._exchange.market(symbol),
+                continuous_alias=continuous_alias,
+                contract_month=contract_month,
+            )
         raw = self._exchange.fetch_ohlcv(
             symbol,
             timeframe=timeframe,
@@ -276,6 +407,12 @@ class CryptoAdapter:
         self._exchange.load_markets()
         symbol = signal["symbol"]
         market = self._exchange.market(symbol)
+        self._validate_contract_selection(
+            symbol,
+            market,
+            continuous_alias=signal.get("continuous_alias", False),
+            contract_month=signal.get("contract_month"),
+        )
         prepared = dict(signal)
 
         quantity = float(self._exchange.amount_to_precision(symbol, signal["quantity"]))
@@ -343,6 +480,13 @@ class CryptoAdapter:
         """
         self._require_auth()
         validate_order_signal(signal)
+        self._exchange.load_markets()
+        self._validate_contract_selection(
+            signal["symbol"],
+            self._exchange.market(signal["symbol"]),
+            continuous_alias=signal.get("continuous_alias", False),
+            contract_month=signal.get("contract_month"),
+        )
         order_type = signal["order_type"]
         price = signal.get("price")
         params = {}
@@ -406,21 +550,35 @@ class CryptoAdapter:
         """Return real free/used/total balance for *currency* from the exchange."""
         self._require_auth()
         balance = self._exchange.fetch_balance()
-        entry = balance.get(currency) or {}
+        entry = balance.get(currency)
+        if entry is None:
+            # CCXT omits currencies with no balance; that absence means zero,
+            # unlike a present-but-incomplete balance record.
+            return {"free": 0.0, "used": 0.0, "total": 0.0}
+        missing = [field for field in ("free", "used", "total") if entry.get(field) is None]
+        if missing:
+            raise ValueError(f"{currency} balance is missing fields: {', '.join(missing)}")
         return {
-            "free": float(entry.get("free", 0) or 0),
-            "used": float(entry.get("used", 0) or 0),
-            "total": float(entry.get("total", 0) or 0),
+            "free": float(entry["free"]),
+            "used": float(entry["used"]),
+            "total": float(entry["total"]),
         }
 
-    def get_position(self, symbol: str) -> dict:
-        """Return current position for *symbol*.
+    def get_position(self, request: PositionRequest) -> dict:
+        """Return the current position for one configured instrument.
 
         Returns ``{symbol, size, avg_price, unrealized_pnl}``.
         """
         self._require_auth()
+        symbol = request.venue_symbol
         self._exchange.load_markets()
         market = self._exchange.market(symbol)
+        self._validate_contract_selection(
+            symbol,
+            market,
+            continuous_alias=request.continuous_alias,
+            contract_month=request.contract_month,
+        )
         if market.get("spot") or market.get("type") == "spot":
             balance = self._exchange.fetch_balance()
             base = market["base"]
@@ -428,21 +586,90 @@ class CryptoAdapter:
             total = entry.get("total")
             if total is None and isinstance(balance.get("total"), dict):
                 total = balance["total"].get(base)
+            if total is None:
+                free = entry.get("free")
+                used = entry.get("used")
+                if free is None or used is None:
+                    raise ValueError(f"{symbol} balance is missing total and free/used")
+                total = float(free) + float(used)
             return {
-                "symbol": symbol,
-                "size": float(total or 0.0),
+                "symbol": request.symbol,
+                "size": float(total),
                 "avg_price": None,
                 "unrealized_pnl": 0.0,
             }
 
         positions = self._exchange.fetch_positions([symbol])
+
+        def signed_contracts(position: dict) -> float:
+            if position.get("contracts") is None:
+                raise ValueError(f"{symbol} derivative position is missing contracts")
+            contracts = float(position["contracts"])
+            if not isfinite(contracts) or contracts < 0:
+                raise ValueError(f"{symbol} derivative position has invalid contracts")
+            if contracts == 0:
+                return 0.0
+            side = position.get("side")
+            if side == "long":
+                return contracts
+            if side == "short":
+                return -contracts
+            raise ValueError(f"{symbol} derivative position has unsupported side: {side!r}")
+
+        def entry_price(position: dict) -> float:
+            if position.get("entryPrice") is None:
+                raise ValueError(f"{symbol} derivative position is missing entryPrice")
+            return float(position["entryPrice"])
+
         return find_position(
             positions,
-            symbol,
+            request.symbol,
             matches=lambda p: p.get("symbol") == symbol,
-            size=lambda p: (
-                float(p.get("contracts", 0)) * (-1.0 if p.get("side") == "short" else 1.0)
-            ),
-            avg_price=lambda p: float(p.get("entryPrice", 0) or 0),
+            size=signed_contracts,
+            avg_price=entry_price,
             pnl=lambda p: float(p.get("unrealizedPnl", 0) or 0),
         )
+
+    @staticmethod
+    def _validate_contract_selection(
+        symbol: str,
+        market: dict,
+        *,
+        continuous_alias: bool,
+        contract_month: str | None,
+    ) -> None:
+        """Verify the common contract identity against CCXT market metadata."""
+        if not isinstance(continuous_alias, bool):
+            raise TypeError("continuous_alias must be a bool")
+        contract_month = validate_contract_month(contract_month)
+        if continuous_alias:
+            raise ValueError(
+                "CryptoAdapter does not order continuous aliases; "
+                "configure an exact CCXT delivery symbol"
+            )
+
+        is_delivery_future = bool(
+            market.get("future") or market.get("type") == "future"
+        )
+        if contract_month is None:
+            if is_delivery_future:
+                raise ValueError(
+                    f"{symbol} delivery future requires contract_month='YYYYMM'"
+                )
+            return
+        if not is_delivery_future:
+            raise ValueError(
+                f"{symbol} contract_month is valid only for a CCXT delivery future"
+            )
+        raw_expiry = market.get("expiry")
+        if isinstance(raw_expiry, bool) or not isinstance(raw_expiry, (int, float)):
+            raise ValueError(f"{symbol} delivery future has no numeric CCXT expiry")
+        expiry = float(raw_expiry)
+        if not isfinite(expiry):
+            raise ValueError(f"{symbol} delivery future has invalid CCXT expiry")
+        resolved_month = pd.to_datetime(expiry, unit="ms", utc=True).strftime("%Y%m")
+        if resolved_month != contract_month:
+            raise ValueError(
+                f"CCXT contract month mismatch for {symbol}: "
+                f"configured={contract_month}, broker={resolved_month}"
+            )

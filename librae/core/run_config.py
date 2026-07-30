@@ -76,6 +76,10 @@ class ExecutionPolicy:
     this wall-clock duration is canceled and the deployment halts for operator
     review. It is not a broker time-in-force instruction. ``None`` leaves order
     lifetime to the broker.
+
+    ``warmup_periods`` is the retained live/sim history used by feature
+    calculation. It is explicit and validated here because too short a window
+    changes engine behavior and can invalidate ADV or strategy inputs.
     """
 
     default_fill_price: str = "open"
@@ -83,6 +87,7 @@ class ExecutionPolicy:
     adv_lookback_sessions: int | None = None
     max_adv_participation_rate: float | None = None
     live_order_timeout_seconds: int | None = None
+    warmup_periods: int = 720
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
@@ -117,6 +122,14 @@ class ExecutionPolicy:
         ):
             raise ValueError(
                 f"live_order_timeout_seconds must be a positive integer or None, got {timeout}"
+            )
+        if (
+            isinstance(self.warmup_periods, bool)
+            or not isinstance(self.warmup_periods, int)
+            or self.warmup_periods <= 0
+        ):
+            raise ValueError(
+                f"warmup_periods must be a positive integer, got {self.warmup_periods}"
             )
 
 
@@ -260,7 +273,7 @@ class RunConfig:
     # Broker/data routing metadata for one symbol. Cost fields remain in
     # symbol_cost_overrides so accounting inputs and venue identifiers cannot be
     # accidentally mixed into CostModel construction.
-    instrument_overrides: dict[str, dict[str, str]] | None = None
+    instrument_overrides: dict[str, dict[str, object]] | None = None
 
     # === Perf params (stored in DB backtest_runs.perf_params, display only) ===
     annualize: bool = True
@@ -365,6 +378,7 @@ class RunConfig:
             "adv_lookback_sessions",
             "max_adv_participation_rate",
             "live_order_timeout_seconds",
+            "warmup_periods",
         }
         invalid_keys = sorted(legacy_execution_keys & set(self.params or {}))
         if invalid_keys:

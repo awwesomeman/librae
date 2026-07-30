@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.live.executor import PositionRequest
 
 from brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 
@@ -17,12 +18,154 @@ from brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 # ---------------------------------------------------------------------------
 
 
+def _position_request(symbol: str) -> PositionRequest:
+    return PositionRequest(
+        symbol=symbol,
+        venue_symbol=symbol,
+        currency="USDT",
+        multiplier=1.0,
+    )
+
+
 def test_missing_ccxt_names_install_extra():
     with (
         patch.dict("sys.modules", {"ccxt": None}),
         pytest.raises(ImportError, match="crypto-live"),
     ):
         _require_ccxt()
+
+
+def test_available_symbols_lists_spot_perpetual_and_ranked_delivery_futures(
+    readonly_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.load_markets.return_value = {
+        "spot": {
+            "id": "BTCUSDT",
+            "symbol": "BTC/USDT",
+            "base": "BTC",
+            "quote": "USDT",
+            "type": "spot",
+            "spot": True,
+            "active": True,
+            "precision": {"price": 0.01},
+            "info": {},
+        },
+        "perpetual": {
+            "id": "BTCUSDT",
+            "symbol": "BTC/USDT:USDT",
+            "base": "BTC",
+            "quote": "USDT",
+            "settle": "USDT",
+            "type": "swap",
+            "swap": True,
+            "active": True,
+            "contractSize": 1.0,
+            "precision": {"price": 0.1},
+            "info": {
+                "contractType": "PERPETUAL",
+                "underlyingType": "COIN",
+            },
+        },
+        "current_quarter": {
+            "id": "BTCUSDT_260925",
+            "symbol": "BTC/USDT:USDT-260925",
+            "base": "BTC",
+            "quote": "USDT",
+            "settle": "USDT",
+            "type": "future",
+            "future": True,
+            "active": True,
+            "expiry": 1_790_294_400_000,
+            "contractSize": 1.0,
+            "precision": {"price": 0.1},
+            "info": {
+                "contractType": "CURRENT_QUARTER",
+                "underlyingType": "COIN",
+            },
+        },
+        "next_quarter": {
+            "id": "BTCUSDT_261225",
+            "symbol": "BTC/USDT:USDT-261225",
+            "base": "BTC",
+            "quote": "USDT",
+            "settle": "USDT",
+            "type": "future",
+            "future": True,
+            "active": True,
+            "expiry": 1_798_185_600_000,
+            "contractSize": 1.0,
+            "precision": {"price": 0.1},
+            "info": {
+                "contractType": "NEXT_QUARTER",
+                "underlyingType": "COIN",
+            },
+        },
+    }
+
+    results = readonly_adapter.available_symbols(
+        query="BTCUSDT",
+        asset_class="crypto",
+    )
+
+    assert {(item.kind, item.contract_rank) for item in results} == {
+        ("spot", None),
+        ("perpetual", None),
+        ("future", 0),
+        ("future", 1),
+    }
+    current = next(item for item in results if item.contract_rank == 0)
+    assert current.contract_month == "202609"
+    assert current.venue_symbol == "BTC/USDT:USDT-260925"
+
+
+def test_available_symbols_filters_binance_tradfi_perpetual_pool(
+    readonly_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.load_markets.return_value = {
+        "mu": {
+            "id": "MUUSDT",
+            "symbol": "MU/USDT:USDT",
+            "base": "MU",
+            "quote": "USDT",
+            "settle": "USDT",
+            "type": "swap",
+            "swap": True,
+            "active": True,
+            "contractSize": 1.0,
+            "precision": {"price": 0.01},
+            "info": {
+                "pair": "MUUSDT",
+                "contractType": "TRADIFI_PERPETUAL",
+                "underlyingType": "EQUITY",
+            },
+        },
+        "btc": {
+            "id": "BTCUSDT",
+            "symbol": "BTC/USDT:USDT",
+            "base": "BTC",
+            "quote": "USDT",
+            "settle": "USDT",
+            "type": "swap",
+            "swap": True,
+            "active": True,
+            "contractSize": 1.0,
+            "precision": {"price": 0.1},
+            "info": {
+                "contractType": "PERPETUAL",
+                "underlyingType": "COIN",
+            },
+        },
+    }
+
+    results = readonly_adapter.available_symbols(
+        kind="perpetual",
+        asset_class="equity",
+    )
+
+    assert [item.native_symbol for item in results] == ["MUUSDT"]
+    assert results[0].canonical_symbol == "MUUSDT_PERP"
 
 
 @pytest.fixture
@@ -35,6 +178,12 @@ def mock_ccxt_exchange():
         [1_700_003_600_000, 35200.0, 35800.0, 35100.0, 35600.0, 120.3],
         [1_700_007_200_000, 35600.0, 36000.0, 35400.0, 35900.0, 95.7],
     ]
+    exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "base": "BTC",
+    }
     return exchange
 
 
@@ -122,7 +271,7 @@ def test_readonly_place_order_raises(readonly_adapter):
 
 def test_readonly_get_position_raises(readonly_adapter):
     with pytest.raises(NotImplementedError, match="read-only"):
-        readonly_adapter.get_position("BTC/USDT")
+        readonly_adapter.get_position(_position_request("BTC/USDT"))
 
 
 def test_readonly_get_balance_raises(readonly_adapter):
@@ -163,7 +312,7 @@ def test_spot_position_uses_inventory_balance(authed_adapter, mock_ccxt_exchange
         "BTC": {"free": 0.7, "used": 0.3, "total": 1.0}
     }
 
-    position = authed_adapter.get_position("BTC/USDT")
+    position = authed_adapter.get_position(_position_request("BTC/USDT"))
 
     assert position == {
         "symbol": "BTC/USDT",
@@ -172,6 +321,22 @@ def test_spot_position_uses_inventory_balance(authed_adapter, mock_ccxt_exchange
         "unrealized_pnl": 0.0,
     }
     mock_ccxt_exchange.fetch_positions.assert_not_called()
+
+
+def test_spot_position_rejects_incomplete_inventory_balance(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "base": "BTC",
+    }
+    mock_ccxt_exchange.fetch_balance.return_value = {"BTC": {"free": 0.7}}
+
+    with pytest.raises(ValueError, match="missing total and free/used"):
+        authed_adapter.get_position(_position_request("BTC/USDT"))
 
 
 def test_derivative_short_position_has_negative_size(authed_adapter, mock_ccxt_exchange):
@@ -189,10 +354,143 @@ def test_derivative_short_position_has_negative_size(authed_adapter, mock_ccxt_e
         }
     ]
 
-    position = authed_adapter.get_position("BTC/USDT:USDT")
+    position = authed_adapter.get_position(_position_request("BTC/USDT:USDT"))
 
     assert position["size"] == -2.0
     assert position["avg_price"] == 50_000.0
+
+
+def test_exact_delivery_future_uses_ccxt_native_contract_symbol(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    venue_symbol = "BTC/USDT:USDT-260925"
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": venue_symbol,
+        "type": "future",
+        "spot": False,
+        "expiry": pd.Timestamp("2026-09-25", tz="UTC").timestamp() * 1000,
+    }
+    mock_ccxt_exchange.fetch_positions.return_value = [
+        {
+            "symbol": venue_symbol,
+            "contracts": 2.0,
+            "side": "long",
+            "entryPrice": 50_000.0,
+        }
+    ]
+    request = PositionRequest(
+        symbol="BTCUSDT_202609",
+        venue_symbol=venue_symbol,
+        currency="USDT",
+        multiplier=1.0,
+        contract_month="202609",
+    )
+
+    position = authed_adapter.get_position(request)
+
+    assert position["symbol"] == "BTCUSDT_202609"
+    mock_ccxt_exchange.market.assert_called_with(venue_symbol)
+    mock_ccxt_exchange.fetch_positions.assert_called_once_with([venue_symbol])
+
+
+def test_exact_delivery_future_rejects_ccxt_expiry_mismatch(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    venue_symbol = "BTC/USDT:USDT-261225"
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": venue_symbol,
+        "type": "future",
+        "future": True,
+        "expiry": pd.Timestamp("2026-12-25", tz="UTC").timestamp() * 1000,
+    }
+
+    with pytest.raises(ValueError, match="contract month mismatch"):
+        authed_adapter.get_position(
+            PositionRequest(
+                symbol="BTCUSDT_202609",
+                venue_symbol=venue_symbol,
+                currency="USDT",
+                multiplier=1.0,
+                contract_month="202609",
+            )
+        )
+
+
+def test_crypto_adapter_rejects_ordering_continuous_alias(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    with pytest.raises(ValueError, match="does not order continuous aliases"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "quantity": 1.0,
+                "order_type": "market",
+                "continuous_alias": True,
+            }
+        )
+
+
+def test_zero_derivative_position_does_not_require_nonexistent_entry_facts(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT:USDT",
+        "type": "swap",
+        "spot": False,
+    }
+    mock_ccxt_exchange.fetch_positions.return_value = [
+        {"symbol": "BTC/USDT:USDT", "contracts": 0.0, "side": None}
+    ]
+
+    position = authed_adapter.get_position(_position_request("BTC/USDT:USDT"))
+
+    assert position == {
+        "symbol": "BTC/USDT:USDT",
+        "size": 0.0,
+        "avg_price": 0.0,
+        "unrealized_pnl": 0.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("position", "message"),
+    [
+        ({"symbol": "BTC/USDT:USDT", "side": "long", "entryPrice": 50_000.0}, "contracts"),
+        (
+            {
+                "symbol": "BTC/USDT:USDT",
+                "contracts": 2.0,
+                "side": "net",
+                "entryPrice": 50_000.0,
+            },
+            "unsupported side",
+        ),
+        (
+            {"symbol": "BTC/USDT:USDT", "contracts": 2.0, "side": "long"},
+            "entryPrice",
+        ),
+    ],
+)
+def test_derivative_position_rejects_missing_or_ambiguous_facts(
+    authed_adapter,
+    mock_ccxt_exchange,
+    position,
+    message,
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT:USDT",
+        "type": "swap",
+        "spot": False,
+    }
+    mock_ccxt_exchange.fetch_positions.return_value = [position]
+
+    with pytest.raises(ValueError, match=message):
+        authed_adapter.get_position(_position_request("BTC/USDT:USDT"))
 
 
 # ---------------------------------------------------------------------------

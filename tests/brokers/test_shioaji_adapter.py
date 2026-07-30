@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.live.executor import PositionRequest
 
 from brokers.shioaji_adapter import _require_shioaji
 
@@ -20,12 +21,91 @@ from brokers.shioaji_adapter import _require_shioaji
 # ---------------------------------------------------------------------------
 
 
+def _position_request(symbol: str) -> PositionRequest:
+    return PositionRequest(
+        symbol=symbol,
+        venue_symbol=symbol,
+        currency="TWD",
+        multiplier=200.0,
+        continuous_alias=symbol.endswith(("R1", "R2")),
+    )
+
+
+def _rolling_contract(
+    code: str = "TXFR1",
+    target_code: str = "TXF202608",
+    **values,
+):
+    return SimpleNamespace(
+        security_type="FUT",
+        code=code,
+        target_code=target_code,
+        **values,
+    )
+
+
 def test_missing_shioaji_names_install_extra():
     with (
         patch.dict("sys.modules", {"shioaji": None}),
         pytest.raises(ImportError, match="tw-live"),
     ):
         _require_shioaji()
+
+
+def test_available_symbols_lists_tmf_exact_front_and_next_contracts():
+    adapter = _make_adapter()
+    adapter._api.contracts.futures.return_value = [
+        SimpleNamespace(
+            code="TMFH6",
+            target_code="",
+            name="微型臺指 202608",
+            delivery_month="202608",
+            currency="TWD",
+            unit=10,
+        ),
+        SimpleNamespace(
+            code="TMFR1",
+            target_code="TMFH6",
+            name="微型臺指 近月",
+            delivery_month="202608",
+            currency="TWD",
+            unit=10,
+        ),
+        SimpleNamespace(
+            code="TMFI6",
+            target_code="",
+            name="微型臺指 202609",
+            delivery_month="202609",
+            currency="TWD",
+            unit=10,
+        ),
+        SimpleNamespace(
+            code="TMFR2",
+            target_code="TMFI6",
+            name="微型臺指 次月",
+            delivery_month="202609",
+            currency="TWD",
+            unit=10,
+        ),
+    ]
+
+    results = adapter.available_symbols(
+        query="TMF",
+        kind="future",
+        asset_class="index",
+    )
+
+    assert {(item.native_symbol, item.contract_rank) for item in results} == {
+        ("TMFH6", 0),
+        ("TMFR1", 0),
+        ("TMFI6", 1),
+        ("TMFR2", 1),
+    }
+    front_alias = next(item for item in results if item.native_symbol == "TMFR1")
+    assert front_alias.continuous_alias is True
+    assert front_alias.contract_month is None
+    assert front_alias.delivery_month == "202608"
+    adapter._api.contracts.futures.assert_called_once_with("TMF")
 
 
 def _make_adapter(*, ca_activated: bool = False):
@@ -71,9 +151,9 @@ class TestFetchOhlcv:
     def test_returns_correct_columns(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
-        df = adapter.fetch_ohlcv("TXFR1", "1m")
+        df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
         assert len(df) == 3
@@ -83,9 +163,9 @@ class TestFetchOhlcv:
         """Shioaji's raw ts is Taipei wall-clock as fake-UTC; must be shifted -8h."""
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
-        df = adapter.fetch_ohlcv("TXFR1", "1m")
+        df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
         expected = pd.to_datetime(
             ["2026-04-01 01:00", "2026-04-01 01:05", "2026-04-01 01:10"],
@@ -96,9 +176,9 @@ class TestFetchOhlcv:
     def test_empty_response(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = {}
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
-        df = adapter.fetch_ohlcv("TXFR1", "1m")
+        df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
         assert df.empty
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
@@ -106,22 +186,27 @@ class TestFetchOhlcv:
     def test_limit_trims_tail(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
-        df = adapter.fetch_ohlcv("TXFR1", "1m", limit=2)
+        df = adapter.fetch_ohlcv("TXFR1", "1m", limit=2, continuous_alias=True)
 
         assert len(df) == 2
 
     def test_drop_incomplete_applies_completed_bar_filter(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(security_type="FUT"))
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
         with patch(
             "brokers.shioaji_adapter.drop_incomplete_ohlcv",
             side_effect=lambda df, _timeframe, **_kwargs: df.iloc[:-1],
         ) as drop_incomplete:
-            df = adapter.fetch_ohlcv("TXFR1", "1m", drop_incomplete=True)
+            df = adapter.fetch_ohlcv(
+                "TXFR1",
+                "1m",
+                continuous_alias=True,
+                drop_incomplete=True,
+            )
 
         assert len(df) == 2
         assert drop_incomplete.call_args.kwargs == {"calendar_id": "XTAIFEX"}
@@ -133,22 +218,31 @@ class TestFetchOhlcv:
     def test_resampling_uses_instrument_calendar(self, security_type, expected_calendar):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(
-            return_value=SimpleNamespace(security_type=security_type)
+        contract = (
+            _rolling_contract()
+            if security_type == "FUT"
+            else SimpleNamespace(security_type="STK", code="2330")
         )
+        adapter._resolve_contract = MagicMock(return_value=contract)
 
         with patch(
             "brokers.shioaji_adapter.resample_session_ohlcv",
             side_effect=lambda frame, _seconds, _calendar: frame,
         ) as resample:
-            adapter.fetch_ohlcv("TXFR1", "5m")
+            adapter.fetch_ohlcv(
+                "TXFR1",
+                "5m",
+                continuous_alias=security_type == "FUT",
+            )
 
         assert resample.call_args.args[2] == expected_calendar
 
     def test_explicit_calendar_override_wins(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
-        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(security_type="FUT"))
+        adapter._resolve_contract = MagicMock(
+            return_value=_rolling_contract("GDFR1", "GDF202608")
+        )
 
         with patch(
             "brokers.shioaji_adapter.resample_session_ohlcv",
@@ -158,6 +252,7 @@ class TestFetchOhlcv:
                 "GDFR1",
                 "5m",
                 calendar_id="XTAIFEX_1725",
+                continuous_alias=True,
             )
 
         assert resample.call_args.args[2] == "XTAIFEX_1725"
@@ -174,7 +269,7 @@ class TestReadOnlyGuard:
         adapter = _make_adapter(ca_activated=False)
 
         with pytest.raises(NotImplementedError, match="read-only"):
-            adapter.get_position("TXFR1")
+            adapter.get_position(_position_request("TXFR1"))
 
 
 class TestPlaceOrder:
@@ -202,7 +297,7 @@ class TestPlaceOrder:
     def test_prepare_order_rounds_lot_and_limit_price(self):
         adapter = _make_adapter(ca_activated=True)
         adapter._resolve_contract = MagicMock(
-            return_value=SimpleNamespace(limit_down=19_000, limit_up=21_000)
+            return_value=_rolling_contract(limit_down=19_000, limit_up=21_000)
         )
 
         prepared = adapter.prepare_order(
@@ -213,16 +308,33 @@ class TestPlaceOrder:
                 "order_type": "limit",
                 "price": 20_000.8,
                 "tick_size": 1.0,
+                "continuous_alias": True,
             }
         )
 
         assert prepared["quantity"] == 2.0
         assert prepared["price"] == 20_000.0
 
+    def test_prepare_limit_order_requires_contract_price_boundaries(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        with pytest.raises(ValueError, match="missing price-limit boundaries"):
+            adapter.prepare_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1.0,
+                    "order_type": "limit",
+                    "price": 20_000.0,
+                    "tick_size": 1.0,
+                    "continuous_alias": True,
+                }
+            )
+
     def test_futures_limit_order_uses_futures_price_type(self):
         adapter = _make_adapter(ca_activated=True)
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
-        adapter._is_futures = MagicMock(return_value=True)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
         mock_trade = MagicMock()
         mock_trade.status.id = "order123"
         mock_trade.status.status = "PendingSubmit"
@@ -237,6 +349,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "limit",
                     "price": 17000,
+                    "continuous_alias": True,
                 }
             )
 
@@ -251,8 +364,9 @@ class TestPlaceOrder:
 
     def test_stock_market_order_uses_stock_price_type(self):
         adapter = _make_adapter(ca_activated=True)
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
-        adapter._is_futures = MagicMock(return_value=False)
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type="STK", code="2330")
+        )
         mock_trade = MagicMock()
         mock_trade.status.id = "order456"
         mock_trade.status.status = "Filled"
@@ -279,8 +393,7 @@ class TestPlaceOrder:
 
     def test_client_order_id_uses_deterministic_six_character_custom_field(self):
         adapter = _make_adapter(ca_activated=True)
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
-        adapter._is_futures = MagicMock(return_value=True)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
         mock_trade = MagicMock()
         mock_trade.status.id = "order123"
         mock_trade.status.status = "PendingSubmit"
@@ -295,6 +408,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "market",
                     "client_order_id": "strategy-TXFR1-open-20260101T000000",
+                    "continuous_alias": True,
                 }
             )
 
@@ -307,8 +421,9 @@ class TestPlaceOrder:
         "市價單不允許當日有效委託(ROD)") -- caught live 2026-07-20. Market orders
         must be IOC; only resting limit orders may use ROD."""
         adapter = _make_adapter(ca_activated=True)
-        adapter._resolve_contract = MagicMock(return_value="mock_contract")
-        adapter._is_futures = MagicMock(return_value=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=_rolling_contract("TMFR1", "TMF202608")
+        )
         mock_trade = MagicMock()
         mock_trade.status.id = "order789"
         mock_trade.status.status = "Filled"
@@ -322,6 +437,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 1,
                     "order_type": "market",
+                    "continuous_alias": True,
                 }
             )
 
@@ -366,7 +482,7 @@ def test_trade_normalization_uses_cumulative_deals():
 
 def test_trade_lookup_resolves_continuous_symbol_to_contract_code():
     adapter = _make_adapter(ca_activated=True)
-    adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="TXF202608"))
+    adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
     matching = SimpleNamespace(contract=SimpleNamespace(code="TXF202608"))
     adapter._api.list_trades.return_value = [
         SimpleNamespace(contract=SimpleNamespace(code="TXF202607")),
@@ -379,26 +495,143 @@ def test_trade_lookup_resolves_continuous_symbol_to_contract_code():
     adapter._api.update_status.assert_called_once_with()
 
 
-def test_position_lookup_resolves_continuous_symbol_to_contract_code():
+@pytest.mark.parametrize(
+    ("direction_name", "expected_size"),
+    [("Buy", 2.0), ("Sell", -2.0)],
+)
+def test_position_lookup_preserves_broker_direction(direction_name, expected_size):
+    sj = _require_shioaji()
     adapter = _make_adapter(ca_activated=True)
-    adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="TXF202608"))
+    adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
     adapter._api.list_positions.return_value = [
         SimpleNamespace(
             code="TXF202608",
+            direction=getattr(sj.Action, direction_name),
             quantity=2,
             price=22000,
             pnl=100,
         )
     ]
 
-    result = adapter.get_position("TXFR1")
+    result = adapter.get_position(_position_request("TXFR1"))
 
     assert result == {
         "symbol": "TXFR1",
-        "size": 2.0,
+        "size": expected_size,
         "avg_price": 22000.0,
         "unrealized_pnl": 100.0,
     }
+
+
+def test_exact_future_uses_shioaji_native_contract_code():
+    sj = _require_shioaji()
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(
+        return_value=SimpleNamespace(
+            security_type="FUT",
+            code="TXF202608",
+            target_code="",
+        )
+    )
+    adapter._api.contracts.info.return_value = SimpleNamespace(
+        delivery_month="202608"
+    )
+    adapter._api.list_positions.return_value = [
+        SimpleNamespace(
+            code="TXF202608",
+            direction=sj.Action.Buy,
+            quantity=1,
+            price=22000,
+            pnl=0,
+        )
+    ]
+    request = PositionRequest(
+        symbol="TXF_202608",
+        venue_symbol="TXF202608",
+        currency="TWD",
+        multiplier=200.0,
+        contract_month="202608",
+    )
+
+    result = adapter.get_position(request)
+
+    assert result["symbol"] == "TXF_202608"
+    adapter._resolve_contract.assert_called_once_with("TXF202608")
+    adapter._api.list_positions.assert_called_once_with(
+        account=adapter._api.futopt_account
+    )
+
+
+def test_exact_future_rejects_shioaji_delivery_month_mismatch():
+    adapter = _make_adapter(ca_activated=True)
+    contract = SimpleNamespace(
+        security_type="FUT",
+        code="TXFI6",
+        target_code="",
+    )
+    adapter._api.contracts.info.return_value = SimpleNamespace(
+        delivery_month="202609"
+    )
+
+    with pytest.raises(ValueError, match="contract month mismatch"):
+        adapter._validate_contract_selection(
+            contract,
+            continuous_alias=False,
+            contract_month="202612",
+        )
+
+
+def test_exact_future_rejects_shioaji_continuous_alias_code():
+    adapter = _make_adapter(ca_activated=True)
+
+    with pytest.raises(ValueError, match="cannot use continuous alias"):
+        adapter._validate_contract_selection(
+            _rolling_contract(),
+            continuous_alias=False,
+            contract_month="202608",
+        )
+
+
+def test_position_lookup_rejects_multiple_matching_native_positions():
+    sj = _require_shioaji()
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+    adapter._api.list_positions.return_value = [
+        SimpleNamespace(
+            code="TXF202608",
+            direction=sj.Action.Buy,
+            quantity=1,
+            price=22000,
+            pnl=0,
+        ),
+        SimpleNamespace(
+            code="TXF202608",
+            direction=sj.Action.Sell,
+            quantity=1,
+            price=22010,
+            pnl=0,
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="ambiguous broker positions"):
+        adapter.get_position(_position_request("TXFR1"))
+
+
+def test_position_lookup_rejects_unknown_direction():
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+    adapter._api.list_positions.return_value = [
+        SimpleNamespace(
+            code="TXF202608",
+            direction="unknown",
+            quantity=1,
+            price=22000,
+            pnl=0,
+        )
+    ]
+
+    with pytest.raises(ValueError, match="unknown Shioaji position direction"):
+        adapter.get_position(_position_request("TXFR1"))
 
 
 class TestResolveContract:
@@ -441,13 +674,19 @@ class TestGetBalance:
 
         assert result == {"free": 300_000.0, "used": 200_000.0, "total": 500_000.0}
 
-    def test_non_twd_currency_returns_zero(self):
+    def test_non_twd_currency_fails_explicitly(self):
         adapter = _make_adapter(ca_activated=True)
 
-        result = adapter.get_balance("USD")
-
-        assert result == {"free": 0.0, "used": 0.0, "total": 0.0}
+        with pytest.raises(ValueError, match="supports TWD only"):
+            adapter.get_balance("USD")
         adapter._api.margin.assert_not_called()
+
+    def test_missing_margin_fields_fail_explicitly(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._api.margin.return_value = SimpleNamespace(equity=500_000.0)
+
+        with pytest.raises(ValueError, match="missing equity or available_margin"):
+            adapter.get_balance("TWD")
 
     def test_requires_ca(self):
         adapter = _make_adapter(ca_activated=False)

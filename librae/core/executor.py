@@ -18,15 +18,19 @@ for initial entries only. Scaling requires explicit quantity.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
 from typing import Literal
 
+import numpy as np
+
 from librae.core import EPSILON
 
 from .cost_model import CostModel
+from .market_data import CAN_BUY_COLUMN, CAN_SELL_COLUMN
 from .strategy import (
     Fill,
     MultiLegOrder,
@@ -50,6 +54,182 @@ REASON_TAKE_PROFIT = "take_profit"
 REASON_FORCE_CLOSE = "force_close"
 REASON_DRAWDOWN_BREACH = "drawdown_breach"
 REASON_LIQUIDATION = "liquidation"
+
+
+def _intent_order_side(
+    intent: OrderIntent,
+    position_side: PositionSide | None,
+) -> Literal["buy", "sell"] | None:
+    if intent.action == "long":
+        return "buy"
+    if intent.action == "short":
+        return "sell"
+    if intent.action == "close" and position_side is not None:
+        return "sell" if position_side == "long" else "buy"
+    return None
+
+
+def _order_side_is_tradable(
+    bar: Mapping[str, object],
+    order_side: Literal["buy", "sell"],
+) -> bool:
+    """Return normalized side tradability without inferring broker rules.
+
+    The data source owns market-specific facts such as price limits, halts,
+    auctions, and empty books. The executor consumes only their common result.
+    """
+    field = CAN_BUY_COLUMN if order_side == "buy" else CAN_SELL_COLUMN
+    has_buy = CAN_BUY_COLUMN in bar
+    has_sell = CAN_SELL_COLUMN in bar
+    if has_buy != has_sell:
+        raise ValueError("bar must provide can_buy and can_sell together")
+    if not has_buy:
+        return True
+    value = bar[field]
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"bar {field} must be boolean")
+    return bool(value)
+
+
+def calculate_signed_position_notionals(
+    positions: dict[str, PositionState],
+    *,
+    prices: Mapping[str, float],
+    get_cost_model: Callable[[str], CostModel],
+) -> dict[str, float]:
+    """Return signed market notional per position at one explicit snapshot."""
+    if not positions:
+        return {}
+    missing_prices = sorted(set(positions) - set(prices))
+    if missing_prices:
+        raise ValueError(f"portfolio exposure validation is missing prices for {missing_prices}")
+    invalid_prices = sorted(
+        symbol
+        for symbol in positions
+        if not isfinite(float(prices[symbol])) or float(prices[symbol]) <= 0
+    )
+    if invalid_prices:
+        raise ValueError(f"portfolio exposure validation has invalid prices for {invalid_prices}")
+    return {
+        symbol: (
+            float(prices[symbol])
+            * position.quantity
+            * get_cost_model(symbol).multiplier
+            * side_multiplier(position.side)
+        )
+        for symbol, position in positions.items()
+    }
+
+
+def calculate_position_weights(
+    positions: dict[str, PositionState],
+    equity: float,
+    *,
+    prices: Mapping[str, float],
+    get_cost_model: Callable[[str], CostModel],
+) -> dict[str, float]:
+    """Return signed position weights using the canonical exposure formula."""
+    if equity <= EPSILON:
+        return {symbol: 0.0 for symbol in positions}
+    return {
+        symbol: signed_notional / equity
+        for symbol, signed_notional in calculate_signed_position_notionals(
+            positions,
+            prices=prices,
+            get_cost_model=get_cost_model,
+        ).items()
+    }
+
+
+def _portfolio_risk_values(
+    cash: float,
+    positions: dict[str, PositionState],
+    *,
+    prices: Mapping[str, float],
+    get_cost_model: Callable[[str], CostModel],
+) -> tuple[float, float, float]:
+    """Return equity, gross notional, and absolute net notional."""
+    signed_notionals = calculate_signed_position_notionals(
+        positions,
+        prices=prices,
+        get_cost_model=get_cost_model,
+    )
+    equity, _ = calc_equity(
+        cash,
+        positions,
+        get_price=lambda symbol, _position: prices[symbol],
+        get_cost_model=get_cost_model,
+    )
+    return (
+        equity,
+        sum(abs(notional) for notional in signed_notionals.values()),
+        abs(sum(signed_notionals.values())),
+    )
+
+
+def validate_exposure_transition(
+    *,
+    positions_before: dict[str, PositionState],
+    cash_before: float,
+    positions_after: dict[str, PositionState],
+    cash_after: float,
+    prices: Mapping[str, float],
+    get_cost_model: Callable[[str], CostModel],
+    max_gross_exposure: float | None,
+    max_net_exposure: float | None,
+) -> None:
+    """Reject a decision batch that worsens an already-breached exposure limit."""
+    if max_gross_exposure is None and max_net_exposure is None:
+        return
+    equity_before, gross_notional_before, net_notional_before = _portfolio_risk_values(
+        cash_before,
+        positions_before,
+        prices=prices,
+        get_cost_model=get_cost_model,
+    )
+    equity_after, gross_notional_after, net_notional_after = _portfolio_risk_values(
+        cash_after,
+        positions_after,
+        prices=prices,
+        get_cost_model=get_cost_model,
+    )
+    if equity_before <= EPSILON or equity_after <= EPSILON:
+        if (
+            max_gross_exposure is not None
+            and gross_notional_after > gross_notional_before + EPSILON
+        ):
+            raise ValueError(
+                "post-decision gross notional increases while portfolio equity is non-positive"
+            )
+        if max_net_exposure is not None and net_notional_after > net_notional_before + EPSILON:
+            raise ValueError(
+                "post-decision absolute net notional increases while portfolio "
+                "equity is non-positive"
+            )
+        return
+
+    gross_before = gross_notional_before / equity_before
+    net_before = net_notional_before / equity_before
+    gross_after = gross_notional_after / equity_after
+    net_after = net_notional_after / equity_after
+    if (
+        max_gross_exposure is not None
+        and gross_after > max_gross_exposure + EPSILON
+        and gross_after > gross_before + EPSILON
+    ):
+        raise ValueError(
+            f"post-decision gross exposure {gross_after:.6f} exceeds "
+            f"max_gross_exposure={max_gross_exposure:.6f}"
+        )
+    if (
+        max_net_exposure is not None
+        and net_after > max_net_exposure + EPSILON
+        and net_after > net_before + EPSILON
+    ):
+        raise ValueError(
+            f"post-decision absolute net exposure {net_after:.6f} exceeds "
+            f"max_net_exposure={max_net_exposure:.6f}"
+        )
 
 
 @dataclass(frozen=True)
@@ -619,6 +799,16 @@ def check_stop_targets(
         if hit is None:
             continue
         price, reason = hit
+        close_side: Literal["buy", "sell"] = "sell" if pos.side == "long" else "buy"
+        if not _order_side_is_tradable(bar, close_side):
+            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
+                pos.pending_market_exit_reason = reason
+            logger.info(
+                "%s exit for %s remains pending because the order side is not tradable",
+                reason,
+                sym,
+            )
+            continue
         bar_volume = bar.get("volume")
         max_volume_qty = _volume_fill_limit(
             sym,
@@ -702,6 +892,13 @@ def liquidate_all(
         bar = bars.get(sym)
         if bar is None or bar.get("close") is None:
             continue
+        close_side: Literal["buy", "sell"] = "sell" if pos.side == "long" else "buy"
+        if not _order_side_is_tradable(bar, close_side):
+            logger.info(
+                "Forced exit for %s cannot fill because the order side is not tradable",
+                sym,
+            )
+            continue
         price = bar["close"]
         bar_volume = bar.get("volume")
         max_volume_qty = _volume_fill_limit(
@@ -777,6 +974,17 @@ def resolve_fill_price(
     The intent is good for this eligible bar only.
     """
     fill_spec = intent.fill_price if intent.fill_price is not None else default_fill
+    order_side = _intent_order_side(intent, position_side)
+    if order_side is None:
+        logger.warning("Order rejected: cannot infer order side for %s", intent.action)
+        return None
+    if not _order_side_is_tradable(bar, order_side):
+        logger.info(
+            "%s %s cannot fill because the order side is not tradable",
+            order_side,
+            intent.symbol,
+        )
+        return None
 
     if isinstance(fill_spec, (int, float)):
         limit = float(fill_spec)
@@ -798,18 +1006,6 @@ def resolve_fill_price(
         open_price = float(open_raw)
         if not isfinite(open_price) or open_price <= 0:
             logger.warning("Limit order rejected: bar has invalid open")
-            return None
-
-        if intent.action == "long":
-            order_side: Literal["buy", "sell"] | None = "buy"
-        elif intent.action == "short":
-            order_side = "sell"
-        elif intent.action == "close" and position_side is not None:
-            order_side = "sell" if position_side == "long" else "buy"
-        else:
-            order_side = None
-        if order_side is None:
-            logger.warning("Limit order rejected: cannot infer order side for %s", intent.action)
             return None
 
         reached = low <= limit if order_side == "buy" else high >= limit
@@ -1446,8 +1642,6 @@ def execute_portfolio_targets(
     max_order_notional: float | None = None,
     max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
-    max_gross_exposure: float | None = None,
-    max_net_exposure: float | None = None,
     get_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
@@ -1462,19 +1656,6 @@ def execute_portfolio_targets(
     """
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
-    target_gross_exposure = sum(abs(weight) for weight in targets.weights.values())
-    target_net_exposure = abs(sum(targets.weights.values()))
-    if max_gross_exposure is not None and target_gross_exposure > max_gross_exposure + EPSILON:
-        raise ValueError(
-            f"target gross exposure {target_gross_exposure:.6f} exceeds "
-            f"max_gross_exposure={max_gross_exposure:.6f}"
-        )
-    if max_net_exposure is not None and target_net_exposure > max_net_exposure + EPSILON:
-        raise ValueError(
-            f"absolute target net exposure {target_net_exposure:.6f} exceeds "
-            f"max_net_exposure={max_net_exposure:.6f}"
-        )
-
     target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
     relevant_symbols = sorted(set(positions) | target_symbols)
     if not relevant_symbols:
@@ -1758,6 +1939,7 @@ def execute_pending_decision_and_stops(
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
+    exposure_prices: Mapping[str, float] | None = None,
 ) -> tuple[float, ExecutionResult]:
     """Fill pending decisions, then check causally eligible protective exits.
 
@@ -1777,6 +1959,17 @@ def execute_pending_decision_and_stops(
     same_bar_protection_symbols = set(positions)
 
     if pending_decision:
+        enforce_portfolio_limits = max_gross_exposure is not None or max_net_exposure is not None
+        if enforce_portfolio_limits and exposure_prices is None:
+            raise ValueError("portfolio exposure limits require explicit exposure_prices")
+        execution_positions = deepcopy(positions) if enforce_portfolio_limits else positions
+        execution_adv_quantities = (
+            dict(used_adv_quantity_by_symbol or {}) if enforce_portfolio_limits else None
+        )
+        adv_quantities = (
+            execution_adv_quantities if enforce_portfolio_limits else used_adv_quantity_by_symbol
+        )
+
         if isinstance(pending_decision, PortfolioTargets):
             effective_fill = pending_decision.fill_price or default_fill
             if effective_fill == "open":
@@ -1801,7 +1994,9 @@ def execute_pending_decision_and_stops(
                 bars.get(sym, {}),
                 action,
                 default_fill=default_fill,
-                position_side=positions[sym].side if sym in positions else None,
+                position_side=(
+                    execution_positions[sym].side if sym in execution_positions else None
+                ),
             )
 
         common_kwargs = {
@@ -1818,13 +2013,11 @@ def execute_pending_decision_and_stops(
         if isinstance(pending_decision, PortfolioTargets):
             fill_result = execute_portfolio_targets(
                 pending_decision,
-                positions,
+                execution_positions,
                 cash,
                 ts,
-                max_gross_exposure=max_gross_exposure,
-                max_net_exposure=max_net_exposure,
                 used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
-                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                used_adv_quantity_by_symbol=adv_quantities,
                 **common_kwargs,
             )
         else:
@@ -1835,13 +2028,32 @@ def execute_pending_decision_and_stops(
             )
             fill_result = execute_order_intents(
                 intents,
-                positions,
+                execution_positions,
                 cash,
                 ts,
                 **common_kwargs,
                 used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
-                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                used_adv_quantity_by_symbol=adv_quantities,
             )
+        if enforce_portfolio_limits:
+            assert exposure_prices is not None
+            validation_prices = dict(exposure_prices)
+            validation_prices.update({event.symbol: event.price for event in fill_result.events})
+            validate_exposure_transition(
+                positions_before=positions,
+                cash_before=cash,
+                positions_after=execution_positions,
+                cash_after=cash + fill_result.cash_delta,
+                prices=validation_prices,
+                get_cost_model=get_cost_model,
+                max_gross_exposure=max_gross_exposure,
+                max_net_exposure=max_net_exposure,
+            )
+            positions.clear()
+            positions.update(execution_positions)
+            if used_adv_quantity_by_symbol is not None and execution_adv_quantities is not None:
+                used_adv_quantity_by_symbol.clear()
+                used_adv_quantity_by_symbol.update(execution_adv_quantities)
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)
         cash_delta_total += fill_result.cash_delta

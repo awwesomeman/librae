@@ -39,21 +39,48 @@ def find_position(
     avg_price: Callable[[Any], float],
     pnl: Callable[[Any], float] = lambda pos: 0.0,
 ) -> dict:
-    """Scan *positions* for *symbol* and return the shape every adapter's
+    """Resolve exactly one native position into the shared adapter shape.
+
+    Multiple matches are ambiguous because the engine tracks one net position
+    per configured instrument. Fail closed instead of silently selecting an
+    arbitrary account, contract expiry, or position condition.
+
+    Return the shape every adapter's
     get_position() must return: ``{symbol, size, avg_price, unrealized_pnl}``
-    (zeroed if not found). Shared by CryptoAdapter/ShioajiAdapter/IBKRAdapter,
-    which differ only in how to pull these fields off their own native
-    position object.
+    (zeroed if not found).
     """
-    for pos in positions:
-        if matches(pos):
-            return {
-                "symbol": symbol,
-                "size": size(pos),
-                "avg_price": avg_price(pos),
-                "unrealized_pnl": pnl(pos),
-            }
-    return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+    matched = [position for position in positions if matches(position)]
+    if not matched:
+        return {"symbol": symbol, "size": 0, "avg_price": 0, "unrealized_pnl": 0}
+    if len(matched) > 1:
+        raise ValueError(f"ambiguous broker positions for {symbol}: {len(matched)} matches")
+    position = matched[0]
+    raw_size = size(position)
+    try:
+        resolved_size = float(raw_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"broker position for {symbol} contains non-numeric size") from exc
+    if not isfinite(resolved_size):
+        raise ValueError(f"broker position for {symbol} contains non-finite size")
+    if resolved_size == 0:
+        return {"symbol": symbol, "size": 0.0, "avg_price": 0.0, "unrealized_pnl": 0.0}
+    raw_avg_price = avg_price(position)
+    raw_pnl = pnl(position)
+    try:
+        resolved_avg_price = float(raw_avg_price)
+        resolved_pnl = float(raw_pnl)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"broker position for {symbol} contains non-numeric facts") from exc
+    if not isfinite(resolved_avg_price) or not isfinite(resolved_pnl):
+        raise ValueError(f"broker position for {symbol} contains non-finite facts")
+    if resolved_avg_price <= 0:
+        raise ValueError(f"open broker position for {symbol} requires a positive average price")
+    return {
+        "symbol": symbol,
+        "size": resolved_size,
+        "avg_price": resolved_avg_price,
+        "unrealized_pnl": resolved_pnl,
+    }
 
 
 def drop_incomplete_ohlcv(

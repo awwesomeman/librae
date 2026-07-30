@@ -7,6 +7,7 @@ Skills: python, quant
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import perf_counter
@@ -27,7 +28,7 @@ from librae.core.strategy import (
     Strategy,
 )
 from librae.live.engine import LiveTrader
-from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest
+from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
 from librae.live.state import LiveMultiLeg, MemoryLiveStateStore
 from tests.conftest import make_test_cfg
 
@@ -176,7 +177,13 @@ class _HoldStrategy(Strategy):
 
 
 def _test_cfg(**overrides) -> RunConfig:
-    overrides.setdefault("params", {"warmup_periods": 5})
+    overrides.setdefault(
+        "execution",
+        ExecutionPolicy(
+            max_bar_volume_participation_rate=None,
+            warmup_periods=5,
+        ),
+    )
     from librae.config.symbols import load_symbol_registry
 
     registry = load_symbol_registry()
@@ -222,6 +229,79 @@ def _test_cfg(**overrides) -> RunConfig:
 
 
 class TestLiveExecutor:
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"venue_symbol": ""}, "venue_symbol"),
+            ({"currency": ""}, "currency"),
+            ({"multiplier": 0.0}, "multiplier"),
+            ({"multiplier": True}, "multiplier"),
+        ],
+    )
+    def test_position_request_rejects_missing_accounting_identity(self, kwargs, message):
+        values = {
+            "symbol": "BTCUSDT",
+            "venue_symbol": "BTC/USDT",
+            "currency": "USDT",
+            "multiplier": 1.0,
+        }
+        values.update(kwargs)
+
+        with pytest.raises(ValueError, match=message):
+            PositionRequest(**values)
+
+    def test_future_position_request_requires_explicit_contract_selection(self):
+        with pytest.raises(ValueError, match="FUT position requires"):
+            PositionRequest(
+                symbol="ES",
+                venue_symbol="ES",
+                currency="USD",
+                multiplier=50.0,
+                security_type="FUT",
+                exchange="CME",
+            )
+
+    def test_future_order_request_rejects_conflicting_contract_selection(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            OrderRequest(
+                client_order_id="test-1",
+                symbol="ES_202609",
+                side="buy",
+                quantity=1.0,
+                order_type="market",
+                submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                security_type="FUT",
+                continuous_alias=True,
+                contract_month="202609",
+            )
+
+    def test_live_adapter_requires_position_reconciliation_capability(self):
+        class LifecycleOnly:
+            def prepare_order(self, signal):
+                return signal
+
+            def place_order(self, signal):
+                return {}
+
+            def find_order(self, client_order_id, symbol):
+                return None
+
+            def get_order(self, order_id, symbol):
+                return {}
+
+            def list_open_orders(self, symbol):
+                return []
+
+            def cancel_order(self, order_id, symbol):
+                return {}
+
+        with pytest.raises(ValueError, match="position reconciliation method"):
+            LiveExecutor(
+                _zero_cost_model(),
+                simulation=False,
+                order_adapter=LifecycleOnly(),
+            )
+
     def test_notify_exit_sends_telegram(self):
         cm = _zero_cost_model()
         mock_telegram = MagicMock()
@@ -1140,6 +1220,36 @@ class TestLiveTrader:
         assert runner._halted is True
         assert runner._positions == {}
 
+    def test_position_reconciliation_detects_changed_average_cost(self):
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 2.0,
+            "avg_price": 101.0,
+            "unrealized_pnl": 0.0,
+        }
+        runner = self._make_runner(
+            strategy=_HoldStrategy(),
+            config=_test_cfg(mode="live"),
+            order_adapter=mock_order_adapter,
+        )
+        local = {
+            "BTCUSDT": PositionState(
+                symbol="BTCUSDT",
+                side="long",
+                entry_price=100.0,
+                quantity=2.0,
+                entry_at=TEST_CLOCK_NOW,
+                periods_held=1,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=200.0,
+            )
+        }
+
+        assert runner._position_books_match(local, runner._read_broker_positions()) is False
+
     def test_reconciliation_failure_halts_startup(self):
         """An unreadable broker book must fail closed without crashing."""
         mock_order_adapter = _mock_order_adapter()
@@ -1153,6 +1263,75 @@ class TestLiveTrader:
         assert runner._positions == {}
         assert runner._halted is True
         assert any("Position Reconciliation Failed" in item[1]["title"] for item in alerts)
+
+    @pytest.mark.parametrize(
+        ("broker_position", "message"),
+        [
+            ({"symbol": "BTCUSDT", "avg_price": 100.0}, "missing size"),
+            (
+                {"symbol": "BTCUSDT", "size": float("nan"), "avg_price": 100.0},
+                "non-finite size",
+            ),
+            (
+                {"symbol": "BTCUSDT", "size": 1.0, "avg_price": None},
+                "missing average price",
+            ),
+        ],
+    )
+    def test_position_reconciliation_rejects_missing_broker_facts(
+        self,
+        broker_position,
+        message,
+    ):
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.return_value = broker_position
+        runner = self._make_runner(
+            config=_test_cfg(mode="live"),
+            order_adapter=mock_order_adapter,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            runner._read_broker_positions()
+
+    def test_ibkr_reconciliation_uses_execution_broker_not_data_adapter(self):
+        mock_order_adapter = _mock_order_adapter()
+        config = _test_cfg(
+            mode="live",
+            broker="ibkr",
+            symbols=["ES"],
+            accounts={"default": AccountConfig(currency="USD", initial_cash=100_000.0)},
+            instrument_overrides={
+                "ES": {
+                    "instrument_type": "contract_quarterly",
+                    "currency": "USD",
+                    "market": "us_equity",
+                    "data_source": "binance_spot",
+                    "data_adapter": "crypto",
+                    "security_type": "FUT",
+                    "exchange": "CME",
+                    "contract_month": "202609",
+                }
+            },
+            symbol_cost_overrides={"ES": {"multiplier": 50.0}},
+        )
+        runner = self._make_runner(
+            strategy=_HoldStrategy(),
+            config=config,
+            order_adapter=mock_order_adapter,
+        )
+
+        assert runner._read_broker_positions() == {}
+        mock_order_adapter.get_position.assert_called_once_with(
+            PositionRequest(
+                symbol="ES",
+                venue_symbol="ES",
+                currency="USD",
+                multiplier=1.0,
+                security_type="FUT",
+                exchange="CME",
+                contract_month="202609",
+            )
+        )
 
     def test_cash_drift_beyond_tolerance_alerts_without_adjusting_cash(self):
         """Drift past CASH_RECONCILE_TOLERANCE_PCT must alert with both
@@ -1249,9 +1428,8 @@ class TestLiveTrader:
         assert runner._cash_by_account == {"usd": 100_000.0, "usdt": 100_000.0}
         assert runner._currency_by_account == {"usd": "USD", "usdt": "USDT"}
 
-    def test_adapter_without_get_balance_is_skipped(self):
-        """A duck-typed adapter with no get_balance() at all must be silently
-        skipped — no alert, no exception, startup proceeds normally."""
+    def test_adapter_without_get_balance_reports_unavailable_reconciliation(self, caplog):
+        """An optional capability stays non-fatal but cannot disappear silently."""
         mock_order_adapter = _mock_order_adapter()
         del mock_order_adapter.get_balance
 
@@ -1260,11 +1438,13 @@ class TestLiveTrader:
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
-        runner.run(max_iterations=1)  # must not raise
+        with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
+            runner.run(max_iterations=1)  # must not raise
 
         assert not [
             kw for m, kw in alerts if m == "send_alert" and "Cash Reconciliation" in kw["title"]
         ]
+        assert "Cash reconciliation unavailable" in caplog.text
 
     def test_cash_reconciliation_failure_does_not_crash_startup(self):
         mock_order_adapter = _mock_order_adapter()
@@ -1520,7 +1700,10 @@ class TestLiveTrader:
                 return []
 
         cfg = _test_cfg(
-            params={"warmup_periods": 5},
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                warmup_periods=5,
+            ),
             risk=RiskPolicy(max_drawdown_rate=0.2),
         )
         runner = self._make_runner(strategy=BuyOnceStrategy(), fetcher=fetcher, config=cfg)
@@ -2094,6 +2277,103 @@ class TestLiveExecutionLifecycle:
 
         assert [request.quantity for request in requests] == [80.0, 20.0]
 
+    def test_live_order_batch_rejects_gross_exposure_before_submission(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                risk=RiskPolicy(max_gross_exposure=0.5),
+            ),
+        )
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
+
+        with pytest.raises(ValueError, match="post-decision gross exposure"):
+            runner._plan_live_orders(
+                [OrderIntent(action="long", symbol="BTCUSDT", quantity=600.0)],
+                {
+                    "BTCUSDT": {
+                        "open": 100.0,
+                        "high": 100.0,
+                        "low": 100.0,
+                        "close": 100.0,
+                        "volume": 1_000.0,
+                    }
+                },
+                ts,
+            )
+
+        adapter.place_order.assert_not_called()
+
+    def test_live_limit_order_exposure_uses_limit_price(self):
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            config=_test_cfg(
+                mode="live",
+                risk=RiskPolicy(max_gross_exposure=0.5),
+            ),
+        )
+
+        with pytest.raises(ValueError, match="post-decision gross exposure"):
+            runner._plan_live_orders(
+                [
+                    OrderIntent(
+                        action="long",
+                        symbol="BTCUSDT",
+                        quantity=500.0,
+                        fill_price=120.0,
+                    )
+                ],
+                {
+                    "BTCUSDT": {
+                        "open": 100.0,
+                        "high": 100.0,
+                        "low": 100.0,
+                        "close": 100.0,
+                        "volume": 1_000.0,
+                    }
+                },
+                datetime(2025, 1, 1, tzinfo=UTC),
+            )
+
+    def test_live_multi_leg_rejects_transient_net_exposure_before_submission(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                risk=RiskPolicy(max_net_exposure=0.5),
+            ),
+        )
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
+
+        with pytest.raises(ValueError, match="post-decision absolute net exposure"):
+            runner._plan_live_orders(
+                MultiLegOrder(
+                    legs=(
+                        OrderIntent(action="long", symbol="AAA", quantity=600.0),
+                        OrderIntent(action="short", symbol="BBB", quantity=600.0),
+                    )
+                ),
+                {
+                    symbol: {
+                        "open": 100.0,
+                        "high": 100.0,
+                        "low": 100.0,
+                        "close": 100.0,
+                        "volume": 1_000.0,
+                    }
+                    for symbol in ("AAA", "BBB")
+                },
+                ts,
+            )
+
+        adapter.place_order.assert_not_called()
+
     def test_live_planning_uses_adv_as_second_volume_budget(self):
         adapter = _mock_order_adapter()
         runner = self._make_trader(_HoldStrategy(), adapter)
@@ -2452,7 +2732,7 @@ class TestLiveExecutionLifecycle:
         assert adapter.place_order.call_count == 1
         assert second._run_id == first._run_id
 
-    def test_restored_spot_inventory_matches_without_broker_cost_basis(self):
+    def test_restored_position_without_broker_cost_basis_fails_closed(self):
         store = MemoryLiveStateStore()
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report()
@@ -2469,7 +2749,7 @@ class TestLiveExecutionLifecycle:
         second = self._make_trader(_HoldStrategy(), adapter, state_store=store)
         second.run(max_iterations=1)
 
-        assert second._halted is False
+        assert second._halted is True
         assert second._positions["BTCUSDT"].quantity == 1.0
         assert second._positions["BTCUSDT"].entry_price == 100.0
 
@@ -2948,7 +3228,13 @@ class TestShioajiLiveAutoWiring:
                 average=104.25,
             )
             mock_shioaji.fetch_ohlcv.side_effect = (
-                lambda symbol, tf, limit, drop_incomplete=False, calendar_id=None: fetcher()
+                lambda symbol,
+                tf,
+                limit,
+                drop_incomplete=False,
+                calendar_id=None,
+                continuous_alias=False,
+                contract_month=None: fetcher()
             )
             mock_cls.return_value = mock_shioaji
 

@@ -12,11 +12,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from math import isfinite
+from numbers import Real
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.strategy import PositionEventType
+from librae.core.utils import validate_contract_month
 
 if TYPE_CHECKING:
     from notifications.telegram import TelegramAdapter
@@ -57,6 +59,8 @@ class OrderRequest:
     security_type: str | None = None
     exchange: str | None = None
     currency: str | None = None
+    continuous_alias: bool = False
+    contract_month: str | None = None
 
     def __post_init__(self) -> None:
         if not self.client_order_id or not self.symbol:
@@ -69,6 +73,17 @@ class OrderRequest:
             raise ValueError(f"invalid position effect: {self.position_effect!r}")
         if self.venue_symbol is not None and not self.venue_symbol:
             raise ValueError("venue_symbol must be non-empty when supplied")
+        if not isinstance(self.continuous_alias, bool):
+            raise TypeError("continuous_alias must be a bool")
+        validate_contract_month(self.contract_month)
+        if self.continuous_alias and self.contract_month is not None:
+            raise ValueError("continuous_alias and contract_month are mutually exclusive")
+        if self.security_type == "FUT" and not (
+            self.continuous_alias or self.contract_month is not None
+        ):
+            raise ValueError(
+                "FUT order requires continuous_alias=True or contract_month='YYYYMM'"
+            )
         if not isfinite(self.quantity) or self.quantity <= 0:
             raise ValueError("order quantity must be positive and finite")
         if self.submitted_at.tzinfo is None:
@@ -89,13 +104,69 @@ class OrderRequest:
             "client_order_id": self.client_order_id,
             "position_effect": self.position_effect,
         }
-        for key in ("security_type", "exchange", "currency"):
+        for key in ("security_type", "exchange", "currency", "contract_month"):
             value = getattr(self, key)
             if value is not None:
                 signal[key] = value
+        signal["continuous_alias"] = self.continuous_alias
         if self.limit_price is not None:
             signal["price"] = self.limit_price
         return signal
+
+
+@dataclass(frozen=True)
+class PositionRequest:
+    """Broker-neutral identity for one configured instrument position.
+
+    The engine always supplies the same canonical fields. Each adapter uses
+    only the venue-routing fields it actually needs; broker-specific contract
+    resolution remains inside that adapter.
+    """
+
+    symbol: str
+    venue_symbol: str
+    currency: str
+    multiplier: float
+    security_type: str | None = None
+    exchange: str | None = None
+    continuous_alias: bool = False
+    contract_month: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise ValueError("position symbol must be non-empty")
+        if not isinstance(self.venue_symbol, str) or not self.venue_symbol:
+            raise ValueError("position venue_symbol must be non-empty")
+        if not isinstance(self.currency, str) or not self.currency:
+            raise ValueError("position currency must be non-empty")
+        if (
+            isinstance(self.multiplier, bool)
+            or not isinstance(self.multiplier, Real)
+            or not isfinite(self.multiplier)
+            or self.multiplier <= 0
+        ):
+            raise ValueError("position multiplier must be positive and finite")
+        if self.security_type is not None and (
+            not isinstance(self.security_type, str) or not self.security_type
+        ):
+            raise ValueError("position security_type must be non-empty when supplied")
+        if self.exchange is not None and (
+            not isinstance(self.exchange, str) or not self.exchange
+        ):
+            raise ValueError("position exchange must be non-empty when supplied")
+        if not isinstance(self.continuous_alias, bool):
+            raise TypeError("position continuous_alias must be a bool")
+        validate_contract_month(self.contract_month)
+        if self.continuous_alias and self.contract_month is not None:
+            raise ValueError(
+                "position continuous_alias and contract_month are mutually exclusive"
+            )
+        if self.security_type == "FUT" and not (
+            self.continuous_alias or self.contract_month is not None
+        ):
+            raise ValueError(
+                "FUT position requires continuous_alias=True or contract_month='YYYYMM'"
+            )
 
 
 @dataclass(frozen=True)
@@ -181,6 +252,11 @@ class LiveExecutor:
                         f"Live order_adapter for {symbol!r} is missing lifecycle methods: "
                         + ", ".join(missing)
                     )
+                if not callable(getattr(adapter, "get_position", None)):
+                    raise ValueError(
+                        f"Live order_adapter for {symbol!r} is missing required "
+                        "position reconciliation method: get_position"
+                    )
         self._cost_models = (
             dict(cost_model) if isinstance(cost_model, Mapping) else {"__default__": cost_model}
         )
@@ -220,6 +296,28 @@ class LiveExecutor:
         except KeyError as exc:
             raise ValueError(f"No order adapter configured for {symbol!r}") from exc
 
+    def get_position(self, symbol: str) -> Mapping[str, object]:
+        """Read one configured instrument through the shared broker boundary."""
+        try:
+            instrument = self._instruments[symbol]
+        except KeyError as exc:
+            raise ValueError(f"No instrument route configured for {symbol!r}") from exc
+        request = PositionRequest(
+            symbol=symbol,
+            venue_symbol=instrument.venue_symbol,
+            currency=instrument.currency,
+            multiplier=self.get_cost_model(symbol).multiplier,
+            security_type=instrument.security_type,
+            exchange=instrument.exchange,
+            continuous_alias=instrument.continuous_alias,
+            contract_month=instrument.contract_month,
+        )
+        adapter = self.get_order_adapter(symbol)
+        raw = adapter.get_position(request)
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"broker position for {symbol} must be a mapping")
+        return raw
+
     def request_from_event(
         self,
         event: OrderEvent,
@@ -254,6 +352,8 @@ class LiveExecutor:
             security_type=instrument.security_type if instrument else None,
             exchange=instrument.exchange if instrument else None,
             currency=instrument.currency if instrument else None,
+            continuous_alias=instrument.continuous_alias if instrument else False,
+            contract_month=instrument.contract_month if instrument else None,
         )
 
     def prepare_order(

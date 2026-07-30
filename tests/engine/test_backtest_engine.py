@@ -384,12 +384,92 @@ class TestBacktestDataContract:
         with pytest.raises(ValueError, match="volume must be non-negative"):
             Backtest(df, HoldStrategy(), data_source="test")
 
+    def test_rejects_non_boolean_side_tradability(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df["can_buy"] = "false"
+        df["can_sell"] = True
+
+        with pytest.raises(ValueError, match="must contain non-null booleans"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
+    def test_rejects_incomplete_side_tradability(self) -> None:
+        df = _make_multiindex_df([100.0] * 5)
+        df["can_buy"] = True
+
+        with pytest.raises(ValueError, match="must provide can_buy and can_sell together"):
+            Backtest(df, HoldStrategy(), data_source="test")
+
     def test_cfg_symbols_must_match_data(self) -> None:
         df = _make_multiindex_df([100.0] * 5)
         cfg = make_test_cfg(mode="backtest", symbols=["ETHUSDT"])
 
         with pytest.raises(ValueError, match="must exactly match data symbols"):
             Backtest(df, HoldStrategy(), config=cfg, cost_model=_zero_cost())
+
+    def test_timeframe_is_inferred_per_symbol_not_from_staggered_event_union(self) -> None:
+        aaa = _make_multiindex_df([100.0] * 5, symbol="AAA")
+        bbb = _make_multiindex_df([200.0] * 5, symbol="BBB")
+        shifted = bbb.index.get_level_values("datetime") + pd.Timedelta(minutes=30)
+        bbb.index = pd.MultiIndex.from_arrays(
+            [bbb.index.get_level_values("symbol"), shifted],
+            names=["symbol", "datetime"],
+        )
+        backtest = Backtest(
+            pd.concat([aaa, bbb]),
+            HoldStrategy(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+        )
+
+        backtest.run()
+
+        assert backtest._timeframe == "H1"
+
+    def test_rejects_inconsistent_per_symbol_timeframes(self) -> None:
+        hourly = _make_multiindex_df([100.0] * 5, symbol="AAA")
+        two_hour = _make_multiindex_df([200.0] * 5, symbol="BBB")
+        timestamps = pd.date_range("2025-01-01", periods=5, freq="2h", tz="UTC")
+        two_hour.index = pd.MultiIndex.from_arrays(
+            [two_hour.index.get_level_values("symbol"), timestamps],
+            names=["symbol", "datetime"],
+        )
+
+        with pytest.raises(ValueError, match="inconsistent timeframes"):
+            Backtest(
+                pd.concat([hourly, two_hour]),
+                HoldStrategy(),
+                initial_balance=1_000.0,
+                cost_model=_zero_cost(),
+            ).run()
+
+    def test_rejects_configured_timeframe_that_disagrees_with_data(self) -> None:
+        config = make_test_cfg(mode="backtest", timeframe="D1")
+
+        with pytest.raises(ValueError, match=r"config\.timeframe=D1"):
+            Backtest(
+                _make_multiindex_df([100.0] * 5),
+                HoldStrategy(),
+                config=config,
+                cost_model=_zero_cost(),
+            ).run()
+
+    def test_monthly_timeframe_accepts_variable_calendar_month_lengths(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5)
+        monthly = pd.date_range("2025-01-01", periods=5, freq="MS", tz="UTC")
+        frame.index = pd.MultiIndex.from_arrays(
+            [frame.index.get_level_values("symbol"), monthly],
+            names=["symbol", "datetime"],
+        )
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+        )
+
+        backtest.run()
+
+        assert backtest._timeframe == "MN1"
 
 
 class TestSignalDrivenStrategy:
@@ -639,6 +719,27 @@ class TestMultiAsset:
                     }
                 )
         df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+
+        class BuyAaa(Strategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol="AAA", quantity=1.0)]
+                return []
+
+        with pytest.raises(ValueError, match=r"cannot force-close.*AAA"):
+            Backtest(
+                df,
+                BuyAaa(),
+                initial_balance=1_000.0,
+                cost_model=_zero_cost(),
+                data_source="test",
+            ).run()
+
+    def test_end_of_run_does_not_invent_liquidity_for_untradable_exit(self) -> None:
+        df = _make_multiindex_df([100.0] * 5, symbol="AAA")
+        df["can_buy"] = True
+        df["can_sell"] = True
+        df.loc[("AAA", df.index.get_level_values("datetime")[-1]), "can_sell"] = False
 
         class BuyAaa(Strategy):
             def on_bar(self, ctx):

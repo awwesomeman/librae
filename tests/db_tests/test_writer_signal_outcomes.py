@@ -356,6 +356,7 @@ class TestPersistBacktest:
             "adv_lookback_sessions": None,
             "max_adv_participation_rate": None,
             "live_order_timeout_seconds": None,
+            "warmup_periods": 720,
         }
         assert call_kwargs.kwargs["replace_existing"] is False
 

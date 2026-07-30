@@ -13,7 +13,9 @@ from librae.core.executor import (
     REASON_FORCE_CLOSE,
     _cap_fill_to_notional,
     _cap_fill_to_volume,
+    calculate_position_weights,
     execute_order_intents,
+    execute_pending_decision_and_stops,
     execute_portfolio_targets,
     liquidate_all,
 )
@@ -21,6 +23,7 @@ from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
     Fill,
+    MultiLegOrder,
     OrderIntent,
     PortfolioTargets,
     PositionState,
@@ -35,6 +38,19 @@ from tests.conftest import make_test_cfg
 
 def _zero_cost() -> CostModel:
     return CostModel.zero()
+
+
+def _leveraged_zero_cost() -> CostModel:
+    return CostModel(
+        multiplier=1.0,
+        commission_rate=0.0,
+        min_commission=0.0,
+        slippage_ticks=0.0,
+        tick_size=0.01,
+        tax_rate=0.0,
+        long_margin_rate=0.5,
+        short_margin_rate=0.5,
+    )
 
 
 def _make_pos(
@@ -267,6 +283,201 @@ class TestMaxOrderNotional:
             )
 
         assert positions == {}
+
+
+class TestPortfolioExposureLimits:
+    def test_canonical_position_weights_preserve_direction(self):
+        positions = {
+            "AAA": _make_pos(symbol="AAA", side="long", quantity=2.0),
+            "BBB": _make_pos(symbol="BBB", side="short", quantity=1.0),
+        }
+
+        weights = calculate_position_weights(
+            positions,
+            1_000.0,
+            prices={"AAA": 100.0, "BBB": 100.0},
+            get_cost_model=lambda _symbol: _zero_cost(),
+        )
+
+        assert weights == pytest.approx({"AAA": 0.2, "BBB": -0.1})
+
+    def test_order_intent_batch_cannot_bypass_gross_limit(self):
+        positions: dict[str, PositionState] = {}
+        bars = {
+            "AAA": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+            "BBB": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+        }
+
+        with pytest.raises(ValueError, match="post-decision gross exposure"):
+            execute_pending_decision_and_stops(
+                TS,
+                positions,
+                200.0,
+                [
+                    OrderIntent(action="long", symbol="AAA", quantity=1.5),
+                    OrderIntent(action="long", symbol="BBB", quantity=1.5),
+                ],
+                bars,
+                get_cost_model=lambda _symbol: _leveraged_zero_cost(),
+                default_fill="open",
+                primary_symbol="AAA",
+                max_gross_exposure=1.0,
+                exposure_prices={"AAA": 100.0, "BBB": 100.0},
+            )
+
+        assert positions == {}
+
+    def test_rejected_exposure_batch_does_not_consume_adv_budget(self):
+        positions: dict[str, PositionState] = {}
+        adv_usage: dict[str, float] = {}
+        bars = {
+            "AAA": {
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "volume": 100.0,
+            },
+        }
+
+        with pytest.raises(ValueError, match="post-decision gross exposure"):
+            execute_pending_decision_and_stops(
+                TS,
+                positions,
+                200.0,
+                [OrderIntent(action="long", symbol="AAA", quantity=1.5)],
+                bars,
+                get_cost_model=lambda _symbol: _leveraged_zero_cost(),
+                default_fill="open",
+                primary_symbol="AAA",
+                max_adv_participation_rate=1.0,
+                get_lagged_adv=lambda _symbol: 100.0,
+                used_adv_quantity_by_symbol=adv_usage,
+                max_gross_exposure=0.5,
+                exposure_prices={"AAA": 100.0},
+            )
+
+        assert positions == {}
+        assert adv_usage == {}
+
+    def test_order_intent_batch_cannot_bypass_net_limit(self):
+        positions: dict[str, PositionState] = {}
+        bars = {
+            "AAA": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+        }
+
+        with pytest.raises(ValueError, match="post-decision absolute net exposure"):
+            execute_pending_decision_and_stops(
+                TS,
+                positions,
+                200.0,
+                [OrderIntent(action="long", symbol="AAA", quantity=1.5)],
+                bars,
+                get_cost_model=lambda _symbol: _leveraged_zero_cost(),
+                default_fill="open",
+                primary_symbol="AAA",
+                max_net_exposure=0.5,
+                exposure_prices={"AAA": 100.0},
+            )
+
+        assert positions == {}
+
+    def test_multi_leg_batch_cannot_bypass_gross_limit(self):
+        positions: dict[str, PositionState] = {}
+        bars = {
+            "AAA": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+            "BBB": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+        }
+        decision = MultiLegOrder(
+            legs=(
+                OrderIntent(action="long", symbol="AAA", quantity=1.5),
+                OrderIntent(action="short", symbol="BBB", quantity=1.5),
+            ),
+            max_completion_seconds=5.0,
+        )
+
+        with pytest.raises(ValueError, match="post-decision gross exposure"):
+            execute_pending_decision_and_stops(
+                TS,
+                positions,
+                200.0,
+                decision,
+                bars,
+                get_cost_model=lambda _symbol: _leveraged_zero_cost(),
+                default_fill="open",
+                primary_symbol="AAA",
+                max_gross_exposure=1.0,
+                exposure_prices={"AAA": 100.0, "BBB": 100.0},
+            )
+
+        assert positions == {}
+
+    def test_risk_reduction_remains_allowed_while_still_above_limit(self):
+        positions = {"TEST": _make_pos(quantity=2.0)}
+        bars = {
+            "TEST": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+        }
+
+        _, result = execute_pending_decision_and_stops(
+            TS,
+            positions,
+            0.0,
+            [OrderIntent(action="close", symbol="TEST", quantity=0.5)],
+            bars,
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+            max_gross_exposure=0.5,
+            exposure_prices={"TEST": 100.0},
+        )
+
+        assert len(result.events) == 1
+        assert positions["TEST"].quantity == pytest.approx(1.5)
+
+    def test_portfolio_target_can_reduce_risk_while_still_above_limit(self):
+        positions = {"TEST": _make_pos(quantity=2.0)}
+        bars = {
+            "TEST": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+        }
+
+        _, result = execute_pending_decision_and_stops(
+            TS,
+            positions,
+            0.0,
+            PortfolioTargets(weights={"TEST": 0.75}),
+            bars,
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+            max_gross_exposure=0.5,
+            exposure_prices={"TEST": 100.0},
+        )
+
+        assert len(result.events) == 1
+        assert positions["TEST"].quantity == pytest.approx(1.5)
+
+    def test_risk_reducing_close_remains_available_with_non_positive_equity(self):
+        positions = {"TEST": _make_pos(quantity=2.0)}
+        bars = {
+            "TEST": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+        }
+
+        cash, result = execute_pending_decision_and_stops(
+            TS,
+            positions,
+            -250.0,
+            [OrderIntent(action="close", symbol="TEST", quantity=0.5)],
+            bars,
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+            max_gross_exposure=0.5,
+            exposure_prices={"TEST": 100.0},
+        )
+
+        assert len(result.events) == 1
+        assert positions["TEST"].quantity == pytest.approx(1.5)
+        assert cash == pytest.approx(-200.0)
 
 
 class TestProcessActionsVolumeCap:

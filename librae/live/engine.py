@@ -31,6 +31,7 @@ from librae.core.executor import (
     ExecutionResult,
     apply_execution_fill,
     calc_equity,
+    calculate_position_weights,
     check_stop_targets,
     execute_order_intents,
     execute_pending_decision_and_stops,
@@ -39,6 +40,7 @@ from librae.core.executor import (
     partition_pending_decision,
     queue_market_exit_all,
     side_multiplier,
+    validate_exposure_transition,
     validate_strategy_decision,
 )
 from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
@@ -277,6 +279,8 @@ class LiveTrader:
                                 security_type=_instrument.security_type,
                                 exchange=_instrument.exchange,
                                 currency=_instrument.currency,
+                                continuous_alias=_instrument.continuous_alias,
+                                contract_month=_instrument.contract_month,
                                 drop_incomplete=drop_incomplete,
                             )
                         )
@@ -289,6 +293,8 @@ class LiveTrader:
                                 tf,
                                 limit=limit,
                                 calendar_id=_instrument.calendar_id,
+                                continuous_alias=_instrument.continuous_alias,
+                                contract_month=_instrument.contract_month,
                                 drop_incomplete=drop_incomplete,
                             )
                         )
@@ -300,6 +306,8 @@ class LiveTrader:
                                 _instrument.venue_symbol,
                                 tf,
                                 limit=limit,
+                                continuous_alias=_instrument.continuous_alias,
+                                contract_month=_instrument.contract_month,
                                 drop_incomplete=drop_incomplete,
                             )
                         )
@@ -464,7 +472,7 @@ class LiveTrader:
                 self._restore_state(restored)
 
         # --- Resolve callbacks (sentinel pattern) ---
-        configured_warmup = (config.params or {}).get("warmup_periods", 720)
+        configured_warmup = config.execution.warmup_periods
         adv_warmup = (config.execution.adv_lookback_sessions or 0) + 1
         self._warmup_periods = max(configured_warmup, adv_warmup)
 
@@ -1028,15 +1036,27 @@ class LiveTrader:
 
         positions: dict[str, _BrokerPosition] = {}
         for symbol in self._symbols:
-            adapter = self._executor.get_order_adapter(symbol)
-            instrument = self._instruments[symbol]
-            broker_pos = adapter.get_position(instrument.venue_symbol)
-            size = float(broker_pos.get("size") or 0)
-            if not size:
+            broker_pos = self._executor.get_position(symbol)
+            if "size" not in broker_pos or broker_pos["size"] is None:
+                raise ValueError(f"broker position for {symbol} is missing size")
+            try:
+                size = float(broker_pos["size"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"broker position for {symbol} has invalid size") from exc
+            if not isfinite(size):
+                raise ValueError(f"broker position for {symbol} has non-finite size")
+            if abs(size) <= EPSILON:
                 continue
             raw_average = broker_pos.get("avg_price")
-            avg_price = float(raw_average) if raw_average is not None else None
-            if avg_price is not None and avg_price <= 0:
+            if raw_average is None:
+                raise ValueError(f"open broker position for {symbol} is missing average price")
+            try:
+                avg_price = float(raw_average)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"open broker position for {symbol} has invalid average price"
+                ) from exc
+            if not isfinite(avg_price) or avg_price <= 0:
                 raise ValueError(f"broker returned invalid average price for {symbol}")
             side: Literal["long", "short"] = "long" if size > 0 else "short"
             positions[symbol] = _BrokerPosition(
@@ -1046,8 +1066,8 @@ class LiveTrader:
             )
         return positions
 
-    @staticmethod
     def _position_books_match(
+        self,
         local: dict[str, PositionState],
         broker: dict[str, _BrokerPosition],
     ) -> bool:
@@ -1058,6 +1078,13 @@ class LiveTrader:
             tolerance = max(EPSILON, expected.quantity * 1e-9)
             if expected.side != actual.side or abs(expected.quantity - actual.quantity) > tolerance:
                 return False
+            if actual.average_price is not None:
+                price_tolerance = max(
+                    self._get_cost_model(symbol).tick_size + EPSILON,
+                    abs(expected.entry_price) * 1e-4,
+                )
+                if abs(expected.entry_price - actual.average_price) > price_tolerance:
+                    return False
         return True
 
     def _reconcile_open_orders(self) -> None:
@@ -1119,9 +1146,9 @@ class LiveTrader:
         — auto-overwriting risks replacing a good local number with a
         misread one. Detect and alert, let a human decide.
 
-        Duck-typed and best-effort: adapters without a get_balance() method
-        are silently skipped, as is a market this engine has no settlement
-        currency mapping for — nothing to compare against either way.
+        Duck-typed and best-effort: an unavailable capability or unreadable
+        balance is reported but does not halt trading because broker balance
+        semantics cannot safely replace the local accounting ledger.
         """
         if self._executor.simulation:
             return
@@ -1134,6 +1161,11 @@ class LiveTrader:
             )
             adapter = self._executor.get_order_adapter(symbol)
             if not callable(getattr(adapter, "get_balance", None)):
+                logger.warning(
+                    "Cash reconciliation unavailable for account=%s: "
+                    "order adapter has no get_balance capability",
+                    account_id,
+                )
                 continue
             currency = self._currency_by_account[account_id]
             try:
@@ -1623,6 +1655,8 @@ class LiveTrader:
             for symbol, bar in bars.items()
             if bar.get("close") is not None and float(bar["close"]) > 0
         }
+        exposure_prices = dict(self._last_prices)
+        exposure_prices.update(prices)
 
         def get_price(symbol: str, _action: OrderIntent) -> float | None:
             return prices.get(symbol)
@@ -1678,13 +1712,70 @@ class LiveTrader:
                 max_order_notional=max_order_notional,
                 max_bar_volume_participation_rate=volume_limit,
                 max_adv_participation_rate=adv_limit,
-                max_gross_exposure=self._risk_policy.max_gross_exposure,
-                max_net_exposure=self._risk_policy.max_net_exposure,
                 get_volume=get_volume,
                 get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                 used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
+            if apply_entry_risk_limits:
+                replay_positions = {
+                    symbol: deepcopy(position)
+                    for symbol, position in self._positions.items()
+                    if self._account_id_by_symbol[symbol] == account_id
+                }
+                replay_cash = self._cash_by_account[account_id]
+                replay_prices = dict(exposure_prices)
+                for event in result.events:
+                    positions_before_event = deepcopy(replay_positions)
+                    cash_before_event = replay_cash
+                    is_entry = event.event_type in ("open", "add")
+                    order_side: Literal["buy", "sell"]
+                    if is_entry:
+                        order_side = "buy" if event.side == "long" else "sell"
+                    else:
+                        order_side = "sell" if event.side == "long" else "buy"
+                    replay_cash, _ = apply_execution_fill(
+                        replay_positions,
+                        replay_cash,
+                        Fill(
+                            symbol=event.symbol,
+                            side=event.side,
+                            price=event.price,
+                            quantity=event.fill_quantity,
+                            commission=event.commission,
+                            slippage=event.slippage,
+                            tax=event.tax,
+                        ),
+                        ts,
+                        order_side=order_side,
+                        cost_model=self._get_cost_model(event.symbol),
+                        reason=event.reason,
+                    )
+                    replay_prices[event.symbol] = event.price
+                    validate_exposure_transition(
+                        positions_before=positions_before_event,
+                        cash_before=cash_before_event,
+                        positions_after=replay_positions,
+                        cash_after=replay_cash,
+                        prices=replay_prices,
+                        get_cost_model=self._get_cost_model,
+                        max_gross_exposure=self._risk_policy.max_gross_exposure,
+                        max_net_exposure=self._risk_policy.max_net_exposure,
+                    )
+                validate_exposure_transition(
+                    positions_before={
+                        symbol: position
+                        for symbol, position in self._positions.items()
+                        if self._account_id_by_symbol[symbol] == account_id
+                    },
+                    cash_before=self._cash_by_account[account_id],
+                    positions_after=account_positions,
+                    cash_after=self._cash_by_account[account_id] + result.cash_delta,
+                    prices=exposure_prices,
+                    get_cost_model=self._get_cost_model,
+                    max_gross_exposure=self._risk_policy.max_gross_exposure,
+                    max_net_exposure=self._risk_policy.max_net_exposure,
+                )
             requests = []
             for index, event in enumerate(result.events):
                 request = self._executor.request_from_event(
@@ -1702,6 +1793,7 @@ class LiveTrader:
         actions = list(intent.legs) if isinstance(intent, MultiLegOrder) else intent
         requests: list[OrderRequest] = []
         planning_cash_by_account = dict(self._cash_by_account)
+        planning_exposure_prices = dict(exposure_prices)
         for action in actions:
             if action.stop_price is not None or action.take_profit_price is not None:
                 raise ValueError(
@@ -1719,6 +1811,12 @@ class LiveTrader:
             planning_action = replace(action, fill_price="close")
             symbol = action.symbol or primary_symbol
             account_id = self._account_id_by_symbol[symbol]
+            positions_before_action = {
+                candidate_symbol: deepcopy(position)
+                for candidate_symbol, position in staged_positions.items()
+                if self._account_id_by_symbol[candidate_symbol] == account_id
+            }
+            cash_before_action = planning_cash_by_account[account_id]
             max_position_notional = (
                 self._risk_policy.max_position_weight * self._prev_equity_by_account[account_id]
                 if apply_entry_risk_limits and self._risk_policy.max_position_weight
@@ -1729,7 +1827,11 @@ class LiveTrader:
                 staged_positions,
                 planning_cash_by_account[account_id],
                 ts,
-                get_price=get_price,
+                get_price=lambda requested_symbol, _action, _symbol=symbol, _limit=limit_price: (
+                    _limit
+                    if requested_symbol == _symbol and _limit is not None
+                    else prices.get(requested_symbol)
+                ),
                 get_cost_model=self._get_cost_model,
                 primary_symbol=primary_symbol,
                 max_position_notional=max_position_notional,
@@ -1742,6 +1844,22 @@ class LiveTrader:
                 used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
             planning_cash_by_account[account_id] += result.cash_delta
+            planning_exposure_prices.update({event.symbol: event.price for event in result.events})
+            if apply_entry_risk_limits:
+                validate_exposure_transition(
+                    positions_before=positions_before_action,
+                    cash_before=cash_before_action,
+                    positions_after={
+                        candidate_symbol: position
+                        for candidate_symbol, position in staged_positions.items()
+                        if self._account_id_by_symbol[candidate_symbol] == account_id
+                    },
+                    cash_after=planning_cash_by_account[account_id],
+                    prices=planning_exposure_prices,
+                    get_cost_model=self._get_cost_model,
+                    max_gross_exposure=self._risk_policy.max_gross_exposure,
+                    max_net_exposure=self._risk_policy.max_net_exposure,
+                )
             sequence_offset = sequence_start + len(requests)
             for index, event in enumerate(result.events):
                 request = self._executor.request_from_event(
@@ -2488,6 +2606,14 @@ class LiveTrader:
                 ready_decision,
                 primary_symbol=primary_symbol,
             )
+            exposure_prices = dict(self._last_prices)
+            exposure_prices.update(
+                {
+                    symbol: float(bar["open"])
+                    for symbol, bar in raw_bars.items()
+                    if bar.get("open") is not None
+                }
+            )
             staged_cash_by_account = dict(self._cash_by_account)
             step_trades: list[TradeResult] = []
             step_events: list[OrderEvent] = []
@@ -2530,6 +2656,7 @@ class LiveTrader:
                         used_adv_quantity_by_symbol=self._adv_filled_quantities,
                         max_gross_exposure=self._risk_policy.max_gross_exposure,
                         max_net_exposure=self._risk_policy.max_net_exposure,
+                        exposure_prices=exposure_prices,
                     )
                     staged_cash_by_account[account_id] = staged_cash
                 self._replace_account_positions(account_id, account_positions)
@@ -2696,27 +2823,22 @@ class LiveTrader:
                 continue
             if equity <= EPSILON:
                 return f"account {account_id} confirmed equity is non-positive ({equity:.6f})"
-            signed_weights: list[tuple[str, float]] = []
-            for symbol, position in account_positions.items():
-                notional = (
-                    position.quantity
-                    * self._get_last_price(symbol, position)
-                    * self._get_cost_model(symbol).multiplier
-                )
-                signed_weight = notional / equity
-                if position.side == "short":
-                    signed_weight = -signed_weight
-                signed_weights.append((symbol, signed_weight))
+            signed_weights = calculate_position_weights(
+                account_positions,
+                equity,
+                prices=self._last_prices,
+                get_cost_model=self._get_cost_model,
+            )
 
             max_position_weight = self._risk_policy.max_position_weight
             if max_position_weight is not None:
-                for symbol, weight in signed_weights:
+                for symbol, weight in signed_weights.items():
                     if abs(weight) > max_position_weight + EPSILON:
                         return (
                             f"{symbol} confirmed weight {abs(weight):.6f} exceeds "
                             f"max_position_weight={max_position_weight:.6f}"
                         )
-            gross = sum(abs(weight) for _, weight in signed_weights)
+            gross = sum(abs(weight) for weight in signed_weights.values())
             max_gross = self._risk_policy.max_gross_exposure
             if max_gross is not None and gross > max_gross + EPSILON:
                 return (
@@ -2724,7 +2846,7 @@ class LiveTrader:
                     f"exceeds max_gross_exposure={max_gross:.6f}"
                 )
             if include_net:
-                net = abs(sum(weight for _, weight in signed_weights))
+                net = abs(sum(signed_weights.values()))
                 max_net = self._risk_policy.max_net_exposure
                 if max_net is not None and net > max_net + EPSILON:
                     return (
@@ -2825,22 +2947,17 @@ class LiveTrader:
             drawdown = (equity - peak) / peak if peak > 0 else 0.0
             period_return = equity / previous_equity - 1.0 if previous_equity > 0 else 0.0
             self._prev_equity_by_account[account_id] = equity
-            signed_weights: list[float] = []
-            if equity > EPSILON:
-                for symbol, position in self._account_positions(account_id).items():
-                    notional = (
-                        position.quantity
-                        * self._get_last_price(symbol, position)
-                        * self._get_cost_model(symbol).multiplier
-                    )
-                    signed_weights.append(
-                        notional / equity * (1.0 if position.side == "long" else -1.0)
-                    )
+            signed_weights = calculate_position_weights(
+                self._account_positions(account_id),
+                equity,
+                prices=self._last_prices,
+                get_cost_model=self._get_cost_model,
+            )
             traded_notional = self._pending_traded_notional_by_account[account_id]
             self._portfolio_diagnostics_by_account[account_id] = (
-                sum(abs(weight) for weight in signed_weights),
-                sum(signed_weights),
-                max((abs(weight) for weight in signed_weights), default=0.0),
+                sum(abs(weight) for weight in signed_weights.values()),
+                sum(signed_weights.values()),
+                max((abs(weight) for weight in signed_weights.values()), default=0.0),
                 traded_notional / equity if equity > EPSILON else 0.0,
             )
             self._pending_traded_notional_by_account[account_id] = 0.0

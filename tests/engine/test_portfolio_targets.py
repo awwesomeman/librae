@@ -225,32 +225,6 @@ class TestRebalanceExecution:
 
         assert positions == {}
 
-    @pytest.mark.parametrize(
-        ("limit_name", "limit", "weights"),
-        [
-            ("max_gross_exposure", 1.0, {"A": 0.75, "B": -0.75}),
-            ("max_net_exposure", 0.5, {"A": 0.75}),
-        ],
-    )
-    def test_portfolio_target_limits_fail_instead_of_scaling(
-        self,
-        limit_name: str,
-        limit: float,
-        weights: dict[str, float],
-    ) -> None:
-        kwargs = {limit_name: limit}
-        with pytest.raises(ValueError, match=r"target .* exposure"):
-            execute_portfolio_targets(
-                PortfolioTargets(weights=weights),
-                {},
-                1_000.0,
-                TS,
-                get_price=lambda symbol, _action: {"A": 100.0, "B": 50.0}[symbol],
-                get_cost_model=lambda _symbol: CostModel.zero(),
-                primary_symbol="A",
-                **kwargs,
-            )
-
 
 class TestBacktestRebalance:
     def test_targets_fill_next_bar_at_execution_prices(self) -> None:

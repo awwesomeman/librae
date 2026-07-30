@@ -38,6 +38,20 @@ def make_event_id(run_id: str, index: int) -> str:
     return f"{run_id}-e{index:04d}"
 
 
+def validate_contract_month(contract_month: object) -> str | None:
+    """Validate an optional futures contract month in ``YYYYMM`` form."""
+    if contract_month is None:
+        return None
+    if (
+        not isinstance(contract_month, str)
+        or len(contract_month) != 6
+        or not contract_month.isdigit()
+        or not 1 <= int(contract_month[4:]) <= 12
+    ):
+        raise ValueError("contract_month must use YYYYMM format")
+    return contract_month
+
+
 # ---------------------------------------------------------------------------
 # Timeframe utilities
 # ---------------------------------------------------------------------------

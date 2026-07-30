@@ -5,12 +5,18 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pandas as pd
-from librae.core.run_config import RunConfig
+from librae.core.run_config import ExecutionPolicy, RunConfig
 from tests.conftest import make_test_cfg
 
 
 def _test_cfg(**overrides) -> RunConfig:
-    overrides.setdefault("params", {"warmup_periods": 50})
+    overrides.setdefault(
+        "execution",
+        ExecutionPolicy(
+            max_bar_volume_participation_rate=None,
+            warmup_periods=50,
+        ),
+    )
     return make_test_cfg(**overrides)
 
 
@@ -73,7 +79,12 @@ class TestWarmupFetcher:
         )
         mock_fetcher = MagicMock(return_value=warmup_df)
 
-        cfg = _test_cfg(params={"warmup_periods": 10})
+        cfg = _test_cfg(
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                warmup_periods=10,
+            )
+        )
         trader = LiveTrader(
             mock_strategy,
             lambda x: x,
@@ -108,7 +119,12 @@ class TestWarmupFetcher:
         trader = LiveTrader(
             MagicMock(),
             lambda x: x,
-            config=_test_cfg(params={"warmup_periods": 2}),
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=2,
+                )
+            ),
             adapter=MagicMock(return_value=invalid_df),
             warmup_fetcher=None,
             on_bar=None,

@@ -52,6 +52,8 @@ from librae.core.executor import (
     TradePnL,
     TradeResult,
     calc_equity,
+    calculate_position_weights,
+    calculate_signed_position_notionals,
     check_stop_targets,
     execute_pending_decision_and_stops,
     liquidate_all,
@@ -75,7 +77,13 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import session_labels, validate_calendar_id
-from librae.core.utils import generate_run_id, infer_timeframe, make_event_id
+from librae.core.utils import (
+    generate_run_id,
+    infer_timeframe,
+    interval_to_timedelta,
+    make_event_id,
+    to_canonical,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +132,66 @@ def _validate_backtest_data(
             raise ValueError(f"data timestamps must be increasing within symbol {symbol!r}")
 
     validate_ohlcv_values(data)
+
+
+def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None) -> str:
+    """Infer each symbol independently and require one coherent bar interval."""
+    indexes_by_symbol = {
+        str(symbol): pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
+        for symbol, symbol_data in data.groupby(level="symbol", sort=False)
+    }
+    inferred_by_symbol = {
+        symbol: infer_timeframe(index[:20])
+        for symbol, index in indexes_by_symbol.items()
+        if len(index) >= 5
+    }
+    if configured_timeframe is not None:
+        expected = to_canonical(configured_timeframe)
+        mismatches = {
+            symbol: timeframe
+            for symbol, timeframe in inferred_by_symbol.items()
+            if timeframe != expected
+        }
+        if mismatches:
+            raise ValueError(
+                f"config.timeframe={expected} does not match per-symbol data "
+                f"timeframes={mismatches}"
+            )
+        data_timeframe = expected
+    else:
+        if not inferred_by_symbol:
+            raise ValueError(
+                "cannot infer a data timeframe: at least one symbol requires five bars"
+            )
+        inferred = set(inferred_by_symbol.values())
+        if len(inferred) != 1:
+            raise ValueError(f"data symbols have inconsistent timeframes: {inferred_by_symbol}")
+        data_timeframe = next(iter(inferred))
+
+    if data_timeframe.startswith("MN"):
+        month_interval = int(data_timeframe[2:])
+        for symbol, index in indexes_by_symbol.items():
+            if len(index) < 2:
+                continue
+            month_ordinals = index.tz_localize(None).to_period("M").asi8
+            month_diffs = np.diff(month_ordinals)
+            if np.any(month_diffs < month_interval) or np.any(month_diffs % month_interval != 0):
+                raise ValueError(
+                    f"data symbol {symbol!r} timestamps are not aligned to "
+                    f"timeframe={data_timeframe}"
+                )
+        return data_timeframe
+
+    base_interval = interval_to_timedelta(data_timeframe)
+    for symbol, index in indexes_by_symbol.items():
+        if len(index) < 2:
+            continue
+        diffs = pd.Series(index).diff().dropna()
+        if any(diff < base_interval or diff % base_interval != pd.Timedelta(0) for diff in diffs):
+            raise ValueError(
+                f"data symbol {symbol!r} timestamps are not aligned to timeframe={data_timeframe}"
+            )
+    return data_timeframe
 
 
 @dataclass(frozen=True)
@@ -213,11 +281,6 @@ class BacktestResult:
     @property
     def initial_cash(self) -> float:
         return self._single_account().initial_cash
-
-    @property
-    def initial_balance(self) -> float:
-        """Backward-compatible name for the direct single-account API."""
-        return self.initial_cash
 
     @property
     def final_equity(self) -> float:
@@ -499,6 +562,7 @@ class Backtest:
         halted_accounts: set[str],
         get_lagged_adv: Callable[[str], float | None],
         used_adv_quantity_by_symbol: dict[str, float],
+        exposure_prices: dict[str, float],
     ) -> ExecutionResult:
         decisions = self._decisions_by_account(decision, primary_symbol=primary_symbol)
         trades: list[TradeResult] = []
@@ -542,6 +606,7 @@ class Backtest:
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
+                    exposure_prices=exposure_prices,
                 )
             cash_by_account[account_id] = account_cash
             self._replace_account_positions(positions, account_id, account_positions)
@@ -558,7 +623,10 @@ class Backtest:
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
-        self._timeframe = infer_timeframe(pd.DatetimeIndex(self._timeline[:20]))
+        self._timeframe = _resolve_data_timeframe(
+            self._data,
+            self._config.timeframe if self._config is not None else None,
+        )
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
             missing_calendars = sorted(
                 symbol for symbol, calendar_id in self._calendar_ids.items() if calendar_id is None
@@ -624,7 +692,11 @@ class Backtest:
             ) -> float | None:
                 return values.get(symbol)
 
+            exposure_prices = dict(last_prices)
             for symbol, bar in bars.items():
+                open_price = bar.get("open")
+                if open_price is not None and np.isfinite(open_price) and open_price > 0:
+                    exposure_prices[symbol] = float(open_price)
                 close = bar.get("close")
                 if close is not None and np.isfinite(close) and close > 0:
                     last_prices[symbol] = float(close)
@@ -668,6 +740,7 @@ class Backtest:
                 halted_accounts=halted_accounts,
                 get_lagged_adv=get_lagged_adv,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                exposure_prices=exposure_prices,
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
@@ -1358,16 +1431,20 @@ class Backtest:
     ) -> list[PositionSnapshot]:
         """Build deterministic end-of-bar position and realized-weight facts."""
         snapshots: list[PositionSnapshot] = []
+        signed_notionals = calculate_signed_position_notionals(
+            positions,
+            prices=last_prices,
+            get_cost_model=self._get_cost_model,
+        )
+        realized_weights = calculate_position_weights(
+            positions,
+            equity,
+            prices=last_prices,
+            get_cost_model=self._get_cost_model,
+        )
         for symbol in sorted(positions):
             position = positions[symbol]
             price = last_prices[symbol]
-            signed_market_value = (
-                price
-                * position.quantity
-                * self._get_cost_model(symbol).multiplier
-                * (-1.0 if position.side == "short" else 1.0)
-            )
-            realized_weight = signed_market_value / equity if abs(equity) > EPSILON else 0.0
             snapshots.append(
                 PositionSnapshot(
                     ts=ts,
@@ -1375,8 +1452,8 @@ class Backtest:
                     side=position.side,
                     quantity=position.quantity,
                     price=price,
-                    market_value=signed_market_value,
-                    realized_weight=realized_weight,
+                    market_value=signed_notionals[symbol],
+                    realized_weight=realized_weights[symbol],
                 )
             )
         return snapshots
@@ -1387,18 +1464,12 @@ class Backtest:
         last_prices: dict[str, float],
         equity: float,
     ) -> dict[str, float]:
-        if equity <= EPSILON:
-            return {symbol: 0.0 for symbol in positions}
-        return {
-            symbol: (
-                last_prices[symbol]
-                * position.quantity
-                * self._get_cost_model(symbol).multiplier
-                * (-1.0 if position.side == "short" else 1.0)
-                / equity
-            )
-            for symbol, position in positions.items()
-        }
+        return calculate_position_weights(
+            positions,
+            equity,
+            prices=last_prices,
+            get_cost_model=self._get_cost_model,
+        )
 
     def _snapshot_allocations(
         self,

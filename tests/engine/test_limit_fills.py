@@ -12,8 +12,23 @@ from librae.core.executor import resolve_fill_price
 from librae.core.strategy import OrderIntent, Strategy
 
 
-def _bar(*, open_: float, high: float, low: float) -> dict[str, float]:
-    return {"open": open_, "high": high, "low": low, "close": open_, "volume": 100.0}
+def _bar(
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    can_buy: bool = True,
+    can_sell: bool = True,
+) -> dict[str, float]:
+    return {
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": open_,
+        "volume": 100.0,
+        "can_buy": can_buy,
+        "can_sell": can_sell,
+    }
 
 
 @pytest.mark.parametrize(
@@ -78,6 +93,97 @@ def test_unreached_limit_expires_with_observable_log(caplog) -> None:
 
     assert fill is None
     assert "expired unfilled" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("action", "position_side", "bar"),
+    [
+        (
+            OrderIntent(action="long", symbol="X"),
+            None,
+            _bar(open_=110, high=110, low=110, can_buy=False),
+        ),
+        (
+            OrderIntent(action="short", symbol="X"),
+            None,
+            _bar(open_=90, high=90, low=90, can_sell=False),
+        ),
+        (
+            OrderIntent(action="close", symbol="X"),
+            "short",
+            _bar(open_=110, high=110, low=110, can_buy=False),
+        ),
+        (
+            OrderIntent(action="close", symbol="X"),
+            "long",
+            _bar(open_=90, high=90, low=90, can_sell=False),
+        ),
+    ],
+)
+def test_untradable_order_side_rejects_fill(
+    action,
+    position_side,
+    bar,
+) -> None:
+    assert (
+        resolve_fill_price(
+            bar,
+            action,
+            default_fill="open",
+            position_side=position_side,
+        )
+        is None
+    )
+
+
+def test_partial_side_tradability_fails_instead_of_defaulting() -> None:
+    bar = _bar(open_=100, high=101, low=99)
+    del bar["can_sell"]
+
+    with pytest.raises(ValueError, match="can_buy and can_sell together"):
+        resolve_fill_price(
+            bar,
+            OrderIntent(action="long", symbol="X"),
+            default_fill="open",
+        )
+
+
+@pytest.mark.parametrize(
+    ("action", "position_side", "bar"),
+    [
+        (
+            OrderIntent(action="short", symbol="X"),
+            None,
+            _bar(open_=110, high=110, low=110, can_buy=False),
+        ),
+        (
+            OrderIntent(action="long", symbol="X"),
+            None,
+            _bar(open_=90, high=90, low=90, can_sell=False),
+        ),
+        (
+            OrderIntent(action="close", symbol="X"),
+            "long",
+            _bar(open_=110, high=110, low=110, can_buy=False),
+        ),
+        (
+            OrderIntent(action="close", symbol="X"),
+            "short",
+            _bar(open_=90, high=90, low=90, can_sell=False),
+        ),
+    ],
+)
+def test_opposite_order_side_remains_tradable(
+    action,
+    position_side,
+    bar,
+) -> None:
+    assert resolve_fill_price(
+        bar,
+        action,
+        default_fill="open",
+        position_side=position_side,
+    ) == pytest.approx(bar["open"])
 
 
 def test_unfilled_limit_does_not_roll_to_a_later_bar(caplog) -> None:

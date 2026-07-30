@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 from librae.config.symbols import (
     ALLOWED_INSTRUMENT_TYPES,
+    AvailableSymbol,
     SymbolInfo,
     _build_registry,
+    available_symbols,
     get_symbol,
     load_symbol_registry,
     resolve_symbol,
@@ -54,6 +56,129 @@ class TestLoadSymbolRegistry:
             registry["BTCUSDT"].market = "tw_futures"
 
 
+class TestAvailableSymbol:
+    def test_exact_future_exposes_fetch_and_run_config_routing(self):
+        symbol = AvailableSymbol(
+            broker="ibkr",
+            canonical_symbol="MNQ_202609",
+            venue_symbol="MNQ",
+            native_symbol="MNQU6",
+            name="Micro E-mini Nasdaq-100",
+            kind="future",
+            asset_class="index",
+            currency="USD",
+            instrument_type="contract_quarterly",
+            security_type="FUT",
+            exchange="CME",
+            contract_month="202609",
+            delivery_month="202609",
+            contract_rank=0,
+            multiplier=2.0,
+            tick_size=0.25,
+        )
+
+        assert symbol.market_data_kwargs() == {
+            "continuous_alias": False,
+            "contract_month": "202609",
+            "security_type": "FUT",
+            "exchange": "CME",
+            "currency": "USD",
+        }
+        assert symbol.instrument_override() == {
+            "broker": "ibkr",
+            "data_adapter": "ibkr",
+            "venue_symbol": "MNQ",
+            "currency": "USD",
+            "instrument_type": "contract_quarterly",
+            "continuous_alias": False,
+            "security_type": "FUT",
+            "exchange": "CME",
+            "contract_month": "202609",
+        }
+        assert symbol.cost_override() == {
+            "multiplier": 2.0,
+            "tick_size": 0.25,
+        }
+
+    def test_dispatcher_forwards_filters_to_injected_adapter(self):
+        expected = (
+            AvailableSymbol(
+                broker="binance",
+                canonical_symbol="MUUSDT_PERP",
+                venue_symbol="MU/USDT:USDT",
+                native_symbol="MUUSDT",
+                name="MUUSDT",
+                kind="perpetual",
+                asset_class="equity",
+                currency="USDT",
+                instrument_type="contract_perpetual",
+                multiplier=1.0,
+            ),
+        )
+
+        class Adapter:
+            def available_symbols(self, **kwargs):
+                assert kwargs == {
+                    "query": "MU",
+                    "kind": "perpetual",
+                    "asset_class": "equity",
+                }
+                return expected
+
+        result = available_symbols(
+            "binance",
+            query="MU",
+            kind="perpetual",
+            asset_class="equity",
+            adapter=Adapter(),
+        )
+
+        assert result == expected
+
+    def test_dispatcher_routes_binance_stock_filters_to_injected_adapter(self):
+        expected = (
+            AvailableSymbol(
+                broker="binance",
+                canonical_symbol="MU",
+                venue_symbol="MU",
+                native_symbol="MU",
+                name="Micron Technology Inc.",
+                kind="spot",
+                asset_class="equity",
+                currency="USD",
+                instrument_type="spot",
+                security_type="STK",
+                exchange="NASDAQ",
+                multiplier=1.0,
+            ),
+        )
+
+        class Adapter:
+            def available_symbols(self, **kwargs):
+                assert kwargs == {
+                    "query": "MU",
+                    "kind": "spot",
+                    "asset_class": "equity",
+                }
+                return expected
+
+        result = available_symbols(
+            "binance",
+            query="MU",
+            kind="spot",
+            asset_class="equity",
+            adapter=Adapter(),
+        )
+
+        assert result == expected
+
+    def test_binance_requires_explicit_product_dimensions(self):
+        with pytest.raises(ValueError, match="requires kind"):
+            available_symbols("binance", query="BTCUSDT", asset_class="crypto")
+        with pytest.raises(ValueError, match="requires asset_class"):
+            available_symbols("binance", query="BTCUSDT", kind="spot")
+
+
 class TestInstrumentTypeValidation:
     def test_invalid_instrument_type_raises(self):
         with pytest.raises(ValueError, match="instrument_type"):
@@ -80,7 +205,45 @@ class TestInstrumentTypeValidation:
                 data_adapter="crypto",
                 venue_symbol="X/USDT",
                 currency="USDT",
+                contract_month=("202609" if t.startswith("contract_") and t != "contract_perpetual" else None),
                 tick_size=0.01,
+            )
+
+    def test_dated_contract_requires_exact_month_or_continuous_alias(self):
+        common = {
+            "symbol": "ES_202609",
+            "market": "us_futures",
+            "data_source": "ibkr",
+            "instrument_type": "contract_quarterly",
+            "multiplier": 50.0,
+            "data_adapter": "ibkr",
+            "venue_symbol": "ES",
+            "currency": "USD",
+        }
+
+        exact = SymbolInfo(**common, contract_month="202609")
+        rolling = SymbolInfo(**(common | {"symbol": "ES_FRONT"}), continuous_alias=True)
+
+        assert exact.contract_month == "202609"
+        assert rolling.continuous_alias is True
+        with pytest.raises(ValueError, match="exactly one"):
+            SymbolInfo(**common)
+        with pytest.raises(ValueError, match="exactly one"):
+            SymbolInfo(**common, continuous_alias=True, contract_month="202609")
+
+    @pytest.mark.parametrize("contract_month", ["20269", "202600", "202613", "SEP2026"])
+    def test_invalid_contract_month_raises(self, contract_month):
+        with pytest.raises(ValueError, match="YYYYMM"):
+            SymbolInfo(
+                symbol="ES_BAD",
+                market="us_futures",
+                data_source="ibkr",
+                instrument_type="contract_quarterly",
+                multiplier=50.0,
+                data_adapter="ibkr",
+                venue_symbol="ES",
+                currency="USD",
+                contract_month=contract_month,
             )
 
     def test_missing_instrument_type_raises(self):
@@ -230,6 +393,33 @@ class TestResolveSymbol:
 
         assert info.calendar_id == "XNYS"
 
+    def test_exact_ibkr_future_keeps_canonical_symbol_and_explicit_month(self):
+        info = resolve_symbol(
+            self._cfg(
+                symbols=["ES_202609"],
+                market="us_futures",
+                data_source="ibkr",
+                instrument_overrides={
+                    "ES_202609": {
+                        "data_adapter": "ibkr",
+                        "currency": "USD",
+                        "instrument_type": "contract_quarterly",
+                        "security_type": "FUT",
+                        "exchange": "CME",
+                        "venue_symbol": "ES",
+                        "contract_month": "202609",
+                    }
+                },
+                symbol_cost_overrides={"ES_202609": {"multiplier": 50.0}},
+            ),
+            "ES_202609",
+        )
+
+        assert info.symbol == "ES_202609"
+        assert info.venue_symbol == "ES"
+        assert info.contract_month == "202609"
+        assert info.continuous_alias is False
+
     def test_unknown_data_source_requires_adapter_route(self):
         with pytest.raises(ValueError, match="No data adapter route"):
             resolve_symbol(
@@ -274,4 +464,16 @@ class TestResolveSymbol:
                     },
                 ),
                 "AAPL",
+            )
+
+    def test_ibkr_execution_route_requires_security_type_from_non_ibkr_data(self):
+        with pytest.raises(ValueError, match="security_type"):
+            resolve_symbol(
+                self._cfg(
+                    symbols=["BTCUSDT"],
+                    market="crypto",
+                    data_source="binance_spot",
+                    broker="ibkr",
+                ),
+                "BTCUSDT",
             )

@@ -143,7 +143,7 @@ class TestBuildOutputValid:
         assert result.equity_curve[-1].equity == pytest.approx(result.final_equity)
         assert output.equity_curve[-1].equity == pytest.approx(result.final_equity)
         assert output.metrics.total_return == pytest.approx(
-            result.final_equity / result.initial_balance - 1.0
+            result.final_equity / result.initial_cash - 1.0
         )
         final_ts = result.equity_curve[-1].ts
         assert all(snapshot.ts != final_ts for snapshot in result.position_snapshots)

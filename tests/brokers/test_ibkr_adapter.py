@@ -12,12 +12,36 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.live.executor import PositionRequest
 
 from brokers.ibkr_adapter import _require_ib_async
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _position_request(
+    symbol: str,
+    *,
+    security_type: str = "STK",
+    exchange: str | None = None,
+    multiplier: float = 1.0,
+    continuous_alias: bool | None = None,
+    contract_month: str | None = None,
+) -> PositionRequest:
+    if continuous_alias is None:
+        continuous_alias = security_type == "FUT" and contract_month is None
+    return PositionRequest(
+        symbol=symbol,
+        venue_symbol=symbol,
+        currency="USD",
+        multiplier=multiplier,
+        security_type=security_type,
+        exchange=exchange,
+        continuous_alias=continuous_alias,
+        contract_month=contract_month,
+    )
 
 
 def test_missing_ib_async_names_install_extra():
@@ -66,6 +90,92 @@ def _mock_ib_async_module(bars_df):
     mock = MagicMock()
     mock.util.df.return_value = bars_df
     return mock
+
+
+def test_available_symbols_lists_mnq_front_and_next_exact_contracts():
+    adapter = _make_adapter()
+    september = SimpleNamespace(
+        contract=SimpleNamespace(
+            conId=1,
+            symbol="MNQ",
+            localSymbol="MNQU6",
+            lastTradeDateOrContractMonth="20260918",
+            multiplier="2",
+            currency="USD",
+            exchange="CME",
+        ),
+        longName="Micro E-mini Nasdaq-100",
+        category="Equity Index",
+        subcategory="",
+        minTick=0.25,
+    )
+    december = SimpleNamespace(
+        contract=SimpleNamespace(
+            conId=2,
+            symbol="MNQ",
+            localSymbol="MNQZ6",
+            lastTradeDateOrContractMonth="20261218",
+            multiplier="2",
+            currency="USD",
+            exchange="CME",
+        ),
+        longName="Micro E-mini Nasdaq-100",
+        category="Equity Index",
+        subcategory="",
+        minTick=0.25,
+    )
+    adapter._ib.reqContractDetails.return_value = [december, september]
+    mock_ib_async = MagicMock()
+    mock_ib_async.Future.return_value = "mnq-chain-query"
+
+    with (
+        patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+        patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 7, 30)),
+    ):
+        results = adapter.available_symbols(
+            query="MNQ",
+            kind="future",
+            asset_class="index",
+            exchange="CME",
+        )
+
+    assert [(item.native_symbol, item.contract_rank) for item in results] == [
+        ("MNQU6", 0),
+        ("MNQZ6", 1),
+    ]
+    assert results[0].canonical_symbol == "MNQ_202609"
+    assert results[0].contract_month == "202609"
+    mock_ib_async.Future.assert_called_once_with("MNQ", exchange="CME", currency="USD")
+
+
+def test_available_symbols_resolves_nvda_spot():
+    adapter = _make_adapter()
+    adapter._ib.reqContractDetails.return_value = [
+        SimpleNamespace(
+            contract=SimpleNamespace(
+                conId=4815747,
+                symbol="NVDA",
+                localSymbol="NVDA",
+                currency="USD",
+            ),
+            longName="NVIDIA CORP",
+            minTick=0.01,
+        )
+    ]
+    mock_ib_async = MagicMock()
+    mock_ib_async.Stock.return_value = "nvda-query"
+
+    with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+        results = adapter.available_symbols(
+            query="NVDA",
+            kind="spot",
+            asset_class="equity",
+        )
+
+    assert len(results) == 1
+    assert results[0].canonical_symbol == "NVDA"
+    assert results[0].venue_symbol == "NVDA"
+    mock_ib_async.Stock.assert_called_once_with("NVDA", "SMART", "USD")
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +302,7 @@ class TestReadOnlyGuard:
         adapter = _make_adapter(trading_enabled=False)
 
         with pytest.raises(NotImplementedError, match="read-only"):
-            adapter.get_position("MU")
+            adapter.get_position(_position_request("MU"))
 
 
 # ---------------------------------------------------------------------------
@@ -437,23 +547,98 @@ def test_find_order_does_not_query_history_when_session_trade_exists():
 class TestGetPosition:
     def test_found(self):
         adapter = _make_adapter(trading_enabled=True)
+        resolved = SimpleNamespace(conId=123)
+        adapter._resolve_contract = MagicMock(return_value=resolved)
         mock_pos = MagicMock()
         mock_pos.contract.symbol = "MU"
+        mock_pos.contract.conId = 123
         mock_pos.position = 100
         mock_pos.avgCost = 850.0
         adapter._ib.positions.return_value = [mock_pos]
 
-        result = adapter.get_position("MU")
+        result = adapter.get_position(_position_request("MU"))
 
         assert result == {"symbol": "MU", "size": 100, "avg_price": 850.0, "unrealized_pnl": 0.0}
 
     def test_not_found_returns_zero(self):
         adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(conId=123))
         adapter._ib.positions.return_value = []
 
-        result = adapter.get_position("MU")
+        result = adapter.get_position(_position_request("MU"))
 
         assert result == {"symbol": "MU", "size": 0, "avg_price": 0, "unrealized_pnl": 0.0}
+
+    def test_futures_position_matches_resolved_contract_id_not_root_symbol(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(conId=222, multiplier="50")
+        )
+        adapter._ib.positions.return_value = [
+            SimpleNamespace(
+                contract=SimpleNamespace(symbol="ES", conId=111),
+                position=1,
+                avgCost=6000,
+            ),
+            SimpleNamespace(
+                contract=SimpleNamespace(symbol="ES", conId=222),
+                position=-2,
+                avgCost=305_000,
+            ),
+        ]
+
+        result = adapter.get_position(
+            _position_request(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                multiplier=50.0,
+            )
+        )
+
+        assert result == {
+            "symbol": "ES",
+            "size": -2,
+            "avg_price": 6100,
+            "unrealized_pnl": 0.0,
+        }
+
+    def test_rejects_resolved_contract_without_stable_id(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(conId=0))
+
+        with pytest.raises(ValueError, match="no stable conId"):
+            adapter.get_position(_position_request("MU"))
+
+    def test_rejects_future_without_contract_multiplier(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(conId=123))
+
+        with pytest.raises(ValueError, match="no contract multiplier"):
+            adapter.get_position(
+                _position_request(
+                    "ES",
+                    security_type="FUT",
+                    exchange="CME",
+                    multiplier=50.0,
+                )
+            )
+
+    def test_rejects_contract_multiplier_that_disagrees_with_accounting_config(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(conId=123, multiplier="50")
+        )
+
+        with pytest.raises(ValueError, match="contract multiplier mismatch"):
+            adapter.get_position(
+                _position_request(
+                    "ES",
+                    security_type="FUT",
+                    exchange="CME",
+                    multiplier=5.0,
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -482,13 +667,26 @@ class TestGetBalance:
 
         assert result == {"free": 12345.67, "used": 0.0, "total": 12345.67}
 
-    def test_no_matching_currency_returns_zero(self):
+    def test_no_matching_currency_fails_explicitly(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._ib.accountSummary.return_value = []
 
-        result = adapter.get_balance("USD")
+        with pytest.raises(ValueError, match="no TotalCashValue"):
+            adapter.get_balance("USD")
 
-        assert result == {"free": 0.0, "used": 0.0, "total": 0.0}
+    def test_multiple_matching_cash_values_fail_as_ambiguous(self):
+        adapter = _make_adapter(trading_enabled=True)
+
+        def account_value(value):
+            return SimpleNamespace(tag="TotalCashValue", currency="USD", value=value)
+
+        adapter._ib.accountSummary.return_value = [
+            account_value("100"),
+            account_value("200"),
+        ]
+
+        with pytest.raises(ValueError, match="ambiguous TotalCashValue"):
+            adapter.get_balance("USD")
 
     def test_requires_trading_enabled(self):
         adapter = _make_adapter(trading_enabled=False)
@@ -564,10 +762,95 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
-            result = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+            result = adapter._resolve_contract(
+                "ES", security_type="FUT", exchange="CME", continuous_alias=True
+            )
 
         assert result is near
         mock_ib_async.Future.assert_called_once_with("ES", exchange="CME", currency="USD")
+
+    def test_exact_contract_month_selects_only_requested_month(self):
+        adapter = _make_adapter()
+        september, december = MagicMock(), MagicMock()
+        adapter._ib.reqContractDetails.return_value = [
+            self._detail("20261218", december),
+            self._detail("20260918", september),
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
+            result = adapter._resolve_contract(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                contract_month="202609",
+            )
+
+        assert result is september
+        mock_ib_async.Future.assert_called_once_with(
+            "ES",
+            exchange="CME",
+            currency="USD",
+            lastTradeDateOrContractMonth="202609",
+        )
+
+    def test_exact_contract_month_does_not_fall_back_to_another_month(self):
+        adapter = _make_adapter()
+        adapter._ib.reqContractDetails.return_value = [
+            self._detail("20261218", MagicMock()),
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="contract_month=202609"),
+        ):
+            adapter._resolve_contract(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                contract_month="202609",
+            )
+
+    def test_future_requires_explicit_selection_mode(self):
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="exactly one"):
+            adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+
+    def test_future_rejects_month_and_continuous_alias_together(self):
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="exactly one"):
+            adapter._resolve_contract(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                continuous_alias=True,
+                contract_month="202609",
+            )
+
+    def test_exact_contract_month_rejects_ambiguous_matches(self):
+        adapter = _make_adapter()
+        adapter._ib.reqContractDetails.return_value = [
+            self._detail("20260918", MagicMock()),
+            self._detail("20260919", MagicMock()),
+        ]
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        with (
+            patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="Ambiguous IBKR future"),
+        ):
+            adapter._resolve_contract(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                contract_month="202609",
+            )
 
     def test_ignores_expired_contract_details(self):
         adapter = _make_adapter()
@@ -581,7 +864,9 @@ class TestResolveContractFutures:
         mock_ib_async.Future.return_value = "unqualified_future"
 
         with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
-            result = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+            result = adapter._resolve_contract(
+                "ES", security_type="FUT", exchange="CME", continuous_alias=True
+            )
 
         assert result is near
 
@@ -599,12 +884,16 @@ class TestResolveContractFutures:
             patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)),
         ):
-            first = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+            first = adapter._resolve_contract(
+                "ES", security_type="FUT", exchange="CME", continuous_alias=True
+            )
         with (
             patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             patch("brokers.ibkr_adapter._utc_today", return_value=date(2026, 4, 1)),
         ):
-            second = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+            second = adapter._resolve_contract(
+                "ES", security_type="FUT", exchange="CME", continuous_alias=True
+            )
 
         assert first is expired
         assert second is current
@@ -613,7 +902,7 @@ class TestResolveContractFutures:
     def test_contract_details_cache_rolls_with_expired_contract(self):
         adapter = _make_adapter()
         expired, current = MagicMock(), MagicMock()
-        cache_key = ("ES", "FUT", "CME", "USD")
+        cache_key = ("ES", "FUT", "CME", "USD", None)
         expired_detail = self._detail("20260321", expired)
         current_detail = self._detail("20260620", current)
         adapter._contract_cache[cache_key] = expired
@@ -631,6 +920,7 @@ class TestResolveContractFutures:
                 security_type="FUT",
                 exchange="CME",
                 currency="USD",
+                continuous_alias=True,
             )
 
         assert result is current_detail
@@ -649,7 +939,9 @@ class TestResolveContractFutures:
             patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="No non-expired future"),
         ):
-            adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+            adapter._resolve_contract(
+                "ES", security_type="FUT", exchange="CME", continuous_alias=True
+            )
 
     def test_missing_exchange_raises(self):
         adapter = _make_adapter()
@@ -666,7 +958,12 @@ class TestResolveContractFutures:
             patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
             pytest.raises(ValueError, match="Unknown future"),
         ):
-            adapter._resolve_contract("NOTREAL", security_type="FUT", exchange="CME")
+            adapter._resolve_contract(
+                "NOTREAL",
+                security_type="FUT",
+                exchange="CME",
+                continuous_alias=True,
+            )
 
     def test_unsupported_security_type_raises(self):
         adapter = _make_adapter()
@@ -686,7 +983,9 @@ class TestResolveContractFutures:
 
         with patch("brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async):
             stock_result = adapter._resolve_contract("ES", security_type="STK")
-            future_result = adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+            future_result = adapter._resolve_contract(
+                "ES", security_type="FUT", exchange="CME", continuous_alias=True
+            )
 
         assert stock_result is stock_contract
         assert future_result is future_contract

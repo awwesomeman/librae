@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
+CAN_BUY_COLUMN = "can_buy"
+CAN_SELL_COLUMN = "can_sell"
+SIDE_TRADABILITY_COLUMNS = (CAN_BUY_COLUMN, CAN_SELL_COLUMN)
 
 
 def validate_ohlcv_values(data: pd.DataFrame, *, context: str = "data") -> None:
@@ -37,3 +40,14 @@ def validate_ohlcv_values(data: pd.DataFrame, *, context: str = "data") -> None:
         )
     if np.any(volume < 0):
         raise ValueError(f"{context} volume must be non-negative")
+
+    present_tradability_columns = [
+        column for column in SIDE_TRADABILITY_COLUMNS if column in data.columns
+    ]
+    if present_tradability_columns and len(present_tradability_columns) != len(
+        SIDE_TRADABILITY_COLUMNS
+    ):
+        raise ValueError(f"{context} must provide can_buy and can_sell together")
+    for column in present_tradability_columns:
+        if not pd.api.types.is_bool_dtype(data[column]) or data[column].isna().any():
+            raise ValueError(f"{context} {column} must contain non-null booleans")

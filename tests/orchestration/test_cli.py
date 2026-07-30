@@ -214,6 +214,7 @@ class TestBuildConfig:
                     default_fill_price: close
                     max_bar_volume_participation_rate: null
                     live_order_timeout_seconds: 120
+                    warmup_periods: 900
                 """
             )
         )
@@ -221,6 +222,7 @@ class TestBuildConfig:
         assert unlimited.execution.default_fill_price == "close"
         assert unlimited.execution.max_bar_volume_participation_rate is None
         assert unlimited.execution.live_order_timeout_seconds == 120
+        assert unlimited.execution.warmup_periods == 900
 
     def test_unknown_execution_setting_is_rejected(self, tmp_path):
         (tmp_path / "config.yaml").write_text(

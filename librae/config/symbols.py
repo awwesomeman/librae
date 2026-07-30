@@ -29,12 +29,19 @@ from the registry and must be selected by the caller.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Real
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from librae.core.run_config import RunConfig
 
+from librae.core.utils import validate_contract_month
+
 AdapterName = Literal["crypto", "ibkr", "shioaji"]
+BrokerName = Literal["binance", "ibkr", "shioaji"]
+InstrumentKind = Literal["spot", "perpetual", "future"]
+AssetClass = Literal["crypto", "equity", "index", "commodity", "fx", "rate", "unknown"]
 _ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
     "binance_spot": "crypto",
     "binance_futures_continuous": "crypto",
@@ -57,6 +64,137 @@ ALLOWED_INSTRUMENT_TYPES = frozenset(
         "contract_quarterly",
     }
 )
+
+
+@dataclass(frozen=True)
+class AvailableSymbol:
+    """One live broker-catalog result, separate from configured accounting.
+
+    ``venue_symbol`` is the value Librae's adapter accepts. ``native_symbol``
+    is the venue's resolved display identifier when it differs (for example,
+    an IBKR futures local symbol while the adapter routes by root + month).
+    ``contract_rank`` is informational: 0 is the currently nearest listed
+    contract and 1 is the next one. A ranked exact contract remains pinned to
+    ``contract_month``; it does not silently become a rolling alias.
+    """
+
+    broker: BrokerName
+    canonical_symbol: str
+    venue_symbol: str
+    native_symbol: str
+    name: str
+    kind: InstrumentKind
+    asset_class: AssetClass
+    currency: str
+    instrument_type: str
+    security_type: str | None = None
+    exchange: str | None = None
+    contract_month: str | None = None
+    delivery_month: str | None = None
+    contract_rank: int | None = None
+    continuous_alias: bool = False
+    multiplier: float | None = None
+    tick_size: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.broker not in ("binance", "ibkr", "shioaji"):
+            raise ValueError(f"unsupported broker: {self.broker!r}")
+        if self.kind not in ("spot", "perpetual", "future"):
+            raise ValueError(f"unsupported instrument kind: {self.kind!r}")
+        if self.asset_class not in (
+            "crypto",
+            "equity",
+            "index",
+            "commodity",
+            "fx",
+            "rate",
+            "unknown",
+        ):
+            raise ValueError(f"unsupported asset_class: {self.asset_class!r}")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                self.canonical_symbol,
+                self.venue_symbol,
+                self.native_symbol,
+                self.name,
+                self.currency,
+            )
+        ):
+            raise ValueError("available-symbol text fields must be non-empty")
+        if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
+            raise ValueError(f"unsupported instrument_type: {self.instrument_type!r}")
+        validate_contract_month(self.contract_month)
+        validate_contract_month(self.delivery_month)
+        if self.contract_rank is not None and (
+            isinstance(self.contract_rank, bool)
+            or not isinstance(self.contract_rank, int)
+            or self.contract_rank < 0
+        ):
+            raise ValueError("contract_rank must be a non-negative integer or None")
+        if not isinstance(self.continuous_alias, bool):
+            raise TypeError("continuous_alias must be a bool")
+        if self.continuous_alias and self.contract_month is not None:
+            raise ValueError("continuous alias cannot also pin contract_month")
+        for field_name in ("multiplier", "tick_size"):
+            value = getattr(self, field_name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{field_name} must be positive when supplied")
+
+    def market_data_kwargs(self) -> dict[str, object]:
+        """Return verified routing kwargs for the concrete adapter."""
+        if self.security_type == "STK" and self.broker == "binance":
+            return {}
+        kwargs: dict[str, object] = {
+            "continuous_alias": self.continuous_alias,
+            "contract_month": self.contract_month,
+        }
+        if self.broker == "ibkr":
+            kwargs.update(
+                security_type=self.security_type,
+                exchange=self.exchange,
+                currency=self.currency,
+            )
+        return kwargs
+
+    def instrument_override(self) -> dict[str, object]:
+        """Return the non-accounting portion of a RunConfig symbol route."""
+        if self.security_type == "STK" and self.broker == "binance":
+            raise ValueError(
+                "Binance Stocks REST does not provide historical OHLCV and is not "
+                "a built-in bar/live RunConfig adapter; use fetch_quote() or inject "
+                "an explicit historical bar source"
+            )
+        adapter: AdapterName = "crypto" if self.broker == "binance" else self.broker
+        route: dict[str, object] = {
+            "broker": self.broker,
+            "data_adapter": adapter,
+            "venue_symbol": self.venue_symbol,
+            "currency": self.currency,
+            "instrument_type": self.instrument_type,
+            "continuous_alias": self.continuous_alias,
+        }
+        for key in ("security_type", "exchange", "contract_month"):
+            value = getattr(self, key)
+            if value is not None:
+                route[key] = value
+        return route
+
+    def cost_override(self) -> dict[str, float]:
+        """Return broker-verified contract economics for RunConfig."""
+        if self.multiplier is None:
+            raise ValueError(
+                f"{self.native_symbol} catalog metadata has no contract multiplier"
+            )
+        costs = {"multiplier": self.multiplier}
+        if self.tick_size is not None:
+            costs["tick_size"] = self.tick_size
+        return costs
 
 
 @dataclass(frozen=True)
@@ -84,6 +222,7 @@ class SymbolInfo:
     currency: str
     account_id: str | None = None
     continuous_alias: bool = False
+    contract_month: str | None = None
     tick_size: float | None = None
     security_type: str | None = None
     exchange: str | None = None
@@ -107,6 +246,22 @@ class SymbolInfo:
             raise ValueError(f"{self.symbol!r} account_id must be non-empty or None")
         if self.calendar_id is not None and not self.calendar_id:
             raise ValueError(f"{self.symbol!r} calendar_id must be non-empty or None")
+        if not isinstance(self.continuous_alias, bool):
+            raise TypeError(f"{self.symbol!r} continuous_alias must be a bool")
+        validate_contract_month(self.contract_month)
+        dated_contract = self.instrument_type in (
+            "contract_monthly",
+            "contract_quarterly",
+        )
+        if dated_contract and self.continuous_alias == (self.contract_month is not None):
+            raise ValueError(
+                f"{self.symbol!r} dated contract requires exactly one of "
+                "continuous_alias=True or contract_month='YYYYMM'"
+            )
+        if not dated_contract and self.contract_month is not None:
+            raise ValueError(
+                f"{self.symbol!r} contract_month is valid only for monthly/quarterly contracts"
+            )
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
@@ -144,7 +299,8 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             venue_symbol=str(data.get("venue_symbol", symbol)),
             currency=str(data["currency"]),
             account_id=None,
-            continuous_alias=bool(data.get("continuous_alias", False)),
+            continuous_alias=data.get("continuous_alias", False),
+            contract_month=validate_contract_month(data.get("contract_month")),
             tick_size=float(raw_tick_size) if raw_tick_size is not None else None,
             security_type=(
                 str(data["security_type"]) if data.get("security_type") is not None else None
@@ -194,7 +350,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "calendar_id": "XTAIFEX",
             "continuous_alias": True,
             "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
-            "tick_size": 1.0,  # 1 個指數點；TXF/MXF/TMF 共用（已用 Shioaji 合約資料的 limit_up/down 驗證過）
+            "tick_size": 1.0,  # 1 index point; venue price limits remain contract-specific
         },
         "MXFR1": {
             "market": "tw_futures",
@@ -261,6 +417,102 @@ def get_symbol(symbol: str) -> SymbolInfo:
         available = list(_BUILTIN_SYMBOLS.keys())
         raise KeyError(f"Symbol '{symbol}' not found. Available: {available}")
     return _BUILTIN_SYMBOLS[symbol]
+
+
+def available_symbols(
+    broker: BrokerName,
+    *,
+    query: str | None = None,
+    kind: InstrumentKind | None = None,
+    asset_class: AssetClass | None = None,
+    exchange: str | None = None,
+    currency: str = "USD",
+    adapter: object | None = None,
+) -> tuple[AvailableSymbol, ...]:
+    """Query the broker's current catalog instead of a static symbol list.
+
+    Binance discovery is public. Shioaji discovery logs in when no adapter is
+    supplied; IBKR discovery opens a read-only TWS/Gateway connection. Passing
+    an existing adapter reuses its authenticated session.
+    """
+    if broker not in ("binance", "ibkr", "shioaji"):
+        raise ValueError(f"unsupported broker: {broker!r}")
+    if kind not in (None, "spot", "perpetual", "future"):
+        raise ValueError(f"unsupported instrument kind: {kind!r}")
+    if asset_class not in (
+        None,
+        "crypto",
+        "equity",
+        "index",
+        "commodity",
+        "fx",
+        "rate",
+        "unknown",
+    ):
+        raise ValueError(f"unsupported asset_class: {asset_class!r}")
+
+    if broker == "binance" and kind is None:
+        raise ValueError(
+            "Binance available_symbols requires kind='spot', 'perpetual', or 'future'; "
+            "its crypto, derivatives, and Stocks catalogs are separate products"
+        )
+    if broker == "binance" and kind == "spot" and asset_class is None:
+        raise ValueError(
+            "Binance spot discovery requires asset_class='crypto' or 'equity' "
+            "to select the correct product catalog"
+        )
+
+    created_adapter = adapter is None
+    if adapter is None:
+        if broker == "binance" and kind == "spot" and asset_class == "equity":
+            from brokers.binance_stocks_adapter import (
+                BinanceStocksAdapter,
+                BinanceStocksCredentials,
+            )
+
+            credentials = BinanceStocksCredentials.from_env("BINANCE")
+            adapter = BinanceStocksAdapter(credentials=credentials)
+        elif broker == "binance":
+            from brokers.crypto_adapter import CryptoAdapter
+
+            adapter = CryptoAdapter(exchange_id="binance")
+        elif broker == "shioaji":
+            from brokers.shioaji_adapter import ShioajiAdapter
+
+            adapter = ShioajiAdapter()
+        else:
+            from brokers.ibkr_adapter import IBKRAdapter
+
+            adapter = IBKRAdapter()
+
+    try:
+        method = getattr(adapter, "available_symbols", None)
+        if not callable(method):
+            raise TypeError(f"{broker} adapter does not implement available_symbols")
+        if broker == "binance":
+            return method(query=query, kind=kind, asset_class=asset_class)
+        if query is None or not query.strip():
+            raise ValueError(f"{broker} available_symbols requires query")
+        if broker == "shioaji":
+            return method(
+                query=query,
+                kind=kind or "future",
+                asset_class=asset_class,
+            )
+        if kind is None:
+            raise ValueError("IBKR available_symbols requires kind='spot' or 'future'")
+        return method(
+            query=query,
+            kind=kind,
+            asset_class=asset_class,
+            exchange=exchange,
+            currency=currency,
+        )
+    finally:
+        if created_adapter:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
 
 
 def resolve_symbol(
@@ -338,15 +590,27 @@ def resolve_symbol(
     security_type = route.get("security_type") or (registered.security_type if registered else None)
     exchange = route.get("exchange") or (registered.exchange if registered else None)
     calendar_id = route.get("calendar_id") or (registered.calendar_id if registered else None)
-    if data_adapter == "ibkr" and not security_type:
+    execution_broker = route.get("broker") or config.broker
+    if (data_adapter == "ibkr" or execution_broker == "ibkr") and not security_type:
         raise ValueError(
-            f"No security_type for IBKR symbol={symbol!r}; set "
+            f"No security_type for IBKR-routed symbol={symbol!r}; set "
             "instrument_overrides[symbol]['security_type']"
         )
     if security_type == "FUT" and not exchange:
         raise ValueError(
             f"No exchange for IBKR future={symbol!r}; set instrument_overrides[symbol]['exchange']"
         )
+    continuous_alias_raw = route.get(
+        "continuous_alias",
+        registered.continuous_alias if registered else False,
+    )
+    if not isinstance(continuous_alias_raw, bool):
+        raise TypeError(f"continuous_alias for symbol={symbol!r} must be a bool")
+    contract_month_raw = route.get(
+        "contract_month",
+        registered.contract_month if registered else None,
+    )
+    contract_month = validate_contract_month(contract_month_raw)
     return SymbolInfo(
         symbol=symbol,
         market=market,
@@ -358,7 +622,8 @@ def resolve_symbol(
         or (registered.venue_symbol if registered else symbol),
         currency=currency,
         account_id=account_id,
-        continuous_alias=registered.continuous_alias if registered else False,
+        continuous_alias=continuous_alias_raw,
+        contract_month=contract_month,
         tick_size=float(tick_size) if tick_size is not None else None,
         security_type=security_type,
         exchange=exchange,

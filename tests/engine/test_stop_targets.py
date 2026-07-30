@@ -173,6 +173,51 @@ class TestResolveStopExit:
         assert remainder.events[0].reason == REASON_STOP_LOSS
         assert positions == {}
 
+    def test_adverse_locked_limit_keeps_stop_exit_pending(self):
+        pos = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": pos}
+
+        result = check_stop_targets(
+            positions,
+            {
+                "TEST": {
+                    "open": 90.0,
+                    "high": 90.0,
+                    "low": 90.0,
+                    "close": 90.0,
+                    "volume": 100.0,
+                    "can_buy": True,
+                    "can_sell": False,
+                }
+            },
+            datetime(2026, 1, 2, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+        )
+
+        assert result.events == []
+        assert positions["TEST"].pending_market_exit_reason == REASON_STOP_LOSS
+
+        remainder = check_stop_targets(
+            positions,
+            {
+                "TEST": {
+                    "open": 85.0,
+                    "high": 87.0,
+                    "low": 84.0,
+                    "close": 86.0,
+                    "volume": 100.0,
+                    "can_buy": True,
+                    "can_sell": True,
+                }
+            },
+            datetime(2026, 1, 3, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+        )
+
+        assert remainder.events[0].price == pytest.approx(85.0)
+        assert remainder.events[0].reason == REASON_STOP_LOSS
+        assert positions == {}
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: liquidation (resolve_stop_exit + CostModel.liquidation_price)

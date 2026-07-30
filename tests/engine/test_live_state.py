@@ -85,6 +85,30 @@ def test_runtime_state_round_trip_preserves_restart_fields():
     assert restored == state
 
 
+def test_exact_future_order_identity_survives_checkpoint_round_trip():
+    order = TrackedOrder(
+        request=OrderRequest(
+            client_order_id="strategy-es-1",
+            symbol="ES_202609",
+            venue_symbol="ES",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+            security_type="FUT",
+            exchange="CME",
+            currency="USD",
+            contract_month="202609",
+        )
+    )
+
+    restored = TrackedOrder.from_dict(order.to_dict())
+
+    assert restored.request.symbol == "ES_202609"
+    assert restored.request.venue_symbol == "ES"
+    assert restored.request.contract_month == "202609"
+
+
 def test_portfolio_targets_round_trip_and_memory_store_isolation():
     store = MemoryLiveStateStore()
     targets = PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
@@ -187,7 +211,8 @@ def test_memory_store_lease_is_exclusive_until_release():
     assert store.acquire_lease("live:abc") is True
 
 
-def test_runtime_state_rejects_v3_schema():
+@pytest.mark.parametrize("version_delta", [-1, 1])
+def test_runtime_state_rejects_non_current_schema(version_delta):
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
@@ -197,50 +222,13 @@ def test_runtime_state_rejects_v3_schema():
         equity_peak_by_account={"default": 1_000.0},
         prev_equity_by_account={"default": 1_000.0},
     ).to_dict()
-    raw["schema_version"] = 3
+    raw["schema_version"] += version_delta
 
-    with pytest.raises(ValueError, match="unsupported live runtime-state schema"):
+    with pytest.raises(ValueError, match=r"expected \d+, got \d+"):
         LiveRuntimeState.from_dict(raw)
 
 
-def test_runtime_state_migrates_v9_without_account_halts():
-    raw = LiveRuntimeState(
-        state_key="sim:abc",
-        run_id="run-1",
-        config_hash="abc",
-        mode="sim",
-        cash_by_account={"default": 1_000.0},
-        equity_peak_by_account={"default": 1_000.0},
-        prev_equity_by_account={"default": 1_000.0},
-    ).to_dict()
-    raw["schema_version"] = 9
-    del raw["halted_accounts"]
-
-    restored = LiveRuntimeState.from_dict(raw)
-
-    assert restored.halted_accounts == set()
-    assert restored.last_funding_ts == {}
-
-
-def test_runtime_state_migrates_v10_without_funding_watermarks():
-    raw = LiveRuntimeState(
-        state_key="sim:abc",
-        run_id="run-1",
-        config_hash="abc",
-        mode="sim",
-        cash_by_account={"default": 1_000.0},
-        equity_peak_by_account={"default": 1_000.0},
-        prev_equity_by_account={"default": 1_000.0},
-    ).to_dict()
-    raw["schema_version"] = 10
-    del raw["last_funding_ts"]
-
-    restored = LiveRuntimeState.from_dict(raw)
-
-    assert restored.last_funding_ts == {}
-
-
-def test_runtime_state_rejects_missing_v6_fact_instead_of_defaulting():
+def test_runtime_state_rejects_missing_required_fact_instead_of_defaulting():
     raw = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",

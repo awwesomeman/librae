@@ -45,7 +45,9 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
     return timestamps
 
 
-_STATE_SCHEMA_VERSION = 11
+# Bump whenever this document or a persisted nested dataclass changes shape.
+# Old checkpoints are deliberately rejected instead of silently defaulted.
+_STATE_SCHEMA_VERSION = 12
 
 
 def _decision_to_dict(decision: StrategyDecision) -> dict:
@@ -359,8 +361,11 @@ class LiveRuntimeState:
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
         schema_version = raw.get("schema_version")
-        if schema_version not in (9, 10, _STATE_SCHEMA_VERSION):
-            raise ValueError("unsupported live runtime-state schema")
+        if schema_version != _STATE_SCHEMA_VERSION:
+            raise ValueError(
+                "unsupported live runtime-state schema: "
+                f"expected {_STATE_SCHEMA_VERSION}, got {schema_version!r}"
+            )
         positions = {}
         for symbol, item in raw["positions"].items():
             position_raw = dict(item)
@@ -379,7 +384,7 @@ class LiveRuntimeState:
             last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
             last_bar_ts=_timestamps_from_dict(raw["last_bar_ts"], field="last_bar_ts"),
             last_funding_ts=_timestamps_from_dict(
-                raw.get("last_funding_ts", {}),
+                raw["last_funding_ts"],
                 field="last_funding_ts",
             ),
             pending_decision=_decision_from_dict(raw["pending_decision"]),
@@ -407,7 +412,7 @@ class LiveRuntimeState:
             period_index=int(raw["period_index"]),
             status_period_count=int(raw["status_period_count"]),
             halted=bool(raw["halted"]),
-            halted_accounts={str(account_id) for account_id in raw.get("halted_accounts", [])},
+            halted_accounts={str(account_id) for account_id in raw["halted_accounts"]},
             adv_session_labels={
                 str(symbol): str(label) for symbol, label in raw["adv_session_labels"].items()
             },

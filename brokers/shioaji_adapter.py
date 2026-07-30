@@ -21,13 +21,21 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from numbers import Real
 
 import pandas as pd
+from librae.config.symbols import (
+    AssetClass,
+    AvailableSymbol,
+    InstrumentKind,
+)
 from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
     resample_session_ohlcv,
 )
+from librae.core.utils import validate_contract_month
+from librae.live.executor import PositionRequest
 
 from .base import (
     AdapterInfo,
@@ -134,6 +142,85 @@ class ShioajiAdapter:
             market_type="tw_futures",
         )
 
+    def available_symbols(
+        self,
+        *,
+        query: str,
+        kind: InstrumentKind | None = None,
+        asset_class: AssetClass | None = None,
+    ) -> tuple[AvailableSymbol, ...]:
+        """List every Shioaji futures contract under one product root."""
+        root = query.strip().upper()
+        if not root:
+            raise ValueError("Shioaji available_symbols requires a futures product root")
+        if kind not in (None, "future"):
+            return ()
+        raw_contracts = self._api.contracts.futures(root)
+        contracts = list(raw_contracts or [])
+        alias_ranks: dict[str, int] = {}
+        for contract in contracts:
+            code = str(getattr(contract, "code", "") or "")
+            target_code = str(getattr(contract, "target_code", "") or "")
+            if code.endswith("R1") and target_code:
+                alias_ranks[target_code] = 0
+            elif code.endswith("R2") and target_code:
+                alias_ranks[target_code] = 1
+
+        results: list[AvailableSymbol] = []
+        index_roots = {"TXF", "MXF", "TMF"}
+        for contract in contracts:
+            code = str(getattr(contract, "code", "") or "")
+            if not code:
+                raise ValueError(f"Shioaji returned a {root} contract without code")
+            target_code = str(getattr(contract, "target_code", "") or "")
+            is_alias = bool(target_code) or code.endswith(("R1", "R2"))
+            delivery_month = validate_contract_month(
+                str(getattr(contract, "delivery_month", "") or "") or None
+            )
+            if is_alias:
+                contract_rank = 0 if code.endswith("R1") else 1
+                contract_month = None
+            else:
+                contract_rank = alias_ranks.get(code)
+                contract_month = delivery_month
+            resolved_asset_class: AssetClass = (
+                "index" if root in index_roots else "equity"
+            )
+            if asset_class is not None and asset_class != resolved_asset_class:
+                continue
+            raw_multiplier = getattr(contract, "unit", None)
+            multiplier = float(raw_multiplier) if raw_multiplier is not None else None
+            results.append(
+                AvailableSymbol(
+                    broker="shioaji",
+                    canonical_symbol=code,
+                    venue_symbol=code,
+                    native_symbol=code,
+                    name=str(getattr(contract, "name", "") or code),
+                    kind="future",
+                    asset_class=resolved_asset_class,
+                    currency=str(getattr(contract, "currency", "") or "TWD"),
+                    instrument_type="contract_monthly",
+                    security_type="FUT",
+                    exchange="TAIFEX",
+                    contract_month=contract_month,
+                    delivery_month=delivery_month,
+                    contract_rank=contract_rank,
+                    continuous_alias=is_alias,
+                    multiplier=multiplier,
+                )
+            )
+        return tuple(
+            sorted(
+                results,
+                key=lambda item: (
+                    item.delivery_month or "",
+                    item.continuous_alias,
+                    item.native_symbol,
+                ),
+            )
+        )
+
     # ------------------------------------------------------------------
     # Market data
     # ------------------------------------------------------------------
@@ -148,6 +235,8 @@ class ShioajiAdapter:
         limit: int = 200,
         drop_incomplete: bool = False,
         calendar_id: str | None = None,
+        continuous_alias: bool = False,
+        contract_month: str | None = None,
     ) -> pd.DataFrame:
         """Fetch OHLCV via Shioaji kbars API.
 
@@ -170,11 +259,18 @@ class ShioajiAdapter:
             limit: Max bars (used only when start/end are omitted).
             drop_incomplete: Drop the current still-forming candle.
             calendar_id: Trading-calendar identifier used for resampling.
+            continuous_alias: For futures only, require a native R1/R2 route.
+            contract_month: For exact futures only, expected ``YYYYMM`` month.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is the true UTC-aware bar-start datetime.
         """
         contract = self._resolve_contract(symbol)
+        self._validate_contract_selection(
+            contract,
+            continuous_alias=continuous_alias,
+            contract_month=contract_month,
+        )
         resolved_calendar = calendar_id or (
             TAIFEX_INDEX_CALENDAR if getattr(contract, "security_type", None) == "FUT" else "XTAI"
         )
@@ -235,6 +331,11 @@ class ShioajiAdapter:
         """Round quantity/limit price to Shioaji contract rules."""
         validate_order_signal(signal)
         contract = self._resolve_contract(signal["symbol"])
+        self._validate_contract_selection(
+            contract,
+            continuous_alias=signal.get("continuous_alias", False),
+            contract_month=signal.get("contract_month"),
+        )
         prepared = dict(signal)
         quantity = floor_to_step(float(signal["quantity"]), 1.0)
         if quantity < 1:
@@ -246,11 +347,21 @@ class ShioajiAdapter:
             if tick_size <= 0:
                 raise ValueError("Shioaji limit orders require a positive tick_size")
             price = passive_price(float(signal["price"]), tick_size, signal["side"])
-            lower = float(getattr(contract, "limit_down", 0) or 0)
-            upper = float(getattr(contract, "limit_up", 0) or 0)
-            if lower and price < lower:
+            raw_lower = getattr(contract, "limit_down", None)
+            raw_upper = getattr(contract, "limit_up", None)
+            if raw_lower is None or raw_upper is None:
+                raise ValueError(
+                    f"{signal['symbol']} contract is missing price-limit boundaries"
+                )
+            lower = float(raw_lower)
+            upper = float(raw_upper)
+            if not isfinite(lower) or not isfinite(upper) or lower <= 0 or upper <= lower:
+                raise ValueError(
+                    f"{signal['symbol']} contract has invalid price-limit boundaries"
+                )
+            if price < lower:
                 raise ValueError(f"{signal['symbol']} price is below limit_down {lower}")
-            if upper and price > upper:
+            if price > upper:
                 raise ValueError(f"{signal['symbol']} price exceeds limit_up {upper}")
             prepared["price"] = price
         return prepared
@@ -271,7 +382,12 @@ class ShioajiAdapter:
 
         sj = _require_shioaji()
         contract = self._resolve_contract(signal["symbol"])
-        is_futures = self._is_futures(signal["symbol"])
+        self._validate_contract_selection(
+            contract,
+            continuous_alias=signal.get("continuous_alias", False),
+            contract_month=signal.get("contract_month"),
+        )
+        is_futures = getattr(contract, "security_type", None) == "FUT"
 
         # shioaji >=1.4 moved these enums from shioaji.order.* to top-level
         # shioaji.* (member names unchanged) — sj.order.Action etc. raises
@@ -366,12 +482,13 @@ class ShioajiAdapter:
         raise LookupError(f"Shioaji order not found: {order_id}")
 
     def _trades(self, symbol: str) -> list:
-        contract_code = str(self._resolve_contract(symbol).code)
+        contract = self._resolve_contract(symbol)
+        contract_codes = self._contract_codes(contract)
         self._api.update_status()
         return [
             trade
             for trade in self._api.list_trades()
-            if str(getattr(trade.contract, "code", "")) == contract_code
+            if str(getattr(trade.contract, "code", "")) in contract_codes
         ]
 
     @staticmethod
@@ -420,16 +537,44 @@ class ShioajiAdapter:
                 result["commission"] = sum(commissions)
         return result
 
-    def get_position(self, symbol: str) -> dict:
-        """Return current position for *symbol*."""
+    def get_position(self, request: PositionRequest) -> dict:
+        """Return the current position for one configured instrument."""
         self._require_auth()
-        contract_code = str(self._resolve_contract(symbol).code)
-        positions = self._api.list_positions()
+        sj = _require_shioaji()
+        symbol = request.venue_symbol
+        contract = self._resolve_contract(symbol)
+        self._validate_contract_selection(
+            contract,
+            continuous_alias=request.continuous_alias,
+            contract_month=request.contract_month,
+        )
+        contract_codes = self._contract_codes(contract)
+        account = (
+            self._api.futopt_account
+            if getattr(contract, "security_type", None) == "FUT"
+            else self._api.stock_account
+        )
+        positions = self._api.list_positions(account=account)
+
+        def signed_quantity(position: object) -> float:
+            quantity = float(position.quantity)
+            if not isfinite(quantity) or quantity < 0:
+                raise ValueError(f"invalid Shioaji position quantity for {symbol}: {quantity!r}")
+            if quantity == 0:
+                return 0.0
+            if position.direction == sj.Action.Buy:
+                return quantity
+            if position.direction == sj.Action.Sell:
+                return -quantity
+            raise ValueError(
+                f"unknown Shioaji position direction for {symbol}: {position.direction!r}"
+            )
+
         return find_position(
             positions,
-            symbol,
-            matches=lambda p: str(p.code) == contract_code,
-            size=lambda p: p.quantity,
+            request.symbol,
+            matches=lambda p: str(p.code) in contract_codes,
+            size=signed_quantity,
             avg_price=lambda p: p.price,
             pnl=lambda p: getattr(p, "pnl", 0),
         )
@@ -446,10 +591,16 @@ class ShioajiAdapter:
         """
         self._require_auth()
         if currency != "TWD":
-            return {"free": 0.0, "used": 0.0, "total": 0.0}
+            raise ValueError(f"Shioaji futures balance supports TWD only, got {currency!r}")
         margin = self._api.margin()
-        total = float(getattr(margin, "equity", 0) or 0)
-        free = float(getattr(margin, "available_margin", 0) or 0)
+        raw_total = getattr(margin, "equity", None)
+        raw_free = getattr(margin, "available_margin", None)
+        if raw_total is None or raw_free is None:
+            raise ValueError("Shioaji margin is missing equity or available_margin")
+        total = float(raw_total)
+        free = float(raw_free)
+        if not isfinite(total) or not isfinite(free):
+            raise ValueError("Shioaji margin contains non-finite balance values")
         return {"free": free, "used": total - free, "total": total}
 
     # ------------------------------------------------------------------
@@ -489,10 +640,73 @@ class ShioajiAdapter:
             raise ValueError(f"Unknown symbol: {symbol}")
         return contract
 
-    def _is_futures(self, symbol: str) -> bool:
-        """Check if a symbol is a futures contract."""
-        contract = self._api.contracts.get(symbol)
-        return contract is not None and contract.security_type == "FUT"
+    def _validate_contract_selection(
+        self,
+        contract: object,
+        *,
+        continuous_alias: bool,
+        contract_month: str | None,
+    ) -> None:
+        """Verify the common contract identity against Shioaji metadata."""
+        if not isinstance(continuous_alias, bool):
+            raise TypeError("continuous_alias must be a bool")
+        contract_month = validate_contract_month(contract_month)
+        is_futures = getattr(contract, "security_type", None) == "FUT"
+        if not is_futures:
+            if continuous_alias or contract_month is not None:
+                raise ValueError(
+                    "continuous_alias and contract_month are valid only for Shioaji futures"
+                )
+            return
+        if continuous_alias == (contract_month is not None):
+            raise ValueError(
+                "Shioaji future requires exactly one of continuous_alias=True "
+                "or contract_month='YYYYMM'"
+            )
+
+        code = str(getattr(contract, "code", "") or "")
+        target_code = str(getattr(contract, "target_code", "") or "")
+        is_native_alias = bool(target_code) or code.endswith(("R1", "R2"))
+        if continuous_alias:
+            if not is_native_alias:
+                raise ValueError(
+                    f"Shioaji contract {code!r} is not a continuous R1/R2 alias"
+                )
+            return
+        if is_native_alias:
+            raise ValueError(
+                f"Shioaji exact contract_month={contract_month} cannot use "
+                f"continuous alias {code!r}"
+            )
+
+        info = self._api.contracts.info(contract)
+        resolved_month = str(
+            getattr(info, "delivery_month", None)
+            or getattr(contract, "delivery_month", "")
+            or ""
+        )
+        if not resolved_month:
+            raise ValueError(f"Shioaji contract {code!r} has no delivery_month metadata")
+        if resolved_month != contract_month:
+            raise ValueError(
+                f"Shioaji contract month mismatch for {code!r}: "
+                f"configured={contract_month}, broker={resolved_month}"
+            )
+
+    @staticmethod
+    def _contract_codes(contract: object) -> set[str]:
+        """Return native codes that may appear in Shioaji order/position state."""
+        codes = {
+            str(value)
+            for value in (
+                getattr(contract, "code", None),
+                getattr(contract, "target_code", None),
+            )
+            if value
+        }
+        if not codes:
+            raise ValueError("Shioaji contract has no stable code")
+        return codes
 
 
 def _to_date_str(dt: datetime | str) -> str:

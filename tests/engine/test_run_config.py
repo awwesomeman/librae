@@ -75,10 +75,12 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     timed_live_order = _config(
         execution=ExecutionPolicy(live_order_timeout_seconds=120),
     )
+    short_warmup = _config(execution=ExecutionPolicy(warmup_periods=10))
 
     assert unlimited.config_hash != capped.config_hash
     assert capped.config_hash != adv_capped.config_hash
     assert capped.config_hash != timed_live_order.config_hash
+    assert capped.config_hash != short_warmup.config_hash
     with pytest.raises(ValueError, match="must be in"):
         ExecutionPolicy(max_bar_volume_participation_rate=1.1)
     with pytest.raises(ValueError, match="positive integer"):
@@ -89,6 +91,10 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         ExecutionPolicy(live_order_timeout_seconds=0)
     with pytest.raises(ValueError, match="live_order_timeout_seconds"):
         ExecutionPolicy(live_order_timeout_seconds=True)
+    with pytest.raises(ValueError, match="warmup_periods"):
+        ExecutionPolicy(warmup_periods=0)
+    with pytest.raises(ValueError, match="warmup_periods"):
+        ExecutionPolicy(warmup_periods=True)
     intraday_adv = _config(
         execution=ExecutionPolicy(
             adv_lookback_sessions=20,
@@ -142,6 +148,7 @@ def test_run_config_rejects_ambiguous_scalar_types(override, message: str) -> No
         "adv_lookback_sessions",
         "max_adv_participation_rate",
         "live_order_timeout_seconds",
+        "warmup_periods",
     ],
 )
 def test_execution_settings_are_rejected_from_strategy_params(
