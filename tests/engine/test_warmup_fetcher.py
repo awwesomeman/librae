@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 from librae.core.run_config import ExecutionPolicy, RunConfig
+
 from tests.conftest import make_test_cfg
 
 

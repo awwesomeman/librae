@@ -29,6 +29,7 @@ from librae.core.strategy import (
     PositionState,
     Strategy,
 )
+
 from tests.conftest import make_test_cfg
 
 # ---------------------------------------------------------------------------

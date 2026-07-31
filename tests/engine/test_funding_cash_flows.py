@@ -12,6 +12,7 @@ from librae.core.funding import calculate_funding_cash_flows
 from librae.core.strategy import PositionState
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
+
 from tests.conftest import make_test_cfg
 
 

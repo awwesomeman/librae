@@ -23,6 +23,7 @@ from librae.db.timescale_writer import (
     write_strategy_performance,
     write_trade_event,
 )
+
 from tests.conftest import make_test_cfg
 
 

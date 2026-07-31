@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from librae.backtest.schema import RUN_ID_PATTERN
+
 from tests.sample_data import (
     generate_btc_h1_ohlcv,
     run_simple_sma_crossover,

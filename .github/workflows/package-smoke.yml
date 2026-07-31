@@ -1,0 +1,74 @@
+name: package-smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "librae/**"
+      - "tests/packaging/**"
+      - "pyproject.toml"
+      - ".github/workflows/package-smoke.yml"
+  pull_request:
+    paths:
+      - "librae/**"
+      - "tests/packaging/**"
+      - "pyproject.toml"
+      - ".github/workflows/package-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  distribution:
+    name: distribution (${{ matrix.os }}, py3.12)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel
+
+      - name: Install editable checkout
+        run: python -m pip install --editable .
+
+      - name: Smoke editable install outside checkout
+        run: >-
+          python -c "import os, runpy, sys, tempfile;
+          script=os.path.abspath('tests/packaging/installed_smoke.py');
+          os.chdir(tempfile.mkdtemp());
+          sys.argv=[script, '--expect-editable'];
+          runpy.run_path(script, run_name='__main__')"
+
+      - name: Replace editable install with wheel
+        run: >-
+          python -c "import glob, subprocess, sys;
+          wheels=glob.glob('dist/*.whl');
+          assert len(wheels) == 1, wheels;
+          subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '--yes', 'librae'], check=True);
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]], check=True)"
+
+      - name: Smoke wheel install outside checkout
+        run: >-
+          python -c "import os, runpy, sys, tempfile;
+          script=os.path.abspath('tests/packaging/installed_smoke.py');
+          os.chdir(tempfile.mkdtemp());
+          sys.argv=[script];
+          runpy.run_path(script, run_name='__main__')"

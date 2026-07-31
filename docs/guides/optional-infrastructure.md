@@ -214,6 +214,13 @@ not engine APIs. They show one Docker/Grafana/VM arrangement and can be used,
 replaced, or ignored. Read `SECURITY.md` before
 deploying them to a host with a public IP.
 
+The `deploy/` and `scripts/` trees are checkout-only and are not installed in
+the Python wheel. The packaged distribution does include the SQL schema and
+Grafana provisioning resources under `librae.*` for caller-owned
+infrastructure. The reference VM flow below requires a Librae checkout on the
+build machine, Bash for the local scripts, and a compatible Linux target; it
+is not part of the OS-independent Python package contract.
+
 The reference builder combines this engine checkout with caller-owned strategy
 source. `TRADE_STRATEGY_PATH` selects that source directory; relative paths
 resolve from the Librae checkout. Its default, `../strategies`, gives this

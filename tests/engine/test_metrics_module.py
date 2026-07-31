@@ -30,6 +30,7 @@ from librae.core.metrics import (
     summarize_signal_mae_mfe,
 )
 from librae.core.strategy import OrderIntent, Strategy
+
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     SIGNAL_OUTCOME_LONG_PERCENTAGE_POINTS,
