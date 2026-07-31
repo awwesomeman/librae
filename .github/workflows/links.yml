@@ -2,6 +2,8 @@ name: links
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "**/*.md"
       - ".github/workflows/links.yml"

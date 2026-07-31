@@ -2,6 +2,8 @@ name: optional-sdk-tests
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "librae/brokers/**"
       - "tests/sdk_contracts/**"

@@ -2,6 +2,8 @@ name: core-tests
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "librae/**"
       - "scripts/**"

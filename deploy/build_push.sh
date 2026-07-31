@@ -5,6 +5,8 @@
 #
 # TRADE_STRATEGY_PATH selects the caller-owned source directory. Relative
 # paths resolve from the Librae checkout; the default is ../strategies.
+# TRADE_PLATFORMS may narrow validation builds; production defaults to both
+# supported image architectures.
 #
 # Usage: ./deploy/build_push.sh
 # Requires TRADE_IMAGE in .env, e.g. ghcr.io/<github-user>/quant-trade.
@@ -50,14 +52,15 @@ if [[ -n "$(git -C "${LIBRAE_ROOT}" status --porcelain --untracked-files=normal)
     SOURCE_TAG="${SOURCE_TAG}-dirty"
 fi
 IMAGE_TAG="${IMAGE}:${SOURCE_TAG}"
+PLATFORMS="${TRADE_PLATFORMS:-linux/amd64,linux/arm64}"
 METADATA_FILE="$(mktemp)"
 trap 'rm -f "${METADATA_FILE}"' EXIT
 
-echo "Building + pushing ${IMAGE_TAG} (linux/amd64 + linux/arm64)..."
+echo "Building + pushing ${IMAGE_TAG} (${PLATFORMS//,/ + })..."
 echo "Librae revision: ${LIBRAE_REVISION}"
-# Publish both architectures under one source-revision tag. Docker pull/run
-# later selects the matching platform from the digest-pinned manifest.
-docker buildx build --platform linux/amd64,linux/arm64 \
+# Production publishes both architectures under one source-revision tag.
+# Docker pull/run later selects the matching platform from the manifest.
+docker buildx build --platform "${PLATFORMS}" \
     --build-context "strategy_source=${STRATEGY_SOURCE}" \
     --build-arg LIBRAE_VERSION="${LIBRAE_VERSION}" \
     --build-arg LIBRAE_REVISION="${LIBRAE_REVISION}" \

@@ -69,12 +69,15 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
 
 def test_trade_image_build_receives_explicit_source_identity() -> None:
     dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
+    build_script = (DEPLOY / "build_push.sh").read_text(encoding="utf-8")
 
     assert "ARG LIBRAE_VERSION" in dockerfile
     assert "ARG LIBRAE_REVISION" in dockerfile
     assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIBRAE=" in dockerfile
     assert 'org.opencontainers.image.version="${LIBRAE_VERSION}"' in dockerfile
     assert 'org.opencontainers.image.revision="${LIBRAE_REVISION}"' in dockerfile
+    assert 'PLATFORMS="${TRADE_PLATFORMS:-linux/amd64,linux/arm64}"' in build_script
+    assert 'docker buildx build --platform "${PLATFORMS}"' in build_script
 
     for script_name in ("build_push.sh", "trade.sh"):
         script = (DEPLOY / script_name).read_text(encoding="utf-8")
@@ -86,11 +89,19 @@ def test_trade_image_build_receives_explicit_source_identity() -> None:
 
 def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
+    workflow_config = yaml.load(workflow, Loader=yaml.BaseLoader)
 
+    assert workflow_config["on"]["push"]["branches"] == ["main"]
+    assert "branches" not in workflow_config["on"]["pull_request"]
     assert workflow.count('- "deploy/**"') == 2
     assert "bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh" in workflow
+    assert "if: github.event_name == 'push'" in workflow
     assert "docker/setup-qemu-action@v3" in workflow
     assert "docker/setup-buildx-action@v3" in workflow
+    assert (
+        "TRADE_PLATFORMS: ${{ github.event_name == 'pull_request' && "
+        "'linux/amd64' || 'linux/amd64,linux/arm64' }}" in workflow
+    )
     assert "registry:2.8.3" in workflow
     assert "docker:28.3.3-dind" in workflow
     assert "bash openssh rsync docker-cli-compose socat" in workflow

@@ -2,6 +2,8 @@ name: trade-image
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "deploy/**"
       - "librae/**"
@@ -34,6 +36,7 @@ jobs:
         run: bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh
 
       - name: Enable multi-platform builds
+        if: github.event_name == 'push'
         uses: docker/setup-qemu-action@v3
 
       - name: Configure Buildx for the disposable registry
@@ -114,11 +117,12 @@ jobs:
             '    initial_cash: 100000' \
             > ../strategy-fixture/failing/config.yaml
 
-      - name: Publish multi-platform image with build_push.sh
+      - name: Publish acceptance image with build_push.sh
         id: image
         env:
           TRADE_IMAGE: localhost:5000/librae-trade
           TRADE_STRATEGY_PATH: ../strategy-fixture
+          TRADE_PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
         run: |
           set -o pipefail
           revision="$(git rev-parse --verify HEAD)"
