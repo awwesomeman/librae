@@ -88,10 +88,14 @@ jobs:
 
           signal.signal(signal.SIGTERM, stop)
           signal.signal(signal.SIGINT, stop)
-          Path(os.environ["LIBRAE_READY_FILE"]).write_text(
-              f"fixture-run:{uuid4().hex}\n",
-              encoding="utf-8",
+          marker = ":".join(
+              (
+                  os.environ["LIBRAE_READY_TOKEN"],
+                  "fixture-run",
+                  uuid4().hex,
+              )
           )
+          Path(os.environ["LIBRAE_READY_FILE"]).write_text(f"{marker}\n", encoding="utf-8")
           while running:
               time.sleep(0.1)
           PY

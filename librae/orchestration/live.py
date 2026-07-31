@@ -38,6 +38,7 @@ _DATA_ADAPTER_BY_BROKER = {
 }
 _DB_FAILURE_ALERT_THRESHOLD = 3
 _READY_FILE_ENV = "LIBRAE_READY_FILE"
+_READY_TOKEN_ENV = "LIBRAE_READY_TOKEN"
 
 
 def _ready_callback_from_env() -> Callable[[str], None] | None:
@@ -45,9 +46,13 @@ def _ready_callback_from_env() -> Callable[[str], None] | None:
     if not ready_file:
         return None
     path = Path(ready_file)
+    ready_token = os.environ.get(_READY_TOKEN_ENV)
 
     def mark_ready(run_id: str) -> None:
-        path.write_text(f"{run_id}:{uuid4().hex}\n", encoding="utf-8")
+        marker_parts = [run_id, uuid4().hex]
+        if ready_token:
+            marker_parts.insert(0, ready_token)
+        path.write_text(":".join(marker_parts) + "\n", encoding="utf-8")
 
     return mark_ready
 

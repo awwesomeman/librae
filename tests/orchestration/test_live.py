@@ -58,6 +58,24 @@ def test_ready_callback_publishes_run_id_to_supervisor_file(
     assert len(generation) == 32
 
 
+def test_ready_callback_binds_marker_to_deployment_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ready_file = tmp_path / "ready"
+    monkeypatch.setenv("LIBRAE_READY_FILE", str(ready_file))
+    monkeypatch.setenv("LIBRAE_READY_TOKEN", "attempt-123")
+
+    callback = _ready_callback_from_env()
+
+    assert callback is not None
+    callback("run-123")
+    token, run_id, generation = ready_file.read_text(encoding="utf-8").strip().split(":")
+    assert token == "attempt-123"
+    assert run_id == "run-123"
+    assert len(generation) == 32
+
+
 def test_missing_db_dependency_is_reported_by_deployment_factory() -> None:
     config = make_test_cfg(mode="sim")
 
