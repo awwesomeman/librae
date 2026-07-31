@@ -117,6 +117,19 @@ container_running() {
     [[ "$(docker inspect --format '{{.State.Running}}' "$1")" == "true" ]]
 }
 
+container_ready_file() {
+    local container="$1" ready_file
+    ready_file="$(
+        docker inspect \
+            --format '{{ index .Config.Labels "io.librae.ready_file" }}' \
+            "${container}"
+    )"
+    if [[ -z "${ready_file}" || "${ready_file}" == "<no value>" ]]; then
+        ready_file="${READY_FILE}"
+    fi
+    printf '%s\n' "${ready_file}"
+}
+
 wait_until_stopped() {
     local container="$1"
     local deadline=$((SECONDS + STOP_TIMEOUT_SECONDS))
@@ -152,14 +165,15 @@ stop_container() {
 
 wait_until_ready() {
     local container="$1" previous_marker="${2:-}"
-    local initial_restart_count deadline status restart_count marker
+    local initial_restart_count deadline status restart_count marker ready_file
+    ready_file="$(container_ready_file "${container}")"
     initial_restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
     deadline=$((SECONDS + START_TIMEOUT_SECONDS))
     while true; do
         status="$(container_status "${container}")"
         restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
         if [[ "${status}" == "running" ]]; then
-            marker="$(docker exec "${container}" cat "${READY_FILE}" 2>/dev/null || true)"
+            marker="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null || true)"
             if [[ -n "${marker}" && "${marker}" != "${previous_marker}" ]]; then
                 return 0
             fi
@@ -248,6 +262,7 @@ cmd_start() {
 
     local container
     container="$(container_name "${deployment_id}")"
+    local ready_file="${READY_FILE}-${deployment_id}"
     local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env}"
 
     local credential_args=()
@@ -497,7 +512,7 @@ finally:
         -e TIMESCALE_DSN="${trade_timescale_dsn}"
         -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
         -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
-        -e LIBRAE_READY_FILE="${READY_FILE}"
+        -e LIBRAE_READY_FILE="${ready_file}"
     )
     if container_exists "${container}"; then
         echo "Stopping existing ${container}..."
@@ -523,6 +538,7 @@ finally:
         --label "io.librae.strategy=${strategy}" \
         --label "io.librae.mode=${mode}" \
         --label "io.librae.runtime_revision=${runtime_revision}" \
+        --label "io.librae.ready_file=${ready_file}" \
         "${credential_args[@]}" \
         "${env_args[@]}" \
         "${config_mount_args[@]}" \
@@ -550,6 +566,7 @@ cmd_inspect() {
     fi
 
     local account_id currency status restart_count process_id exit_code reason ready run_id phase
+    local ready_file
     account_id="$(docker inspect --format '{{ index .Config.Labels "io.librae.account_id" }}' "${container}")"
     currency="$(docker inspect --format '{{ index .Config.Labels "io.librae.currency" }}' "${container}")"
     status="$(container_status "${container}")"
@@ -557,10 +574,11 @@ cmd_inspect() {
     process_id="$(docker inspect --format '{{.State.Pid}}' "${container}")"
     exit_code="$(docker inspect --format '{{.State.ExitCode}}' "${container}")"
     reason="$(docker inspect --format '{{.State.Error}}' "${container}")"
+    ready_file="$(container_ready_file "${container}")"
     ready="false"
     run_id=""
     if [[ "${status}" == "running" ]]; then
-        run_id="$(docker exec "${container}" cat "${READY_FILE}" 2>/dev/null || true)"
+        run_id="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null || true)"
         if [[ -n "${run_id}" ]]; then
             ready="true"
             run_id="${run_id%%:*}"
@@ -599,13 +617,14 @@ cmd_inspect() {
 }
 
 read_ready_marker() {
-    local container="$1" marker_file marker=""
+    local container="$1" marker_file marker="" ready_file
+    ready_file="$(container_ready_file "${container}")"
     if container_running "${container}"; then
-        docker exec "${container}" cat "${READY_FILE}" 2>/dev/null || true
+        docker exec "${container}" cat "${ready_file}" 2>/dev/null || true
         return 0
     fi
     marker_file="$(mktemp)"
-    if docker cp "${container}:${READY_FILE}" "${marker_file}" >/dev/null 2>&1; then
+    if docker cp "${container}:${ready_file}" "${marker_file}" >/dev/null 2>&1; then
         marker="$(cat "${marker_file}")"
     fi
     rm -f -- "${marker_file}"

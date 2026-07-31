@@ -219,6 +219,8 @@ def _run_trade_script(
     existing_strategy: str = "",
     existing_mode: str = "",
     existing_managed: str = "true",
+    ready_marker: str = "fixture-run:generation",
+    stale_ready_marker: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
 
@@ -247,6 +249,7 @@ elif [[ "$1" == "inspect" ]]; then
         *io.librae.strategy*) printf '%s\\n' "${FAKE_EXISTING_STRATEGY}" ;;
         *io.librae.mode*) printf '%s\\n' "${FAKE_EXISTING_MODE}" ;;
         *io.librae.managed*) printf '%s\\n' "${FAKE_EXISTING_MANAGED}" ;;
+        *io.librae.ready_file*) printf '%s\\n' "${FAKE_READY_FILE}" ;;
         *State.Running*) printf '%s\\n' "false" ;;
         *State.Status*) printf '%s\\n' "running" ;;
         *RestartCount*) printf '%s\\n' "0" ;;
@@ -275,7 +278,12 @@ elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
     fi
 elif [[ "$1" == "exec" ]]; then
     if [[ "$*" == *" cat "* ]]; then
-        printf '%s\\n' "fixture-run:generation"
+        marker_file="${@: -1}"
+        if [[ "${marker_file}" == "${FAKE_READY_FILE}" ]]; then
+            [[ -z "${FAKE_READY_MARKER}" ]] || printf '%s\\n' "${FAKE_READY_MARKER}"
+        elif [[ "${marker_file}" == "/tmp/librae-ready" ]]; then
+            [[ -z "${FAKE_STALE_READY_MARKER}" ]] || printf '%s\\n' "${FAKE_STALE_READY_MARKER}"
+        fi
     fi
     exit 0
 fi
@@ -304,6 +312,9 @@ fi
             "FAKE_EXISTING_STRATEGY": existing_strategy,
             "FAKE_EXISTING_MODE": existing_mode,
             "FAKE_EXISTING_MANAGED": existing_managed,
+            "FAKE_READY_FILE": f"/tmp/librae-ready-{deployment_id}",
+            "FAKE_READY_MARKER": ready_marker,
+            "FAKE_STALE_READY_MARKER": stale_ready_marker,
         }
     )
     command = [
@@ -357,6 +368,23 @@ def test_trade_script_reuses_exact_digest_reference(tmp_path: Path) -> None:
     assert any(call.startswith("run --rm ") and image_reference in call for call in docker_calls)
     assert any(call.startswith("run -d ") and image_reference in call for call in docker_calls)
     assert all(":latest" not in call for call in docker_calls)
+
+
+def test_trade_script_does_not_accept_an_unrelated_ready_marker(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'3' * 64}"
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        deployment_id="not-ready",
+        ready_marker="",
+        stale_ready_marker="fixture-run:unrelated",
+    )
+
+    assert result.returncode != 0
+    assert "did not become ready" in result.stderr
+    assert any("LIBRAE_READY_FILE=/tmp/librae-ready-not-ready" in call for call in docker_calls)
+    assert not any(call.endswith("cat /tmp/librae-ready") for call in docker_calls)
 
 
 def test_trade_script_rejects_strategy_account_mismatch_before_replacement(
@@ -436,6 +464,8 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert "--label io.librae.strategy=momentum" in final_run
     assert "--label io.librae.mode=live" in final_run
     assert "--label io.librae.runtime_revision=sha256:" in final_run
+    assert "--label io.librae.ready_file=/tmp/librae-ready-momentum-main" in final_run
+    assert "LIBRAE_READY_FILE=/tmp/librae-ready-momentum-main" in final_run
     assert "--runtime-revision sha256:" in final_run
     assert "--config /app/deployment/config.yaml" in final_run
     assert "--add-host host.docker.internal:host-gateway" in final_run
@@ -582,6 +612,9 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert 'source "${PROJECT_ROOT}/.env.secrets"' not in script
     assert 'credential_args+=(--env-file "${credentials_file}")' in script
     assert '--filter "label=io.librae.managed=true"' in script
+    assert "container_ready_file()" in script
+    assert 'ready_file="${READY_FILE}"' in script
+    assert script.count('container_ready_file "${container}"') == 3
     assert "cmd_inspect()" in script
     assert "cmd_restart()" in script
     assert 'stop_container "${container}" "${force}"' in script
