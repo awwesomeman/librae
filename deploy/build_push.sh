@@ -56,11 +56,17 @@ PLATFORMS="${TRADE_PLATFORMS:-linux/amd64,linux/arm64}"
 METADATA_FILE="$(mktemp)"
 trap 'rm -f "${METADATA_FILE}"' EXIT
 
+UV_BUILD_ARGS=()
+[[ -z "${UV_DEFAULT_INDEX:-}" ]] || UV_BUILD_ARGS+=(--build-arg UV_DEFAULT_INDEX)
+[[ -z "${UV_INDEX:-}" ]] || UV_BUILD_ARGS+=(--build-arg UV_INDEX)
+[[ -z "${UV_FIND_LINKS:-}" ]] || UV_BUILD_ARGS+=(--build-arg UV_FIND_LINKS)
+
 echo "Building + pushing ${IMAGE_TAG} (${PLATFORMS//,/ + })..."
 echo "Librae revision: ${LIBRAE_REVISION}"
 # Production publishes both architectures under one source-revision tag.
 # Docker pull/run later selects the matching platform from the manifest.
 docker buildx build --platform "${PLATFORMS}" \
+    "${UV_BUILD_ARGS[@]}" \
     --build-context "strategy_source=${STRATEGY_SOURCE}" \
     --build-arg LIBRAE_VERSION="${LIBRAE_VERSION}" \
     --build-arg LIBRAE_REVISION="${LIBRAE_REVISION}" \

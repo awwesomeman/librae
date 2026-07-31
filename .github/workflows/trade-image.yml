@@ -158,6 +158,42 @@ jobs:
             "${TRADE_IMAGE_REF}" \
             python -c \
             'import importlib.metadata as m, os; import librae; assert m.version("librae") == os.environ["EXPECTED_VERSION"]'
+          docker run --rm --interactive "${TRADE_IMAGE_REF}" python - <<'PY'
+          import importlib.metadata
+          import tomllib
+          from pathlib import Path
+
+          distribution_names = (
+              "numpy",
+              "pandas",
+              "exchange-calendars",
+              "PyYAML",
+              "psycopg2-binary",
+              "ccxt",
+              "httpx",
+              "shioaji",
+              "ib-async",
+          )
+          with Path("/app/uv.lock").open("rb") as lock_file:
+              lock = tomllib.load(lock_file)
+
+          locked_versions = {}
+          for package in lock["package"]:
+              package_version = package.get("version")
+              if package_version is not None:
+                  locked_versions.setdefault(package["name"], set()).add(package_version)
+
+          for distribution_name in distribution_names:
+              normalized_name = distribution_name.lower()
+              installed_version = importlib.metadata.version(distribution_name)
+              selected_versions = locked_versions.get(normalized_name, set())
+              if installed_version not in selected_versions:
+                  raise SystemExit(
+                      f"{distribution_name}=={installed_version} is not selected by uv.lock "
+                      f"(expected one of {sorted(selected_versions)})"
+                  )
+              print(f"{distribution_name}=={installed_version}")
+          PY
           docker run --rm "${TRADE_IMAGE_REF}" python -m strategies.smoke.run --once
 
       - name: Verify TimescaleDB container endpoint
