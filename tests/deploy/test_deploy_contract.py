@@ -219,7 +219,10 @@ def _run_trade_script(
     existing_strategy: str = "",
     existing_mode: str = "",
     existing_managed: str = "true",
-    ready_marker: str = "fixture-run:generation",
+    ready_token: str = "attempt-token",
+    ready_marker: str = f"attempt-token:fixture-run:{'a' * 32}",
+    ready_marker_exit_code: int = 0,
+    status_after_ready_read: str = "",
     stale_ready_marker: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
@@ -250,8 +253,22 @@ elif [[ "$1" == "inspect" ]]; then
         *io.librae.mode*) printf '%s\\n' "${FAKE_EXISTING_MODE}" ;;
         *io.librae.managed*) printf '%s\\n' "${FAKE_EXISTING_MANAGED}" ;;
         *io.librae.ready_file*) printf '%s\\n' "${FAKE_READY_FILE}" ;;
+        *io.librae.ready_token*) printf '%s\\n' "${FAKE_READY_TOKEN}" ;;
+        *".State.Status}} {{.RestartCount"*)
+            if [[ -s "${FAKE_DOCKER_STATE_FILE}" ]]; then
+                printf '%s 0\\n' "$(cat "${FAKE_DOCKER_STATE_FILE}")"
+            else
+                printf '%s\\n' "running 0"
+            fi
+            ;;
         *State.Running*) printf '%s\\n' "false" ;;
-        *State.Status*) printf '%s\\n' "running" ;;
+        *State.Status*)
+            if [[ -s "${FAKE_DOCKER_STATE_FILE}" ]]; then
+                cat "${FAKE_DOCKER_STATE_FILE}"
+            else
+                printf '%s\\n' "running"
+            fi
+            ;;
         *RestartCount*) printf '%s\\n' "0" ;;
     esac
 elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
@@ -281,11 +298,15 @@ elif [[ "$1" == "exec" ]]; then
         marker_file="${@: -1}"
         if [[ "${marker_file}" == "${FAKE_READY_FILE}" ]]; then
             [[ -z "${FAKE_READY_MARKER}" ]] || printf '%s\\n' "${FAKE_READY_MARKER}"
+            if [[ -n "${FAKE_STATUS_AFTER_READY_READ}" ]]; then
+                printf '%s\\n' "${FAKE_STATUS_AFTER_READY_READ}" \
+                    > "${FAKE_DOCKER_STATE_FILE}"
+            fi
         elif [[ "${marker_file}" == "/tmp/librae-ready" ]]; then
             [[ -z "${FAKE_STALE_READY_MARKER}" ]] || printf '%s\\n' "${FAKE_STALE_READY_MARKER}"
         fi
     fi
-    exit 0
+    exit "${FAKE_READY_MARKER_EXIT_CODE}"
 fi
 """,
         encoding="utf-8",
@@ -297,6 +318,7 @@ fi
     env.update(
         {
             "DOCKER_LOG": docker_log.as_posix(),
+            "FAKE_DOCKER_STATE_FILE": (tmp_path / "docker-state").as_posix(),
             "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
             "TRADE_IMAGE_REF": image_reference,
             "TRADE_TIMESCALE_DSN": ("postgresql://quant_app:secret@quant_timescaledb:5432/quant"),
@@ -313,7 +335,10 @@ fi
             "FAKE_EXISTING_MODE": existing_mode,
             "FAKE_EXISTING_MANAGED": existing_managed,
             "FAKE_READY_FILE": f"/tmp/librae-ready-{deployment_id}",
+            "FAKE_READY_TOKEN": ready_token,
             "FAKE_READY_MARKER": ready_marker,
+            "FAKE_READY_MARKER_EXIT_CODE": str(ready_marker_exit_code),
+            "FAKE_STATUS_AFTER_READY_READ": status_after_ready_read,
             "FAKE_STALE_READY_MARKER": stale_ready_marker,
         }
     )
@@ -385,6 +410,45 @@ def test_trade_script_does_not_accept_an_unrelated_ready_marker(tmp_path: Path) 
     assert "did not become ready" in result.stderr
     assert any("LIBRAE_READY_FILE=/tmp/librae-ready-not-ready" in call for call in docker_calls)
     assert not any(call.endswith("cat /tmp/librae-ready") for call in docker_calls)
+
+
+def test_trade_script_rejects_marker_from_failed_exec(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'4' * 64}"
+
+    result, _ = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        ready_marker_exit_code=1,
+    )
+
+    assert result.returncode != 0
+    assert "did not become ready" in result.stderr
+
+
+def test_trade_script_rechecks_container_after_reading_marker(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'5' * 64}"
+
+    result, _ = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        status_after_ready_read="exited",
+    )
+
+    assert result.returncode != 0
+    assert "failed before becoming ready" in result.stderr
+
+
+def test_trade_script_rejects_marker_for_another_attempt(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'6' * 64}"
+
+    result, _ = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        ready_marker=f"other-attempt:fixture-run:{'b' * 32}",
+    )
+
+    assert result.returncode != 0
+    assert "did not become ready" in result.stderr
 
 
 def test_trade_script_rejects_strategy_account_mismatch_before_replacement(
@@ -613,6 +677,8 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert 'credential_args+=(--env-file "${credentials_file}")' in script
     assert '--filter "label=io.librae.managed=true"' in script
     assert "container_ready_file()" in script
+    assert "container_ready_token()" in script
+    assert "valid_ready_marker()" in script
     assert 'ready_file="${READY_FILE}"' in script
     assert script.count('container_ready_file "${container}"') == 3
     assert "cmd_inspect()" in script

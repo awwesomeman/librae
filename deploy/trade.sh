@@ -130,6 +130,35 @@ container_ready_file() {
     printf '%s\n' "${ready_file}"
 }
 
+container_ready_token() {
+    local container="$1" ready_token
+    ready_token="$(
+        docker inspect \
+            --format '{{ index .Config.Labels "io.librae.ready_token" }}' \
+            "${container}"
+    )"
+    if [[ "${ready_token}" == "<no value>" ]]; then
+        ready_token=""
+    fi
+    printf '%s\n' "${ready_token}"
+}
+
+valid_ready_marker() {
+    local marker="$1" ready_token="$2"
+    local marker_body generation
+    generation="${marker##*:}"
+    marker_body="${marker%:*}"
+    if [[ ! "${generation}" =~ ^[0-9a-f]{32}$ ]]; then
+        return 1
+    fi
+    if [[ -n "${ready_token}" ]]; then
+        [[ "${marker_body}" == "${ready_token}:"* \
+            && -n "${marker_body#"${ready_token}:"}" ]]
+        return
+    fi
+    [[ -n "${marker_body}" ]]
+}
+
 wait_until_stopped() {
     local container="$1"
     local deadline=$((SECONDS + STOP_TIMEOUT_SECONDS))
@@ -165,17 +194,31 @@ stop_container() {
 
 wait_until_ready() {
     local container="$1" previous_marker="${2:-}"
-    local initial_restart_count deadline status restart_count marker ready_file
+    local initial_restart_count deadline status restart_count marker ready_file ready_token
+    local confirmed_state confirmed_status confirmed_restart_count
     ready_file="$(container_ready_file "${container}")"
+    ready_token="$(container_ready_token "${container}")"
     initial_restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
     deadline=$((SECONDS + START_TIMEOUT_SECONDS))
     while true; do
         status="$(container_status "${container}")"
         restart_count="$(docker inspect --format '{{.RestartCount}}' "${container}")"
         if [[ "${status}" == "running" ]]; then
-            marker="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null || true)"
-            if [[ -n "${marker}" && "${marker}" != "${previous_marker}" ]]; then
-                return 0
+            marker=""
+            if marker="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null)" \
+                && valid_ready_marker "${marker}" "${ready_token}" \
+                && [[ "${marker}" != "${previous_marker}" ]]; then
+                confirmed_state="$(
+                    docker inspect \
+                        --format '{{.State.Status}} {{.RestartCount}}' \
+                        "${container}"
+                )"
+                confirmed_status="${confirmed_state%% *}"
+                confirmed_restart_count="${confirmed_state##* }"
+                if [[ "${confirmed_status}" == "running" \
+                    && "${confirmed_restart_count}" == "${restart_count}" ]]; then
+                    return 0
+                fi
             fi
         fi
         if [[ "${status}" == "exited" || "${status}" == "dead" \
@@ -263,6 +306,7 @@ cmd_start() {
     local container
     container="$(container_name "${deployment_id}")"
     local ready_file="${READY_FILE}-${deployment_id}"
+    local ready_token="${deployment_id}-$(date +%s)-$$-${RANDOM}-${RANDOM}"
     local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env}"
 
     local credential_args=()
@@ -513,6 +557,7 @@ finally:
         -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
         -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
         -e LIBRAE_READY_FILE="${ready_file}"
+        -e LIBRAE_READY_TOKEN="${ready_token}"
     )
     if container_exists "${container}"; then
         echo "Stopping existing ${container}..."
@@ -539,6 +584,7 @@ finally:
         --label "io.librae.mode=${mode}" \
         --label "io.librae.runtime_revision=${runtime_revision}" \
         --label "io.librae.ready_file=${ready_file}" \
+        --label "io.librae.ready_token=${ready_token}" \
         "${credential_args[@]}" \
         "${env_args[@]}" \
         "${config_mount_args[@]}" \
@@ -566,7 +612,7 @@ cmd_inspect() {
     fi
 
     local account_id currency status restart_count process_id exit_code reason ready run_id phase
-    local ready_file
+    local ready_file ready_token marker_body
     account_id="$(docker inspect --format '{{ index .Config.Labels "io.librae.account_id" }}' "${container}")"
     currency="$(docker inspect --format '{{ index .Config.Labels "io.librae.currency" }}' "${container}")"
     status="$(container_status "${container}")"
@@ -575,13 +621,18 @@ cmd_inspect() {
     exit_code="$(docker inspect --format '{{.State.ExitCode}}' "${container}")"
     reason="$(docker inspect --format '{{.State.Error}}' "${container}")"
     ready_file="$(container_ready_file "${container}")"
+    ready_token="$(container_ready_token "${container}")"
     ready="false"
     run_id=""
     if [[ "${status}" == "running" ]]; then
-        run_id="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null || true)"
-        if [[ -n "${run_id}" ]]; then
+        if run_id="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null)" \
+            && valid_ready_marker "${run_id}" "${ready_token}"; then
             ready="true"
-            run_id="${run_id%%:*}"
+            marker_body="${run_id%:*}"
+            if [[ -n "${ready_token}" ]]; then
+                marker_body="${marker_body#"${ready_token}:"}"
+            fi
+            run_id="${marker_body}"
         fi
     fi
 
