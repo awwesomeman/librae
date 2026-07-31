@@ -67,7 +67,7 @@ Install only the integration you use:
 | `cli` | Repository YAML/CLI orchestration helpers |
 | `db` | TimescaleDB persistence and durable live state |
 | `crypto-live` | CCXT crypto adapter |
-| `tw-live` | Shioaji Taiwan stocks and futures adapter |
+| `tw-live` | Shioaji Taiwan futures adapter; stock account routing is not currently supported |
 | `us-live` | IBKR US stocks and futures adapter |
 | `stocks-data` | Binance Stocks catalog and latest quotes |
 | `telegram` | Telegram notifications |

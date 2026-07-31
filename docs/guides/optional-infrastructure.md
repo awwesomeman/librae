@@ -130,7 +130,7 @@ Install only the adapter needed by the execution venue:
 | Extra | Adapter | Typical scope |
 |---|---|---|
 | `crypto-live` | `CryptoAdapter` / CCXT | Crypto |
-| `tw-live` | `ShioajiAdapter` | Taiwan stocks and futures |
+| `tw-live` | `ShioajiAdapter` | Taiwan futures; stock account routing is not currently supported |
 | `us-live` | `IBKRAdapter` | US stocks and futures |
 
 Market data and execution routing are separate. `data_source` chooses where
@@ -267,7 +267,9 @@ builder in the normal way for the environment. Configure an alternative
 Python package index through the standard `UV_DEFAULT_INDEX`, `UV_INDEX`, or
 `UV_FIND_LINKS` environment variables; both build scripts forward only the
 values that are set. The repository does not embed a public index URL,
-credentials, or TLS exceptions.
+credentials, or TLS exceptions. These values are Docker build arguments, so
+keep credentials out of them and configure authenticated access on the
+builder.
 
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
 application repository; it syncs the compose file, `librae/db/timescale_init.sql`,
@@ -367,9 +369,10 @@ different strategies, configurations, and launch paths.
 
 `trade.sh start` reports success only after the runner publishes readiness.
 The repository's `build_live_trader()` wiring does this after state restore,
-durable ownership, and startup broker reconciliation. A custom runner must
-honour the same `LIBRAE_READY_FILE` contract or the launch times out without
-being reported ready.
+durable ownership, and startup broker reconciliation. A custom runner must write
+`${LIBRAE_READY_TOKEN}:<run_id>:<32-character-lowercase-hex-generation>` to
+`LIBRAE_READY_FILE` after completing the same startup checks. An absent,
+malformed, or stale marker does not make the deployment ready.
 
 Use the lifecycle commands without relying on shell process memory:
 
@@ -387,26 +390,11 @@ image and configuration first, then gracefully stops and removes the old
 container. A failed new launch remains failed for diagnosis; the script does
 not blindly reactivate the old revision. `trade.sh stop --all` applies the same
 graceful behavior to all containers carrying the Librae managed label.
-The repository CI exercises this lifecycle with a long-running simulation
-fixture and verifies the durable account lease across separate containers.
-It also runs the real registry-to-VM path against a disposable multi-platform
-OCI registry and a clean SSH Linux target with its own Docker daemon. The
-acceptance run:
-
-- publishes the combined Librae and external-strategy image with
-  `build_push.sh` and consumes only its digest-qualified output;
-- transfers infrastructure with `cloud_deploy.sh`, verifies the current
-  schema and shared container network, and reruns without changing
-  operator-created account configuration or credentials;
-- starts a long-running broker-free deployment with `trade.sh` from the
-  published digest and removes the disposable registry, host, containers,
-  networks, volumes, and image cache afterward.
-
-This validates the documented script handoff without copying either
-application repository to the target. It does not claim registry
-authentication, image-signing policy, cloud hardening, or broker API
-certification; real live credentials and venue reconciliation remain
-environment-specific release gates.
+Repository CI validates the multi-platform image, digest-only handoff,
+infrastructure deployment and repeat deployment, strategy lifecycle, and
+durable account lease against disposable Linux targets. It does not certify
+registry authentication, image signing, cloud hardening, broker APIs, or real
+credentials.
 
 `cloud_deploy.sh` reports file transfer, Compose startup, TimescaleDB
 readiness, schema loading, Grafana readiness, and dashboard publication as
