@@ -253,7 +253,22 @@ files. The source directory does not have to use Git; it should have its own
 Run `deploy/build_push.sh` from `librae/`; it fails before invoking Docker when
 the selected source directory is absent. The shared image installs the
 `calendars`, `cli`, `db`, `crypto-live`, `telegram`, `tw-live`, and `us-live`
-extras.
+extras at the exact versions selected by the checked-in `uv.lock`.
+`deploy/Dockerfile` uses `uv sync --locked`, so a build fails instead of
+resolving new versions when `pyproject.toml`, those extras, and the lock
+disagree. It also pins the Python base and `uv` installer by multi-platform
+manifest digest. A deliberate base, installer, dependency, or extras refresh
+therefore appears in review. Both the local build in `trade.sh` and the
+registry build in `build_push.sh` use this same Dockerfile and frozen
+selection.
+
+Configure registry mirrors, HTTP proxies, and BuildKit caches on the Docker
+builder in the normal way for the environment. Configure an alternative
+Python package index through the standard `UV_DEFAULT_INDEX`, `UV_INDEX`, or
+`UV_FIND_LINKS` environment variables; both build scripts forward only the
+values that are set. The repository does not embed a public index URL,
+credentials, or TLS exceptions.
+
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
 application repository; it syncs the compose file, `librae/db/timescale_init.sql`,
 Grafana provisioning, and `.env`.
@@ -261,6 +276,10 @@ Grafana provisioning, and `.env`.
 This combined-source builder is optional. A caller-owned image may instead
 install a pinned Librae distribution and copy its own strategy package, as
 long as it provides the `strategies.<name>.run` module invoked by `trade.sh`.
+The combined-source builder copies strategy source but does not discover or
+install strategy-specific requirements. A strategy with additional
+dependencies must provide a caller-owned final image or an explicit extension
+layer that installs its own frozen dependencies.
 The final image digest identifies the selected image bytes, independently of
 the stable `deployment_id` that identifies one running process.
 

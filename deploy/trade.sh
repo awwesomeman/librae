@@ -344,8 +344,13 @@ cmd_start() {
         if [[ -n "$(git -C "${PROJECT_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
             librae_version="${librae_version}.dirty"
         fi
+        local -a uv_build_args=()
+        [[ -z "${UV_DEFAULT_INDEX:-}" ]] || uv_build_args+=(--build-arg UV_DEFAULT_INDEX)
+        [[ -z "${UV_INDEX:-}" ]] || uv_build_args+=(--build-arg UV_INDEX)
+        [[ -z "${UV_FIND_LINKS:-}" ]] || uv_build_args+=(--build-arg UV_FIND_LINKS)
         echo "Building trade image locally (librae=${librae_version})..."
         docker build -q \
+            "${uv_build_args[@]}" \
             --build-context "strategy_source=${strategy_source}" \
             --build-arg LIBRAE_VERSION="${librae_version}" \
             --build-arg LIBRAE_REVISION="${librae_revision}" \
