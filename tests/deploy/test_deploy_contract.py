@@ -3,6 +3,7 @@
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -56,9 +57,40 @@ def test_compose_database_init_mount_exists() -> None:
 def test_trade_image_installs_every_supported_runtime_extra() -> None:
     dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
     dockerignore = (DEPLOY / "Dockerfile.dockerignore").read_text(encoding="utf-8")
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    locked_project = next(package for package in lock["package"] if package["name"] == "librae")
+    runtime_extras = (
+        "calendars",
+        "cli",
+        "db",
+        "crypto-live",
+        "telegram",
+        "tw-live",
+        "us-live",
+    )
 
-    assert '".[calendars,cli,db,crypto-live,telegram,tw-live,us-live]"' in dockerfile
+    assert "uv sync --locked --no-dev --no-editable --no-cache" in dockerfile
+    assert "--no-python-downloads" in dockerfile
+    assert "pip install" not in dockerfile
+    for extra in runtime_extras:
+        assert f"--extra {extra}" in dockerfile
+        assert extra in project["project"]["optional-dependencies"]
+        assert extra in locked_project["optional-dependencies"]
+
+    from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
+    python_bases = [line.split()[1] for line in from_lines if "python:3.12-slim@" in line]
+    assert len(python_bases) == 2
+    assert len(set(python_bases)) == 1
+    assert python_bases[0].startswith("python:3.12-slim@sha256:")
+    assert len(python_bases[0].partition("@sha256:")[2]) == 64
+    assert any(
+        line.startswith("FROM ghcr.io/astral-sh/uv:") and "@sha256:" in line for line in from_lines
+    )
+
     assert "COPY --from=strategy_source . strategies/" in dockerfile
+    assert "COPY --from=build /app/.venv .venv/" in dockerfile
+    assert "COPY --from=build /app/uv.lock uv.lock" in dockerfile
     assert "COPY orchestration_helpers.py" not in dockerfile
     assert "**/.git" in dockerignore
     assert "**/.env.*" in dockerignore
@@ -83,6 +115,9 @@ def test_trade_image_build_receives_explicit_source_identity() -> None:
         script = (DEPLOY / script_name).read_text(encoding="utf-8")
         assert '--build-arg LIBRAE_VERSION="' in script
         assert '--build-arg LIBRAE_REVISION="' in script
+        assert "--build-arg UV_DEFAULT_INDEX" in script
+        assert "--build-arg UV_INDEX" in script
+        assert "--build-arg UV_FIND_LINKS" in script
         assert "git -C " in script
         assert "rev-parse --verify HEAD" in script
 
@@ -114,6 +149,9 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "docker image inspect" in workflow
     assert "docker run --rm" in workflow
     assert "EXPECTED_VERSION" in workflow
+    assert 'Path("/app/uv.lock")' in workflow
+    for distribution_name in ("numpy", "pandas", "ccxt", "shioaji", "ib-async"):
+        assert f'"{distribution_name}"' in workflow
     assert "strategy-fixture/smoke/run.py" in workflow
     assert "TRADE_STRATEGY_PATH: ../strategy-fixture" in workflow
     assert "./deploy/trade.sh start smoke-ci ci USD smoke sim 60" in workflow
