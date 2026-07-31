@@ -72,6 +72,8 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
 
     assert "uv sync --locked --no-dev --no-editable --no-cache" in dockerfile
     assert "--no-python-downloads" in dockerfile
+    assert "--mount=type=secret,id=uv_config" in dockerfile
+    assert "UV_CONFIG_FILE=/run/secrets/uv_config" in dockerfile
     assert "pip install" not in dockerfile
     for extra in runtime_extras:
         assert f"--extra {extra}" in dockerfile
@@ -118,6 +120,8 @@ def test_trade_image_build_receives_explicit_source_identity() -> None:
         assert "--build-arg UV_DEFAULT_INDEX" in script
         assert "--build-arg UV_INDEX" in script
         assert "--build-arg UV_FIND_LINKS" in script
+        assert '--secret "id=uv_config,src=${' in script
+        assert "UV_CONFIG_FILE not found:" in script
         assert "git -C " in script
         assert "rev-parse --verify HEAD" in script
 
@@ -131,8 +135,8 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert workflow.count('- "deploy/**"') == 2
     assert "bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh" in workflow
     assert "if: github.event_name == 'push'" in workflow
-    assert "docker/setup-qemu-action@v3" in workflow
-    assert "docker/setup-buildx-action@v3" in workflow
+    assert "docker/setup-qemu-action@v4" in workflow
+    assert "docker/setup-buildx-action@v4" in workflow
     assert (
         "TRADE_PLATFORMS: ${{ github.event_name == 'pull_request' && "
         "'linux/amd64' || 'linux/amd64,linux/arm64' }}" in workflow
@@ -145,6 +149,7 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "./deploy/build_push.sh" in workflow
     assert "./deploy/cloud_deploy.sh deployment-target" in workflow
     assert "TRADE_IMAGE: localhost:5000/librae-trade" in workflow
+    assert "UV_CONFIG_FILE: ${{ runner.temp }}/uv.toml" in workflow
     assert 'docker pull "${TRADE_IMAGE_REF}"' in workflow
     assert "docker image inspect" in workflow
     assert "docker run --rm" in workflow

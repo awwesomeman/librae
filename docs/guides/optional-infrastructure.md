@@ -266,10 +266,12 @@ Configure registry mirrors, HTTP proxies, and BuildKit caches on the Docker
 builder in the normal way for the environment. Configure an alternative
 Python package index through the standard `UV_DEFAULT_INDEX`, `UV_INDEX`, or
 `UV_FIND_LINKS` environment variables; both build scripts forward only the
-values that are set. The repository does not embed a public index URL,
-credentials, or TLS exceptions. These values are Docker build arguments, so
-keep credentials out of them and configure authenticated access on the
-builder.
+values that are set. These are Docker build arguments and must contain only
+non-secret mirror or link settings. For an authenticated index, set
+`UV_CONFIG_FILE` to a local `uv.toml`; the scripts pass that file to
+`deploy/Dockerfile` as a temporary BuildKit secret. Keep the file outside
+version control. The repository does not embed an index URL, credentials, or
+TLS exceptions.
 
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
 application repository; it syncs the compose file, `librae/db/timescale_init.sql`,

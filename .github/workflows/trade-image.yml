@@ -30,17 +30,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Validate deployment scripts
         run: bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh
 
       - name: Enable multi-platform builds
         if: github.event_name == 'push'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Configure Buildx for the disposable registry
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver-opts: network=host
 
@@ -127,8 +127,10 @@ jobs:
           TRADE_IMAGE: localhost:5000/librae-trade
           TRADE_STRATEGY_PATH: ../strategy-fixture
           TRADE_PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          UV_CONFIG_FILE: ${{ runner.temp }}/uv.toml
         run: |
           set -o pipefail
+          printf '%s\n' 'index-url = "https://pypi.org/simple"' > "${UV_CONFIG_FILE}"
           revision="$(git rev-parse --verify HEAD)"
           version="0+g${revision:0:12}"
           ./deploy/build_push.sh | tee "${RUNNER_TEMP}/build-push.log"

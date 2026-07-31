@@ -407,6 +407,17 @@ cmd_start() {
         [[ -z "${UV_DEFAULT_INDEX:-}" ]] || uv_build_args+=(--build-arg UV_DEFAULT_INDEX)
         [[ -z "${UV_INDEX:-}" ]] || uv_build_args+=(--build-arg UV_INDEX)
         [[ -z "${UV_FIND_LINKS:-}" ]] || uv_build_args+=(--build-arg UV_FIND_LINKS)
+        if [[ -n "${UV_CONFIG_FILE:-}" ]]; then
+            local uv_config_source="${UV_CONFIG_FILE}"
+            if [[ "${uv_config_source}" != /* ]]; then
+                uv_config_source="${PROJECT_ROOT}/${uv_config_source}"
+            fi
+            if [[ ! -f "${uv_config_source}" ]]; then
+                echo "UV_CONFIG_FILE not found: ${uv_config_source}" >&2
+                exit 1
+            fi
+            uv_build_args+=(--secret "id=uv_config,src=${uv_config_source}")
+        fi
         echo "Building trade image locally (librae=${librae_version})..."
         docker build -q \
             "${uv_build_args[@]}" \
