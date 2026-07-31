@@ -11,10 +11,6 @@ Naming convention:
                 data from broader inputs
     refresh_* — recompute derived/aggregate data from other tables and
                 upsert the result
-
-Tables: backtest_runs, equity_curve, trade_events, funding_cash_flows,
-strategy_performance, ohlcv, signal_events, ohlcv_coverage_ranges,
-external_factors, external_factor_coverage_ranges.
 """
 
 from __future__ import annotations

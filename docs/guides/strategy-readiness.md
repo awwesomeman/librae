@@ -109,16 +109,13 @@ ratio and quantities. Both bundled runners are backtest-only because their
 data is synthetic; attempting `sim` or `live` reports that boundary before
 strategy execution.
 
-## Capability tracking and intentional non-goals
+## External certification and intentional non-goals
 
-| Capability | Tracking |
-|---|---|
-| Binance sandbox order lifecycle | [Issue #31](https://github.com/awwesomeman/librae/issues/31) |
-| Shioaji simulation order lifecycle | [Issue #32](https://github.com/awwesomeman/librae/issues/32) |
-| IBKR paper order lifecycle | [Issue #33](https://github.com/awwesomeman/librae/issues/33) |
-| Broker-native stop and OCO capability audit | [Issue #34](https://github.com/awwesomeman/librae/issues/34) |
-| Timestamped perpetual funding cash flows | [Issue #35](https://github.com/awwesomeman/librae/issues/35) |
-| Engine correctness and this readiness workflow | [Issue #37](https://github.com/awwesomeman/librae/issues/37) |
+Broker paper or live claims require environment-specific lifecycle evidence for
+the selected Binance, Shioaji, or IBKR account. Broker-native stop, bracket,
+and OCO behavior also requires venue-specific evidence before a strategy
+depends on it. Track that work in the repository issue tracker rather than
+copying mutable issue status into this guide.
 
 The following remain intentional boundaries rather than implied roadmap
 promises:

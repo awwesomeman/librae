@@ -1,13 +1,14 @@
 # Architecture & Naming Conventions
 
-> **Document purpose**: this is a **living, current-state document** — it reflects the system's architecture and naming conventions as they are today, and gets edited in place as the code evolves.
-> This is the opposite of `docs/decisions/` (a point-in-time record of a decision, never rewritten after the fact) — this file only ever carries "what is true now"; the *why* behind a naming rule lives in the corresponding decision doc, cross-referenced from here.
+> **Purpose**: this is the living current-state architecture. Historical
+> rationale stays in `docs/decisions/`.
 >
-> When you add/change a table, column, or a `librae/db/` read/write function, **you must update this document in the same change**. If a naming rule itself changes (as opposed to adding a new entry), add a new decision doc under `docs/decisions/` explaining why, as appropriate.
+> **Scope**: engine layering, the DB access layer, and naming conventions.
+> Optional Grafana, Docker, and VM operations are documented in
+> `docs/guides/optional-infrastructure.md`.
 >
-> **Scope**: engine layering, the DB access layer, and naming conventions — not deployment/ops. `scripts/`, `librae/app/`, and `deploy/` are optional ops tooling (Grafana, Docker, VM scripts), deliberately not architecture; see `docs/guides/optional-infrastructure.md` instead.
->
-> **Language**: this repo is English-only outside `docs/` (which stays in the language it was originally written in — mixing languages mid-document isn't worth the churn). Keep descriptions concise and to the point — a one-line WHY beats a paragraph; link to `docs/decisions/` for the full history instead of re-explaining it here.
+> **Language**: use English outside `docs/`; preserve each existing document's
+> language. Keep current-state descriptions concise.
 
 ## Compatibility Policy Before 1.0
 
@@ -170,8 +171,17 @@ columns from the same adapter snapshot; see
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
 - Futures have one broker-neutral selection rule: a dated monthly/quarterly instrument must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract). `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
 - IBKR consumes a product root in `venue_symbol` plus the separate `contract_month`. Shioaji and CCXT may instead require an exact broker-native contract code in `venue_symbol`; they still receive the common month/alias identity, but the adapter does not parse or reconstruct proprietary symbol syntax. This is one semantic interface with broker-specific resolution, not one universal ticker format.
-- `IBKRAdapter` covers both US stocks and futures through one class, same pattern as `ShioajiAdapter` covering TW futures + stocks: stocks are SMART-routed by symbol alone, futures need an explicit `security_type="FUT"` + `exchange` (e.g. `"CME"` for ES/NQ, `"NYMEX"` for CL, `"COMEX"` for GC — futures aren't SMART-routed). For an exact contract it queries the root plus `contract_month` and rejects missing or ambiguous matches; it never falls back to another month. Only `continuous_alias=True` resolves the nearest non-expired contract. Cached futures contracts and contract details are revalidated against their IBKR expiry before reuse so a long-running rolling route cannot continue quoting or trading an expired month. Position reconciliation resolves the same contract and matches its stable `conId`; a root such as `ES` alone is intentionally invalid because it cannot select one broker position. `CostModel.multiplier` remains the accounting SSOT and must match the resolved IBKR contract multiplier; IBKR `avgCost` is then divided by that verified multiplier before comparison with the engine's per-unit entry price.
-- `ShioajiAdapter` accepts native R1/R2 contracts only when `continuous_alias=True` and considers both alias `code` and resolved `target_code` during order/position reconciliation. An exact contract must use a non-alias `venue_symbol`; the adapter reads Shioaji `FuturesInfo.delivery_month` and rejects a mismatch with `contract_month`. Futures positions explicitly query `futopt_account` (Shioaji otherwise defaults `list_positions()` to the stock account).
+- `IBKRAdapter` covers US stocks and futures. Stocks are SMART-routed by
+  symbol; futures require `security_type="FUT"` and an exchange. Exact
+  contracts use `contract_month`; only `continuous_alias=True` selects the
+  nearest non-expired contract. Reconciliation matches the stable `conId`, and
+  `CostModel.multiplier` must match the broker contract multiplier.
+- The configured Shioaji engine account route is Taiwan futures. Stock
+  contract/order branches exist, but stock cash and reconciliation semantics
+  are not supported. Futures R1/R2 contracts require `continuous_alias=True`;
+  exact contracts use a non-alias `venue_symbol` and matching
+  `contract_month`. Position reconciliation checks alias and target codes
+  through `futopt_account`.
 - `CryptoAdapter` keeps the CCXT unified symbol as `venue_symbol`. A delivery future must set `contract_month`, checked against CCXT market `expiry`; spot and perpetual markets cannot carry that field. Binance continuous klines remain a data/research API and are explicitly rejected by order/position paths instead of being mistaken for an orderable contract.
 
 ### Broker symbol discovery
@@ -1463,16 +1473,16 @@ outcome table is maintained.
 
 ### Handling quantity ambiguity
 
-If a single record holds both "the quantity filled in this event" and "the remaining position size after the event," it's forbidden to call both `quantity` generically — the name itself must disambiguate. Standardized on:
+When one record holds both values, distinguish:
 
 - `fill_quantity` — the quantity filled in this event
 - `remaining_quantity` — the remaining position size after the event
 
-**Only make this distinction on types that actually hold both** (the `trade_events` table, `OrderEvent`, `OrderEventRecord`). Types with a single quantity field (`Position.quantity`, `PositionState.quantity`, `Fill.quantity`, `OrderIntent.quantity`, `TradeResult.quantity`) keep `quantity` unchanged — there's no ambiguity there, so no need to match this pattern.
+Types with only one quantity keep the name `quantity`.
 
 ### Scalar counts are never plural
 
-An integer count representing "how many bars this has been held" is always `periods_held`, never a plural form (plurals are too easy to misread as a list). Applied consistently everywhere this concept appears: `trade_events.periods_held`, `Position.periods_held`, `PositionState.periods_held`, `TradeResult.periods_held`, `OrderEvent.periods_held`, `OrderEventRecord.periods_held`.
+Use `periods_held` for the scalar number of bars a position was held.
 
 ### Return-rate naming
 
@@ -1480,21 +1490,14 @@ An integer count representing "how many bars this has been held" is always `peri
 frequency word. A timeframe can be 1h, 4h, 1d, or caller-defined, so the name
 must not imply a daily or annual convention.
 
-## Python function naming conventions
+## Python database helper conventions
 
-### `librae/db/timescale_writer.py` (five verb categories, documented in that file's module docstring)
-
-```
-write_*   — single-table INSERT/UPSERT (may include type/timezone normalization), writes a full row
-update_*  — single-table partial UPDATE, updates only some fields of an existing row
-merge_*   — single-table read-modify-write consolidation logic (e.g. merging ranges), beyond a plain UPSERT
-save_*    — multi-table transactional coordinator; may extract/transform data from a broader input
-refresh_* — recomputes derived/aggregate data from other tables and upserts the result
-```
-
-Decision criteria: **single-table vs. multi-table** decides between `write_`/`save_`; **writing a full row vs. partially updating an existing one** decides between `write_`/`update_`; **whether existing data must be read first to decide what to write** (rather than a plain UPSERT) means `merge_`; **whether it re-aggregates from other tables** means `refresh_`.
-
-Examples: `save_backtest_output` (writes 5 tables in one go, a multi-table coordinator), `write_trade_event` (single-table full-row write), `update_heartbeat` (single-table partial update of one field), `merge_ohlcv_coverage_ranges` (must read existing ranges first to decide the merge result), `refresh_performance` (recomputes KPIs from `equity_curve` + `trade_events` and writes them back to `strategy_performance`).
+Exact prefix definitions live beside the implementation in
+[`timescale_writer.py`](librae/db/timescale_writer.py) and
+[`timescale_reader.py`](librae/db/timescale_reader.py). Writer helpers
+distinguish single-table writes, partial updates, read-modify-write merges,
+multi-table saves, and aggregate refreshes. Reader helpers distinguish small
+lookups, DataFrame loads, and derived results.
 
 Backtest and signal-result persistence serialize writers for the same
 non-null `backtest_cache_key` with a transaction-scoped PostgreSQL advisory
@@ -1504,25 +1507,14 @@ replaces the prior canonical run for that cache key in the same transaction,
 so rollback restores the prior run if the replacement fails. A null key means
 cache reuse is disabled and does not serialize otherwise equal configurations.
 
-**Duplicate-data conflict handling**: `write_ohlcv()`/`write_external_factor()`'s SQL both use `ON CONFLICT (...) DO NOTHING` — when the same primary key (ts + symbol + timeframe/factor_name + data_source/source + instrument_type) already exists, a newly-fetched value is simply discarded and the old value in the DB stays put (the earliest write wins, not the latest). This is deliberate: a backtest needs to reproduce "the number as it was seen at the time," so a later correction from the data source must never silently rewrite a past point-in-time snapshot — the same point-in-time-correctness principle applies to any ingestion layer built on top of `librae/db/` (e.g. fundamentals data, where the earliest-disclosed value should win the same way).
-
-### `librae/db/timescale_reader.py` (three verb categories, documented in that file's module docstring)
-
-```
-get_*    — a single scalar / small object query (an id, a dict, a list of tuples)
-load_*   — a batch query returning a DataFrame, for analysis/dashboard use
-derive_* — computes a differently-shaped result from existing data; not a direct read of a raw table
-```
-
-Examples: `get_run_by_backtest_cache_key` and `get_run_by_config_hash` (return
-dicts), `load_trade_events` (returns a DataFrame), `derive_trade_signals`
-(reconstructs an entry/exit signal sequence *from* `trade_events` — it does
-**not** read the `signal_events` table; these two are easy to conflate, hence
-the deliberate use of `derive_` instead of `load_` to remind the caller this
-is derived data, not the original raw signal).
+`write_ohlcv()` and `write_external_factor()` keep the earliest value on a
+primary-key conflict. Later source corrections do not silently rewrite stored
+point-in-time observations.
 
 ## Maintenance rules
 
-1. When adding/changing a table, column, or a read/write function in `librae/db/timescale_writer.py` or `librae/db/timescale_reader.py`, update the corresponding section of this document in the same change.
-2. When a new field raises a boundary judgment call ("is this name ambiguous," "should this use `_at`"), follow the criteria in "Handling quantity ambiguity" / "Timestamp naming rules" above rather than deciding case by case.
-3. If a naming rule itself needs to change (as opposed to simply adding an entry), open a new decision doc under `docs/decisions/` explaining why; once this file is updated it should only reflect the final current state, with no explanation of the old rule retained.
+1. Update this document with every table or column change. Keep exact helper
+   prefixes in the reader and writer module docstrings.
+2. Apply the quantity and timestamp naming rules consistently.
+3. Record a changed naming rule in `docs/decisions/`, then keep only the new
+   current state here.
