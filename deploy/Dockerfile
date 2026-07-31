@@ -17,7 +17,11 @@ ARG LIBRAE_REVISION
 ARG UV_DEFAULT_INDEX
 ARG UV_INDEX
 ARG UV_FIND_LINKS
-RUN test -n "${LIBRAE_VERSION}" \
+RUN --mount=type=secret,id=uv_config \
+    if [ -f /run/secrets/uv_config ]; then \
+        export UV_CONFIG_FILE=/run/secrets/uv_config; \
+    fi; \
+    test -n "${LIBRAE_VERSION}" \
     && test -n "${LIBRAE_REVISION}" \
     && SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIBRAE="${LIBRAE_VERSION}" \
        uv sync --locked --no-dev --no-editable --no-cache \

@@ -60,6 +60,17 @@ UV_BUILD_ARGS=()
 [[ -z "${UV_DEFAULT_INDEX:-}" ]] || UV_BUILD_ARGS+=(--build-arg UV_DEFAULT_INDEX)
 [[ -z "${UV_INDEX:-}" ]] || UV_BUILD_ARGS+=(--build-arg UV_INDEX)
 [[ -z "${UV_FIND_LINKS:-}" ]] || UV_BUILD_ARGS+=(--build-arg UV_FIND_LINKS)
+if [[ -n "${UV_CONFIG_FILE:-}" ]]; then
+    UV_CONFIG_SOURCE="${UV_CONFIG_FILE}"
+    if [[ "${UV_CONFIG_SOURCE}" != /* ]]; then
+        UV_CONFIG_SOURCE="${LIBRAE_ROOT}/${UV_CONFIG_SOURCE}"
+    fi
+    if [[ ! -f "${UV_CONFIG_SOURCE}" ]]; then
+        echo "UV_CONFIG_FILE not found: ${UV_CONFIG_SOURCE}" >&2
+        exit 1
+    fi
+    UV_BUILD_ARGS+=(--secret "id=uv_config,src=${UV_CONFIG_SOURCE}")
+fi
 
 echo "Building + pushing ${IMAGE_TAG} (${PLATFORMS//,/ + })..."
 echo "Librae revision: ${LIBRAE_REVISION}"

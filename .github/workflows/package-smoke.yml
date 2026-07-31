@@ -33,10 +33,10 @@ jobs:
         os: [windows-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -57,18 +57,5 @@ jobs:
           sys.argv=[script, '--expect-editable'];
           runpy.run_path(script, run_name='__main__')"
 
-      - name: Replace editable install with wheel
-        run: >-
-          python -c "import glob, subprocess, sys;
-          wheels=glob.glob('dist/*.whl');
-          assert len(wheels) == 1, wheels;
-          subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '--yes', 'librae'], check=True);
-          subprocess.run([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]], check=True)"
-
-      - name: Smoke wheel install outside checkout
-        run: >-
-          python -c "import os, runpy, sys, tempfile;
-          script=os.path.abspath('tests/packaging/installed_smoke.py');
-          os.chdir(tempfile.mkdtemp());
-          sys.argv=[script];
-          runpy.run_path(script, run_name='__main__')"
+      - name: Smoke wheelhouse install without indexes
+        run: python tests/packaging/offline_install_smoke.py
