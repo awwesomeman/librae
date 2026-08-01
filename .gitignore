@@ -28,3 +28,6 @@ dist/
 # Local logs
 *.log
 logs/
+
+# DB backups (deploy/db_backup.sh output — contains trading/account data)
+backups/

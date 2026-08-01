@@ -12,7 +12,7 @@ result with the strategy release.
 | Backtest | Causal research logic and accounting under declared assumptions | Reproducible config/data revision, out-of-sample results, cost and capacity stress |
 | Shadow simulation (`mode=sim`) | Incremental data arrival, feature parity, scheduling, and durable analytics | Stable completed-bar decisions and no stale-data/deadline alerts |
 | Broker paper (`mode=live`) | Real broker normalization, order lifecycle, reconciliation, and restart behavior | Adapter certification issue complete for the selected broker and account type |
-| Live broker | Small-capital operational behavior under real liquidity and failure modes | Named operator, limits, alerts, kill/recovery procedure, and reviewed paper evidence |
+| Live broker | Small-capital operational behavior under real liquidity and failure modes | Named operator, limits, alerts, kill/recovery procedure ([operational runbook](operational-runbook.md)), and reviewed paper evidence |
 
 Shadow simulation is Librae's bar-fill model; it is not a broker paper
 environment. Paper trading uses `mode=live` against a broker sandbox or paper
