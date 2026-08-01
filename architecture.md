@@ -176,9 +176,10 @@ columns from the same adapter snapshot; see
   contracts use `contract_month`; only `continuous_alias=True` selects the
   nearest non-expired contract. Reconciliation matches the stable `conId`, and
   `CostModel.multiplier` must match the broker contract multiplier.
-- The configured Shioaji engine account route is Taiwan futures. Stock
-  contract/order branches exist, but stock cash and reconciliation semantics
-  are not supported. Futures R1/R2 contracts require `continuous_alias=True`;
+- The configured Shioaji engine account route is Taiwan futures.
+  `prepare_order` rejects stock (`STK`) contracts outright — stock cash and
+  reconciliation semantics are not supported; stock market data remains
+  available via `fetch_ohlcv`. Futures R1/R2 contracts require `continuous_alias=True`;
   exact contracts use a non-alias `venue_symbol` and matching
   `contract_month`. Position reconciliation checks alias and target codes
   through `futopt_account`.

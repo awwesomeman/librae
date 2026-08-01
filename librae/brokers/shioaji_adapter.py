@@ -1,10 +1,14 @@
-"""ShioajiAdapter — Sinopac Shioaji adapter for Taiwan futures/stocks.
+"""ShioajiAdapter — Sinopac Shioaji adapter for Taiwan futures.
 
 Wraps Shioaji SDK using the same flat, duck-typed adapter style as
 CryptoAdapter.
 
 Authentication is **required** for all operations (including market data).
 Order placement additionally requires CA certificate activation.
+
+Order submission is futures-only: stock (STK) contracts resolve and fetch
+market data, but ``prepare_order`` rejects them before submission — there
+is no stock settlement account on a certified Sinopac test account.
 
 Credentials can be passed explicitly or loaded from environment variables
 using the ``SHIOAJI_`` prefix convention::
@@ -83,7 +87,8 @@ class ShioajiCredentials(CredentialConfig):
 
 
 class ShioajiAdapter:
-    """Taiwan futures/stocks adapter backed by Shioaji SDK.
+    """Taiwan futures adapter backed by Shioaji SDK (order submission is
+    futures-only — see module docstring).
 
     Parameters
     ----------
@@ -335,6 +340,12 @@ class ShioajiAdapter:
             continuous_alias=signal.get("continuous_alias", False),
             contract_month=signal.get("contract_month"),
         )
+        if getattr(contract, "security_type", None) == "STK":
+            raise ValueError(
+                f"{signal['symbol']} is a Taiwan stock; ShioajiAdapter supports "
+                "futures order submission only. Stock market data remains "
+                "available via fetch_ohlcv."
+            )
         prepared = dict(signal)
         quantity = floor_to_step(float(signal["quantity"]), 1.0)
         if quantity < 1:
