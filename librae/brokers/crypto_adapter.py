@@ -54,21 +54,38 @@ def _require_ccxt() -> object:
 
 
 def _patch_binance_sandbox_urls(exchange) -> None:
-    """Redirect Binance sandbox URLs from the deprecated testnet.binance.vision
-    to demo-api.binance.com.
+    """Redirect Binance sandbox URLs to their current Demo Trading domains
+    and disable a currency-config call Demo Trading accounts don't expose.
 
-    Binance migrated Spot Testnet ("Demo Trading") to demo-api.binance.com;
-    testnet.binance.vision no longer accepts authenticated requests. ccxt's
-    set_sandbox_mode() hasn't been updated for this yet (ccxt/ccxt#27266,
-    open as of 2026-07). Remove this patch once ccxt ships a fix upstream.
+    Binance migrated Spot Testnet to demo-api.binance.com and USDS-Margined
+    Futures Testnet to demo-fapi.binance.com; the old testnet.binance.vision
+    / testnet.binancefuture.com domains no longer accept authenticated
+    requests. ccxt's set_sandbox_mode() hasn't been updated for either
+    migration yet (ccxt/ccxt#27266, open as of 2026-07).
+
+    Separately, binanceusdm's create_order()/fetch_balance()/
+    fetch_positions() all call load_markets(), which fetches currency
+    config from a SAPI endpoint (sapi/v1/capital/config/getall) that 404s
+    on the demo domain — a demo account has no real capital to configure.
+    That failure happens before the actual request, breaking every private
+    call even though order/account endpoints work fine. Disabling
+    fetchCurrencies skips it; nothing here needs it.
+
+    Remove this patch once ccxt ships fixes for both issues upstream.
     """
-    for section in ("api",):
-        urls = exchange.urls.get(section)
-        if not isinstance(urls, dict):
-            continue
+    urls = exchange.urls.get("api")
+    if isinstance(urls, dict):
         for key, url in urls.items():
-            if isinstance(url, str) and "testnet.binance.vision" in url:
+            if not isinstance(url, str):
+                continue
+            if "testnet.binance.vision" in url:
                 urls[key] = url.replace("testnet.binance.vision", "demo-api.binance.com")
+            elif "testnet.binancefuture.com" in url:
+                urls[key] = url.replace("testnet.binancefuture.com", "demo-fapi.binance.com")
+            elif key.startswith("sapi") and url.startswith("https://api.binance.com"):
+                urls[key] = url.replace("api.binance.com", "demo-api.binance.com", 1)
+    exchange.has["fetchCurrencies"] = False
+    exchange.options["fetchCurrencies"] = False
 
 
 @dataclass
@@ -129,7 +146,7 @@ class CryptoAdapter:
         self._exchange = exchange_class(config)
         if sandbox:
             self._exchange.set_sandbox_mode(True)
-            if exchange_id == "binance":
+            if exchange_id.startswith("binance"):
                 _patch_binance_sandbox_urls(self._exchange)
 
         self._read_only = not bool(api_key)
@@ -503,7 +520,29 @@ class CryptoAdapter:
             price=price,
             params=params,
         )
-        return result
+        return self._backfill_fee(result, signal["symbol"])
+
+    def _backfill_fee(self, order: dict, symbol: str) -> dict:
+        """Fill commission from fetch_my_trades() when missing — binanceusdm's
+        create_order()/fetchOrder() never include fee, unlike spot, which
+        otherwise permanently fails LiveExecutor's fill-report validation."""
+        if order.get("fee") or order.get("fees"):
+            return order
+        if not (order.get("filled") or 0) or not order.get("id"):
+            return order
+        if not self._exchange.has.get("fetchMyTrades"):
+            return order
+        trades = self._exchange.fetch_my_trades(symbol, params={"orderId": order["id"]})
+        fees = [
+            trade["fee"]
+            for trade in trades
+            if trade.get("order") == order["id"] and trade.get("fee")
+        ]
+        if not fees:
+            return order
+        order = dict(order)
+        order["fees"] = fees
+        return order
 
     def find_order(self, client_order_id: str, symbol: str) -> dict | None:
         """Find an open or final order after an ambiguous create response."""
@@ -525,14 +564,14 @@ class CryptoAdapter:
         ]
         if len(matches) > 1:
             raise ValueError(f"duplicate broker clientOrderId: {client_order_id}")
-        return matches[0] if matches else None
+        return self._backfill_fee(matches[0], symbol) if matches else None
 
     def get_order(self, order_id: str, symbol: str) -> dict:
         """Return the latest cumulative CCXT order state."""
         self._require_auth()
         if not self._exchange.has.get("fetchOrder"):
             raise NotImplementedError(f"{self._exchange_id} does not support fetchOrder")
-        return self._exchange.fetch_order(order_id, symbol)
+        return self._backfill_fee(self._exchange.fetch_order(order_id, symbol), symbol)
 
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return currently resting orders for orphan detection."""

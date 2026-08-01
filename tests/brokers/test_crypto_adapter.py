@@ -638,6 +638,56 @@ def test_place_order_without_client_order_id_omits_param(authed_adapter, mock_cc
     assert "clientOrderId" not in mock_ccxt_exchange.create_order.call_args.kwargs["params"]
 
 
+def test_place_order_backfills_missing_fee_from_trades(authed_adapter, mock_ccxt_exchange):
+    # binanceusdm's create_order()/fetchOrder() never include fee, unlike
+    # spot; commission is only available per-fill via fetch_my_trades().
+    mock_ccxt_exchange.create_order.return_value = {
+        "id": "ord_1",
+        "status": "closed",
+        "filled": 0.01,
+    }
+    mock_ccxt_exchange.has = {"fetchMyTrades": True}
+    mock_ccxt_exchange.fetch_my_trades.return_value = [
+        {"order": "ord_1", "fee": {"currency": "USDT", "cost": 0.05}},
+    ]
+
+    result = authed_adapter.place_order(
+        {"symbol": "BTC/USDT:USDT", "side": "buy", "quantity": 0.01, "order_type": "market"}
+    )
+
+    assert result["fees"] == [{"currency": "USDT", "cost": 0.05}]
+    mock_ccxt_exchange.fetch_my_trades.assert_called_once_with(
+        "BTC/USDT:USDT", params={"orderId": "ord_1"}
+    )
+
+
+def test_place_order_skips_backfill_when_fee_already_present(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.create_order.return_value = {
+        "id": "ord_1",
+        "status": "closed",
+        "filled": 0.01,
+        "fee": {"currency": "USDT", "cost": 0.05},
+    }
+    mock_ccxt_exchange.has = {"fetchMyTrades": True}
+
+    authed_adapter.place_order(
+        {"symbol": "BTC/USDT", "side": "buy", "quantity": 0.01, "order_type": "market"}
+    )
+
+    mock_ccxt_exchange.fetch_my_trades.assert_not_called()
+
+
+def test_place_order_skips_backfill_when_unfilled(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open", "filled": 0}
+    mock_ccxt_exchange.has = {"fetchMyTrades": True}
+
+    authed_adapter.place_order(
+        {"symbol": "BTC/USDT", "side": "buy", "quantity": 0.01, "order_type": "market"}
+    )
+
+    mock_ccxt_exchange.fetch_my_trades.assert_not_called()
+
+
 def test_find_order_uses_client_id_across_order_history(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.has = {"fetchOrders": True}
     mock_ccxt_exchange.fetch_orders.return_value = [
@@ -695,18 +745,59 @@ def test_sandbox_patches_deprecated_binance_testnet_url():
     Binance migrated Spot Testnet ("Demo Trading") to demo-api.binance.com;
     the old host no longer accepts authenticated requests."""
     mock_exchange = MagicMock()
+    mock_exchange.has = {}
+    mock_exchange.options = {}
     mock_exchange.urls = {
         "api": {
             "public": "https://testnet.binance.vision/api/v3",
             "private": "https://testnet.binance.vision/api/v3",
-            # different domain (futures testnet) — must be left untouched
-            "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
         }
     }
     _build_adapter_via_init("binance", mock_exchange)
     assert mock_exchange.urls["api"]["public"] == "https://demo-api.binance.com/api/v3"
     assert mock_exchange.urls["api"]["private"] == "https://demo-api.binance.com/api/v3"
-    assert mock_exchange.urls["api"]["fapiPublic"] == "https://testnet.binancefuture.com/fapi/v1"
+
+
+def test_sandbox_patches_deprecated_binanceusdm_futures_testnet_url():
+    """binanceusdm's set_sandbox_mode() still points at the deprecated
+    testnet.binancefuture.com; Binance moved USDS-Margined Futures Testnet
+    to demo-fapi.binance.com. Also confirms the sandbox patch applies to
+    binanceusdm, not just the exact exchange_id "binance"."""
+    mock_exchange = MagicMock()
+    mock_exchange.has = {}
+    mock_exchange.options = {}
+    mock_exchange.urls = {
+        "api": {
+            "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
+            "fapiPrivate": "https://testnet.binancefuture.com/fapi/v1",
+        }
+    }
+    _build_adapter_via_init("binanceusdm", mock_exchange)
+    assert mock_exchange.urls["api"]["fapiPublic"] == "https://demo-fapi.binance.com/fapi/v1"
+    assert mock_exchange.urls["api"]["fapiPrivate"] == "https://demo-fapi.binance.com/fapi/v1"
+
+
+def test_sandbox_patches_binance_sapi_url_and_disables_fetch_currencies():
+    """binanceusdm's create_order()/fetch_balance()/fetch_positions() all
+    call load_markets(), which fetches currency config from a SAPI endpoint
+    that 404s on the demo domain — a demo account has no real capital to
+    configure. Redirect sapi* URLs and disable fetchCurrencies so
+    load_markets() never hits that endpoint."""
+    mock_exchange = MagicMock()
+    mock_exchange.has = {}
+    mock_exchange.options = {}
+    mock_exchange.urls = {
+        "api": {
+            "sapi": "https://api.binance.com/sapi/v1",
+            "sapiV3": "https://api.binance.com/sapi/v3",
+            "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
+        }
+    }
+    _build_adapter_via_init("binanceusdm", mock_exchange)
+    assert mock_exchange.urls["api"]["sapi"] == "https://demo-api.binance.com/sapi/v1"
+    assert mock_exchange.urls["api"]["sapiV3"] == "https://demo-api.binance.com/sapi/v3"
+    assert mock_exchange.has["fetchCurrencies"] is False
+    assert mock_exchange.options["fetchCurrencies"] is False
 
 
 def test_sandbox_patch_not_applied_to_non_binance_exchange():
