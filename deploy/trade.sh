@@ -420,7 +420,7 @@ cmd_start() {
         fi
         echo "Building trade image locally (librae=${librae_version})..."
         docker build -q \
-            "${uv_build_args[@]}" \
+            "${uv_build_args[@]+"${uv_build_args[@]}"}" \
             --build-context "strategy_source=${strategy_source}" \
             --build-arg LIBRAE_VERSION="${librae_version}" \
             --build-arg LIBRAE_REVISION="${librae_revision}" \
@@ -451,9 +451,9 @@ cmd_start() {
     echo "Checking strategy account and TimescaleDB connectivity from ${image} on ${NETWORK}..."
     docker run --rm \
         --network "${NETWORK}" \
-        "${credential_args[@]}" \
-        "${config_mount_args[@]}" \
-        "${secret_mount_args[@]}" \
+        "${credential_args[@]+"${credential_args[@]}"}" \
+        "${config_mount_args[@]+"${config_mount_args[@]}"}" \
+        "${secret_mount_args[@]+"${secret_mount_args[@]}"}" \
         -e TIMESCALE_DSN="${trade_timescale_dsn}" \
         -e TRADE_RUN_MODULE="strategies.${strategy}.run" \
         -e TRADE_CONFIG_PATH="${container_config}" \
@@ -596,17 +596,17 @@ finally:
         --label "io.librae.runtime_revision=${runtime_revision}" \
         --label "io.librae.ready_file=${ready_file}" \
         --label "io.librae.ready_token=${ready_token}" \
-        "${credential_args[@]}" \
+        "${credential_args[@]+"${credential_args[@]}"}" \
         "${env_args[@]}" \
-        "${config_mount_args[@]}" \
-        "${secret_mount_args[@]}" \
-        "${host_args[@]}" \
+        "${config_mount_args[@]+"${config_mount_args[@]}"}" \
+        "${secret_mount_args[@]+"${secret_mount_args[@]}"}" \
+        "${host_args[@]+"${host_args[@]}"}" \
         "${image}" \
         python -m "strategies.${strategy}.run" \
         --mode "${mode}" \
         --poll-seconds "${poll_seconds}" \
-        "${runtime_revision_args[@]}" \
-        "${runner_config_args[@]}"
+        "${runtime_revision_args[@]+"${runtime_revision_args[@]}"}" \
+        "${runner_config_args[@]+"${runner_config_args[@]}"}"
 
     wait_until_ready "${container}" ""
     echo "Ready. Logs: docker logs -f ${container}"

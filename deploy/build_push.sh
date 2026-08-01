@@ -77,7 +77,7 @@ echo "Librae revision: ${LIBRAE_REVISION}"
 # Production publishes both architectures under one source-revision tag.
 # Docker pull/run later selects the matching platform from the manifest.
 docker buildx build --platform "${PLATFORMS}" \
-    "${UV_BUILD_ARGS[@]}" \
+    "${UV_BUILD_ARGS[@]+"${UV_BUILD_ARGS[@]}"}" \
     --build-context "strategy_source=${STRATEGY_SOURCE}" \
     --build-arg LIBRAE_VERSION="${LIBRAE_VERSION}" \
     --build-arg LIBRAE_REVISION="${LIBRAE_REVISION}" \
