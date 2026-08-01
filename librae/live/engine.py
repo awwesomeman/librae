@@ -174,6 +174,11 @@ class LiveTrader:
             notifications. Scheduling is separate from the transport.
         on_ready: Optional deployment hook called after state restoration,
             durable ownership, and startup broker reconciliation.
+        on_run_registered: Optional hook called with the resolved run_id
+            before the first durable checkpoint write, for a caller whose
+            state_store enforces a run must be registered first (e.g. a
+            foreign key to a run-metadata table). No-op for a restored run,
+            since that run is already registered.
     """
 
     def __init__(
@@ -195,6 +200,7 @@ class LiveTrader:
         on_funding_cash_flow: FundingCashFlowCallback | None = None,
         on_performance: PerformanceCallback | None = None,
         on_ready: Callable[[str], None] | None = None,
+        on_run_registered: Callable[[str], None] | None = None,
         warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
         runtime_revision: str | None = None,
@@ -400,6 +406,8 @@ class LiveTrader:
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
         if self._state_store is not None and not self._restored_state:
+            if on_run_registered is not None:
+                on_run_registered(self._run_id)
             self._persist_state()
 
     # --- Durable runtime state ---

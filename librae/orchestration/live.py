@@ -452,7 +452,10 @@ def build_live_trader(
         on_funding_cash_flow=callbacks.on_funding_cash_flow if callbacks else None,
         on_performance=callbacks.on_performance if callbacks else None,
         on_ready=_combine_ready_callbacks(on_ready),
+        # Must run before LiveTrader's own first checkpoint write, which a
+        # durable state_store may reject until the run is registered (e.g. a
+        # foreign key to a run-metadata table) — calling this only after
+        # construction returns is too late, since __init__ already persisted.
+        on_run_registered=callbacks.register_run if callbacks else None,
     )
-    if callbacks is not None:
-        callbacks.register_run(trader.run_id)
     return trader
