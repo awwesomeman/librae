@@ -1352,8 +1352,12 @@ class TestLiveTrader:
                 "non-finite size",
             ),
             (
-                {"symbol": "BTCUSDT", "size": 1.0, "avg_price": None},
-                "missing average price",
+                {"symbol": "BTCUSDT", "size": 1.0, "avg_price": "not-a-number"},
+                "invalid average price",
+            ),
+            (
+                {"symbol": "BTCUSDT", "size": 1.0, "avg_price": 0.0},
+                "invalid average price",
             ),
         ],
     )
@@ -1371,6 +1375,26 @@ class TestLiveTrader:
 
         with pytest.raises(ValueError, match=message):
             runner._read_broker_positions()
+
+    def test_position_reconciliation_accepts_missing_average_price(self):
+        """CCXT spot balances never carry avg_price (no cost-basis field in
+        the balance API) — a missing avg_price is not itself an error,
+        unlike a missing size which every broker returns."""
+        mock_order_adapter = _mock_order_adapter()
+        mock_order_adapter.get_position.return_value = {
+            "symbol": "BTC/USDT",
+            "size": 1.0,
+            "avg_price": None,
+            "unrealized_pnl": 0.0,
+        }
+        runner = self._make_runner(
+            config=_test_cfg(mode="live"),
+            order_adapter=mock_order_adapter,
+        )
+
+        positions = runner._read_broker_positions()
+
+        assert positions["BTCUSDT"].average_price is None
 
     def test_ibkr_reconciliation_uses_execution_broker_not_data_adapter(self):
         mock_order_adapter = _mock_order_adapter()
@@ -2641,7 +2665,10 @@ class TestLiveExecutionLifecycle:
         assert adapter.place_order.call_count == 1
         assert second._run_id == first._run_id
 
-    def test_restored_position_without_broker_cost_basis_fails_closed(self):
+    def test_restored_position_without_broker_cost_basis_reconciles_on_size_alone(self):
+        """CCXT spot balances never carry avg_price; restore must not halt
+        forever just because that field is absent — only size/side are
+        cross-checked against the broker in that case."""
         store = MemoryLiveStateStore()
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report()
@@ -2658,7 +2685,7 @@ class TestLiveExecutionLifecycle:
         second = self._make_trader(_HoldStrategy(), adapter, state_store=store)
         second.run(max_iterations=1)
 
-        assert second._halted is True
+        assert second._halted is False
         assert second._positions["BTCUSDT"].quantity == 1.0
         assert second._positions["BTCUSDT"].entry_price == 100.0
 
