@@ -415,6 +415,10 @@ capital is enabled. An operator can call `LiveTrader.halt(reason)` to persist a
 fail-closed halt and cancel tracked broker orders; resumption requires an
 explicit `reset_halt()` after reconciliation.
 
+The [operational runbook](operational-runbook.md) is where the named
+operator, secret rotation, and rehearsed alert/kill-switch/backup/restart
+procedures for a given deployment are recorded.
+
 ### Development checkpoint compatibility
 
 The relevant identities are intentionally not interchangeable:
