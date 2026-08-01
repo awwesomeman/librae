@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
 from librae.db.timescale_reader import get_ohlcv_coverage_ranges
 from librae.db.timescale_writer import merge_ohlcv_coverage_ranges
 
@@ -79,3 +80,14 @@ class TestMergeOhlcvCoverage:
 
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 2
+
+    def test_rejects_invalid_instrument_type(self):
+        with pytest.raises(ValueError, match="instrument_type"):
+            merge_ohlcv_coverage_ranges(
+                "BTCUSDT",
+                "H1",
+                "binance_spot",
+                datetime(2024, 1, 2, tzinfo=UTC),
+                datetime(2024, 1, 3, tzinfo=UTC),
+                instrument_type="daily",
+            )

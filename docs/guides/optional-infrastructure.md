@@ -65,6 +65,10 @@ Normal integrations call the high-level functions in
 ad hoc SQL. The repository runner skips database writes when
 `RunOptions.database_enabled` is false.
 
+`timescale_writer`'s `instrument_type` params are validated in Python
+against `librae.config.symbols.ALLOWED_INSTRUMENT_TYPES` before any SQL
+runs — fails fast instead of relying on the `CHECK` constraint at `INSERT`.
+
 Backtest database reuse is disabled unless the caller supplies
 `backtest_revision` through CLI/YAML orchestration and passes the same value to
 `save_strategy_results()` or `save_signal_results()`. The value is an opaque,
