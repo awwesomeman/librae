@@ -94,6 +94,17 @@ def test_market_data_artifact_rejects_naive_timestamps() -> None:
         )
 
 
+def test_market_data_artifact_rejects_invalid_instrument_type() -> None:
+    with pytest.raises(ValueError, match="instrument_type"):
+        build_market_data_artifact(
+            _market_frame(),
+            symbol="BTCUSDT",
+            timeframe="1h",
+            data_source="fixture",
+            instrument_type="daily",
+        )
+
+
 def test_market_data_artifact_accepts_backtest_style_multiindex() -> None:
     frame = _market_frame()
     frame["symbol"] = "BTCUSDT"

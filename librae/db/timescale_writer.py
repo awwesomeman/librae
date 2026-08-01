@@ -34,6 +34,7 @@ import pandas as pd
 
 from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
 from librae.backtest.schema import BacktestOutput
+from librae.config.symbols import validate_instrument_type
 from librae.core.utils import to_canonical
 from librae.db import get_conn
 
@@ -523,6 +524,7 @@ def write_ohlcv(
     if df is None or df.empty:
         return 0
 
+    validate_instrument_type(instrument_type)
     timeframe = to_canonical(timeframe)
     required_columns = {"open", "high", "low", "close", "volume"}
     missing_columns = sorted(required_columns - set(df.columns))
@@ -637,6 +639,7 @@ def merge_ohlcv_coverage_ranges(
     Merges with any existing rows it now overlaps or touches, so the row
     count per key stays small instead of growing one row per fetch.
     """
+    validate_instrument_type(instrument_type)
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
     with get_conn(dsn) as conn:
         cur = conn.cursor()
@@ -667,6 +670,7 @@ def write_external_factor(
     if df is None or df.empty:
         return 0
 
+    validate_instrument_type(instrument_type)
     ts_series = pd.to_datetime(df["timestamp"])
     if ts_series.dt.tz is None:
         raise ValueError(
@@ -745,6 +749,7 @@ def merge_external_factor_coverage_ranges(
     (symbol, factor_name, source, instrument_type) instead of
     (symbol, timeframe, data_source, instrument_type).
     """
+    validate_instrument_type(instrument_type)
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
     with get_conn(dsn) as conn:
         cur = conn.cursor()

@@ -17,6 +17,7 @@ from librae.backtest.schema import (
     PositionSnapshotPoint,
     StrategyMetrics,
 )
+from librae.config.symbols import validate_instrument_type
 from librae.core.market_data import validate_ohlcv_values
 
 if TYPE_CHECKING:
@@ -117,6 +118,7 @@ def build_market_data_artifact(
         "instrument_type": instrument_type,
     }
     _validate_identity(identity)
+    validate_instrument_type(instrument_type)
     table = _normalized_market_data(frame, symbol=symbol)
 
     for name, expected in identity.items():

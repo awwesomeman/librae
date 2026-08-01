@@ -67,6 +67,10 @@ with sqlite3.connect(target) as connection:
 For enriched price/factor input, call `build_market_data_artifact()` with
 explicit `symbol`, `timeframe`, `data_source`, and `instrument_type`. It
 preserves extra feature columns and normalizes timestamps to UTC.
+`instrument_type` is validated against
+`librae.config.symbols.ALLOWED_INSTRUMENT_TYPES`, the same set the reference
+DB schema's `CHECK` constraint enforces, so no-DB callers get the same
+rejection.
 
 These helpers are research/export boundaries. They do not replace durable live
 state, active-order persistence, broker reconciliation, leases, or the

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 from librae.db.timescale_reader import get_external_factor_coverage_ranges, load_external_factor
 from librae.db.timescale_writer import merge_external_factor_coverage_ranges, write_external_factor
 
@@ -82,6 +83,17 @@ class TestMergeExternalFactorCoverage:
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 2
 
+    def test_rejects_invalid_instrument_type(self):
+        with pytest.raises(ValueError, match="instrument_type"):
+            merge_external_factor_coverage_ranges(
+                "BTCUSDT",
+                "funding_rate",
+                "binanceusdm",
+                datetime(2024, 1, 2, tzinfo=UTC),
+                datetime(2024, 1, 3, tzinfo=UTC),
+                instrument_type="daily",
+            )
+
 
 class TestWriteExternalFactor:
     def test_empty_df_writes_nothing(self):
@@ -89,10 +101,17 @@ class TestWriteExternalFactor:
 
     def test_naive_timestamp_raises(self):
         df = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-01"]), "value": [0.01]})
-        import pytest
 
         with pytest.raises(ValueError, match="timezone-naive"):
             write_external_factor(df, "BTCUSDT", "funding_rate", "binanceusdm")
+
+    def test_rejects_invalid_instrument_type(self):
+        df = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-01T00:00:00Z"]), "value": [0.01]})
+
+        with pytest.raises(ValueError, match="instrument_type"):
+            write_external_factor(
+                df, "BTCUSDT", "funding_rate", "binanceusdm", instrument_type="daily"
+            )
 
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")

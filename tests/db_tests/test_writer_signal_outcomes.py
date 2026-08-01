@@ -274,6 +274,22 @@ def test_write_ohlcv_requires_real_volume() -> None:
         write_ohlcv(frame, "BTCUSDT", "H1", "test")
 
 
+def test_write_ohlcv_rejects_invalid_instrument_type() -> None:
+    frame = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [10.0],
+        },
+        index=pd.DatetimeIndex([datetime(2024, 6, 1, tzinfo=UTC)], name="ts"),
+    )
+
+    with pytest.raises(ValueError, match="instrument_type"):
+        write_ohlcv(frame, "BTCUSDT", "H1", "test", instrument_type="daily")
+
+
 class TestWriteSignalEvent:
     """write_signal_event single-row upsert."""
 

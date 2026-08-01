@@ -56,6 +56,12 @@ _ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
 # explicit-required) can key off the prefix. Extend this set (and the
 # matching DB CHECK constraint in librae/db/timescale_init.sql) when a new type is
 # actually needed — don't pre-enumerate speculative ones.
+#
+# This is the single source of truth for the value — librae/artifacts.py and
+# librae/db/timescale_writer.py both call validate_instrument_type() below
+# instead of re-declaring the set, so a caller who never touches TimescaleDB
+# (Parquet/SQLite/no persistence at all) still gets it rejected here instead
+# of silently writing a value only the Postgres CHECK constraint would catch.
 ALLOWED_INSTRUMENT_TYPES = frozenset(
     {
         "spot",
@@ -64,6 +70,14 @@ ALLOWED_INSTRUMENT_TYPES = frozenset(
         "contract_quarterly",
     }
 )
+
+
+def validate_instrument_type(instrument_type: str, *, context: str = "instrument_type") -> None:
+    """Raise ValueError unless instrument_type is one of ALLOWED_INSTRUMENT_TYPES."""
+    if instrument_type not in ALLOWED_INSTRUMENT_TYPES:
+        raise ValueError(
+            f"{context}={instrument_type!r} is not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
+        )
 
 
 @dataclass(frozen=True)
@@ -122,8 +136,7 @@ class AvailableSymbol:
             )
         ):
             raise ValueError("available-symbol text fields must be non-empty")
-        if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
-            raise ValueError(f"unsupported instrument_type: {self.instrument_type!r}")
+        validate_instrument_type(self.instrument_type)
         validate_contract_month(self.contract_month)
         validate_contract_month(self.delivery_month)
         if self.contract_rank is not None and (
@@ -226,11 +239,7 @@ class SymbolInfo:
     calendar_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.instrument_type not in ALLOWED_INSTRUMENT_TYPES:
-            raise ValueError(
-                f"{self.symbol!r} has instrument_type="
-                f"{self.instrument_type!r}, not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
-            )
+        validate_instrument_type(self.instrument_type, context=f"{self.symbol!r} instrument_type")
         if not isinstance(self.data_adapter, str) or not self.data_adapter:
             raise ValueError(f"{self.symbol!r} data_adapter must be a non-empty string")
         if self.multiplier <= 0:
