@@ -333,6 +333,22 @@ class TestPlaceOrder:
                 }
             )
 
+    def test_prepare_order_rejects_stock_contract(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type="STK", code="2330")
+        )
+
+        with pytest.raises(ValueError, match="futures order submission only"):
+            adapter.prepare_order(
+                {
+                    "symbol": "2330",
+                    "side": "buy",
+                    "quantity": 1.0,
+                    "order_type": "market",
+                }
+            )
+
     def test_futures_limit_order_uses_futures_price_type(self):
         adapter = _make_adapter(ca_activated=True)
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract())

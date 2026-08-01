@@ -652,17 +652,20 @@ class LiveTrader:
                 raise ValueError(f"broker position for {symbol} has non-finite size")
             if abs(size) <= EPSILON:
                 continue
+            # CCXT spot balances carry no cost-basis field, so avg_price is
+            # legitimately absent here (unlike size, which every broker
+            # returns) — _position_books_match already tolerates None.
             raw_average = broker_pos.get("avg_price")
-            if raw_average is None:
-                raise ValueError(f"open broker position for {symbol} is missing average price")
-            try:
-                avg_price = float(raw_average)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"open broker position for {symbol} has invalid average price"
-                ) from exc
-            if not isfinite(avg_price) or avg_price <= 0:
-                raise ValueError(f"broker returned invalid average price for {symbol}")
+            avg_price: float | None = None
+            if raw_average is not None:
+                try:
+                    avg_price = float(raw_average)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"open broker position for {symbol} has invalid average price"
+                    ) from exc
+                if not isfinite(avg_price) or avg_price <= 0:
+                    raise ValueError(f"broker returned invalid average price for {symbol}")
             side: Literal["long", "short"] = "long" if size > 0 else "short"
             positions[symbol] = _BrokerPosition(
                 side=side,

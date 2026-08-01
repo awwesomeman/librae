@@ -116,25 +116,23 @@ Procedure it exercises:
    intended guard rail, not a bug.
 
 **Findings from the 2026-08-01 rehearsal**, worth knowing before running this
-again — two were real bugs, fixed in the same session
-(`fix(live): keep client_order_id within Binance's 36-char limit`,
-`fix(live): register a fresh run before its first checkpoint write`), one is
-a still-open limitation this rehearsal routes around:
+again — three were real bugs, all fixed:
 
 - **CCXT spot positions never carry an average price, but reconciliation
-  requires one (still open).** `_read_broker_positions()` raises
+  required one (fixed).** `_read_broker_positions()` used to raise
   `ValueError: ... is missing average price` for any non-zero position where
   the broker doesn't return `avg_price` — which Binance spot balances never
-  do (CCXT's balance API has no cost-basis field). This makes both the
+  do (CCXT's balance API has no cost-basis field). This made both the
   first-run bootstrap check and the post-restore reconciliation check
   unconditionally fail for a non-flat CCXT spot position, on *any* account,
-  not just one with unclearable dust — worth a follow-up issue against
-  `librae/live/engine.py::_read_broker_positions`. Routed around here by
-  rehearsing against `ETHUSDT` (this account has zero ETH) instead of
-  `BTCUSDT` (which has unclearable dust — see below); `--seed-reviewed-state`
-  does *not* work around this, since the engine re-reads live broker state
-  and hits the same missing-average-price error regardless of what the
-  checkpoint says.
+  not just one with unclearable dust. Fixed by letting `avg_price` be `None`
+  when the broker omits it (still raising on a malformed *present* value);
+  `_position_books_match()` already tolerated a `None` average price and
+  falls back to a size/side-only check, so this only required not raising
+  earlier. First-run bootstrap still halts on any non-flat snapshot
+  regardless of cost basis, since adopting spot inventory with no known
+  entry price still can't seed cash/PnL. This rehearsal still exercises
+  `ETHUSDT` rather than `BTCUSDT` for the unrelated dust reason below.
 - **`client_order_id` exceeded Binance's 36-character limit for any ordinary
   symbol (fixed).** The readable `strategy-symbol-event-timestamp-sequence`
   id was already 37+ characters for `open`/`close`/`reduce` events on a
