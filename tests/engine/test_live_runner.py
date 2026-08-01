@@ -8,6 +8,7 @@ Skills: python, quant
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import perf_counter
@@ -360,6 +361,35 @@ class TestLiveExecutor:
         assert sent_signal["quantity"] == 2.0
         assert sent_signal["order_type"] == "market"
         assert sent_signal["client_order_id"]  # non-empty, deterministic per event
+
+    @pytest.mark.parametrize("event_type", ["open", "add", "reduce", "close"])
+    @pytest.mark.parametrize("symbol", ["BTCUSDT", "ETHUSDT"])
+    def test_client_order_id_stays_within_broker_length_limit(self, symbol, event_type):
+        """The readable id alone can already exceed Binance's 36-char limit
+        for ordinary symbols, regardless of strategy_name (issue #89)."""
+        ex = LiveExecutor(
+            _zero_cost_model(),
+            simulation=False,
+            strategy_name="a_reasonably_long_strategy_name",
+            order_adapter=MagicMock(),
+        )
+        event = OrderEvent(
+            ts=datetime(2025, 1, 1, tzinfo=UTC),
+            symbol=symbol,
+            side="long",
+            event_type=event_type,
+            fill_quantity=1.0,
+            price=100.0,
+            entry_price=100.0,
+            remaining_quantity=1.0,
+            notional=100.0,
+            commission=0.0,
+            slippage=0.0,
+            tax=0.0,
+        )
+        request = ex.request_from_event(event, sequence=3)
+        assert 1 <= len(request.client_order_id) <= 36
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", request.client_order_id)
 
     def test_submit_order_returns_none_on_broker_error(self):
         mock_adapter = MagicMock()

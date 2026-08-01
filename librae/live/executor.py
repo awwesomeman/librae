@@ -7,6 +7,7 @@ Portfolio state is updated by ``LiveTrader`` only from confirmed fills.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -47,6 +48,28 @@ REQUIRED_ORDER_ADAPTER_METHODS = (
     "cancel_order",
     "get_position",
 )
+
+# Tightest client_order_id length among librae's live brokers (Binance's
+# newClientOrderId): the readable strategy-symbol-event-timestamp-sequence
+# id alone already exceeds this for common 6-7 char symbols, regardless of
+# strategy_name — see _build_client_order_id.
+_MAX_CLIENT_ORDER_ID_LENGTH = 36
+
+
+def _build_client_order_id(
+    strategy_name: str, symbol: str, event_type: str, ts: datetime, sequence: int
+) -> str:
+    """Build a broker-safe, unique client order id.
+
+    Prefers the readable ``strategy-symbol-event-timestamp-sequence`` form;
+    falls back to a shortened id with a content hash suffix when the
+    readable form would exceed the tightest broker limit.
+    """
+    readable = f"{strategy_name}-{symbol}-{event_type}-{ts:%Y%m%dT%H%M%S%f}-{sequence}"
+    if len(readable) <= _MAX_CLIENT_ORDER_ID_LENGTH:
+        return readable
+    digest = hashlib.sha256(readable.encode()).hexdigest()[:10]
+    return f"{symbol}-{event_type[:1]}{sequence}-{digest}"[:_MAX_CLIENT_ORDER_ID_LENGTH]
 
 
 class OrderSignal(TypedDict):
@@ -396,9 +419,8 @@ class LiveExecutor:
             side = "buy" if is_entry else "sell"
         else:
             side = "sell" if is_entry else "buy"
-        client_order_id = (
-            f"{self._strategy_name}-{event.symbol}-{event.event_type}-"
-            f"{event.ts:%Y%m%dT%H%M%S%f}-{sequence}"
+        client_order_id = _build_client_order_id(
+            self._strategy_name, event.symbol, event.event_type, event.ts, sequence
         )
         instrument = self._instruments.get(event.symbol)
         return OrderRequest(
