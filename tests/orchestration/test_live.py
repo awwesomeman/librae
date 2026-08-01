@@ -106,6 +106,48 @@ def test_factory_registers_timescale_callbacks() -> None:
     callbacks.register_run.assert_called_once_with(trader.run_id)
 
 
+def test_run_is_registered_before_first_checkpoint_write() -> None:
+    """A durable state_store may enforce that a run is registered before
+    accepting its first checkpoint (e.g. TimescaleLiveStateStore's foreign
+    key to backtest_runs). register_run() must therefore run before
+    LiveTrader's first internal persist, not after build_live_trader()
+    returns (issue #90) — MemoryLiveStateStore doesn't enforce this, so it
+    can't catch a regression here; this fake does."""
+    config = make_test_cfg(mode="sim")
+    registered_run_ids: set[str] = set()
+
+    class _RunMustBeRegisteredFirstStore:
+        def load(self, state_key):
+            return None
+
+        def save(self, state, orders=()):
+            if state.run_id not in registered_run_ids:
+                raise RuntimeError(f"checkpoint for unregistered run: {state.run_id}")
+
+        def acquire_lease(self, state_key):
+            return True
+
+        def release_lease(self, state_key):
+            pass
+
+    callbacks = MagicMock()
+    callbacks.register_run.side_effect = registered_run_ids.add
+
+    with (
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=callbacks),
+    ):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            state_store=_RunMustBeRegisteredFirstStore(),
+        )
+
+    callbacks.register_run.assert_called_once()
+
+
 def test_database_and_telegram_wiring_are_independent() -> None:
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
