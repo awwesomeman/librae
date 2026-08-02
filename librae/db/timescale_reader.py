@@ -70,6 +70,26 @@ def get_run_by_config_hash(
     }
 
 
+def get_run(run_id: str, dsn: str | None = None) -> dict[str, Any] | None:
+    """Look up one run's metadata by its primary key, or None if not found."""
+    sql = """SELECT run_id, params, execution_policy, risk_policy
+             FROM backtest_runs
+             WHERE run_id = %s"""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (run_id,))
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None
+    return {
+        "run_id": row[0],
+        "params": json.loads(row[1]) if row[1] else None,
+        "execution_policy": json.loads(row[2]) if row[2] else None,
+        "risk_policy": json.loads(row[3]) if row[3] else None,
+    }
+
+
 def get_latest_run_id(strategy: str | None = None, dsn: str | None = None) -> str | None:
     """Return the most recent run_id, optionally filtered by strategy."""
     sql = "SELECT run_id FROM backtest_runs"
