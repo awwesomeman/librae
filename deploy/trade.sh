@@ -24,7 +24,9 @@
 # TRADE_STRATEGY_PATH. An optional host config is mounted read-only and passed
 # to the strategy's existing --config option.
 #
-# Live mode requires one explicitly selected Docker env file. Copy
+# Live mode requires one explicitly selected Docker env file; sim mode
+# accepts the same --credentials flag optionally, for brokers that require
+# authentication even for read-only market data (e.g. Shioaji). Copy
 # .env.secrets.example to a per-account file under the ignored .credentials/
 # directory on the machine that trades. Shioaji CA files remain under the
 # ignored .secrets/ directory; only the selected account's CA file is mounted.
@@ -312,11 +314,17 @@ cmd_start() {
     local credential_args=()
     local secret_mount_args=()
     local host_args=()
-    if [[ "${mode}" == "live" ]]; then
-        if [[ -z "${credentials_file}" ]]; then
-            echo "live mode requires --credentials <account-env-file>" >&2
-            exit 1
-        fi
+    if [[ "${mode}" == "live" && -z "${credentials_file}" ]]; then
+        echo "live mode requires --credentials <account-env-file>" >&2
+        exit 1
+    fi
+    # sim mode accepts --credentials too (optional): brokers that require
+    # authentication even for read-only market data (e.g. ShioajiAdapter)
+    # have no other safe way to reach sim mode. --env-file is the same
+    # mechanism live mode already uses -- values only ever reach the
+    # container's process environment via Docker, never sourced as shell
+    # code in this script.
+    if [[ -n "${credentials_file}" ]]; then
         credentials_file="$(resolve_project_path "${credentials_file}")"
         if [[ ! -f "${credentials_file}" ]]; then
             echo "Credential file not found: ${credentials_file}" >&2
@@ -346,9 +354,6 @@ cmd_start() {
             fi
             secret_mount_args+=(-v "${shioaji_ca_file}:/app/${shioaji_ca_path}:ro")
         fi
-    elif [[ -n "${credentials_file}" ]]; then
-        echo "--credentials is only valid in live mode" >&2
-        exit 1
     fi
 
     local container_config="/app/strategies/${strategy}/config.yaml"

@@ -541,6 +541,31 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert ".secrets:/app/.secrets:ro" not in final_run
 
 
+def test_trade_script_accepts_optional_credentials_in_sim_mode(tmp_path: Path) -> None:
+    """Brokers that require authentication even for read-only market data
+    (e.g. ShioajiAdapter) have no other safe way to reach sim mode --
+    --credentials must be optional in sim, not live-only. Uses the same
+    --env-file mechanism as live mode, never sourced as shell code."""
+    image_reference = f"registry.example/librae-trade@sha256:{'f' * 64}"
+    credentials_file = tmp_path / "account-main.env"
+    credentials_file.write_text(
+        "IBKR_HOST=host.docker.internal\nIBKR_PORT=7497\nIBKR_CLIENT_ID=7\n",
+        encoding="utf-8",
+    )
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        mode="sim",
+        credentials_file=credentials_file,
+    )
+
+    assert result.returncode == 0, result.stderr
+    final_run = next(call for call in docker_calls if call.startswith("run -d "))
+    assert f"--env-file {credentials_file}" in final_run
+    assert "--label io.librae.mode=sim" in final_run
+
+
 def test_trade_script_allows_same_strategy_for_independent_deployments(tmp_path: Path) -> None:
     image_reference = f"registry.example/librae-trade@sha256:{'d' * 64}"
 
