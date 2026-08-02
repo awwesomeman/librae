@@ -168,6 +168,33 @@ selection, a strategy-owned optimizer, and an explicitly sized multi-leg
 decision. Use the [strategy readiness checklist](guides/strategy-readiness.md)
 before promoting a strategy beyond research.
 
+## Add a new instrument
+
+A symbol already in `librae/config/symbols.py`'s registry needs no
+configuration — copy an existing entry for the same broker/asset class as a
+working example. An unregistered symbol needs `instrument_overrides` in
+`config.yaml`, resolved from three separate sources:
+
+1. **The field schema** — `symbol`/`venue_symbol`/`currency`/`multiplier`/
+   `security_type`/`exchange`/`continuous_alias`/`contract_month`, defined
+   once in `PositionRequest`
+   ([`librae/live/executor.py`](../librae/live/executor.py)) and walked
+   through with worked IBKR stock and futures examples in the "Per-symbol
+   overrides" section of [`architecture.md`](../architecture.md).
+2. **Broker-specific rules** — which fields a given broker actually needs
+   (for example, IBKR SMART-routes stocks by symbol alone and needs
+   `exchange` only for futures) are documented in that adapter's module
+   docstring: `librae/brokers/{shioaji,crypto,ibkr}_adapter.py`.
+3. **The real-world value** (which `exchange` code, which `security_type`) —
+   this is the broker's own contract data, not something Librae can look up
+   for you. Check the broker's contract search (IBKR TWS/Gateway, Shioaji's
+   `api.Contracts`, or `exchange.load_markets()` for a CCXT venue).
+
+A registered symbol can still override select routing fields per run via
+`instrument_overrides`; execution broker selection never falls back from
+`data_source` — set `strategy.broker` or
+`instrument_overrides.<symbol>.broker` explicitly.
+
 ## Environment variables
 
 Librae components read environment variables but do not load `.env` files.

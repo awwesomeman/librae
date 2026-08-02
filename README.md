@@ -51,12 +51,8 @@ application's complete dependency set when the environment must be
 repeatable. See [Getting started](docs/getting-started.md) for package-only,
 editable, restricted-network, and checkout workflows.
 
-To run a complete example from a clone:
-
-```bash
-uv sync --extra test --extra dev
-uv run python -m examples.simple_sma.run --mode backtest --no-db
-```
+To run a complete example from a clone, see
+[Run the examples](docs/getting-started.md#run-the-examples).
 
 A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects,
 `PortfolioTargets`, or `MultiLegOrder`. Your data pipeline supplies timezone-aware OHLCV and
@@ -121,14 +117,8 @@ from historical decisions, plans, research, and operational learnings.
 
 ## Development
 
-```bash
-uv run pytest tests/ -q
-uv run ruff check .
-uv run ruff format --check .
-```
-
 See [Getting started](docs/getting-started.md#contributing-to-this-repository)
-for the full environment setup.
+for environment setup and the test/lint commands.
 
 ## License
 

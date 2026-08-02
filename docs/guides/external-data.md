@@ -45,10 +45,11 @@ adapter = CryptoAdapter(exchange_id="binance")
 bars = adapter.fetch_ohlcv("BTC/USDT", "1h", limit=500)
 ```
 
-Install the extra for the adapter you use: `crypto-live`, `tw-live`, or
-`us-live`. `BinanceStocksAdapter` uses the separate `stocks-data` extra and
-currently provides catalog/latest-quote access only; it does not fabricate
-historical OHLCV.
+Install the extra for the adapter you use — see the broker extras table in
+[Optional infrastructure](optional-infrastructure.md#brokers).
+`BinanceStocksAdapter` uses the separate `stocks-data` extra and currently
+provides catalog/latest-quote access only; it does not fabricate historical
+OHLCV.
 
 For sim/live, `LiveTrader(adapter=...)` accepts either:
 

@@ -1,41 +1,47 @@
-# 文件導覽
+# Documentation index
 
-根目錄的 [README](../README.md) 是專案入口；本目錄收錄任務導向指南與工程歷史紀錄。請優先閱讀描述現況的文件，只有在需要理解決策原因或實作歷程時，才往 decisions 與 plans 深入。
+The root [README](../README.md) is the project entry point; this directory
+holds task-oriented guides and engineering history. Read the docs that
+describe current behavior first — go into `decisions/` and `plans/` only when
+you need the reasoning behind a decision or the implementation history.
 
-## 從這裡開始
+## Start here
 
-| 需求 | 文件 |
+| Need | Doc |
 |---|---|
-| 安裝 Librae 或設定本機開發環境 | [Getting started](getting-started.md) |
-| 執行一個完整策略 | [Examples](../examples/README.md) |
-| 理解執行語意與系統設計 | [Architecture](../architecture.md) |
-| 比較策略、benchmark 與不同回測結果 | [Performance analysis](guides/performance-analysis.md) |
-| 分析訊號的遠期表現 | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
-| 檢查策略是否可進入下一執行階段 | [Strategy readiness checklist](guides/strategy-readiness.md) |
-| 串接 broker 價量或第三方因子 | [External market data and factors](guides/external-data.md) |
-| 設定 DB、Grafana、broker 或部署環境 | [Optional infrastructure](guides/optional-infrastructure.md) |
+| Install Librae or set up a local dev environment | [Getting started](getting-started.md) |
+| Run a complete strategy | [Examples](../examples/README.md) |
+| Understand execution semantics and system design | [Architecture](../architecture.md) |
+| Compare strategies, benchmarks, and backtest results | [Performance analysis](guides/performance-analysis.md) |
+| Analyze a signal's forward outcomes | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
+| Check whether a strategy is ready for the next execution stage | [Strategy readiness checklist](guides/strategy-readiness.md) |
+| Wire up broker market data or third-party factors | [External market data and factors](guides/external-data.md) |
+| Set up the DB, Grafana, a broker, or a deployment | [Optional infrastructure](guides/optional-infrastructure.md) |
 
-需要將資料或回測結果存成 Parquet、SQLite 等本地格式時，請參考
-[Local artifacts](guides/local-artifacts.md)。
+For saving data or backtest results to a local format such as Parquet or
+SQLite, see [Local artifacts](guides/local-artifacts.md).
 
-## 文件類型
+## Document types
 
-| 位置 | 用途 | 維護原則 |
+| Location | Purpose | Maintenance rule |
 |---|---|---|
-| [`../architecture.md`](../architecture.md) | 系統現況與設計規範 | 行為或結構改變時，與程式碼同步更新 |
-| `guides/` | 使用者與維運者的任務導向指南 | 確保指令可執行，深入細節改連結 reference |
-| `decisions/` | 架構決策紀錄（ADR） | 保留當時觀點；以 supersede 取代重寫歷史 |
-| `plans/` | 實作計畫與工作筆記 | 除非文件明確標示，否則狀態視為歷史資訊 |
-| `research/` | 研究筆記與技術調查 | 清楚註明假設、資料範圍與結論 |
-| `spikes/` | 限時實驗與框架評估 | 有長期影響的結論應整理到 decisions |
-| `learnings/` | 錯誤與維運經驗 | 記錄現象、根因、修正與預防方式 |
+| [`../architecture.md`](../architecture.md) | Current system state and design contract | Updated alongside the code whenever behavior or structure changes |
+| `guides/` | Task-oriented guides for users and operators | Commands must stay runnable; deep detail links out to a reference |
+| `decisions/` | Architecture decision records (ADRs) | Preserve the view at the time; supersede rather than rewrite history |
+| `plans/` | Implementation plans and working notes | Status is historical unless the doc says otherwise |
+| `research/` | Research notes and technical investigations | State assumptions, data scope, and conclusions clearly |
+| `spikes/` | Time-boxed experiments and framework evaluations | Promote conclusions with lasting impact into `decisions/` |
+| `learnings/` | Bugs and operational experience | Record the symptom, root cause, fix, and prevention |
 
-## 資訊衝突時，以誰為準？
+## When docs disagree, what wins?
 
-1. 測試與目前程式碼定義實際行為。
-2. [`architecture.md`](../architecture.md) 說明預期的系統現況。
-3. guides 說明如何在該現況下完成任務。
-4. decisions 說明某個時間點為何做出選擇。
-5. plans、research 與 spikes 是歷史輸入，不是 API 保證。
+1. Tests and the current code define actual behavior.
+2. [`architecture.md`](../architecture.md) describes the intended system
+   state.
+3. `guides/` describe how to accomplish a task under that state.
+4. `decisions/` explain why a choice was made at a point in time.
+5. `plans/`, `research/`, and `spikes/` are historical input, not an API
+   guarantee.
 
-這個順序讓根 README 維持精簡，同時保留深入資訊的明確入口。
+This ordering keeps the root README concise while still giving deeper
+information a clear entry point.
