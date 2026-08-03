@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-from librae.backtest.schema import StrategyMetrics
+from librae.backtest.schema import RunMetadata, StrategyMetrics
 from librae.db.timescale_reader import get_run, row_to_strategy_metrics
 
 
@@ -20,22 +21,35 @@ class TestGetRun:
     @patch("librae.db.timescale_reader.get_conn")
     def test_returns_run_metadata_by_run_id(self, mock_conn_ctx):
         mock_cur = MagicMock()
+        started_at = datetime(2026, 7, 29, tzinfo=UTC)
+        ended_at = datetime(2026, 7, 30, tzinfo=UTC)
+        run_at = datetime(2026, 7, 30, 1, tzinfo=UTC)
         mock_cur.fetchone.return_value = (
             "demo-20260729t1200-abcdef",
-            '{"fast": 10}',
-            '{"slippage_bps": 5}',
-            None,
+            "demo",
+            '["BTCUSDT"]',
+            "1h",
+            "fixture",
+            started_at,
+            ended_at,
+            run_at,
+            "backtest",
         )
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         result = get_run("demo-20260729t1200-abcdef")
 
-        assert result == {
-            "run_id": "demo-20260729t1200-abcdef",
-            "params": {"fast": 10},
-            "execution_policy": {"slippage_bps": 5},
-            "risk_policy": None,
-        }
+        assert result == RunMetadata(
+            run_id="demo-20260729t1200-abcdef",
+            strategy="demo",
+            symbols=("BTCUSDT",),
+            timeframe="1h",
+            data_source="fixture",
+            started_at=started_at,
+            ended_at=ended_at,
+            run_at=run_at,
+            mode="backtest",
+        )
         sql = mock_cur.execute.call_args[0][0]
         assert "WHERE run_id = %s" in sql
 
