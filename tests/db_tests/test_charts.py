@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 from librae.backtest.charts import _build_markers
-from librae.db.charts import _df_to_order_events
+from librae.db.charts import df_to_order_events
 
 
 def test_df_to_order_events_matches_reader_shape() -> None:
@@ -37,7 +37,7 @@ def test_df_to_order_events_matches_reader_shape() -> None:
         ]
     )
 
-    events = _df_to_order_events(df)
+    events = df_to_order_events(df)
 
     assert len(events) == 1
     assert events[0].symbol == "BTCUSDT"

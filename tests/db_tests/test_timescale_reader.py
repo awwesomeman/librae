@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-from librae.backtest.schema import RunMetadata
-from librae.db.timescale_reader import get_run
+from librae.backtest.schema import RunMetadata, StrategyMetrics
+from librae.db.timescale_reader import get_run, row_to_strategy_metrics
 
 
 def _mock_conn(mock_cur: MagicMock) -> MagicMock:
@@ -60,3 +60,69 @@ class TestGetRun:
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         assert get_run("missing-run") is None
+
+
+class TestRowToStrategyMetrics:
+    def test_picks_only_strategy_metrics_fields(self):
+        row = {
+            # load_performance() columns that are not StrategyMetrics fields
+            "run_id": "demo-20260729t1200-abcdef",
+            "account_id": "main",
+            "currency": "USDT",
+            "initial_cash": 10_000.0,
+            "final_equity": 10_100.0,
+            "net_pnl": 100.0,
+            "strategy": "demo",
+            "symbols": ["BTCUSDT"],
+            "timeframe": "1h",
+            # StrategyMetrics fields
+            "total_return": 0.01,
+            "max_drawdown": -0.02,
+            "trades": 3,
+            "mean_period_return": 0.001,
+            "period_volatility": 0.02,
+            "period_downside_deviation": 0.01,
+            "period_sharpe": 1.2,
+            "period_sortino": 1.5,
+            "positive_period_rate": 0.6,
+            "win_rate": 0.5,
+            "profit_factor": 1.8,
+            "payoff_ratio": 1.1,
+            "avg_trade_return": 0.005,
+            "exposure_ratio": 0.4,
+            "total_turnover": 3.0,
+            "average_gross_exposure": 0.3,
+            "max_gross_exposure": 0.6,
+            "max_abs_net_exposure": 0.5,
+            "max_concentration": 0.7,
+            "total_commission": 1.0,
+            "total_slippage": 0.5,
+            "total_tax": 0.0,
+        }
+
+        metrics = row_to_strategy_metrics(row)
+
+        assert metrics == StrategyMetrics(
+            total_return=0.01,
+            max_drawdown=-0.02,
+            trades=3,
+            mean_period_return=0.001,
+            period_volatility=0.02,
+            period_downside_deviation=0.01,
+            period_sharpe=1.2,
+            period_sortino=1.5,
+            positive_period_rate=0.6,
+            win_rate=0.5,
+            profit_factor=1.8,
+            payoff_ratio=1.1,
+            avg_trade_return=0.005,
+            exposure_ratio=0.4,
+            total_turnover=3.0,
+            average_gross_exposure=0.3,
+            max_gross_exposure=0.6,
+            max_abs_net_exposure=0.5,
+            max_concentration=0.7,
+            total_commission=1.0,
+            total_slippage=0.5,
+            total_tax=0.0,
+        )
