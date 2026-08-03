@@ -848,7 +848,10 @@ def test_backtest_cache_identity_is_separate_from_config_hash() -> None:
 def test_local_trade_build_uses_explicit_strategy_context() -> None:
     script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
 
-    assert 'strategy_source="${TRADE_STRATEGY_PATH:-../strategies}"' in script
+    assert (
+        'strategy_source="${TRADE_STRATEGY_PATH:?Set TRADE_STRATEGY_PATH to the directory '
+        'containing <strategy>/run.py.}"' in script
+    )
     assert '--build-context "strategy_source=${strategy_source}"' in script
     assert '"${strategy_source}/${strategy}/${required_file}"' in script
     assert '-f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"' in script

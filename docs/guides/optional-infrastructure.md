@@ -226,9 +226,10 @@ build machine, Bash for the local scripts, and a compatible Linux target; it
 is not part of the OS-independent Python package contract.
 
 The reference builder combines this engine checkout with caller-owned strategy
-source. `TRADE_STRATEGY_PATH` selects that source directory; relative paths
-resolve from the Librae checkout. Its default, `../strategies`, gives this
-convenient layout but is not required:
+source. `TRADE_STRATEGY_PATH` selects that source directory and is required —
+there is no default. Relative paths resolve from the Librae checkout, so a
+co-located layout like this works, but librae and the strategy source do not
+need to sit next to each other:
 
 ```text
 workspace/
