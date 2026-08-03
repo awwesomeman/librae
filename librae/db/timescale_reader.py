@@ -10,12 +10,17 @@ Naming convention:
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from librae.backtest.schema import StrategyMetrics
 from librae.db import get_conn
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def get_run_by_backtest_cache_key(
@@ -241,6 +246,12 @@ def load_performance(
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=params)
     return df
+
+
+def row_to_strategy_metrics(row: Mapping[str, Any]) -> StrategyMetrics:
+    """Convert one ``load_performance()`` row into a ``StrategyMetrics`` record."""
+    field_names = {f.name for f in fields(StrategyMetrics)}
+    return StrategyMetrics(**{name: row[name] for name in field_names})
 
 
 def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
