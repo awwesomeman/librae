@@ -3,8 +3,9 @@
 # registry. The script prints the digest-qualified TRADE_IMAGE_REF selected by
 # trade.sh; it never updates deployment configuration automatically.
 #
-# TRADE_STRATEGY_PATH selects the caller-owned source directory. Relative
-# paths resolve from the Librae checkout; the default is ../strategies.
+# TRADE_STRATEGY_PATH selects the caller-owned source directory; there is no
+# default — relative paths resolve from the Librae checkout, but the checkout
+# is not assumed to sit next to the strategy source.
 # TRADE_PLATFORMS may narrow validation builds; production defaults to both
 # supported image architectures.
 #
@@ -23,13 +24,12 @@ if [[ -f "${LIBRAE_ROOT}/.env" ]]; then
     set +a
 fi
 
-STRATEGY_SOURCE="${TRADE_STRATEGY_PATH:-../strategies}"
+STRATEGY_SOURCE="${TRADE_STRATEGY_PATH:?Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py.}"
 if [[ "${STRATEGY_SOURCE}" != /* ]]; then
     STRATEGY_SOURCE="${LIBRAE_ROOT}/${STRATEGY_SOURCE}"
 fi
 if [[ ! -d "${STRATEGY_SOURCE}" ]]; then
     echo "Strategy source directory not found: ${STRATEGY_SOURCE}" >&2
-    echo "Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py." >&2
     exit 1
 fi
 STRATEGY_SOURCE="$(cd "${STRATEGY_SOURCE}" && pwd)"

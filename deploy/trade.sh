@@ -386,13 +386,12 @@ cmd_start() {
     else
         image="quant-trade:local"
         local strategy_source
-        strategy_source="${TRADE_STRATEGY_PATH:-../strategies}"
+        strategy_source="${TRADE_STRATEGY_PATH:?Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py.}"
         if [[ "${strategy_source}" != /* ]]; then
             strategy_source="${PROJECT_ROOT}/${strategy_source}"
         fi
         if [[ ! -d "${strategy_source}" ]]; then
             echo "Strategy source directory not found: ${strategy_source}" >&2
-            echo "Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py." >&2
             exit 1
         fi
         strategy_source="$(cd "${strategy_source}" && pwd)"
