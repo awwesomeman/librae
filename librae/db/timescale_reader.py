@@ -15,6 +15,7 @@ from typing import Any
 
 import pandas as pd
 
+from librae.backtest.schema import RunMetadata
 from librae.db import get_conn
 
 
@@ -70,9 +71,16 @@ def get_run_by_config_hash(
     }
 
 
-def get_run(run_id: str, dsn: str | None = None) -> dict[str, Any] | None:
-    """Look up one run's metadata by its primary key, or None if not found."""
-    sql = """SELECT run_id, params, execution_policy, risk_policy
+def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
+    """Look up one run's identity by its primary key, or None if not found.
+
+    Returns the run's RunMetadata (strategy/symbols/timeframe/data_source/
+    started_at/ended_at/run_at/mode) — the identity fields a caller needs to
+    label a report or chart. For the resolved config used to decide backtest
+    cache reuse, see get_run_by_config_hash()/get_run_by_backtest_cache_key().
+    """
+    sql = """SELECT run_id, strategy, symbols, timeframe, data_source,
+                     started_at, ended_at, run_at, mode
              FROM backtest_runs
              WHERE run_id = %s"""
     with get_conn(dsn) as conn:
@@ -82,12 +90,17 @@ def get_run(run_id: str, dsn: str | None = None) -> dict[str, Any] | None:
         cur.close()
     if not row:
         return None
-    return {
-        "run_id": row[0],
-        "params": json.loads(row[1]) if row[1] else None,
-        "execution_policy": json.loads(row[2]) if row[2] else None,
-        "risk_policy": json.loads(row[3]) if row[3] else None,
-    }
+    return RunMetadata(
+        run_id=row[0],
+        strategy=row[1],
+        symbols=json.loads(row[2]),
+        timeframe=row[3],
+        data_source=row[4],
+        started_at=row[5],
+        ended_at=row[6],
+        run_at=row[7],
+        mode=row[8],
+    )
 
 
 def get_latest_run_id(strategy: str | None = None, dsn: str | None = None) -> str | None:
