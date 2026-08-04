@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from numbers import Real
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -1185,7 +1186,7 @@ def _style_axes(ax: Axes) -> None:
     ax.yaxis.label.set_color(_MUTED)
 
 
-def _plot_trade_durations(ax: Axes, durations: list[int]) -> None:
+def plot_trade_durations(ax: Axes, durations: list[int]) -> None:
     if durations:
         ax.hist(
             durations,
@@ -1200,7 +1201,7 @@ def _plot_trade_durations(ax: Axes, durations: list[int]) -> None:
     ax.set_ylabel("Completed lifecycle count")
 
 
-def _plot_pnl_by_lifecycle(ax: Axes, pnl_curve: list[float]) -> None:
+def plot_pnl_by_lifecycle(ax: Axes, pnl_curve: list[float]) -> None:
     x = list(range(1, len(pnl_curve) + 1))
     if pnl_curve:
         arr = np.array(pnl_curve)
@@ -1214,7 +1215,7 @@ def _plot_pnl_by_lifecycle(ax: Axes, pnl_curve: list[float]) -> None:
     ax.set_ylabel("Cumulative PnL")
 
 
-def _plot_trade_entry_envelope(ax: Axes, summary: pd.DataFrame) -> None:
+def plot_trade_entry_envelope(ax: Axes, summary: pd.DataFrame) -> None:
     if not summary.empty:
         offsets = summary["horizon"]
         ax.plot(
@@ -1401,56 +1402,117 @@ def _render_tearsheet_html(
 </body></html>"""
 
 
+def _win_rate_and_profit_factor(net_pnl: pd.Series) -> tuple[float | None, float | None]:
+    """Win rate and profit factor from a completed-lifecycle net_pnl column."""
+    wins = net_pnl[net_pnl > 0]
+    losses_abs = net_pnl[net_pnl < 0].abs()
+    win_rate = float(len(wins) / len(net_pnl)) if len(net_pnl) > 0 else None
+    profit_factor = float(wins.sum() / losses_abs.sum()) if len(losses_abs) > 0 else None
+    return win_rate, profit_factor
+
+
+def _suffixed_path(path: str, suffix: str) -> str:
+    p = Path(path)
+    return str(p.with_name(f"{p.stem}.{suffix}{p.suffix}"))
+
+
 def generate_trade_tearsheet(
     output: BacktestOutput,
     ohlcv_by_symbol: Mapping[str, pd.DataFrame],
     output_path: str = "trade_tearsheet.html",
     max_periods: int = 48,
-) -> str:
+    oos_start: datetime | None = None,
+) -> str | dict[str, str]:
     """Generate a lifecycle-consistent HTML trade tearsheet.
 
     Reports completed position lifecycle duration/PnL and hypothetical
     post-open/add entry envelopes. Realized exits and completed lifecycles are
     labeled separately.
+
+    With `oos_start`, also writes an in-sample and an out-of-sample tearsheet
+    split by `closed_at`/`anchor_ts` — lifecycle reconstruction still runs on
+    the full event stream first, so a lifecycle straddling the cutoff is not
+    misclassified as incomplete. Returns `{"full", "in_sample", "out_of_sample"}`
+    paths instead of one. `full`'s win rate/profit factor stay sourced from
+    `output.metrics` (exit-level); the split scopes use lifecycle-level net_pnl
+    instead, since exit-level figures cannot be split from `output.metrics` alone.
     """
     order_events = output.order_events
     lifecycle_outcomes = compute_trade_lifecycle_outcomes(order_events, ohlcv_by_symbol)
     completed = lifecycle_outcomes[lifecycle_outcomes["status"] == "complete"].sort_values(
         ["closed_at", "symbol", "lifecycle_ordinal"]
     )
-    durations = [int(value) for value in completed["periods_held"].dropna()]
-    pnl_curve = [float(value) for value in completed["net_pnl"].cumsum().to_numpy(dtype=np.float64)]
     entry_outcomes = compute_trade_entry_outcomes(
         order_events, ohlcv_by_symbol, max_periods=max_periods
-    )
-    entry_summary = summarize_trade_entry_outcomes(entry_outcomes)
-    pooled_entry_summary = entry_summary[entry_summary["scope"] == "pooled"]
-    entry_anchors = (
-        int(entry_outcomes["anchor_event_id"].nunique()) if not entry_outcomes.empty else 0
     )
     symbols = ", ".join(sorted({event.symbol for event in order_events})) or "no symbols"
     m = output.metrics
 
-    html = _render_tearsheet_html(
-        page_title=f"Trade Tearsheet — {output.run_metadata.run_id}",
-        heading="Trade Tearsheet",
-        subtitle=(f"{output.run_metadata.strategy} · {symbols} · {output.run_metadata.timeframe}"),
-        tiles=[
-            ("Realized exits", m.trades),
-            ("Completed lifecycles", len(completed)),
-            ("Entry anchors", entry_anchors),
-            ("Exit win rate", m.win_rate),
-            ("Exit profit factor", m.profit_factor),
-        ],
-        chart_builders=[
-            lambda ax: _plot_trade_durations(ax, durations),
-            lambda ax: _plot_pnl_by_lifecycle(ax, pnl_curve),
-            lambda ax: _plot_trade_entry_envelope(ax, pooled_entry_summary),
-        ],
-    )
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    return output_path
+    scope_masks: dict[str, tuple[pd.Series | None, pd.Series | None]] = {"full": (None, None)}
+    if oos_start is not None:
+        cutoff = _normalize_timestamp(oos_start, index_is_aware=True, name="oos_start")
+        scope_masks["in_sample"] = (
+            completed["closed_at"] < cutoff,
+            entry_outcomes["anchor_ts"] < cutoff,
+        )
+        scope_masks["out_of_sample"] = (
+            completed["closed_at"] >= cutoff,
+            entry_outcomes["anchor_ts"] >= cutoff,
+        )
+
+    paths: dict[str, str] = {}
+    for scope, (completed_mask, entry_mask) in scope_masks.items():
+        scoped_completed = completed if completed_mask is None else completed[completed_mask]
+        scoped_entries = entry_outcomes if entry_mask is None else entry_outcomes[entry_mask]
+        durations = [int(value) for value in scoped_completed["periods_held"].dropna()]
+        pnl_curve = [
+            float(value)
+            for value in scoped_completed["net_pnl"].cumsum().to_numpy(dtype=np.float64)
+        ]
+        entry_summary = summarize_trade_entry_outcomes(scoped_entries)
+        pooled_entry_summary = entry_summary[entry_summary["scope"] == "pooled"]
+        entry_anchors = (
+            int(scoped_entries["anchor_event_id"].nunique()) if not scoped_entries.empty else 0
+        )
+
+        if scope == "full":
+            tiles = [
+                ("Realized exits", m.trades),
+                ("Completed lifecycles", len(scoped_completed)),
+                ("Entry anchors", entry_anchors),
+                ("Exit win rate", m.win_rate),
+                ("Exit profit factor", m.profit_factor),
+            ]
+        else:
+            win_rate, profit_factor = _win_rate_and_profit_factor(scoped_completed["net_pnl"])
+            tiles = [
+                ("Completed lifecycles", len(scoped_completed)),
+                ("Entry anchors", entry_anchors),
+                ("Lifecycle win rate", win_rate),
+                ("Lifecycle profit factor", profit_factor),
+            ]
+
+        subtitle = f"{output.run_metadata.strategy} · {symbols} · {output.run_metadata.timeframe}"
+        if scope != "full":
+            subtitle += f" · {scope.replace('_', '-')} (cutoff {cutoff.date()})"
+
+        html = _render_tearsheet_html(
+            page_title=f"Trade Tearsheet — {output.run_metadata.run_id}",
+            heading="Trade Tearsheet",
+            subtitle=subtitle,
+            tiles=tiles,
+            chart_builders=[
+                lambda ax, d=durations: plot_trade_durations(ax, d),
+                lambda ax, p=pnl_curve: plot_pnl_by_lifecycle(ax, p),
+                lambda ax, s=pooled_entry_summary: plot_trade_entry_envelope(ax, s),
+            ],
+        )
+        path = output_path if scope == "full" else _suffixed_path(output_path, scope)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        paths[scope] = path
+
+    return paths["full"] if oos_start is None else paths
 
 
 def generate_signal_mae_mfe_report(
