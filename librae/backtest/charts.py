@@ -105,7 +105,7 @@ def _prepare_ohlcv(ohlcv: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def plot_trades(
+def plot_kbars(
     ohlcv: pd.DataFrame,
     order_events: Sequence[OrderEventRecord],
     symbol: str,

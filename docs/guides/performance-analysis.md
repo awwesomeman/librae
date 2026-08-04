@@ -279,7 +279,9 @@ calendar convention. For hourly, 24/7, irregular-event, or trade-return
 series, resample or choose a justified convention before asking an external
 library for annualized statistics.
 
-Install `librae[analytics]` only for Librae's optional Matplotlib trade and
-signal reports. Reporting may consume caller-prepared reference data, but it
-must not silently redefine alignment, annualization, active periods, or
-portfolio aggregation.
+Trade-level charting/reports follow the same principle: librae computes
+(`compute_trade_lifecycle_outcomes`, `compute_trade_entry_outcomes`,
+`split_lifecycle_by_oos_start`) and stops before charting — see
+`examples/trade_report.py`. Reporting may consume caller-prepared reference
+data, but it must not silently redefine alignment, annualization, active
+periods, or portfolio aggregation.

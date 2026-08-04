@@ -17,6 +17,7 @@ key, database, or external data service.
 | [`minimum_variance/`](minimum_variance/) | Keep a diagonal risk model and optimizer inside the strategy | `PortfolioTargets` | backtest |
 | [`multi_leg_spread/`](multi_leg_spread/) | Open and close an explicitly sized relative-value spread | `MultiLegOrder` | backtest |
 | [`custom_data_provider.py`](custom_data_provider.py) | Point-in-time third-party factor enrichment | data-provider callable | sim/live adapter boundary |
+| [`trade_report.py`](trade_report.py) | Chart/report on `BacktestOutput` (librae computes, you chart) | matplotlib PNG | compute → chart boundary |
 
 Run the backtests from the repository root:
 
@@ -27,6 +28,7 @@ uv run python -m examples.topk_selection.run --mode backtest --no-db
 uv run python -m examples.minimum_variance.run --mode backtest --no-db
 uv run python -m examples.multi_leg_spread.run --mode backtest --no-db
 uv run python -m examples.custom_data_provider
+uv run python -m examples.trade_report
 ```
 
 Start with `simple_sma` to learn the basic contract. Use `target_weights` when

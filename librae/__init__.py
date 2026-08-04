@@ -22,6 +22,7 @@ from .backtest.schema import (
     StrategyMetrics,
     RUN_ID_PATTERN,
 )
+from .backtest.charts import plot_kbars
 from .backtest.engine import Backtest
 from .backtest.result import (
     AccountBacktestResult,
@@ -71,11 +72,7 @@ from .core.metrics import (
     compute_signal_outcomes,
     compute_trade_entry_outcomes,
     compute_trade_lifecycle_outcomes,
-    generate_signal_mae_mfe_report,
-    generate_trade_tearsheet,
-    plot_pnl_by_lifecycle,
-    plot_trade_durations,
-    plot_trade_entry_envelope,
+    split_lifecycle_by_oos_start,
     summarize_signal_mae_mfe,
     summarize_performance,
     summarize_trade_entry_outcomes,
@@ -162,15 +159,12 @@ __all__ = [
     "compute_performance_series",
     "compute_signal_outcomes",
     "summarize_signal_mae_mfe",
-    "generate_signal_mae_mfe_report",
     "compute_trade_lifecycle_outcomes",
     "summarize_trade_lifecycle_outcomes",
     "compute_trade_entry_outcomes",
     "summarize_trade_entry_outcomes",
-    "generate_trade_tearsheet",
-    "plot_trade_durations",
-    "plot_pnl_by_lifecycle",
-    "plot_trade_entry_envelope",
+    "split_lifecycle_by_oos_start",
+    "plot_kbars",
     "RunConfig",
     "ExecutionPolicy",
     "RiskPolicy",

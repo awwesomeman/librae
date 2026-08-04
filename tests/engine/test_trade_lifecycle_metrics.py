@@ -4,23 +4,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
-from librae.backtest.schema import (
-    AccountPerformance,
-    BacktestOutput,
-    OrderEventRecord,
-    RunMetadata,
-    StrategyMetrics,
-)
+from librae.backtest.schema import OrderEventRecord
 from librae.core.metrics import (
     compute_trade_entry_outcomes,
     compute_trade_lifecycle_outcomes,
-    generate_trade_tearsheet,
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
 )
@@ -521,80 +513,3 @@ def test_same_timestamp_events_keep_input_sequence() -> None:
 
     assert outcome["status"] == "complete"
     assert outcome["mfe"] == 20.0
-
-
-def test_trade_tearsheet_uses_lifecycle_and_anchor_populations(tmp_path: Path) -> None:
-    events = [
-        _event("open", 0, "open"),
-        _event(
-            "add",
-            1,
-            "add",
-            price=110.0,
-            entry_price=105.0,
-            remaining_quantity=2.0,
-        ),
-        _event(
-            "reduce",
-            2,
-            "reduce",
-            price=115.0,
-            entry_price=105.0,
-            remaining_quantity=1.0,
-            pnl=10.0,
-        ),
-        _event(
-            "close",
-            3,
-            "close",
-            price=100.0,
-            entry_price=105.0,
-            remaining_quantity=0.0,
-            pnl=-5.0,
-            periods_held=3,
-        ),
-    ]
-    output = BacktestOutput(
-        run_metadata=RunMetadata(
-            run_id="test-20260101t0000-abcdef",
-            strategy="test",
-            symbols=("X",),
-            timeframe="1h",
-            data_source="fixture",
-            started_at=T0,
-            ended_at=T0 + timedelta(hours=7),
-            run_at=T0 + timedelta(hours=8),
-        ),
-        account=AccountPerformance(
-            account_id="default",
-            currency="USD",
-            initial_cash=100.0,
-            final_equity=100.0,
-            net_pnl=0.0,
-            equity_curve=(),
-            metrics=StrategyMetrics(
-                total_return=0.0,
-                trades=2,
-                win_rate=0.5,
-                profit_factor=2.0,
-            ),
-        ),
-        order_events=events,
-        position_snapshots=(),
-        allocation_snapshots=(),
-    )
-    output_path = tmp_path / "trade-tearsheet.html"
-
-    result = generate_trade_tearsheet(
-        output,
-        {"X": _ohlcv()},
-        output_path=str(output_path),
-        max_periods=3,
-    )
-    html = output_path.read_text(encoding="utf-8")
-
-    assert result == str(output_path)
-    assert "Realized exits" in html
-    assert "Completed lifecycles" in html
-    assert "Entry anchors" in html
-    assert "test · X · 1h" in html

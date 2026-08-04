@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from librae.backtest.charts import plot_trades
+from librae.backtest.charts import plot_kbars
 from librae.backtest.schema import OrderEventRecord
 from librae.db.timescale_reader import load_ohlcv, load_trade_events
 
@@ -27,4 +27,4 @@ def plot_trades_by_run_id(
     resolved_symbol = symbol or (
         order_events[0].symbol if order_events else ohlcv["symbol"].iloc[0]
     )
-    return plot_trades(ohlcv, order_events, resolved_symbol, block=block)
+    return plot_kbars(ohlcv, order_events, resolved_symbol, block=block)

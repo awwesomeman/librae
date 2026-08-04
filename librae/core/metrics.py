@@ -1,9 +1,9 @@
-"""Period-return performance metrics and optional trade/signal reports.
+"""Period-return performance metrics and trade/signal outcome analysis.
 
 Core metrics are computed with NumPy so backtests do not require reporting
-packages. Matplotlib is loaded only by the optional trade/signal HTML helpers.
-Public functions accept primitive sequences and DataFrames rather than
-database dependencies.
+packages. This module owns computation only (returns primitive sequences and
+DataFrames) — charting and reporting on top of it are caller-owned; see
+`examples/trade_report.py`.
 
 Performance summaries preserve the observation frequency supplied by the
 caller. Annualization, resampling, grouping, and reference alignment remain
@@ -13,20 +13,17 @@ reporting or research policies.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from numbers import Real
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from matplotlib.axes import Axes
-
-    from librae.backtest.schema import BacktestOutput, OrderEventRecord, StrategyMetrics
+    from librae.backtest.schema import OrderEventRecord, StrategyMetrics
     from librae.core.executor import TradePnL
 
 from librae.core import EPSILON
@@ -1156,406 +1153,33 @@ def summarize_trade_entry_outcomes(outcomes: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-# WHY these two colors specifically: matches the green=favorable/red=adverse
-# threshold-coloring convention already used in the Grafana strategy_dashboard
-# (librae/app/grafana/generate_dashboards.py) — local HTML reports and Grafana panels
-# read as the same visual system instead of picking an arbitrary new palette.
-_FAVORABLE = "#2a9d8f"
-_ADVERSE = "#e63946"
-_NEUTRAL = "#3d5a80"
-_MUTED = "#8a8f98"
+def split_lifecycle_by_oos_start(
+    completed: pd.DataFrame,
+    entry_outcomes: pd.DataFrame,
+    oos_start: datetime,
+) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
+    """Split already-reconstructed lifecycle/entry-outcome tables by closed_at/anchor_ts.
 
+    `completed`/`entry_outcomes` must come from `compute_trade_lifecycle_outcomes()`/
+    `compute_trade_entry_outcomes()` run on the *full* event stream — lifecycle
+    reconstruction needs every event to classify a lifecycle as complete, so
+    split the resulting tables rather than pre-filtering `order_events`; a
+    lifecycle opened in-sample and closed out-of-sample is bucketed by
+    `closed_at` and stays correctly `complete` either way.
 
-def _style_axes(ax: Axes) -> None:
-    """Shared minimal chart style: no chartjunk, readable on light or dark cards.
-
-    Colors are mid-grey (not pure black) and the figure is saved transparent
-    (see generate_trade_tearsheet) so charts sit directly on the card
-    background in both light and dark mode without a baked-in white box.
+    Returns `{"in_sample": (completed, entry_outcomes), "out_of_sample": (...)}`
+    so callers can build any presentation (combined page, side-by-side
+    subplots, a third rolling-window cut, ...) without reimplementing the
+    cutoff logic.
     """
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    for spine in ("left", "bottom"):
-        ax.spines[spine].set_color(_MUTED)
-    ax.grid(True, color=_MUTED, linewidth=0.5, alpha=0.25)
-    ax.set_axisbelow(True)
-    ax.tick_params(colors=_MUTED, labelsize=9)
-    ax.title.set_color("#555555")
-    ax.title.set_fontsize(11)
-    ax.xaxis.label.set_color(_MUTED)
-    ax.yaxis.label.set_color(_MUTED)
-
-
-def plot_trade_durations(ax: Axes, durations: list[int]) -> None:
-    if durations:
-        ax.hist(
-            durations,
-            bins=min(30, max(1, len(set(durations)))),
-            color=_NEUTRAL,
-            edgecolor="white",
-            linewidth=0.5,
-        )
-    _style_axes(ax)
-    ax.set_title("Position Lifecycle Duration")
-    ax.set_xlabel("Periods held (bars)")
-    ax.set_ylabel("Completed lifecycle count")
-
-
-def plot_pnl_by_lifecycle(ax: Axes, pnl_curve: list[float]) -> None:
-    x = list(range(1, len(pnl_curve) + 1))
-    if pnl_curve:
-        arr = np.array(pnl_curve)
-        ax.fill_between(x, arr, 0, where=arr >= 0, color=_FAVORABLE, alpha=0.15, linewidth=0)
-        ax.fill_between(x, arr, 0, where=arr < 0, color=_ADVERSE, alpha=0.15, linewidth=0)
-        ax.plot(x, arr, color=_NEUTRAL, linewidth=1.6, zorder=3)
-    ax.axhline(0, color=_MUTED, linewidth=0.7)
-    _style_axes(ax)
-    ax.set_title("Net PnL by Position Lifecycle")
-    ax.set_xlabel("Completed lifecycle #")
-    ax.set_ylabel("Cumulative PnL")
-
-
-def plot_trade_entry_envelope(ax: Axes, summary: pd.DataFrame) -> None:
-    if not summary.empty:
-        offsets = summary["horizon"]
-        ax.plot(
-            offsets,
-            summary["median_mfe"],
-            color=_FAVORABLE,
-            linewidth=1.8,
-            label="median MFE",
-        )
-        ax.plot(
-            offsets,
-            summary["p75_mfe"],
-            color=_FAVORABLE,
-            linewidth=1.1,
-            linestyle="--",
-            label="p75 MFE",
-        )
-        ax.plot(
-            offsets,
-            summary["median_mae"],
-            color=_ADVERSE,
-            linewidth=1.8,
-            label="median MAE",
-        )
-        ax.plot(
-            offsets,
-            summary["p75_mae"],
-            color=_ADVERSE,
-            linewidth=1.1,
-            linestyle="--",
-            label="p75 MAE",
-        )
-        ax.legend(frameon=False, fontsize=8.5, labelcolor=_MUTED)
-    _style_axes(ax)
-    coverage = (
-        f"n={int(summary['n'].iloc[0])}->{int(summary['n'].iloc[-1])}"
-        if not summary.empty
-        else "no data"
-    )
-    ax.set_title(f"Post-Entry MAE/MFE Envelope ({coverage})")
-    ax.set_xlabel("Observed bars after open/add anchor")
-    ax.set_ylabel("Percentage-point move from active entry basis")
-
-
-def _plot_signal_mae_mfe_by_horizon(ax: Axes, summary: pd.DataFrame) -> None:
-    if summary.empty:
-        _style_axes(ax)
-        ax.set_title("Signal MAE/MFE by Horizon (no data)")
-        return
-
-    x = np.arange(len(summary))
-    width = 0.35
-    mfe_err = (summary["p75_mfe"] - summary["median_mfe"]).clip(lower=0)
-    mae_err = (summary["p75_mae"] - summary["median_mae"]).clip(lower=0)
-    ax.bar(x - width / 2, summary["median_mfe"], width, color=_FAVORABLE, label="median MFE")
-    ax.bar(x + width / 2, summary["median_mae"], width, color=_ADVERSE, label="median MAE")
-    ax.errorbar(
-        x - width / 2,
-        summary["median_mfe"],
-        yerr=[np.zeros(len(summary)), mfe_err],
-        fmt="none",
-        ecolor=_FAVORABLE,
-        alpha=0.6,
-        capsize=3,
-    )
-    ax.errorbar(
-        x + width / 2,
-        summary["median_mae"],
-        yerr=[np.zeros(len(summary)), mae_err],
-        fmt="none",
-        ecolor=_ADVERSE,
-        alpha=0.6,
-        capsize=3,
-    )
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        [f"{h}\nn={n}" for h, n in zip(summary["horizon"], summary["n"], strict=True)]
-    )
-    ax.legend(frameon=False, fontsize=8.5, labelcolor=_MUTED)
-    _style_axes(ax)
-    ax.set_title("Signal MAE/MFE by Horizon (error bar = p75)")
-    ax.set_xlabel("Observed bars after reference")
-    ax.set_ylabel("Percentage-point move from reference price")
-
-
-def _fmt_stat(value: float | int | None) -> str:
-    if value is None:
-        return "—"
-    if isinstance(value, float):
-        return f"{value:.2f}"
-    return str(value)
-
-
-_TEARSHEET_CSS = """
-:root { --bg:#fafafa; --card:#ffffff; --text:#1a1a1a; --muted:#6b7280; --border:#e5e7eb; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#15181c; --card:#1e2227; --text:#e8e8e8; --muted:#9aa0a6; --border:#2c3138; }
-}
-* { box-sizing: border-box; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  background: var(--bg); color: var(--text);
-  max-width: 880px; margin: 0 auto; padding: 2.5rem 1.5rem 4rem;
-}
-h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.2rem; }
-.subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.75rem; }
-.tiles { display: flex; gap: 0.75rem; margin-bottom: 2rem; flex-wrap: wrap; }
-.tile {
-  flex: 1; min-width: 130px; background: var(--card); border: 1px solid var(--border);
-  border-radius: 10px; padding: 0.9rem 1.1rem;
-}
-.tile-value { font-size: 1.35rem; font-weight: 600; }
-.tile-label {
-  font-size: 0.7rem; color: var(--muted); margin-top: 0.25rem;
-  text-transform: uppercase; letter-spacing: 0.04em;
-}
-.card {
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: 0.75rem; margin-bottom: 1.25rem;
-}
-.card img { width: 100%; display: block; }
-"""
-
-
-def _render_tearsheet_html(
-    page_title: str,
-    heading: str,
-    subtitle: str,
-    tiles: list[tuple[str, float | int | str | None]],
-    chart_builders: list[Callable[[Axes], None]],
-) -> str:
-    """Shared HTML assembly: stat tiles + stacked chart cards on ``_TEARSHEET_CSS``.
-
-    Used by every ``generate_*_tearsheet``/``generate_*_report`` function so
-    they stay visually consistent and none of them re-implements the
-    matplotlib-to-base64-to-HTML plumbing.
-    """
-    import base64
-    from io import BytesIO
-
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Trade and signal reports require the 'analytics' extra: "
-            "pip install 'librae[analytics]'"
-        ) from exc
-
-    def _fig_to_base64(fig: Any) -> str:
-        buf = BytesIO()
-        # WHY transparent=True: lets each chart sit on the card background
-        # (light or dark) instead of a baked-in white box — see _style_axes.
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=130, transparent=True)
-        plt.close(fig)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
-
-    cards = []
-    for builder in chart_builders:
-        fig, ax = plt.subplots(figsize=(7.6, 3.1))
-        builder(ax)
-        cards.append(
-            f'<div class="card"><img src="data:image/png;base64,{_fig_to_base64(fig)}"/></div>'
-        )
-
-    tile_html = "".join(
-        f'<div class="tile"><div class="tile-value">{_fmt_stat(value)}</div>'
-        f'<div class="tile-label">{label}</div></div>'
-        for label, value in tiles
-    )
-
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8">
-<title>{page_title}</title>
-<style>{_TEARSHEET_CSS}</style>
-</head>
-<body>
-<h1>{heading}</h1>
-<div class="subtitle">{subtitle}</div>
-<div class="tiles">{tile_html}</div>
-{"".join(cards)}
-</body></html>"""
-
-
-def _win_rate_and_profit_factor(net_pnl: pd.Series) -> tuple[float | None, float | None]:
-    """Win rate and profit factor from a completed-lifecycle net_pnl column."""
-    wins = net_pnl[net_pnl > 0]
-    losses_abs = net_pnl[net_pnl < 0].abs()
-    win_rate = float(len(wins) / len(net_pnl)) if len(net_pnl) > 0 else None
-    profit_factor = float(wins.sum() / losses_abs.sum()) if len(losses_abs) > 0 else None
-    return win_rate, profit_factor
-
-
-def _suffixed_path(path: str, suffix: str) -> str:
-    p = Path(path)
-    return str(p.with_name(f"{p.stem}.{suffix}{p.suffix}"))
-
-
-def generate_trade_tearsheet(
-    output: BacktestOutput,
-    ohlcv_by_symbol: Mapping[str, pd.DataFrame],
-    output_path: str = "trade_tearsheet.html",
-    max_periods: int = 48,
-    oos_start: datetime | None = None,
-) -> str | dict[str, str]:
-    """Generate a lifecycle-consistent HTML trade tearsheet.
-
-    Reports completed position lifecycle duration/PnL and hypothetical
-    post-open/add entry envelopes. Realized exits and completed lifecycles are
-    labeled separately.
-
-    With `oos_start`, also writes an in-sample and an out-of-sample tearsheet
-    split by `closed_at`/`anchor_ts` — lifecycle reconstruction still runs on
-    the full event stream first, so a lifecycle straddling the cutoff is not
-    misclassified as incomplete. Returns `{"full", "in_sample", "out_of_sample"}`
-    paths instead of one. `full`'s win rate/profit factor stay sourced from
-    `output.metrics` (exit-level); the split scopes use lifecycle-level net_pnl
-    instead, since exit-level figures cannot be split from `output.metrics` alone.
-    """
-    order_events = output.order_events
-    lifecycle_outcomes = compute_trade_lifecycle_outcomes(order_events, ohlcv_by_symbol)
-    completed = lifecycle_outcomes[lifecycle_outcomes["status"] == "complete"].sort_values(
-        ["closed_at", "symbol", "lifecycle_ordinal"]
-    )
-    entry_outcomes = compute_trade_entry_outcomes(
-        order_events, ohlcv_by_symbol, max_periods=max_periods
-    )
-    symbols = ", ".join(sorted({event.symbol for event in order_events})) or "no symbols"
-    m = output.metrics
-
-    scope_masks: dict[str, tuple[pd.Series | None, pd.Series | None]] = {"full": (None, None)}
-    if oos_start is not None:
-        cutoff = _normalize_timestamp(oos_start, index_is_aware=True, name="oos_start")
-        scope_masks["in_sample"] = (
-            completed["closed_at"] < cutoff,
-            entry_outcomes["anchor_ts"] < cutoff,
-        )
-        scope_masks["out_of_sample"] = (
-            completed["closed_at"] >= cutoff,
-            entry_outcomes["anchor_ts"] >= cutoff,
-        )
-
-    paths: dict[str, str] = {}
-    for scope, (completed_mask, entry_mask) in scope_masks.items():
-        scoped_completed = completed if completed_mask is None else completed[completed_mask]
-        scoped_entries = entry_outcomes if entry_mask is None else entry_outcomes[entry_mask]
-        durations = [int(value) for value in scoped_completed["periods_held"].dropna()]
-        pnl_curve = [
-            float(value)
-            for value in scoped_completed["net_pnl"].cumsum().to_numpy(dtype=np.float64)
-        ]
-        entry_summary = summarize_trade_entry_outcomes(scoped_entries)
-        pooled_entry_summary = entry_summary[entry_summary["scope"] == "pooled"]
-        entry_anchors = (
-            int(scoped_entries["anchor_event_id"].nunique()) if not scoped_entries.empty else 0
-        )
-
-        if scope == "full":
-            tiles = [
-                ("Realized exits", m.trades),
-                ("Completed lifecycles", len(scoped_completed)),
-                ("Entry anchors", entry_anchors),
-                ("Exit win rate", m.win_rate),
-                ("Exit profit factor", m.profit_factor),
-            ]
-        else:
-            win_rate, profit_factor = _win_rate_and_profit_factor(scoped_completed["net_pnl"])
-            tiles = [
-                ("Completed lifecycles", len(scoped_completed)),
-                ("Entry anchors", entry_anchors),
-                ("Lifecycle win rate", win_rate),
-                ("Lifecycle profit factor", profit_factor),
-            ]
-
-        subtitle = f"{output.run_metadata.strategy} · {symbols} · {output.run_metadata.timeframe}"
-        if scope != "full":
-            subtitle += f" · {scope.replace('_', '-')} (cutoff {cutoff.date()})"
-
-        html = _render_tearsheet_html(
-            page_title=f"Trade Tearsheet — {output.run_metadata.run_id}",
-            heading="Trade Tearsheet",
-            subtitle=subtitle,
-            tiles=tiles,
-            chart_builders=[
-                lambda ax, d=durations: plot_trade_durations(ax, d),
-                lambda ax, p=pnl_curve: plot_pnl_by_lifecycle(ax, p),
-                lambda ax, s=pooled_entry_summary: plot_trade_entry_envelope(ax, s),
-            ],
-        )
-        path = output_path if scope == "full" else _suffixed_path(output_path, scope)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
-        paths[scope] = path
-
-    return paths["full"] if oos_start is None else paths
-
-
-def generate_signal_mae_mfe_report(
-    signal_timestamps: Sequence[datetime],
-    ohlcv: pd.DataFrame,
-    output_path: str = "signal_mae_mfe.html",
-    horizons: Sequence[int] = (1, 5, 10, 20, 60),
-    direction: SignalDirection = "long",
-    price_col: SignalPriceColumn = "open",
-) -> str:
-    """Generate a descriptive local signal-outcome report.
-
-    Outcomes are gross and hypothetical: the next observed bar's
-    ``price_col`` is the reference price, offset 1 starts on the following
-    observed bar, and no costs or execution constraints are modeled. The
-    report shows a separate valid sample count for each horizon and makes no
-    statistical-significance claim.
-    """
-    summary = summarize_signal_mae_mfe(
-        signal_timestamps, ohlcv, horizons=horizons, direction=direction, price_col=price_col
-    )
-    sample_counts = (
-        ", ".join(f"T+{h}: {n}" for h, n in zip(summary["horizon"], summary["n"], strict=True))
-        if not summary.empty
-        else "none"
-    )
-
-    html = _render_tearsheet_html(
-        page_title="Signal Outcome Report",
-        heading="Signal Outcome Report",
-        subtitle=(
-            f"Gross hypothetical outcomes · direction={direction} · "
-            f"reference=next observed {price_col} · offset 1=following observed bar · "
-            "no costs or execution constraints"
+    cutoff = _normalize_timestamp(oos_start, index_is_aware=True, name="oos_start")
+    return {
+        "in_sample": (
+            completed[completed["closed_at"] < cutoff],
+            entry_outcomes[entry_outcomes["anchor_ts"] < cutoff],
         ),
-        tiles=[
-            ("Signals", len(signal_timestamps)),
-            ("Direction", direction),
-            ("Reference", f"next {price_col}"),
-            ("Valid samples", sample_counts),
-        ],
-        chart_builders=[lambda ax: _plot_signal_mae_mfe_by_horizon(ax, summary)],
-    )
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    return output_path
+        "out_of_sample": (
+            completed[completed["closed_at"] >= cutoff],
+            entry_outcomes[entry_outcomes["anchor_ts"] >= cutoff],
+        ),
+    }

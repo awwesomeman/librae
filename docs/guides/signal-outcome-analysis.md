@@ -8,11 +8,7 @@ execution and position sizing are introduced.
 ## Basic workflow
 
 ```python
-from librae import (
-    compute_signal_outcomes,
-    generate_signal_mae_mfe_report,
-    summarize_signal_mae_mfe,
-)
+from librae import compute_signal_outcomes, summarize_signal_mae_mfe
 
 symbol_ohlcv = df.xs(symbol, level="symbol")
 signal_ts = symbol_ohlcv.index[
@@ -30,11 +26,11 @@ summary = summarize_signal_mae_mfe(
     signal_ts,
     symbol_ohlcv,
 )
-generate_signal_mae_mfe_report(
-    signal_ts,
-    symbol_ohlcv,
-)
 ```
+
+Charting `summary` (e.g. median/p75 MFE-MAE by horizon) is caller-owned — see
+`examples/trade_report.py` for the compute → chart pattern used elsewhere in
+librae.
 
 ## Interpretation
 

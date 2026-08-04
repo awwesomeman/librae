@@ -25,7 +25,6 @@ from librae.core.metrics import (
     compute_performance_series,
     compute_signal_outcomes,
     compute_trade_entry_outcomes,
-    generate_signal_mae_mfe_report,
     summarize_performance,
     summarize_signal_mae_mfe,
 )
@@ -46,7 +45,6 @@ def test_signal_outcome_functions_are_public() -> None:
 
     assert librae.compute_signal_outcomes is compute_signal_outcomes
     assert librae.summarize_signal_mae_mfe is summarize_signal_mae_mfe
-    assert librae.generate_signal_mae_mfe_report is generate_signal_mae_mfe_report
 
 
 def test_performance_functions_are_public() -> None:
@@ -670,26 +668,6 @@ class TestSummarizeSignalMaeMfe:
                 _signal_fixture_ohlcv(),
                 horizons=horizons,
             )
-
-
-def test_generate_signal_report_states_assumptions_and_sample_counts(tmp_path):
-    ohlcv = _signal_fixture_ohlcv()
-    output_path = tmp_path / "signal-outcomes.html"
-
-    result = generate_signal_mae_mfe_report(
-        [ohlcv.index[0], ohlcv.index[3]],
-        ohlcv,
-        output_path=str(output_path),
-        horizons=(1, 3),
-        direction="long",
-        price_col="open",
-    )
-
-    html = output_path.read_text(encoding="utf-8")
-    assert result == str(output_path)
-    assert "Gross hypothetical outcomes" in html
-    assert "reference=next observed open" in html
-    assert "T+1: 2, T+3: 1" in html
 
 
 def test_kernel_shared_by_trade_entry_and_signal_outcomes():

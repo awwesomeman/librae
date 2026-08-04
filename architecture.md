@@ -290,7 +290,7 @@ librae/
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()
 │   ├── result.py             raw side-effect-free backtest result models
 │   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord, PositionSnapshotPoint
-│   └── charts.py             plot_trades — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
+│   └── charts.py             plot_kbars — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
 │
 ├── live/                     real-time / sim runtime
 │   ├── engine.py             LiveTrader — data-driven multi-symbol polling events
@@ -404,11 +404,14 @@ document scoped to layering, boundaries, and naming conventions.
 ### Design decisions
 
 - **Primitive signature**: `compute_all()` accepts `Sequence[float]` / `Sequence[datetime]` rather than depending on `BacktestResult`, so the live engine can call it directly too.
-- **Optional reports and integrations**: core metrics use NumPy; Matplotlib,
-  exchange calendars, CLI YAML, DB, broker, notification, and UI dependencies
-  are loaded only by their opt-in features. Opinionated equity tearsheets are
-  called directly by users so their alignment and annualization parameters
-  remain explicit. See
+- **Optional integrations, caller-owned reporting**: core metrics use NumPy;
+  exchange calendars, CLI YAML, DB, broker, and notification dependencies are
+  loaded only by their opt-in features. `librae/core/metrics.py` computes
+  (DataFrames/primitives, no chart dependency); charting/HTML reports on top
+  of that are not a librae feature at all — `librae.plot_kbars` (K-line/marker
+  overlay) is the one chart librae ships, since there is essentially one
+  correct way to draw it. See `examples/trade_report.py` for the caller-owned
+  pattern and
   [Product position and system boundaries](#product-position-and-system-boundaries).
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.

@@ -377,11 +377,11 @@ records directly, while aggregate metrics remain owned by
 `librae/core/metrics.py`.
 
 ```python
+from librae import plot_kbars
 from librae.db.charts import plot_trades_by_run_id
-from librae.backtest.charts import plot_trades
 
 ohlcv = df.xs(symbol, level="symbol")  # a single symbol's OHLCV
-plot_trades(
+plot_kbars(
     ohlcv, output.order_events, symbol
 )  # right after a backtest run, output already in hand
 
@@ -412,6 +412,14 @@ fact/summary split is:
 |---|---|---|
 | Actual lifecycle excursion | `compute_trade_lifecycle_outcomes` | equal completed lifecycles, pooled and per symbol |
 | Hypothetical post-entry envelope | `compute_trade_entry_outcomes` | equal `open`/`add` anchors at each valid horizon, pooled and per symbol |
+
+`split_lifecycle_by_oos_start(completed, entry_outcomes, oos_start)` splits
+already-reconstructed lifecycle/entry-outcome tables by `closed_at`/`anchor_ts`
+into in-sample/out-of-sample — split the computed tables, not `order_events`,
+so a lifecycle straddling the cutoff is not misclassified as incomplete.
+Charting or reporting on any of these DataFrames is caller-owned — librae only
+ships `plot_kbars` (the K-line/marker overlay); see `examples/trade_report.py`
+for the compute → chart pattern.
 
 MFE/MAE are gross, direction-adjusted percentage-point price excursions;
 costs and notional-weighted portfolio risk remain separate metrics. Adds

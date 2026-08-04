@@ -127,6 +127,14 @@ docker compose --env-file ../.env -f docker-compose.local.yml up -d
 Open `http://localhost:3000`. Credentials and the remote database connection
 come from the repository `.env` file as documented in the compose file.
 
+The Signal Monitor dashboard's forward-return/MFE/MAE panels (Cumulative
+Signal Return, Rolling Mean Return, Rolling Edge Ratio) recompute that logic
+directly in SQL rather than calling `librae.compute_signal_outcomes()` —
+Grafana runs against Postgres and cannot call Python. This is a deliberate,
+independent implementation for a live/rolling-window dashboard, not
+duplication to be unified with the offline Python path; keep both correct
+under review rather than trying to merge them.
+
 ## Brokers
 
 Install only the adapter needed by the execution venue:
