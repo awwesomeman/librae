@@ -30,7 +30,7 @@ strategy interface.
 
 | You are... | Start here | Go deeper |
 |---|---|---|
-| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review [performance analysis](docs/guides/performance-analysis.md), the [strategy readiness checklist](docs/guides/strategy-readiness.md), [data and execution contract](architecture.md#usage), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
+| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review [performance analysis](docs/guides/performance-analysis.md), the [strategy readiness checklist](docs/guides/strategy-readiness.md), [data and execution contract](docs/guides/engine-usage.md), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
 | Backend/platform developer | Read the [system architecture](architecture.md) | Review [optional infrastructure](docs/guides/optional-infrastructure.md), callbacks, adapters, and durable state |
 
 ## Quick start
@@ -104,7 +104,7 @@ For custom broker fetches and third-party factors, see
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
 | Short borrow / funding | Timestamped perpetual funding is supported in backtest/sim; no engine borrow/locate ledger |
 
-See the [full capability matrix](architecture.md#use-case-capability-matrix)
+See the [full capability matrix](docs/guides/engine-usage.md#use-case-capability-matrix)
 and complete the [strategy readiness checklist](docs/guides/strategy-readiness.md)
 before selecting or promoting a workflow.
 

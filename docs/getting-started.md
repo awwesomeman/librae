@@ -1,8 +1,10 @@
 # Getting started
 
-This guide covers installation, a first run, and contributor setup. Engine
-semantics and API details live in [`architecture.md`](../architecture.md);
-runnable strategy patterns live in the [examples index](../examples/README.md).
+This guide covers installation, a first run, and contributor setup. System
+boundaries and API design live in [`architecture.md`](../architecture.md);
+usage examples and runtime behavior live in
+[`docs/guides/engine-usage.md`](guides/engine-usage.md); runnable strategy
+patterns live in the [examples index](../examples/README.md).
 
 ## Requirements
 

@@ -1,5 +1,7 @@
 # Refactor Librae: Decouple into a Standalone Backtest Engine
 
+> **佈局結論已被推翻**：本文件「`db/`、`brokers/`、`notifications/`、`orchestration/` 保留 repo 頂層、不搬進 librae package」的判斷，已被 2026-07-30 的 `1f7190b refactor(packaging)!: move integrations under librae (#55)` 反向覆蓋——這幾個資料夾現在都是 `librae.*` 子套件，見 [`docs/decisions/2026-07-30-integration-discovery-and-packaging.md`](../decisions/2026-07-30-integration-discovery-and-packaging.md)。下方佈局圖僅供 Phase 1-4 執行紀錄參考，不代表目前實際目錄結構。
+>
 > 狀態：Phase 0/1/3/4 已落地（一次做完，2026-07-25）；Phase 2 併入 Phase 4 一併完成；Phase 5（repo 工程化基礎設施）2026-07-25 一併完成
 > Commits：`8d94a27`（Phase 0/1/3/4）、`fe1b125`（README/architecture.md 整合）、`e8ca1ea`（Phase 5：ruff + CI + Python 版本矩陣）
 > 範圍：librae/core, librae/live, librae/backtest, librae/config, librae/cli, db, brokers

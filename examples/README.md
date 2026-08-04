@@ -72,7 +72,7 @@ Live mode receives a plain per-symbol OHLCV frame and calls the strategy's
 live paths helps prevent research/production skew.
 
 For exact validation, T → T+1 execution, incomplete baskets, and fill rules,
-read the [engine usage contract](../architecture.md#usage).
+read the [engine usage contract](../docs/guides/engine-usage.md).
 
 ## User-controlled trading settings
 
@@ -104,7 +104,7 @@ market_data_workers: 1
 ```
 
 Each example config comments the values it chooses. The
-[execution and risk reference](../architecture.md#execution-policy-risk-controls-and-portfolio-diagnostics)
+[execution and risk reference](../docs/guides/engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)
 is the SSOT for defaults, liquidity composition, calendars, decision fields,
 protective-order timing, and failure behavior. Cost and instrument override
 priority is documented under the
@@ -172,7 +172,7 @@ transitions. Backtest/sim uses a synchronous OHLCV approximation. The generic
 live runner rejects the group before submitting any leg; production execution
 requires a venue-native combo adapter or a strategy-owned coordinator. The
 exact boundary is defined in the
-[multi-leg engine contract](../architecture.md#related-multi-leg-order-contract).
+[multi-leg engine contract](../docs/guides/engine-usage.md#related-multi-leg-order-contract).
 
 All legs in one runner use its single account:
 
