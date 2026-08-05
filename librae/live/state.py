@@ -16,11 +16,9 @@ from typing import Protocol
 
 from librae.core.run_config import LiveMode
 from librae.core.strategy import (
-    MultiLegOrder,
     OrderIntent,
     PortfolioTargets,
     PositionState,
-    StrategyDecision,
 )
 
 from .executor import OrderRequest, OrderStatus
@@ -47,7 +45,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 16
+_STATE_SCHEMA_VERSION = 17
 
 
 def normalize_runtime_revision(
@@ -68,39 +66,16 @@ def normalize_runtime_revision(
     return normalized
 
 
-def _decision_to_dict(decision: StrategyDecision) -> dict:
-    if isinstance(decision, PortfolioTargets):
-        return {
-            "kind": "portfolio_targets",
-            "value": {
-                "weights": dict(decision.weights),
-                "reason": decision.reason,
-            },
-        }
-    if isinstance(decision, MultiLegOrder):
-        return {
-            "kind": "multi_leg_order",
-            "value": {
-                "legs": [asdict(leg) for leg in decision.legs],
-                "reason": decision.reason,
-            },
-        }
-    return {"kind": "order_intents", "value": [asdict(intent) for intent in decision]}
+def _pending_intents_to_list(pending_intents: list[OrderIntent]) -> list[dict]:
+    """pending_decision is always plain OrderIntents: PortfolioTargets/
+    MultiLegOrder must be immediately executable when returned and never
+    sit waiting across periods (see executor.validate_strategy_decision).
+    """
+    return [asdict(intent) for intent in pending_intents]
 
 
-def _decision_from_dict(raw: dict) -> StrategyDecision:
-    kind = raw.get("kind")
-    value = raw.get("value")
-    if kind == "portfolio_targets" and isinstance(value, dict):
-        return PortfolioTargets(**value)
-    if kind == "order_intents" and isinstance(value, list):
-        return [OrderIntent(**item) for item in value]
-    if kind == "multi_leg_order" and isinstance(value, dict):
-        return MultiLegOrder(
-            legs=tuple(OrderIntent(**item) for item in value["legs"]),
-            reason=str(value["reason"]),
-        )
-    raise ValueError("invalid persisted strategy decision")
+def _pending_intents_from_list(raw: list) -> list[OrderIntent]:
+    return [OrderIntent(**item) for item in raw]
 
 
 @dataclass
@@ -177,7 +152,7 @@ class LiveRebalance:
 
     def to_dict(self) -> dict:
         return {
-            "targets": _decision_to_dict(self.targets),
+            "targets": {"weights": dict(self.targets.weights), "reason": self.targets.reason},
             "reference_prices": self.reference_prices,
             "reference_volumes": self.reference_volumes,
             "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
@@ -188,9 +163,7 @@ class LiveRebalance:
 
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRebalance:
-        targets = _decision_from_dict(raw["targets"])
-        if not isinstance(targets, PortfolioTargets):
-            raise ValueError("live rebalance must contain PortfolioTargets")
+        targets = PortfolioTargets(**raw["targets"])
         decided_at = _to_utc(raw["decided_at"])
         if decided_at is None:
             raise ValueError("live rebalance is missing decided_at")
@@ -234,7 +207,7 @@ class LiveRuntimeState:
     last_cycle_ts: datetime | None = None
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     last_funding_ts: dict[str, datetime] = field(default_factory=dict)
-    pending_decision: StrategyDecision = field(default_factory=list)
+    pending_decision: list[OrderIntent] = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
     equity_peak: float = 0.0
@@ -281,7 +254,7 @@ class LiveRuntimeState:
             "last_funding_ts": {
                 symbol: timestamp.isoformat() for symbol, timestamp in self.last_funding_ts.items()
             },
-            "pending_decision": _decision_to_dict(self.pending_decision),
+            "pending_decision": _pending_intents_to_list(self.pending_decision),
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
             "equity_peak": self.equity_peak,
@@ -324,7 +297,7 @@ class LiveRuntimeState:
                 raw["last_funding_ts"],
                 field="last_funding_ts",
             ),
-            pending_decision=_decision_from_dict(raw["pending_decision"]),
+            pending_decision=_pending_intents_from_list(raw["pending_decision"]),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
             live_rebalance=(
                 LiveRebalance.from_dict(raw["live_rebalance"])

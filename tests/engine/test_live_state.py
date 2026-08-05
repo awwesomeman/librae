@@ -123,7 +123,12 @@ def test_exact_future_order_identity_survives_checkpoint_round_trip():
     assert restored.request.contract_month == "202609"
 
 
-def test_portfolio_targets_round_trip_and_memory_store_isolation():
+def test_live_rebalance_round_trip_and_memory_store_isolation():
+    """pending_decision is always plain OrderIntents (validate_strategy_decision
+    requires PortfolioTargets/MultiLegOrder to be immediately executable, so
+    they never sit as pending state); live_rebalance is the separate,
+    still-PortfolioTargets-typed state for an in-flight leg-by-leg rebalance.
+    """
     store = MemoryLiveStateStore()
     targets = PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
     state = LiveRuntimeState(
@@ -133,7 +138,7 @@ def test_portfolio_targets_round_trip_and_memory_store_isolation():
         mode="sim",
         account_id="default",
         cash=1_000.0,
-        pending_decision=targets,
+        pending_decision=[OrderIntent(action="long", symbol="CCC", quantity=1.0)],
         live_rebalance=LiveRebalance(
             targets=targets,
             reference_prices={"AAA": 100.0, "BBB": 200.0},
@@ -158,14 +163,11 @@ def test_portfolio_targets_round_trip_and_memory_store_isolation():
     assert second.pending_decision == state.pending_decision
 
 
-def test_multi_leg_order_round_trip():
-    decision = MultiLegOrder(
-        legs=(
-            OrderIntent(action="long", symbol="BTC/USDT", quantity=1.0),
-            OrderIntent(action="short", symbol="BTC-PERP", quantity=1.0),
-        ),
-        reason="basis",
-    )
+def test_pending_order_intents_round_trip_through_to_dict():
+    decision = [
+        OrderIntent(action="long", symbol="AAA", quantity=1.0),
+        OrderIntent(action="short", symbol="BBB", quantity=2.0),
+    ]
     state = LiveRuntimeState(
         state_key="live:abc",
         run_id="run-1",

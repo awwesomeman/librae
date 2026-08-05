@@ -2039,62 +2039,64 @@ class LiveTrader:
                         signal_type="exit",
                     )
 
-        # A target-weight basket waits for a complete synchronous snapshot;
-        # per-symbol intents do not prevent decisions for other symbols.
-        if not isinstance(self._pending_decision, (PortfolioTargets, MultiLegOrder)):
-            equity, position_snapshot = self._calc_account_snapshot()
-            ctx = Context(
-                ts=ts,
-                symbol=primary_symbol,
-                symbols=self._symbols,
-                bar=bars.get(primary_symbol, {}),
-                bars=bars,
-                positions=position_snapshot,
-                account_id=self._account_id,
-                account=AccountSnapshot(
-                    currency=self._currency,
-                    cash=self._cash,
-                    equity=equity,
-                ),
-                period_index=self._period_index,
-            )
-            strategy_started = perf_counter()
-            try:
-                intent = self._strategy.on_bar(ctx)
-            finally:
-                self._cycle_strategy_seconds += perf_counter() - strategy_started
-            validate_strategy_decision(
+        # PortfolioTargets/MultiLegOrder must be immediately executable when
+        # returned (validate_strategy_decision enforces this), so on_bar is
+        # never gated waiting for one to become ready.
+        equity, position_snapshot = self._calc_account_snapshot()
+        ctx = Context(
+            ts=ts,
+            symbol=primary_symbol,
+            symbols=self._symbols,
+            bar=bars.get(primary_symbol, {}),
+            bars=bars,
+            positions=position_snapshot,
+            account_id=self._account_id,
+            account=AccountSnapshot(
+                currency=self._currency,
+                cash=self._cash,
+                equity=equity,
+            ),
+            period_index=self._period_index,
+        )
+        strategy_started = perf_counter()
+        try:
+            intent = self._strategy.on_bar(ctx)
+        finally:
+            self._cycle_strategy_seconds += perf_counter() - strategy_started
+        validate_strategy_decision(
+            intent,
+            set(self._symbols),
+            primary_symbol=primary_symbol,
+            bars=bars,
+            positions=self._positions,
+        )
+        intent = self._without_halted_account(intent)
+        self._period_index += 1
+        if self._executor.simulation:
+            self._pending_decision = merge_pending_decisions(
+                self._pending_decision,
                 intent,
-                set(self._symbols),
                 primary_symbol=primary_symbol,
             )
-            intent = self._without_halted_account(intent)
-            self._period_index += 1
-            if self._executor.simulation:
-                self._pending_decision = merge_pending_decisions(
-                    self._pending_decision,
-                    intent,
-                    primary_symbol=primary_symbol,
-                )
-            else:
-                ready_decision, waiting_decision = partition_pending_decision(
-                    intent,
+        else:
+            ready_decision, waiting_decision = partition_pending_decision(
+                intent,
+                raw_bars,
+                self._positions,
+                primary_symbol=primary_symbol,
+            )
+            self._pending_decision = merge_pending_decisions(
+                self._pending_decision,
+                waiting_decision,
+                primary_symbol=primary_symbol,
+            )
+            if ready_decision:
+                self._execute_live_decision(
+                    ready_decision,
                     raw_bars,
-                    self._positions,
-                    primary_symbol=primary_symbol,
+                    ts,
+                    lagged_adv_by_symbol=lagged_adv_by_symbol,
                 )
-                self._pending_decision = merge_pending_decisions(
-                    self._pending_decision,
-                    waiting_decision,
-                    primary_symbol=primary_symbol,
-                )
-                if ready_decision:
-                    self._execute_live_decision(
-                        ready_decision,
-                        raw_bars,
-                        ts,
-                        lagged_adv_by_symbol=lagged_adv_by_symbol,
-                    )
 
         for symbol, position in self._positions.items():
             if symbol in raw_bars:

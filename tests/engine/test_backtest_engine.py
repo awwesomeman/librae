@@ -10,7 +10,7 @@ from librae.backtest.engine import Backtest
 from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
-from librae.core.strategy import Context, OrderIntent, Strategy
+from librae.core.strategy import Context, MultiLegOrder, OrderIntent, Strategy
 
 from tests.conftest import make_test_cfg
 
@@ -609,6 +609,55 @@ class TestMultiAsset:
             ("AAA", "BBB"),
             ("AAA", "BBB"),
         ]
+
+    def test_unready_multi_leg_decision_does_not_block_an_unrelated_symbol(self) -> None:
+        """NEXT joins the universe two periods late. A strategy that
+        self-checks readiness via ctx.available_symbols before proposing a
+        MultiLegOrder(NEAR, NEXT) must still be able to trade SOLO in the
+        meantime — the engine no longer queues an incomplete grouped
+        decision and blocks on_bar for everything else while it waits."""
+        timeline = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
+        rows = []
+        for i, ts in enumerate(timeline):
+            symbols = ("NEAR", "SOLO") if i < 2 else ("NEAR", "NEXT", "SOLO")
+            for symbol in symbols:
+                price = {"NEAR": 100.0, "NEXT": 50.0, "SOLO": 200.0}[symbol]
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 100.0,
+                    }
+                )
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+
+        class SpreadPlusSolo(Strategy):
+            def on_bar(self, ctx):
+                if {"NEAR", "NEXT"}.issubset(ctx.available_symbols) and "NEAR" not in ctx.positions:
+                    return MultiLegOrder(
+                        legs=(
+                            OrderIntent(action="long", symbol="NEAR", quantity=1.0),
+                            OrderIntent(action="short", symbol="NEXT", quantity=1.0),
+                        )
+                    )
+                if "SOLO" in ctx.available_symbols and "SOLO" not in ctx.positions:
+                    return [OrderIntent(action="long", symbol="SOLO", quantity=1.0)]
+                return []
+
+        result = Backtest(
+            df,
+            SpreadPlusSolo(),
+            initial_balance=100_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        symbols_traded = {t.symbol for t in result.trades}
+        assert symbols_traded == {"NEAR", "NEXT", "SOLO"}
 
     def test_partial_bars_run_strategy_without_consuming_other_symbol_intent(self) -> None:
         timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")

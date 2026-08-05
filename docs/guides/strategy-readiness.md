@@ -57,6 +57,11 @@ account and therefore follows the broker-confirmed execution path.
       use separate runs and an external FX and transfer model.
 - [ ] A `PortfolioTargets` decision contains one complete account-level target
       state. Omitted existing holdings intentionally target zero.
+- [ ] The strategy checks `ctx.available_symbols` for every required symbol
+      (every non-zero target/leg and every currently held position) before
+      returning `PortfolioTargets`/`MultiLegOrder`. The engine rejects a
+      grouped decision missing a required bar rather than queueing it, so an
+      unchecked call raises instead of retrying next period.
 - [ ] Optimizer inputs, covariance model, objective, optimizer-specific
       constraints, and rebalance schedule live in strategy code and use
       point-in-time data. Engine risk limits remain a separate safety overlay.

@@ -126,8 +126,10 @@ synthetic and date-specific, not because `LiveTrader` rejects portfolio
 or multi-leg decisions. A backtest-only runner rejects `--mode sim` or
 `--mode live` before strategy execution and directs the developer to add real
 market-data, broker, and state wiring. In real-time use, `PortfolioTargets`
-waits for a complete required basket; per-symbol `OrderIntent` decisions can
-execute asynchronously.
+must be returned only once the required basket is already complete — the
+strategy checks `ctx.available_symbols` itself, since the engine rejects a
+grouped decision missing a required bar rather than waiting for it; per-symbol
+`OrderIntent` decisions can still execute asynchronously.
 
 `PortfolioTargets` uses the configured next-bar fill field in backtest/sim.
 Live sizes from the latest completed close and submits market orders whose

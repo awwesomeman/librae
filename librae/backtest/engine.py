@@ -75,7 +75,6 @@ from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
-    MultiLegOrder,
     PortfolioTargets,
     Position,
     PositionState,
@@ -611,7 +610,7 @@ class Backtest:
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
                 pending_decision = []
-            elif not isinstance(pending_decision, (PortfolioTargets, MultiLegOrder)):
+            else:
                 ctx = Context(
                     ts=ts,
                     symbol=primary_symbol,
@@ -628,6 +627,8 @@ class Backtest:
                     new_decision,
                     universe,
                     primary_symbol=primary_symbol,
+                    bars=bars,
+                    positions=positions,
                 )
                 new_decision = self._without_halted_account(new_decision, halted)
                 pending_decision = merge_pending_decisions(

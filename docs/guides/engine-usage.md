@@ -234,11 +234,14 @@ warm up a newly discovered symbol while a process is running. Those lifecycle
 operations require reconfiguration and restart; they are not behavior that
 strategy code should emulate.
 
-Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar.
-`PortfolioTargets` is intentionally synchronous: the basket waits for current
-bars from every non-zero target and currently held symbol, and is never
-silently replaced. Use per-symbol order intents for asynchronous cross-market
-execution.
+Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar
+and can wait indefinitely without blocking anything else. `PortfolioTargets`
+is intentionally synchronous and must be immediately executable when
+returned: the strategy checks `ctx.available_symbols` for every non-zero
+target and currently held symbol *before* returning one — the engine does not
+wait across periods for a grouped decision's data to arrive, and rejects one
+that is missing a required bar rather than queueing it. Use per-symbol order
+intents for asynchronous cross-market execution.
 
 ## Related multi-leg order contract
 
@@ -269,10 +272,12 @@ return MultiLegOrder(
 ```
 
 Every leg requires an explicit symbol and quantity, symbols cannot repeat, and
-tuple order is the simulation order. Backtest/sim waits for one event containing
-every leg and executes a synchronous OHLCV approximation. This is useful for
-strategy research but does not claim intrabar sequencing, venue atomicity, or
-recoverability in production.
+tuple order is the simulation order. The strategy checks `ctx.available_symbols`
+for every leg *before* returning a `MultiLegOrder` — one event must already
+contain every leg, or the engine rejects the decision rather than waiting
+across periods for it. Backtest/sim then executes a synchronous OHLCV
+approximation. This is useful for strategy research but does not claim
+intrabar sequencing, venue atomicity, or recoverability in production.
 
 Examples include TAIFEX near/next-future/cash-proxy and Binance
 spot/perpetual/delivery-future spreads. Every leg in one `MultiLegOrder` belongs

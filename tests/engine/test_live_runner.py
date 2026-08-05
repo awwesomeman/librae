@@ -767,6 +767,65 @@ class TestLiveTrader:
             {"AAA", "BBB"},
         ]
 
+    def test_unready_grouped_decision_does_not_block_an_unrelated_symbol(self):
+        """A strategy managing a spread (NEAR/NEXT) and an independent
+        symbol (SOLO) must not have SOLO's decision blocked just because
+        the spread's data isn't complete yet — the strategy self-checks
+        readiness via ctx.available_symbols (as examples/multi_leg_spread
+        does) instead of the engine queueing an incomplete decision."""
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        t2 = t1 + timedelta(hours=1)
+        responses = {
+            "NEAR": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1]), _make_ohlcv_at([t2])]),
+            "NEXT": iter([_make_ohlcv_at([t1]), _make_ohlcv_at([t1]), _make_ohlcv_at([t2])]),
+            "SOLO": iter([_make_ohlcv_at([t0]), _make_ohlcv_at([t1]), _make_ohlcv_at([t2])]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            return next(responses[symbol])
+
+        class SpreadPlusSolo(Strategy):
+            """MultiLegOrder is sim/backtest-only (live rejects it outright,
+            see test_live_multi_leg_fails_closed_without_submitting_orders) —
+            this test exercises the sim-mode path."""
+
+            def __init__(self):
+                self.solo_emitted = False
+
+            def on_bar(self, ctx):
+                if {"NEAR", "NEXT"}.issubset(ctx.available_symbols):
+                    return MultiLegOrder(
+                        legs=(
+                            OrderIntent(action="long", symbol="NEAR", quantity=1.0),
+                            OrderIntent(action="short", symbol="NEXT", quantity=1.0),
+                        )
+                    )
+                if not self.solo_emitted and "SOLO" in ctx.available_symbols:
+                    self.solo_emitted = True
+                    return [OrderIntent(action="long", symbol="SOLO", quantity=1.0)]
+                return []
+
+        runner = self._make_runner(
+            strategy=SpreadPlusSolo(),
+            fetcher=fetcher,
+            config=_test_cfg(symbols=["NEAR", "NEXT", "SOLO"]),
+        )
+
+        runner._poll_cycle()  # t0: NEXT has no bar yet, spread withheld, SOLO decided
+        assert runner._pending_decision == [OrderIntent(action="long", symbol="SOLO", quantity=1.0)]
+
+        runner._poll_cycle()  # t1: SOLO fills; NEXT now has a bar, spread decided
+        assert runner._positions["SOLO"].quantity == pytest.approx(1.0)
+        assert "NEAR" not in runner._positions
+        assert "NEXT" not in runner._positions
+
+        runner._poll_cycle()  # t2: spread fills
+        assert runner._positions["NEAR"].side == "long"
+        assert runner._positions["NEAR"].quantity == pytest.approx(1.0)
+        assert runner._positions["NEXT"].side == "short"
+        assert runner._positions["NEXT"].quantity == pytest.approx(1.0)
+
     def test_missing_symbol_bar_does_not_skip_available_event(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
         t1 = t0 + timedelta(hours=1)

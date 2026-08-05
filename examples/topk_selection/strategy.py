@@ -48,6 +48,8 @@ class TopKSelectionStrategy(Strategy):
 
         selected = sorted(scores, key=lambda symbol: (-scores[symbol], symbol))[: self._top_k]
         weight = self._target_exposure / len(selected)
+        if not set(ctx.positions).issubset(ctx.available_symbols):
+            return []
         return PortfolioTargets(
             weights={symbol: weight for symbol in selected},
             reason="top_k_selection",

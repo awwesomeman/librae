@@ -1804,12 +1804,36 @@ def validate_strategy_decision(
     universe: set[str],
     *,
     primary_symbol: str,
+    bars: dict[str, dict[str, float]],
+    positions: dict[str, PositionState],
 ) -> None:
-    """Validate one strategy return value before it enters engine state."""
+    """Validate one strategy return value before it enters engine state.
+
+    PortfolioTargets/MultiLegOrder must be immediately executable: every
+    symbol they need must already have a bar this period. The engine does
+    not wait across periods for a grouped decision's data to arrive —
+    strategies check readiness themselves via ctx.available_symbols before
+    returning one (see examples/multi_leg_spread/strategy.py).
+    """
     if isinstance(decision, PortfolioTargets):
         symbols = set(decision.weights)
+        target_symbols = {
+            symbol for symbol, weight in decision.weights.items() if abs(weight) > EPSILON
+        }
+        missing = (set(positions) | target_symbols) - set(bars)
+        if missing:
+            raise ValueError(
+                f"PortfolioTargets requires a bar for {sorted(missing)} this period; "
+                "check ctx.available_symbols before returning PortfolioTargets"
+            )
     elif isinstance(decision, MultiLegOrder):
         symbols = {leg.symbol for leg in decision.legs}
+        missing = symbols - set(bars)
+        if missing:
+            raise ValueError(
+                f"MultiLegOrder requires a bar for {sorted(missing)} this period; "
+                "check ctx.available_symbols before returning MultiLegOrder"
+            )
     else:
         if not isinstance(decision, list):
             raise TypeError(
@@ -1859,22 +1883,14 @@ def partition_pending_decision(
 ) -> tuple[StrategyDecision, StrategyDecision]:
     """Split a decision into executable-now and waiting-for-data parts.
 
-    Per-symbol order intents become eligible on that symbol's next observed bar.
-    PortfolioTargets and MultiLegOrder remain synchronous and wait until every
-    required symbol has a bar.
+    Per-symbol order intents become eligible on that symbol's next observed
+    bar and can wait indefinitely without blocking anything else.
+    PortfolioTargets and MultiLegOrder are always returned fully ready:
+    validate_strategy_decision already required every symbol they need to
+    have a bar one period earlier, at decision time.
     """
-    if isinstance(decision, PortfolioTargets):
-        target_symbols = {
-            symbol for symbol, weight in decision.weights.items() if abs(weight) > EPSILON
-        }
-        required_symbols = set(positions) | target_symbols
-        if required_symbols.issubset(bars):
-            return decision, []
-        return [], decision
-    if isinstance(decision, MultiLegOrder):
-        if {leg.symbol for leg in decision.legs}.issubset(bars):
-            return decision, []
-        return [], decision
+    if isinstance(decision, (PortfolioTargets, MultiLegOrder)):
+        return decision, []
 
     ready: list[OrderIntent] = []
     waiting: list[OrderIntent] = []
@@ -1893,16 +1909,20 @@ def merge_pending_decisions(
     *,
     primary_symbol: str,
 ) -> StrategyDecision:
-    """Merge independent per-symbol intents without replacing pending ones."""
+    """Merge independent per-symbol intents without replacing pending ones.
+
+    `pending` is always a plain list here: partition_pending_decision never
+    leaves a PortfolioTargets/MultiLegOrder waiting (see its docstring) —
+    only individual OrderIntents can still be waiting on their own symbol.
+    """
     if not pending:
         return new_decision
     if not new_decision:
         return pending
-    if isinstance(pending, (PortfolioTargets, MultiLegOrder)) or isinstance(
-        new_decision,
-        (PortfolioTargets, MultiLegOrder),
-    ):
-        raise ValueError("cannot replace a pending grouped decision")
+    if isinstance(new_decision, (PortfolioTargets, MultiLegOrder)):
+        raise ValueError(
+            "cannot return a grouped decision while per-symbol intents are still pending"
+        )
 
     pending_intents = list(pending)
     new_intents = list(new_decision)
@@ -2014,11 +2034,18 @@ def execute_pending_decision_and_stops(
                 **common_kwargs,
             )
         else:
-            intents = (
-                list(pending_decision.legs)
-                if isinstance(pending_decision, MultiLegOrder)
-                else pending_decision
-            )
+            if isinstance(pending_decision, MultiLegOrder):
+                intents = list(pending_decision.legs)
+                # execute_order_intents silently skips a leg with no price
+                # instead of raising, which would fill the other legs alone.
+                missing = {intent.symbol for intent in intents} - set(bars)
+                if missing:
+                    raise ValueError(
+                        f"MultiLegOrder lost its bar for {sorted(missing)} between decision "
+                        "and execution; cannot fill some legs and not others"
+                    )
+            else:
+                intents = pending_decision
             fill_result = execute_order_intents(
                 intents,
                 execution_positions,

@@ -18,6 +18,9 @@ class TargetWeightsStrategy(Strategy):
 
         row = self._target_weights.loc[ctx.ts]
         weights = {str(symbol): float(weight) for symbol, weight in row.items() if pd.notna(weight)}
+        required = set(ctx.positions) | set(weights)
+        if not required.issubset(ctx.available_symbols):
+            return []
         return PortfolioTargets(
             weights=weights,
             reason="scheduled_allocation",
