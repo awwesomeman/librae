@@ -400,6 +400,47 @@ class TestResolveSymbol:
 
         assert info.data_adapter == "vendor_plugin"
 
+    def test_unregistered_symbol_falls_back_to_run_wide_calendar_id(self):
+        info = resolve_symbol(
+            self._cfg(
+                calendar_id="XTAI",
+                instrument_overrides={
+                    "AAPL": {
+                        "data_adapter": "ibkr",
+                        "currency": "USD",
+                        "instrument_type": "spot",
+                        "security_type": "STK",
+                        "exchange": "SMART",
+                    }
+                },
+                symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+            ),
+            "AAPL",
+        )
+
+        assert info.calendar_id == "XTAI"
+
+    def test_per_symbol_calendar_id_wins_over_run_wide_default(self):
+        info = resolve_symbol(
+            self._cfg(
+                calendar_id="XTAI",
+                instrument_overrides={
+                    "AAPL": {
+                        "data_adapter": "ibkr",
+                        "currency": "USD",
+                        "instrument_type": "spot",
+                        "security_type": "STK",
+                        "exchange": "SMART",
+                        "calendar_id": "XNYS",
+                    }
+                },
+                symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+            ),
+            "AAPL",
+        )
+
+        assert info.calendar_id == "XNYS"
+
     def test_instrument_override_replaces_registered_calendar(self):
         info = resolve_symbol(
             self._cfg(

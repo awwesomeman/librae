@@ -527,8 +527,9 @@ def resolve_symbol(
     """Resolve accounting and broker metadata for one configured symbol.
 
     Registry values are authoritative for registered symbols. Run-wide
-    market/data_source values are fallbacks for homogeneous, unregistered
-    universes; ``instrument_overrides`` supplies per-symbol routing metadata.
+    market/data_source/calendar_id values are fallbacks for homogeneous,
+    unregistered universes; ``instrument_overrides`` supplies per-symbol
+    routing metadata.
     """
     registered = _BUILTIN_SYMBOLS.get(symbol)
     route = (config.instrument_overrides or {}).get(symbol, {})
@@ -584,7 +585,9 @@ def resolve_symbol(
         )
     security_type = route.get("security_type") or (registered.security_type if registered else None)
     exchange = route.get("exchange") or (registered.exchange if registered else None)
-    calendar_id = route.get("calendar_id") or (registered.calendar_id if registered else None)
+    calendar_id = route.get("calendar_id") or (
+        registered.calendar_id if registered else config.calendar_id
+    )
     execution_broker = route.get("broker") or config.broker
     if (data_adapter == "ibkr" or execution_broker == "ibkr") and not security_type:
         raise ValueError(

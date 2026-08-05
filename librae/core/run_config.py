@@ -282,6 +282,14 @@ class RunConfig:
     # symbol_cost_overrides so accounting inputs and venue identifiers cannot be
     # accidentally mixed into CostModel construction.
     instrument_overrides: dict[str, dict[str, object]] | None = None
+    # Run-wide trading-session calendar fallback, mirroring market/data_source:
+    # resolve_symbol() uses it for any symbol without its own registry entry or
+    # instrument_overrides[symbol]["calendar_id"]. Lets a homogeneous, dynamically
+    # discovered universe (e.g. a screening strategy) share one calendar without
+    # enumerating every symbol up front. None if unset — calendar_id stays optional
+    # per SymbolInfo and is only required where session-boundary awareness is
+    # actually used (intraday ADV, session-aware resampling).
+    calendar_id: str | None = None
 
     # === Non-result policies (excluded from config_hash) ===
     runtime: RuntimePolicy = field(default_factory=RuntimePolicy)
@@ -323,6 +331,10 @@ class RunConfig:
                 raise ValueError(f"{field_name} must be a non-empty string")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
+        if self.calendar_id is not None and (
+            not isinstance(self.calendar_id, str) or not self.calendar_id
+        ):
+            raise ValueError("calendar_id must be a non-empty string or None")
         legacy_execution_keys = {
             "fill_price",
             "max_volume_participation_pct",
@@ -372,8 +384,8 @@ class RunConfig:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
-        account, start, end, params, cost_overrides, symbol_cost_overrides,
-        instrument_overrides, execution, risk.
+        calendar_id, account, start, end, params, cost_overrides,
+        symbol_cost_overrides, instrument_overrides, execution, risk.
         Excludes: runtime behavior.
         """
         blob = json.dumps(
@@ -387,6 +399,7 @@ class RunConfig:
                     "data_source": self.data_source,
                     "mode": self.mode,
                     "broker": self.broker,
+                    "calendar_id": self.calendar_id,
                     "account": asdict(self.account),
                     "start": self.start,
                     "end": self.end,

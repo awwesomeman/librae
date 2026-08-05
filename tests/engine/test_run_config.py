@@ -143,6 +143,7 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
         ({"symbols": ["AAA", 1]}, "symbols"),
         ({"strategy_name": 1}, "strategy_name"),
         ({"broker": ""}, "broker"),
+        ({"calendar_id": ""}, "calendar_id"),
         ({"account": True}, "account"),
     ],
 )
