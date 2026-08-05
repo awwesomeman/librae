@@ -258,6 +258,54 @@ class TestFetchOhlcv:
 
         assert resample.call_args.args[2] == "XTAIFEX_1725"
 
+    def test_long_range_is_chunked_to_shioajis_30_day_kbars_limit(self):
+        """https://sinotrade.github.io/zh/tutor/limit/ — kbars() rejects any
+        single query spanning more than 30 days; a 74-day request must be
+        split into 30/30/14-day windows and concatenated transparently."""
+        adapter = _make_adapter()
+        adapter._api.kbars.side_effect = [_make_kbars_response() for _ in range(3)]
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        df = adapter.fetch_ohlcv(
+            "TXFR1",
+            "1m",
+            start="2026-01-01",
+            end="2026-03-15",
+            continuous_alias=True,
+        )
+
+        assert adapter._api.kbars.call_count == 3
+        assert [call.kwargs["start"] for call in adapter._api.kbars.call_args_list] == [
+            "2026-01-01",
+            "2026-01-31",
+            "2026-03-02",
+        ]
+        assert [call.kwargs["end"] for call in adapter._api.kbars.call_args_list] == [
+            "2026-01-30",
+            "2026-03-01",
+            "2026-03-15",
+        ]
+        assert len(df) == 9
+
+    def test_short_range_issues_a_single_kbars_call(self):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        adapter.fetch_ohlcv(
+            "TXFR1",
+            "1m",
+            start="2026-04-01",
+            end="2026-04-05",
+            continuous_alias=True,
+        )
+
+        adapter._api.kbars.assert_called_once_with(
+            contract=adapter._resolve_contract.return_value,
+            start="2026-04-01",
+            end="2026-04-05",
+        )
+
 
 class TestReadOnlyGuard:
     def test_place_order_raises_without_ca(self):

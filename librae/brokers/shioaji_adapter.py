@@ -24,7 +24,7 @@ import base64
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from numbers import Real
 
@@ -259,7 +259,9 @@ class ShioajiAdapter:
                 (e.g. ``"1m"``, ``"5m"``, ``"30m"``, ``"1h"``, ``"1d"``) —
                 same convention as CryptoAdapter.
             start/end: Date range as datetime or ``"YYYY-MM-DD"`` string.
-                If omitted, fetches the most recent *limit* bars.
+                If omitted, fetches the most recent *limit* bars. A range
+                longer than Shioaji's 30-day kbars() query limit is fetched
+                in multiple chunked calls and concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
             drop_incomplete: Drop the current still-forming candle.
             calendar_id: Trading-calendar identifier used for resampling.
@@ -279,18 +281,30 @@ class ShioajiAdapter:
             TAIFEX_INDEX_CALENDAR if getattr(contract, "security_type", None) == "FUT" else "XTAI"
         )
 
-        kbar_kwargs: dict = {}
-        if start:
-            kbar_kwargs["start"] = _to_date_str(start)
-        if end:
-            kbar_kwargs["end"] = _to_date_str(end)
-
-        kbars = self._api.kbars(
-            contract=contract,
-            **kbar_kwargs,
-        )
-
-        df = pd.DataFrame({**kbars})
+        if start and end:
+            date_chunks = _kbar_date_chunks(_to_date(start), _to_date(end), _MAX_KBAR_QUERY_DAYS)
+            frames = []
+            for chunk_start, chunk_end in date_chunks:
+                chunk_kbars = self._api.kbars(
+                    contract=contract,
+                    start=chunk_start.isoformat(),
+                    end=chunk_end.isoformat(),
+                )
+                chunk_df = pd.DataFrame({**chunk_kbars})
+                if not chunk_df.empty:
+                    frames.append(chunk_df)
+            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        else:
+            kbar_kwargs: dict = {}
+            if start:
+                kbar_kwargs["start"] = _to_date_str(start)
+            if end:
+                kbar_kwargs["end"] = _to_date_str(end)
+            kbars = self._api.kbars(
+                contract=contract,
+                **kbar_kwargs,
+            )
+            df = pd.DataFrame({**kbars})
         if df.empty:
             return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
 
@@ -716,3 +730,25 @@ def _to_date_str(dt: datetime | str) -> str:
     if isinstance(dt, str):
         return dt[:10]
     return dt.strftime("%Y-%m-%d")
+
+
+def _to_date(dt: datetime | str) -> date:
+    if isinstance(dt, str):
+        return datetime.strptime(dt[:10], "%Y-%m-%d").date()
+    return dt.date()
+
+
+# Shioaji rejects a single kbars() query spanning more than this many days:
+# https://sinotrade.github.io/zh/tutor/limit/
+_MAX_KBAR_QUERY_DAYS = 30
+
+
+def _kbar_date_chunks(start: date, end: date, max_days: int) -> list[tuple[date, date]]:
+    """Split [start, end] into consecutive windows no wider than max_days."""
+    chunks = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=max_days - 1), end)
+        chunks.append((chunk_start, chunk_end))
+        chunk_start = chunk_end + timedelta(days=1)
+    return chunks
