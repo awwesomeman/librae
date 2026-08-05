@@ -264,6 +264,17 @@ unrelated groups and independent intents keep executing; it does not attempt
 to unwind legs that already filled. If a broker adds native combo support in
 the future, use that adapter-specific capability instead.
 
+Whether to close an already-filled leg after its sibling failed is a
+strategy risk decision, not something the engine can decide generically —
+the correct response depends on the strategy's hedge substitutability and
+risk tolerance, which the engine has no visibility into. The engine does not
+halt the account for a scoped group failure, so `on_bar` keeps being called
+on the next completed bar as usual; the strategy sees the imbalance directly
+through `ctx.positions` (the same information it used to assign `group_id`
+in the first place) and can close the naked leg with an ordinary
+`OrderIntent(action="close", ...)` through the normal decision path — no
+separate recovery API is needed or provided.
+
 ```python
 from librae import OrderIntent
 
