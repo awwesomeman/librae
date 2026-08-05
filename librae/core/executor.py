@@ -33,10 +33,9 @@ from .cost_model import CostModel
 from .market_data import CAN_BUY_COLUMN, CAN_SELL_COLUMN
 from .strategy import (
     Fill,
-    MultiLegOrder,
     OrderAction,
     OrderIntent,
-    PortfolioTargets,
+    PortfolioWeights,
     Position,
     PositionEventType,
     PositionSide,
@@ -251,6 +250,7 @@ class TradeResult:
     gross_return: float
     net_return: float
     periods_held: int
+    group_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +294,7 @@ class OrderEvent:
     entry_commission: float | None = None
     entry_slippage: float | None = None
     entry_tax: float | None = None
+    group_id: str | None = None
 
 
 @dataclass
@@ -543,6 +544,7 @@ def build_close_event(
         entry_at=pos.entry_at,
         periods_held=pos.periods_held,
         reason=reason,
+        group_id=pos.group_id,
     )
     return trade, event, proceeds, fully_closed
 
@@ -1281,6 +1283,7 @@ def build_trade_result(
         gross_return=pnl.gross_return,
         net_return=pnl.net_return,
         periods_held=pos.periods_held,
+        group_id=pos.group_id,
     )
 
 
@@ -1382,14 +1385,37 @@ def execute_order_intents(
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
 
-    for action in intents:
+    # Resolve every intent's price once so grouped intents can be checked for
+    # all-or-nothing pricing before any of them (or an unrelated intent) fills.
+    priced_actions = [
+        (action, get_price(action.symbol or primary_symbol, action)) for action in intents
+    ]
+    groups: dict[str, list[tuple[OrderIntent, float | None]]] = {}
+    for action, price_raw in priced_actions:
+        if action.group_id is not None:
+            groups.setdefault(action.group_id, []).append((action, price_raw))
+    for group_id, members in groups.items():
+        missing = sorted(
+            {
+                action.symbol or primary_symbol
+                for action, price_raw in members
+                if price_raw is None or price_raw <= 0
+            }
+        )
+        if missing:
+            raise ValueError(
+                f"group {group_id!r} lost pricing for {missing} between decision and "
+                "execution; cannot fill some legs and not others"
+            )
+
+    for action, price_raw in priced_actions:
         sym = action.symbol or primary_symbol
-        price_raw = get_price(sym, action)
         if price_raw is None or price_raw <= 0:
             continue
         price = float(price_raw)
         cost_model = get_cost_model(sym)
         reason = action.reason
+        group_id = action.group_id
 
         if action.action in ("long", "short"):
             desired_side: PositionSide = action.action
@@ -1438,6 +1464,7 @@ def execute_order_intents(
                         total_entry_cost=price * fill.quantity * cost_model.multiplier,
                         stop_price=action.stop_price,
                         take_profit_price=action.take_profit_price,
+                        group_id=group_id,
                     )
                     events.append(
                         OrderEvent(
@@ -1454,6 +1481,7 @@ def execute_order_intents(
                             slippage=fill.slippage,
                             tax=fill.tax,
                             reason=reason,
+                            group_id=group_id,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1507,6 +1535,7 @@ def execute_order_intents(
                             slippage=fill.slippage,
                             tax=fill.tax,
                             reason=reason,
+                            group_id=group_id,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1629,8 +1658,8 @@ def _scale_additions_to_cash(
     ]
 
 
-def execute_portfolio_targets(
-    targets: PortfolioTargets,
+def execute_portfolio_weights(
+    targets: PortfolioWeights,
     positions: dict[str, PositionState],
     cash: float,
     ts: datetime,
@@ -1809,13 +1838,15 @@ def validate_strategy_decision(
 ) -> None:
     """Validate one strategy return value before it enters engine state.
 
-    PortfolioTargets/MultiLegOrder must be immediately executable: every
-    symbol they need must already have a bar this period. The engine does
-    not wait across periods for a grouped decision's data to arrive —
+    PortfolioWeights must be immediately executable: every symbol it needs
+    must already have a bar this period. OrderIntents sharing a group_id form
+    an atomic related-order group with the same requirement — the engine
+    does not wait across periods for a grouped decision's data to arrive;
     strategies check readiness themselves via ctx.available_symbols before
-    returning one (see examples/multi_leg_spread/strategy.py).
+    returning one (see examples/multi_leg_spread/strategy.py). Ungrouped
+    intents may wait for their own symbol's next bar.
     """
-    if isinstance(decision, PortfolioTargets):
+    if isinstance(decision, PortfolioWeights):
         symbols = set(decision.weights)
         target_symbols = {
             symbol for symbol, weight in decision.weights.items() if abs(weight) > EPSILON
@@ -1823,22 +1854,12 @@ def validate_strategy_decision(
         missing = (set(positions) | target_symbols) - set(bars)
         if missing:
             raise ValueError(
-                f"PortfolioTargets requires a bar for {sorted(missing)} this period; "
-                "check ctx.available_symbols before returning PortfolioTargets"
-            )
-    elif isinstance(decision, MultiLegOrder):
-        symbols = {leg.symbol for leg in decision.legs}
-        missing = symbols - set(bars)
-        if missing:
-            raise ValueError(
-                f"MultiLegOrder requires a bar for {sorted(missing)} this period; "
-                "check ctx.available_symbols before returning MultiLegOrder"
+                f"PortfolioWeights requires a bar for {sorted(missing)} this period; "
+                "check ctx.available_symbols before returning PortfolioWeights"
             )
     else:
         if not isinstance(decision, list):
-            raise TypeError(
-                "strategy decision must be list[OrderIntent], PortfolioTargets, or MultiLegOrder"
-            )
+            raise TypeError("strategy decision must be list[OrderIntent] or PortfolioWeights")
         invalid = [
             type(intent).__name__ for intent in decision if not isinstance(intent, OrderIntent)
         ]
@@ -1848,6 +1869,21 @@ def validate_strategy_decision(
         if len(resolved_symbols) != len(set(resolved_symbols)):
             raise ValueError("strategy decision must contain at most one intent per symbol")
         symbols = set(resolved_symbols)
+
+        groups: dict[str, list[OrderIntent]] = {}
+        for intent in decision:
+            if intent.group_id is not None:
+                groups.setdefault(intent.group_id, []).append(intent)
+        for group_id, members in groups.items():
+            if any(member.quantity is None for member in members):
+                raise ValueError(f"group {group_id!r} requires explicit quantities on every leg")
+            group_symbols = {member.symbol or primary_symbol for member in members}
+            missing = group_symbols - set(bars)
+            if missing:
+                raise ValueError(
+                    f"group {group_id!r} requires a bar for {sorted(missing)} this period; "
+                    "check ctx.available_symbols before returning a grouped decision"
+                )
     unknown = symbols - universe
     if unknown:
         raise ValueError(f"strategy decision contains unknown symbols: {sorted(unknown)}")
@@ -1884,19 +1920,20 @@ def partition_pending_decision(
     """Split a decision into executable-now and waiting-for-data parts.
 
     Per-symbol order intents become eligible on that symbol's next observed
-    bar and can wait indefinitely without blocking anything else.
-    PortfolioTargets and MultiLegOrder are always returned fully ready:
-    validate_strategy_decision already required every symbol they need to
-    have a bar one period earlier, at decision time.
+    bar and can wait indefinitely without blocking anything else. PortfolioWeights
+    and grouped OrderIntents (group_id is not None) are always returned fully
+    ready: validate_strategy_decision already required every symbol they need
+    to have a bar one period earlier, at decision time — grouped intents can
+    never end up waiting.
     """
-    if isinstance(decision, (PortfolioTargets, MultiLegOrder)):
+    if isinstance(decision, PortfolioWeights):
         return decision, []
 
     ready: list[OrderIntent] = []
     waiting: list[OrderIntent] = []
     for intent in decision:
         symbol = intent.symbol or primary_symbol
-        if symbol in bars:
+        if intent.group_id is not None or symbol in bars:
             ready.append(intent)
         else:
             waiting.append(intent)
@@ -1912,16 +1949,17 @@ def merge_pending_decisions(
     """Merge independent per-symbol intents without replacing pending ones.
 
     `pending` is always a plain list here: partition_pending_decision never
-    leaves a PortfolioTargets/MultiLegOrder waiting (see its docstring) —
-    only individual OrderIntents can still be waiting on their own symbol.
+    leaves a PortfolioWeights or grouped OrderIntent waiting (see its
+    docstring) — only ungrouped OrderIntents can still be waiting on their
+    own symbol.
     """
     if not pending:
         return new_decision
     if not new_decision:
         return pending
-    if isinstance(new_decision, (PortfolioTargets, MultiLegOrder)):
+    if isinstance(new_decision, PortfolioWeights):
         raise ValueError(
-            "cannot return a grouped decision while per-symbol intents are still pending"
+            "cannot return PortfolioWeights while per-symbol intents are still pending"
         )
 
     pending_intents = list(pending)
@@ -1984,16 +2022,11 @@ def execute_pending_decision_and_stops(
             execution_adv_quantities if enforce_portfolio_limits else used_adv_quantity_by_symbol
         )
 
-        if isinstance(pending_decision, PortfolioTargets):
+        if isinstance(pending_decision, PortfolioWeights):
             if default_fill == "open":
                 same_bar_protection_symbols.update(pending_decision.weights)
         else:
-            intents = (
-                pending_decision.legs
-                if isinstance(pending_decision, MultiLegOrder)
-                else pending_decision
-            )
-            for intent in intents:
+            for intent in pending_decision:
                 symbol = intent.symbol or primary_symbol
                 if intent.action in ("long", "short") and _intent_executes_at_open(
                     intent,
@@ -2023,8 +2056,8 @@ def execute_pending_decision_and_stops(
             "get_volume": lambda sym: bars.get(sym, {}).get("volume"),
             "get_lagged_adv": get_lagged_adv,
         }
-        if isinstance(pending_decision, PortfolioTargets):
-            fill_result = execute_portfolio_targets(
+        if isinstance(pending_decision, PortfolioWeights):
+            fill_result = execute_portfolio_weights(
                 pending_decision,
                 execution_positions,
                 cash,
@@ -2034,20 +2067,11 @@ def execute_pending_decision_and_stops(
                 **common_kwargs,
             )
         else:
-            if isinstance(pending_decision, MultiLegOrder):
-                intents = list(pending_decision.legs)
-                # execute_order_intents silently skips a leg with no price
-                # instead of raising, which would fill the other legs alone.
-                missing = {intent.symbol for intent in intents} - set(bars)
-                if missing:
-                    raise ValueError(
-                        f"MultiLegOrder lost its bar for {sorted(missing)} between decision "
-                        "and execution; cannot fill some legs and not others"
-                    )
-            else:
-                intents = pending_decision
+            # execute_order_intents raises rather than silently skipping a
+            # leg with no price, so a grouped decision never fills some legs
+            # and not others.
             fill_result = execute_order_intents(
-                intents,
+                pending_decision,
                 execution_positions,
                 cash,
                 ts,

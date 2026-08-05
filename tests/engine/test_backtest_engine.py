@@ -10,7 +10,7 @@ from librae.backtest.engine import Backtest
 from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
-from librae.core.strategy import Context, MultiLegOrder, OrderIntent, Strategy
+from librae.core.strategy import Context, OrderIntent, Strategy
 
 from tests.conftest import make_test_cfg
 
@@ -610,10 +610,10 @@ class TestMultiAsset:
             ("AAA", "BBB"),
         ]
 
-    def test_unready_multi_leg_decision_does_not_block_an_unrelated_symbol(self) -> None:
+    def test_unready_grouped_decision_does_not_block_an_unrelated_symbol(self) -> None:
         """NEXT joins the universe two periods late. A strategy that
         self-checks readiness via ctx.available_symbols before proposing a
-        MultiLegOrder(NEAR, NEXT) must still be able to trade SOLO in the
+        group_id-tagged NEAR/NEXT pair must still be able to trade SOLO in the
         meantime — the engine no longer queues an incomplete grouped
         decision and blocks on_bar for everything else while it waits."""
         timeline = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
@@ -638,12 +638,10 @@ class TestMultiAsset:
         class SpreadPlusSolo(Strategy):
             def on_bar(self, ctx):
                 if {"NEAR", "NEXT"}.issubset(ctx.available_symbols) and "NEAR" not in ctx.positions:
-                    return MultiLegOrder(
-                        legs=(
-                            OrderIntent(action="long", symbol="NEAR", quantity=1.0),
-                            OrderIntent(action="short", symbol="NEXT", quantity=1.0),
-                        )
-                    )
+                    return [
+                        OrderIntent(action="long", symbol="NEAR", quantity=1.0, group_id="spread"),
+                        OrderIntent(action="short", symbol="NEXT", quantity=1.0, group_id="spread"),
+                    ]
                 if "SOLO" in ctx.available_symbols and "SOLO" not in ctx.positions:
                     return [OrderIntent(action="long", symbol="SOLO", quantity=1.0)]
                 return []
@@ -658,6 +656,53 @@ class TestMultiAsset:
 
         symbols_traded = {t.symbol for t in result.trades}
         assert symbols_traded == {"NEAR", "NEXT", "SOLO"}
+
+    def test_two_concurrent_groups_execute_independently_in_one_decision(self) -> None:
+        """A single on_bar return can carry multiple independent arbitrage
+        groups at once — this is the core scenario group_id exists for.
+        Each group fills atomically and its OrderEvents/TradeResults carry
+        its own group_id; the two groups never interact."""
+        timeline = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
+        rows = []
+        for ts in timeline:
+            for symbol, price in [("A", 100.0), ("B", 100.0), ("C", 50.0), ("D", 50.0)]:
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 100.0,
+                    }
+                )
+        df = pd.DataFrame(rows).set_index(["symbol", "datetime"])
+
+        class TwoSpreads(Strategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [
+                        OrderIntent(action="long", symbol="A", quantity=1.0, group_id="pair_ab"),
+                        OrderIntent(action="short", symbol="B", quantity=1.0, group_id="pair_ab"),
+                        OrderIntent(action="long", symbol="C", quantity=2.0, group_id="pair_cd"),
+                        OrderIntent(action="short", symbol="D", quantity=2.0, group_id="pair_cd"),
+                    ]
+                return []
+
+        result = Backtest(
+            df,
+            TwoSpreads(),
+            initial_balance=100_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        events_by_symbol = {e.symbol: e for e in result.order_events if e.event_type == "open"}
+        assert events_by_symbol["A"].group_id == "pair_ab"
+        assert events_by_symbol["B"].group_id == "pair_ab"
+        assert events_by_symbol["C"].group_id == "pair_cd"
+        assert events_by_symbol["D"].group_id == "pair_cd"
 
     def test_partial_bars_run_strategy_without_consuming_other_symbol_intent(self) -> None:
         timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")

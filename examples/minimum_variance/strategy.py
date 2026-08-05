@@ -5,7 +5,7 @@ from __future__ import annotations
 from math import isfinite
 
 import pandas as pd
-from librae import Context, PortfolioTargets, Strategy, StrategyDecision
+from librae import Context, PortfolioWeights, Strategy, StrategyDecision
 
 
 def prepare_signals(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
@@ -70,7 +70,7 @@ class DiagonalMinimumVarianceStrategy(Strategy):
             symbol: self._target_exposure * inverse_variances[symbol] / normalizer
             for symbol in ctx.symbols
         }
-        return PortfolioTargets(
+        return PortfolioWeights(
             weights=weights,
             reason="diagonal_minimum_variance",
         )

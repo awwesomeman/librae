@@ -91,6 +91,7 @@ class OrderSignal(TypedDict):
     exchange: NotRequired[str]
     currency: NotRequired[str]
     contract_month: NotRequired[str]
+    group_id: NotRequired[str]
 
 
 class BrokerOrderReport(TypedDict, total=False):
@@ -156,6 +157,7 @@ class OrderRequest:
     currency: str | None = None
     continuous_alias: bool = False
     contract_month: str | None = None
+    group_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.client_order_id or not self.symbol:
@@ -197,7 +199,7 @@ class OrderRequest:
             "client_order_id": self.client_order_id,
             "position_effect": self.position_effect,
         }
-        for key in ("security_type", "exchange", "currency", "contract_month"):
+        for key in ("security_type", "exchange", "currency", "contract_month", "group_id"):
             value = getattr(self, key)
             if value is not None:
                 signal[key] = value
@@ -439,6 +441,7 @@ class LiveExecutor:
             currency=instrument.currency if instrument else None,
             continuous_alias=instrument.continuous_alias if instrument else False,
             contract_month=instrument.contract_month if instrument else None,
+            group_id=event.group_id,
         )
 
     def prepare_order(

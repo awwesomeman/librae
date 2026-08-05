@@ -94,6 +94,7 @@ class OrderEventRecord:
     entry_commission: float | None = None
     entry_slippage: float | None = None
     entry_tax: float | None = None
+    group_id: str | None = None
 
 
 @dataclass(frozen=True)

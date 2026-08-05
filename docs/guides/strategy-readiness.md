@@ -55,13 +55,14 @@ account and therefore follows the broker-confirmed execution path.
 - [ ] Every symbol resolves to the run's single account and currency, with an
       explicit instrument type and multiplier. Separate accounts or currencies
       use separate runs and an external FX and transfer model.
-- [ ] A `PortfolioTargets` decision contains one complete account-level target
+- [ ] A `PortfolioWeights` decision contains one complete account-level target
       state. Omitted existing holdings intentionally target zero.
 - [ ] The strategy checks `ctx.available_symbols` for every required symbol
       (every non-zero target/leg and every currently held position) before
-      returning `PortfolioTargets`/`MultiLegOrder`. The engine rejects a
-      grouped decision missing a required bar rather than queueing it, so an
-      unchecked call raises instead of retrying next period.
+      returning `PortfolioWeights` or a `group_id`-tagged group of
+      `OrderIntent`s. The engine rejects a grouped decision missing a
+      required bar rather than queueing it, so an unchecked call raises
+      instead of retrying next period.
 - [ ] Optimizer inputs, covariance model, objective, optimizer-specific
       constraints, and rebalance schedule live in strategy code and use
       point-in-time data. Engine risk limits remain a separate safety overlay.
@@ -104,8 +105,8 @@ account and therefore follows the broker-confirmed execution path.
 | Decision | Backtest / shadow sim | Broker-confirmed live |
 |---|---|---|
 | `OrderIntent` | `limit_price=None` uses the configured next-bar market fill; a numeric limit is valid for one eligible bar | `None` submits market; numeric `limit_price` submits limit |
-| `PortfolioTargets` | Complete one-account target state, resolved with the configured next-bar fill | The engine sizes from the latest completed close and replans from confirmed fills |
-| `MultiLegOrder` | Explicit quantities execute as one synchronous OHLCV approximation | Rejected before submission; use a venue-native combo or strategy-owned coordinator |
+| `PortfolioWeights` | Complete one-account target state, resolved with the configured next-bar fill | The engine sizes from the latest completed close and replans from confirmed fills |
+| `OrderIntent` group (shared `group_id`) | Explicit quantities execute as one synchronous OHLCV approximation | Serial per-leg submission; a failed leg cancels its group only, other groups unaffected |
 
 The runnable [minimum-variance example](../../examples/minimum_variance/)
 keeps the risk model and optimizer in strategy code. The

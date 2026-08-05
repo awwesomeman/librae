@@ -75,7 +75,7 @@ from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
-    PortfolioTargets,
+    PortfolioWeights,
     Position,
     PositionState,
     Strategy,
@@ -505,7 +505,7 @@ class Backtest:
                 positions,
                 primary_symbol=primary_symbol,
             )
-            if isinstance(decision_to_execute, PortfolioTargets):
+            if isinstance(decision_to_execute, PortfolioWeights):
                 active_target_weights = dict(decision_to_execute.weights)
 
             # ── Steps 1+1.5: fill the previous pending decision at current
@@ -891,6 +891,7 @@ class Backtest:
                 entry_at=e.entry_at,
                 periods_held=e.periods_held,
                 reason=e.reason,
+                group_id=e.group_id,
             )
             for i, e in enumerate(result.order_events)
         ]

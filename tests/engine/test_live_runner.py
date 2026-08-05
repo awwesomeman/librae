@@ -22,9 +22,8 @@ from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
-    MultiLegOrder,
     OrderIntent,
-    PortfolioTargets,
+    PortfolioWeights,
     PositionState,
     Strategy,
 )
@@ -786,21 +785,19 @@ class TestLiveTrader:
             return next(responses[symbol])
 
         class SpreadPlusSolo(Strategy):
-            """MultiLegOrder is sim/backtest-only (live rejects it outright,
-            see test_live_multi_leg_fails_closed_without_submitting_orders) —
-            this test exercises the sim-mode path."""
+            """This test exercises the sim-mode path (see
+            test_live_group_leg_rejection_cancels_only_that_group for the
+            broker-facing serial-submission/per-group-failure behavior)."""
 
             def __init__(self):
                 self.solo_emitted = False
 
             def on_bar(self, ctx):
                 if {"NEAR", "NEXT"}.issubset(ctx.available_symbols):
-                    return MultiLegOrder(
-                        legs=(
-                            OrderIntent(action="long", symbol="NEAR", quantity=1.0),
-                            OrderIntent(action="short", symbol="NEXT", quantity=1.0),
-                        )
-                    )
+                    return [
+                        OrderIntent(action="long", symbol="NEAR", quantity=1.0, group_id="spread"),
+                        OrderIntent(action="short", symbol="NEXT", quantity=1.0, group_id="spread"),
+                    ]
                 if not self.solo_emitted and "SOLO" in ctx.available_symbols:
                     self.solo_emitted = True
                     return [OrderIntent(action="long", symbol="SOLO", quantity=1.0)]
@@ -973,7 +970,7 @@ class TestLiveTrader:
         class AllocationStrategy(Strategy):
             def on_bar(self, ctx: Context):
                 contexts.append(ctx)
-                return PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
+                return PortfolioWeights(weights={"AAA": 0.6, "BBB": 0.4})
 
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
         t1 = t0 + timedelta(hours=1)
@@ -1262,7 +1259,7 @@ class TestLiveTrader:
         class AllocateOnce(Strategy):
             def on_bar(self, ctx):
                 if ctx.period_index == 0:
-                    return PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
+                    return PortfolioWeights(weights={"AAA": 0.6, "BBB": 0.4})
                 return []
 
         adapter = _mock_order_adapter()
@@ -2058,7 +2055,7 @@ class TestLiveExecutionLifecycle:
         runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
 
         complete = runner._execute_live_decision(
-            PortfolioTargets(weights={"AAA": 0.5, "BBB": 0.5}),
+            PortfolioWeights(weights={"AAA": 0.5, "BBB": 0.5}),
             {
                 "AAA": {"close": 100.0, "volume": 10_000.0},
                 "BBB": {"close": 100.0, "volume": 10_000.0},
@@ -2072,22 +2069,35 @@ class TestLiveExecutionLifecycle:
         assert second["side"] == "sell"
         assert second["quantity"] == pytest.approx(250.0)
 
-    def test_live_multi_leg_fails_closed_without_submitting_orders(self):
+    def test_live_group_leg_rejection_cancels_only_that_group(self):
+        """No broker adapter offers a native combo order, so live submits each
+        leg of a group serially. A rejected leg cancels that group's other
+        legs and alerts — it does not halt the whole account, since the
+        failure has nothing to do with unrelated groups or independent
+        intents (see test_live_group_failure_does_not_block_other_groups)."""
         adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = [
+            _broker_report(order_id="spot-1", status="filled", quantity=1.0, average=100.0),
+            _broker_report(order_id="perp-1", status="rejected", quantity=1.0, filled=0.0),
+        ]
         runner = self._make_trader(
             _HoldStrategy(),
             adapter,
             config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
         )
+        alerts = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner._last_prices = {"SPOT": 100.0, "PERP": 100.0}
 
         complete = runner._execute_live_decision(
-            MultiLegOrder(
-                legs=(
-                    OrderIntent(action="long", symbol="SPOT", quantity=1.0),
-                    OrderIntent(action="short", symbol="PERP", quantity=1.0),
+            [
+                OrderIntent(
+                    action="long", symbol="SPOT", quantity=1.0, reason="basis", group_id="basis"
                 ),
-                reason="basis",
-            ),
+                OrderIntent(
+                    action="short", symbol="PERP", quantity=1.0, reason="basis", group_id="basis"
+                ),
+            ],
             {
                 "SPOT": {"close": 100.0, "volume": 10_000.0},
                 "PERP": {"close": 100.0, "volume": 10_000.0},
@@ -2095,10 +2105,53 @@ class TestLiveExecutionLifecycle:
             TEST_CLOCK_NOW,
         )
 
-        assert complete is False
-        assert runner._halted is True
+        assert complete is True
+        assert runner._halted is False
         assert runner._active_orders == []
-        adapter.place_order.assert_not_called()
+        assert runner._positions["SPOT"].quantity == pytest.approx(1.0)
+        assert "PERP" not in runner._positions
+        assert any(m == "send_alert" and "'basis'" in kw["message"] for m, kw in alerts)
+
+    def test_live_group_failure_does_not_block_other_groups(self):
+        """A failed group's rejection only cancels its own siblings — an
+        unrelated group and an independent (ungrouped) intent queued in the
+        same decision keep executing normally."""
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = [
+            _broker_report(order_id="a-1", status="rejected", quantity=1.0, filled=0.0),
+            _broker_report(order_id="c-1", status="filled", quantity=1.0, average=100.0),
+            _broker_report(order_id="d-1", status="filled", quantity=1.0, average=100.0),
+            _broker_report(order_id="solo-1", status="filled", quantity=1.0, average=100.0),
+        ]
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "B", "C", "D", "SOLO"]),
+        )
+        runner._last_prices = {symbol: 100.0 for symbol in ("A", "B", "C", "D", "SOLO")}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0, group_id="failing"),
+                OrderIntent(action="short", symbol="B", quantity=1.0, group_id="failing"),
+                OrderIntent(action="long", symbol="C", quantity=1.0, group_id="ok"),
+                OrderIntent(action="short", symbol="D", quantity=1.0, group_id="ok"),
+                OrderIntent(action="long", symbol="SOLO", quantity=1.0),
+            ],
+            {
+                symbol: {"close": 100.0, "volume": 10_000.0}
+                for symbol in ("A", "B", "C", "D", "SOLO")
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert "A" not in runner._positions
+        assert "B" not in runner._positions
+        assert runner._positions["C"].quantity == pytest.approx(1.0)
+        assert runner._positions["D"].quantity == pytest.approx(1.0)
+        assert runner._positions["SOLO"].quantity == pytest.approx(1.0)
 
     def test_post_fill_risk_uses_broker_price_and_halts(self):
         adapter = _mock_order_adapter()

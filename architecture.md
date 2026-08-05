@@ -274,7 +274,7 @@ eligibility, broker-side enablement, and upgrades made outside the lockfile.
 ```
 librae/
 ├── core/                     shared domain model (pure computation, no I/O)
-│   ├── strategy.py           Strategy, OrderIntent, PortfolioTargets, Context, Position, PositionState, Fill
+│   ├── strategy.py           Strategy, OrderIntent, PortfolioWeights, Context, Position, PositionState, Fill
 │   ├── executor.py           simulated matching plus apply_execution_fill for externally confirmed fills
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
 │   ├── metrics.py            performance metrics + on-demand trade/signal outcome analysis
@@ -315,9 +315,9 @@ This is a different thing from the "Data flow" section below: that one is about 
 ```
 Strategy ETL (utils.py)  →  DataFrame (MultiIndex + signal columns)
                               ↓
-Strategy logic (strategy.py)  →  on_bar(ctx) → list[OrderIntent] | PortfolioTargets | MultiLegOrder
+Strategy logic (strategy.py)  →  on_bar(ctx) → list[OrderIntent] (optionally group_id-tagged) | PortfolioWeights
                               ↓
-Engine (engine.py)     →  execute_order_intents / execute_portfolio_targets
+Engine (engine.py)     →  execute_order_intents / execute_portfolio_weights
                               ↓
 Output (build_output)  →  BacktestOutput (metrics + equity/position/allocation facts + events)
 ```
@@ -341,13 +341,12 @@ document scoped to layering, boundaries, and naming conventions.
 
 | Type | Description |
 |------|------|
-| `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioTargets \| MultiLegOrder` |
+| `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioWeights` |
 | `Context` | immutable event snapshot: current bars, positions, one account snapshot, and callback period index |
-| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioTargets \| MultiLegOrder`; `[]` means no decision |
+| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
-| `OrderIntent` | symbol-level instruction: `action` = long / short / close |
-| `PortfolioTargets` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
-| `MultiLegOrder` | explicitly sized related legs with a synchronous backtest/sim approximation; rejected by generic live execution |
+| `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` ties it to other intents in the same decision that must fill together atomically |
+| `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 
@@ -387,7 +386,7 @@ document scoped to layering, boundaries, and naming conventions.
 | `simulate_fill(intent, price, cash, cost_model)` | build a deterministic simulated fill |
 | `calc_equity(cash, positions, ...)` | calculate mark-to-market equity and the immutable strategy snapshot |
 | `execute_order_intents(intents, ...)` | deterministic simulated intent matching; also reused on a copy for live request sizing |
-| `execute_portfolio_targets(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
+| `execute_portfolio_weights(targets, ...)` | deterministic weight sizing and reduce-then-add planning |
 | `apply_execution_fill(...)` | apply an externally confirmed price/quantity/cost/timestamp without re-simulating it |
 | `close_position(pos, exit_price, cost_model)` | close-out PnL + proceeds |
 | `available_metrics(kind=...)` | list supported summary or series metric names without computing them |
@@ -415,7 +414,7 @@ document scoped to layering, boundaries, and naming conventions.
   [Product position and system boundaries](#product-position-and-system-boundaries).
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.
-- **Immutable engine output**: frozen result dataclasses use tuple collections in engine-produced `BacktestOutput`; `Context` and `PortfolioTargets.weights` expose read-only mappings. Mutable `PositionState` remains internal.
+- **Immutable engine output**: frozen result dataclasses use tuple collections in engine-produced `BacktestOutput`; `Context` and `PortfolioWeights.weights` expose read-only mappings. Mutable `PositionState` remains internal.
 - **Unified margin-rate formula**: `margin_rate` = the fraction of notional that actually leaves available cash. On entry, `cash -= notional * margin_rate + costs`; on exit, `proceeds = notional * margin_rate + gross_pnl - exit_costs`; equity's `mtm += unrealized + notional * margin_rate`. One formula covers spot (1.0), US short selling (0.5, Reg T), Taiwan margin short selling (0.9), and futures (0.067). Callers can override the default via `cost_overrides`.
 
 ### Config API

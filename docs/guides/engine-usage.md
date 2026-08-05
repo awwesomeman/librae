@@ -80,7 +80,7 @@ buy fills when the bar's low reaches the limit and a sell fills when its high
 does; a gap through receives the opening price. An unreached limit expires
 after that bar and is logged. Simulated market orders use
 `ExecutionPolicy.default_fill_price`; a strategy never embeds a historical bar
-field in its decision. `PortfolioTargets` always uses that run-wide simulated
+field in its decision. `PortfolioWeights` always uses that run-wide simulated
 market-fill policy; use per-symbol `OrderIntent`s for limits.
 
 Historical data may additionally provide non-null boolean `can_buy` and
@@ -178,12 +178,12 @@ Within an account the engine is portfolio-level. `on_bar()` can return
 account's available cash, so multi-symbol decisions should normally use
 explicit quantities.
 
-For allocation strategies, return one `PortfolioTargets` instead:
+For allocation strategies, return one `PortfolioWeights` instead:
 
 ```python
-from librae import PortfolioTargets
+from librae import PortfolioWeights
 
-return PortfolioTargets(
+return PortfolioWeights(
     weights={"AAA": 0.50, "BBB": 0.45},
     reason="monthly allocation",
 )
@@ -200,7 +200,7 @@ symbol order, then additions. If entry costs exceed available cash, all
 addition quantities receive one common scale factor so symbol ordering does not
 starve later assets.
 
-`PortfolioTargets` uses the run's single account as its capital base. A
+`PortfolioWeights` uses the run's single account as its capital base. A
 cross-account hedge or arbitrage strategy must coordinate explicitly sized
 orders across separate runs; hedge ratios remain strategy-owned.
 
@@ -219,7 +219,7 @@ Backtest, sim, and live runs use a predeclared candidate universe. For stock
 selection, configure a survivorship-bias-free candidate superset and provide
 point-in-time membership or eligibility as input data. The strategy filters
 the currently eligible observations before ranking or optimization and returns
-a complete `PortfolioTargets`; an omitted holding is therefore targeted to
+a complete `PortfolioWeights`; an omitted holding is therefore targeted to
 zero.
 
 `ctx.symbols` is the configured universe. `ctx.available_symbols` and
@@ -235,7 +235,7 @@ operations require reconfiguration and restart; they are not behavior that
 strategy code should emulate.
 
 Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar
-and can wait indefinitely without blocking anything else. `PortfolioTargets`
+and can wait indefinitely without blocking anything else. `PortfolioWeights`
 is intentionally synchronous and must be immediately executable when
 returned: the strategy checks `ctx.available_symbols` for every non-zero
 target and currently held symbol *before* returning one — the engine does not
@@ -245,42 +245,45 @@ intents for asynchronous cross-market execution.
 
 ## Related multi-leg order contract
 
-`MultiLegOrder` represents explicitly sized related orders for synchronous
-research simulation. It covers spreads, rolls, inventory hedges, and ordered
-cross-instrument exposure transitions without encoding strategy-specific
-arbitrage types:
+`OrderIntent.group_id` ties explicitly sized, related orders together for
+synchronous research simulation. It covers spreads, rolls, inventory hedges,
+and ordered cross-instrument exposure transitions without encoding
+strategy-specific arbitrage types. Any number of independent groups — and
+ungrouped intents (`group_id=None`) — can coexist in one decision, so multiple
+concurrent arbitrage strategies each express their own group without blocking
+each other or the rest of the decision.
 
 Atomic multi-leg execution means the venue accepts the group as one
 all-or-none transaction: every leg fills or none does. Separate API requests,
 whether serial or concurrent, do not provide that guarantee; compensating
-orders can add further exposure instead of restoring a portfolio. Generic live
-execution therefore rejects `MultiLegOrder` and halts before sending any leg.
-If one venue or broker exposes a native combo order, use that adapter-specific
-capability. Cross-venue coordination belongs to a strategy-owned deployment
-coordinator with explicit partial-fill and recovery policy.
+orders can add further exposure instead of restoring a portfolio. No adapter
+currently exposes a venue-native combo order, so live execution submits each
+leg of a group serially. If any leg in a group is rejected, cancelled, or
+times out, the engine cancels that group's remaining legs and alerts —
+unrelated groups and independent intents keep executing; it does not attempt
+to unwind legs that already filled. If a broker adds native combo support in
+the future, use that adapter-specific capability instead.
 
 ```python
-from librae import MultiLegOrder, OrderIntent
+from librae import OrderIntent
 
-return MultiLegOrder(
-    legs=(
-        OrderIntent(action="long", symbol="BTCUSDT", quantity=0.10),
-        OrderIntent(action="short", symbol="BTCUSDT-PERP", quantity=0.10),
-    ),
-    reason="spot-perpetual basis",
-)
+return [
+    OrderIntent(action="long", symbol="BTCUSDT", quantity=0.10, group_id="basis"),
+    OrderIntent(action="short", symbol="BTCUSDT-PERP", quantity=0.10, group_id="basis"),
+]
 ```
 
-Every leg requires an explicit symbol and quantity, symbols cannot repeat, and
-tuple order is the simulation order. The strategy checks `ctx.available_symbols`
-for every leg *before* returning a `MultiLegOrder` — one event must already
-contain every leg, or the engine rejects the decision rather than waiting
-across periods for it. Backtest/sim then executes a synchronous OHLCV
-approximation. This is useful for strategy research but does not claim
-intrabar sequencing, venue atomicity, or recoverability in production.
+Every intent sharing a group_id requires an explicit quantity, and a symbol
+cannot appear twice in one decision (grouped or not). The strategy checks
+`ctx.available_symbols` for every member of a group *before* returning it —
+one event must already contain every member, or the engine rejects the
+decision rather than waiting across periods for it. Backtest/sim then
+executes a synchronous OHLCV approximation. This is useful for strategy
+research but does not claim intrabar sequencing, venue atomicity, or
+guaranteed recovery in production.
 
 Examples include TAIFEX near/next-future/cash-proxy and Binance
-spot/perpetual/delivery-future spreads. Every leg in one `MultiLegOrder` belongs
+spot/perpetual/delivery-future spreads. Every member of one group belongs
 to the run's single account. Cross-account or cross-currency execution requires
 separate runs and a strategy-owned coordinator with an explicit FX/valuation
 model.
@@ -338,7 +341,7 @@ uses XTAI trading dates as its holiday-session source; users requiring a
 product-specific exceptional closure must provide already filtered data.
 Cross-market baskets must provide coherent event labels; broker submissions
 remain sequential reductions-then-additions, not exchange-level atomic.
-`PortfolioTargets` expresses a desired portfolio state, not a transactional
+`PortfolioWeights` expresses a desired portfolio state, not a transactional
 all-or-none order. Live target legs are replanned only after the previous
 broker fill is confirmed, using actual cash and positions, so slippage and
 confirmed fill outcomes change the remaining quantities instead of preserving a stale
@@ -528,8 +531,8 @@ exceeded `RunConfig.runtime.poll_seconds`.
   this ratio. Market orders are unaffected because their execution price is
   not known before submission.
 - `max_gross_exposure` / `max_net_exposure`: backtest/sim validate every
-  complete strategy decision batch (`OrderIntent`, `PortfolioTargets`, or
-  `MultiLegOrder`) against staged post-decision positions before mutation.
+  complete strategy decision batch (`list[OrderIntent]`, grouped or not, or
+  `PortfolioWeights`) against staged post-decision positions before mutation.
   Live validates each request in its actual submission order as well as the
   final portfolio, so a later hedge cannot conceal a transient breach. A
   transition that worsens an already-breached limit is rejected before
@@ -745,7 +748,7 @@ live capital.
 | Use case | Backtest | Shadow sim | Paper/live execution |
 |---|---|---|---|
 | Single asset | Supported research | Simplified bar simulation | Broker-confirmed lifecycle; adapter/account readiness is external |
-| Related multi-leg execution | Synchronous `MultiLegOrder` OHLCV approximation | Synchronous approximation | Generic runner halts before submission; use a venue-native combo or strategy-owned coordinator |
+| Related multi-leg execution | Synchronous `group_id`-tagged OHLCV approximation | Synchronous approximation | Serial per-leg submission; a failed leg cancels its group only, other groups unaffected |
 | Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
 | Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
 | Cross-account arbitrage | Separate independent runs; no synchronized engine contract | Same | Strategy-owned external orchestration; no shared funding or atomicity |

@@ -32,7 +32,7 @@ from librae.core.executor import (
     check_stop_targets,
     execute_order_intents,
     execute_pending_decision_and_stops,
-    execute_portfolio_targets,
+    execute_portfolio_weights,
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
@@ -46,9 +46,8 @@ from librae.core.strategy import (
     AccountSnapshot,
     Context,
     Fill,
-    MultiLegOrder,
     OrderIntent,
-    PortfolioTargets,
+    PortfolioWeights,
     Position,
     PositionState,
     Strategy,
@@ -854,6 +853,36 @@ class LiveTrader:
             message=f"{message}; trading halted.",
         )
 
+    def _fail_group_or_halt(self, tracked: TrackedOrder, *, title: str, message: str) -> bool:
+        """Scope one leg's failure to its related-order group when possible.
+
+        A leg with no group_id has no isolation boundary, so it halts live
+        trading exactly like any other unrecoverable order failure. A grouped
+        leg's failure instead cancels only that group's other still-active
+        legs and alerts — unrelated groups and independent intents keep
+        executing. Returns True if the whole account was halted (caller
+        should stop advancing this tick), False if only the group was
+        cancelled (caller should continue to the next active order).
+        """
+        group_id = tracked.request.group_id
+        if group_id is None:
+            self._halt_live(title=title, message=message)
+            return True
+        if tracked in self._active_orders:
+            self._active_orders.remove(tracked)
+            self._persist_state(tracked)
+        if not self._executor.simulation:
+            for sibling in list(self._active_orders):
+                if sibling.request.group_id == group_id:
+                    self._cancel_tracked_order(sibling)
+        logger.error("%s: %s", title, message)
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] {title}",
+            message=f"{message}; group {group_id!r} cancelled, other groups unaffected.",
+        )
+        return False
+
     def _has_active_recovery_orders(self) -> bool:
         """Whether every tracked order is an engine-owned recovery order."""
         return bool(self._active_orders) and all(
@@ -1275,13 +1304,13 @@ class LiveTrader:
         planned_adv_quantity_by_symbol = dict(self._adv_filled_quantities)
         lagged_adv = lagged_adv_by_symbol or {}
 
-        if isinstance(intent, PortfolioTargets):
+        if isinstance(intent, PortfolioWeights):
             max_position_notional = (
                 self._risk_policy.max_position_weight * self._prev_equity
                 if apply_entry_risk_limits and self._risk_policy.max_position_weight
                 else None
             )
-            result = execute_portfolio_targets(
+            result = execute_portfolio_weights(
                 intent,
                 staged_positions,
                 self._cash,
@@ -1363,7 +1392,7 @@ class LiveTrader:
                 )
             return requests
 
-        actions = list(intent.legs) if isinstance(intent, MultiLegOrder) else intent
+        actions = intent
         requests: list[OrderRequest] = []
         planning_cash = self._cash
         planning_exposure_prices = dict(exposure_prices)
@@ -1447,17 +1476,8 @@ class LiveTrader:
         intent = self._without_halted_account(intent)
         if not intent:
             return True
-        if isinstance(intent, MultiLegOrder):
-            self._halt_live(
-                title="Unsupported Live Multi-leg Decision",
-                message=(
-                    "generic serial execution cannot guarantee a related-order group; "
-                    "use a venue-native combo adapter or a strategy-owned coordinator"
-                ),
-            )
-            return False
 
-        if isinstance(intent, PortfolioTargets):
+        if isinstance(intent, PortfolioWeights):
             if self._live_rebalance is not None:
                 raise RuntimeError("cannot replace an active live rebalance")
             self._live_rebalance = LiveRebalance(
@@ -1579,14 +1599,16 @@ class LiveTrader:
                         lambda request=request: self._executor.find_order(request)
                     )
                     if report is None:
-                        self._halt_live(
+                        if self._fail_group_or_halt(
+                            tracked,
                             title="Ambiguous Order Placement",
                             message=(
                                 f"{request.symbol} qty={request.quantity:.4f} client_order_id="
                                 f"{request.client_order_id} was not found after placement failure"
                             ),
-                        )
-                        return
+                        ):
+                            return
+                        continue
             elif tracked.order_id:
                 report = self._timed_order_call(
                     lambda request=request, order_id=tracked.order_id: self._executor.get_order(
@@ -1598,14 +1620,16 @@ class LiveTrader:
                     lambda request=request: self._executor.find_order(request)
                 )
                 if report is None:
-                    self._halt_live(
+                    if self._fail_group_or_halt(
+                        tracked,
                         title="Ambiguous Restored Order",
                         message=(
                             f"{request.symbol} client_order_id={request.client_order_id} "
                             "was placement-attempted but cannot be found"
                         ),
-                    )
-                    return
+                    ):
+                        return
+                    continue
 
             cancellation_was_pending = tracked.status == "cancel_pending"
             prior_filled_quantity = tracked.filled_quantity
@@ -1621,15 +1645,17 @@ class LiveTrader:
                 self._persist_state(tracked)
                 return
             if report.status in ("cancelled", "rejected"):
-                self._halt_live(
+                if self._fail_group_or_halt(
+                    tracked,
                     title=f"Order {report.status.title()}",
                     message=(
                         f"{request.symbol} order_id={report.order_id or 'unassigned'} "
                         f"filled={report.filled_quantity:.4f}/"
                         f"{report.requested_quantity:.4f}"
                     ),
-                )
-                return
+                ):
+                    return
+                continue
             if (
                 report.filled_quantity > prior_filled_quantity + EPSILON
                 and request.position_effect in ("open", "add")
@@ -1675,7 +1701,8 @@ class LiveTrader:
         request = tracked.request
         order_id = latest_report.order_id or tracked.order_id
         if not order_id:
-            self._halt_live(
+            self._fail_group_or_halt(
+                tracked,
                 title="Order Timeout Unresolved",
                 message=(
                     f"{request.symbol} client_order_id={request.client_order_id} "
@@ -1691,7 +1718,8 @@ class LiveTrader:
                 raise RuntimeError("broker cancellation returned no execution report")
             self._apply_order_report(tracked, cancel_report)
         except Exception as exc:
-            self._halt_live(
+            self._fail_group_or_halt(
+                tracked,
                 title="Order Timeout Cancellation Failed",
                 message=(
                     f"{request.symbol} order_id={order_id} could not be confirmed cancelled: {exc}"
@@ -1705,7 +1733,8 @@ class LiveTrader:
         if status not in ("cancelled", "rejected"):
             tracked.status = "cancel_pending"
             self._persist_state(tracked)
-        self._halt_live(
+        self._fail_group_or_halt(
+            tracked,
             title=(
                 "Order Timeout"
                 if status in ("cancelled", "rejected")
@@ -1790,52 +1819,56 @@ class LiveTrader:
         if result is not None:
             self._publish_action_results(result)
 
-    def _cancel_active_orders(self) -> None:
-        """Best-effort cancellation used whenever live trading halts."""
-        for tracked in list(self._active_orders):
-            try:
-                if not tracked.placement_attempted:
-                    tracked.status = "cancelled"
-                    self._active_orders.remove(tracked)
-                    self._persist_state(tracked)
-                    continue
+    def _cancel_tracked_order(self, tracked: TrackedOrder) -> None:
+        """Best-effort cancellation of one tracked order."""
+        try:
+            if not tracked.placement_attempted:
+                tracked.status = "cancelled"
+                self._active_orders.remove(tracked)
+                self._persist_state(tracked)
+                return
+            report = self._timed_order_call(
+                lambda request=tracked.request, order_id=tracked.order_id: (
+                    self._executor.get_order(request, order_id)
+                    if order_id
+                    else self._executor.find_order(request)
+                )
+            )
+            if report is None:
+                logger.error(
+                    "Cannot cancel unresolved order %s",
+                    tracked.request.client_order_id,
+                )
+                return
+            cancellation_was_pending = tracked.status == "cancel_pending"
+            if (
+                report.status not in ("filled", "cancelled", "rejected", "cancel_pending")
+                and not cancellation_was_pending
+            ):
                 report = self._timed_order_call(
-                    lambda request=tracked.request, order_id=tracked.order_id: (
-                        self._executor.get_order(request, order_id)
-                        if order_id
-                        else self._executor.find_order(request)
+                    lambda request=tracked.request, order_id=report.order_id: (
+                        self._executor.cancel_order(
+                            request,
+                            order_id,
+                        )
                     )
                 )
                 if report is None:
-                    logger.error(
-                        "Cannot cancel unresolved order %s",
-                        tracked.request.client_order_id,
-                    )
-                    continue
-                cancellation_was_pending = tracked.status == "cancel_pending"
-                if (
-                    report.status not in ("filled", "cancelled", "rejected", "cancel_pending")
-                    and not cancellation_was_pending
-                ):
-                    report = self._timed_order_call(
-                        lambda request=tracked.request, order_id=report.order_id: (
-                            self._executor.cancel_order(
-                                request,
-                                order_id,
-                            )
-                        )
-                    )
-                    if report is None:
-                        raise RuntimeError("broker cancellation returned no execution report")
-                self._apply_order_report(tracked, report)
-                if report.status not in ("filled", "cancelled", "rejected"):
-                    tracked.status = "cancel_pending"
-                    self._persist_state(tracked)
-            except Exception:
-                logger.exception(
-                    "Failed to cancel tracked order %s",
-                    tracked.request.client_order_id,
-                )
+                    raise RuntimeError("broker cancellation returned no execution report")
+            self._apply_order_report(tracked, report)
+            if report.status not in ("filled", "cancelled", "rejected"):
+                tracked.status = "cancel_pending"
+                self._persist_state(tracked)
+        except Exception:
+            logger.exception(
+                "Failed to cancel tracked order %s",
+                tracked.request.client_order_id,
+            )
+
+    def _cancel_active_orders(self) -> None:
+        """Best-effort cancellation used whenever live trading halts."""
+        for tracked in list(self._active_orders):
+            self._cancel_tracked_order(tracked)
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Process one symbol through the portfolio-cycle path."""
@@ -2039,9 +2072,9 @@ class LiveTrader:
                         signal_type="exit",
                     )
 
-        # PortfolioTargets/MultiLegOrder must be immediately executable when
-        # returned (validate_strategy_decision enforces this), so on_bar is
-        # never gated waiting for one to become ready.
+        # PortfolioWeights and grouped OrderIntents must be immediately
+        # executable when returned (validate_strategy_decision enforces
+        # this), so on_bar is never gated waiting for one to become ready.
         equity, position_snapshot = self._calc_account_snapshot()
         ctx = Context(
             ts=ts,

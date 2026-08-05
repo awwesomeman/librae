@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from librae import Context, PortfolioTargets, Strategy, StrategyDecision
+from librae import Context, PortfolioWeights, Strategy, StrategyDecision
 
 
 class TargetWeightsStrategy(Strategy):
@@ -21,7 +21,7 @@ class TargetWeightsStrategy(Strategy):
         required = set(ctx.positions) | set(weights)
         if not required.issubset(ctx.available_symbols):
             return []
-        return PortfolioTargets(
+        return PortfolioWeights(
             weights=weights,
             reason="scheduled_allocation",
         )

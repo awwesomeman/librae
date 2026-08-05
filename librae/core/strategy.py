@@ -1,9 +1,12 @@
 """Strategy protocol and data types for the backtest engine.
 
 Defines the contract between strategies and the engine:
-- Strategy implements on_bar(ctx) → list[OrderIntent] | PortfolioTargets | MultiLegOrder
+- Strategy implements on_bar(ctx) → list[OrderIntent] | PortfolioWeights
 - Engine provides Context with market data + portfolio state
-- Engine executes symbol intents, portfolio targets, or a multi-leg group
+- Engine executes symbol intents or portfolio weights. OrderIntents sharing
+  a non-None group_id form an atomic related-order group (spreads, rolls,
+  hedges); the engine fills every member together or raises, and any number
+  of independent groups may coexist in one decision.
 """
 
 from __future__ import annotations
@@ -138,6 +141,12 @@ class OrderIntent:
             For a new entry whose simulated fill time within the bar is
             ambiguous (for example, a resting limit), protection starts on the
             next bar. Entries known to fill at open may trigger it immediately.
+        group_id: Ties this intent to other OrderIntents in the same decision
+            that share the same group_id, forming one atomic related-order
+            group (spreads, rolls, inventory hedges). The engine fills every
+            member of a group together on one bar or raises — never partially.
+            None means independent execution (the default): the intent may
+            wait for its own symbol's next bar without blocking anything else.
     """
 
     action: OrderAction
@@ -147,6 +156,7 @@ class OrderIntent:
     limit_price: float | None = None
     stop_price: float | None = None
     take_profit_price: float | None = None
+    group_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.action not in ("long", "short", "close"):
@@ -155,6 +165,8 @@ class OrderIntent:
             raise TypeError("OrderIntent.symbol must be a string")
         if not isinstance(self.reason, str):
             raise TypeError("OrderIntent.reason must be a string")
+        if self.group_id is not None and not isinstance(self.group_id, str):
+            raise TypeError("OrderIntent.group_id must be a string or None")
 
         if self.quantity is not None:
             _validate_positive_finite_number(self.quantity, "OrderIntent.quantity")
@@ -173,7 +185,7 @@ class OrderIntent:
 
 
 @dataclass(frozen=True)
-class PortfolioTargets:
+class PortfolioWeights:
     """Portfolio-level target weights.
 
     Positive weights target long exposure and negative weights target short
@@ -192,7 +204,7 @@ class PortfolioTargets:
 
     def __post_init__(self) -> None:
         if not isinstance(self.reason, str):
-            raise TypeError("PortfolioTargets.reason must be a string")
+            raise TypeError("PortfolioWeights.reason must be a string")
 
         weights = dict(self.weights)
         for symbol, raw_weight in weights.items():
@@ -204,45 +216,12 @@ class PortfolioTargets:
                 raise ValueError(f"target weight for {symbol!r} must be finite")
         object.__setattr__(self, "weights", MappingProxyType(weights))
 
-    def __deepcopy__(self, memo: dict[int, object]) -> PortfolioTargets:
+    def __deepcopy__(self, memo: dict[int, object]) -> PortfolioWeights:
         """Immutable value objects can be shared across runtime snapshots."""
         return self
 
 
-@dataclass(frozen=True)
-class MultiLegOrder:
-    """One related order group for synchronous research simulation.
-
-    This contract covers spreads, rolls, inventory hedges, and other
-    cross-instrument operations where several explicitly sized orders belong
-    to one strategy decision. Backtest and shadow simulation use one
-    synchronous market-data event. Generic live execution rejects this type;
-    venue-native combos and cross-venue coordination are adapter or
-    deployment-level concerns.
-    """
-
-    legs: tuple[OrderIntent, ...]
-    reason: str = ""
-
-    def __post_init__(self) -> None:
-        legs = tuple(self.legs)
-        if len(legs) < 2:
-            raise ValueError("MultiLegOrder requires at least two legs")
-        if any(not isinstance(leg, OrderIntent) for leg in legs):
-            raise TypeError("MultiLegOrder.legs must contain only OrderIntent values")
-        if any(not leg.symbol for leg in legs):
-            raise ValueError("MultiLegOrder legs require explicit symbols")
-        if any(leg.quantity is None for leg in legs):
-            raise ValueError("MultiLegOrder legs require explicit quantities")
-        symbols = [leg.symbol for leg in legs]
-        if len(symbols) != len(set(symbols)):
-            raise ValueError("MultiLegOrder requires at most one leg per symbol")
-        if not isinstance(self.reason, str):
-            raise TypeError("MultiLegOrder.reason must be a string")
-        object.__setattr__(self, "legs", legs)
-
-
-StrategyDecision = list[OrderIntent] | PortfolioTargets | MultiLegOrder
+StrategyDecision = list[OrderIntent] | PortfolioWeights
 
 
 @dataclass(frozen=True)
@@ -284,6 +263,7 @@ class PositionState:
     stop_price: float | None = None
     take_profit_price: float | None = None
     pending_market_exit_reason: str | None = None
+    group_id: str | None = None
 
 
 class Strategy(ABC):
@@ -295,7 +275,7 @@ class Strategy(ABC):
 
     @abstractmethod
     def on_bar(self, ctx: Context) -> StrategyDecision:
-        """Return intents, targets, a multi-leg order, or ``[]``."""
+        """Return order intents (optionally grouped via group_id), weights, or ``[]``."""
         ...
 
 

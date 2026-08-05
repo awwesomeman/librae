@@ -9,11 +9,11 @@ import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.executor import ExecutionResult, execute_portfolio_targets
+from librae.core.executor import ExecutionResult, execute_portfolio_weights
 from librae.core.strategy import (
     Context,
     OrderIntent,
-    PortfolioTargets,
+    PortfolioWeights,
     PositionState,
     Strategy,
     StrategyDecision,
@@ -23,7 +23,7 @@ TS = datetime(2026, 7, 27, tzinfo=UTC)
 
 
 def _process(
-    targets: PortfolioTargets,
+    targets: PortfolioWeights,
     positions: dict[str, PositionState],
     cash: float,
     *,
@@ -31,7 +31,7 @@ def _process(
     cost_model: CostModel | None = None,
 ) -> ExecutionResult:
     model = cost_model or CostModel.zero()
-    return execute_portfolio_targets(
+    return execute_portfolio_weights(
         targets,
         positions,
         cash,
@@ -81,17 +81,17 @@ class OneRebalance(Strategy):
     def on_bar(self, ctx: Context) -> StrategyDecision:
         self.seen_equity.append(ctx.equity)
         if ctx.period_index == 0:
-            return PortfolioTargets(weights={"A": 0.5, "B": 0.5})
+            return PortfolioWeights(weights={"A": 0.5, "B": 0.5})
         return []
 
 
-class TestPortfolioTargetsValidation:
+class TestPortfolioWeightsValidation:
     def test_rejects_non_finite_weight(self) -> None:
         with pytest.raises(ValueError, match="finite"):
-            PortfolioTargets(weights={"A": float("nan")})
+            PortfolioWeights(weights={"A": float("nan")})
 
     def test_weights_are_immutable_after_validation(self) -> None:
-        targets = PortfolioTargets(weights={"A": 1.0})
+        targets = PortfolioWeights(weights={"A": 1.0})
 
         with pytest.raises(TypeError):
             targets.weights["A"] = float("nan")
@@ -116,7 +116,7 @@ class TestRebalanceExecution:
     def test_opens_equal_weight_long_only_portfolio(self) -> None:
         positions: dict[str, PositionState] = {}
         result = _process(
-            PortfolioTargets(weights={"B": 0.5, "A": 0.5}),
+            PortfolioWeights(weights={"B": 0.5, "A": 0.5}),
             positions,
             1_000.0,
             prices={"A": 100.0, "B": 50.0},
@@ -130,7 +130,7 @@ class TestRebalanceExecution:
     def test_reduces_before_adding(self) -> None:
         positions: dict[str, PositionState] = {}
         first = _process(
-            PortfolioTargets(weights={"A": 0.5, "B": 0.5}),
+            PortfolioWeights(weights={"A": 0.5, "B": 0.5}),
             positions,
             1_000.0,
             prices={"A": 100.0, "B": 50.0},
@@ -138,7 +138,7 @@ class TestRebalanceExecution:
         cash = 1_000.0 + first.cash_delta
 
         second = _process(
-            PortfolioTargets(weights={"A": 0.25, "B": 0.75}),
+            PortfolioWeights(weights={"A": 0.25, "B": 0.75}),
             positions,
             cash,
             prices={"A": 100.0, "B": 50.0},
@@ -154,7 +154,7 @@ class TestRebalanceExecution:
     def test_omitted_asset_is_closed(self) -> None:
         positions: dict[str, PositionState] = {}
         first = _process(
-            PortfolioTargets(weights={"A": 0.5, "B": 0.5}),
+            PortfolioWeights(weights={"A": 0.5, "B": 0.5}),
             positions,
             1_000.0,
             prices={"A": 100.0, "B": 50.0},
@@ -162,7 +162,7 @@ class TestRebalanceExecution:
         cash = 1_000.0 + first.cash_delta
 
         second = _process(
-            PortfolioTargets(weights={"B": 1.0}),
+            PortfolioWeights(weights={"B": 1.0}),
             positions,
             cash,
             prices={"A": 100.0, "B": 50.0},
@@ -184,7 +184,7 @@ class TestRebalanceExecution:
         positions: dict[str, PositionState] = {}
 
         result = _process(
-            PortfolioTargets(weights={"A": 0.5, "B": 0.5}),
+            PortfolioWeights(weights={"A": 0.5, "B": 0.5}),
             positions,
             1_000.0,
             prices={"A": 100.0, "B": 50.0},
@@ -200,7 +200,7 @@ class TestRebalanceExecution:
     def test_weight_remainder_stays_in_cash(self) -> None:
         positions: dict[str, PositionState] = {}
         result = _process(
-            PortfolioTargets(weights={"A": 0.95}),
+            PortfolioWeights(weights={"A": 0.95}),
             positions,
             1_000.0,
             prices={"A": 100.0},
@@ -213,7 +213,7 @@ class TestRebalanceExecution:
         positions: dict[str, PositionState] = {}
         with pytest.raises(ValueError, match="execution price for B"):
             _process(
-                PortfolioTargets(weights={"A": 0.5, "B": 0.5}),
+                PortfolioWeights(weights={"A": 0.5, "B": 0.5}),
                 positions,
                 1_000.0,
                 prices={"A": 100.0},

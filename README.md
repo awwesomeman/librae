@@ -11,8 +11,8 @@ strategy interface.
 ## Why Librae
 
 - **One decision API** — express symbol orders with `OrderIntent`, complete
-  allocations with `PortfolioTargets`, or an explicitly sized best-effort
-  related order group with `MultiLegOrder`.
+  allocations with `PortfolioWeights`, or tie explicitly sized `OrderIntent`s
+  into a best-effort related order group with a shared `group_id`.
 - **One execution-policy source** — fill-field, current-bar participation,
   optional session-level lagged-ADV assumptions, and the local live-order
   timeout live in typed
@@ -54,8 +54,8 @@ editable, restricted-network, and checkout workflows.
 To run a complete example from a clone, see
 [Run the examples](docs/getting-started.md#run-the-examples).
 
-A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects,
-`PortfolioTargets`, or `MultiLegOrder`. Your data pipeline supplies timezone-aware OHLCV and
+A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects
+(optionally grouped via `group_id`) or `PortfolioWeights`. Your data pipeline supplies timezone-aware OHLCV and
 point-in-time features; Librae owns validation, execution timing, portfolio
 state, costs, and output. The [examples](examples/README.md) show the complete
 `RunConfig`, DataFrame, and engine wiring.
@@ -98,7 +98,7 @@ For custom broker fetches and third-party factors, see
 | Cross-sectional selection and allocation | Predeclared candidate universe with point-in-time eligibility; optimizer remains strategy-owned; runtime symbol/subscription changes are not managed |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
 | Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
-| Related multi-leg execution | Explicitly sized `MultiLegOrder` for synchronous backtest/sim approximation; generic live execution fails closed before submission |
+| Related multi-leg execution | Explicitly sized `OrderIntent`s sharing a `group_id`, synchronous backtest/sim approximation; live submits legs serially and cancels only the failing group on a leg failure |
 | Execution account | One named account and currency per run; use separate runs for separate broker accounts or currencies |
 | Cross-account coordination | Caller-owned; the engine does not model FX, transfers, settlement, netting, or atomic execution across runs |
 | Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |

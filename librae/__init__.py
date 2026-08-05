@@ -45,11 +45,10 @@ from .core.strategy import (
     Strategy,
     Context,
     Fill,
-    MultiLegOrder,
     Position,
     PositionEventType,
     PositionSide,
-    PortfolioTargets,
+    PortfolioWeights,
     StrategyDecision,
 )
 from .core.executor import (
@@ -127,8 +126,7 @@ __all__ = [
     "normalize_bars",
     "OrderIntent",
     "OrderAction",
-    "MultiLegOrder",
-    "PortfolioTargets",
+    "PortfolioWeights",
     "StrategyDecision",
     "Strategy",
     "Context",

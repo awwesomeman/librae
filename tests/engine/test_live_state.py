@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from librae.core.strategy import MultiLegOrder, OrderIntent, PortfolioTargets, PositionState
+from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState
 from librae.live.executor import OrderRequest
 from librae.live.state import (
     LiveRebalance,
@@ -125,12 +125,13 @@ def test_exact_future_order_identity_survives_checkpoint_round_trip():
 
 def test_live_rebalance_round_trip_and_memory_store_isolation():
     """pending_decision is always plain OrderIntents (validate_strategy_decision
-    requires PortfolioTargets/MultiLegOrder to be immediately executable, so
-    they never sit as pending state); live_rebalance is the separate,
-    still-PortfolioTargets-typed state for an in-flight leg-by-leg rebalance.
+    requires PortfolioWeights/grouped OrderIntents to be immediately
+    executable, so they never sit as pending state); live_rebalance is the
+    separate, still-PortfolioWeights-typed state for an in-flight leg-by-leg
+    rebalance.
     """
     store = MemoryLiveStateStore()
-    targets = PortfolioTargets(weights={"AAA": 0.6, "BBB": 0.4})
+    targets = PortfolioWeights(weights={"AAA": 0.6, "BBB": 0.4})
     state = LiveRuntimeState(
         state_key="sim:abc",
         run_id="run-1",
@@ -183,25 +184,6 @@ def test_pending_order_intents_round_trip_through_to_dict():
     restored = LiveRuntimeState.from_dict(state.to_dict())
 
     assert restored.pending_decision == decision
-
-
-@pytest.mark.parametrize(
-    "legs",
-    [
-        (OrderIntent(action="long", symbol="AAA", quantity=1.0),),
-        (
-            OrderIntent(action="long", symbol="AAA"),
-            OrderIntent(action="short", symbol="BBB", quantity=1.0),
-        ),
-        (
-            OrderIntent(action="long", symbol="AAA", quantity=1.0),
-            OrderIntent(action="short", symbol="AAA", quantity=1.0),
-        ),
-    ],
-)
-def test_multi_leg_order_rejects_unsafe_ambiguous_legs(legs):
-    with pytest.raises(ValueError):
-        MultiLegOrder(legs=legs)
 
 
 def test_memory_store_lease_is_exclusive_until_release():

@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import pytest
 from librae.core.executor import partition_pending_decision, validate_strategy_decision
-from librae.core.strategy import MultiLegOrder, OrderIntent
+from librae.core.strategy import OrderIntent
 
 
-def _decision() -> MultiLegOrder:
-    return MultiLegOrder(
-        legs=(
-            OrderIntent(action="long", symbol="NEAR", quantity=1.0),
-            OrderIntent(action="short", symbol="NEXT", quantity=1.0),
-        )
-    )
+def _decision() -> list[OrderIntent]:
+    return [
+        OrderIntent(action="long", symbol="NEAR", quantity=1.0, group_id="roll"),
+        OrderIntent(action="short", symbol="NEXT", quantity=1.0, group_id="roll"),
+    ]
 
 
-def test_multi_leg_decision_rejected_when_a_required_symbol_has_no_bar() -> None:
+def test_grouped_decision_rejected_when_a_required_symbol_has_no_bar() -> None:
     decision = _decision()
 
     with pytest.raises(ValueError, match="NEXT"):
@@ -27,7 +25,7 @@ def test_multi_leg_decision_rejected_when_a_required_symbol_has_no_bar() -> None
         )
 
 
-def test_multi_leg_decision_accepted_once_every_symbol_has_a_bar() -> None:
+def test_grouped_decision_accepted_once_every_symbol_has_a_bar() -> None:
     decision = _decision()
 
     validate_strategy_decision(
@@ -46,3 +44,27 @@ def test_multi_leg_decision_accepted_once_every_symbol_has_a_bar() -> None:
     )
     assert ready == decision
     assert waiting == []
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        [
+            OrderIntent(action="long", symbol="NEAR", group_id="roll"),
+            OrderIntent(action="short", symbol="NEXT", quantity=1.0, group_id="roll"),
+        ],
+        [
+            OrderIntent(action="long", symbol="NEAR", quantity=1.0, group_id="roll"),
+            OrderIntent(action="short", symbol="NEAR", quantity=1.0, group_id="roll"),
+        ],
+    ],
+)
+def test_grouped_decision_rejects_unsafe_ambiguous_legs(decision) -> None:
+    with pytest.raises(ValueError):
+        validate_strategy_decision(
+            decision,
+            {"NEAR", "NEXT"},
+            primary_symbol="NEAR",
+            bars={"NEAR": {"close": 100.0}, "NEXT": {"close": 101.0}},
+            positions={},
+        )

@@ -15,8 +15,7 @@ from examples.topk_selection.strategy import TopKSelectionStrategy
 from librae import (
     AccountSnapshot,
     Context,
-    MultiLegOrder,
-    PortfolioTargets,
+    PortfolioWeights,
     Position,
 )
 
@@ -72,7 +71,7 @@ def test_target_weights_strategy_submits_only_scheduled_non_null_weights() -> No
         _context({"ALPHA": {}, "BETA": {}, "GAMMA": {}})
     )
 
-    assert isinstance(intent, PortfolioTargets)
+    assert isinstance(intent, PortfolioWeights)
     assert intent.weights == {"ALPHA": 0.6, "BETA": 0.35}
 
 
@@ -87,7 +86,7 @@ def test_topk_strategy_selects_and_equal_weights_highest_scores() -> None:
         )
     )
 
-    assert isinstance(intent, PortfolioTargets)
+    assert isinstance(intent, PortfolioWeights)
     assert intent.weights == {"BETA": 0.475, "GAMMA": 0.475}
 
 
@@ -114,7 +113,7 @@ def test_minimum_variance_strategy_owns_risk_model_and_waits_for_complete_basket
     )
 
     assert incomplete == []
-    assert isinstance(optimized, PortfolioTargets)
+    assert isinstance(optimized, PortfolioWeights)
     assert sum(optimized.weights.values()) == pytest.approx(0.90)
     assert (
         optimized.weights["LOW_VOL"] > optimized.weights["MID_VOL"] > optimized.weights["HIGH_VOL"]
@@ -142,7 +141,7 @@ def test_minimum_variance_features_do_not_use_future_prices() -> None:
         )
 
 
-def test_multi_leg_spread_strategy_emits_sized_entry_and_exit_groups() -> None:
+def test_spread_strategy_emits_sized_entry_and_exit_groups() -> None:
     strategy = MultiLegSpreadStrategy(
         "NEAR",
         "FAR",
@@ -172,13 +171,15 @@ def test_multi_leg_spread_strategy_emits_sized_entry_and_exit_groups() -> None:
         )
     )
 
-    assert isinstance(entry, MultiLegOrder)
-    assert [(leg.action, leg.symbol, leg.quantity) for leg in entry.legs] == [
+    assert isinstance(entry, list)
+    assert [(leg.action, leg.symbol, leg.quantity) for leg in entry] == [
         ("short", "NEAR", 3.0),
         ("long", "FAR", 4.5),
     ]
-    assert isinstance(exit_group, MultiLegOrder)
-    assert [leg.action for leg in exit_group.legs] == ["close", "close"]
+    assert len({leg.group_id for leg in entry}) == 1
+    assert isinstance(exit_group, list)
+    assert [leg.action for leg in exit_group] == ["close", "close"]
+    assert len({leg.group_id for leg in exit_group}) == 1
 
 
 def test_spread_features_do_not_use_future_prices() -> None:

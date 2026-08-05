@@ -17,7 +17,7 @@ from typing import Protocol
 from librae.core.run_config import LiveMode
 from librae.core.strategy import (
     OrderIntent,
-    PortfolioTargets,
+    PortfolioWeights,
     PositionState,
 )
 
@@ -45,7 +45,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 17
+_STATE_SCHEMA_VERSION = 18
 
 
 def normalize_runtime_revision(
@@ -67,9 +67,10 @@ def normalize_runtime_revision(
 
 
 def _pending_intents_to_list(pending_intents: list[OrderIntent]) -> list[dict]:
-    """pending_decision is always plain OrderIntents: PortfolioTargets/
-    MultiLegOrder must be immediately executable when returned and never
-    sit waiting across periods (see executor.validate_strategy_decision).
+    """pending_decision is always plain OrderIntents: PortfolioWeights and
+    grouped OrderIntents (group_id is not None) must be immediately
+    executable when returned and never sit waiting across periods (see
+    executor.validate_strategy_decision).
     """
     return [asdict(intent) for intent in pending_intents]
 
@@ -142,7 +143,7 @@ class TrackedOrder:
 class LiveRebalance:
     """Restartable live target execution using one confirmed leg at a time."""
 
-    targets: PortfolioTargets
+    targets: PortfolioWeights
     reference_prices: dict[str, float]
     reference_volumes: dict[str, float | None]
     lagged_adv_by_symbol: dict[str, float]
@@ -163,7 +164,7 @@ class LiveRebalance:
 
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRebalance:
-        targets = PortfolioTargets(**raw["targets"])
+        targets = PortfolioWeights(**raw["targets"])
         decided_at = _to_utc(raw["decided_at"])
         if decided_at is None:
             raise ValueError("live rebalance is missing decided_at")

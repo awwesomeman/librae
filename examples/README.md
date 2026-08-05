@@ -12,10 +12,10 @@ key, database, or external data service.
 | Example | What it teaches | Strategy output | Supported demo modes |
 |---|---|---|---|
 | [`simple_sma/`](simple_sma/) | Single-asset entry and exit timing | `list[OrderIntent]` | backtest, shadow sim; live with explicit broker setup |
-| [`target_weights/`](target_weights/) | Execute an externally prepared allocation schedule | `PortfolioTargets` | backtest |
-| [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select Top K | `PortfolioTargets` | backtest |
-| [`minimum_variance/`](minimum_variance/) | Keep a diagonal risk model and optimizer inside the strategy | `PortfolioTargets` | backtest |
-| [`multi_leg_spread/`](multi_leg_spread/) | Open and close an explicitly sized relative-value spread | `MultiLegOrder` | backtest |
+| [`target_weights/`](target_weights/) | Execute an externally prepared allocation schedule | `PortfolioWeights` | backtest |
+| [`topk_selection/`](topk_selection/) | Rank a cross-sectional universe and select Top K | `PortfolioWeights` | backtest |
+| [`minimum_variance/`](minimum_variance/) | Keep a diagonal risk model and optimizer inside the strategy | `PortfolioWeights` | backtest |
+| [`multi_leg_spread/`](multi_leg_spread/) | Open and close an explicitly sized relative-value spread | `list[OrderIntent]` (shared `group_id`) | backtest |
 | [`custom_data_provider.py`](custom_data_provider.py) | Point-in-time third-party factor enrichment | data-provider callable | sim/live adapter boundary |
 | [`trade_report.py`](trade_report.py) | Chart/report on `BacktestOutput` (librae computes, you chart) | matplotlib PNG | compute → chart boundary |
 
@@ -125,13 +125,13 @@ The portfolio and multi-leg demos stay backtest-only because their bundled input
 synthetic and date-specific, not because `LiveTrader` rejects portfolio
 or multi-leg decisions. A backtest-only runner rejects `--mode sim` or
 `--mode live` before strategy execution and directs the developer to add real
-market-data, broker, and state wiring. In real-time use, `PortfolioTargets`
+market-data, broker, and state wiring. In real-time use, `PortfolioWeights`
 must be returned only once the required basket is already complete — the
 strategy checks `ctx.available_symbols` itself, since the engine rejects a
 grouped decision missing a required bar rather than waiting for it; per-symbol
 `OrderIntent` decisions can still execute asynchronously.
 
-`PortfolioTargets` uses the configured next-bar fill field in backtest/sim.
+`PortfolioWeights` uses the configured next-bar fill field in backtest/sim.
 Live sizes from the latest completed close and submits market orders whose
 fills come only from broker reports. A per-symbol `OrderIntent.limit_price`
 has the same limit-order meaning in every mode.
@@ -154,28 +154,30 @@ operator review. `null` leaves lifetime to the broker.
 
 ## Related multi-leg decisions
 
-Use `MultiLegOrder` when explicitly sized legs belong to one decision and must
-execute in a declared order. The
+Give explicitly sized `OrderIntent`s a shared `group_id` when they belong to
+one decision and must fill together or not at all. Any number of independent
+groups (and ungrouped intents) can coexist in the same `on_bar` return value —
+this is how multiple concurrent arbitrage/spread strategies express their own
+groups without blocking each other. The
 [`multi_leg_spread` example](multi_leg_spread/) is runnable and tests both
 entry and exit groups:
 
 ```python
-from librae import MultiLegOrder, OrderIntent
+from librae import OrderIntent
 
-return MultiLegOrder(
-    legs=(
-        OrderIntent(action="long", symbol="TXF_NEAR", quantity=1),
-        OrderIntent(action="short", symbol="TXF_NEXT", quantity=1),
-    ),
-    reason="calendar spread",
-)
+return [
+    OrderIntent(action="long", symbol="TXF_NEAR", quantity=1, group_id="calendar_spread"),
+    OrderIntent(action="short", symbol="TXF_NEXT", quantity=1, group_id="calendar_spread"),
+]
 ```
 
 The contract also covers rolls, inventory hedges, and ordered exposure
-transitions. Backtest/sim uses a synchronous OHLCV approximation. The generic
-live runner rejects the group before submitting any leg; production execution
-requires a venue-native combo adapter or a strategy-owned coordinator. The
-exact boundary is defined in the
+transitions. Backtest/sim fills every member of a group atomically on one
+synchronous OHLCV event, or raises rather than filling some legs and not
+others. The live runner submits each leg serially; if any leg in a group
+fails (rejected, cancelled, or times out), it cancels that group's remaining
+legs and alerts — unrelated groups and independent intents keep executing.
+The exact boundary is defined in the
 [multi-leg engine contract](../docs/guides/engine-usage.md#related-multi-leg-order-contract).
 
 All legs in one runner use its single account:

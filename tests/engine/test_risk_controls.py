@@ -16,16 +16,15 @@ from librae.core.executor import (
     calculate_position_weights,
     execute_order_intents,
     execute_pending_decision_and_stops,
-    execute_portfolio_targets,
+    execute_portfolio_weights,
     liquidate_all,
 )
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
     Fill,
-    MultiLegOrder,
     OrderIntent,
-    PortfolioTargets,
+    PortfolioWeights,
     PositionState,
     Strategy,
 )
@@ -272,8 +271,8 @@ class TestMaxOrderNotional:
         positions: dict[str, PositionState] = {}
 
         with pytest.raises(ValueError, match="max_order_notional"):
-            execute_portfolio_targets(
-                PortfolioTargets(weights={"TEST": 0.5}),
+            execute_portfolio_weights(
+                PortfolioWeights(weights={"TEST": 0.5}),
                 positions,
                 1_000.0,
                 TS,
@@ -383,18 +382,16 @@ class TestPortfolioExposureLimits:
 
         assert positions == {}
 
-    def test_multi_leg_batch_cannot_bypass_gross_limit(self):
+    def test_grouped_batch_cannot_bypass_gross_limit(self):
         positions: dict[str, PositionState] = {}
         bars = {
             "AAA": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
             "BBB": {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
         }
-        decision = MultiLegOrder(
-            legs=(
-                OrderIntent(action="long", symbol="AAA", quantity=1.5),
-                OrderIntent(action="short", symbol="BBB", quantity=1.5),
-            ),
-        )
+        decision = [
+            OrderIntent(action="long", symbol="AAA", quantity=1.5, group_id="g"),
+            OrderIntent(action="short", symbol="BBB", quantity=1.5, group_id="g"),
+        ]
 
         with pytest.raises(ValueError, match="post-decision gross exposure"):
             execute_pending_decision_and_stops(
@@ -444,7 +441,7 @@ class TestPortfolioExposureLimits:
             TS,
             positions,
             0.0,
-            PortfolioTargets(weights={"TEST": 0.75}),
+            PortfolioWeights(weights={"TEST": 0.75}),
             bars,
             get_cost_model=lambda _symbol: _zero_cost(),
             default_fill="open",

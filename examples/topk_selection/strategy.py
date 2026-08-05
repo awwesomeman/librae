@@ -5,7 +5,7 @@ from __future__ import annotations
 from math import isfinite
 
 import pandas as pd
-from librae import Context, PortfolioTargets, Strategy, StrategyDecision
+from librae import Context, PortfolioWeights, Strategy, StrategyDecision
 
 
 def prepare_signals(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
@@ -50,7 +50,7 @@ class TopKSelectionStrategy(Strategy):
         weight = self._target_exposure / len(selected)
         if not set(ctx.positions).issubset(ctx.available_symbols):
             return []
-        return PortfolioTargets(
+        return PortfolioWeights(
             weights={symbol: weight for symbol in selected},
             reason="top_k_selection",
         )

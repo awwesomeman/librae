@@ -1,11 +1,11 @@
-"""Trade a mean-reverting spread with an explicitly sized order group."""
+"""Trade a mean-reverting spread as one group_id-tagged, atomically filled order group."""
 
 from __future__ import annotations
 
 from math import isfinite
 
 import pandas as pd
-from librae import Context, MultiLegOrder, OrderIntent, Strategy, StrategyDecision
+from librae import Context, OrderIntent, Strategy, StrategyDecision
 
 
 def prepare_signals(
@@ -78,45 +78,48 @@ class MultiLegSpreadStrategy(Strategy):
             return []
         zscore = float(raw_zscore)
 
+        group_id = f"{self._near_symbol}-{self._far_symbol}"
         near_position = ctx.positions.get(self._near_symbol)
         far_position = ctx.positions.get(self._far_symbol)
         if near_position is None and far_position is None and abs(zscore) >= self._entry_zscore:
             near_action = "short" if zscore > 0 else "long"
             far_action = "long" if zscore > 0 else "short"
-            return MultiLegOrder(
-                legs=(
-                    OrderIntent(
-                        action=near_action,
-                        symbol=self._near_symbol,
-                        quantity=self._quantity,
-                    ),
-                    OrderIntent(
-                        action=far_action,
-                        symbol=self._far_symbol,
-                        quantity=self._far_quantity,
-                    ),
+            return [
+                OrderIntent(
+                    action=near_action,
+                    symbol=self._near_symbol,
+                    quantity=self._quantity,
+                    reason="spread_entry",
+                    group_id=group_id,
                 ),
-                reason="spread_entry",
-            )
+                OrderIntent(
+                    action=far_action,
+                    symbol=self._far_symbol,
+                    quantity=self._far_quantity,
+                    reason="spread_entry",
+                    group_id=group_id,
+                ),
+            ]
 
         if (
             near_position is not None
             and far_position is not None
             and abs(zscore) <= self._exit_zscore
         ):
-            return MultiLegOrder(
-                legs=(
-                    OrderIntent(
-                        action="close",
-                        symbol=self._near_symbol,
-                        quantity=near_position.quantity,
-                    ),
-                    OrderIntent(
-                        action="close",
-                        symbol=self._far_symbol,
-                        quantity=far_position.quantity,
-                    ),
+            return [
+                OrderIntent(
+                    action="close",
+                    symbol=self._near_symbol,
+                    quantity=near_position.quantity,
+                    reason="spread_exit",
+                    group_id=group_id,
                 ),
-                reason="spread_exit",
-            )
+                OrderIntent(
+                    action="close",
+                    symbol=self._far_symbol,
+                    quantity=far_position.quantity,
+                    reason="spread_exit",
+                    group_id=group_id,
+                ),
+            ]
         return []
