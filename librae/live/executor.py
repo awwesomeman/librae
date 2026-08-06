@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
-from librae.core.strategy import PositionEventType
+from librae.core.strategy import PositionEventType, TimeInForce
 from librae.core.utils import validate_contract_month
 
 if TYPE_CHECKING:
@@ -92,6 +92,7 @@ class OrderSignal(TypedDict):
     currency: NotRequired[str]
     contract_month: NotRequired[str]
     group_id: NotRequired[str]
+    time_in_force: TimeInForce
 
 
 class BrokerOrderReport(TypedDict, total=False):
@@ -158,6 +159,7 @@ class OrderRequest:
     continuous_alias: bool = False
     contract_month: str | None = None
     group_id: str | None = None
+    time_in_force: TimeInForce | None = None
 
     def __post_init__(self) -> None:
         if not self.client_order_id or not self.symbol:
@@ -188,6 +190,15 @@ class OrderRequest:
                 raise ValueError("limit orders require a positive finite limit_price")
         elif self.limit_price is not None:
             raise ValueError("market orders cannot have a limit_price")
+        if self.time_in_force is None:
+            # A resting market order is nonsensical everywhere; a limit order
+            # rests for the placing bar's duration by default, matching
+            # OrderIntent.limit_price's "valid for one eligible bar" contract.
+            object.__setattr__(
+                self, "time_in_force", "ioc" if self.order_type == "market" else "day"
+            )
+        elif self.time_in_force not in ("day", "gtc", "ioc", "fok"):
+            raise ValueError(f"invalid time_in_force: {self.time_in_force!r}")
 
     def to_signal(self) -> OrderSignal:
         signal: OrderSignal = {
@@ -198,6 +209,7 @@ class OrderRequest:
             "order_type": self.order_type,
             "client_order_id": self.client_order_id,
             "position_effect": self.position_effect,
+            "time_in_force": self.time_in_force,
         }
         for key in ("security_type", "exchange", "currency", "contract_month", "group_id"):
             value = getattr(self, key)
@@ -442,6 +454,7 @@ class LiveExecutor:
             continuous_alias=instrument.continuous_alias if instrument else False,
             contract_month=instrument.contract_month if instrument else None,
             group_id=event.group_id,
+            time_in_force=event.time_in_force,
         )
 
     def prepare_order(

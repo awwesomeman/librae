@@ -477,7 +477,8 @@ config = RunConfig(
         adv_lookback_sessions=20,
         max_adv_participation_rate=0.01,
         warmup_periods=720,
-        # Local fallback, not broker IOC/FOK/GTD.
+        # Client-side backstop; see OrderIntent.time_in_force for the
+        # broker-native day/gtc/ioc/fok instruction.
         live_order_timeout_seconds=120,
     ),
     risk=RiskPolicy(
@@ -531,8 +532,27 @@ exceeded `RunConfig.runtime.poll_seconds`.
   from the persisted wall-clock placement attempt. On expiry the engine first
   refreshes the broker report, requests cancellation only if the order remains
   non-terminal, applies any additional cumulative fill, then halts. `None`
-  leaves lifetime to the broker. This is not broker-native time-in-force:
-  IOC/FOK/GTD/DAY support remains adapter- and venue-specific.
+  leaves lifetime to the broker. This is a client-side wall-clock watchdog,
+  not broker-native time-in-force, and composes with `OrderIntent.time_in_force`
+  rather than replacing it: time-in-force governs what the *exchange* does
+  when an order can't immediately match; this timeout is the engine's own
+  backstop for cancelling a still-resting `day`/`gtc` order after N seconds
+  regardless of its time-in-force.
+
+`OrderIntent.time_in_force` (`"day"` / `"gtc"` / `"ioc"` / `"fok"`) is a
+live-only broker instruction, ignored by backtest/sim fills. Leaving it unset
+(`None`) resolves per order type rather than to one fixed default: market
+orders resolve to `"ioc"` (a resting market order is nonsensical everywhere)
+and limit orders resolve to `"day"` (rests for the placing bar's duration,
+matching `OrderIntent.limit_price`'s "valid for one eligible bar" backtest
+contract). Each adapter maps the four values to its own SDK:
+
+| `time_in_force` | Shioaji (`sj.OrderType`) | IBKR (`order.tif`) | Crypto/ccxt (`params["timeInForce"]`) |
+|---|---|---|---|
+| `"day"` | `ROD` (limit only — TAIFEX rejects market+ROD) | `"DAY"` | `"GTC"` (24/7 market, no session end) |
+| `"gtc"` | unsupported — raises | `"GTC"` | `"GTC"` |
+| `"ioc"` | `IOC` | `"IOC"` | `"IOC"` |
+| `"fok"` | `FOK` | `"FOK"` | `"FOK"` |
 - `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
 - `max_order_notional`: hard-rejects an individual exposure-increasing open or
   add above this account-currency notional after normal position/liquidity

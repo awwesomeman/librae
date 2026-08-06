@@ -339,6 +339,7 @@ class TestPlaceOrder:
         mock_sj.StockPriceType.MKT = "STK_MKT"
         mock_sj.OrderType.ROD = "ROD"
         mock_sj.OrderType.IOC = "IOC"
+        mock_sj.OrderType.FOK = "FOK"
         mock_sj.FuturesOrder = MagicMock(return_value="mock_order")
         mock_sj.StockOrder = MagicMock(return_value="mock_order")
         return mock_sj
@@ -355,6 +356,7 @@ class TestPlaceOrder:
                 "side": "buy",
                 "quantity": 2.9,
                 "order_type": "limit",
+                "time_in_force": "day",
                 "price": 20_000.8,
                 "tick_size": 1.0,
                 "continuous_alias": True,
@@ -375,6 +377,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 1.0,
                     "order_type": "limit",
+                    "time_in_force": "day",
                     "price": 20_000.0,
                     "tick_size": 1.0,
                     "continuous_alias": True,
@@ -394,6 +397,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 1.0,
                     "order_type": "market",
+                    "time_in_force": "ioc",
                 }
             )
 
@@ -413,6 +417,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 1,
                     "order_type": "limit",
+                    "time_in_force": "day",
                     "price": 17000,
                     "continuous_alias": True,
                 }
@@ -445,6 +450,7 @@ class TestPlaceOrder:
                     "side": "sell",
                     "quantity": 1000,
                     "order_type": "market",
+                    "time_in_force": "ioc",
                 }
             )
 
@@ -472,6 +478,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 1,
                     "order_type": "market",
+                    "time_in_force": "ioc",
                     "client_order_id": "strategy-TXFR1-open-20260101T000000",
                     "continuous_alias": True,
                 }
@@ -500,6 +507,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 1,
                     "order_type": "market",
+                    "time_in_force": "ioc",
                     "continuous_alias": True,
                 }
             )
@@ -511,6 +519,81 @@ class TestPlaceOrder:
             price_type="FUT_MKT",
             order_type="IOC",
         )
+
+    def test_futures_limit_order_accepts_explicit_fok(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+        mock_trade = MagicMock()
+        mock_trade.status.id = "order999"
+        mock_trade.status.status = "Filled"
+        adapter._api.place_order.return_value = mock_trade
+
+        mock_sj = self._mock_shioaji_module()
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj):
+            adapter.place_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "limit",
+                    "time_in_force": "fok",
+                    "price": 17000,
+                    "continuous_alias": True,
+                }
+            )
+
+        mock_sj.FuturesOrder.assert_called_once_with(
+            price=17000,
+            quantity=1,
+            action="BUY",
+            price_type="FUT_LMT",
+            order_type="FOK",
+        )
+
+    def test_place_order_rejects_gtc(self):
+        """TAIFEX has no multi-day resting order; 'gtc' has no ROD/IOC/FOK
+        equivalent and must fail closed rather than silently downgrading."""
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        mock_sj = self._mock_shioaji_module()
+        with (
+            patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj),
+            pytest.raises(ValueError, match="GTC"),
+        ):
+            adapter.place_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "limit",
+                    "time_in_force": "gtc",
+                    "price": 17000,
+                    "continuous_alias": True,
+                }
+            )
+
+    def test_place_order_rejects_market_order_with_day(self):
+        """Confirms the existing TAIFEX market+ROD rejection (op_code 9938)
+        is still enforced now that time_in_force is an explicit field."""
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        mock_sj = self._mock_shioaji_module()
+        with (
+            patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj),
+            pytest.raises(ValueError, match="market orders cannot use 'day'"),
+        ):
+            adapter.place_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "market",
+                    "time_in_force": "day",
+                    "continuous_alias": True,
+                }
+            )
 
 
 def test_trade_normalization_uses_cumulative_deals():

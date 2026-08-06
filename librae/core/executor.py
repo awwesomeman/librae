@@ -41,6 +41,7 @@ from .strategy import (
     PositionSide,
     PositionState,
     StrategyDecision,
+    TimeInForce,
 )
 
 logger = logging.getLogger(__name__)
@@ -295,6 +296,7 @@ class OrderEvent:
     entry_slippage: float | None = None
     entry_tax: float | None = None
     group_id: str | None = None
+    time_in_force: TimeInForce | None = None
 
 
 @dataclass
@@ -503,6 +505,7 @@ def build_close_event(
     *,
     quantity: float | None = None,
     bar_volume: float | None = None,
+    time_in_force: TimeInForce | None = None,
 ) -> tuple[TradeResult, OrderEvent, float, bool]:
     """Close a position (full/partial) and build its TradeResult + OrderEvent together.
 
@@ -545,6 +548,7 @@ def build_close_event(
         periods_held=pos.periods_held,
         reason=reason,
         group_id=pos.group_id,
+        time_in_force=time_in_force,
     )
     return trade, event, proceeds, fully_closed
 
@@ -1416,6 +1420,7 @@ def execute_order_intents(
         cost_model = get_cost_model(sym)
         reason = action.reason
         group_id = action.group_id
+        time_in_force = action.time_in_force
 
         if action.action in ("long", "short"):
             desired_side: PositionSide = action.action
@@ -1482,6 +1487,7 @@ def execute_order_intents(
                             tax=fill.tax,
                             reason=reason,
                             group_id=group_id,
+                            time_in_force=time_in_force,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1536,6 +1542,7 @@ def execute_order_intents(
                             tax=fill.tax,
                             reason=reason,
                             group_id=group_id,
+                            time_in_force=time_in_force,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1581,6 +1588,7 @@ def execute_order_intents(
                 reason,
                 quantity=requested_qty,
                 bar_volume=bar_volume,
+                time_in_force=time_in_force,
             )
             trades.append(trade)
             events.append(event)

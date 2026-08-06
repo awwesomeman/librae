@@ -428,6 +428,7 @@ def test_crypto_adapter_rejects_ordering_continuous_alias(
                 "side": "buy",
                 "quantity": 1.0,
                 "order_type": "market",
+                "time_in_force": "ioc",
                 "continuous_alias": True,
             }
         )
@@ -518,6 +519,7 @@ def test_prepare_order_applies_precision_and_limits(authed_adapter, mock_ccxt_ex
             "side": "buy",
             "quantity": 0.12345,
             "order_type": "limit",
+            "time_in_force": "day",
             "price": 100.123,
             "position_effect": "open",
         }
@@ -543,6 +545,7 @@ def test_prepare_order_rejects_spot_short_open(authed_adapter, mock_ccxt_exchang
                 "side": "sell",
                 "quantity": 0.1,
                 "order_type": "market",
+                "time_in_force": "ioc",
                 "position_effect": "open",
                 "reference_price": 50_000.0,
             }
@@ -565,6 +568,7 @@ def test_prepare_order_rejects_min_notional(authed_adapter, mock_ccxt_exchange):
                 "side": "buy",
                 "quantity": 0.0001,
                 "order_type": "market",
+                "time_in_force": "ioc",
                 "position_effect": "open",
                 "reference_price": 50_000.0,
             }
@@ -591,6 +595,7 @@ def test_prepare_order_requires_derivative_contract_size(
                 "side": "sell",
                 "quantity": 1.0,
                 "order_type": "market",
+                "time_in_force": "ioc",
                 "position_effect": "open",
                 "reference_price": 50_000.0,
             }
@@ -604,10 +609,33 @@ def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
         "side": "buy",
         "quantity": 0.01,
         "order_type": "market",
+        "time_in_force": "ioc",
     }
     result = authed_adapter.place_order(signal)
     assert result["id"] == "ord_1"
     mock_ccxt_exchange.create_order.assert_called_once()
+    assert mock_ccxt_exchange.create_order.call_args.kwargs["params"]["timeInForce"] == "IOC"
+
+
+@pytest.mark.parametrize(
+    ("time_in_force", "expected"),
+    [("day", "GTC"), ("gtc", "GTC"), ("ioc", "IOC"), ("fok", "FOK")],
+)
+def test_place_order_maps_time_in_force(
+    authed_adapter, mock_ccxt_exchange, time_in_force, expected
+):
+    """'day' has no ccxt equivalent on a 24/7 market, so it maps to GTC."""
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
+    authed_adapter.place_order(
+        {
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "quantity": 0.01,
+            "order_type": "market",
+            "time_in_force": time_in_force,
+        }
+    )
+    assert mock_ccxt_exchange.create_order.call_args.kwargs["params"]["timeInForce"] == expected
 
 
 def test_place_order_forwards_client_order_id(authed_adapter, mock_ccxt_exchange):
@@ -617,6 +645,7 @@ def test_place_order_forwards_client_order_id(authed_adapter, mock_ccxt_exchange
         "side": "buy",
         "quantity": 0.01,
         "order_type": "market",
+        "time_in_force": "ioc",
         "client_order_id": "strat-BTCUSDT-open-20260101T000000",
     }
     authed_adapter.place_order(signal)
@@ -633,6 +662,7 @@ def test_place_order_without_client_order_id_omits_param(authed_adapter, mock_cc
         "side": "buy",
         "quantity": 0.01,
         "order_type": "market",
+        "time_in_force": "ioc",
     }
     authed_adapter.place_order(signal)
     assert "clientOrderId" not in mock_ccxt_exchange.create_order.call_args.kwargs["params"]
@@ -652,7 +682,13 @@ def test_place_order_backfills_missing_fee_from_trades(authed_adapter, mock_ccxt
     ]
 
     result = authed_adapter.place_order(
-        {"symbol": "BTC/USDT:USDT", "side": "buy", "quantity": 0.01, "order_type": "market"}
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "quantity": 0.01,
+            "order_type": "market",
+            "time_in_force": "ioc",
+        }
     )
 
     assert result["fees"] == [{"currency": "USDT", "cost": 0.05}]
@@ -671,7 +707,13 @@ def test_place_order_skips_backfill_when_fee_already_present(authed_adapter, moc
     mock_ccxt_exchange.has = {"fetchMyTrades": True}
 
     authed_adapter.place_order(
-        {"symbol": "BTC/USDT", "side": "buy", "quantity": 0.01, "order_type": "market"}
+        {
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "quantity": 0.01,
+            "order_type": "market",
+            "time_in_force": "ioc",
+        }
     )
 
     mock_ccxt_exchange.fetch_my_trades.assert_not_called()
@@ -682,7 +724,13 @@ def test_place_order_skips_backfill_when_unfilled(authed_adapter, mock_ccxt_exch
     mock_ccxt_exchange.has = {"fetchMyTrades": True}
 
     authed_adapter.place_order(
-        {"symbol": "BTC/USDT", "side": "buy", "quantity": 0.01, "order_type": "market"}
+        {
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "quantity": 0.01,
+            "order_type": "market",
+            "time_in_force": "ioc",
+        }
     )
 
     mock_ccxt_exchange.fetch_my_trades.assert_not_called()

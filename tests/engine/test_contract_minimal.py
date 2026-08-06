@@ -68,3 +68,15 @@ def test_grouped_decision_rejects_unsafe_ambiguous_legs(decision) -> None:
             bars={"NEAR": {"close": 100.0}, "NEXT": {"close": 101.0}},
             positions={},
         )
+
+
+@pytest.mark.parametrize("invalid", ["gtd", "GTC", "", 1])
+def test_order_intent_rejects_invalid_time_in_force(invalid) -> None:
+    with pytest.raises(ValueError, match="time_in_force"):
+        OrderIntent(action="long", symbol="AAA", time_in_force=invalid)
+
+
+@pytest.mark.parametrize("valid", ["day", "gtc", "ioc", "fok"])
+def test_order_intent_accepts_valid_time_in_force(valid) -> None:
+    intent = OrderIntent(action="long", symbol="AAA", time_in_force=valid)
+    assert intent.time_in_force == valid

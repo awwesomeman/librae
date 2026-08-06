@@ -892,6 +892,7 @@ class Backtest:
                 periods_held=e.periods_held,
                 reason=e.reason,
                 group_id=e.group_id,
+                time_in_force=e.time_in_force,
             )
             for i, e in enumerate(result.order_events)
         ]

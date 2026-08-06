@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from librae.core.run_config import RunMode
-from librae.core.strategy import PositionEventType, PositionSide
+from librae.core.strategy import PositionEventType, PositionSide, TimeInForce
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -95,6 +95,7 @@ class OrderEventRecord:
     entry_slippage: float | None = None
     entry_tax: float | None = None
     group_id: str | None = None
+    time_in_force: TimeInForce | None = None
 
 
 @dataclass(frozen=True)

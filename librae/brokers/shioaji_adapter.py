@@ -391,6 +391,7 @@ class ShioajiAdapter:
 
         Expected *signal* keys: ``symbol``, ``side`` (``"buy"``/``"sell"``),
         ``quantity``, ``order_type`` (``"market"``/``"limit"``),
+        ``time_in_force`` (``"day"``/``"ioc"``/``"fok"`` — no ``"gtc"``),
         and optionally ``price`` for limit orders.
 
         Shioaji caps ``custom_field`` at six characters, so a deterministic
@@ -422,9 +423,18 @@ class ShioajiAdapter:
         # Market orders (MKT) are rejected by TAIFEX/TWSE with ROD (rest-of-day)
         # time-in-force -- confirmed live 2026-07-20, op_code 9938: "市價單不允許
         # 當日有效委託(ROD)". A market order that stays resting all day is a
-        # contradiction in terms; it must be IOC (fill immediately or cancel).
-        # Limit orders keep ROD, which is a legitimate resting order.
-        order_type = sj.OrderType.ROD if is_limit else sj.OrderType.IOC
+        # contradiction in terms; it must be IOC or FOK. TAIFEX has no
+        # multi-day resting order, so "gtc" has no Shioaji equivalent.
+        time_in_force = signal["time_in_force"]
+        if time_in_force == "gtc":
+            raise ValueError("Shioaji has no GTC time-in-force; use 'day', 'ioc', or 'fok'")
+        if not is_limit and time_in_force == "day":
+            raise ValueError("Shioaji market orders cannot use 'day' (ROD); use 'ioc' or 'fok'")
+        order_type = {
+            "day": sj.OrderType.ROD,
+            "ioc": sj.OrderType.IOC,
+            "fok": sj.OrderType.FOK,
+        }[time_in_force]
 
         # shioaji >=1.5 deprecated the generic Order() in favour of
         # StockOrder()/FuturesOrder() (place_order's type hint is now

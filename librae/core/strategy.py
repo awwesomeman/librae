@@ -23,6 +23,7 @@ from typing import Literal
 PositionSide = Literal["long", "short"]
 OrderAction = Literal["long", "short", "close"]
 PositionEventType = Literal["open", "add", "reduce", "close"]
+TimeInForce = Literal["day", "gtc", "ioc", "fok"]
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,12 @@ class OrderIntent:
             member of a group together on one bar or raises — never partially.
             None means independent execution (the default): the intent may
             wait for its own symbol's next bar without blocking anything else.
+        time_in_force: Broker time-in-force hint — "day" (rest until session
+            end), "gtc" (rest until cancelled), "ioc" (fill immediately,
+            cancel the remainder), or "fok" (fill the entire quantity
+            immediately or cancel it all). Live-only: backtest/sim fills are
+            simulated and ignore it. None resolves per order type
+            (see LiveExecutor.OrderRequest) rather than any single default.
     """
 
     action: OrderAction
@@ -157,6 +164,7 @@ class OrderIntent:
     stop_price: float | None = None
     take_profit_price: float | None = None
     group_id: str | None = None
+    time_in_force: TimeInForce | None = None
 
     def __post_init__(self) -> None:
         if self.action not in ("long", "short", "close"):
@@ -167,6 +175,13 @@ class OrderIntent:
             raise TypeError("OrderIntent.reason must be a string")
         if self.group_id is not None and not isinstance(self.group_id, str):
             raise TypeError("OrderIntent.group_id must be a string or None")
+        if self.time_in_force is not None and self.time_in_force not in (
+            "day",
+            "gtc",
+            "ioc",
+            "fok",
+        ):
+            raise ValueError(f"invalid time_in_force: {self.time_in_force!r}")
 
         if self.quantity is not None:
             _validate_positive_finite_number(self.quantity, "OrderIntent.quantity")

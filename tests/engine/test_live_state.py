@@ -53,6 +53,50 @@ def _order() -> TrackedOrder:
     )
 
 
+@pytest.mark.parametrize(
+    ("order_type", "limit_price", "expected"),
+    [("market", None, "ioc"), ("limit", 99.0, "day")],
+)
+def test_order_request_resolves_default_time_in_force(order_type, limit_price, expected):
+    request = OrderRequest(
+        client_order_id="strategy-order-1",
+        symbol="BTC/USDT",
+        side="buy",
+        quantity=2.0,
+        order_type=order_type,
+        limit_price=limit_price,
+        submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+    )
+    assert request.time_in_force == expected
+
+
+def test_order_request_preserves_explicit_time_in_force():
+    request = OrderRequest(
+        client_order_id="strategy-order-1",
+        symbol="BTC/USDT",
+        side="buy",
+        quantity=2.0,
+        order_type="limit",
+        limit_price=99.0,
+        submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+        time_in_force="fok",
+    )
+    assert request.time_in_force == "fok"
+
+
+def test_order_request_rejects_invalid_time_in_force():
+    with pytest.raises(ValueError, match="time_in_force"):
+        OrderRequest(
+            client_order_id="strategy-order-1",
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=2.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+            time_in_force="gtd",
+        )
+
+
 def test_runtime_state_round_trip_preserves_restart_fields():
     state = LiveRuntimeState(
         state_key="live:abc",

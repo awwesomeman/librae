@@ -704,6 +704,33 @@ class TestMultiAsset:
         assert events_by_symbol["C"].group_id == "pair_cd"
         assert events_by_symbol["D"].group_id == "pair_cd"
 
+    def test_time_in_force_flows_from_order_intent_to_order_event(self) -> None:
+        """time_in_force is a live-only hint that backtest ignores for fill
+        logic, but it must still round-trip onto the resulting OrderEvent so
+        it's visible in output regardless of run mode."""
+        df = _make_multiindex_df([100.0] * 5)
+
+        class BuyWithIoc(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 0:
+                    return [
+                        OrderIntent(
+                            action="long", symbol=ctx.symbol, quantity=1.0, time_in_force="ioc"
+                        )
+                    ]
+                return []
+
+        result = Backtest(
+            df,
+            BuyWithIoc(),
+            initial_balance=100_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        open_event = next(e for e in result.order_events if e.event_type == "open")
+        assert open_event.time_in_force == "ioc"
+
     def test_partial_bars_run_strategy_without_consuming_other_symbol_intent(self) -> None:
         timeline = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
         rows = []

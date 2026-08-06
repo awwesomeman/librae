@@ -494,9 +494,12 @@ class CryptoAdapter:
         """Place an order.
 
         Expected *signal* keys: ``symbol``, ``side``, ``quantity``,
-        ``order_type`` (``"market"`` or ``"limit"``), optionally ``price``
-        for limit orders, and optionally ``client_order_id`` (forwarded as
-        ccxt's unified ``clientOrderId`` param, exchange-side dedup/audit).
+        ``order_type`` (``"market"`` or ``"limit"``), ``time_in_force``
+        (``"day"``/``"gtc"``/``"ioc"``/``"fok"``, forwarded as ccxt's unified
+        ``timeInForce`` param — ``"day"`` maps to ``"GTC"``), optionally
+        ``price`` for limit orders, and optionally ``client_order_id``
+        (forwarded as ccxt's unified ``clientOrderId`` param, exchange-side
+        dedup/audit).
         """
         self._require_auth()
         validate_order_signal(signal)
@@ -509,7 +512,13 @@ class CryptoAdapter:
         )
         order_type = signal["order_type"]
         price = signal.get("price")
-        params = {}
+        params = {
+            # "day" has no ccxt/exchange equivalent on a 24/7 market with no
+            # session end, so it maps to GTC (rest until cancelled).
+            "timeInForce": {"day": "GTC", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
+                signal["time_in_force"]
+            ],
+        }
         if signal.get("client_order_id"):
             params["clientOrderId"] = signal["client_order_id"]
         result = self._exchange.create_order(

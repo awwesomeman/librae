@@ -495,7 +495,8 @@ class IBKRAdapter:
         """Place an order.
 
         Expected *signal* keys: ``symbol``, ``side`` (``"buy"``/``"sell"``),
-        ``quantity``, ``order_type`` (``"market"``/``"limit"``),
+        ``quantity``, ``order_type`` (``"market"``/``"limit"``), ``time_in_force``
+        (``"day"``/``"gtc"``/``"ioc"``/``"fok"``, set as IBKR's ``order.tif``),
         optionally ``price`` for limit orders, plus explicit ``security_type``
         (``"STK"`` or ``"FUT"``), ``exchange`` (required for ``"FUT"``),
         and ``currency``. It also accepts an optional
@@ -520,6 +521,9 @@ class IBKRAdapter:
             order = ib_async.LimitOrder(action, signal["quantity"], signal["price"])
         else:
             order = ib_async.MarketOrder(action, signal["quantity"])
+        order.tif = {"day": "DAY", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
+            signal["time_in_force"]
+        ]
         if signal.get("client_order_id"):
             order.orderRef = signal["client_order_id"]
 

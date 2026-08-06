@@ -126,6 +126,8 @@ def validate_order_signal(signal: Mapping[str, Any]) -> None:
     order_type = signal.get("order_type")
     if order_type not in ("market", "limit"):
         raise ValueError("order_type must be 'market' or 'limit'")
+    if signal.get("time_in_force") not in ("day", "gtc", "ioc", "fok"):
+        raise ValueError("time_in_force must be 'day', 'gtc', 'ioc', or 'fok'")
     try:
         quantity = float(signal["quantity"])
     except (KeyError, TypeError, ValueError) as exc:

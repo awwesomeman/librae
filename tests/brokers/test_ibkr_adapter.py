@@ -312,17 +312,17 @@ class TestReadOnlyGuard:
 class TestPlaceOrder:
     def _mock_ib_async_module(self):
         mock = MagicMock()
-        mock.MarketOrder.side_effect = lambda action, qty: {
-            "action": action,
-            "qty": qty,
-            "type": "MKT",
-        }
-        mock.LimitOrder.side_effect = lambda action, qty, price: {
-            "action": action,
-            "qty": qty,
-            "price": price,
-            "type": "LMT",
-        }
+        mock.MarketOrder.side_effect = lambda action, qty: SimpleNamespace(
+            action=action,
+            qty=qty,
+            type="MKT",
+        )
+        mock.LimitOrder.side_effect = lambda action, qty, price: SimpleNamespace(
+            action=action,
+            qty=qty,
+            price=price,
+            type="LMT",
+        )
         return mock
 
     def test_prepare_order_uses_contract_size_and_tick_rules(self):
@@ -342,6 +342,7 @@ class TestPlaceOrder:
                 "side": "sell",
                 "quantity": 1.29,
                 "order_type": "limit",
+                "time_in_force": "day",
                 "price": 100.001,
                 "security_type": "STK",
                 "currency": "USD",
@@ -374,6 +375,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 100,
                     "order_type": "market",
+                    "time_in_force": "ioc",
                     "security_type": "STK",
                     "currency": "USD",
                 }
@@ -381,7 +383,7 @@ class TestPlaceOrder:
 
         adapter._ib.placeOrder.assert_called_once_with(
             "mock_contract",
-            {"action": "BUY", "qty": 100, "type": "MKT"},
+            SimpleNamespace(action="BUY", qty=100, type="MKT", tif="IOC"),
         )
         assert result["id"] == "123"
         assert result["status"] == "PendingSubmit"
@@ -411,6 +413,7 @@ class TestPlaceOrder:
                     "side": "sell",
                     "quantity": 50,
                     "order_type": "limit",
+                    "time_in_force": "day",
                     "price": 900.0,
                     "security_type": "STK",
                     "currency": "USD",
@@ -419,7 +422,7 @@ class TestPlaceOrder:
 
         adapter._ib.placeOrder.assert_called_once_with(
             "mock_contract",
-            {"action": "SELL", "qty": 50, "price": 900.0, "type": "LMT"},
+            SimpleNamespace(action="SELL", qty=50, price=900.0, type="LMT", tif="DAY"),
         )
         assert result["id"] == "456"
         assert result["status"] == "Submitted"
@@ -442,6 +445,7 @@ class TestPlaceOrder:
                     "side": "buy",
                     "quantity": 100,
                     "order_type": "market",
+                    "time_in_force": "ioc",
                     "security_type": "STK",
                     "currency": "USD",
                     "client_order_id": "strat-MU-open-20260101T000000",
@@ -450,6 +454,41 @@ class TestPlaceOrder:
 
         placed_order = adapter._ib.placeOrder.call_args.args[1]
         assert placed_order.orderRef == "strat-MU-open-20260101T000000"
+
+    @pytest.mark.parametrize(
+        ("time_in_force", "expected_tif"),
+        [("day", "DAY"), ("gtc", "GTC"), ("ioc", "IOC"), ("fok", "FOK")],
+    )
+    def test_place_order_sets_tif_from_time_in_force(self, time_in_force, expected_tif):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        mock_trade = MagicMock()
+        mock_trade.order.orderId = 1
+        mock_trade.order.orderRef = ""
+        mock_trade.orderStatus.status = "PendingSubmit"
+        mock_trade.orderStatus.filled = 0
+        mock_trade.orderStatus.avgFillPrice = 0
+        mock_trade.fills = []
+        adapter._ib.placeOrder.return_value = mock_trade
+
+        with patch(
+            "librae.brokers.ibkr_adapter._require_ib_async",
+            return_value=self._mock_ib_async_module(),
+        ):
+            adapter.place_order(
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "quantity": 100,
+                    "order_type": "market",
+                    "time_in_force": time_in_force,
+                    "security_type": "STK",
+                    "currency": "USD",
+                }
+            )
+
+        placed_order = adapter._ib.placeOrder.call_args.args[1]
+        assert placed_order.tif == expected_tif
 
 
 def test_trade_normalization_uses_ibkr_cumulative_fill_and_commission():

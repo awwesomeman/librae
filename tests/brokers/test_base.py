@@ -33,6 +33,7 @@ def test_drop_incomplete_uses_calendar_session_close() -> None:
     [
         ({"side": "hold"}, "side"),
         ({"order_type": "stop"}, "order_type"),
+        ({"time_in_force": "gtd"}, "time_in_force"),
         ({"quantity": 0}, "quantity"),
         ({"order_type": "limit"}, "limit price"),
     ],
@@ -43,6 +44,7 @@ def test_validate_order_signal_rejects_ambiguous_orders(overrides, match):
         "side": "buy",
         "quantity": 1.0,
         "order_type": "market",
+        "time_in_force": "ioc",
     }
     signal.update(overrides)
 
@@ -57,5 +59,6 @@ def test_validate_order_signal_accepts_explicit_market_order():
             "side": "sell",
             "quantity": 1.0,
             "order_type": "market",
+            "time_in_force": "ioc",
         }
     )
