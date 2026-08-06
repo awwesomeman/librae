@@ -97,7 +97,7 @@ For custom broker fetches and third-party factors, see
 | Single-asset research | Supported with next-observed-bar simulated fills |
 | Cross-sectional selection and allocation | Predeclared candidate universe with point-in-time eligibility; optimizer remains strategy-owned; runtime symbol/subscription changes are not managed |
 | Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
-| Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, and latency diagnostics |
+| Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, latency diagnostics, and explicit `time_in_force` (day/gtc/ioc/fok) per adapter |
 | Related multi-leg execution | Explicitly sized `OrderIntent`s sharing a `group_id`, synchronous backtest/sim approximation; live submits legs serially and cancels only the failing group on a leg failure |
 | Execution account | One named account and currency per run; use separate runs for separate broker accounts or currencies |
 | Cross-account coordination | Caller-owned; the engine does not model FX, transfers, settlement, netting, or atomic execution across runs |

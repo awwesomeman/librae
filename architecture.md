@@ -345,7 +345,7 @@ document scoped to layering, boundaries, and naming conventions.
 | `Context` | immutable event snapshot: current bars, positions, one account snapshot, and callback period index |
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
-| `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` ties it to other intents in the same decision that must fill together atomically |
+| `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` ties it to other intents in the same decision that must fill together atomically; `time_in_force` (`day`/`gtc`/`ioc`/`fok`) is a live-only broker hint, ignored by backtest/sim |
 | `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
@@ -355,7 +355,7 @@ document scoped to layering, boundaries, and naming conventions.
 | Type | Description |
 |------|------|
 | `Fill` | fill report: price, quantity, commission, slippage, tax |
-| `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time |
+| `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time, time_in_force (resolved to `ioc`/`day` by order type when unset) |
 | `PositionRequest` | broker-neutral live reconciliation identity: canonical + venue symbol, currency, multiplier, and concrete routing fields |
 | `ExecutionReport` | normalized live state: submitted/accepted/partial/cancel_pending/filled/cancelled/rejected plus confirmed execution facts |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
