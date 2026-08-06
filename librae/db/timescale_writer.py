@@ -359,6 +359,8 @@ def save_backtest_output(
                     _to_dt(ev.entry_at) if ev.entry_at else None,
                     ev.periods_held,
                     ev.reason,
+                    ev.group_id,
+                    ev.time_in_force,
                 )
                 for ev in output.order_events
             ]
@@ -373,7 +375,7 @@ def save_backtest_output(
                     commission, slippage, tax,
                     entry_commission, entry_slippage, entry_tax,
                     pnl, net_return,
-                    entry_at, periods_held, reason)
+                    entry_at, periods_held, reason, group_id, time_in_force)
                    VALUES %s
                    ON CONFLICT (event_id, ts) DO NOTHING""",
                 event_rows,

@@ -45,7 +45,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 18
+_STATE_SCHEMA_VERSION = 19
 
 
 def normalize_runtime_revision(

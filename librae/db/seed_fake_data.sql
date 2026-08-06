@@ -26,13 +26,15 @@ INSERT INTO trade_events
     (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
      symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,
-     commission, slippage, tax, pnl, net_return, entry_at, periods_held, reason)
+     commission, slippage, tax, pnl, net_return, entry_at, periods_held, reason,
+     group_id, time_in_force)
 VALUES
     ('seed_evt_1', 'seed_test_run', 'default', 'USDT',
      'seed_test', 'backtest', 'H1', NOW(),
      'BTCUSDT', 'long', 'close',
      0.1, 65000, 64000, 0, 6500,
-     1.2, 0.5, 0, 95, 0.0148, NOW() - INTERVAL '2 hours', 2, 'exit_signal')
+     1.2, 0.5, 0, 95, 0.0148, NOW() - INTERVAL '2 hours', 2, 'exit_signal',
+     NULL, 'day')
 ON CONFLICT (event_id, ts) DO NOTHING;
 
 INSERT INTO strategy_performance

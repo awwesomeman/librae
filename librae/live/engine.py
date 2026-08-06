@@ -854,23 +854,30 @@ class LiveTrader:
         )
 
     def _fail_group_or_halt(self, tracked: TrackedOrder, *, title: str, message: str) -> bool:
-        """Scope one leg's failure to its related-order group when possible.
+        """Scope one leg's *confirmed* terminal failure to its group when possible.
 
-        A leg with no group_id has no isolation boundary, so it halts live
-        trading exactly like any other unrecoverable order failure. A grouped
-        leg's failure instead cancels only that group's other still-active
-        legs and alerts — unrelated groups and independent intents keep
-        executing. Returns True if the whole account was halted (caller
-        should stop advancing this tick), False if only the group was
-        cancelled (caller should continue to the next active order).
+        Only call this once the broker has given a definite answer for
+        `tracked` (report.status in ("cancelled", "rejected"), already
+        reflected via _apply_order_report — tracked is no longer in
+        _active_orders by the time this runs). Anything short of that —
+        ambiguous placement, an unresolved timeout, a cancellation attempt
+        that raised — means the broker-side state of `tracked` itself is
+        unknown, not just its outcome, and must still fail the whole account
+        closed via _halt_live regardless of group_id: scoping an unknown
+        state to "cancel the group and keep going" risks silently losing
+        track of an order that may still be live at the venue.
+
+        A leg with no group_id has no isolation boundary, so it always halts.
+        A grouped leg's confirmed failure cancels only that group's other
+        still-active legs and alerts — unrelated groups and independent
+        intents keep executing. Returns True if the whole account was halted
+        (caller should stop advancing this tick), False if only the group
+        was cancelled (caller should continue to the next active order).
         """
         group_id = tracked.request.group_id
         if group_id is None:
             self._halt_live(title=title, message=message)
             return True
-        if tracked in self._active_orders:
-            self._active_orders.remove(tracked)
-            self._persist_state(tracked)
         if not self._executor.simulation:
             for sibling in list(self._active_orders):
                 if sibling.request.group_id == group_id:
@@ -1599,16 +1606,18 @@ class LiveTrader:
                         lambda request=request: self._executor.find_order(request)
                     )
                     if report is None:
-                        if self._fail_group_or_halt(
-                            tracked,
+                        # Genuinely unknown broker state (not a confirmed
+                        # rejection) — always halt the whole account, even
+                        # for a grouped leg, rather than risk losing track
+                        # of an order that may still be live at the venue.
+                        self._halt_live(
                             title="Ambiguous Order Placement",
                             message=(
                                 f"{request.symbol} qty={request.quantity:.4f} client_order_id="
                                 f"{request.client_order_id} was not found after placement failure"
                             ),
-                        ):
-                            return
-                        continue
+                        )
+                        return
             elif tracked.order_id:
                 report = self._timed_order_call(
                     lambda request=request, order_id=tracked.order_id: self._executor.get_order(
@@ -1620,16 +1629,16 @@ class LiveTrader:
                     lambda request=request: self._executor.find_order(request)
                 )
                 if report is None:
-                    if self._fail_group_or_halt(
-                        tracked,
+                    # Same reasoning as "Ambiguous Order Placement" above:
+                    # unknown broker state always halts, group or not.
+                    self._halt_live(
                         title="Ambiguous Restored Order",
                         message=(
                             f"{request.symbol} client_order_id={request.client_order_id} "
                             "was placement-attempted but cannot be found"
                         ),
-                    ):
-                        return
-                    continue
+                    )
+                    return
 
             cancellation_was_pending = tracked.status == "cancel_pending"
             prior_filled_quantity = tracked.filled_quantity
@@ -1701,8 +1710,10 @@ class LiveTrader:
         request = tracked.request
         order_id = latest_report.order_id or tracked.order_id
         if not order_id:
-            self._fail_group_or_halt(
-                tracked,
+            # No order id to even attempt a cancel with — unknown broker
+            # state, always halt regardless of group_id (see
+            # _fail_group_or_halt's docstring).
+            self._halt_live(
                 title="Order Timeout Unresolved",
                 message=(
                     f"{request.symbol} client_order_id={request.client_order_id} "
@@ -1718,8 +1729,8 @@ class LiveTrader:
                 raise RuntimeError("broker cancellation returned no execution report")
             self._apply_order_report(tracked, cancel_report)
         except Exception as exc:
-            self._fail_group_or_halt(
-                tracked,
+            # The cancel attempt itself failed — still unknown broker state.
+            self._halt_live(
                 title="Order Timeout Cancellation Failed",
                 message=(
                     f"{request.symbol} order_id={order_id} could not be confirmed cancelled: {exc}"
@@ -1730,22 +1741,19 @@ class LiveTrader:
         if cancel_report.status == "filled":
             return
         status = cancel_report.status
-        if status not in ("cancelled", "rejected"):
+        message = (
+            f"{request.symbol} order_id={order_id} status={status} "
+            f"filled={cancel_report.filled_quantity:.4f}/"
+            f"{cancel_report.requested_quantity:.4f}"
+        )
+        if status in ("cancelled", "rejected"):
+            self._fail_group_or_halt(tracked, title="Order Timeout", message=message)
+        else:
+            # Cancellation itself didn't reach a confirmed terminal status —
+            # still unknown broker state, always halt.
             tracked.status = "cancel_pending"
             self._persist_state(tracked)
-        self._fail_group_or_halt(
-            tracked,
-            title=(
-                "Order Timeout"
-                if status in ("cancelled", "rejected")
-                else "Order Timeout Cancellation Unresolved"
-            ),
-            message=(
-                f"{request.symbol} order_id={order_id} status={status} "
-                f"filled={cancel_report.filled_quantity:.4f}/"
-                f"{cancel_report.requested_quantity:.4f}"
-            ),
-        )
+            self._halt_live(title="Order Timeout Cancellation Unresolved", message=message)
 
     def _apply_order_report(
         self,

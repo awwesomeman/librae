@@ -181,9 +181,12 @@ CREATE TABLE IF NOT EXISTS trade_events (
     entry_at        TIMESTAMPTZ,
     periods_held       INTEGER,
     reason          TEXT,
+    group_id        TEXT,
+    time_in_force   TEXT,
     CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
     CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close')),
-    CONSTRAINT chk_event_mode CHECK (mode IN ('backtest', 'sim', 'live'))
+    CONSTRAINT chk_event_mode CHECK (mode IN ('backtest', 'sim', 'live')),
+    CONSTRAINT chk_event_time_in_force CHECK (time_in_force IN ('day', 'gtc', 'ioc', 'fok'))
 );
 SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);

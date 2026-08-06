@@ -2153,6 +2153,46 @@ class TestLiveExecutionLifecycle:
         assert runner._positions["D"].quantity == pytest.approx(1.0)
         assert runner._positions["SOLO"].quantity == pytest.approx(1.0)
 
+    def test_live_group_ambiguous_placement_still_halts_whole_account(self):
+        """A confirmed broker rejection scopes to its group (see above), but
+        an *ambiguous* failure (submit and find_order both fail) means the
+        order's true broker-side state is unknown — that must still halt the
+        whole account even for a grouped leg, since the order may actually be
+        live at the venue and dropping it from tracking would lose it."""
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = RuntimeError("connection refused")
+        adapter.find_order.return_value = None
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
+        )
+        alerts = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner._last_prices = {"SPOT": 100.0, "PERP": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(
+                    action="long", symbol="SPOT", quantity=1.0, reason="basis", group_id="basis"
+                ),
+                OrderIntent(
+                    action="short", symbol="PERP", quantity=1.0, reason="basis", group_id="basis"
+                ),
+            ],
+            {
+                "SPOT": {"close": 100.0, "volume": 10_000.0},
+                "PERP": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        assert runner._halted is True
+        assert any(
+            m == "send_alert" and "Ambiguous Order Placement" in kw["title"] for m, kw in alerts
+        )
+
     def test_post_fill_risk_uses_broker_price_and_halts(self):
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report(

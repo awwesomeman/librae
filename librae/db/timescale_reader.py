@@ -180,7 +180,7 @@ def load_trade_events(
                fill_quantity, price, entry_price, remaining_quantity, notional,
                commission, slippage, tax,
                entry_commission, entry_slippage, entry_tax,
-               pnl, net_return, entry_at, periods_held, reason
+               pnl, net_return, entry_at, periods_held, reason, group_id, time_in_force
         FROM trade_events
         WHERE run_id = %s
     """
