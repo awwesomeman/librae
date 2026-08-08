@@ -33,6 +33,16 @@ class TestRenderUnifiedDashboard:
         assert "run_id" in var_names
         assert "account_id" in var_names
         assert "symbol" in var_names
+        assert "symbols" in var_names
+
+    def test_symbols_variable_supports_multi_select_and_all(self):
+        """Trade Events must default to showing every symbol (a multi-leg
+        arb position's paired legs need to stay visible together) while
+        still letting a user narrow to one or a few for debugging."""
+        d = render_unified_dashboard()
+        symbols_var = next(v for v in d["templating"]["list"] if v["name"] == "symbols")
+        assert symbols_var["multi"] is True
+        assert symbols_var["includeAll"] is True
 
     def test_single_symbol_panels_are_filtered_and_labeled_by_symbol(self):
         """Price Trend / Entry-Exit Signals show one instrument at a time —
@@ -98,6 +108,23 @@ class TestRenderUnifiedDashboard:
         assert "gross_exposure" in sql
         assert "net_exposure" in sql
         assert "concentration" in sql
+
+    def test_open_positions_and_trade_events_surface_group_id(self):
+        """group_id (OrderIntent's atomic multi-leg grouping) is the correct
+        way to pair related rows (e.g. a funding-arb spot+perp leg) — not
+        coincidental symbol-name sorting."""
+        d = render_unified_dashboard()
+        for title in ("Open Positions", "Trade Events"):
+            panel = next(p for p in d["panels"] if p["title"] == title)
+            sql = panel["targets"][0]["rawSql"]
+            assert '"Group"' in sql
+            assert "group_id" in sql
+
+    def test_trade_events_filters_by_multi_symbol_variable(self):
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Trade Events")
+        sql = panel["targets"][0]["rawSql"]
+        assert "${symbols:sqlstring}" in sql
 
 
 class TestRenderSignalMonitor:

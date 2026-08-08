@@ -399,6 +399,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' currency AS "Currency",'
                 ' event_type AS "Event",'
                 ' symbol AS "Symbol",'
+                ' group_id AS "Group",'
                 ' side AS "Side",'
                 ' ROUND(fill_quantity::numeric,4) AS "Qty",'
                 ' ROUND(price::numeric,2) AS "Price",'
@@ -412,6 +413,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' reason AS "Reason"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND account_id = '${account_id}'"
+                " AND symbol IN (${symbols:sqlstring})"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
                 "A",
@@ -531,10 +533,11 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "WITH latest AS ("
-                " SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price, entry_at"
+                " SELECT DISTINCT ON (symbol) symbol, group_id, side, remaining_quantity,"
+                " entry_price, entry_at"
                 " FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
                 " ORDER BY symbol, ts DESC)"
-                ' SELECT symbol AS "Symbol", side AS "Side",'
+                ' SELECT symbol AS "Symbol", group_id AS "Group", side AS "Side",'
                 ' ROUND(remaining_quantity::numeric,4) AS "Qty",'
                 ' ROUND(entry_price::numeric,2) AS "Avg Entry",'
                 ' entry_at AS "Entry Time"'
@@ -551,7 +554,7 @@ BASE_PANELS_DEF: list[dict] = [
         },
         "options": {
             "showHeader": True,
-            "sortBy": [{"displayName": "Symbol", "desc": False}],
+            "sortBy": [{"displayName": "Group", "desc": False}],
         },
     },
     {
@@ -785,8 +788,14 @@ def _make_query_variable(
     *,
     hide: int = 0,
     label: str | None = None,
+    multi: bool = False,
 ) -> dict:
-    """Build a Grafana query-type template variable."""
+    """Build a Grafana query-type template variable.
+
+    ``multi=True`` also enables "All" (default expands to every option, so
+    ``${name:sqlstring}`` interpolates a valid SQL ``IN (...)`` list whether
+    one, several, or all values are selected).
+    """
     v: dict = {
         "name": name,
         "type": "query",
@@ -796,11 +805,11 @@ def _make_query_variable(
         "rawQuery": True,
         "refresh": 2,
         "regex": "",
-        "includeAll": False,
+        "includeAll": multi,
         "sort": 0,
-        "current": {},
+        "current": {"text": "All", "value": ["$__all"]} if multi else {},
         "hide": hide,
-        "multi": False,
+        "multi": multi,
     }
     if label:
         v["label"] = label
@@ -840,6 +849,13 @@ def render_unified_dashboard() -> dict:
         " FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
         label="Symbol",
     )
+    symbols_var = _make_query_variable(
+        "symbols",
+        "SELECT jsonb_array_elements_text(symbols) AS symbol"
+        " FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
+        label="Symbols (Trade Events)",
+        multi=True,
+    )
 
     return {
         "uid": "strategy_dashboard",
@@ -851,7 +867,7 @@ def render_unified_dashboard() -> dict:
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [mode_var, strategy_var, run_id_var, account_id_var, symbol_var],
+            "list": [mode_var, strategy_var, run_id_var, account_id_var, symbol_var, symbols_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},

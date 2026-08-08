@@ -117,6 +117,30 @@
         "hide": 0,
         "multi": false,
         "label": "Symbol"
+      },
+      {
+        "name": "symbols",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT jsonb_array_elements_text(symbols) AS symbol FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
+        "query": "SELECT jsonb_array_elements_text(symbols) AS symbol FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": true,
+        "sort": 0,
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "hide": 0,
+        "multi": true,
+        "label": "Symbols (Trade Events)"
       }
     ]
   },
@@ -905,7 +929,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", account_id AS \"Account\", currency AS \"Currency\", event_type AS \"Event\", symbol AS \"Symbol\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_at AS \"Entry Time\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", account_id AS \"Account\", currency AS \"Currency\", event_type AS \"Event\", symbol AS \"Symbol\", group_id AS \"Group\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_at AS \"Entry Time\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND symbol IN (${symbols:sqlstring}) AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1146,7 +1170,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "WITH latest AS ( SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price, entry_at FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' ORDER BY symbol, ts DESC) SELECT symbol AS \"Symbol\", side AS \"Side\", ROUND(remaining_quantity::numeric,4) AS \"Qty\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", entry_at AS \"Entry Time\" FROM latest WHERE remaining_quantity > 0 ORDER BY symbol",
+          "rawSql": "WITH latest AS ( SELECT DISTINCT ON (symbol) symbol, group_id, side, remaining_quantity, entry_price, entry_at FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' ORDER BY symbol, ts DESC) SELECT symbol AS \"Symbol\", group_id AS \"Group\", side AS \"Side\", ROUND(remaining_quantity::numeric,4) AS \"Qty\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", entry_at AS \"Entry Time\" FROM latest WHERE remaining_quantity > 0 ORDER BY symbol",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1196,7 +1220,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "Symbol",
+            "displayName": "Group",
             "desc": false
           }
         ]
