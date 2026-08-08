@@ -194,11 +194,15 @@ class LiveTrader:
             notifications. Scheduling is separate from the transport.
         on_ready: Optional deployment hook called after state restoration,
             durable ownership, and startup broker reconciliation.
-        on_run_registered: Optional hook called with the resolved run_id
-            before the first durable checkpoint write, for a caller whose
+        on_run_registered: Optional hook called with the resolved run_id on
+            every construction, restored or not, for a caller whose
             state_store enforces a run must be registered first (e.g. a
-            foreign key to a run-metadata table). No-op for a restored run,
-            since that run is already registered.
+            foreign key to a run-metadata table). On a fresh run it fires
+            before the first durable checkpoint write; on a restored run it
+            fires inside state restoration, before the state_recovered
+            runtime event, so callers that cache run_id from this call alone
+            (e.g. to stamp later DB writes) are in sync before any event can
+            reach them — no other callback receives run_id as an argument.
     """
 
     def __init__(
@@ -390,7 +394,7 @@ class LiveTrader:
         if self._state_store is not None:
             restored = self._state_store.load(self._state_key)
             if restored is not None:
-                self._restore_state(restored)
+                self._restore_state(restored, on_run_registered)
 
         configured_warmup = config.execution.warmup_periods
         adv_warmup = (config.execution.adv_lookback_sessions or 0) + 1
@@ -428,6 +432,12 @@ class LiveTrader:
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
         if self._state_store is not None and not self._restored_state:
+            # A restored run already notified on_run_registered inside
+            # _restore_state, before it fires the state_recovered event —
+            # callers like _TimescaleCallbacks cache run_id from this call
+            # alone and have no other way to learn it, since on_bar is the
+            # only other callback that receives run_id as an argument rather
+            # than reading cached state.
             if on_run_registered is not None:
                 on_run_registered(self._run_id)
             self._persist_state()
@@ -468,7 +478,9 @@ class LiveTrader:
             adv_filled_quantities=dict(self._adv_filled_quantities),
         )
 
-    def _restore_state(self, state: LiveRuntimeState) -> None:
+    def _restore_state(
+        self, state: LiveRuntimeState, on_run_registered: Callable[[str], None] | None
+    ) -> None:
         if state.state_key != self._state_key:
             raise ValueError("runtime state key does not match this configuration")
         if state.config_hash != self._config.config_hash or state.mode != self._config.mode:
@@ -510,6 +522,11 @@ class LiveTrader:
             len(self._active_orders),
             self._halted,
         )
+        # Notify callbacks of the restored run_id before firing any event —
+        # state_recovered below fires synchronously, and callers like
+        # _TimescaleCallbacks cache run_id from on_run_registered alone.
+        if on_run_registered is not None:
+            on_run_registered(self._run_id)
         if self._on_runtime_event:
             self._on_runtime_event(
                 RuntimeEvent(

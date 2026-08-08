@@ -151,6 +151,76 @@ def test_run_is_registered_before_first_checkpoint_write() -> None:
     callbacks.register_run.assert_called_once()
 
 
+def test_restored_run_also_calls_register_run() -> None:
+    """A restarted process must re-sync callback state too, not just skip
+    straight to trading — _TimescaleCallbacks caches run_id purely from
+    register_run() and has no other way to learn it after a restart, since
+    on_order_event/on_funding_cash_flow/on_runtime_event all read that
+    cached value rather than receiving run_id as an argument. Without this,
+    every DB write after a restart silently fails on the run_id foreign
+    key (caught by _write's best-effort try/except) — invisible short of
+    reading warning logs."""
+    config = make_test_cfg(mode="sim")
+    store = MemoryLiveStateStore()
+
+    first_callbacks = MagicMock()
+    with (
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=first_callbacks),
+    ):
+        first = build_live_trader(
+            MagicMock(), lambda frame: frame, config=config, state_store=store
+        )
+
+    second_callbacks = MagicMock()
+    with (
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=second_callbacks),
+    ):
+        second = build_live_trader(
+            MagicMock(), lambda frame: frame, config=config, state_store=store
+        )
+
+    assert second.run_id == first.run_id
+    second_callbacks.register_run.assert_called_once_with(second.run_id)
+
+
+def test_restored_run_registers_before_state_recovered_event() -> None:
+    """register_run() must complete before the state_recovered RuntimeEvent
+    fires, not just before build_live_trader() returns — _restore_state
+    fires state_recovered synchronously as part of restoration itself, so a
+    register_run() called only afterward (at the end of __init__) is too
+    late: _TimescaleCallbacks.on_runtime_event would still read the stale
+    cached run_id and hit a foreign-key violation on every restart."""
+    config = make_test_cfg(mode="sim")
+    store = MemoryLiveStateStore()
+    call_order: list[str] = []
+
+    first_callbacks = MagicMock()
+    with (
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=first_callbacks),
+    ):
+        build_live_trader(MagicMock(), lambda frame: frame, config=config, state_store=store)
+
+    second_callbacks = MagicMock()
+    second_callbacks.register_run.side_effect = lambda run_id: call_order.append("register_run")
+    second_callbacks.on_runtime_event.side_effect = lambda event: call_order.append(
+        f"on_runtime_event:{event.event_type}"
+    )
+    with (
+        patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=second_callbacks),
+    ):
+        build_live_trader(MagicMock(), lambda frame: frame, config=config, state_store=store)
+
+    assert call_order == ["register_run", "on_runtime_event:state_recovered"]
+
+
 def test_database_and_telegram_wiring_are_independent() -> None:
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
