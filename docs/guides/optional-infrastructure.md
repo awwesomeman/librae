@@ -105,9 +105,11 @@ is generated with:
 uv run python -m librae.app.grafana.generate_dashboards
 ```
 
-The strategy dashboard selects both `run_id` and `account_id`. Equity, PnL,
-metrics, and trade events always retain their currency label; it does not
-combine accounts, including accounts that share a currency.
+The strategy dashboard selects `run_id`, `account_id`, and `symbol`. Equity,
+PnL, metrics, and trade events always retain their currency label; it does
+not combine accounts, including accounts that share a currency. Price Trend
+and Entry/Exit Signals show one symbol at a time — Open Positions and
+Portfolio Exposure cover the full multi-symbol/portfolio state.
 
 Dashboards query the TimescaleDB tables and remain empty until a strategy has
 written data. To inspect the panels before running a real strategy, load the

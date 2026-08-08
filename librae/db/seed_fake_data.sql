@@ -17,9 +17,11 @@ VALUES
 ON CONFLICT (run_id) DO NOTHING;
 
 INSERT INTO equity_curve
-    (ts, run_id, account_id, currency, equity, drawdown, period_return, strategy)
+    (ts, run_id, account_id, currency, equity, drawdown, period_return,
+     gross_exposure, net_exposure, concentration, turnover, strategy)
 VALUES
-    (NOW(), 'seed_test_run', 'default', 'USDT', 100500, -0.01, 0.005, 'seed_test')
+    (NOW(), 'seed_test_run', 'default', 'USDT', 100500, -0.01, 0.005,
+     0.35, 0.35, 0.35, 0.05, 'seed_test')
 ON CONFLICT (run_id, account_id, ts) DO NOTHING;
 
 INSERT INTO trade_events
@@ -30,10 +32,18 @@ INSERT INTO trade_events
      group_id, time_in_force)
 VALUES
     ('seed_evt_1', 'seed_test_run', 'default', 'USDT',
-     'seed_test', 'backtest', 'H1', NOW(),
+     'seed_test', 'backtest', 'H1', NOW() - INTERVAL '2 hours',
      'BTCUSDT', 'long', 'close',
      0.1, 65000, 64000, 0, 6500,
-     1.2, 0.5, 0, 95, 0.0148, NOW() - INTERVAL '2 hours', 2, 'exit_signal',
+     1.2, 0.5, 0, 95, 0.0148, NOW() - INTERVAL '4 hours', 2, 'exit_signal',
+     NULL, 'day'),
+    -- Open position — demonstrates the Open Positions panel (Grafana filters
+    -- to remaining_quantity > 0); the row above is already closed.
+    ('seed_evt_2', 'seed_test_run', 'default', 'USDT',
+     'seed_test', 'backtest', 'H1', NOW(),
+     'BTCUSDT', 'long', 'open',
+     0.05, 65000, 65000, 0.05, 3250,
+     0.6, 0.2, 0, NULL, NULL, NOW(), 0, 'entry_signal',
      NULL, 'day')
 ON CONFLICT (event_id, ts) DO NOTHING;
 

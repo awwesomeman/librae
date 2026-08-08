@@ -342,19 +342,19 @@ BASE_PANELS_DEF: list[dict] = [
         "_type": "fixed",
         "_x": 0,
         "_dy": 0,
-        "title": "Price Trend",
-        "description": "Close price for every run symbol, matched by timeframe and data source.",
+        "title": "Price Trend — ${symbol}",
+        "description": "Close price for the selected symbol, matched by timeframe and data source.",
         "type": "timeseries",
         "h": 10,
         "w": 12,
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT symbols, timeframe, data_source, started_at, ended_at"
+                " SELECT timeframe, data_source, started_at, ended_at"
                 " FROM backtest_runs WHERE run_id = '${run_id}')"
-                " SELECT o.ts AS time, o.close, o.symbol AS metric"
+                ' SELECT o.ts AS time, o.close AS "${symbol}"'
                 " FROM ohlcv o, meta m"
-                " WHERE o.symbol IN (SELECT jsonb_array_elements_text(m.symbols))"
+                " WHERE o.symbol = '${symbol}'"
                 " AND o.timeframe = m.timeframe"
                 " AND (m.data_source IS NULL OR o.data_source = m.data_source)"
                 " AND (m.started_at IS NULL OR o.ts >= m.started_at)"
@@ -365,8 +365,11 @@ BASE_PANELS_DEF: list[dict] = [
             ),
         ],
         "fieldConfig": {
-            "defaults": {"custom": {"lineWidth": 1, "showPoints": "never"}},
-            "overrides": [_color_override("close", "#5794F2")],
+            "defaults": {
+                "custom": {"lineWidth": 1, "showPoints": "never"},
+                "color": {"fixedColor": "#5794F2", "mode": "fixed"},
+            },
+            "overrides": [],
         },
         "options": {
             "tooltip": {"mode": "single"},
@@ -461,7 +464,7 @@ BASE_PANELS_DEF: list[dict] = [
         "_type": "fixed",
         "_x": 0,
         "_dy": 10,
-        "title": "Entry / Exit Signals",
+        "title": "Entry / Exit Signals — ${symbol}",
         "description": "Signal decision time (1 period before fill). Entry = open/add, Exit = reduce/close.",
         "type": "timeseries",
         "h": 5,
@@ -480,6 +483,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
                 " AND te.account_id = '${account_id}'"
+                " AND te.symbol = '${symbol}'"
                 " AND te.event_type IN ('open', 'add')"
                 " AND $__timeFilter(te.ts)",
                 "A",
@@ -497,6 +501,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
                 " AND te.account_id = '${account_id}'"
+                " AND te.symbol = '${symbol}'"
                 " AND te.event_type IN ('reduce', 'close')"
                 " AND $__timeFilter(te.ts)",
                 "B",
@@ -829,6 +834,12 @@ def render_unified_dashboard() -> dict:
         "SELECT DISTINCT account_id FROM equity_curve WHERE run_id='${run_id}' ORDER BY account_id",
         label="Account",
     )
+    symbol_var = _make_query_variable(
+        "symbol",
+        "SELECT jsonb_array_elements_text(symbols) AS symbol"
+        " FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
+        label="Symbol",
+    )
 
     return {
         "uid": "strategy_dashboard",
@@ -840,7 +851,7 @@ def render_unified_dashboard() -> dict:
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [mode_var, strategy_var, run_id_var, account_id_var],
+            "list": [mode_var, strategy_var, run_id_var, account_id_var, symbol_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},

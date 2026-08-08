@@ -32,6 +32,17 @@ class TestRenderUnifiedDashboard:
         assert "mode" in var_names
         assert "run_id" in var_names
         assert "account_id" in var_names
+        assert "symbol" in var_names
+
+    def test_single_symbol_panels_are_filtered_and_labeled_by_symbol(self):
+        """Price Trend / Entry-Exit Signals show one instrument at a time —
+        multiple symbols on one price axis mixes incomparable scales."""
+        d = render_unified_dashboard()
+        for title in ("Price Trend", "Entry / Exit Signals"):
+            panel = next(p for p in d["panels"] if p["title"].startswith(title))
+            assert "${symbol}" in panel["title"]
+            for target in panel["targets"]:
+                assert "${symbol}" in target["rawSql"]
 
     def test_accounting_panels_filter_the_selected_account(self):
         d = render_unified_dashboard()

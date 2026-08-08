@@ -98,6 +98,25 @@
         "hide": 0,
         "multi": false,
         "label": "Account"
+      },
+      {
+        "name": "symbol",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT jsonb_array_elements_text(symbols) AS symbol FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
+        "query": "SELECT jsonb_array_elements_text(symbols) AS symbol FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 0,
+        "multi": false,
+        "label": "Symbol"
       }
     ]
   },
@@ -832,12 +851,12 @@
       }
     },
     {
-      "title": "Price Trend",
-      "description": "Close price for every run symbol, matched by timeframe and data source.",
+      "title": "Price Trend — ${symbol}",
+      "description": "Close price for the selected symbol, matched by timeframe and data source.",
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT symbols, timeframe, data_source, started_at, ended_at FROM backtest_runs WHERE run_id = '${run_id}') SELECT o.ts AS time, o.close, o.symbol AS metric FROM ohlcv o, meta m WHERE o.symbol IN (SELECT jsonb_array_elements_text(m.symbols)) AND o.timeframe = m.timeframe AND (m.data_source IS NULL OR o.data_source = m.data_source) AND (m.started_at IS NULL OR o.ts >= m.started_at) AND (m.ended_at IS NULL OR o.ts <= m.ended_at) AND $__timeFilter(o.ts) ORDER BY o.ts",
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source, started_at, ended_at FROM backtest_runs WHERE run_id = '${run_id}') SELECT o.ts AS time, o.close AS \"${symbol}\" FROM ohlcv o, meta m WHERE o.symbol = '${symbol}' AND o.timeframe = m.timeframe AND (m.data_source IS NULL OR o.data_source = m.data_source) AND (m.started_at IS NULL OR o.ts >= m.started_at) AND (m.ended_at IS NULL OR o.ts <= m.ended_at) AND $__timeFilter(o.ts) ORDER BY o.ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -851,25 +870,13 @@
           "custom": {
             "lineWidth": 1,
             "showPoints": "never"
+          },
+          "color": {
+            "fixedColor": "#5794F2",
+            "mode": "fixed"
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "close"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#5794F2",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "tooltip": {
@@ -1048,12 +1055,12 @@
       }
     },
     {
-      "title": "Entry / Exit Signals",
+      "title": "Entry / Exit Signals — ${symbol}",
       "description": "Signal decision time (1 period before fill). Entry = open/add, Exit = reduce/close.",
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Entry\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.event_type IN ('open', 'add') AND $__timeFilter(te.ts)",
+          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Entry\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.symbol = '${symbol}' AND te.event_type IN ('open', 'add') AND $__timeFilter(te.ts)",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -1062,7 +1069,7 @@
           }
         },
         {
-          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Exit\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.event_type IN ('reduce', 'close') AND $__timeFilter(te.ts)",
+          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Exit\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.symbol = '${symbol}' AND te.event_type IN ('reduce', 'close') AND $__timeFilter(te.ts)",
           "format": "time_series",
           "refId": "B",
           "datasource": {
