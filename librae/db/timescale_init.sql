@@ -226,13 +226,17 @@ CREATE TABLE IF NOT EXISTS runtime_events (
     ts              TIMESTAMPTZ NOT NULL,
     run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
     event_type      TEXT NOT NULL,
+    symbol          TEXT,
     detail          JSONB,
     CONSTRAINT chk_runtime_event_type
-        CHECK (event_type IN ('state_recovered', 'entry_skipped_insufficient_cash'))
+        CHECK (event_type IN ('state_recovered', 'decision_skipped'))
 );
 SELECT create_hypertable('runtime_events', 'ts', if_not_exists => TRUE);
+-- COALESCE(symbol, '') so multiple NULL-symbol events (state_recovered,
+-- batch-level rebalance skips) still dedupe on retry — plain NULL columns
+-- never collide with each other under a standard unique index.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_events_unique
-    ON runtime_events(run_id, ts, event_type);
+    ON runtime_events(run_id, ts, event_type, COALESCE(symbol, ''));
 CREATE INDEX IF NOT EXISTS idx_runtime_events_run_id ON runtime_events(run_id, ts DESC);
 
 -- ============================================================

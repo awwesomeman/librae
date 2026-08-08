@@ -996,6 +996,7 @@ def write_runtime_event(
     run_id: str,
     ts: datetime,
     event_type: str,
+    symbol: str | None = None,
     detail: Mapping[str, object] | None = None,
     dsn: str | None = None,
 ) -> None:
@@ -1003,14 +1004,15 @@ def write_runtime_event(
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO runtime_events (ts, run_id, event_type, detail)
-               VALUES (%s,%s,%s,%s)
-               ON CONFLICT (run_id, ts, event_type) DO UPDATE SET
+            """INSERT INTO runtime_events (ts, run_id, event_type, symbol, detail)
+               VALUES (%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id, ts, event_type, COALESCE(symbol, '')) DO UPDATE SET
                  detail=EXCLUDED.detail""",
             (
                 _to_dt(ts),
                 run_id,
                 event_type,
+                symbol,
                 json.dumps(detail) if detail is not None else None,
             ),
         )

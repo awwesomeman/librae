@@ -684,7 +684,7 @@ flowchart TD
 | `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
 | `funding_cash_flows` | applied perpetual-funding rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
-| `runtime_events` | operational audit trail (restarts, skipped decisions) — not a fill; `event_type` is a small, deliberately closed set | unique `(run_id, ts, event_type)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
+| `runtime_events` | operational audit trail (restarts, skipped decisions) — not a fill; `event_type` is a small, deliberately closed set (`state_recovered`, `decision_skipped`), with the specific skip reason as a free string in `detail` | unique `(run_id, ts, event_type, COALESCE(symbol, ''))`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |

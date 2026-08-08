@@ -223,7 +223,8 @@ class TestRebalanceExecution:
         assert positions == {}
         assert len(result.runtime_events) == 1
         event = result.runtime_events[0]
-        assert event.event_type == "entry_skipped_insufficient_cash"
+        assert event.event_type == "decision_skipped"
+        assert event.detail["reason"] == "insufficient_cash"
         assert event.detail["symbols"] == ["A"]
 
     def test_weight_remainder_stays_in_cash(self) -> None:

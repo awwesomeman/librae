@@ -392,6 +392,7 @@ def test_timescale_callbacks_writes_runtime_event() -> None:
         run_id="run-1",
         ts=ts,
         event_type="state_recovered",
+        symbol=None,
         detail={},
     )
 

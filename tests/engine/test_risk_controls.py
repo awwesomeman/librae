@@ -231,6 +231,83 @@ class TestProcessActionsPositionCap:
         assert len(result.events) == 1
         assert result.events[0].fill_quantity == pytest.approx(3.0)
 
+    def test_no_room_at_all_reports_notional_capped(self):
+        """An existing position already at the cap leaves no room for a new
+        addition — the fill is dropped entirely, not just clamped."""
+        actions = [OrderIntent(action="long", symbol="TEST")]
+        result = execute_order_intents(
+            actions,
+            {},
+            10_000.0,
+            TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_position_notional=0.0,
+        )
+        assert result.events == []
+        assert [e.detail["reason"] for e in result.runtime_events] == ["notional_capped"]
+        assert result.runtime_events[0].symbol == "TEST"
+
+
+class TestSilentlyDroppedDecisionsAreReported:
+    """execute_order_intents' entry/scale/close paths must report every
+    "decision hit an operational constraint and wasn't executed" case as a
+    RuntimeEvent — not just log it (or not even that)."""
+
+    def test_opposite_side_reject(self):
+        positions = {"TEST": _make_pos(side="long", quantity=10.0)}
+
+        result = execute_order_intents(
+            [OrderIntent(action="short", symbol="TEST", quantity=1.0)],
+            positions,
+            10_000.0,
+            TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+        )
+
+        assert result.events == []
+        assert [e.detail["reason"] for e in result.runtime_events] == ["opposite_side"]
+        assert result.runtime_events[0].symbol == "TEST"
+
+    def test_scale_in_missing_quantity(self):
+        positions = {"TEST": _make_pos(side="long", quantity=10.0)}
+
+        result = execute_order_intents(
+            [OrderIntent(action="long", symbol="TEST")],
+            positions,
+            10_000.0,
+            TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+        )
+
+        assert result.events == []
+        assert [e.detail["reason"] for e in result.runtime_events] == ["missing_quantity"]
+        assert result.runtime_events[0].symbol == "TEST"
+
+    def test_close_capped_to_zero_by_volume(self):
+        positions = {"TEST": _make_pos(side="long", quantity=10.0)}
+
+        result = execute_order_intents(
+            [OrderIntent(action="close", symbol="TEST")],
+            positions,
+            0.0,
+            TS,
+            get_price=lambda s, a: 100.0,
+            get_cost_model=lambda s: _zero_cost(),
+            primary_symbol="TEST",
+            max_bar_volume_participation_rate=0.1,
+            get_volume=lambda s: 0.0,
+        )
+
+        assert result.trades == []
+        assert [e.detail["reason"] for e in result.runtime_events] == ["volume_capped"]
+        assert result.runtime_events[0].symbol == "TEST"
+
 
 class TestMaxOrderNotional:
     def test_oversized_entry_is_rejected_before_mutation(self):
@@ -512,6 +589,7 @@ class TestProcessActionsVolumeCap:
             get_volume=lambda s: 0.0,
         )
         assert result.events == []
+        assert [e.detail["reason"] for e in result.runtime_events] == ["volume_capped"]
 
     def test_missing_volume_data_rejects_when_cap_is_enabled(self):
         """No volume data (get_volume returns None) is a different case
@@ -530,6 +608,7 @@ class TestProcessActionsVolumeCap:
             get_volume=lambda s: None,
         )
         assert result.events == []
+        assert [e.detail["reason"] for e in result.runtime_events] == ["volume_capped"]
 
     def test_reduction_is_capped_and_uses_exit_volume_for_impact(self):
         positions = {"TEST": _make_pos(quantity=10.0)}

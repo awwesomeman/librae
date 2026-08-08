@@ -299,7 +299,7 @@ class OrderEvent:
     time_in_force: TimeInForce | None = None
 
 
-RuntimeEventType = Literal["state_recovered", "entry_skipped_insufficient_cash"]
+RuntimeEventType = Literal["state_recovered", "decision_skipped"]
 
 
 @dataclass(frozen=True)
@@ -307,13 +307,33 @@ class RuntimeEvent:
     """An operational event worth an audit trail — not a fill.
 
     ``event_type`` is a small, deliberately closed set (matches the
-    ``runtime_events`` table's CHECK constraint); extend it only when a new
-    call site actually needs to report one, not speculatively.
+    ``runtime_events`` table's CHECK constraint) — new *kinds* of event
+    still extend it deliberately. ``decision_skipped`` instead covers every
+    "a decision hit an operational constraint and wasn't executed" case
+    (insufficient cash, a notional/volume cap, an unresolvable side, a
+    missing quantity, ...) under one type, with ``detail["reason"]``
+    naming which one — a free string, not part of the closed set, so a new
+    reason never needs a schema change.
     """
 
     ts: datetime
     event_type: RuntimeEventType
+    symbol: str | None = None
     detail: Mapping[str, object] = field(default_factory=dict)
+
+
+def _skipped(
+    ts: datetime, reason: str, *, symbol: str | None = None, **context: object
+) -> RuntimeEvent:
+    """Build a ``decision_skipped`` RuntimeEvent — the single call every
+    "operational constraint blocked a decision" site should use.
+
+    ``symbol`` is a top-level field (not just detail) so multiple skips at
+    the same ts for different symbols stay distinguishable in storage.
+    """
+    return RuntimeEvent(
+        ts=ts, event_type="decision_skipped", symbol=symbol, detail={"reason": reason, **context}
+    )
 
 
 @dataclass
@@ -1324,21 +1344,24 @@ def _try_fill(
     existing_qty: float = 0.0,
     max_volume_qty: float | None = None,
     bar_volume: float | None = None,
-) -> tuple[Fill | None, float]:
-    """Attempt a fill and validate cash sufficiency. Returns (fill, outlay) or (None, 0)."""
+) -> tuple[Fill | None, float, str | None]:
+    """Attempt a fill and validate cash sufficiency.
+
+    Returns (fill, outlay, None), or (None, 0.0, skip_reason) when rejected.
+    """
     fill = simulate_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
     if not fill or fill.quantity <= 0:
-        return None, 0.0
+        return None, 0.0, "insufficient_cash"
     if max_notional is not None:
         fill = _cap_fill_to_notional(
             fill, existing_qty, cost_model, max_notional, bar_volume=bar_volume
         )
         if fill is None:
-            return None, 0.0
+            return None, 0.0, "notional_capped"
     if max_volume_qty is not None:
         fill = _cap_fill_to_volume(fill, cost_model, max_volume_qty, bar_volume=bar_volume)
         if fill is None:
-            return None, 0.0
+            return None, 0.0, "volume_capped"
     outlay = cost_model.estimate_entry_outlay(
         price,
         fill.quantity,
@@ -1346,8 +1369,8 @@ def _try_fill(
         bar_volume=bar_volume,
     )
     if available_cash - outlay < -EPSILON:
-        return None, 0.0
-    return fill, outlay
+        return None, 0.0, "insufficient_cash"
+    return fill, outlay, None
 
 
 def _validate_entry_order_notional(
@@ -1403,6 +1426,7 @@ def execute_order_intents(
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
+    runtime_events: list[RuntimeEvent] = []
     cash_delta = 0.0
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
@@ -1456,7 +1480,7 @@ def execute_order_intents(
 
             if sym not in positions:
                 # OPEN NEW
-                fill, outlay = _try_fill(
+                fill, outlay, skip_reason = _try_fill(
                     action,
                     price,
                     cash + cash_delta,
@@ -1510,6 +1534,8 @@ def execute_order_intents(
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
                     adv_consumed[sym] = adv_consumed.get(sym, 0.0) + fill.quantity
+                else:
+                    runtime_events.append(_skipped(ts, skip_reason, symbol=sym))
 
             elif positions[sym].side == desired_side:
                 # SCALE IN — must specify quantity. Same severity as the
@@ -1517,8 +1543,9 @@ def execute_order_intents(
                 # silently turned into a no-op, not a normal/expected path.
                 if action.quantity is None:
                     logger.warning("Scaling %s requires explicit quantity, skipping", sym)
+                    runtime_events.append(_skipped(ts, "missing_quantity", symbol=sym))
                     continue
-                fill, outlay = _try_fill(
+                fill, outlay, skip_reason = _try_fill(
                     action,
                     price,
                     cash + cash_delta,
@@ -1565,6 +1592,8 @@ def execute_order_intents(
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
                     adv_consumed[sym] = adv_consumed.get(sym, 0.0) + fill.quantity
+                else:
+                    runtime_events.append(_skipped(ts, skip_reason, symbol=sym))
 
             else:
                 # OPPOSITE SIDE — reject
@@ -1574,6 +1603,7 @@ def execute_order_intents(
                     sym,
                     positions[sym].side,
                 )
+                runtime_events.append(_skipped(ts, "opposite_side", symbol=sym))
 
         elif action.action == "close" and sym in positions:
             pos = positions[sym]
@@ -1596,6 +1626,8 @@ def execute_order_intents(
             if max_volume_qty is not None:
                 requested_qty = min(requested_qty, max_volume_qty)
             if requested_qty <= EPSILON:
+                if max_volume_qty is not None:
+                    runtime_events.append(_skipped(ts, "volume_capped", symbol=sym))
                 continue
 
             trade, event, proceeds, fully_closed = build_close_event(
@@ -1619,7 +1651,9 @@ def execute_order_intents(
             else:
                 reduce_position(pos, trade.quantity)
 
-    return ExecutionResult(trades=trades, events=events, cash_delta=cash_delta)
+    return ExecutionResult(
+        trades=trades, events=events, cash_delta=cash_delta, runtime_events=runtime_events
+    )
 
 
 def _scale_additions_to_cash(
@@ -1670,13 +1704,11 @@ def _scale_additions_to_cash(
 
     if low <= EPSILON:
         logger.warning("Rebalance additions skipped: insufficient cash after reductions")
-        event = RuntimeEvent(
-            ts=ts,
-            event_type="entry_skipped_insufficient_cash",
-            detail={
-                "symbols": sorted({action.symbol for action in actions}),
-                "available_cash": available_cash,
-            },
+        event = _skipped(
+            ts,
+            "insufficient_cash",
+            symbols=sorted({action.symbol for action in actions}),
+            available_cash=available_cash,
         )
         return [], [event]
 

@@ -283,6 +283,7 @@ class _TimescaleCallbacks:
             run_id=self._run_id,
             ts=event.ts,
             event_type=event.event_type,
+            symbol=event.symbol,
             detail=event.detail,
         )
 
