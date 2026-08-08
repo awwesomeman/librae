@@ -197,6 +197,35 @@ class TestRebalanceExecution:
         assert positions["A"].quantity < 5.0
         assert positions["B"].quantity < 10.0
 
+    def test_insufficient_cash_reports_a_runtime_event_and_skips_additions(self) -> None:
+        """A minimum-commission floor that dwarfs available cash makes any
+        nonzero scale unaffordable — additions are dropped entirely, and the
+        drop must be reported as a RuntimeEvent, not just a log line."""
+        cost_model = CostModel(
+            multiplier=1.0,
+            commission_rate=0.01,
+            min_commission=1e12,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+        )
+        positions: dict[str, PositionState] = {}
+
+        result = _process(
+            PortfolioWeights(weights={"A": 1.0}),
+            positions,
+            1_000_000.0,
+            prices={"A": 100.0},
+            cost_model=cost_model,
+        )
+
+        assert result.events == []
+        assert positions == {}
+        assert len(result.runtime_events) == 1
+        event = result.runtime_events[0]
+        assert event.event_type == "entry_skipped_insufficient_cash"
+        assert event.detail["symbols"] == ["A"]
+
     def test_weight_remainder_stays_in_cash(self) -> None:
         positions: dict[str, PositionState] = {}
         result = _process(

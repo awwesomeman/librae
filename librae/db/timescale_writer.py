@@ -992,6 +992,31 @@ def write_funding_cash_flow(
         cur.close()
 
 
+def write_runtime_event(
+    run_id: str,
+    ts: datetime,
+    event_type: str,
+    detail: Mapping[str, object] | None = None,
+    dsn: str | None = None,
+) -> None:
+    """Write one idempotent operational-audit event (not a fill)."""
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO runtime_events (ts, run_id, event_type, detail)
+               VALUES (%s,%s,%s,%s)
+               ON CONFLICT (run_id, ts, event_type) DO UPDATE SET
+                 detail=EXCLUDED.detail""",
+            (
+                _to_dt(ts),
+                run_id,
+                event_type,
+                json.dumps(detail) if detail is not None else None,
+            ),
+        )
+        cur.close()
+
+
 def write_strategy_performance(
     run_id: str,
     account_id: str,

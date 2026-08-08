@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from math import isfinite
 from typing import Literal
@@ -299,6 +299,23 @@ class OrderEvent:
     time_in_force: TimeInForce | None = None
 
 
+RuntimeEventType = Literal["state_recovered", "entry_skipped_insufficient_cash"]
+
+
+@dataclass(frozen=True)
+class RuntimeEvent:
+    """An operational event worth an audit trail — not a fill.
+
+    ``event_type`` is a small, deliberately closed set (matches the
+    ``runtime_events`` table's CHECK constraint); extend it only when a new
+    call site actually needs to report one, not speculatively.
+    """
+
+    ts: datetime
+    event_type: RuntimeEventType
+    detail: Mapping[str, object] = field(default_factory=dict)
+
+
 @dataclass
 class ExecutionResult:
     """Results from executing one decision on one bar."""
@@ -306,6 +323,7 @@ class ExecutionResult:
     trades: list[TradeResult]
     events: list[OrderEvent]
     cash_delta: float
+    runtime_events: list[RuntimeEvent] = field(default_factory=list)
 
 
 def side_multiplier(side: PositionSide) -> float:
@@ -1607,11 +1625,12 @@ def execute_order_intents(
 def _scale_additions_to_cash(
     actions: list[OrderIntent],
     available_cash: float,
+    ts: datetime,
     *,
     prices: dict[str, float],
     get_cost_model: Callable[[str], CostModel],
     get_volume: Callable[[str], float | None] | None = None,
-) -> list[OrderIntent]:
+) -> tuple[list[OrderIntent], list[RuntimeEvent]]:
     """Scale all rebalance additions by one factor when cash is insufficient.
 
     A common factor preserves the intended cross-sectional allocation better
@@ -1619,7 +1638,7 @@ def _scale_additions_to_cash(
     search accounts for nonlinear minimum commissions.
     """
     if not actions or available_cash <= EPSILON:
-        return []
+        return [], []
 
     def total_outlay(scale: float) -> float:
         total = 0.0
@@ -1639,7 +1658,7 @@ def _scale_additions_to_cash(
         return total
 
     if total_outlay(1.0) <= available_cash + EPSILON:
-        return actions
+        return actions, []
 
     low, high = 0.0, 1.0
     for _ in range(60):
@@ -1651,7 +1670,15 @@ def _scale_additions_to_cash(
 
     if low <= EPSILON:
         logger.warning("Rebalance additions skipped: insufficient cash after reductions")
-        return []
+        event = RuntimeEvent(
+            ts=ts,
+            event_type="entry_skipped_insufficient_cash",
+            detail={
+                "symbols": sorted({action.symbol for action in actions}),
+                "available_cash": available_cash,
+            },
+        )
+        return [], [event]
 
     logger.info("Rebalance additions scaled to %.6f of requested quantities", low)
     return [
@@ -1663,7 +1690,7 @@ def _scale_additions_to_cash(
             limit_price=action.limit_price,
         )
         for action in actions
-    ]
+    ], []
 
 
 def execute_portfolio_weights(
@@ -1800,9 +1827,10 @@ def execute_portfolio_weights(
         used_adv_quantity_by_symbol=adv_consumed,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
-    scaled_additions = _scale_additions_to_cash(
+    scaled_additions, cash_events = _scale_additions_to_cash(
         additions,
         cash_after_reductions,
+        ts,
         prices=prices,
         get_cost_model=get_cost_model,
         get_volume=get_volume,
@@ -1828,6 +1856,7 @@ def execute_portfolio_weights(
         trades=[*reduction_result.trades, *addition_result.trades],
         events=[*reduction_result.events, *addition_result.events],
         cash_delta=reduction_result.cash_delta + addition_result.cash_delta,
+        runtime_events=cash_events,
     )
 
 
@@ -2014,6 +2043,7 @@ def execute_pending_decision_and_stops(
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
+    runtime_events: list[RuntimeEvent] = []
     cash_delta_total = 0.0
     used_bar_quantity_by_symbol: dict[str, float] = {}
     same_bar_protection_symbols = set(positions)
@@ -2108,6 +2138,7 @@ def execute_pending_decision_and_stops(
                 used_adv_quantity_by_symbol.update(execution_adv_quantities)
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)
+        runtime_events.extend(fill_result.runtime_events)
         cash_delta_total += fill_result.cash_delta
         cash += fill_result.cash_delta
 
@@ -2129,4 +2160,6 @@ def execute_pending_decision_and_stops(
         cash_delta_total += stop_result.cash_delta
         cash += stop_result.cash_delta
 
-    return cash, ExecutionResult(trades=trades, events=events, cash_delta=cash_delta_total)
+    return cash, ExecutionResult(
+        trades=trades, events=events, cash_delta=cash_delta_total, runtime_events=runtime_events
+    )

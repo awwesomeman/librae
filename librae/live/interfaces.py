@@ -8,7 +8,7 @@ from typing import Protocol
 
 import pandas as pd
 
-from librae.core.executor import OrderEvent
+from librae.core.executor import OrderEvent, RuntimeEvent
 from librae.core.funding import FundingCashFlow
 
 
@@ -79,6 +79,7 @@ type OrderEventCallback = Callable[[OrderEvent, int], None]
 type OhlcvCallback = Callable[[str, str, dict[str, float], datetime], None]
 type HeartbeatCallback = Callable[[str], None]
 type FundingCashFlowCallback = Callable[[FundingCashFlow], None]
+type RuntimeEventCallback = Callable[[RuntimeEvent], None]
 type PerformanceCallback = Callable[[str, str], None]
 type WarmupFetcher = Callable[[str, str, int], pd.DataFrame]
 

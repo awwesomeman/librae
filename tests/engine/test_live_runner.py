@@ -1908,6 +1908,7 @@ class TestLiveExecutionLifecycle:
         runtime_revision: str = "test-runtime",
         clock=None,
         on_ready=None,
+        on_runtime_event=None,
     ) -> LiveTrader:
         return LiveTrader(
             strategy,
@@ -1925,6 +1926,7 @@ class TestLiveExecutionLifecycle:
             runtime_revision=runtime_revision,
             clock=clock or (lambda: TEST_CLOCK_NOW),
             on_ready=on_ready,
+            on_runtime_event=on_runtime_event,
         )
 
     def test_live_runtime_revision_is_required_before_checkpoint_or_broker_access(self):
@@ -2816,6 +2818,29 @@ class TestLiveExecutionLifecycle:
         assert second_strategy.calls == 0
         assert adapter.place_order.call_count == 1
         assert second._run_id == first._run_id
+
+    def test_restore_reports_state_recovered_runtime_event(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report()
+
+        first = self._make_trader(_HoldStrategy(), adapter, state_store=store)
+        first.run(max_iterations=1)
+
+        on_runtime_event = MagicMock()
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 0.0,
+            "avg_price": 0.0,
+            "unrealized_pnl": 0.0,
+        }
+        self._make_trader(
+            _HoldStrategy(), adapter, state_store=store, on_runtime_event=on_runtime_event
+        )
+
+        on_runtime_event.assert_called_once()
+        event = on_runtime_event.call_args[0][0]
+        assert event.event_type == "state_recovered"
 
     def test_restored_position_without_broker_cost_basis_reconciles_on_size_alone(self):
         """CCXT spot balances never carry avg_price; restore must not halt

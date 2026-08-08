@@ -561,6 +561,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return, gross_exposure, net_exposure, concentration, turnover)` |
 | `on_order_event` | `on_order_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close |
 | `on_funding_cash_flow` | `on_funding_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
+| `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions), not a fill |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
@@ -675,7 +676,7 @@ flowchart TD
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
-### Current 13 tables
+### Current 14 tables
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
@@ -683,6 +684,7 @@ flowchart TD
 | `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
 | `funding_cash_flows` | applied perpetual-funding rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
+| `runtime_events` | operational audit trail (restarts, skipped decisions) — not a fill; `event_type` is a small, deliberately closed set | unique `(run_id, ts, event_type)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |

@@ -218,6 +218,24 @@ CREATE INDEX IF NOT EXISTS idx_funding_cash_flows_run_id
     ON funding_cash_flows(run_id, account_id, ts DESC);
 
 -- ============================================================
+-- runtime_events — operational audit trail (restarts, skipped decisions),
+-- not a fill. event_type is deliberately small; extend it only when a new
+-- call site actually needs to report one.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS runtime_events (
+    ts              TIMESTAMPTZ NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    event_type      TEXT NOT NULL,
+    detail          JSONB,
+    CONSTRAINT chk_runtime_event_type
+        CHECK (event_type IN ('state_recovered', 'entry_skipped_insufficient_cash'))
+);
+SELECT create_hypertable('runtime_events', 'ts', if_not_exists => TRUE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_events_unique
+    ON runtime_events(run_id, ts, event_type);
+CREATE INDEX IF NOT EXISTS idx_runtime_events_run_id ON runtime_events(run_id, ts DESC);
+
+-- ============================================================
 -- strategy_performance — 帳戶 KPI (1 row / account / run, FK CASCADE)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS strategy_performance (

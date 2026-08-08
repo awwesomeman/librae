@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -374,6 +375,25 @@ def test_factory_rejects_two_notifier_sources() -> None:
             notifier=MagicMock(),
             telegram_config={"enabled": True},
         )
+
+
+def test_timescale_callbacks_writes_runtime_event() -> None:
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks._run_id = "run-1"
+    ts = datetime.now(UTC)
+
+    with patch("librae.db.timescale_writer.write_runtime_event") as write:
+        from librae.core.executor import RuntimeEvent
+
+        callbacks.on_runtime_event(RuntimeEvent(ts=ts, event_type="state_recovered", detail={}))
+
+    write.assert_called_once_with(
+        run_id="run-1",
+        ts=ts,
+        event_type="state_recovered",
+        detail={},
+    )
 
 
 def test_timescale_callbacks_alert_after_repeated_write_failures() -> None:

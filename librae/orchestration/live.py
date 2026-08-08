@@ -23,7 +23,7 @@ from librae.live.state import normalize_runtime_revision
 
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
-    from librae.core.executor import OrderEvent
+    from librae.core.executor import OrderEvent, RuntimeEvent
     from librae.core.funding import FundingCashFlow
     from librae.core.run_config import RunConfig
     from librae.core.strategy import Strategy
@@ -275,6 +275,17 @@ class _TimescaleCallbacks:
             cash_flow=cash_flow.cash_flow,
         )
 
+    def on_runtime_event(self, event: RuntimeEvent) -> None:
+        from librae.db.timescale_writer import write_runtime_event
+
+        self._write(
+            write_runtime_event,
+            run_id=self._run_id,
+            ts=event.ts,
+            event_type=event.event_type,
+            detail=event.detail,
+        )
+
     def on_ohlcv(
         self,
         symbol: str,
@@ -476,6 +487,7 @@ def build_live_trader(
         on_heartbeat=callbacks.on_heartbeat if callbacks else None,
         on_signal_outcome=callbacks.on_signal_outcome if callbacks else None,
         on_funding_cash_flow=callbacks.on_funding_cash_flow if callbacks else None,
+        on_runtime_event=callbacks.on_runtime_event if callbacks else None,
         on_performance=callbacks.on_performance if callbacks else None,
         on_ready=_combine_ready_callbacks(on_ready),
         # Must run before LiveTrader's own first checkpoint write, which a

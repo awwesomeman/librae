@@ -26,6 +26,7 @@ from librae.core import EPSILON
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     ExecutionResult,
+    RuntimeEvent,
     apply_execution_fill,
     calc_equity,
     calculate_position_weights,
@@ -65,6 +66,7 @@ from .interfaces import (
     OhlcvCallback,
     OrderEventCallback,
     PerformanceCallback,
+    RuntimeEventCallback,
     SignalOutcomeCallback,
     WarmupFetcher,
 )
@@ -216,6 +218,7 @@ class LiveTrader:
         on_heartbeat: HeartbeatCallback | None = None,
         on_signal_outcome: SignalOutcomeCallback | None = None,
         on_funding_cash_flow: FundingCashFlowCallback | None = None,
+        on_runtime_event: RuntimeEventCallback | None = None,
         on_performance: PerformanceCallback | None = None,
         on_ready: Callable[[str], None] | None = None,
         on_run_registered: Callable[[str], None] | None = None,
@@ -383,6 +386,7 @@ class LiveTrader:
         self._lease_acquired = False
         self._account_lease_acquired = False
         self._restored_state = False
+        self._on_runtime_event = on_runtime_event
         if self._state_store is not None:
             restored = self._state_store.load(self._state_key)
             if restored is not None:
@@ -506,6 +510,20 @@ class LiveTrader:
             len(self._active_orders),
             self._halted,
         )
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._clock(),
+                    event_type="state_recovered",
+                    detail={
+                        "last_cycle_ts": (
+                            self._last_cycle_ts.isoformat() if self._last_cycle_ts else None
+                        ),
+                        "active_orders": len(self._active_orders),
+                        "halted": self._halted,
+                    },
+                )
+            )
 
     def _persist_state(self, *orders: TrackedOrder) -> None:
         """Critical checkpoint write; failures propagate and stop the cycle."""
@@ -1255,6 +1273,10 @@ class LiveTrader:
             )
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
 
+        if self._on_runtime_event:
+            for runtime_event in result.runtime_events:
+                self._on_runtime_event(runtime_event)
+
     def _commit_simulated_results(
         self,
         *,
@@ -1353,6 +1375,9 @@ class LiveTrader:
                 used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
             )
+            if self._on_runtime_event:
+                for runtime_event in result.runtime_events:
+                    self._on_runtime_event(runtime_event)
             if apply_entry_risk_limits:
                 replay_positions = deepcopy(self._positions)
                 replay_cash = self._cash
