@@ -17,7 +17,7 @@ from tests.signal_outcome_contract import (
 class TestRenderUnifiedDashboard:
     def test_panel_count(self):
         d = render_unified_dashboard()
-        assert len(d["panels"]) == 17
+        assert len(d["panels"]) == 19
 
     def test_has_required_fields(self):
         d = render_unified_dashboard()
@@ -65,6 +65,28 @@ class TestRenderUnifiedDashboard:
         account_id_var = next(v for v in d["templating"]["list"] if v["name"] == "account_id")
         assert "strategy_performance" not in account_id_var["query"]
         assert "equity_curve" in account_id_var["query"]
+
+    def test_open_positions_panel_is_symbol_keyed_and_account_scoped(self):
+        """Multi-position/portfolio strategies must be readable from generic
+        librae vocabulary (symbol, side, account_id) — not a strategy's
+        private terms (e.g. "slot"/"base")."""
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Open Positions")
+        sql = panel["targets"][0]["rawSql"]
+        assert "trade_events" in sql
+        assert "${account_id}" in sql
+        assert '"Symbol"' in sql
+        assert "slot" not in sql.lower()
+        assert "base" not in sql.lower()
+
+    def test_portfolio_exposure_panel_reads_equity_curve(self):
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Portfolio Exposure")
+        sql = panel["targets"][0]["rawSql"]
+        assert "equity_curve" in sql
+        assert "gross_exposure" in sql
+        assert "net_exposure" in sql
+        assert "concentration" in sql
 
 
 class TestRenderSignalMonitor:

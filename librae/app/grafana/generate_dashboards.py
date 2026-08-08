@@ -514,6 +514,74 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
+    {
+        "_type": "fixed",
+        "_x": 0,
+        "_dy": 15,
+        "title": "Open Positions",
+        "description": "Latest trade_events row per symbol with an open quantity. Symbol-keyed, so this also covers multi-position/portfolio strategies.",
+        "type": "table",
+        "h": 8,
+        "w": 12,
+        "targets": [
+            _target(
+                "WITH latest AS ("
+                " SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price, entry_at"
+                " FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
+                " ORDER BY symbol, ts DESC)"
+                ' SELECT symbol AS "Symbol", side AS "Side",'
+                ' ROUND(remaining_quantity::numeric,4) AS "Qty",'
+                ' ROUND(entry_price::numeric,2) AS "Avg Entry",'
+                ' entry_at AS "Entry Time"'
+                " FROM latest WHERE remaining_quantity > 0 ORDER BY symbol",
+                "A",
+                "table",
+            )
+        ],
+        "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+                _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
+            ],
+        },
+        "options": {
+            "showHeader": True,
+            "sortBy": [{"displayName": "Symbol", "desc": False}],
+        },
+    },
+    {
+        "_type": "fixed",
+        "_x": 12,
+        "_dy": 15,
+        "title": "Portfolio Exposure",
+        "description": "Gross/net exposure and concentration as a fraction of equity, from equity_curve.",
+        "type": "timeseries",
+        "h": 8,
+        "w": 12,
+        "targets": [
+            _target(
+                'SELECT ts AS time, gross_exposure AS "Gross", net_exposure AS "Net",'
+                ' concentration AS "Concentration"'
+                " FROM equity_curve WHERE run_id = '${run_id}'"
+                " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
+            )
+        ],
+        "fieldConfig": {
+            "defaults": {
+                "unit": "percentunit",
+                "custom": {"lineWidth": 1, "fillOpacity": 0, "showPoints": "never"},
+            },
+            "overrides": [
+                _color_override("Gross", "orange"),
+                _color_override("Net", "blue"),
+                _color_override("Concentration", "red"),
+            ],
+        },
+        "options": {
+            "tooltip": {"mode": "multi"},
+            "legend": {"displayMode": "list", "placement": "bottom"},
+        },
+    },
 ]
 
 
