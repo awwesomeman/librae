@@ -335,6 +335,31 @@ class CryptoAdapter:
 
         return df
 
+    def fetch_funding_rate_history(
+        self,
+        symbol: str,
+        limit: int = 100,
+        *,
+        since: int | None = None,
+    ) -> pd.DataFrame:
+        """Fetch settled funding payments for a perpetual contract.
+
+        Only meaningful for perpetual symbols (e.g. ``"BTC/USDT:USDT"``) —
+        spot and dated-future markets have no funding schedule and ccxt
+        raises for them.
+
+        Returns columns: ``[ts, funding_rate]`` where ``ts`` is the
+        UTC-aware payment ``datetime`` and ``funding_rate`` is the decimal
+        rate paid at that settlement (positive = longs pay shorts).
+        """
+        raw = self._exchange.fetch_funding_rate_history(symbol, since=since, limit=limit)
+        df = pd.DataFrame(raw)
+        if df.empty:
+            return pd.DataFrame(columns=["ts", "funding_rate"])
+        df = df.rename(columns={"fundingRate": "funding_rate"})
+        df["ts"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        return df[["ts", "funding_rate"]].astype({"funding_rate": float})
+
     def fetch_continuous_ohlcv(
         self,
         pair: str,

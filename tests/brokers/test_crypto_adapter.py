@@ -252,6 +252,37 @@ def test_symbol_passthrough(readonly_adapter, mock_ccxt_exchange):
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: fetch_funding_rate_history returns [ts, funding_rate]
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_funding_rate_history_returns_ts_and_rate(readonly_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.fetch_funding_rate_history.return_value = [
+        {"timestamp": 1_700_000_000_000, "fundingRate": 0.0001},
+        {"timestamp": 1_700_028_800_000, "fundingRate": -0.0002},
+    ]
+
+    df = readonly_adapter.fetch_funding_rate_history("BTC/USDT:USDT", limit=2)
+
+    assert list(df.columns) == ["ts", "funding_rate"]
+    assert pd.api.types.is_datetime64_any_dtype(df["ts"])
+    assert str(df["ts"].dt.tz) == "UTC"
+    assert list(df["funding_rate"]) == [0.0001, -0.0002]
+    mock_ccxt_exchange.fetch_funding_rate_history.assert_called_once_with(
+        "BTC/USDT:USDT", since=None, limit=2
+    )
+
+
+def test_fetch_funding_rate_history_empty(readonly_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.fetch_funding_rate_history.return_value = []
+
+    df = readonly_adapter.fetch_funding_rate_history("BTC/USDT:USDT")
+
+    assert list(df.columns) == ["ts", "funding_rate"]
+    assert df.empty
+
+
+# ---------------------------------------------------------------------------
 # Test 3: read-only mode raises NotImplementedError on place_order
 # ---------------------------------------------------------------------------
 

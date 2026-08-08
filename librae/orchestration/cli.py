@@ -19,7 +19,7 @@ import argparse
 import functools
 import logging
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from librae.core.strategy import Strategy
+    from librae.integrations import AdapterFactory
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +561,9 @@ def run_realtime_generic(
     options: RunOptions,
     strategy: Strategy,
     prepare_signals: Callable[[pd.DataFrame], pd.DataFrame],
+    *,
+    adapter_factories: Mapping[str, AdapterFactory] | None = None,
+    data_adapter_overrides: Mapping[str, object] | None = None,
 ) -> None:
     """Run the repository's default sim/live deployment wiring."""
     from librae.orchestration.live import build_live_trader
@@ -571,6 +575,8 @@ def run_realtime_generic(
         database_enabled=options.database_enabled,
         telegram_config=None if options.dry_run else options.telegram_config,
         runtime_revision=options.runtime_revision,
+        adapter_factories=adapter_factories,
+        data_adapter_overrides=data_adapter_overrides,
     )
     trader.run()
 

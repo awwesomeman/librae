@@ -78,8 +78,16 @@ def _build_adapter(
     *,
     trading: bool,
     factories: Mapping[str, AdapterFactory] | None = None,
+    instrument_type: str | None = None,
 ) -> object:
-    """Construct one explicitly configured repository adapter."""
+    """Construct one explicitly configured repository adapter.
+
+    ``instrument_type`` picks the CCXT venue for crypto: Binance splits spot
+    and USDS-margined contracts (spot/perpetual/dated futures) into separate
+    exchange ids, so a contract symbol built against the default spot venue
+    can't resolve its own market (e.g. ``BTC/USDT:USDT`` doesn't exist on
+    ``ccxt.binance``).
+    """
     factory = (factories or {}).get(name)
     if factory is not None:
         return factory(trading=trading)
@@ -94,10 +102,11 @@ def _build_adapter(
     if name in ("crypto", "binance"):
         from librae.brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
 
+        exchange_id = "binance" if instrument_type in (None, "spot") else "binanceusdm"
         credentials = (
-            CryptoCredentials.from_env("BINANCE", exchange_id="binance") if trading else None
+            CryptoCredentials.from_env("BINANCE", exchange_id=exchange_id) if trading else None
         )
-        return CryptoAdapter(credentials=credentials)
+        return CryptoAdapter(exchange_id=exchange_id, credentials=credentials)
     raise ValueError(f"unsupported adapter: {name!r}")
 
 
@@ -339,13 +348,21 @@ def build_live_trader(
     database_enabled: bool = True,
     telegram_config: Mapping[str, object] | None = None,
     adapter_factories: Mapping[str, AdapterFactory] | None = None,
+    data_adapter_overrides: Mapping[str, object] | None = None,
     notifier: Notifier | None = None,
     status_interval_periods: int | None = None,
     state_store: LiveStateStore | None = None,
     runtime_revision: str | None = None,
     on_ready: Callable[[str], None] | None = None,
 ) -> LiveTrader:
-    """Build a sim/live deployment from built-in or caller-registered factories."""
+    """Build a sim/live deployment from built-in or caller-registered factories.
+
+    ``data_adapter_overrides`` injects a concrete market-data adapter
+    instance for specific symbols directly, bypassing ``adapter_factories``
+    (which resolves by adapter *type*, not per symbol) — for a symbol that
+    needs a bespoke data source ``instrument_overrides``' ``data_adapter``
+    type can't express.
+    """
     resolved_runtime_revision = normalize_runtime_revision(
         runtime_revision,
         required=config.mode == "live",
@@ -371,9 +388,13 @@ def build_live_trader(
         for symbol in config.symbols
     }
 
-    adapter_instances: dict[tuple[str, str], object] = {}
+    overrides = dict(data_adapter_overrides or {})
+    adapter_instances: dict[tuple[str, str, str], object] = {}
     data_adapters: dict[str, object] = {}
     for symbol, instrument in instruments.items():
+        if symbol in overrides:
+            data_adapters[symbol] = overrides[symbol]
+            continue
         if instrument.data_adapter == "crypto" and instrument.continuous_alias:
             raise ValueError(
                 f"{symbol!r} is a continuous crypto alias and is not directly orderable; "
@@ -386,16 +407,21 @@ def build_live_trader(
             and broker is not None
             and _DATA_ADAPTER_BY_BROKER.get(broker, broker) == instrument.data_adapter
         )
-        key = (instrument.data_adapter, instrument.data_source)
+        key = (instrument.data_adapter, instrument.data_source, instrument.instrument_type)
         instance = adapter_instances.get(key)
         if instance is None:
             instance = _build_adapter(
                 instrument.data_adapter,
                 trading=trading,
                 factories=factories,
+                instrument_type=instrument.instrument_type,
             )
             adapter_instances[key] = instance
         data_adapters[symbol] = instance
+
+    unknown_overrides = set(overrides) - set(instruments)
+    if unknown_overrides:
+        raise ValueError(f"data_adapter_overrides has unknown symbols: {sorted(unknown_overrides)}")
 
     order_adapters: dict[str, object] | None = None
     if config.mode == "live":

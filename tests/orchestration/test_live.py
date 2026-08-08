@@ -5,9 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 from librae.live.state import MemoryLiveStateStore
 from librae.orchestration.live import (
+    _build_adapter,
     _ready_callback_from_env,
     _status_interval_periods,
     _TimescaleCallbacks,
@@ -199,6 +201,64 @@ def test_factory_builds_external_data_adapter() -> None:
     assert trader._fetchers
 
 
+def test_build_adapter_selects_binanceusdm_for_non_spot_instrument_type() -> None:
+    mock_exchange = MagicMock()
+    with patch("librae.brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
+        mock_require_ccxt.return_value = MagicMock(
+            binanceusdm=MagicMock(return_value=mock_exchange)
+        )
+        adapter = _build_adapter("crypto", trading=False, instrument_type="contract_perpetual")
+
+    assert adapter._exchange_id == "binanceusdm"
+
+
+def test_build_adapter_selects_spot_binance_by_default() -> None:
+    mock_exchange = MagicMock()
+    with patch("librae.brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
+        mock_require_ccxt.return_value = MagicMock(binance=MagicMock(return_value=mock_exchange))
+        spot_adapter = _build_adapter("crypto", trading=False, instrument_type="spot")
+        omitted_adapter = _build_adapter("crypto", trading=False)
+
+    assert spot_adapter._exchange_id == "binance"
+    assert omitted_adapter._exchange_id == "binance"
+
+
+def test_data_adapters_are_not_shared_across_differing_instrument_types() -> None:
+    """Same data_adapter/data_source but different instrument_type (spot vs
+    perpetual) must not reuse one cached adapter instance — they need
+    different CCXT exchange ids (see _build_adapter)."""
+    config = make_test_cfg(
+        mode="sim",
+        symbols=["BTCUSDT", "BTCUSDT_PERP"],
+        symbol_cost_overrides={"BTCUSDT_PERP": {"multiplier": 1.0}},
+        instrument_overrides={
+            "BTCUSDT_PERP": {
+                "data_adapter": "crypto",
+                "data_source": "binance_spot",
+                "instrument_type": "contract_perpetual",
+                "currency": "USDT",
+            }
+        },
+    )
+    spot_adapter = MagicMock()
+    perp_adapter = MagicMock()
+
+    with patch(
+        "librae.orchestration.live._build_adapter",
+        side_effect=[spot_adapter, perp_adapter],
+    ) as build_adapter:
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+        )
+
+    assert build_adapter.call_count == 2
+    instrument_types = {call.kwargs["instrument_type"] for call in build_adapter.call_args_list}
+    assert instrument_types == {"spot", "contract_perpetual"}
+
+
 def test_factory_reuses_external_adapter_for_live_orders() -> None:
     config = make_test_cfg(
         mode="live",
@@ -227,6 +287,40 @@ def test_factory_reuses_external_adapter_for_live_orders() -> None:
 
     factory.assert_called_once_with(trading=True)
     assert trader._executor.get_order_adapter("BTCUSDT") is adapter
+
+
+def test_data_adapter_overrides_injects_per_symbol_instance_directly() -> None:
+    config = make_test_cfg(mode="sim")
+    override_adapter = MagicMock()
+    override_adapter.fetch_ohlcv.return_value = pd.DataFrame(
+        columns=["ts", "open", "high", "low", "close", "volume"]
+    )
+
+    with patch("librae.orchestration.live._build_adapter") as build_adapter:
+        trader = build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+            data_adapter_overrides={"BTCUSDT": override_adapter},
+        )
+
+    build_adapter.assert_not_called()
+    trader._fetchers["BTCUSDT"]("BTCUSDT", "1h", 10)
+    override_adapter.fetch_ohlcv.assert_called_once()
+
+
+def test_data_adapter_overrides_rejects_unknown_symbol() -> None:
+    config = make_test_cfg(mode="sim")
+
+    with pytest.raises(ValueError, match="unknown symbols"):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+            data_adapter_overrides={"NOT_A_SYMBOL": MagicMock()},
+        )
 
 
 def test_factory_rejects_missing_live_revision_before_building_adapters() -> None:

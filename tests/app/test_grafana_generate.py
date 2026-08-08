@@ -49,6 +49,23 @@ class TestRenderUnifiedDashboard:
         raw = json.dumps(render_unified_dashboard())
         assert "strategy_signals" not in raw
 
+    def test_run_id_selector_is_not_gated_on_a_sparse_event_table(self):
+        """run_id must resolve from backtest_runs alone — gating it on
+        strategy_performance (only written after a fill or funding cash
+        flow) hides any run with no confirmed trades yet from the picker."""
+        d = render_unified_dashboard()
+        run_id_var = next(v for v in d["templating"]["list"] if v["name"] == "run_id")
+        assert "strategy_performance" not in run_id_var["query"]
+        assert "backtest_runs" in run_id_var["query"]
+
+    def test_account_id_selector_reads_equity_curve(self):
+        """account_id must resolve from equity_curve — written every bar —
+        not strategy_performance, which stays empty until the first fill."""
+        d = render_unified_dashboard()
+        account_id_var = next(v for v in d["templating"]["list"] if v["name"] == "account_id")
+        assert "strategy_performance" not in account_id_var["query"]
+        assert "equity_curve" in account_id_var["query"]
+
 
 class TestRenderSignalMonitor:
     def test_panel_count(self):
@@ -87,6 +104,15 @@ class TestRenderSignalMonitor:
             sqls = [t["rawSql"] for t in p["targets"]]
             combined = " ".join(sqls)
             assert "signal_events" in combined or "ohlcv" in combined
+
+    def test_run_id_selector_is_not_gated_on_a_sparse_event_table(self):
+        """run_id must resolve from backtest_runs alone — gating it on
+        signal_events hides any deployed run that hasn't fired a signal
+        yet from the picker."""
+        d = render_signal_monitor()
+        run_id_var = next(v for v in d["templating"]["list"] if v["name"] == "run_id")
+        assert "signal_events" not in run_id_var["query"]
+        assert "backtest_runs" in run_id_var["query"]
 
     def test_no_hardcoded_datasource_uid_in_panels(self):
         """All panels should get datasource from build_panels, not hardcoded."""

@@ -753,13 +753,12 @@ def render_unified_dashboard() -> dict:
         "run_id",
         "SELECT run_id FROM backtest_runs"
         " WHERE mode='${mode}' AND strategy='${strategy}'"
-        " AND run_id IN (SELECT run_id FROM strategy_performance)"
         " ORDER BY run_at DESC LIMIT 20",
         label="Run ID",
     )
     account_id_var = _make_query_variable(
         "account_id",
-        "SELECT account_id FROM strategy_performance WHERE run_id='${run_id}' ORDER BY account_id",
+        "SELECT DISTINCT account_id FROM equity_curve WHERE run_id='${run_id}' ORDER BY account_id",
         label="Account",
     )
 
@@ -1097,7 +1096,6 @@ def render_signal_monitor() -> dict:
             "run_id",
             "SELECT run_id FROM backtest_runs"
             " WHERE mode='${mode}' AND strategy='${strategy}'"
-            " AND run_id IN (SELECT DISTINCT run_id FROM signal_events WHERE run_id IS NOT NULL)"
             " ORDER BY run_at DESC LIMIT 20",
             label="Run ID",
         ),

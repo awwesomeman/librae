@@ -666,5 +666,38 @@ class TestRunDispatch:
             database_enabled=False,
             telegram_config=None,
             runtime_revision=None,
+            adapter_factories=None,
+            data_adapter_overrides=None,
+        )
+        trader.run.assert_called_once_with()
+
+    def test_generic_realtime_runner_forwards_adapter_injection(self):
+        config = _make_cfg(mode="sim")
+        options = RunOptions(database_enabled=False)
+        trader = MagicMock()
+        strategy = MagicMock()
+        feature_fn = MagicMock()
+        factories = {"vendor_plugin": MagicMock()}
+        overrides = {"BTCUSDT": MagicMock()}
+
+        with patch("librae.orchestration.live.build_live_trader", return_value=trader) as build:
+            run_realtime_generic(
+                config,
+                options,
+                strategy,
+                feature_fn,
+                adapter_factories=factories,
+                data_adapter_overrides=overrides,
+            )
+
+        build.assert_called_once_with(
+            strategy,
+            feature_fn,
+            config=config,
+            database_enabled=False,
+            telegram_config=None,
+            runtime_revision=None,
+            adapter_factories=factories,
+            data_adapter_overrides=overrides,
         )
         trader.run.assert_called_once_with()

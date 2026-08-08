@@ -138,14 +138,33 @@ def _bind_market_data_source(
             contract_month=instrument.contract_month,
             drop_incomplete=drop_incomplete,
         )
-    return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
-        instrument.venue_symbol,
-        tf,
-        limit=limit,
-        continuous_alias=instrument.continuous_alias,
-        contract_month=instrument.contract_month,
-        drop_incomplete=drop_incomplete,
-    )
+
+    def base_fetcher(_symbol, tf, limit, *, drop_incomplete=False):
+        return fetch_ohlcv(
+            instrument.venue_symbol,
+            tf,
+            limit=limit,
+            continuous_alias=instrument.continuous_alias,
+            contract_month=instrument.contract_month,
+            drop_incomplete=drop_incomplete,
+        )
+
+    fetch_funding_rate_history = getattr(source, "fetch_funding_rate_history", None)
+    if instrument.instrument_type != "contract_perpetual" or not callable(
+        fetch_funding_rate_history
+    ):
+        return base_fetcher
+
+    def _with_funding(_symbol, tf, limit, *, drop_incomplete=False):
+        bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
+        if bars.empty:
+            return bars
+        funding = fetch_funding_rate_history(instrument.venue_symbol, limit=limit)
+        if funding.empty:
+            return bars
+        return bars.merge(funding, on="ts", how="left")
+
+    return _with_funding
 
 
 class LiveTrader:
