@@ -1276,6 +1276,13 @@ def simulate_fill(
     bar_volume: float | None = None,
 ) -> Fill | None:
     """Build a Fill for a long/short intent. Returns None if rejected."""
+    # Both guards below are unreachable via _try_fill's current callers —
+    # execute_order_intents only reaches this path for action in
+    # ("long", "short"), and OrderIntent.__post_init__ already rejects a
+    # non-positive quantity at construction. Kept as a defensive contract
+    # for any future direct caller of this function; _try_fill's caller-
+    # facing "insufficient_cash" reason assumes only the sizing path below
+    # (qty computed by _size_position) can actually produce qty <= 0.
     if intent.action not in ("long", "short"):
         return None
 
