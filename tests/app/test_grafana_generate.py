@@ -17,7 +17,7 @@ from tests.signal_outcome_contract import (
 class TestRenderUnifiedDashboard:
     def test_panel_count(self):
         d = render_unified_dashboard()
-        assert len(d["panels"]) == 19
+        assert len(d["panels"]) == 20
 
     def test_has_required_fields(self):
         d = render_unified_dashboard()
@@ -77,18 +77,50 @@ class TestRenderUnifiedDashboard:
         assert "strategy_performance" not in account_id_var["query"]
         assert "equity_curve" in account_id_var["query"]
 
-    def test_open_positions_panel_is_symbol_keyed_and_account_scoped(self):
+    def test_position_snapshot_panel_is_symbol_keyed_and_account_scoped(self):
         """Multi-position/portfolio strategies must be readable from generic
         librae vocabulary (symbol, side, account_id) — not a strategy's
         private terms (e.g. "slot"/"base")."""
         d = render_unified_dashboard()
-        panel = next(p for p in d["panels"] if p["title"] == "Open Positions")
+        panel = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
         sql = panel["targets"][0]["rawSql"]
         assert "trade_events" in sql
         assert "${account_id}" in sql
         assert '"Symbol"' in sql
         assert "slot" not in sql.lower()
         assert "base" not in sql.lower()
+
+    def test_position_snapshot_weight_is_multiplier_and_equity_adjusted(self):
+        """Weight must use the contract multiplier (derived from the stored
+        notional/price/fill_quantity ratio, since Grafana SQL has no access
+        to the Python cost_model registry) — a raw price*qty weight would be
+        wrong by the multiplier's factor for any futures/perpetual symbol,
+        and the same multiplier must carry into MTM P&L for the same
+        reason. Sorted by magnitude (ABS), not signed value, so the largest
+        exposure — long or short — is always first regardless of direction."""
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
+        sql = panel["targets"][0]["rawSql"]
+        assert "multiplier" in sql
+        assert "notional / NULLIF(price * fill_quantity, 0)" in sql
+        assert '"Weight"' in sql
+
+    def test_position_snapshot_reconstructs_state_as_of_time_range_end(self):
+        """Every 'latest' lookup (position, mark, equity) must be bounded by
+        $__timeTo(), not just $__timeFilter(ts) on ts's own row — otherwise
+        dragging the time picker to a past date wouldn't move this panel at
+        all, since trade_events/ohlcv/equity_curve are read via DISTINCT
+        ON/ORDER BY...LIMIT 1 subqueries that $__timeFilter never touches.
+        This is what makes History tracking a time-range drag, not a new
+        panel or a new DB table. A table (not a per-symbol line chart) is
+        deliberate — a stock-picking/dynamic-portfolio strategy can hold an
+        unbounded number of distinct symbols over its lifetime, which would
+        blow up a chart legend but scrolls fine as table rows."""
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
+        sql = panel["targets"][0]["rawSql"]
+        assert sql.count("$__timeTo()") == 3
+        assert panel["type"] == "table"
 
     def test_portfolio_exposure_panel_reads_equity_curve(self):
         d = render_unified_dashboard()
@@ -99,16 +131,27 @@ class TestRenderUnifiedDashboard:
         assert "net_exposure" in sql
         assert "concentration" in sql
 
-    def test_open_positions_and_trade_events_surface_group_id(self):
+    def test_trade_events_surfaces_group_id(self):
         """group_id (OrderIntent's atomic multi-leg grouping) is the correct
         way to pair related rows (e.g. a funding-arb spot+perp leg) — not
         coincidental symbol-name sorting."""
         d = render_unified_dashboard()
-        for title in ("Open Positions", "Trade Events"):
-            panel = next(p for p in d["panels"] if p["title"] == title)
-            sql = panel["targets"][0]["rawSql"]
-            assert '"Group"' in sql
-            assert "group_id" in sql
+        panel = next(p for p in d["panels"] if p["title"] == "Trade Events")
+        sql = panel["targets"][0]["rawSql"]
+        assert '"Group"' in sql
+        assert "group_id" in sql
+
+    def test_position_snapshot_surfaces_trade_id_not_group(self):
+        """Position Snapshot swaps Group for Trade ID (symbol + open time) —
+        the precise cross-reference key back into Trade Events' full fill
+        history for one lifecycle, unlike Group which only identifies the
+        multi-leg cohort without pinning a single position's history."""
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
+        sql = panel["targets"][0]["rawSql"]
+        assert '"Trade ID"' in sql
+        assert "entry_at" in sql
+        assert '"Group"' not in sql
 
     def test_trade_events_shows_all_symbols_with_in_panel_filtering(self):
         """Trade Events shows every symbol by default (a multi-leg arb
@@ -120,6 +163,18 @@ class TestRenderUnifiedDashboard:
         panel = next(p for p in d["panels"] if p["title"] == "Trade Events")
         sql = panel["targets"][0]["rawSql"]
         assert "${symbol}" not in sql
+        assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
+
+    def test_runtime_events_panel_reads_runtime_events(self):
+        """runtime_events (state_recovered/decision_skipped) previously had
+        no Grafana panel despite being written to the DB — the only way to
+        see it was querying the table directly."""
+        d = render_unified_dashboard()
+        panel = next(p for p in d["panels"] if p["title"] == "Runtime Events")
+        sql = panel["targets"][0]["rawSql"]
+        assert "runtime_events" in sql
+        assert "${run_id}" in sql
+        assert "detail->>'reason'" in sql
         assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
 
 

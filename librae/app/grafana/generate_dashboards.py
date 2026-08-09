@@ -197,7 +197,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("max_drawdown"),
         "percentunit",
         [{"color": "red", "value": None}],
-        description="Negative ratio: largest peak-to-trough decline.",
+        description="Largest peak-to-trough decline. Always ≤ 0.",
     ),
     "period_sharpe": _stat_panel(
         "Period Sharpe",
@@ -224,7 +224,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("win_rate"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0.5}],
-        description="Winning trades (net_pnl > 0) / total trades. Interpret with PF — low win rate + high PF = trend following.",
+        description="Winning trades (net_pnl > 0) / total trades. Read together with Profit Factor — low win rate + high profit factor means trend following.",
     ),
     "profit_factor": _stat_panel(
         "Profit Factor",
@@ -235,7 +235,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
             {"color": "yellow", "value": 1.0},
             {"color": "green", "value": 1.5},
         ],
-        description="sum(winning net_pnl) / sum(losing net_pnl). None if no losses. >1.5 healthy, <1.0 losing.",
+        description="Sum of winning net P&L / sum of losing net P&L. Blank if there are no losing trades yet. >1.5 healthy, <1.0 losing.",
     ),
     "trades": _stat_panel(
         "Trades",
@@ -398,8 +398,8 @@ BASE_PANELS_DEF: list[dict] = [
             "open/add = entry side, reduce/close = exit side; P&L and Return % (net of cost)\n"
             "only appear on reduce/close rows, and Position goes 0 → N → 0 over one full lifecycle.\n"
             "\n"
-            "- Entry is the weighted-average cost basis, recalculated on every add —\n"
-            "  not this row's fill Price.\n"
+            "- Entry Price is the weighted-average cost basis, recalculated on every add —\n"
+            "  not this row's own Trade Price.\n"
             "- Position is the size *after* this event, not this event's fill Quantity.\n"
             "- Cost = commission + slippage + tax for this event only.\n"
             "- Group ties every leg of one atomic multi-leg decision (e.g. a spot+perp\n"
@@ -425,10 +425,10 @@ BASE_PANELS_DEF: list[dict] = [
                 ' event_type AS "Event",'
                 ' side AS "Side",'
                 ' ROUND(fill_quantity::numeric,4) AS "Quantity",'
-                ' ROUND(price::numeric,2) AS "Price",'
+                ' ROUND(price::numeric,2) AS "Trade Price",'
                 ' ROUND(pnl::numeric,2) AS "P&L",'
                 ' ROUND(net_return::numeric,2) AS "Return %",'
-                ' ROUND(entry_price::numeric,2) AS "Entry",'
+                ' ROUND(entry_price::numeric,2) AS "Entry Price",'
                 ' ROUND(remaining_quantity::numeric,4) AS "Position",'
                 ' ROUND((commission + slippage + tax)::numeric,2) AS "Cost",'
                 ' group_id AS "Group",'
@@ -489,10 +489,10 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("Event", 90),
                 _width_override("Side", 70),
                 _width_override("Quantity", 100),
-                _width_override("Price", 90),
+                _width_override("Trade Price", 110),
                 _width_override("P&L", 100),
                 _width_override("Return %", 100),
-                _width_override("Entry", 100),
+                _width_override("Entry Price", 110),
                 _width_override("Position", 100),
                 _width_override("Cost", 80),
                 _width_override("Group", 140),
@@ -569,23 +569,78 @@ BASE_PANELS_DEF: list[dict] = [
         "_type": "fixed",
         "_x": 0,
         "_dy": 15,
-        "title": "Open Positions",
-        "description": "Latest trade_events row per symbol with an open quantity. Symbol-keyed, so this also covers multi-position/portfolio strategies.",
+        "title": "Position Snapshot",
+        "description": (
+            "Holdings as of the time range's end (top-right picker) — one row per\n"
+            "symbol, same shape for 1 symbol or N (stock-picking, portfolio\n"
+            "optimization, arb legs). Position and Entry Price are the current\n"
+            "running total and weighted-average cost even after multiple\n"
+            "adds/reduces, not the most recent fill alone; Weight and MTM P&L use\n"
+            "the same multiplier. Sorted by |Weight|, biggest exposure on top.\n"
+            "\n"
+            "- Default range end is 'now' — drag the picker to a past date to see\n"
+            "  positions as of that point instead (no explicit rebalance marker,\n"
+            "  so this is point-in-time reconstruction, not a rebalance list).\n"
+            "- Market Price is the latest close at or before that time; MTM P&L is\n"
+            "  mark-to-market then, not 'unrealized' in the live sense — a past\n"
+            "  date's position may since have been closed/realized.\n"
+            "- Trade ID = symbol + this trade's open time — filter it in Trade Events\n"
+            "  to pull the complete fill history behind this row."
+        ),
         "type": "table",
         "h": 8,
         "w": 12,
         "targets": [
             _target(
-                "WITH latest AS ("
-                " SELECT DISTINCT ON (symbol) symbol, group_id, side, remaining_quantity,"
-                " entry_price, entry_at"
-                " FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
-                " ORDER BY symbol, ts DESC)"
-                ' SELECT symbol AS "Symbol", group_id AS "Group", side AS "Side",'
-                ' ROUND(remaining_quantity::numeric,4) AS "Qty",'
-                ' ROUND(entry_price::numeric,2) AS "Avg Entry",'
-                ' entry_at AS "Entry Time"'
-                " FROM latest WHERE remaining_quantity > 0 ORDER BY symbol",
+                "WITH meta AS ("
+                " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
+                "),\n"
+                "equity AS (\n"
+                "  SELECT equity FROM equity_curve\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "    AND ts <= $__timeTo()\n"
+                "  ORDER BY ts DESC LIMIT 1\n"
+                "),\n"
+                "positions AS (\n"
+                "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n"
+                "    entry_price, entry_at,\n"
+                "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
+                "  FROM trade_events\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "    AND ts <= $__timeTo()\n"
+                "  ORDER BY symbol, ts DESC\n"
+                "),\n"
+                "marks AS (\n"
+                "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n"
+                "  FROM ohlcv o, meta m\n"
+                "  WHERE o.timeframe = m.timeframe\n"
+                "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
+                "    AND o.ts <= $__timeTo()\n"
+                "  ORDER BY o.symbol, o.ts DESC\n"
+                "),\n"
+                "sized AS (\n"
+                "  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n"
+                "    mk.market_price, p.multiplier,\n"
+                "    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n"
+                "      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n"
+                "  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
+                "  WHERE p.remaining_quantity > 0\n"
+                ")\n"
+                'SELECT s.symbol AS "Symbol", s.side AS "Side",\n'
+                '  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS "Weight",\n'
+                '  ROUND(s.remaining_quantity::numeric,4) AS "Position",\n'
+                '  ROUND(s.entry_price::numeric,2) AS "Entry Price",\n'
+                '  ROUND(s.market_price::numeric,2) AS "Market Price",\n'
+                "  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n"
+                "    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)"
+                '    ::numeric,2) AS "MTM P&L",\n'
+                "  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n"
+                "    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))"
+                '    ::numeric,4) AS "MTM P&L %",\n'
+                "  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS')"
+                ' AS "Trade ID"\n'
+                "FROM sized s CROSS JOIN equity e\n"
+                "ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
                 "A",
                 "table",
             )
@@ -594,11 +649,63 @@ BASE_PANELS_DEF: list[dict] = [
             "defaults": {},
             "overrides": [
                 _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
+                {
+                    "matcher": {"id": "byName", "options": "Weight"},
+                    "properties": [
+                        {"id": "unit", "value": "percentunit"},
+                        {
+                            "id": "thresholds",
+                            "value": {
+                                "mode": "absolute",
+                                "steps": [
+                                    {"color": "red", "value": None},
+                                    {"color": "green", "value": 0},
+                                ],
+                            },
+                        },
+                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
+                        # Footer sum here is signed, so it's Net exposure — should
+                        # match Portfolio Exposure's Net line at the latest point.
+                        {"id": "custom.footer", "value": {"reducers": ["sum"]}},
+                    ],
+                },
+                {
+                    "matcher": {"id": "byName", "options": "MTM P&L"},
+                    "properties": [
+                        {
+                            "id": "thresholds",
+                            "value": {
+                                "mode": "absolute",
+                                "steps": [
+                                    {"color": "red", "value": None},
+                                    {"color": "green", "value": 0},
+                                ],
+                            },
+                        },
+                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
+                        {"id": "custom.footer", "value": {"reducers": ["sum"]}},
+                    ],
+                },
+                {
+                    "matcher": {"id": "byName", "options": "MTM P&L %"},
+                    "properties": [{"id": "unit", "value": "percentunit"}],
+                },
+                _width_override("Symbol", 90),
+                _width_override("Side", 60),
+                _width_override("Weight", 90),
+                _width_override("Position", 80),
+                _width_override("Entry Price", 90),
+                _width_override("Market Price", 100),
+                _width_override("MTM P&L", 90),
+                _width_override("MTM P&L %", 90),
+                _width_override("Trade ID", 220),
             ],
         },
         "options": {
+            # No sortBy: Grafana's column sort is signed-value only (no
+            # sort-by-magnitude option), which would fight the query's
+            # ORDER BY ABS(...) DESC — leave row order exactly as queried.
             "showHeader": True,
-            "sortBy": [{"displayName": "Group", "desc": False}],
         },
     },
     {
@@ -606,7 +713,7 @@ BASE_PANELS_DEF: list[dict] = [
         "_x": 12,
         "_dy": 15,
         "title": "Portfolio Exposure",
-        "description": "Gross/net exposure and concentration as a fraction of equity, from equity_curve.",
+        "description": "Gross/Net/Concentration as % of current equity — notional exposure, not margin usage. Concentration is whichever position is currently largest; it can shift between symbols, so check Position Snapshot to see which one.",
         "type": "timeseries",
         "h": 8,
         "w": 12,
@@ -634,6 +741,57 @@ BASE_PANELS_DEF: list[dict] = [
             "legend": {"displayMode": "list", "placement": "bottom"},
         },
     },
+    {
+        "_type": "fixed",
+        "_x": 0,
+        "_dy": 23,
+        "title": "Runtime Events",
+        "description": (
+            "Operational audit trail, not trade activity. Two event types:\n"
+            "state_recovered — a restarted process resumed from its last checkpoint\n"
+            "(sim/live only); decision_skipped — a risk/sizing constraint blocked an\n"
+            "order this period (e.g. insufficient_cash, opposite_side, notional_capped).\n"
+            "\n"
+            "- Reason shows why a decision was skipped — blank for state_recovered,\n"
+            "  since resuming always succeeds.\n"
+            "- Detail is the full raw event payload behind Reason, for deeper checks."
+        ),
+        "type": "table",
+        "h": 8,
+        "w": 24,
+        "targets": [
+            _target(
+                "SELECT"
+                ' ROW_NUMBER() OVER (ORDER BY ts) AS "#",'
+                ' ts AS "Time",'
+                ' event_type AS "Event",'
+                ' symbol AS "Symbol",'
+                " detail->>'reason' AS \"Reason\","
+                ' detail::text AS "Detail"'
+                " FROM runtime_events WHERE run_id = '${run_id}'"
+                " AND $__timeFilter(ts)"
+                " ORDER BY ts",
+                "A",
+                "table",
+            )
+        ],
+        "fieldConfig": {
+            "defaults": {"custom": {"filterable": True}},
+            "overrides": [
+                # Event is deliberately uncolored — both event types are
+                # expected, by-design occurrences, not alarms.
+                _width_override("#", 40),
+                _width_override("Time", 180),
+                _width_override("Event", 140),
+                _width_override("Symbol", 120),
+                _width_override("Reason", 140),
+            ],
+        },
+        "options": {
+            "showHeader": True,
+            "sortBy": [{"displayName": "Time", "desc": False}],
+        },
+    },
 ]
 
 
@@ -655,67 +813,62 @@ EXTRA_PANELS: list[dict] = [
     {**STATUS_PANEL, "w": 6},
     _poll_seconds_panel(w=6),
     _stat_panel(
-        "Unrealized PnL",
+        "Open Positions",
+        (
+            'SELECT COUNT(*) AS "Count" FROM (\n'
+            "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
+            "  FROM trade_events\n"
+            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+            "  ORDER BY symbol, ts DESC\n"
+            ") p\n"
+            "WHERE p.remaining_quantity > 0"
+        ),
+        None,
+        [{"color": "blue", "value": None}],
+        w=6,
+        decimals=0,
+        description="Distinct symbols currently held. Pairs with Trades (closed count) in Performance Overview.",
+    ),
+    _stat_panel(
+        "Unrealized P&L",
         (
             "WITH meta AS ("
-            " SELECT timeframe, data_source"
-            " FROM backtest_runs WHERE run_id='${run_id}'"
+            " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
             "),\n"
-            "pos AS (\n"
-            "  SELECT symbol, side, entry_price, remaining_quantity\n"
+            "positions AS (\n"
+            "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
+            "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
             "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}'\n"
-            "    AND account_id = '${account_id}'\n"
-            "  ORDER BY ts DESC LIMIT 1\n"
+            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+            "  ORDER BY symbol, ts DESC\n"
             "),\n"
-            "latest AS (\n"
-            "  SELECT close FROM ohlcv, meta, pos\n"
-            "  WHERE ohlcv.symbol = pos.symbol AND ohlcv.timeframe = meta.timeframe\n"
-            "    AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)\n"
-            "  ORDER BY ts DESC LIMIT 1\n"
+            "marks AS (\n"
+            "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
+            "  FROM ohlcv o, meta m\n"
+            "  WHERE o.timeframe = m.timeframe\n"
+            "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
+            "  ORDER BY o.symbol, o.ts DESC\n"
             ")\n"
-            "SELECT CASE WHEN p.remaining_quantity > 0 THEN\n"
-            "  CASE WHEN p.side='long'\n"
-            "    THEN (l.close - p.entry_price) * p.remaining_quantity\n"
-            "    ELSE (p.entry_price - l.close) * p.remaining_quantity\n"
-            '  END ELSE NULL END AS "PnL"\n'
-            "FROM pos p, latest l"
+            "SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n"
+            "  ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier"
+            ') AS "PnL"\n'
+            "FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
+            "WHERE p.remaining_quantity > 0"
         ),
         None,
         [
             {"color": "red", "value": None},
-            {"color": "red", "value": -100},
-            {"color": "yellow", "value": 0},
-            {"color": "green", "value": 100},
+            {"color": "green", "value": 0},
         ],
         w=6,
         decimals=2,
-        no_value="No Position",
-        description="Unrealized P&L of the current open position.",
-    ),
-    _stat_panel(
-        "Current Position",
-        (
-            "WITH pos AS (\n"
-            "  SELECT side, remaining_quantity, entry_price\n"
-            "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}'\n"
-            "    AND account_id = '${account_id}'\n"
-            "  ORDER BY ts DESC LIMIT 1\n"
-            ")\n"
-            "SELECT CASE WHEN remaining_quantity > 0 THEN\n"
-            "  CASE WHEN side='long' THEN '+' ELSE '-' END\n"
-            "  || ROUND(remaining_quantity::numeric, 4) || ' @ '\n"
-            "  || ROUND(entry_price::numeric, 2)\n"
-            'ELSE NULL END AS "Position"\n'
-            "FROM pos"
-        ),
-        None,
-        [],
-        w=6,
         no_value="Flat",
-        fixed_color="blue",
-        description="Current open position: direction, size, entry price.",
+        description=(
+            "Sum of mark-to-market P&L across every open position, multiplier-adjusted "
+            "— same figure as Position Snapshot's MTM P&L footer. Total Return % already "
+            "includes this (equity is mark-to-market), so it is not additional realized "
+            "profit; Total Return $ minus this figure is the realized portion."
+        ),
     ),
 ]
 
