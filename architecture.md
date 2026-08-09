@@ -33,6 +33,25 @@ the code simpler and easier to maintain.
 After either gate, compatibility, deprecation, and migration requirements must
 be defined explicitly before further breaking changes.
 
+## Failure handling policy
+
+Chosen by blast radius:
+
+- **Trading correctness** (order sizing/pricing/limits, position/balance
+  state, config validation, symbol resolution, persisted financial data
+  shape) **fails fast** — raise, never default silently. E.g. the
+  compatibility policy above, `prepare_order`'s venue quantity limits
+  ([Broker Adapter Design](#broker-adapter-design-libraebrokers)), and
+  [Broker API compatibility](#broker-api-compatibility)'s response-shape
+  checks.
+- **Optional/observability-only paths** (analytics DB writes,
+  notifications, reference-data caches) **may degrade, but must log a
+  warning** (and alert past a repeated-failure threshold) on every fallback
+  or swallowed exception. Reference implementation:
+  `_TimescaleCallbacks._write` in `librae/orchestration/live.py`.
+
+An unlogged `except` or silent fallback is a bug either way.
+
 ## Product position and system boundaries
 
 Librae is a dependency-light, bar-based strategy engine with two first-class
@@ -609,7 +628,10 @@ These are optional persistence integrations, not the engine's acquisition
 path. `get_ohlcv()`/`get_factor()` are external, caller-owned functions (not
 shipped by Librae); the first subgraph only illustrates how such a data layer
 could use the reference `librae/db/` primitives. The other subgraphs show optional
-engine result/runtime writes.
+engine result/runtime writes. Per the [Failure handling policy](#failure-handling-policy),
+the "DB unavailable" branch is the reference-data fallback case, not the
+fail-fast case — a caller implementing it must still log a warning when it
+triggers, not fall back to the API silently.
 
 ```mermaid
 flowchart TD

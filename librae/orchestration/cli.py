@@ -595,7 +595,8 @@ def _get_code_rev() -> str:
             text=True,
         ).strip()
         return out or "unknown"
-    except Exception:
+    except Exception as exc:
+        logger.warning("git describe failed, code_rev will be 'unknown': %s", exc)
         return "unknown"
 
 
