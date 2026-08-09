@@ -117,30 +117,6 @@
         "hide": 0,
         "multi": false,
         "label": "Symbol"
-      },
-      {
-        "name": "symbols",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-postgresql-datasource",
-          "uid": "P40AE60E18F02DE32"
-        },
-        "definition": "SELECT jsonb_array_elements_text(symbols) AS symbol FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
-        "query": "SELECT jsonb_array_elements_text(symbols) AS symbol FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
-        "rawQuery": true,
-        "refresh": 2,
-        "regex": "",
-        "includeAll": true,
-        "sort": 0,
-        "current": {
-          "text": "All",
-          "value": [
-            "$__all"
-          ]
-        },
-        "hide": 0,
-        "multi": true,
-        "label": "Symbols (Trade Events)"
       }
     ]
   },
@@ -463,7 +439,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Compounded return over the full stored sample. Not annualized.",
+      "description": "Compounded return over the full stored sample. Not annualized. Net of cost.",
       "id": 7,
       "gridPos": {
         "h": 4,
@@ -574,7 +550,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Mean period return / sample period volatility. Not annualized; compare only like-frequency observations.",
+      "description": "Mean period return / sample period volatility. Not annualized; compare only like-frequency observations. Net of cost.",
       "id": 9,
       "gridPos": {
         "h": 4,
@@ -925,11 +901,11 @@
     },
     {
       "title": "Trade Events",
-      "description": "Position lifecycle: open/add = entry side, reduce/close = exit side.\nP&L and return shown on reduce/close rows only (weighted-average entry price).\nOne full lifecycle = remaining_quantity goes from 0 → N → 0.",
+      "description": "Shows all symbols in the run — filter via the Symbol column's icon, independent\nof the Symbol variable above (which only scopes Price Trend/Entry-Exit). Lifecycle:\nopen/add = entry side, reduce/close = exit side; P&L and Return % (net of cost)\nonly appear on reduce/close rows, and Position goes 0 → N → 0 over one full lifecycle.\n\n- Entry is the weighted-average cost basis, recalculated on every add —\n  not this row's fill Price.\n- Position is the size *after* this event, not this event's fill Quantity.\n- Cost = commission + slippage + tax for this event only.\n- Group ties every leg of one atomic multi-leg decision (e.g. a spot+perp\n  arb pair) — the engine fills all legs together or rejects the whole group.\n- Trade ID = symbol + this trade's open time. Filter it to isolate every\n  row of one open→close round-trip. A paired trade's legs (same Group, same bar)\n  get different Trade IDs, since their symbols differ.\n- Periods counts elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Reason is either strategy-supplied free text (optional, may be blank) or one of\n  five engine risk-exit codes the strategy did not choose: stop_loss, take_profit,\n  liquidation, drawdown_breach, force_close.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", account_id AS \"Account\", currency AS \"Currency\", event_type AS \"Event\", symbol AS \"Symbol\", group_id AS \"Group\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Qty\", ROUND(price::numeric,2) AS \"Price\", ROUND(entry_price::numeric,2) AS \"Avg Entry\", ROUND(remaining_quantity::numeric,4) AS \"Pos Qty\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", ROUND(pnl::numeric,2) AS \"Net P&L\", ROUND(net_return::numeric,2) AS \"Net Return %\", entry_at AS \"Entry Time\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND symbol IN (${symbols:sqlstring}) AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Price\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Return %\", ROUND(entry_price::numeric,2) AS \"Entry\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", currency AS \"Currency\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -939,12 +915,16 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Net P&L"
+              "options": "P&L"
             },
             "properties": [
               {
@@ -1046,12 +1026,204 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Net Return %"
+              "options": "Return %"
             },
             "properties": [
               {
                 "id": "unit",
                 "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "#"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 40
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Symbol"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Event"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Side"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Quantity"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Price"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P&L"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Return %"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Entry"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Position"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Group"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trade ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Periods"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Currency"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
               }
             ]
           }

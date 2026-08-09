@@ -31,6 +31,16 @@ def _color_override(name: str, color: str) -> dict:
     }
 
 
+def _width_override(name: str, px: int) -> dict:
+    """Fixed pixel width for a table column, sized to its actual content
+    (e.g. 'reduce'/'short' vs. a full timestamp) instead of Grafana's
+    equal-split default."""
+    return {
+        "matcher": {"id": "byName", "options": name},
+        "properties": [{"id": "custom.width", "value": px}],
+    }
+
+
 def _mapping_override(
     name: str, mappings: dict[str, str], cell_mode: str = "color-background"
 ) -> dict:
@@ -180,7 +190,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("total_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="Compounded return over the full stored sample. Not annualized.",
+        description="Compounded return over the full stored sample. Not annualized. Net of cost.",
     ),
     "max_drawdown": _stat_panel(
         "Max Drawdown %",
@@ -197,7 +207,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
             {"color": "red", "value": None},
             {"color": "green", "value": 0},
         ],
-        description="Mean period return / sample period volatility. Not annualized; compare only like-frequency observations.",
+        description="Mean period return / sample period volatility. Not annualized; compare only like-frequency observations. Net of cost.",
     ),
     "period_sortino": _stat_panel(
         "Period Sortino",
@@ -207,7 +217,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
             {"color": "red", "value": None},
             {"color": "green", "value": 0},
         ],
-        description="Mean period return / period downside deviation. Not annualized.",
+        description="Mean period return / period downside deviation. Not annualized. Net of cost.",
     ),
     "win_rate": _stat_panel(
         "Win Rate %",
@@ -239,7 +249,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("avg_trade_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="Notional-weighted mean net return per realized exit.",
+        description="Notional-weighted mean return per realized exit. Net of cost.",
     ),
     "exposure_ratio": _stat_panel(
         "Exposure %",
@@ -253,7 +263,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         _account_metric_sql("mean_period_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="Arithmetic mean return per stored observation. Not annualized.",
+        description="Arithmetic mean return per stored observation. Not annualized. Net of cost.",
     ),
     "positive_period_rate": _stat_panel(
         "Positive Periods %",
@@ -383,9 +393,25 @@ BASE_PANELS_DEF: list[dict] = [
         "_dy": 0,
         "title": "Trade Events",
         "description": (
-            "Position lifecycle: open/add = entry side, reduce/close = exit side.\n"
-            "P&L and return shown on reduce/close rows only (weighted-average entry price).\n"
-            "One full lifecycle = remaining_quantity goes from 0 → N → 0."
+            "Shows all symbols in the run — filter via the Symbol column's icon, independent\n"
+            "of the Symbol variable above (which only scopes Price Trend/Entry-Exit). Lifecycle:\n"
+            "open/add = entry side, reduce/close = exit side; P&L and Return % (net of cost)\n"
+            "only appear on reduce/close rows, and Position goes 0 → N → 0 over one full lifecycle.\n"
+            "\n"
+            "- Entry is the weighted-average cost basis, recalculated on every add —\n"
+            "  not this row's fill Price.\n"
+            "- Position is the size *after* this event, not this event's fill Quantity.\n"
+            "- Cost = commission + slippage + tax for this event only.\n"
+            "- Group ties every leg of one atomic multi-leg decision (e.g. a spot+perp\n"
+            "  arb pair) — the engine fills all legs together or rejects the whole group.\n"
+            "- Trade ID = symbol + this trade's open time. Filter it to isolate every\n"
+            "  row of one open→close round-trip. A paired trade's legs (same Group, same bar)\n"
+            "  get different Trade IDs, since their symbols differ.\n"
+            "- Periods counts elapsed bars, not clock time — multiply by the run's\n"
+            "  timeframe for actual duration.\n"
+            "- Reason is either strategy-supplied free text (optional, may be blank) or one of\n"
+            "  five engine risk-exit codes the strategy did not choose: stop_loss, take_profit,\n"
+            "  liquidation, drawdown_breach, force_close."
         ),
         "type": "table",
         "h": 15,
@@ -395,25 +421,24 @@ BASE_PANELS_DEF: list[dict] = [
                 "SELECT"
                 ' ROW_NUMBER() OVER (ORDER BY ts) AS "#",'
                 ' ts AS "Time",'
-                ' account_id AS "Account",'
-                ' currency AS "Currency",'
-                ' event_type AS "Event",'
                 ' symbol AS "Symbol",'
-                ' group_id AS "Group",'
+                ' event_type AS "Event",'
                 ' side AS "Side",'
-                ' ROUND(fill_quantity::numeric,4) AS "Qty",'
+                ' ROUND(fill_quantity::numeric,4) AS "Quantity",'
                 ' ROUND(price::numeric,2) AS "Price",'
-                ' ROUND(entry_price::numeric,2) AS "Avg Entry",'
-                ' ROUND(remaining_quantity::numeric,4) AS "Pos Qty",'
+                ' ROUND(pnl::numeric,2) AS "P&L",'
+                ' ROUND(net_return::numeric,2) AS "Return %",'
+                ' ROUND(entry_price::numeric,2) AS "Entry",'
+                ' ROUND(remaining_quantity::numeric,4) AS "Position",'
                 ' ROUND((commission + slippage + tax)::numeric,2) AS "Cost",'
-                ' ROUND(pnl::numeric,2) AS "Net P&L",'
-                ' ROUND(net_return::numeric,2) AS "Net Return %",'
-                ' entry_at AS "Entry Time",'
+                ' group_id AS "Group",'
+                " symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS')"
+                ' AS "Trade ID",'
                 ' periods_held AS "Periods",'
+                ' currency AS "Currency",'
                 ' reason AS "Reason"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND account_id = '${account_id}'"
-                " AND symbol IN (${symbols:sqlstring})"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
                 "A",
@@ -421,10 +446,10 @@ BASE_PANELS_DEF: list[dict] = [
             )
         ],
         "fieldConfig": {
-            "defaults": {},
+            "defaults": {"custom": {"filterable": True}},
             "overrides": [
                 {
-                    "matcher": {"id": "byName", "options": "Net P&L"},
+                    "matcher": {"id": "byName", "options": "P&L"},
                     "properties": [
                         {
                             "id": "thresholds",
@@ -450,11 +475,30 @@ BASE_PANELS_DEF: list[dict] = [
                 ),
                 _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
                 {
-                    "matcher": {"id": "byName", "options": "Net Return %"},
+                    "matcher": {"id": "byName", "options": "Return %"},
                     "properties": [
                         {"id": "unit", "value": "percent"},
                     ],
                 },
+                # Widths sized to actual content (timestamps/symbols need room,
+                # short enums/numbers don't) instead of Grafana's equal-split
+                # default. Reason is left unset — free-text, takes the remainder.
+                _width_override("#", 40),
+                _width_override("Time", 180),
+                _width_override("Symbol", 140),
+                _width_override("Event", 90),
+                _width_override("Side", 70),
+                _width_override("Quantity", 100),
+                _width_override("Price", 90),
+                _width_override("P&L", 100),
+                _width_override("Return %", 100),
+                _width_override("Entry", 100),
+                _width_override("Position", 100),
+                _width_override("Cost", 80),
+                _width_override("Group", 140),
+                _width_override("Trade ID", 260),  # "symbol @ entry_at" — both concatenated
+                _width_override("Periods", 80),
+                _width_override("Currency", 80),
             ],
         },
         "options": {
@@ -849,13 +893,6 @@ def render_unified_dashboard() -> dict:
         " FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
         label="Symbol",
     )
-    symbols_var = _make_query_variable(
-        "symbols",
-        "SELECT jsonb_array_elements_text(symbols) AS symbol"
-        " FROM backtest_runs WHERE run_id='${run_id}' ORDER BY symbol",
-        label="Symbols (Trade Events)",
-        multi=True,
-    )
 
     return {
         "uid": "strategy_dashboard",
@@ -867,7 +904,7 @@ def render_unified_dashboard() -> dict:
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [mode_var, strategy_var, run_id_var, account_id_var, symbol_var, symbols_var],
+            "list": [mode_var, strategy_var, run_id_var, account_id_var, symbol_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},

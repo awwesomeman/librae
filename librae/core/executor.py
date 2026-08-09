@@ -670,6 +670,7 @@ def apply_execution_fill(
             slippage=fill.slippage,
             tax=fill.tax,
             reason=reason,
+            entry_at=position.entry_at,
         )
         result = ExecutionResult(trades=[], events=[event], cash_delta=-outlay)
         return cash - outlay, result
@@ -1530,6 +1531,7 @@ def execute_order_intents(
                             reason=reason,
                             group_id=group_id,
                             time_in_force=time_in_force,
+                            entry_at=positions[sym].entry_at,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1588,6 +1590,7 @@ def execute_order_intents(
                             reason=reason,
                             group_id=group_id,
                             time_in_force=time_in_force,
+                            entry_at=pos.entry_at,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity

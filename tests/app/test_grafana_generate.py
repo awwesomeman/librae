@@ -33,16 +33,6 @@ class TestRenderUnifiedDashboard:
         assert "run_id" in var_names
         assert "account_id" in var_names
         assert "symbol" in var_names
-        assert "symbols" in var_names
-
-    def test_symbols_variable_supports_multi_select_and_all(self):
-        """Trade Events must default to showing every symbol (a multi-leg
-        arb position's paired legs need to stay visible together) while
-        still letting a user narrow to one or a few for debugging."""
-        d = render_unified_dashboard()
-        symbols_var = next(v for v in d["templating"]["list"] if v["name"] == "symbols")
-        assert symbols_var["multi"] is True
-        assert symbols_var["includeAll"] is True
 
     def test_single_symbol_panels_are_filtered_and_labeled_by_symbol(self):
         """Price Trend / Entry-Exit Signals show one instrument at a time —
@@ -120,11 +110,17 @@ class TestRenderUnifiedDashboard:
             assert '"Group"' in sql
             assert "group_id" in sql
 
-    def test_trade_events_filters_by_multi_symbol_variable(self):
+    def test_trade_events_shows_all_symbols_with_in_panel_filtering(self):
+        """Trade Events shows every symbol by default (a multi-leg arb
+        position's paired legs need to stay visible together, and it's
+        independent of the Price Trend/Entry-Exit ${symbol} selector) —
+        narrowing happens via the table's own filterable Symbol column,
+        not a dashboard-level variable."""
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Trade Events")
         sql = panel["targets"][0]["rawSql"]
-        assert "${symbols:sqlstring}" in sql
+        assert "${symbol}" not in sql
+        assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
 
 
 class TestRenderSignalMonitor:

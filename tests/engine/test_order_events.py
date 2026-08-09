@@ -65,8 +65,15 @@ class TestOpenEvent:
         events, _, _ = _run([OrderIntent(action="long", symbol="TEST")])
         assert events[0].pnl is None
         assert events[0].net_return is None
-        assert events[0].entry_at is None
         assert events[0].periods_held is None
+
+    def test_open_carries_its_own_entry_at(self):
+        """entry_at is populated on every event type, not just reduce/close —
+        it's the position lifecycle's stable identity (paired with symbol),
+        letting a caller correlate every row of one open→close cycle even
+        before it's known how the position will eventually close."""
+        events, _, positions = _run([OrderIntent(action="long", symbol="TEST")])
+        assert events[0].entry_at == positions["TEST"].entry_at == TS
 
 
 class TestAddEvent:
@@ -97,6 +104,7 @@ class TestAddEvent:
         # entry_price = (450 + 500) / 10 = 95.0
         assert np.isclose(e.entry_price, 95.0)
         assert e.pnl is None
+        assert e.entry_at == TS  # unchanged by scaling in — fixed at the original open
 
 
 class TestReduceCloseEvents:
