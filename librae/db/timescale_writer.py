@@ -897,6 +897,8 @@ def write_trade_event(
     entry_commission: float | None = None,
     entry_slippage: float | None = None,
     entry_tax: float | None = None,
+    group_id: str | None = None,
+    time_in_force: str | None = None,
     margin_locked: float | None = None,
     leverage: float | None = None,
     liquidation_price: float | None = None,
@@ -916,11 +918,11 @@ def write_trade_event(
                 commission, slippage, tax,
                 entry_commission, entry_slippage, entry_tax,
                 pnl, net_return,
-                entry_at, periods_held, reason,
+                entry_at, periods_held, reason, group_id, time_in_force,
                 margin_locked, leverage, liquidation_price, margin_roi)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                       %s,%s,%s,%s,%s,%s,%s)
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
                 event_id,
@@ -950,6 +952,8 @@ def write_trade_event(
                 _to_dt(entry_at) if entry_at else None,
                 periods_held,
                 reason,
+                group_id,
+                time_in_force,
                 margin_locked,
                 leverage,
                 liquidation_price,

@@ -287,6 +287,206 @@ class TestReduceCloseEvents:
         assert events[0].reason == "stop loss"
 
 
+LEVERAGED = CostModel(
+    multiplier=1.0,
+    commission_rate=0.0,
+    min_commission=0.0,
+    slippage_ticks=0.0,
+    tick_size=0.01,
+    tax_rate=0.0,
+    long_margin_rate=0.1,
+    short_margin_rate=0.1,
+    maintenance_margin_rate=0.05,
+)
+
+
+class TestMarginFields:
+    """margin_locked/leverage/liquidation_price/margin_roi — computed via
+    _margin_fields()/_margin_roi() at every fill site, so backtest and live
+    share the same math."""
+
+    def test_spot_open_margin_equals_notional_and_leverage_is_one(self):
+        events, _, _ = _run([OrderIntent(action="long", symbol="TEST", quantity=2.0)])
+        e = events[0]
+        assert e.margin_locked == 200.0  # 2 * 100 price, margin_rate=1.0
+        assert e.leverage == 1.0
+        assert e.liquidation_price is None  # maintenance_margin_rate=0 disables it
+
+    def test_leveraged_open_margin_and_leverage(self):
+        events, _, _ = _run(
+            [OrderIntent(action="long", symbol="TEST", quantity=2.0)],
+            cost_model=LEVERAGED,
+        )
+        e = events[0]
+        assert np.isclose(e.margin_locked, 20.0)  # 200 notional * 0.1
+        assert np.isclose(e.leverage, 10.0)
+        assert np.isclose(e.liquidation_price, 95.0)  # 100 * (1 + 0.05 - 0.1)
+
+    def test_leveraged_short_liquidation_price_is_mirrored(self):
+        events, _, _ = _run(
+            [OrderIntent(action="short", symbol="TEST", quantity=2.0)],
+            cost_model=LEVERAGED,
+        )
+        assert np.isclose(events[0].liquidation_price, 105.0)  # 100 * (1 - 0.05 + 0.1)
+
+    def test_scale_in_margin_locked_tracks_combined_position(self):
+        events, _, positions = _run(
+            [
+                OrderIntent(action="long", symbol="TEST", quantity=2.0),
+                OrderIntent(action="long", symbol="TEST", quantity=1.0),
+            ],
+            cost_model=LEVERAGED,
+        )
+        add_event = events[1]
+        pos = positions["TEST"]
+        assert add_event.remaining_quantity == pos.quantity == 3.0
+        assert np.isclose(add_event.margin_locked, pos.entry_price * 3.0 * 0.1)
+        assert np.isclose(add_event.leverage, 10.0)
+
+    def test_full_close_zeroes_margin_locked_and_leverage(self):
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=2.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=160.0,
+            )
+        }
+        events, _, _ = _run(
+            [OrderIntent(action="close", symbol="TEST")],
+            cost_model=LEVERAGED,
+            positions=positions,
+        )
+        e = events[0]
+        assert e.margin_locked == 0.0
+        assert e.leverage is None
+        assert e.liquidation_price is None  # remaining_quantity == 0
+
+    def test_partial_reduce_keeps_remaining_margin_locked(self):
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=10.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=800.0,
+            )
+        }
+        events, _, _ = _run(
+            [OrderIntent(action="close", symbol="TEST", quantity=4.0)],
+            cost_model=LEVERAGED,
+            positions=positions,
+        )
+        e = events[0]
+        assert e.event_type == "reduce"
+        assert e.remaining_quantity == 6.0
+        assert np.isclose(e.margin_locked, 80.0 * 6.0 * 0.1)
+        assert np.isclose(e.leverage, 10.0)
+
+    def test_spot_full_close_margin_roi_equals_price_return(self):
+        """margin_rate=1.0 makes margin ROI and price return identical."""
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=2.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=160.0,
+            )
+        }
+        events, _, _ = _run([OrderIntent(action="close", symbol="TEST")], positions=positions)
+        e = events[0]
+        assert np.isclose(e.margin_roi, e.net_return)
+
+    def test_leveraged_full_close_margin_roi_is_amplified_by_margin_rate(self):
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=80.0,
+                quantity=2.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=0,
+                entry_slippage=0,
+                entry_tax=0,
+                total_entry_cost=160.0,
+            )
+        }
+        events, _, _ = _run(
+            [OrderIntent(action="close", symbol="TEST")],
+            cost_model=LEVERAGED,
+            positions=positions,
+        )
+        e = events[0]
+        # gross_pnl = (100-80)*2 = 40; closed_margin = 80*2*0.1 = 16
+        assert np.isclose(e.margin_roi, 40.0 / 16.0 * 100)
+        assert np.isclose(e.margin_roi, e.net_return / 0.1)
+
+    def test_confirmed_fill_open_and_close_produce_same_margin_fields_as_backtest(self):
+        """apply_execution_fill (live path) must compute margin fields
+        identically to execute_order_intents (backtest path) — same helper,
+        same math, no live/backtest divergence."""
+        positions: dict[str, PositionState] = {}
+        _, open_result = apply_execution_fill(
+            positions,
+            0.0,
+            Fill(
+                symbol="TEST",
+                side="long",
+                price=80.0,
+                quantity=2.0,
+                commission=0,
+                slippage=0,
+                tax=0,
+            ),
+            TS,
+            order_side="buy",
+            cost_model=LEVERAGED,
+        )
+        open_event = open_result.events[0]
+        assert np.isclose(open_event.margin_locked, 16.0)  # 80*2*0.1
+        assert np.isclose(open_event.leverage, 10.0)
+        assert np.isclose(open_event.liquidation_price, 76.0)  # 80*(1+0.05-0.1)
+
+        _, close_result = apply_execution_fill(
+            positions,
+            0.0,
+            Fill(
+                symbol="TEST",
+                side="short",
+                price=100.0,
+                quantity=2.0,
+                commission=0,
+                slippage=0,
+                tax=0,
+            ),
+            TS,
+            order_side="sell",
+            cost_model=LEVERAGED,
+        )
+        close_event = close_result.events[0]
+        assert close_event.margin_locked == 0.0
+        assert close_event.leverage is None
+        assert np.isclose(close_event.margin_roi, 40.0 / 16.0 * 100)
+
+
 class TestComplexLifecycle:
     """buy → buy → sell a bit → buy → sell all."""
 

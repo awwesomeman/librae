@@ -45,3 +45,16 @@ SQLite, see [Local artifacts](guides/local-artifacts.md).
 
 This ordering keeps the root README concise while still giving deeper
 information a clear entry point.
+
+## Writing conventions
+
+Applies to every doc in this repo except `plans/`, `research/`, and `spikes/`
+(historical by design — see the table above):
+
+1. **No drift-prone specifics.** Don't restate counts, names, or field lists
+   that live in code — link to the file/symbol and describe the invariant
+   instead, so the doc can't silently fall out of sync.
+2. **Concise and scannable.** Short paragraphs/bullets, one point per line,
+   no padding.
+3. **One canonical home per concept.** If two docs would describe the same
+   thing, pick one and link from the other instead of restating it.

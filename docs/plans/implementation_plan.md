@@ -144,23 +144,27 @@ Engine Refactor         Pipeline              (Goal 1 MVP)        (Goal 2 MVP)  
 
 ## 待辦：Dashboard 指標擴充
 
-目前 Performance Overview 只有 6 個 KPI（Total Return, Max DD, Sharpe, Win Rate, Profit Factor, Trades）。
-需要設計如何加入更多指標（例如 Active Period Return、年化報酬、Sortino、Calmar）同時保持版面整潔。
+Performance Overview 的寬度限制（w=4 一行放 6 個，超過自動換下一行）已經用「直接
+換行」解決，不再需要摺疊或 variable 切換；目前實際有哪些 tile 以
+`generate_dashboards.py` 的 `BASE_PANELS_DEF` 為準，這裡不重複列。
+
+需要設計如何加入更多指標（例如 Active Period Return、年化報酬、Sortino、Calmar）
+同時保持版面整潔。
 
 ### 考量
 
-- **KPI row 寬度有限**：目前 6 × w=4 = 24 剛好滿，再加就要換行或縮窄
+- **行數會一直長**：目前已經兩行，靠換行擴充沒有上限煞車，遲早要換一種展示方式
 - **不同模式需求不同**：backtest 有完整歷史可算年化，sim 可能只跑幾天、年化無意義
 - **指標重要性分層**：核心 KPI（一眼要看到）vs 進階指標（展開才看）
 
 ### 可能方向
 
-1. **分層展示**：核心 KPI 維持第一行，進階指標放可摺疊 row（類似 Live/Sim Only）
-2. **動態切換**：Grafana variable 選擇指標集（簡潔 / 完整），切換 KPI row 顯示內容
+1. **分層展示**：核心指標維持現有兩行，進階指標放可摺疊 row
+2. **動態切換**：Grafana variable 選擇指標集（簡潔 / 完整），切換顯示內容
 3. **Tooltip 補充**：主 KPI 不變，hover 時顯示相關延伸指標（如 Total Return hover 顯示 CAGR）
 4. **Table panel**：一個表格列出所有指標，取代多個 stat panel，省空間
 
-等指標數量 >10 時再決定方案。
+下一個要加的指標就該決定方案，不要再靠換行擴充成第三行 stat tile。
 
 ---
 

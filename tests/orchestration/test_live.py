@@ -447,6 +447,56 @@ def test_factory_rejects_two_notifier_sources() -> None:
         )
 
 
+def test_timescale_callbacks_writes_trade_event() -> None:
+    """asdict(OrderEvent) must match write_trade_event's real signature —
+    autospec enforces this; a plain MagicMock would hide a mismatch since
+    _write() swallows the resulting TypeError as a logged DB failure."""
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks._run_id = "run-1"
+    ts = datetime.now(UTC)
+
+    from librae.core.executor import OrderEvent
+
+    event = OrderEvent(
+        ts=ts,
+        symbol="BTCUSDT",
+        side="long",
+        event_type="close",
+        fill_quantity=1.0,
+        price=100.0,
+        entry_price=90.0,
+        remaining_quantity=0.0,
+        notional=100.0,
+        commission=0.1,
+        slippage=0.05,
+        tax=0.0,
+        pnl=10.0,
+        net_return=11.1,
+        entry_at=ts,
+        periods_held=3,
+        reason="take_profit",
+        entry_commission=0.1,
+        entry_slippage=0.05,
+        entry_tax=0.0,
+        group_id="grp-1",
+        time_in_force="day",
+        margin_locked=0.0,
+        leverage=None,
+        liquidation_price=None,
+        margin_roi=11.1,
+    )
+
+    with patch("librae.db.timescale_writer.write_trade_event", autospec=True) as write:
+        callbacks.on_order_event(event, sequence=1)
+
+    assert callbacks._failures == 0
+    write.assert_called_once()
+    assert write.call_args.kwargs["group_id"] == "grp-1"
+    assert write.call_args.kwargs["time_in_force"] == "day"
+    assert write.call_args.kwargs["margin_roi"] == 11.1
+
+
 def test_timescale_callbacks_writes_runtime_event() -> None:
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(config, {}, None)

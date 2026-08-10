@@ -254,7 +254,7 @@ def test_write_trade_event_sql_matches_persisted_cost_fields(mock_conn_ctx) -> N
     )
 
     sql, values = mock_cur.execute.call_args.args
-    assert sql.count("%s") == len(values) == 27
+    assert sql.count("%s") == len(values) == 33
     assert "entry_commission, entry_slippage, entry_tax" in sql
     assert values[19:22] == (0.1, None, None)
 

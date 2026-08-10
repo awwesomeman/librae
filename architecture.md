@@ -781,3 +781,8 @@ point-in-time observations.
 2. Apply the quantity and timestamp naming rules consistently.
 3. Record a changed naming rule in `docs/decisions/`, then keep only the new
    current state here.
+
+Repo-wide documentation writing conventions (drift-prone content, conciseness,
+one canonical home per concept) live in [`docs/README.md`](docs/README.md#writing-conventions),
+not here — that's the canonical index for how docs in this repo relate to
+each other.

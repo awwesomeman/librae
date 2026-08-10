@@ -115,11 +115,11 @@ ON CONFLICT (run_id, account_id, ts) DO NOTHING;
 -- resetting entry_at on reopen, partial reduce, and arb-pair correlation.
 --
 -- BTCUSDT lifecycle 1 and ETHUSDT are spot (margin_rate=1.0): margin_locked
--- equals notional and leverage=1.0, so ROI on Margin % == Return % — demos the
+-- equals notional and leverage=1.0, so Margin ROI % == Return % — demos the
 -- "no difference for spot" case. The BTC/SOL funding_arb_1 pair (10x,
 -- margin_rate=0.1) and the final still-open BTC lifecycle (4x, margin_rate=0.25)
 -- are leveraged futures positions (maintenance_margin_rate=0.05 throughout) so
--- Leverage/Liquidation Price/Distance to Liquidation/ROI on Margin % all have
+-- Leverage/Liquidation Price/Liquidation Buffer %/Margin ROI % all have
 -- something to show — including in Position Snapshot, which only reflects
 -- currently-open rows. liquidation_price = entry*(1+maintenance-margin_rate)
 -- for longs, entry*(1-maintenance+margin_rate) for shorts (see
@@ -189,7 +189,7 @@ VALUES
     -- Fresh BTC lifecycle, still open at "now" (day -1) — also leveraged
     -- (4x, lower than the arb pair above), so the currently-held row in
     -- Position Snapshot (not just closed Trade Events rows) demos
-    -- Leverage/Liquidation Price/Distance to Liquidation. 4x rather than
+    -- Leverage/Liquidation Price/Liquidation Buffer %. 4x rather than
     -- the arb pair's 10x so liquidation_price (52000) stays safely below
     -- the BTCUSDT OHLCV path's actual range near "now" (~55k-59k) — 10x
     -- here would put liquidation_price (61750) above the current close,
