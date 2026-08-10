@@ -893,6 +893,12 @@ class Backtest:
                 reason=e.reason,
                 group_id=e.group_id,
                 time_in_force=e.time_in_force,
+                margin_locked=(float(e.margin_locked) if e.margin_locked is not None else None),
+                leverage=float(e.leverage) if e.leverage is not None else None,
+                liquidation_price=(
+                    float(e.liquidation_price) if e.liquidation_price is not None else None
+                ),
+                margin_roi=float(e.margin_roi) if e.margin_roi is not None else None,
             )
             for i, e in enumerate(result.order_events)
         ]

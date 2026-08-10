@@ -96,6 +96,10 @@ class OrderEventRecord:
     entry_tax: float | None = None
     group_id: str | None = None
     time_in_force: TimeInForce | None = None
+    margin_locked: float | None = None
+    leverage: float | None = None
+    liquidation_price: float | None = None
+    margin_roi: float | None = None
 
 
 @dataclass(frozen=True)

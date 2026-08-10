@@ -17,7 +17,7 @@ from tests.signal_outcome_contract import (
 class TestRenderUnifiedDashboard:
     def test_panel_count(self):
         d = render_unified_dashboard()
-        assert len(d["panels"]) == 20
+        assert len(d["panels"]) == 22
 
     def test_has_required_fields(self):
         d = render_unified_dashboard()

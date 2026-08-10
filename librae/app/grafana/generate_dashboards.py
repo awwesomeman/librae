@@ -179,8 +179,22 @@ STATUS_PANEL: dict = {
     },
 }
 
+
+def _poll_seconds_panel(w: int) -> dict:
+    return _stat_panel(
+        "Poll Seconds",
+        "SELECT poll_seconds AS \"Seconds\" FROM backtest_runs WHERE run_id = '${run_id}'",
+        "s",
+        [],
+        w=w,
+        fixed_color="blue",
+        no_value="N/A",
+        description="Polling interval in seconds. Only set for sim/live runs.",
+    )
+
+
 # ---------------------------------------------------------------------------
-# KPI catalogue — all available stat panels for Performance Overview.
+# KPI catalogue — all available stat panels for the Overview row.
 # Edit DEFAULT_KPIS to control which KPIs appear on the dashboard.
 # ---------------------------------------------------------------------------
 
@@ -287,7 +301,120 @@ DEFAULT_KPIS: list[str] = [
 
 BASE_PANELS_DEF: list[dict] = [
     {"_type": "row", "title": "Performance Overview"},
+    STATUS_PANEL,
+    _poll_seconds_panel(w=4),
+    _stat_panel(
+        "Open Positions",
+        (
+            'SELECT COUNT(*) AS "Count" FROM (\n'
+            "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
+            "  FROM trade_events\n"
+            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+            "  ORDER BY symbol, ts DESC\n"
+            ") p\n"
+            "WHERE p.remaining_quantity > 0"
+        ),
+        None,
+        [{"color": "blue", "value": None}],
+        decimals=0,
+        description="Distinct symbols currently held. Pairs with Trades (closed count) below.",
+    ),
+    _stat_panel(
+        "Unrealized P&L",
+        (
+            "WITH meta AS ("
+            " SELECT timeframe, data_source, mode, ended_at"
+            " FROM backtest_runs WHERE run_id='${run_id}'"
+            "),\n"
+            "positions AS (\n"
+            "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
+            "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
+            "  FROM trade_events\n"
+            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+            "  ORDER BY symbol, ts DESC\n"
+            "),\n"
+            "marks AS (\n"
+            "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
+            "  FROM ohlcv o, meta m\n"
+            "  WHERE o.timeframe = m.timeframe\n"
+            "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
+            "    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
+            "  ORDER BY o.symbol, o.ts DESC\n"
+            ")\n"
+            "SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n"
+            "  ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier"
+            ') AS "PnL"\n'
+            "FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
+            "WHERE p.remaining_quantity > 0"
+        ),
+        None,
+        [
+            {"color": "red", "value": None},
+            {"color": "green", "value": 0},
+        ],
+        decimals=2,
+        no_value="Flat",
+        description=(
+            "Sum of mark-to-market P&L across every open position, multiplier-adjusted "
+            "— same figure as Position Snapshot's MTM P&L footer. Total Return % already "
+            "includes this (equity is mark-to-market), so it is not additional realized "
+            "profit; Total Return $ minus this figure is the realized portion. Backtest "
+            "runs mark against the run's own ended_at, not a live price, so a finished "
+            "run's number doesn't drift as the market keeps moving."
+        ),
+    ),
+    _stat_panel(
+        "Margin Utilization",
+        (
+            "WITH equity AS (\n"
+            "  SELECT equity FROM equity_curve\n"
+            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+            "  ORDER BY ts DESC LIMIT 1\n"
+            "),\n"
+            "positions AS (\n"
+            "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n"
+            "  FROM trade_events\n"
+            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+            "  ORDER BY symbol, ts DESC\n"
+            ")\n"
+            'SELECT SUM(p.margin_locked) / NULLIF(MAX(e.equity),0) AS "Utilization"\n'
+            "FROM positions p CROSS JOIN equity e\n"
+            "WHERE p.remaining_quantity > 0"
+        ),
+        "percentunit",
+        [
+            {"color": "green", "value": None},
+            {"color": "orange", "value": 0.5},
+            {"color": "red", "value": 0.8},
+        ],
+        description=(
+            "Margin locked across open positions, as % of equity — the capital\n"
+            "actually committed to current exposure (vs. Portfolio Exposure's\n"
+            "notional %). Equals gross exposure for spot-only runs (margin_rate=1.0)."
+        ),
+    ),
+    _stat_panel(
+        "Funding P&L",
+        (
+            'SELECT SUM(cash_flow) AS "Funding P&L"\n'
+            "FROM funding_cash_flows\n"
+            "WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
+            " AND $__timeFilter(ts)"
+        ),
+        None,
+        [
+            {"color": "red", "value": None},
+            {"color": "green", "value": 0},
+        ],
+        decimals=2,
+        no_value="0",
+        description=(
+            "Total perpetual-funding cash flow while holding open positions. Positive "
+            "= net received. 0 for runs with no funding (equities, most futures)."
+        ),
+    ),
     *[_KPI_CATALOGUE[k] for k in DEFAULT_KPIS],
+    {"_type": "row", "title": "Performance Detail"},
     {
         "_type": "half",
         "title": "Equity Curve",
@@ -411,7 +538,10 @@ BASE_PANELS_DEF: list[dict] = [
             "  timeframe for actual duration.\n"
             "- Reason is either strategy-supplied free text (optional, may be blank) or one of\n"
             "  five engine risk-exit codes the strategy did not choose: stop_loss, take_profit,\n"
-            "  liquidation, drawdown_breach, force_close."
+            "  liquidation, drawdown_breach, force_close.\n"
+            "- Return % is price return (notional-based); Margin ROI % is P&L against\n"
+            "  the capital locked for the closed quantity — same as Return % for spot\n"
+            "  (margin_rate=1.0), amplified by leverage for futures."
         ),
         "type": "table",
         "h": 15,
@@ -428,6 +558,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' ROUND(price::numeric,2) AS "Trade Price",'
                 ' ROUND(pnl::numeric,2) AS "P&L",'
                 ' ROUND(net_return::numeric,2) AS "Return %",'
+                ' ROUND(margin_roi::numeric,2) AS "Margin ROI %",'
                 ' ROUND(entry_price::numeric,2) AS "Entry Price",'
                 ' ROUND(remaining_quantity::numeric,4) AS "Position",'
                 ' ROUND((commission + slippage + tax)::numeric,2) AS "Cost",'
@@ -480,6 +611,12 @@ BASE_PANELS_DEF: list[dict] = [
                         {"id": "unit", "value": "percent"},
                     ],
                 },
+                {
+                    "matcher": {"id": "byName", "options": "Margin ROI %"},
+                    "properties": [
+                        {"id": "unit", "value": "percent"},
+                    ],
+                },
                 # Widths sized to actual content (timestamps/symbols need room,
                 # short enums/numbers don't) instead of Grafana's equal-split
                 # default. Reason is left unset — free-text, takes the remainder.
@@ -492,6 +629,7 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("Trade Price", 110),
                 _width_override("P&L", 100),
                 _width_override("Return %", 100),
+                _width_override("Margin ROI %", 110),
                 _width_override("Entry Price", 110),
                 _width_override("Position", 100),
                 _width_override("Cost", 80),
@@ -585,7 +723,10 @@ BASE_PANELS_DEF: list[dict] = [
             "  mark-to-market then, not 'unrealized' in the live sense — a past\n"
             "  date's position may since have been closed/realized.\n"
             "- Trade ID = symbol + this trade's open time — filter it in Trade Events\n"
-            "  to pull the complete fill history behind this row."
+            "  to pull the complete fill history behind this row.\n"
+            "- Leverage = notional / Margin Locked (1.0 for spot). Liquidation Buffer %\n"
+            "  is how far Market Price sits from Liquidation Price, as % of Market\n"
+            "  Price — both null unless the market's maintenance_margin_rate is set."
         ),
         "type": "table",
         "h": 8,
@@ -603,7 +744,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n"
-                "    entry_price, entry_at,\n"
+                "    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n"
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
                 "  FROM trade_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
@@ -620,6 +761,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "sized AS (\n"
                 "  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n"
+                "    p.margin_locked, p.leverage, p.liquidation_price,\n"
                 "    mk.market_price, p.multiplier,\n"
                 "    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n"
                 "      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n"
@@ -637,6 +779,13 @@ BASE_PANELS_DEF: list[dict] = [
                 "  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n"
                 "    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))"
                 '    ::numeric,4) AS "MTM P&L %",\n'
+                '  ROUND(s.margin_locked::numeric,2) AS "Margin Locked",\n'
+                '  ROUND(s.leverage::numeric,2) AS "Leverage",\n'
+                '  ROUND(s.liquidation_price::numeric,2) AS "Liquidation Price",\n'
+                "  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n"
+                "    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n"
+                "    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)"
+                '    ::numeric,4) AS "Liquidation Buffer %",\n'
                 "  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS')"
                 ' AS "Trade ID"\n'
                 "FROM sized s CROSS JOIN equity e\n"
@@ -690,6 +839,28 @@ BASE_PANELS_DEF: list[dict] = [
                     "matcher": {"id": "byName", "options": "MTM P&L %"},
                     "properties": [{"id": "unit", "value": "percentunit"}],
                 },
+                {
+                    "matcher": {"id": "byName", "options": "Leverage"},
+                    "properties": [{"id": "unit", "value": "none"}, {"id": "decimals", "value": 2}],
+                },
+                {
+                    "matcher": {"id": "byName", "options": "Liquidation Buffer %"},
+                    "properties": [
+                        {"id": "unit", "value": "percentunit"},
+                        {
+                            "id": "thresholds",
+                            "value": {
+                                "mode": "absolute",
+                                "steps": [
+                                    {"color": "red", "value": None},
+                                    {"color": "orange", "value": 0.1},
+                                    {"color": "green", "value": 0.25},
+                                ],
+                            },
+                        },
+                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
+                    ],
+                },
                 _width_override("Symbol", 90),
                 _width_override("Side", 60),
                 _width_override("Weight", 90),
@@ -698,6 +869,10 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("Market Price", 100),
                 _width_override("MTM P&L", 90),
                 _width_override("MTM P&L %", 90),
+                _width_override("Margin Locked", 100),
+                _width_override("Leverage", 80),
+                _width_override("Liquidation Price", 110),
+                _width_override("Liquidation Buffer %", 130),
                 _width_override("Trade ID", 220),
             ],
         },
@@ -792,84 +967,6 @@ BASE_PANELS_DEF: list[dict] = [
             "sortBy": [{"displayName": "Time", "desc": False}],
         },
     },
-]
-
-
-def _poll_seconds_panel(w: int) -> dict:
-    return _stat_panel(
-        "Poll Seconds",
-        "SELECT poll_seconds AS \"Seconds\" FROM backtest_runs WHERE run_id = '${run_id}'",
-        "s",
-        [],
-        w=w,
-        fixed_color="blue",
-        no_value="N/A",
-        description="Polling interval in seconds. Only set for sim/live runs.",
-    )
-
-
-EXTRA_PANELS: list[dict] = [
-    {"_type": "row", "title": "Live / Sim Only"},
-    {**STATUS_PANEL, "w": 6},
-    _poll_seconds_panel(w=6),
-    _stat_panel(
-        "Open Positions",
-        (
-            'SELECT COUNT(*) AS "Count" FROM (\n'
-            "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
-            "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
-            "  ORDER BY symbol, ts DESC\n"
-            ") p\n"
-            "WHERE p.remaining_quantity > 0"
-        ),
-        None,
-        [{"color": "blue", "value": None}],
-        w=6,
-        decimals=0,
-        description="Distinct symbols currently held. Pairs with Trades (closed count) in Performance Overview.",
-    ),
-    _stat_panel(
-        "Unrealized P&L",
-        (
-            "WITH meta AS ("
-            " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
-            "),\n"
-            "positions AS (\n"
-            "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
-            "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
-            "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
-            "  ORDER BY symbol, ts DESC\n"
-            "),\n"
-            "marks AS (\n"
-            "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
-            "  FROM ohlcv o, meta m\n"
-            "  WHERE o.timeframe = m.timeframe\n"
-            "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
-            "  ORDER BY o.symbol, o.ts DESC\n"
-            ")\n"
-            "SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n"
-            "  ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier"
-            ') AS "PnL"\n'
-            "FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
-            "WHERE p.remaining_quantity > 0"
-        ),
-        None,
-        [
-            {"color": "red", "value": None},
-            {"color": "green", "value": 0},
-        ],
-        w=6,
-        decimals=2,
-        no_value="Flat",
-        description=(
-            "Sum of mark-to-market P&L across every open position, multiplier-adjusted "
-            "— same figure as Position Snapshot's MTM P&L footer. Total Return % already "
-            "includes this (equity is mark-to-market), so it is not additional realized "
-            "profit; Total Return $ minus this figure is the realized portion."
-        ),
-    ),
 ]
 
 
@@ -1015,7 +1112,7 @@ def _make_query_variable(
 
 def render_unified_dashboard() -> dict:
     """Build the single unified Strategy Dashboard."""
-    all_defs = list(EXTRA_PANELS) + list(BASE_PANELS_DEF)
+    all_defs = list(BASE_PANELS_DEF)
     panels = build_panels(all_defs)
 
     mode_var = _make_custom_variable(

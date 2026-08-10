@@ -297,6 +297,10 @@ class OrderEvent:
     entry_tax: float | None = None
     group_id: str | None = None
     time_in_force: TimeInForce | None = None
+    margin_locked: float | None = None
+    leverage: float | None = None
+    liquidation_price: float | None = None
+    margin_roi: float | None = None
 
 
 RuntimeEventType = Literal["state_recovered", "decision_skipped"]
@@ -349,6 +353,31 @@ class ExecutionResult:
 def side_multiplier(side: PositionSide) -> float:
     """Convert side to direction multiplier. +1 for long, -1 for short."""
     return -1.0 if side == "short" else 1.0
+
+
+def _margin_fields(
+    entry_price: float,
+    remaining_quantity: float,
+    side: PositionSide,
+    cost_model: CostModel,
+) -> tuple[float, float | None, float | None]:
+    """(margin_locked, leverage, liquidation_price) for the position left
+    after an OrderEvent — zero margin_locked/no leverage once fully closed
+    (remaining_quantity == 0)."""
+    notional = entry_price * remaining_quantity * cost_model.multiplier
+    margin_locked = notional * cost_model.margin_rate(side)
+    leverage = notional / margin_locked if margin_locked > EPSILON else None
+    liq_price = cost_model.liquidation_price(entry_price, side) if remaining_quantity > 0 else None
+    return margin_locked, leverage, liq_price
+
+
+def _margin_roi(net_pnl: float, closed_margin: float) -> float | None:
+    """PnL as % of the margin backing the closed quantity — real return on
+    capital for a leveraged trade, unlike TradePnL.net_return (price return,
+    kept notional-based so it stays comparable across trades/runs with
+    different margin rates). None when nothing was actually margined
+    (closed_margin <= 0, e.g. spot never reaches here with a zero base)."""
+    return net_pnl / closed_margin * 100 if closed_margin > EPSILON else None
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +593,11 @@ def build_close_event(
     )
     trade = build_trade_result(pos, ts, exit_price, close_qty, pnl)
     remaining_qty = 0.0 if fully_closed else max(0.0, pos.quantity - close_qty)
+    margin_locked, leverage, liq_price = _margin_fields(
+        pos.entry_price, remaining_qty, pos.side, cost_model
+    )
+    closed_margin, _, _ = _margin_fields(pos.entry_price, close_qty, pos.side, cost_model)
+    margin_roi = _margin_roi(pnl.net_pnl, closed_margin)
     event = OrderEvent(
         ts=ts,
         symbol=pos.symbol,
@@ -587,6 +621,10 @@ def build_close_event(
         reason=reason,
         group_id=pos.group_id,
         time_in_force=time_in_force,
+        margin_locked=margin_locked,
+        leverage=leverage,
+        liquidation_price=liq_price,
+        margin_roi=margin_roi,
     )
     return trade, event, proceeds, fully_closed
 
@@ -656,6 +694,9 @@ def apply_execution_fill(
         else:
             scale_into_position(position, fill, cost_model)
 
+        margin_locked, leverage, liq_price = _margin_fields(
+            position.entry_price, position.quantity, entry_side, cost_model
+        )
         event = OrderEvent(
             ts=ts,
             symbol=symbol,
@@ -671,6 +712,9 @@ def apply_execution_fill(
             tax=fill.tax,
             reason=reason,
             entry_at=position.entry_at,
+            margin_locked=margin_locked,
+            leverage=leverage,
+            liquidation_price=liq_price,
         )
         result = ExecutionResult(trades=[], events=[event], cash_delta=-outlay)
         return cash - outlay, result
@@ -711,6 +755,11 @@ def apply_execution_fill(
     )
     trade = build_trade_result(position, ts, fill.price, close_quantity, pnl)
     remaining_quantity = 0.0 if fully_closed else position.quantity - close_quantity
+    margin_locked, leverage, liq_price = _margin_fields(
+        position.entry_price, remaining_quantity, position.side, cost_model
+    )
+    closed_margin = entry_notional * cost_model.margin_rate(position.side)
+    margin_roi = _margin_roi(net_pnl, closed_margin)
     event = OrderEvent(
         ts=ts,
         symbol=symbol,
@@ -732,10 +781,13 @@ def apply_execution_fill(
         entry_at=position.entry_at,
         periods_held=position.periods_held,
         reason=reason,
+        margin_locked=margin_locked,
+        leverage=leverage,
+        liquidation_price=liq_price,
+        margin_roi=margin_roi,
     )
 
-    margin_locked = entry_notional * cost_model.margin_rate(position.side)
-    proceeds = margin_locked + gross_pnl - costs
+    proceeds = closed_margin + gross_pnl - costs
     if fully_closed:
         del positions[symbol]
     else:
@@ -1521,6 +1573,9 @@ def execute_order_intents(
                         take_profit_price=action.take_profit_price,
                         group_id=group_id,
                     )
+                    margin_locked, leverage, liq_price = _margin_fields(
+                        price, fill.quantity, fill.side, cost_model
+                    )
                     events.append(
                         OrderEvent(
                             ts=ts,
@@ -1539,6 +1594,9 @@ def execute_order_intents(
                             group_id=group_id,
                             time_in_force=time_in_force,
                             entry_at=positions[sym].entry_at,
+                            margin_locked=margin_locked,
+                            leverage=leverage,
+                            liquidation_price=liq_price,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1580,6 +1638,9 @@ def execute_order_intents(
                         pos.stop_price = action.stop_price
                     if action.take_profit_price is not None:
                         pos.take_profit_price = action.take_profit_price
+                    margin_locked, leverage, liq_price = _margin_fields(
+                        pos.entry_price, pos.quantity, pos.side, cost_model
+                    )
                     events.append(
                         OrderEvent(
                             ts=ts,
@@ -1598,6 +1659,9 @@ def execute_order_intents(
                             group_id=group_id,
                             time_in_force=time_in_force,
                             entry_at=pos.entry_at,
+                            margin_locked=margin_locked,
+                            leverage=leverage,
+                            liquidation_price=liq_price,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
