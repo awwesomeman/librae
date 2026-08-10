@@ -417,7 +417,7 @@ BASE_PANELS_DEF: list[dict] = [
     {"_type": "row", "title": "Performance Detail"},
     {
         "_type": "half",
-        "title": "Equity Curve",
+        "title": "Portfolio Equity Curve",
         "description": "Portfolio equity over time.",
         "type": "timeseries",
         "h": 8,
@@ -449,7 +449,7 @@ BASE_PANELS_DEF: list[dict] = [
     },
     {
         "_type": "half",
-        "title": "Drawdown %",
+        "title": "Portfolio Drawdown %",
         "description": "Peak-to-trough drawdown over time. Depth = risk, duration = recovery speed.",
         "type": "timeseries",
         "h": 8,

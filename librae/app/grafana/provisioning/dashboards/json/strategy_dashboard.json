@@ -853,7 +853,7 @@
       "panels": []
     },
     {
-      "title": "Equity Curve",
+      "title": "Portfolio Equity Curve",
       "description": "Portfolio equity over time.",
       "type": "timeseries",
       "targets": [
@@ -916,7 +916,7 @@
       }
     },
     {
-      "title": "Drawdown %",
+      "title": "Portfolio Drawdown %",
       "description": "Peak-to-trough drawdown over time. Depth = risk, duration = recovery speed.",
       "type": "timeseries",
       "targets": [
