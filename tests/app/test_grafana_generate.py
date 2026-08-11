@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from librae.app.grafana.generate_dashboards import (
+    build_panels,
     render_signal_monitor,
     render_unified_dashboard,
 )
@@ -12,6 +13,35 @@ from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     make_signal_outcome_contract_ohlcv,
 )
+
+
+def _kpi_def(title: str, w: int = 4, h: int = 4) -> dict:
+    return {"_type": "kpi", "title": title, "type": "stat", "h": h, "w": w, "targets": []}
+
+
+class TestBuildPanelsBreak:
+    """ "break" forces a fresh row for the next kpi/half panel without
+    emitting anything itself — used to keep two thematic groups of stat
+    tiles from bleeding into each other's row without a divider bar."""
+
+    def test_break_flushes_an_incomplete_row_without_emitting_a_panel(self):
+        defs = [
+            _kpi_def("a"),
+            _kpi_def("b"),
+            _kpi_def("c"),  # 3 * w=4 = 12, row still has room
+            {"_type": "break"},
+            _kpi_def("d"),
+        ]
+        panels = build_panels(defs)
+        assert [p["title"] for p in panels] == ["a", "b", "c", "d"]
+        assert panels[-1]["gridPos"] == {"h": 4, "w": 4, "x": 0, "y": 4}
+
+    def test_break_is_a_noop_after_an_already_full_row(self):
+        defs = [_kpi_def(f"t{i}") for i in range(6)]  # 6 * w=4 = 24, exactly one row
+        defs.append({"_type": "break"})
+        defs.append(_kpi_def("next"))
+        panels = build_panels(defs)
+        assert panels[-1]["gridPos"] == {"h": 4, "w": 4, "x": 0, "y": 4}
 
 
 class TestRenderUnifiedDashboard:

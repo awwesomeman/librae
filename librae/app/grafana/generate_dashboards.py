@@ -294,6 +294,7 @@ DEFAULT_KPIS: list[str] = [
     "total_return",
     "max_drawdown",
     "period_sharpe",
+    "period_sortino",
     "win_rate",
     "profit_factor",
     "trades",
@@ -393,26 +394,7 @@ BASE_PANELS_DEF: list[dict] = [
             "notional %). Equals gross exposure for spot-only runs (margin_rate=1.0)."
         ),
     ),
-    _stat_panel(
-        "Funding P&L",
-        (
-            'SELECT SUM(cash_flow) AS "Funding P&L"\n'
-            "FROM funding_cash_flows\n"
-            "WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
-            " AND $__timeFilter(ts)"
-        ),
-        None,
-        [
-            {"color": "red", "value": None},
-            {"color": "green", "value": 0},
-        ],
-        decimals=2,
-        no_value="0",
-        description=(
-            "Total perpetual-funding cash flow while holding open positions. Positive "
-            "= net received. 0 for runs with no funding (equities, most futures)."
-        ),
-    ),
+    {"_type": "break"},
     *[_KPI_CATALOGUE[k] for k in DEFAULT_KPIS],
     {"_type": "row", "title": "Performance Detail"},
     {
@@ -979,7 +961,7 @@ def build_panels(panel_defs: list[dict]) -> list[dict]:
     row_h = 0  # tallest panel in the current row
 
     fixed_defs: list[dict] = []
-    valid_types = {"kpi", "half", "fixed", "row", "full_row"}
+    valid_types = {"kpi", "half", "fixed", "row", "full_row", "break"}
     for defn in panel_defs:
         ptype = defn.get("_type")
         if ptype is None:
@@ -990,11 +972,19 @@ def build_panels(panel_defs: list[dict]) -> list[dict]:
             fixed_defs.append(defn)
             continue
 
-        # WHY: flush incomplete row before block-level panels (row / full_row)
-        if ptype in ("row", "full_row") and x > 0:
+        # WHY: flush incomplete row before block-level panels (row / full_row / break)
+        if ptype in ("row", "full_row", "break") and x > 0:
             y += row_h
             x = 0
             row_h = 0
+
+        if ptype == "break":
+            # Forces the next kpi/half panel onto a fresh row, leaving any
+            # unfilled width in the current row blank — unlike "row", this
+            # renders nothing (no title bar, no panel_id) so two adjacent
+            # groups of tiles don't visually bleed into each other without
+            # adding a divider between them.
+            continue
 
         if ptype == "row":
             panels.append(_materialize_row(defn, panel_id, y))
