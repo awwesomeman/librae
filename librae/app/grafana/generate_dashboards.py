@@ -132,6 +132,15 @@ def _account_metric_sql(column: str) -> str:
     )
 
 
+def _data_source_filter(meta_alias: str, ohlcv_alias: str) -> str:
+    # data_source='multi' means the run mixes sources (e.g. spot+perp); treat it
+    # like NULL (unrestricted) rather than a literal value ohlcv.data_source can match.
+    return (
+        f"({meta_alias}.data_source IS NULL OR {meta_alias}.data_source = 'multi'"
+        f" OR {ohlcv_alias}.data_source = {meta_alias}.data_source)"
+    )
+
+
 # WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
 # Threshold = 2x strategy timeframe (not poll_seconds) to avoid false Offline on brief delays.
 _STATUS_SQL = (
@@ -426,7 +435,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
                 "  FROM ohlcv o, meta m\n"
                 "  WHERE o.timeframe = m.timeframe\n"
-                "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
+                f"    AND {_data_source_filter('m', 'o')}\n"
                 "    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
                 "  ORDER BY o.symbol, o.ts DESC\n"
                 "),\n"
@@ -583,7 +592,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " FROM ohlcv o, meta m"
                 " WHERE o.symbol = '${symbol}'"
                 " AND o.timeframe = m.timeframe"
-                " AND (m.data_source IS NULL OR o.data_source = m.data_source)"
+                f" AND {_data_source_filter('m', 'o')}"
                 " AND (m.started_at IS NULL OR o.ts >= m.started_at)"
                 " AND (m.ended_at IS NULL OR o.ts <= m.ended_at)"
                 " AND $__timeFilter(o.ts)"
@@ -845,7 +854,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n"
                 "  FROM ohlcv o, meta m\n"
                 "  WHERE o.timeframe = m.timeframe\n"
-                "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
+                f"    AND {_data_source_filter('m', 'o')}\n"
                 "    AND o.ts <= $__timeTo()\n"
                 "  ORDER BY o.symbol, o.ts DESC\n"
                 "),\n"
@@ -1276,7 +1285,7 @@ _META_INNER = " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='$
 _OHLCV_WHERE = (
     "ohlcv.symbol = s.symbol"
     " AND ohlcv.timeframe = meta.timeframe"
-    " AND (meta.data_source IS NULL OR ohlcv.data_source = meta.data_source)"
+    f" AND {_data_source_filter('meta', 'ohlcv')}"
 )
 _ENTRY_BAR = (
     f"SELECT $fill_price_field AS entry_price FROM ohlcv, meta"
