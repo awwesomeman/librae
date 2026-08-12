@@ -305,7 +305,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Distinct symbols currently held. Pairs with Trades (closed count) below.",
+      "description": "Distinct symbols currently held. Pairs with Trades (closed count) next to it.",
       "id": 4,
       "gridPos": {
         "h": 4,
@@ -319,11 +319,11 @@
       }
     },
     {
-      "title": "Unrealized P&L",
+      "title": "Trades",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT timeframe, data_source, mode, ended_at FROM backtest_runs WHERE run_id='${run_id}'),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n  ORDER BY o.symbol, o.ts DESC\n)\nSELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n  ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier) AS \"PnL\"\nFROM positions p JOIN marks mk ON mk.symbol = p.symbol\nWHERE p.remaining_quantity > 0",
+          "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -338,20 +338,14 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "green",
-                "value": 0
               }
             ]
           },
           "color": {
             "mode": "thresholds"
-          },
-          "decimals": 2,
-          "noValue": "Flat"
+          }
         },
         "overrides": []
       },
@@ -364,12 +358,95 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Sum of mark-to-market P&L across every open position, multiplier-adjusted — same figure as Position Snapshot's MTM P&L footer. Total Return % already includes this (equity is mark-to-market), so it is not additional realized profit; Total Return $ minus this figure is the realized portion. Backtest runs mark against the run's own ended_at, not a live price, so a finished run's number doesn't drift as the market keeps moving.",
+      "description": "Total closed trades (reduce + close). Low count (<30) = metrics statistically unreliable.",
       "id": 5,
       "gridPos": {
         "h": 4,
         "w": 4,
         "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
+      }
+    },
+    {
+      "title": "Unrealized P&L",
+      "description": "Mark-to-market P&L across every open position, shown as \"$ / % of equity\" — same figure as Position Snapshot's MTM P&L footer. Total Return already includes this (equity is mark-to-market), so it is not additional realized profit. Backtest runs mark against the run's own ended_at, not a live price, so a finished run's number doesn't drift as the market keeps moving.",
+      "type": "stat",
+      "targets": [
+        {
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source, mode, ended_at FROM backtest_runs WHERE run_id='${run_id}'),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n  ORDER BY o.symbol, o.ts DESC\n),\npnl AS (\n  SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n    ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier) AS value\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT COALESCE(\n  ROUND(pnl.value::numeric,0)::text || ' / ' ||\n    ROUND((pnl.value/NULLIF(e.equity,0)*100)::numeric,1)::text || '%',\n  'Flat'\n) AS \"Unrealized P&L\"\nFROM pnl CROSS JOIN equity e",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "Flat": {
+                  "color": "text"
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^-",
+                "result": {
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^[^-]",
+                "result": {
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "id": 6,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
         "y": 1
       },
       "datasource": {
@@ -427,11 +504,11 @@
         "graphMode": "none"
       },
       "description": "Margin locked across open positions, as % of equity — the capital\nactually committed to current exposure (vs. Portfolio Exposure's\nnotional %). Equals gross exposure for spot-only runs (margin_rate=1.0).",
-      "id": 6,
+      "id": 7,
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 16,
+        "x": 20,
         "y": 1
       },
       "datasource": {
@@ -440,11 +517,12 @@
       }
     },
     {
-      "title": "Total Return %",
+      "title": "Total Return",
+      "description": "Compounded return over the full stored sample, shown as \"$ / %\". Not annualized. Net of cost.",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT total_return FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT ROUND(net_pnl::numeric,0)::text || ' / ' ||\n  ROUND((total_return*100)::numeric,1)::text || '%' AS \"Total Return\"\nFROM strategy_performance\nWHERE run_id = '${run_id}' AND account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -455,23 +533,38 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
-              },
-              {
-                "color": "green",
-                "value": 0
               }
             ]
           },
-          "color": {
-            "mode": "thresholds"
-          },
-          "unit": "percentunit"
+          "mappings": [
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^-",
+                "result": {
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^[^-]",
+                "result": {
+                  "color": "green"
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -479,13 +572,14 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "/.*/"
         },
         "colorMode": "value",
-        "graphMode": "none"
+        "graphMode": "none",
+        "justifyMode": "center"
       },
-      "description": "Compounded return over the full stored sample. Not annualized. Net of cost.",
-      "id": 7,
+      "id": 8,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -498,11 +592,12 @@
       }
     },
     {
-      "title": "Max Drawdown %",
+      "title": "Max Drawdown",
+      "description": "Largest peak-to-trough decline, shown as \"$ / %\". Always ≤ 0.",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT max_drawdown FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "WITH curve AS (\n  SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak\n  FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n),\ndd AS (\n  SELECT MAX(peak - equity) AS dollar_dd FROM curve\n)\nSELECT ROUND((-dd.dollar_dd)::numeric,0)::text || ' / ' ||\n  ROUND((sp.max_drawdown*100)::numeric,1)::text || '%' AS \"Max Drawdown\"\nFROM dd CROSS JOIN strategy_performance sp\nWHERE sp.run_id = '${run_id}' AND sp.account_id = '${account_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -513,19 +608,10 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              }
-            ]
-          },
           "color": {
-            "mode": "thresholds"
-          },
-          "unit": "percentunit"
+            "fixedColor": "red",
+            "mode": "fixed"
+          }
         },
         "overrides": []
       },
@@ -533,13 +619,14 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "/.*/"
         },
         "colorMode": "value",
-        "graphMode": "none"
+        "graphMode": "none",
+        "justifyMode": "center"
       },
-      "description": "Largest peak-to-trough decline. Always ≤ 0.",
-      "id": 8,
+      "id": 9,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -596,7 +683,7 @@
         "graphMode": "none"
       },
       "description": "Mean period return / sample period volatility. Not annualized; compare only like-frequency observations. Net of cost.",
-      "id": 9,
+      "id": 10,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -653,7 +740,7 @@
         "graphMode": "none"
       },
       "description": "Mean period return / period downside deviation. Not annualized. Net of cost.",
-      "id": 10,
+      "id": 11,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -711,7 +798,7 @@
         "graphMode": "none"
       },
       "description": "Winning trades (net_pnl > 0) / total trades. Read together with Profit Factor — low win rate + high profit factor means trend following.",
-      "id": 11,
+      "id": 12,
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -772,65 +859,12 @@
         "graphMode": "none"
       },
       "description": "Sum of winning net P&L / sum of losing net P&L. Blank if there are no losing trades yet. >1.5 healthy, <1.0 losing.",
-      "id": 12,
+      "id": 13,
       "gridPos": {
         "h": 4,
         "w": 4,
         "x": 20,
         "y": 5
-      },
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "P40AE60E18F02DE32"
-      }
-    },
-    {
-      "title": "Trades",
-      "type": "stat",
-      "targets": [
-        {
-          "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
-          "format": "table",
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "P40AE60E18F02DE32"
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "value",
-        "graphMode": "none"
-      },
-      "description": "Total closed trades (reduce + close). Low count (<30) = metrics statistically unreliable.",
-      "id": 13,
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 9
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -846,7 +880,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 9
       },
       "panels": []
     },
@@ -906,7 +940,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 10
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -958,7 +992,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 10
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1007,7 +1041,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 18
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1382,7 +1416,7 @@
         "h": 15,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 18
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1468,7 +1502,7 @@
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 28
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1555,14 +1589,6 @@
                 "id": "custom.cellOptions",
                 "value": {
                   "type": "color-background"
-                }
-              },
-              {
-                "id": "custom.footer",
-                "value": {
-                  "reducers": [
-                    "sum"
-                  ]
                 }
               }
             ]
@@ -1837,7 +1863,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 37
+        "y": 33
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1930,7 +1956,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 37
+        "y": 33
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -2035,7 +2061,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 41
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",

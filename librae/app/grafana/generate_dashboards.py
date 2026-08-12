@@ -64,6 +64,16 @@ def _mapping_override(
     }
 
 
+def _sign_color_mappings() -> list[dict]:
+    """Value mappings that color a formatted text field (e.g. "-500 / -12%")
+    red/green by its leading sign — for stat panels combining $ and % into
+    one string, where Grafana's numeric thresholds no longer apply."""
+    return [
+        {"type": "regex", "options": {"pattern": "^-", "result": {"color": "red"}}},
+        {"type": "regex", "options": {"pattern": "^[^-]", "result": {"color": "green"}}},
+    ]
+
+
 def _stat_target(sql: str) -> dict:
     return _target(sql, "A", "table")
 
@@ -199,20 +209,79 @@ def _poll_seconds_panel(w: int) -> dict:
 # ---------------------------------------------------------------------------
 
 _KPI_CATALOGUE: dict[str, dict] = {
-    "total_return": _stat_panel(
-        "Total Return %",
-        _account_metric_sql("total_return"),
-        "percentunit",
-        [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-        description="Compounded return over the full stored sample. Not annualized. Net of cost.",
-    ),
-    "max_drawdown": _stat_panel(
-        "Max Drawdown %",
-        _account_metric_sql("max_drawdown"),
-        "percentunit",
-        [{"color": "red", "value": None}],
-        description="Largest peak-to-trough decline. Always ≤ 0.",
-    ),
+    "total_return": {
+        "_type": "kpi",
+        "title": "Total Return",
+        "description": (
+            "Compounded return over the full stored sample, shown as "
+            '"$ / %". Not annualized. Net of cost.'
+        ),
+        "type": "stat",
+        "h": 4,
+        "w": 4,
+        "targets": [
+            _stat_target(
+                "SELECT ROUND(net_pnl::numeric,0)::text || ' / ' ||\n"
+                "  ROUND((total_return*100)::numeric,1)::text || '%' AS \"Total Return\"\n"
+                "FROM strategy_performance\n"
+                "WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
+            )
+        ],
+        "fieldConfig": {
+            "defaults": {
+                "color": {"mode": "thresholds"},
+                "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+                "mappings": _sign_color_mappings(),
+            },
+            "overrides": [],
+        },
+        "options": {
+            # fields:"" (the default) means "numeric fields only" — this
+            # panel's value is a formatted text field ("6500 / 6.5%"), which
+            # that default silently excludes, showing "No data" even though
+            # the query returns a row. "/.*/" includes it.
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/"},
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+        },
+    },
+    "max_drawdown": {
+        "_type": "kpi",
+        "title": "Max Drawdown",
+        "description": 'Largest peak-to-trough decline, shown as "$ / %". Always ≤ 0.',
+        "type": "stat",
+        "h": 4,
+        "w": 4,
+        "targets": [
+            _stat_target(
+                "WITH curve AS (\n"
+                "  SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak\n"
+                "  FROM equity_curve\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "),\n"
+                "dd AS (\n"
+                "  SELECT MAX(peak - equity) AS dollar_dd FROM curve\n"
+                ")\n"
+                "SELECT ROUND((-dd.dollar_dd)::numeric,0)::text || ' / ' ||\n"
+                "  ROUND((sp.max_drawdown*100)::numeric,1)::text || '%' AS \"Max Drawdown\"\n"
+                "FROM dd CROSS JOIN strategy_performance sp\n"
+                "WHERE sp.run_id = '${run_id}' AND sp.account_id = '${account_id}'"
+            )
+        ],
+        "fieldConfig": {
+            "defaults": {
+                "color": {"fixedColor": "red", "mode": "fixed"},
+            },
+            "overrides": [],
+        },
+        "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/"},
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+        },
+    },
     "period_sharpe": _stat_panel(
         "Period Sharpe",
         _account_metric_sql("period_sharpe"),
@@ -297,73 +366,110 @@ DEFAULT_KPIS: list[str] = [
     "period_sortino",
     "win_rate",
     "profit_factor",
-    "trades",
 ]
+
+_OPEN_POSITIONS_PANEL = _stat_panel(
+    "Open Positions",
+    (
+        'SELECT COUNT(*) AS "Count" FROM (\n'
+        "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
+        "  FROM trade_events\n"
+        "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+        "  ORDER BY symbol, ts DESC\n"
+        ") p\n"
+        "WHERE p.remaining_quantity > 0"
+    ),
+    None,
+    [{"color": "blue", "value": None}],
+    decimals=0,
+    description="Distinct symbols currently held. Pairs with Trades (closed count) next to it.",
+)
 
 BASE_PANELS_DEF: list[dict] = [
     {"_type": "row", "title": "Performance Overview"},
+    # Row 1: is it alive, what is it doing right now — the monitoring
+    # question this dashboard exists to answer moment to moment, so it
+    # gets the top-left, most-scanned position. Status leads: "is the
+    # process even running" beats every other number if the answer is no.
     STATUS_PANEL,
     _poll_seconds_panel(w=4),
-    _stat_panel(
-        "Open Positions",
-        (
-            'SELECT COUNT(*) AS "Count" FROM (\n'
-            "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
-            "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
-            "  ORDER BY symbol, ts DESC\n"
-            ") p\n"
-            "WHERE p.remaining_quantity > 0"
+    _OPEN_POSITIONS_PANEL,
+    _KPI_CATALOGUE["trades"],
+    {
+        "_type": "kpi",
+        "title": "Unrealized P&L",
+        "description": (
+            'Mark-to-market P&L across every open position, shown as "$ / % of '
+            "equity\" — same figure as Position Snapshot's MTM P&L footer. Total "
+            "Return already includes this (equity is mark-to-market), so it is "
+            "not additional realized profit. Backtest runs mark against the "
+            "run's own ended_at, not a live price, so a finished run's number "
+            "doesn't drift as the market keeps moving."
         ),
-        None,
-        [{"color": "blue", "value": None}],
-        decimals=0,
-        description="Distinct symbols currently held. Pairs with Trades (closed count) below.",
-    ),
-    _stat_panel(
-        "Unrealized P&L",
-        (
-            "WITH meta AS ("
-            " SELECT timeframe, data_source, mode, ended_at"
-            " FROM backtest_runs WHERE run_id='${run_id}'"
-            "),\n"
-            "positions AS (\n"
-            "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
-            "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
-            "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
-            "  ORDER BY symbol, ts DESC\n"
-            "),\n"
-            "marks AS (\n"
-            "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
-            "  FROM ohlcv o, meta m\n"
-            "  WHERE o.timeframe = m.timeframe\n"
-            "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
-            "    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
-            "  ORDER BY o.symbol, o.ts DESC\n"
-            ")\n"
-            "SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n"
-            "  ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier"
-            ') AS "PnL"\n'
-            "FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
-            "WHERE p.remaining_quantity > 0"
-        ),
-        None,
-        [
-            {"color": "red", "value": None},
-            {"color": "green", "value": 0},
+        "type": "stat",
+        "h": 4,
+        "w": 4,
+        "targets": [
+            _stat_target(
+                "WITH meta AS ("
+                " SELECT timeframe, data_source, mode, ended_at"
+                " FROM backtest_runs WHERE run_id='${run_id}'"
+                "),\n"
+                "positions AS (\n"
+                "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
+                "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
+                "  FROM trade_events\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  ORDER BY symbol, ts DESC\n"
+                "),\n"
+                "marks AS (\n"
+                "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
+                "  FROM ohlcv o, meta m\n"
+                "  WHERE o.timeframe = m.timeframe\n"
+                "    AND (m.data_source IS NULL OR o.data_source = m.data_source)\n"
+                "    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
+                "  ORDER BY o.symbol, o.ts DESC\n"
+                "),\n"
+                "pnl AS (\n"
+                "  SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n"
+                "    ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier) AS value\n"
+                "  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
+                "  WHERE p.remaining_quantity > 0\n"
+                "),\n"
+                "equity AS (\n"
+                "  SELECT equity FROM equity_curve\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  ORDER BY ts DESC LIMIT 1\n"
+                ")\n"
+                "SELECT COALESCE(\n"
+                "  ROUND(pnl.value::numeric,0)::text || ' / ' ||\n"
+                "    ROUND((pnl.value/NULLIF(e.equity,0)*100)::numeric,1)::text || '%',\n"
+                "  'Flat'\n"
+                ') AS "Unrealized P&L"\n'
+                "FROM pnl CROSS JOIN equity e"
+            )
         ],
-        decimals=2,
-        no_value="Flat",
-        description=(
-            "Sum of mark-to-market P&L across every open position, multiplier-adjusted "
-            "— same figure as Position Snapshot's MTM P&L footer. Total Return % already "
-            "includes this (equity is mark-to-market), so it is not additional realized "
-            "profit; Total Return $ minus this figure is the realized portion. Backtest "
-            "runs mark against the run's own ended_at, not a live price, so a finished "
-            "run's number doesn't drift as the market keeps moving."
-        ),
-    ),
+        "fieldConfig": {
+            "defaults": {
+                "color": {"mode": "thresholds"},
+                "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+                # "Flat" (no open positions) must win over the sign regexes
+                # below — it has no leading "-" so ^[^-] would otherwise
+                # color it green, falsely implying a profit.
+                "mappings": [
+                    {"type": "value", "options": {"Flat": {"color": "text"}}},
+                    *_sign_color_mappings(),
+                ],
+            },
+            "overrides": [],
+        },
+        "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/"},
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+        },
+    },
     _stat_panel(
         "Margin Utilization",
         (
@@ -395,6 +501,8 @@ BASE_PANELS_DEF: list[dict] = [
         ),
     ),
     {"_type": "break"},
+    # Row 2: how has it done overall — the whole-run summary, secondary to
+    # "what's happening right now" in a monitoring-first dashboard.
     *[_KPI_CATALOGUE[k] for k in DEFAULT_KPIS],
     {"_type": "row", "title": "Performance Detail"},
     {
@@ -795,9 +903,9 @@ BASE_PANELS_DEF: list[dict] = [
                             },
                         },
                         {"id": "custom.cellOptions", "value": {"type": "color-background"}},
-                        # Footer sum here is signed, so it's Net exposure — should
-                        # match Portfolio Exposure's Net line at the latest point.
-                        {"id": "custom.footer", "value": {"reducers": ["sum"]}},
+                        # No footer sum here (unlike MTM P&L below) — it would
+                        # duplicate Portfolio Exposure's Net line, and the two
+                        # panels now sit side by side in the same row.
                     ],
                 },
                 {
