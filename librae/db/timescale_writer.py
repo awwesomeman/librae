@@ -120,6 +120,7 @@ def write_run_metadata(
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
     """
+    timeframe = to_canonical(timeframe)
     sql = """INSERT INTO backtest_runs
                (run_id, strategy, symbols, timeframe, data_source,
                 started_at, ended_at, run_at, mode, poll_seconds,

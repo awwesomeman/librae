@@ -373,7 +373,7 @@
     },
     {
       "title": "Unrealized P&L",
-      "description": "Mark-to-market P&L across every open position, shown as \"$ / % of equity\" — same figure as Position Snapshot's MTM P&L footer. Total Return already includes this (equity is mark-to-market), so it is not additional realized profit. Backtest runs mark against the run's own ended_at, not a live price, so a finished run's number doesn't drift as the market keeps moving.",
+      "description": "Mark-to-market P&L across all open positions, shown as \"$ / % of equity\" — same figure as Position Snapshot's MTM P&L footer. Already included in Total Return (equity is mark-to-market), not additional profit. Backtest runs mark against the run's own ended_at, not a live price, so a finished run's number won't drift.",
       "type": "stat",
       "targets": [
         {
@@ -753,7 +753,7 @@
       }
     },
     {
-      "title": "Win Rate %",
+      "title": "Win Rate",
       "type": "stat",
       "targets": [
         {
@@ -937,9 +937,9 @@
       },
       "id": 15,
       "gridPos": {
-        "h": 8,
+        "h": 5,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 10
       },
       "datasource": {
@@ -948,13 +948,13 @@
       }
     },
     {
-      "title": "Portfolio Drawdown %",
-      "description": "Peak-to-trough drawdown over time. Depth = risk, duration = recovery speed.",
-      "type": "timeseries",
+      "title": "Trade Return Distribution",
+      "description": "Realized return % per closed trade (reduce/close only), binned. Return\nnormalizes across position sizes, unlike raw P&L — trade-count based,\nnot time-based, so it stays readable for high-frequency strategies.",
+      "type": "histogram",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, drawdown AS \"Drawdown %\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
-          "format": "time_series",
+          "rawSql": "SELECT ROUND(net_return::numeric,4)::float8 AS \"Return\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND net_return IS NOT NULL AND $__timeFilter(ts)",
+          "format": "table",
           "refId": "A",
           "datasource": {
             "type": "grafana-postgresql-datasource",
@@ -964,35 +964,29 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "max": 0,
+          "unit": "percent",
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 30,
-            "showPoints": "never"
+            "fillOpacity": 80,
+            "lineWidth": 0
           },
           "color": {
-            "fixedColor": "red",
+            "fixedColor": "blue",
             "mode": "fixed"
           }
         },
         "overrides": []
       },
       "options": {
-        "tooltip": {
-          "mode": "single"
-        },
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "showLegend": false
         }
       },
       "id": 16,
       "gridPos": {
-        "h": 8,
+        "h": 5,
         "w": 12,
         "x": 12,
-        "y": 10
+        "y": 15
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1041,7 +1035,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 10
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1050,11 +1044,11 @@
     },
     {
       "title": "Trade Events",
-      "description": "Shows all symbols in the run — filter via the Symbol column's icon, independent\nof the Symbol variable above (which only scopes Price Trend/Entry-Exit). Lifecycle:\nopen/add = entry side, reduce/close = exit side; P&L and Return % (net of cost)\nonly appear on reduce/close rows, and Position goes 0 → N → 0 over one full lifecycle.\n\n- Entry Price is the weighted-average cost basis, recalculated on every add —\n  not this row's own Trade Price.\n- Position is the size *after* this event, not this event's fill Quantity.\n- Cost = commission + slippage + tax for this event only.\n- Group ties every leg of one atomic multi-leg decision (e.g. a spot+perp\n  arb pair) — the engine fills all legs together or rejects the whole group.\n- Trade ID = symbol + this trade's open time. Filter it to isolate every\n  row of one open→close round-trip. A paired trade's legs (same Group, same bar)\n  get different Trade IDs, since their symbols differ.\n- Periods counts elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Reason is either strategy-supplied free text (optional, may be blank) or one of\n  five engine risk-exit codes the strategy did not choose: stop_loss, take_profit,\n  liquidation, drawdown_breach, force_close.\n- Return % is price return (notional-based); Margin ROI % is P&L against\n  the capital locked for the closed quantity — same as Return % for spot\n  (margin_rate=1.0), amplified by leverage for futures.",
+      "description": "One row per fill event, all symbols in the run — filter via the Symbol\ncolumn's icon. Lifecycle: open/add = entry, reduce/close = exit;\nP&L/Return/Margin ROI only populate on reduce/close rows.\n\n- `#` — row index.\n- Time — event timestamp.\n- Symbol — trading pair.\n- Event — open / add / reduce / close.\n- Side — long / short.\n- Quantity — this event's fill size (base-asset units).\n- Trade Price — this event's fill price.\n- P&L — realized profit/loss on this event, account currency\n  (reduce/close only).\n- Return — price return, % of notional (reduce/close only).\n- Margin ROI — % return on the capital locked for the closed qty;\n  = Return for spot, amplified by leverage for futures.\n- Entry Price — weighted-average cost basis after this event, not\n  this row's own Trade Price.\n- Position — running position size after this event, not this\n  event's Quantity.\n- Cost — commission + slippage + tax for this event, account currency.\n- Group — ties every leg of one atomic multi-leg decision (e.g. a\n  spot+perp arb pair) — legs fill together or the group is rejected.\n- Trade ID — symbol + this trade's open time; identifies one\n  open→close round-trip.\n- Periods — elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Currency — account currency.\n- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n  take_profit, liquidation, drawdown_breach, force_close.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Return %\", ROUND(margin_roi::numeric,2) AS \"Margin ROI %\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", currency AS \"Currency\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Return\", ROUND(margin_roi::numeric,2) AS \"Margin ROI\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", currency AS \"Currency\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1073,109 +1067,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "P&L"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 0
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Event"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "open": {
-                        "color": "blue",
-                        "index": 0
-                      },
-                      "add": {
-                        "color": "super-light-blue",
-                        "index": 1
-                      },
-                      "reduce": {
-                        "color": "orange",
-                        "index": 2
-                      },
-                      "close": {
-                        "color": "semi-dark-orange",
-                        "index": 3
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Side"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "long": {
-                        "color": "green",
-                        "index": 0
-                      },
-                      "short": {
-                        "color": "red",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Return %"
+              "options": "Return"
             },
             "properties": [
               {
@@ -1187,7 +1079,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Margin ROI %"
+              "options": "Margin ROI"
             },
             "properties": [
               {
@@ -1295,7 +1187,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Return %"
+              "options": "Return"
             },
             "properties": [
               {
@@ -1307,7 +1199,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Margin ROI %"
+              "options": "Margin ROI"
             },
             "properties": [
               {
@@ -1414,9 +1306,9 @@
       "id": 18,
       "gridPos": {
         "h": 15,
-        "w": 12,
-        "x": 12,
-        "y": 18
+        "w": 24,
+        "x": 0,
+        "y": 25
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1502,7 +1394,7 @@
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 20
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1511,11 +1403,11 @@
     },
     {
       "title": "Position Snapshot",
-      "description": "Holdings as of the time range's end (top-right picker) — one row per\nsymbol, same shape for 1 symbol or N (stock-picking, portfolio\noptimization, arb legs). Position and Entry Price are the current\nrunning total and weighted-average cost even after multiple\nadds/reduces, not the most recent fill alone; Weight and MTM P&L use\nthe same multiplier. Sorted by |Weight|, biggest exposure on top.\n\n- Default range end is 'now' — drag the picker to a past date to see\n  positions as of that point instead (no explicit rebalance marker,\n  so this is point-in-time reconstruction, not a rebalance list).\n- Market Price is the latest close at or before that time; MTM P&L is\n  mark-to-market then, not 'unrealized' in the live sense — a past\n  date's position may since have been closed/realized.\n- Trade ID = symbol + this trade's open time — filter it in Trade Events\n  to pull the complete fill history behind this row.\n- Leverage = notional / Margin Locked (1.0 for spot). Liquidation Buffer %\n  is how far Market Price sits from Liquidation Price, as % of Market\n  Price — both null unless the market's maintenance_margin_rate is set.",
+      "description": "Holdings as of the time range's end (top-right picker) — one row per\nsymbol, sorted by |Weight| (biggest exposure first). Point-in-time\nreconstruction, not an explicit rebalance list — drag the picker to a\npast date to see positions as of that point instead.\n\n- `#` — rank by |Weight|, largest exposure first.\n- Time — this position's open time (entry_at).\n- Symbol — trading pair.\n- Side — long / short.\n- Weight — position notional as % of equity, signed by side\n  (negative = short).\n- Entry Price — weighted-average cost basis across all fills to date.\n- Position — current running size (base-asset units).\n- Market Price — latest close at/before the picker's end time.\n- MTM P&L — mark-to-market P&L at that time, account currency —\n  not 'unrealized' in the live sense, a past date's position may\n  since be closed.\n- MTM Return — same, as % of Entry Price.\n- Margin Locked — capital committed to this position, account\n  currency (= notional for spot).\n- Leverage — notional / Margin Locked (1.0 for spot).\n- Liquidation Price — price at which this position liquidates;\n  null unless the market's maintenance_margin_rate is set.\n- Liquidation Buffer — how far Market Price sits from Liquidation\n  Price, % of Market Price; null under the same condition.\n- Trade ID — symbol + this position's open time; filter it in Trade\n  Events for the full fill history behind this row.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= $__timeTo()\n  ORDER BY o.symbol, o.ts DESC\n),\nsized AS (\n  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n    p.margin_locked, p.leverage, p.liquidation_price,\n    mk.market_price, p.multiplier,\n    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n)\nSELECT s.symbol AS \"Symbol\", s.side AS \"Side\",\n  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS \"Weight\",\n  ROUND(s.remaining_quantity::numeric,4) AS \"Position\",\n  ROUND(s.entry_price::numeric,2) AS \"Entry Price\",\n  ROUND(s.market_price::numeric,2) AS \"Market Price\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)    ::numeric,2) AS \"MTM P&L\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))    ::numeric,4) AS \"MTM P&L %\",\n  ROUND(s.margin_locked::numeric,2) AS \"Margin Locked\",\n  ROUND(s.leverage::numeric,2) AS \"Leverage\",\n  ROUND(s.liquidation_price::numeric,2) AS \"Liquidation Price\",\n  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)    ::numeric,4) AS \"Liquidation Buffer %\",\n  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\"\nFROM sized s CROSS JOIN equity e\nORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= $__timeTo()\n  ORDER BY o.symbol, o.ts DESC\n),\nsized AS (\n  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n    p.margin_locked, p.leverage, p.liquidation_price,\n    mk.market_price, p.multiplier,\n    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n)\nSELECT ROW_NUMBER() OVER (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS \"#\",\n  s.entry_at AS \"Time\",\n  s.symbol AS \"Symbol\", s.side AS \"Side\",\n  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS \"Weight\",\n  ROUND(s.entry_price::numeric,2) AS \"Entry Price\",\n  ROUND(s.remaining_quantity::numeric,4) AS \"Position\",\n  ROUND(s.market_price::numeric,2) AS \"Market Price\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)    ::numeric,2) AS \"MTM P&L\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))    ::numeric,4) AS \"MTM Return\",\n  ROUND(s.margin_locked::numeric,2) AS \"Margin Locked\",\n  ROUND(s.leverage::numeric,2) AS \"Leverage\",\n  ROUND(s.liquidation_price::numeric,2) AS \"Liquidation Price\",\n  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)    ::numeric,4) AS \"Liquidation Buffer\",\n  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\"\nFROM sized s CROSS JOIN equity e\nORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1530,66 +1422,12 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Side"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "long": {
-                        "color": "green",
-                        "index": 0
-                      },
-                      "short": {
-                        "color": "red",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "Weight"
             },
             "properties": [
               {
                 "id": "unit",
                 "value": "percentunit"
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 0
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
               }
             ]
           },
@@ -1599,28 +1437,6 @@
               "options": "MTM P&L"
             },
             "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 0
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
-              },
               {
                 "id": "custom.footer",
                 "value": {
@@ -1634,7 +1450,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "MTM P&L %"
+              "options": "MTM Return"
             },
             "properties": [
               {
@@ -1662,38 +1478,36 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Liquidation Buffer %"
+              "options": "Liquidation Buffer"
             },
             "properties": [
               {
                 "id": "unit",
                 "value": "percentunit"
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "#"
+            },
+            "properties": [
               {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 0.1
-                    },
-                    {
-                      "color": "green",
-                      "value": 0.25
-                    }
-                  ]
-                }
-              },
+                "id": "custom.width",
+                "value": 40
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
               {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
+                "id": "custom.width",
+                "value": 180
               }
             ]
           },
@@ -1736,24 +1550,24 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Position"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "Entry Price"
             },
             "properties": [
               {
                 "id": "custom.width",
                 "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Position"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
               }
             ]
           },
@@ -1784,7 +1598,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "MTM P&L %"
+              "options": "MTM Return"
             },
             "properties": [
               {
@@ -1832,7 +1646,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Liquidation Buffer %"
+              "options": "Liquidation Buffer"
             },
             "properties": [
               {
@@ -1861,9 +1675,9 @@
       "id": 20,
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 33
+        "y": 40
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1953,10 +1767,10 @@
       },
       "id": 21,
       "gridPos": {
-        "h": 8,
+        "h": 5,
         "w": 12,
         "x": 12,
-        "y": 33
+        "y": 20
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1965,11 +1779,11 @@
     },
     {
       "title": "Runtime Events",
-      "description": "Operational audit trail, not trade activity. Two event types:\nstate_recovered — a restarted process resumed from its last checkpoint\n(sim/live only); decision_skipped — a risk/sizing constraint blocked an\norder this period (e.g. insufficient_cash, opposite_side, notional_capped).\n\n- Reason shows why a decision was skipped — blank for state_recovered,\n  since resuming always succeeds.\n- Detail is the full raw event payload behind Reason, for deeper checks.",
+      "description": "Operational audit trail, not trade activity.\n\n- `#` — row index.\n- Time — event timestamp.\n- Symbol — trading pair; blank for run-level events (state_recovered).\n- Event — state_recovered (process resumed from checkpoint after a\n  restart, sim/live only) or decision_skipped (a risk/sizing\n  constraint blocked an order this period).\n- Reason — why a decision was skipped, e.g. insufficient_cash,\n  opposite_side, notional_capped; blank for state_recovered.\n- Detail — full raw event payload behind Reason, for deeper checks.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", event_type AS \"Event\", symbol AS \"Symbol\", detail->>'reason' AS \"Reason\", detail::text AS \"Detail\" FROM runtime_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", detail->>'reason' AS \"Reason\", detail::text AS \"Detail\" FROM runtime_events WHERE run_id = '${run_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -2012,24 +1826,24 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Event"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 140
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "Symbol"
             },
             "properties": [
               {
                 "id": "custom.width",
                 "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Event"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
               }
             ]
           },
@@ -2061,7 +1875,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 48
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",

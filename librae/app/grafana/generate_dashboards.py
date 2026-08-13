@@ -41,29 +41,6 @@ def _width_override(name: str, px: int) -> dict:
     }
 
 
-def _mapping_override(
-    name: str, mappings: dict[str, str], cell_mode: str = "color-background"
-) -> dict:
-    """Build a Grafana field override with value mappings and cell coloring."""
-    return {
-        "matcher": {"id": "byName", "options": name},
-        "properties": [
-            {
-                "id": "mappings",
-                "value": [
-                    {
-                        "type": "value",
-                        "options": {
-                            k: {"color": v, "index": i} for i, (k, v) in enumerate(mappings.items())
-                        },
-                    },
-                ],
-            },
-            {"id": "custom.cellOptions", "value": {"type": cell_mode}},
-        ],
-    }
-
-
 def _sign_color_mappings() -> list[dict]:
     """Value mappings that color a formatted text field (e.g. "-500 / -12%")
     red/green by its leading sign — for stat panels combining $ and % into
@@ -312,7 +289,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
         description="Mean period return / period downside deviation. Not annualized. Net of cost.",
     ),
     "win_rate": _stat_panel(
-        "Win Rate %",
+        "Win Rate",
         _account_metric_sql("win_rate"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0.5}],
@@ -337,28 +314,28 @@ _KPI_CATALOGUE: dict[str, dict] = {
         description="Total closed trades (reduce + close). Low count (<30) = metrics statistically unreliable.",
     ),
     "avg_trade_return": _stat_panel(
-        "Avg Trade Return %",
+        "Avg Trade Return",
         _account_metric_sql("avg_trade_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
         description="Notional-weighted mean return per realized exit. Net of cost.",
     ),
     "exposure_ratio": _stat_panel(
-        "Exposure %",
+        "Exposure",
         _account_metric_sql("exposure_ratio"),
         "percentunit",
         [{"color": "blue", "value": None}],
         description="Bars with any open position / total bars. Multi-asset safe — overlapping positions counted once.",
     ),
     "mean_period_return": _stat_panel(
-        "Mean Period Return %",
+        "Mean Period Return",
         _account_metric_sql("mean_period_return"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0}],
         description="Arithmetic mean return per stored observation. Not annualized. Net of cost.",
     ),
     "positive_period_rate": _stat_panel(
-        "Positive Periods %",
+        "Positive Periods",
         _account_metric_sql("positive_period_rate"),
         "percentunit",
         [{"color": "blue", "value": None}],
@@ -408,12 +385,11 @@ BASE_PANELS_DEF: list[dict] = [
         "_type": "kpi",
         "title": "Unrealized P&L",
         "description": (
-            'Mark-to-market P&L across every open position, shown as "$ / % of '
-            "equity\" — same figure as Position Snapshot's MTM P&L footer. Total "
-            "Return already includes this (equity is mark-to-market), so it is "
-            "not additional realized profit. Backtest runs mark against the "
-            "run's own ended_at, not a live price, so a finished run's number "
-            "doesn't drift as the market keeps moving."
+            'Mark-to-market P&L across all open positions, shown as "$ / % of '
+            "equity\" — same figure as Position Snapshot's MTM P&L footer. Already "
+            "included in Total Return (equity is mark-to-market), not additional "
+            "profit. Backtest runs mark against the run's own ended_at, not a "
+            "live price, so a finished run's number won't drift."
         ),
         "type": "stat",
         "h": 4,
@@ -515,11 +491,13 @@ BASE_PANELS_DEF: list[dict] = [
     *[_KPI_CATALOGUE[k] for k in DEFAULT_KPIS],
     {"_type": "row", "title": "Performance Detail"},
     {
-        "_type": "half",
+        "_type": "fixed",
+        "_x": 12,
+        "_dy": 0,
         "title": "Portfolio Equity Curve",
         "description": "Portfolio equity over time.",
         "type": "timeseries",
-        "h": 8,
+        "h": 5,
         "w": 12,
         "targets": [
             _target(
@@ -547,31 +525,38 @@ BASE_PANELS_DEF: list[dict] = [
         },
     },
     {
-        "_type": "half",
-        "title": "Portfolio Drawdown %",
-        "description": "Peak-to-trough drawdown over time. Depth = risk, duration = recovery speed.",
-        "type": "timeseries",
-        "h": 8,
+        "_type": "fixed",
+        "_x": 12,
+        "_dy": 5,
+        "title": "Trade Return Distribution",
+        "description": (
+            "Realized return % per closed trade (reduce/close only), binned. Return\n"
+            "normalizes across position sizes, unlike raw P&L — trade-count based,\n"
+            "not time-based, so it stays readable for high-frequency strategies."
+        ),
+        "type": "histogram",
+        "h": 5,
         "w": 12,
         "targets": [
             _target(
-                'SELECT ts AS time, drawdown AS "Drawdown %"'
-                " FROM equity_curve WHERE run_id = '${run_id}'"
-                " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
+                'SELECT ROUND(net_return::numeric,4)::float8 AS "Return"'
+                " FROM trade_events WHERE run_id = '${run_id}'"
+                " AND account_id = '${account_id}' AND net_return IS NOT NULL"
+                " AND $__timeFilter(ts)",
+                "A",
+                "table",
             )
         ],
         "fieldConfig": {
             "defaults": {
-                "unit": "percentunit",
-                "max": 0,
-                "custom": {"lineWidth": 1, "fillOpacity": 30, "showPoints": "never"},
-                "color": {"fixedColor": "red", "mode": "fixed"},
+                "unit": "percent",
+                "custom": {"fillOpacity": 80, "lineWidth": 0},
+                "color": {"fixedColor": "blue", "mode": "fixed"},
             },
             "overrides": [],
         },
         "options": {
-            "tooltip": {"mode": "single"},
-            "legend": {"displayMode": "list", "placement": "bottom"},
+            "legend": {"showLegend": False},
         },
     },
     {
@@ -615,36 +600,44 @@ BASE_PANELS_DEF: list[dict] = [
     # -- Trade Events (single table replacing old Trade Detail) --
     {
         "_type": "fixed",
-        "_x": 12,
-        "_dy": 0,
+        "_x": 0,
+        "_dy": 15,
         "title": "Trade Events",
         "description": (
-            "Shows all symbols in the run — filter via the Symbol column's icon, independent\n"
-            "of the Symbol variable above (which only scopes Price Trend/Entry-Exit). Lifecycle:\n"
-            "open/add = entry side, reduce/close = exit side; P&L and Return % (net of cost)\n"
-            "only appear on reduce/close rows, and Position goes 0 → N → 0 over one full lifecycle.\n"
+            "One row per fill event, all symbols in the run — filter via the Symbol\n"
+            "column's icon. Lifecycle: open/add = entry, reduce/close = exit;\n"
+            "P&L/Return/Margin ROI only populate on reduce/close rows.\n"
             "\n"
-            "- Entry Price is the weighted-average cost basis, recalculated on every add —\n"
-            "  not this row's own Trade Price.\n"
-            "- Position is the size *after* this event, not this event's fill Quantity.\n"
-            "- Cost = commission + slippage + tax for this event only.\n"
-            "- Group ties every leg of one atomic multi-leg decision (e.g. a spot+perp\n"
-            "  arb pair) — the engine fills all legs together or rejects the whole group.\n"
-            "- Trade ID = symbol + this trade's open time. Filter it to isolate every\n"
-            "  row of one open→close round-trip. A paired trade's legs (same Group, same bar)\n"
-            "  get different Trade IDs, since their symbols differ.\n"
-            "- Periods counts elapsed bars, not clock time — multiply by the run's\n"
+            "- `#` — row index.\n"
+            "- Time — event timestamp.\n"
+            "- Symbol — trading pair.\n"
+            "- Event — open / add / reduce / close.\n"
+            "- Side — long / short.\n"
+            "- Quantity — this event's fill size (base-asset units).\n"
+            "- Trade Price — this event's fill price.\n"
+            "- P&L — realized profit/loss on this event, account currency\n"
+            "  (reduce/close only).\n"
+            "- Return — price return, % of notional (reduce/close only).\n"
+            "- Margin ROI — % return on the capital locked for the closed qty;\n"
+            "  = Return for spot, amplified by leverage for futures.\n"
+            "- Entry Price — weighted-average cost basis after this event, not\n"
+            "  this row's own Trade Price.\n"
+            "- Position — running position size after this event, not this\n"
+            "  event's Quantity.\n"
+            "- Cost — commission + slippage + tax for this event, account currency.\n"
+            "- Group — ties every leg of one atomic multi-leg decision (e.g. a\n"
+            "  spot+perp arb pair) — legs fill together or the group is rejected.\n"
+            "- Trade ID — symbol + this trade's open time; identifies one\n"
+            "  open→close round-trip.\n"
+            "- Periods — elapsed bars, not clock time — multiply by the run's\n"
             "  timeframe for actual duration.\n"
-            "- Reason is either strategy-supplied free text (optional, may be blank) or one of\n"
-            "  five engine risk-exit codes the strategy did not choose: stop_loss, take_profit,\n"
-            "  liquidation, drawdown_breach, force_close.\n"
-            "- Return % is price return (notional-based); Margin ROI % is P&L against\n"
-            "  the capital locked for the closed quantity — same as Return % for spot\n"
-            "  (margin_rate=1.0), amplified by leverage for futures."
+            "- Currency — account currency.\n"
+            "- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n"
+            "  take_profit, liquidation, drawdown_breach, force_close."
         ),
         "type": "table",
         "h": 15,
-        "w": 12,
+        "w": 24,
         "targets": [
             _target(
                 "SELECT"
@@ -656,8 +649,8 @@ BASE_PANELS_DEF: list[dict] = [
                 ' ROUND(fill_quantity::numeric,4) AS "Quantity",'
                 ' ROUND(price::numeric,2) AS "Trade Price",'
                 ' ROUND(pnl::numeric,2) AS "P&L",'
-                ' ROUND(net_return::numeric,2) AS "Return %",'
-                ' ROUND(margin_roi::numeric,2) AS "Margin ROI %",'
+                ' ROUND(net_return::numeric,2) AS "Return",'
+                ' ROUND(margin_roi::numeric,2) AS "Margin ROI",'
                 ' ROUND(entry_price::numeric,2) AS "Entry Price",'
                 ' ROUND(remaining_quantity::numeric,4) AS "Position",'
                 ' ROUND((commission + slippage + tax)::numeric,2) AS "Cost",'
@@ -679,39 +672,13 @@ BASE_PANELS_DEF: list[dict] = [
             "defaults": {"custom": {"filterable": True}},
             "overrides": [
                 {
-                    "matcher": {"id": "byName", "options": "P&L"},
-                    "properties": [
-                        {
-                            "id": "thresholds",
-                            "value": {
-                                "mode": "absolute",
-                                "steps": [
-                                    {"color": "red", "value": None},
-                                    {"color": "green", "value": 0},
-                                ],
-                            },
-                        },
-                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
-                    ],
-                },
-                _mapping_override(
-                    "Event",
-                    {
-                        "open": "blue",
-                        "add": "super-light-blue",
-                        "reduce": "orange",
-                        "close": "semi-dark-orange",
-                    },
-                ),
-                _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
-                {
-                    "matcher": {"id": "byName", "options": "Return %"},
+                    "matcher": {"id": "byName", "options": "Return"},
                     "properties": [
                         {"id": "unit", "value": "percent"},
                     ],
                 },
                 {
-                    "matcher": {"id": "byName", "options": "Margin ROI %"},
+                    "matcher": {"id": "byName", "options": "Margin ROI"},
                     "properties": [
                         {"id": "unit", "value": "percent"},
                     ],
@@ -727,8 +694,8 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("Quantity", 100),
                 _width_override("Trade Price", 110),
                 _width_override("P&L", 100),
-                _width_override("Return %", 100),
-                _width_override("Margin ROI %", 110),
+                _width_override("Return", 100),
+                _width_override("Margin ROI", 110),
                 _width_override("Entry Price", 110),
                 _width_override("Position", 100),
                 _width_override("Cost", 80),
@@ -805,31 +772,40 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed",
         "_x": 0,
-        "_dy": 15,
+        "_dy": 30,
         "title": "Position Snapshot",
         "description": (
             "Holdings as of the time range's end (top-right picker) — one row per\n"
-            "symbol, same shape for 1 symbol or N (stock-picking, portfolio\n"
-            "optimization, arb legs). Position and Entry Price are the current\n"
-            "running total and weighted-average cost even after multiple\n"
-            "adds/reduces, not the most recent fill alone; Weight and MTM P&L use\n"
-            "the same multiplier. Sorted by |Weight|, biggest exposure on top.\n"
+            "symbol, sorted by |Weight| (biggest exposure first). Point-in-time\n"
+            "reconstruction, not an explicit rebalance list — drag the picker to a\n"
+            "past date to see positions as of that point instead.\n"
             "\n"
-            "- Default range end is 'now' — drag the picker to a past date to see\n"
-            "  positions as of that point instead (no explicit rebalance marker,\n"
-            "  so this is point-in-time reconstruction, not a rebalance list).\n"
-            "- Market Price is the latest close at or before that time; MTM P&L is\n"
-            "  mark-to-market then, not 'unrealized' in the live sense — a past\n"
-            "  date's position may since have been closed/realized.\n"
-            "- Trade ID = symbol + this trade's open time — filter it in Trade Events\n"
-            "  to pull the complete fill history behind this row.\n"
-            "- Leverage = notional / Margin Locked (1.0 for spot). Liquidation Buffer %\n"
-            "  is how far Market Price sits from Liquidation Price, as % of Market\n"
-            "  Price — both null unless the market's maintenance_margin_rate is set."
+            "- `#` — rank by |Weight|, largest exposure first.\n"
+            "- Time — this position's open time (entry_at).\n"
+            "- Symbol — trading pair.\n"
+            "- Side — long / short.\n"
+            "- Weight — position notional as % of equity, signed by side\n"
+            "  (negative = short).\n"
+            "- Entry Price — weighted-average cost basis across all fills to date.\n"
+            "- Position — current running size (base-asset units).\n"
+            "- Market Price — latest close at/before the picker's end time.\n"
+            "- MTM P&L — mark-to-market P&L at that time, account currency —\n"
+            "  not 'unrealized' in the live sense, a past date's position may\n"
+            "  since be closed.\n"
+            "- MTM Return — same, as % of Entry Price.\n"
+            "- Margin Locked — capital committed to this position, account\n"
+            "  currency (= notional for spot).\n"
+            "- Leverage — notional / Margin Locked (1.0 for spot).\n"
+            "- Liquidation Price — price at which this position liquidates;\n"
+            "  null unless the market's maintenance_margin_rate is set.\n"
+            "- Liquidation Buffer — how far Market Price sits from Liquidation\n"
+            "  Price, % of Market Price; null under the same condition.\n"
+            "- Trade ID — symbol + this position's open time; filter it in Trade\n"
+            "  Events for the full fill history behind this row."
         ),
         "type": "table",
         "h": 8,
-        "w": 12,
+        "w": 24,
         "targets": [
             _target(
                 "WITH meta AS ("
@@ -867,24 +843,27 @@ BASE_PANELS_DEF: list[dict] = [
                 "  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
                 "  WHERE p.remaining_quantity > 0\n"
                 ")\n"
-                'SELECT s.symbol AS "Symbol", s.side AS "Side",\n'
+                "SELECT ROW_NUMBER() OVER"
+                ' (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS "#",\n'
+                '  s.entry_at AS "Time",\n'
+                '  s.symbol AS "Symbol", s.side AS "Side",\n'
                 '  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS "Weight",\n'
-                '  ROUND(s.remaining_quantity::numeric,4) AS "Position",\n'
                 '  ROUND(s.entry_price::numeric,2) AS "Entry Price",\n'
+                '  ROUND(s.remaining_quantity::numeric,4) AS "Position",\n'
                 '  ROUND(s.market_price::numeric,2) AS "Market Price",\n'
                 "  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n"
                 "    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)"
                 '    ::numeric,2) AS "MTM P&L",\n'
                 "  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n"
                 "    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))"
-                '    ::numeric,4) AS "MTM P&L %",\n'
+                '    ::numeric,4) AS "MTM Return",\n'
                 '  ROUND(s.margin_locked::numeric,2) AS "Margin Locked",\n'
                 '  ROUND(s.leverage::numeric,2) AS "Leverage",\n'
                 '  ROUND(s.liquidation_price::numeric,2) AS "Liquidation Price",\n'
                 "  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n"
                 "    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n"
                 "    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)"
-                '    ::numeric,4) AS "Liquidation Buffer %",\n'
+                '    ::numeric,4) AS "Liquidation Buffer",\n'
                 "  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS')"
                 ' AS "Trade ID"\n'
                 "FROM sized s CROSS JOIN equity e\n"
@@ -896,46 +875,16 @@ BASE_PANELS_DEF: list[dict] = [
         "fieldConfig": {
             "defaults": {},
             "overrides": [
-                _mapping_override("Side", {"long": "green", "short": "red"}, "color-text"),
                 {
                     "matcher": {"id": "byName", "options": "Weight"},
-                    "properties": [
-                        {"id": "unit", "value": "percentunit"},
-                        {
-                            "id": "thresholds",
-                            "value": {
-                                "mode": "absolute",
-                                "steps": [
-                                    {"color": "red", "value": None},
-                                    {"color": "green", "value": 0},
-                                ],
-                            },
-                        },
-                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
-                        # No footer sum here (unlike MTM P&L below) — it would
-                        # duplicate Portfolio Exposure's Net line, and the two
-                        # panels now sit side by side in the same row.
-                    ],
+                    "properties": [{"id": "unit", "value": "percentunit"}],
                 },
                 {
                     "matcher": {"id": "byName", "options": "MTM P&L"},
-                    "properties": [
-                        {
-                            "id": "thresholds",
-                            "value": {
-                                "mode": "absolute",
-                                "steps": [
-                                    {"color": "red", "value": None},
-                                    {"color": "green", "value": 0},
-                                ],
-                            },
-                        },
-                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
-                        {"id": "custom.footer", "value": {"reducers": ["sum"]}},
-                    ],
+                    "properties": [{"id": "custom.footer", "value": {"reducers": ["sum"]}}],
                 },
                 {
-                    "matcher": {"id": "byName", "options": "MTM P&L %"},
+                    "matcher": {"id": "byName", "options": "MTM Return"},
                     "properties": [{"id": "unit", "value": "percentunit"}],
                 },
                 {
@@ -943,35 +892,23 @@ BASE_PANELS_DEF: list[dict] = [
                     "properties": [{"id": "unit", "value": "none"}, {"id": "decimals", "value": 2}],
                 },
                 {
-                    "matcher": {"id": "byName", "options": "Liquidation Buffer %"},
-                    "properties": [
-                        {"id": "unit", "value": "percentunit"},
-                        {
-                            "id": "thresholds",
-                            "value": {
-                                "mode": "absolute",
-                                "steps": [
-                                    {"color": "red", "value": None},
-                                    {"color": "orange", "value": 0.1},
-                                    {"color": "green", "value": 0.25},
-                                ],
-                            },
-                        },
-                        {"id": "custom.cellOptions", "value": {"type": "color-background"}},
-                    ],
+                    "matcher": {"id": "byName", "options": "Liquidation Buffer"},
+                    "properties": [{"id": "unit", "value": "percentunit"}],
                 },
+                _width_override("#", 40),
+                _width_override("Time", 180),
                 _width_override("Symbol", 90),
                 _width_override("Side", 60),
                 _width_override("Weight", 90),
-                _width_override("Position", 80),
                 _width_override("Entry Price", 90),
+                _width_override("Position", 80),
                 _width_override("Market Price", 100),
                 _width_override("MTM P&L", 90),
-                _width_override("MTM P&L %", 90),
+                _width_override("MTM Return", 90),
                 _width_override("Margin Locked", 100),
                 _width_override("Leverage", 80),
                 _width_override("Liquidation Price", 110),
-                _width_override("Liquidation Buffer %", 130),
+                _width_override("Liquidation Buffer", 130),
                 _width_override("Trade ID", 220),
             ],
         },
@@ -985,11 +922,11 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed",
         "_x": 12,
-        "_dy": 15,
+        "_dy": 10,
         "title": "Portfolio Exposure",
         "description": "Gross/Net/Concentration as % of current equity — notional exposure, not margin usage. Concentration is whichever position is currently largest; it can shift between symbols, so check Position Snapshot to see which one.",
         "type": "timeseries",
-        "h": 8,
+        "h": 5,
         "w": 12,
         "targets": [
             _target(
@@ -1018,17 +955,20 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed",
         "_x": 0,
-        "_dy": 23,
+        "_dy": 38,
         "title": "Runtime Events",
         "description": (
-            "Operational audit trail, not trade activity. Two event types:\n"
-            "state_recovered — a restarted process resumed from its last checkpoint\n"
-            "(sim/live only); decision_skipped — a risk/sizing constraint blocked an\n"
-            "order this period (e.g. insufficient_cash, opposite_side, notional_capped).\n"
+            "Operational audit trail, not trade activity.\n"
             "\n"
-            "- Reason shows why a decision was skipped — blank for state_recovered,\n"
-            "  since resuming always succeeds.\n"
-            "- Detail is the full raw event payload behind Reason, for deeper checks."
+            "- `#` — row index.\n"
+            "- Time — event timestamp.\n"
+            "- Symbol — trading pair; blank for run-level events (state_recovered).\n"
+            "- Event — state_recovered (process resumed from checkpoint after a\n"
+            "  restart, sim/live only) or decision_skipped (a risk/sizing\n"
+            "  constraint blocked an order this period).\n"
+            "- Reason — why a decision was skipped, e.g. insufficient_cash,\n"
+            "  opposite_side, notional_capped; blank for state_recovered.\n"
+            "- Detail — full raw event payload behind Reason, for deeper checks."
         ),
         "type": "table",
         "h": 8,
@@ -1038,8 +978,8 @@ BASE_PANELS_DEF: list[dict] = [
                 "SELECT"
                 ' ROW_NUMBER() OVER (ORDER BY ts) AS "#",'
                 ' ts AS "Time",'
-                ' event_type AS "Event",'
                 ' symbol AS "Symbol",'
+                ' event_type AS "Event",'
                 " detail->>'reason' AS \"Reason\","
                 ' detail::text AS "Detail"'
                 " FROM runtime_events WHERE run_id = '${run_id}'"
@@ -1056,8 +996,8 @@ BASE_PANELS_DEF: list[dict] = [
                 # expected, by-design occurrences, not alarms.
                 _width_override("#", 40),
                 _width_override("Time", 180),
-                _width_override("Event", 140),
                 _width_override("Symbol", 120),
+                _width_override("Event", 140),
                 _width_override("Reason", 140),
             ],
         },
