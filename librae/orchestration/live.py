@@ -158,27 +158,42 @@ class _TimescaleCallbacks:
         self._instruments = instruments
         self._notifier = notifier
         self._run_id = ""
-        self._failures = 0
+        self._failures: dict[str, int] = {}
 
-    def _write(self, callback: Callable[..., object], *args: object, **kwargs: object) -> None:
+    def _write(
+        self,
+        callback: Callable[..., object],
+        *args: object,
+        critical: bool = False,
+        **kwargs: object,
+    ) -> None:
+        """Run one best-effort DB write.
+
+        ``critical=True`` alerts on the first failure instead of after
+        ``_DB_FAILURE_ALERT_THRESHOLD`` consecutive ones — for writes that
+        are one-shot (register_run fires once per process, so it would
+        never reach a consecutive-failure threshold at all) or per-event
+        and irreplaceable (a fill, a funding payment), unlike a recoverable
+        next-bar snapshot such as equity_curve.
+        """
+        name = callback.__name__
         try:
             callback(*args, **kwargs)
-            self._failures = 0
+            self._failures[name] = 0
         except Exception as exc:
-            self._failures += 1
+            failures = self._failures.get(name, 0) + 1
+            self._failures[name] = failures
             logger.warning(
                 "DB %s failed (%d consecutive): %s",
-                callback.__name__,
-                self._failures,
+                name,
+                failures,
                 exc,
             )
-            if self._failures == _DB_FAILURE_ALERT_THRESHOLD:
+            threshold = 1 if critical else _DB_FAILURE_ALERT_THRESHOLD
+            if failures == threshold:
                 self._alert(
                     title=f"[{self._config.strategy_name}] DB Write Failing",
-                    message=(
-                        f"{self._failures} consecutive DB write failures "
-                        f"(last: {callback.__name__}); trading continues."
-                    ),
+                    message=(f"{failures} consecutive {name} failures; trading continues."),
                 )
 
     def _alert(self, *, title: str, message: str) -> None:
@@ -196,6 +211,7 @@ class _TimescaleCallbacks:
         self._run_id = run_id
         self._write(
             write_run_metadata,
+            critical=True,
             run_id=run_id,
             strategy=self._config.strategy_name,
             symbols=self._config.symbols,
@@ -255,13 +271,14 @@ class _TimescaleCallbacks:
             account_id=self._config.account_id,
             currency=self._config.account.currency,
         )
-        self._write(write_trade_event, **fields)
+        self._write(write_trade_event, critical=True, **fields)
 
     def on_funding_cash_flow(self, cash_flow: FundingCashFlow) -> None:
         from librae.db.timescale_writer import write_funding_cash_flow
 
         self._write(
             write_funding_cash_flow,
+            critical=True,
             run_id=self._run_id,
             account_id=self._config.account_id,
             currency=self._config.account.currency,

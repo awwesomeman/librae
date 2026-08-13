@@ -490,7 +490,7 @@ def test_timescale_callbacks_writes_trade_event() -> None:
     with patch("librae.db.timescale_writer.write_trade_event", autospec=True) as write:
         callbacks.on_order_event(event, sequence=1)
 
-    assert callbacks._failures == 0
+    assert callbacks._failures.get("write_trade_event", 0) == 0
     write.assert_called_once()
     assert write.call_args.kwargs["group_id"] == "grp-1"
     assert write.call_args.kwargs["time_in_force"] == "day"
@@ -503,7 +503,7 @@ def test_timescale_callbacks_writes_runtime_event() -> None:
     callbacks._run_id = "run-1"
     ts = datetime.now(UTC)
 
-    with patch("librae.db.timescale_writer.write_runtime_event") as write:
+    with patch("librae.db.timescale_writer.write_runtime_event", autospec=True) as write:
         from librae.core.executor import RuntimeEvent
 
         callbacks.on_runtime_event(RuntimeEvent(ts=ts, event_type="state_recovered", detail={}))
@@ -529,3 +529,129 @@ def test_timescale_callbacks_alert_after_repeated_write_failures() -> None:
 
     notifier.send_alert.assert_called_once()
     assert "DB Write Failing" in notifier.send_alert.call_args.kwargs["title"]
+
+
+def test_timescale_callbacks_track_failures_per_callback() -> None:
+    """A different callback succeeding (e.g. equity_curve writes every bar)
+    must not reset another callback's consecutive-failure streak (e.g.
+    trade_event writes failing every time) — each is tracked independently."""
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(config, {}, notifier)
+
+    failing_write = MagicMock(side_effect=RuntimeError("db down"))
+    failing_write.__name__ = "failing_write"
+    succeeding_write = MagicMock()
+    succeeding_write.__name__ = "succeeding_write"
+
+    callbacks._write(failing_write)
+    callbacks._write(succeeding_write)
+    callbacks._write(failing_write)
+    callbacks._write(succeeding_write)
+    callbacks._write(failing_write)
+
+    notifier.send_alert.assert_called_once()
+    assert callbacks._failures["failing_write"] == 3
+    assert callbacks._failures["succeeding_write"] == 0
+
+
+def test_timescale_callbacks_critical_write_alerts_on_first_failure() -> None:
+    """critical=True writes (register_run's write_run_metadata — fires once
+    per process, so it could never reach a consecutive-failure threshold at
+    all; trade/funding writes — per-event, irreplaceable financial records,
+    unlike a recoverable next-bar snapshot like equity_curve) must alert
+    immediately instead of waiting for _DB_FAILURE_ALERT_THRESHOLD."""
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(config, {}, notifier)
+    failing_write = MagicMock(side_effect=RuntimeError("db down"))
+    failing_write.__name__ = "failing_write"
+
+    callbacks._write(failing_write, critical=True)
+
+    notifier.send_alert.assert_called_once()
+    assert callbacks._failures["failing_write"] == 1
+
+
+@pytest.mark.parametrize(
+    ("method", "callback_name", "call_kwargs"),
+    [
+        ("register_run", "write_run_metadata", {"run_id": "run-1"}),
+        ("on_funding_cash_flow", "write_funding_cash_flow", {}),
+    ],
+)
+def test_timescale_callbacks_mark_one_shot_writes_critical(
+    method: str, callback_name: str, call_kwargs: dict
+) -> None:
+    """Wiring check: register_run and on_funding_cash_flow must pass
+    critical=True through to _write, or the first-failure alert silently
+    stops firing for these irreplaceable writes."""
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks._run_id = "run-1"
+
+    with patch.object(callbacks, "_write") as write:
+        if method == "on_funding_cash_flow":
+            from librae.core.funding import FundingCashFlow
+
+            getattr(callbacks, method)(
+                FundingCashFlow(
+                    ts=datetime.now(UTC),
+                    symbol="BTCUSDT",
+                    side="long",
+                    quantity=1.0,
+                    mark_price=100.0,
+                    multiplier=1.0,
+                    rate=0.0001,
+                    cash_flow=-0.01,
+                )
+            )
+        else:
+            getattr(callbacks, method)(**call_kwargs)
+
+    assert write.call_args.args[0].__name__ == callback_name
+    assert write.call_args.kwargs["critical"] is True
+
+
+def test_timescale_callbacks_on_order_event_marks_write_trade_event_critical() -> None:
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks._run_id = "run-1"
+
+    from librae.core.executor import OrderEvent
+
+    ts = datetime.now(UTC)
+    event = OrderEvent(
+        ts=ts,
+        symbol="BTCUSDT",
+        side="long",
+        event_type="open",
+        fill_quantity=1.0,
+        price=100.0,
+        entry_price=100.0,
+        remaining_quantity=1.0,
+        notional=100.0,
+        commission=0.1,
+        slippage=0.05,
+        tax=0.0,
+        pnl=None,
+        net_return=None,
+        entry_at=ts,
+        periods_held=0,
+        reason="entry_signal",
+        entry_commission=0.1,
+        entry_slippage=0.05,
+        entry_tax=0.0,
+        group_id=None,
+        time_in_force="day",
+        margin_locked=100.0,
+        leverage=1.0,
+        liquidation_price=None,
+        margin_roi=None,
+    )
+
+    with patch.object(callbacks, "_write") as write:
+        callbacks.on_order_event(event, sequence=1)
+
+    assert write.call_args.args[0].__name__ == "write_trade_event"
+    assert write.call_args.kwargs["critical"] is True
