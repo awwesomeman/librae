@@ -65,6 +65,22 @@ def test_load_restores_json_checkpoint(mock_get_conn):
     assert restored == _state()
 
 
+@patch("librae.db.timescale_state.get_conn")
+def test_delete_reports_whether_a_checkpoint_existed(mock_get_conn):
+    conn = MagicMock()
+    mock_get_conn.return_value.__enter__.return_value = conn
+    cursor = conn.cursor.return_value
+    cursor.rowcount = 1
+
+    assert TimescaleLiveStateStore().delete("live:abc") is True
+    cursor.execute.assert_called_once_with(
+        "DELETE FROM execution_runtime_state WHERE state_key = %s", ("live:abc",)
+    )
+
+    cursor.rowcount = 0
+    assert TimescaleLiveStateStore().delete("live:missing") is False
+
+
 @patch("librae.db.timescale_state.get_pool")
 def test_advisory_lease_holds_connection_until_release(mock_get_pool):
     pool = MagicMock()

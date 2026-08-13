@@ -59,6 +59,7 @@ class RunOptions:
     database_enabled: bool = True
     dry_run: bool = False
     replace_existing: bool = False
+    reset_state: bool = False
     backtest_revision: str | None = None
     runtime_revision: str | None = None
     telegram_config: dict[str, object] | None = None
@@ -66,6 +67,8 @@ class RunOptions:
     def __post_init__(self) -> None:
         if self.dry_run and self.database_enabled:
             raise ValueError("dry_run=True requires database_enabled=False")
+        if self.reset_state and not self.database_enabled:
+            raise ValueError("reset_state=True requires database_enabled=True")
         revision = normalize_backtest_revision(self.backtest_revision)
         if self.replace_existing and revision is None:
             raise ValueError("replace_existing=True requires backtest_revision")
@@ -129,6 +132,12 @@ def base_parser(description: str) -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="replace the cached run for the same config and backtest revision",
+    )
+    p.add_argument(
+        "--reset-state",
+        action="store_true",
+        help="delete this config's sim/live checkpoint instead of running "
+        "(next start begins a fresh run_id); does not touch trade/equity history",
     )
     return p
 
@@ -432,6 +441,7 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         database_enabled=not no_db,
         dry_run=dry_run,
         replace_existing=args.force,
+        reset_state=args.reset_state,
         backtest_revision=args.backtest_revision,
         runtime_revision=args.runtime_revision,
         telegram_config=getattr(args, "telegram", None),
@@ -515,6 +525,48 @@ def check_existing_run(
 
 
 # ---------------------------------------------------------------------------
+# reset_realtime_state() — delete a sim/live checkpoint, not its history
+# ---------------------------------------------------------------------------
+
+
+def reset_realtime_state(config: RunConfig) -> None:
+    """Delete this config's sim/live checkpoint so the next start begins a
+    fresh run_id. Does not touch trade_events/equity_curve/etc — those are
+    real execution history, not derivable from the checkpoint, and require
+    a separate, explicit decision to discard.
+    """
+    if config.mode == "backtest":
+        raise ValueError("--reset-state applies to sim/live only; backtest has no checkpoint")
+
+    from librae.db.timescale_state import TimescaleLiveStateStore
+
+    # Must match LiveTrader._state_key (librae/live/engine.py) exactly, or
+    # this looks up the wrong (or no) checkpoint.
+    state_key = f"{config.mode}:{config.config_hash}"
+    store = TimescaleLiveStateStore()
+
+    if not store.acquire_lease(state_key):
+        raise RuntimeError(
+            f"cannot reset state_key={state_key!r}: another sim/live process "
+            "currently holds its lease — stop it first"
+        )
+    try:
+        existing = store.load(state_key)
+        if existing is None:
+            logger.info("No checkpoint found for state_key=%s; nothing to reset", state_key)
+            return
+        store.delete(state_key)
+        logger.info(
+            "Deleted checkpoint for state_key=%s (was run_id=%s); next start begins "
+            "a fresh run — trade/equity history for that run_id is untouched",
+            state_key,
+            existing.run_id,
+        )
+    finally:
+        store.release_lease(state_key)
+
+
+# ---------------------------------------------------------------------------
 # run_dispatch() — shared main() for all strategy runners
 # ---------------------------------------------------------------------------
 
@@ -533,6 +585,9 @@ def run_dispatch(
     """
     setup_logging()
     config, options = build_run(strategy_name, run_file)
+    if options.reset_state:
+        reset_realtime_state(config)
+        return
     if config.mode == "backtest":
         log_run_summary(config, options)
         with_dedup_check(run_backtest, options)(config)

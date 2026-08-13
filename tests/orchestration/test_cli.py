@@ -16,6 +16,7 @@ from librae.orchestration.cli import (
     build_run,
     check_existing_run,
     parse_with_config,
+    reset_realtime_state,
     run_dispatch,
     run_realtime_generic,
     with_dedup_check,
@@ -618,6 +619,22 @@ class TestCheckExistingRun:
 
 
 class TestRunDispatch:
+    def test_reset_state_resets_and_skips_execution(self):
+        config = _make_cfg(mode="sim")
+        options = RunOptions(database_enabled=True, reset_state=True)
+        run_backtest = MagicMock()
+        run_realtime = MagicMock()
+
+        with (
+            patch("librae.orchestration.cli.build_run", return_value=(config, options)),
+            patch("librae.orchestration.cli.reset_realtime_state") as reset,
+        ):
+            run_dispatch("test_strat", "run.py", run_backtest, run_realtime)
+
+        reset.assert_called_once_with(config)
+        run_backtest.assert_not_called()
+        run_realtime.assert_not_called()
+
     def test_backtest_only_runner_rejects_realtime_mode_before_execution(self):
         config = _make_cfg(mode="sim")
         options = RunOptions(database_enabled=False)
@@ -701,3 +718,58 @@ class TestRunDispatch:
             data_adapter_overrides=overrides,
         )
         trader.run.assert_called_once_with()
+
+
+class TestResetRealtimeState:
+    def test_rejects_backtest_mode(self):
+        with pytest.raises(ValueError, match="applies to sim/live only"):
+            reset_realtime_state(_make_cfg(mode="backtest"))
+
+    def test_noop_when_no_checkpoint_exists(self):
+        config = _make_cfg(mode="sim")
+        store = MagicMock()
+        store.acquire_lease.return_value = True
+        store.load.return_value = None
+
+        with patch("librae.db.timescale_state.TimescaleLiveStateStore", return_value=store):
+            reset_realtime_state(config)
+
+        store.delete.assert_not_called()
+        store.release_lease.assert_called_once_with(f"sim:{config.config_hash}")
+
+    def test_deletes_checkpoint_when_found(self):
+        from librae.live.state import LiveRuntimeState
+
+        config = _make_cfg(mode="sim")
+        state_key = f"sim:{config.config_hash}"
+        store = MagicMock()
+        store.acquire_lease.return_value = True
+        store.load.return_value = LiveRuntimeState(
+            state_key=state_key,
+            run_id="run-1",
+            config_hash=config.config_hash,
+            mode="sim",
+            account_id="default",
+            cash=1_000.0,
+        )
+
+        with patch("librae.db.timescale_state.TimescaleLiveStateStore", return_value=store):
+            reset_realtime_state(config)
+
+        store.delete.assert_called_once_with(state_key)
+        store.release_lease.assert_called_once_with(state_key)
+
+    def test_raises_when_another_process_holds_the_lease(self):
+        config = _make_cfg(mode="sim")
+        store = MagicMock()
+        store.acquire_lease.return_value = False
+
+        with (
+            patch("librae.db.timescale_state.TimescaleLiveStateStore", return_value=store),
+            pytest.raises(RuntimeError, match="another sim/live process"),
+        ):
+            reset_realtime_state(config)
+
+        store.load.assert_not_called()
+        store.delete.assert_not_called()
+        store.release_lease.assert_not_called()
