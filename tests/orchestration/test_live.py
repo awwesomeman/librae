@@ -497,6 +497,29 @@ def test_timescale_callbacks_writes_trade_event() -> None:
     assert write.call_args.kwargs["margin_roi"] == 11.1
 
 
+def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
+    """Without this seed row, strategy_performance has no row at all until
+    the first close/reduce (on_performance is dirty-flag gated — see
+    live/engine.py), so Total Return/Max Drawdown/Sharpe show "No data"
+    next to an already-live Unrealized P&L. register_run() must seed a
+    $0/0.0% baseline instead."""
+    config = make_test_cfg(mode="sim", initial_balance=50_000.0)
+    callbacks = _TimescaleCallbacks(config, {}, None)
+
+    with (
+        patch("librae.db.timescale_writer.write_run_metadata", autospec=True),
+        patch("librae.db.timescale_writer.write_strategy_performance", autospec=True) as write_perf,
+    ):
+        callbacks.register_run("run-1")
+
+    write_perf.assert_called_once()
+    kwargs = write_perf.call_args.kwargs
+    assert kwargs["run_id"] == "run-1"
+    assert kwargs["initial_cash"] == kwargs["final_equity"] == 50_000.0
+    assert kwargs["net_pnl"] == 0.0
+    assert kwargs["metrics"].total_return == 0.0
+
+
 def test_timescale_callbacks_writes_runtime_event() -> None:
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(config, {}, None)
@@ -609,8 +632,12 @@ def test_timescale_callbacks_mark_one_shot_writes_critical(
         else:
             getattr(callbacks, method)(**call_kwargs)
 
-    assert write.call_args.args[0].__name__ == callback_name
-    assert write.call_args.kwargs["critical"] is True
+    # register_run also seeds a $0/0.0% strategy_performance baseline (a
+    # second, equally one-shot _write call) — match by name instead of
+    # asserting on the last call, so this doesn't depend on call order.
+    matching = [call for call in write.call_args_list if call.args[0].__name__ == callback_name]
+    assert len(matching) == 1
+    assert matching[0].kwargs["critical"] is True
 
 
 def test_timescale_callbacks_on_order_event_marks_write_trade_event_critical() -> None:

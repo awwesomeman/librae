@@ -206,7 +206,8 @@ class _TimescaleCallbacks:
             logger.exception("DB failure notification failed")
 
     def register_run(self, run_id: str) -> None:
-        from librae.db.timescale_writer import write_run_metadata
+        from librae.backtest.schema import StrategyMetrics
+        from librae.db.timescale_writer import write_run_metadata, write_strategy_performance
 
         self._run_id = run_id
         self._write(
@@ -223,6 +224,22 @@ class _TimescaleCallbacks:
             params=self._config.params,
             execution_policy=asdict(self._config.execution),
             risk_policy=asdict(self._config.risk),
+        )
+        # Seed a $0/0.0% baseline row up front — otherwise strategy_performance
+        # has no row at all until the first close/reduce (on_performance is
+        # dirty-flag gated, see live/engine.py), so every KPI panel sourced
+        # from it (Total Return, Max Drawdown, Sharpe, ...) shows "No data"
+        # next to an already-live Unrealized P&L, which reads as broken.
+        self._write(
+            write_strategy_performance,
+            critical=True,
+            run_id=run_id,
+            account_id=self._config.account_id,
+            currency=self._config.account.currency,
+            initial_cash=self._config.account.initial_cash,
+            final_equity=self._config.account.initial_cash,
+            net_pnl=0.0,
+            metrics=StrategyMetrics(total_return=0.0, max_drawdown=0.0, trades=0),
         )
 
     def on_bar(
