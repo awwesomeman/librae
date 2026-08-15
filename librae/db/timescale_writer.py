@@ -366,6 +366,8 @@ def save_backtest_output(
                     ev.leverage,
                     ev.liquidation_price,
                     ev.margin_roi,
+                    ev.margin_mode,
+                    ev.cash_flow,
                 )
                 for ev in output.order_events
             ]
@@ -381,7 +383,8 @@ def save_backtest_output(
                     entry_commission, entry_slippage, entry_tax,
                     pnl, net_return,
                     entry_at, periods_held, reason, group_id, time_in_force,
-                    margin_locked, leverage, liquidation_price, margin_roi)
+                    margin_locked, leverage, liquidation_price, margin_roi, margin_mode,
+                    cash_flow)
                    VALUES %s
                    ON CONFLICT (event_id, ts) DO NOTHING""",
                 event_rows,
@@ -916,6 +919,8 @@ def write_trade_event(
     leverage: float | None = None,
     liquidation_price: float | None = None,
     margin_roi: float | None = None,
+    margin_mode: str | None = None,
+    cash_flow: float | None = None,
     dsn: str | None = None,
 ) -> None:
     """Write a single trade event (upsert by event_id + ts)."""
@@ -932,10 +937,11 @@ def write_trade_event(
                 entry_commission, entry_slippage, entry_tax,
                 pnl, net_return,
                 entry_at, periods_held, reason, group_id, time_in_force,
-                margin_locked, leverage, liquidation_price, margin_roi)
+                margin_locked, leverage, liquidation_price, margin_roi, margin_mode,
+                cash_flow)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                       %s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (event_id, ts) DO NOTHING""",
             (
                 event_id,
@@ -971,6 +977,8 @@ def write_trade_event(
                 leverage,
                 liquidation_price,
                 margin_roi,
+                margin_mode,
+                cash_flow,
             ),
         )
         cur.close()

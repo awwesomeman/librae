@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from librae.core.strategy import PositionSide
 
 if TYPE_CHECKING:
-    from librae.config.market_config import MarketConfig
+    from librae.config.market_config import MarginMode, MarketConfig
     from librae.core.run_config import RunConfig
 
 
@@ -56,6 +56,12 @@ class CostModel:
             long/short_margin_rate — maintenance-margin tiers on the venues
             this matters for, crypto perps, aren't side-dependent). 0
             (default) disables liquidation simulation entirely.
+        long_margin_mode/short_margin_mode: who sets the corresponding
+            margin_rate — 'unlevered' (always 1.0), 'fixed' (exchange/
+            regulator-set, e.g. TAIFEX margin or Reg-T), 'dynamic'
+            (trader-chosen leverage, e.g. isolated-margin perps). Labels the
+            rate for reporting; doesn't itself change PnL/margin math. See
+            librae/config/market_config.py's MarginMode.
     """
 
     multiplier: float
@@ -68,9 +74,15 @@ class CostModel:
     short_margin_rate: float = 1.0
     volume_impact_ticks: float = 0.0
     maintenance_margin_rate: float = 0.0
+    long_margin_mode: MarginMode = "unlevered"
+    short_margin_mode: MarginMode = "unlevered"
 
     def __post_init__(self) -> None:
-        values = asdict(self)
+        values = {
+            k: v
+            for k, v in asdict(self).items()
+            if k not in ("long_margin_mode", "short_margin_mode")
+        }
         if not all(isfinite(value) for value in values.values()):
             raise ValueError("CostModel values must be finite")
         if self.multiplier <= 0:
@@ -90,6 +102,19 @@ class CostModel:
         for name in ("long_margin_rate", "short_margin_rate"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
+        for rate_name, mode_name in (
+            ("long_margin_rate", "long_margin_mode"),
+            ("short_margin_rate", "short_margin_mode"),
+        ):
+            mode = getattr(self, mode_name)
+            if mode not in ("unlevered", "fixed", "dynamic"):
+                raise ValueError(
+                    f"{mode_name} must be 'unlevered', 'fixed', or 'dynamic', got {mode!r}"
+                )
+            if mode == "unlevered" and getattr(self, rate_name) != 1.0:
+                raise ValueError(
+                    f"{mode_name}='unlevered' requires {rate_name}=1.0, got {getattr(self, rate_name)}"
+                )
 
     @classmethod
     def zero(cls) -> CostModel:
@@ -105,6 +130,8 @@ class CostModel:
             short_margin_rate=1.0,
             volume_impact_ticks=0.0,
             maintenance_margin_rate=0.0,
+            long_margin_mode="unlevered",
+            short_margin_mode="unlevered",
         )
 
     @classmethod
@@ -201,6 +228,8 @@ class CostModel:
             short_margin_rate=market.short_margin_rate,
             volume_impact_ticks=market.volume_impact_ticks,
             maintenance_margin_rate=market.maintenance_margin_rate,
+            long_margin_mode=market.long_margin_mode,
+            short_margin_mode=market.short_margin_mode,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
@@ -253,6 +282,10 @@ class CostModel:
     def margin_rate(self, side: PositionSide) -> float:
         """Return margin rate for the given side."""
         return self.short_margin_rate if side == "short" else self.long_margin_rate
+
+    def margin_mode(self, side: PositionSide) -> MarginMode:
+        """Return who sets margin_rate for the given side — see MarginMode."""
+        return self.short_margin_mode if side == "short" else self.long_margin_mode
 
     def estimate_entry_outlay(
         self,
@@ -308,6 +341,8 @@ class SymbolDescription:
     tick_size_source: str
     long_margin_rate: float | None
     short_margin_rate: float | None
+    long_margin_mode: MarginMode | None
+    short_margin_mode: MarginMode | None
     error: str | None = None
 
 
@@ -357,6 +392,8 @@ def describe_symbols(
                     tick_size_source="unresolved",
                     long_margin_rate=None,
                     short_margin_rate=None,
+                    long_margin_mode=None,
+                    short_margin_mode=None,
                     error=str(e),
                 )
             )
@@ -391,6 +428,8 @@ def describe_symbols(
                 tick_size_source=tick_size_source,
                 long_margin_rate=cm.long_margin_rate,
                 short_margin_rate=cm.short_margin_rate,
+                long_margin_mode=cm.long_margin_mode,
+                short_margin_mode=cm.short_margin_mode,
             )
         )
     return results

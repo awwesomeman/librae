@@ -561,6 +561,7 @@ def _us_equity_cost() -> CostModel:
         tax_rate=0.0,
         long_margin_rate=1.0,
         short_margin_rate=0.5,
+        short_margin_mode="fixed",
     )
 
 
@@ -575,6 +576,8 @@ def _futures_cost() -> CostModel:
         tax_rate=0.0,
         long_margin_rate=0.1,
         short_margin_rate=0.1,
+        long_margin_mode="fixed",
+        short_margin_mode="fixed",
     )
 
 

@@ -899,6 +899,8 @@ class Backtest:
                     float(e.liquidation_price) if e.liquidation_price is not None else None
                 ),
                 margin_roi=float(e.margin_roi) if e.margin_roi is not None else None,
+                margin_mode=e.margin_mode,
+                cash_flow=float(e.cash_flow) if e.cash_flow is not None else None,
             )
             for i, e in enumerate(result.order_events)
         ]

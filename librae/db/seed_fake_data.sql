@@ -114,90 +114,107 @@ ON CONFLICT (run_id, account_id, ts) DO NOTHING;
 -- lifecycle shape discussed: scale-in weighted-average entry, full close
 -- resetting entry_at on reopen, partial reduce, and arb-pair correlation.
 --
--- BTCUSDT lifecycle 1 and ETHUSDT are spot (margin_rate=1.0): margin_locked
--- equals notional and leverage=1.0, so Margin ROI % == Return % — demos the
--- "no difference for spot" case. The BTC/SOL funding_arb_1 pair (10x,
--- margin_rate=0.1) and the final still-open BTC lifecycle (4x, margin_rate=0.25)
--- are leveraged futures positions (maintenance_margin_rate=0.05 throughout) so
--- Leverage/Liquidation Price/Liquidation Buffer %/Margin ROI % all have
--- something to show — including in Position Snapshot, which only reflects
--- currently-open rows. liquidation_price = entry*(1+maintenance-margin_rate)
--- for longs, entry*(1-maintenance+margin_rate) for shorts (see
+-- BTCUSDT lifecycle 1 and ETHUSDT are spot (margin_rate=1.0, margin_mode=
+-- unlevered): margin_locked equals notional and leverage=1.0, so Margin
+-- ROI % == Return % — demos the "no difference for spot" case. The BTC/SOL
+-- funding_arb_1 pair (10x, margin_rate=0.1) and the final still-open BTC
+-- lifecycle (4x, margin_rate=0.25) are leveraged perpetual positions
+-- (maintenance_margin_rate=0.05 throughout, margin_mode=dynamic — trader-
+-- chosen isolated-margin leverage, see MarginMode) so Leverage/Liquidation
+-- Price/Liquidation Buffer %/Margin ROI %/Margin Mode all have something to
+-- show — including in Position Snapshot, which only reflects currently-open
+-- rows. liquidation_price = entry*(1+maintenance-margin_rate) for longs,
+-- entry*(1-maintenance+margin_rate) for shorts (see
 -- CostModel.liquidation_price). The still-open leg intentionally uses lower
 -- leverage than the (already-closed) arb pair so its liquidation_price stays
 -- below the BTCUSDT OHLCV path's actual range near "now" — otherwise a
 -- position shown as still open would already be past liquidation.
+--
+-- cash_flow values below approximate the engine's outlay/proceeds formula
+-- (see executor.py's _margin_fields/build_close_event): open/add =
+-- -(this fill's notional*margin_rate + this row's commission+slippage+tax);
+-- reduce/close = closed_margin + pnl (folds entry-vs-exit cost attribution
+-- into the given net pnl rather than re-deriving gross_pnl — fine for fake
+-- demo data, not meant to reconcile to the cent).
 INSERT INTO trade_events
     (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
      symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,
      commission, slippage, tax, pnl, net_return, entry_at, periods_held, reason,
-     group_id, time_in_force, margin_locked, leverage, liquidation_price, margin_roi)
+     group_id, time_in_force, margin_locked, leverage, liquidation_price, margin_roi,
+     margin_mode, cash_flow)
 VALUES
     -- Lifecycle 1: BTCUSDT open -> add -> close (day -13 to day -9), spot (margin_rate=1.0)
     ('seed_evt_1', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '13 days', 'BTCUSDT', 'long', 'open',
      0.1, 60000, 60000, 0.1, 6000, 0.6, 0.2, 0, NULL, NULL,
-     NOW() - INTERVAL '13 days', 0, 'entry_signal', NULL, 'day', 6000, 1.0, NULL, NULL),
+     NOW() - INTERVAL '13 days', 0, 'entry_signal', NULL, 'day', 6000, 1.0, NULL, NULL,
+     'unlevered', -6000.8),
     ('seed_evt_2', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '11 days', 'BTCUSDT', 'long', 'add',
      0.05, 61000, 60333.33, 0.15, 3050, 0.4, 0.1, 0, NULL, NULL,
-     NOW() - INTERVAL '13 days', 48, 'scale_in', NULL, 'day', 9050, 1.0, NULL, NULL),
+     NOW() - INTERVAL '13 days', 48, 'scale_in', NULL, 'day', 9050, 1.0, NULL, NULL,
+     'unlevered', -3050.5),
     ('seed_evt_3', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '9 days' - INTERVAL '1 hour', 'BTCUSDT', 'long', 'close',
      0.15, 62000, 60333.33, 0, 9300, 1.2, 0.5, 0, 250.00, 0.0276,
-     NOW() - INTERVAL '13 days', 94, 'take_profit', NULL, 'day', 0, NULL, NULL, 0.0276),
+     NOW() - INTERVAL '13 days', 94, 'take_profit', NULL, 'day', 0, NULL, NULL, 0.0276,
+     'unlevered', 9300.0),
     -- Rotation: close BTC, open ETH the same day (day -9), spot
     ('seed_evt_4', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '9 days', 'ETHUSDT', 'long', 'open',
      1.5, 3100, 3100, 1.5, 4650, 0.5, 0.2, 0, NULL, NULL,
-     NOW() - INTERVAL '9 days', 0, 'rotation_entry', NULL, 'day', 4650, 1.0, NULL, NULL),
+     NOW() - INTERVAL '9 days', 0, 'rotation_entry', NULL, 'day', 4650, 1.0, NULL, NULL,
+     'unlevered', -4650.7),
     -- Partial reduce (day -7), spot
     ('seed_evt_5', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '7 days', 'ETHUSDT', 'long', 'reduce',
      0.5, 3250, 3100, 1.0, 1625, 0.3, 0.1, 0, 75.00, 0.0484,
-     NOW() - INTERVAL '9 days', 48, 'trim_signal', NULL, 'day', 3100, 1.0, NULL, 0.0484),
+     NOW() - INTERVAL '9 days', 48, 'trim_signal', NULL, 'day', 3100, 1.0, NULL, 0.0484,
+     'unlevered', 1625.0),
     -- Arb pair opened on the same bar, same group_id, different symbols (day -6),
-    -- 10x-leveraged futures (margin_rate=0.1, maintenance_margin_rate=0.05)
+    -- 10x-leveraged perpetuals (margin_rate=0.1, maintenance_margin_rate=0.05)
     ('seed_evt_6', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '6 days', 'BTCUSDT', 'long', 'open',
      0.08, 63000, 63000, 0.08, 5040, 0.5, 0.15, 0, NULL, NULL,
      NOW() - INTERVAL '6 days', 0, 'basis_arb_entry', 'funding_arb_1', 'day',
-     504.0, 10.0, 59850.0, NULL),
+     504.0, 10.0, 59850.0, NULL, 'dynamic', -504.65),
     ('seed_evt_7', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '6 days', 'SOLUSDT', 'short', 'open',
      15, 135, 135, 15, 2025, 0.3, 0.08, 0, NULL, NULL,
      NOW() - INTERVAL '6 days', 0, 'basis_arb_entry', 'funding_arb_1', 'day',
-     202.5, 10.0, 141.75, NULL),
+     202.5, 10.0, 141.75, NULL, 'dynamic', -202.88),
     -- ETH lifecycle closes out (day -4), spot
     ('seed_evt_8', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '4 days', 'ETHUSDT', 'long', 'close',
      1.0, 3400, 3100, 0, 3400, 0.6, 0.2, 0, 300.00, 0.0968,
-     NOW() - INTERVAL '9 days', 120, 'exit_signal', NULL, 'day', 0, NULL, NULL, 0.0968),
+     NOW() - INTERVAL '9 days', 120, 'exit_signal', NULL, 'day', 0, NULL, NULL, 0.0968,
+     'unlevered', 3400.0),
     -- Arb unwind, both legs closed on the same bar (day -2) — margin_roi =
-    -- net_return / margin_rate (0.1) shows the 10x amplification vs. Return %
+    -- net_return / margin_rate (0.1) shows the 10x amplification vs. Notional Return
     ('seed_evt_9', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '2 days', 'BTCUSDT', 'long', 'close',
      0.08, 64000, 63000, 0, 5120, 0.5, 0.15, 0, 80.00, 0.0159,
      NOW() - INTERVAL '6 days', 96, 'basis_arb_exit', 'funding_arb_1', 'day',
-     0, NULL, NULL, 0.159),
+     0, NULL, NULL, 0.159, 'dynamic', 584.0),
     ('seed_evt_10', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '2 days', 'SOLUSDT', 'short', 'close',
      15, 132, 135, 0, 1980, 0.3, 0.08, 0, 45.00, 0.0222,
      NOW() - INTERVAL '6 days', 96, 'basis_arb_exit', 'funding_arb_1', 'day',
-     0, NULL, NULL, 0.222),
+     0, NULL, NULL, 0.222, 'dynamic', 247.5),
     -- Fresh BTC lifecycle, still open at "now" (day -1) — also leveraged
     -- (4x, lower than the arb pair above), so the currently-held row in
     -- Position Snapshot (not just closed Trade Events rows) demos
-    -- Leverage/Liquidation Price/Liquidation Buffer %. 4x rather than
-    -- the arb pair's 10x so liquidation_price (52000) stays safely below
+    -- Leverage/Liquidation Price/Liquidation Buffer %/Margin Mode. 4x rather
+    -- than the arb pair's 10x so liquidation_price (52000) stays safely below
     -- the BTCUSDT OHLCV path's actual range near "now" (~55k-59k) — 10x
     -- here would put liquidation_price (61750) above the current close,
     -- i.e. this "still open" position would already be liquidated.
     ('seed_evt_11', 'seed_test_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
      NOW() - INTERVAL '1 day', 'BTCUSDT', 'long', 'open',
      0.06, 65000, 65000, 0.06, 3900, 0.4, 0.12, 0, NULL, NULL,
-     NOW() - INTERVAL '1 day', 0, 'entry_signal', NULL, 'day', 975.0, 4.0, 52000.0, NULL)
+     NOW() - INTERVAL '1 day', 0, 'entry_signal', NULL, 'day', 975.0, 4.0, 52000.0, NULL,
+     'dynamic', -975.52)
 ON CONFLICT (event_id, ts) DO NOTHING;
 
 -- Funding payments for the leveraged BTC/SOL arb pair while held (day -6 to

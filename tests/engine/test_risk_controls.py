@@ -50,6 +50,8 @@ def _leveraged_zero_cost() -> CostModel:
         tax_rate=0.0,
         long_margin_rate=0.5,
         short_margin_rate=0.5,
+        long_margin_mode="fixed",
+        short_margin_mode="fixed",
     )
 
 

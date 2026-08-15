@@ -26,6 +26,8 @@ def _cost_model(multiplier: float = 10.0) -> CostModel:
         tax_rate=0.0,
         long_margin_rate=0.1,
         short_margin_rate=0.1,
+        long_margin_mode="dynamic",
+        short_margin_mode="dynamic",
     )
 
 

@@ -100,6 +100,8 @@ class OrderEventRecord:
     leverage: float | None = None
     liquidation_price: float | None = None
     margin_roi: float | None = None
+    margin_mode: str | None = None
+    cash_flow: float | None = None
 
 
 @dataclass(frozen=True)

@@ -40,6 +40,8 @@ def _leveraged_cost(margin_rate: float = 0.1, maintenance_margin_rate: float = 0
         long_margin_rate=margin_rate,
         short_margin_rate=margin_rate,
         maintenance_margin_rate=maintenance_margin_rate,
+        long_margin_mode="dynamic",
+        short_margin_mode="dynamic",
     )
 
 

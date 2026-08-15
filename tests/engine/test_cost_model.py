@@ -194,6 +194,8 @@ class TestLiquidationPrice:
             long_margin_rate=0.1,
             short_margin_rate=0.1,
             maintenance_margin_rate=0.05,
+            long_margin_mode="dynamic",
+            short_margin_mode="dynamic",
         )
 
     def test_long_formula(self, leveraged_cost: CostModel) -> None:
@@ -220,6 +222,8 @@ class TestLiquidationPrice:
             long_margin_rate=0.05,
             short_margin_rate=0.05,
             maintenance_margin_rate=0.05,
+            long_margin_mode="dynamic",
+            short_margin_mode="dynamic",
         )
         assert cm.liquidation_price(100.0, "long") is None
 

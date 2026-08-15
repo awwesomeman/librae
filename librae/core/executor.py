@@ -301,6 +301,8 @@ class OrderEvent:
     leverage: float | None = None
     liquidation_price: float | None = None
     margin_roi: float | None = None
+    margin_mode: str | None = None
+    cash_flow: float | None = None
 
 
 RuntimeEventType = Literal["state_recovered", "decision_skipped"]
@@ -360,15 +362,17 @@ def _margin_fields(
     remaining_quantity: float,
     side: PositionSide,
     cost_model: CostModel,
-) -> tuple[float, float | None, float | None]:
-    """(margin_locked, leverage, liquidation_price) for the position left
-    after an OrderEvent — zero margin_locked/no leverage once fully closed
-    (remaining_quantity == 0)."""
+) -> tuple[float, float | None, float | None, str]:
+    """(margin_locked, leverage, liquidation_price, margin_mode) for the
+    position left after an OrderEvent — zero margin_locked/no leverage once
+    fully closed (remaining_quantity == 0). margin_mode always reflects the
+    side's financing regime (unlevered/fixed/dynamic — see MarginMode), even
+    when the position is fully closed."""
     notional = entry_price * remaining_quantity * cost_model.multiplier
     margin_locked = notional * cost_model.margin_rate(side)
     leverage = notional / margin_locked if margin_locked > EPSILON else None
     liq_price = cost_model.liquidation_price(entry_price, side) if remaining_quantity > 0 else None
-    return margin_locked, leverage, liq_price
+    return margin_locked, leverage, liq_price, cost_model.margin_mode(side)
 
 
 def _margin_roi(net_pnl: float, closed_margin: float) -> float | None:
@@ -593,10 +597,10 @@ def build_close_event(
     )
     trade = build_trade_result(pos, ts, exit_price, close_qty, pnl)
     remaining_qty = 0.0 if fully_closed else max(0.0, pos.quantity - close_qty)
-    margin_locked, leverage, liq_price = _margin_fields(
+    margin_locked, leverage, liq_price, margin_mode = _margin_fields(
         pos.entry_price, remaining_qty, pos.side, cost_model
     )
-    closed_margin, _, _ = _margin_fields(pos.entry_price, close_qty, pos.side, cost_model)
+    closed_margin, _, _, _ = _margin_fields(pos.entry_price, close_qty, pos.side, cost_model)
     margin_roi = _margin_roi(pnl.net_pnl, closed_margin)
     event = OrderEvent(
         ts=ts,
@@ -625,6 +629,8 @@ def build_close_event(
         leverage=leverage,
         liquidation_price=liq_price,
         margin_roi=margin_roi,
+        margin_mode=margin_mode,
+        cash_flow=proceeds,
     )
     return trade, event, proceeds, fully_closed
 
@@ -694,7 +700,7 @@ def apply_execution_fill(
         else:
             scale_into_position(position, fill, cost_model)
 
-        margin_locked, leverage, liq_price = _margin_fields(
+        margin_locked, leverage, liq_price, margin_mode = _margin_fields(
             position.entry_price, position.quantity, entry_side, cost_model
         )
         event = OrderEvent(
@@ -715,6 +721,8 @@ def apply_execution_fill(
             margin_locked=margin_locked,
             leverage=leverage,
             liquidation_price=liq_price,
+            margin_mode=margin_mode,
+            cash_flow=-outlay,
         )
         result = ExecutionResult(trades=[], events=[event], cash_delta=-outlay)
         return cash - outlay, result
@@ -755,11 +763,12 @@ def apply_execution_fill(
     )
     trade = build_trade_result(position, ts, fill.price, close_quantity, pnl)
     remaining_quantity = 0.0 if fully_closed else position.quantity - close_quantity
-    margin_locked, leverage, liq_price = _margin_fields(
+    margin_locked, leverage, liq_price, margin_mode = _margin_fields(
         position.entry_price, remaining_quantity, position.side, cost_model
     )
     closed_margin = entry_notional * cost_model.margin_rate(position.side)
     margin_roi = _margin_roi(net_pnl, closed_margin)
+    proceeds = closed_margin + gross_pnl - costs
     event = OrderEvent(
         ts=ts,
         symbol=symbol,
@@ -785,9 +794,10 @@ def apply_execution_fill(
         leverage=leverage,
         liquidation_price=liq_price,
         margin_roi=margin_roi,
+        margin_mode=margin_mode,
+        cash_flow=proceeds,
     )
 
-    proceeds = closed_margin + gross_pnl - costs
     if fully_closed:
         del positions[symbol]
     else:
@@ -1573,7 +1583,7 @@ def execute_order_intents(
                         take_profit_price=action.take_profit_price,
                         group_id=group_id,
                     )
-                    margin_locked, leverage, liq_price = _margin_fields(
+                    margin_locked, leverage, liq_price, margin_mode = _margin_fields(
                         price, fill.quantity, fill.side, cost_model
                     )
                     events.append(
@@ -1597,6 +1607,8 @@ def execute_order_intents(
                             margin_locked=margin_locked,
                             leverage=leverage,
                             liquidation_price=liq_price,
+                            margin_mode=margin_mode,
+                            cash_flow=-outlay,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity
@@ -1638,7 +1650,7 @@ def execute_order_intents(
                         pos.stop_price = action.stop_price
                     if action.take_profit_price is not None:
                         pos.take_profit_price = action.take_profit_price
-                    margin_locked, leverage, liq_price = _margin_fields(
+                    margin_locked, leverage, liq_price, margin_mode = _margin_fields(
                         pos.entry_price, pos.quantity, pos.side, cost_model
                     )
                     events.append(
@@ -1662,6 +1674,8 @@ def execute_order_intents(
                             margin_locked=margin_locked,
                             leverage=leverage,
                             liquidation_price=liq_price,
+                            margin_mode=margin_mode,
+                            cash_flow=-outlay,
                         )
                     )
                     volume_consumed[sym] = volume_consumed.get(sym, 0.0) + fill.quantity

@@ -187,10 +187,23 @@ CREATE TABLE IF NOT EXISTS trade_events (
     leverage        DOUBLE PRECISION,
     liquidation_price DOUBLE PRECISION,
     margin_roi      DOUBLE PRECISION,
+    -- Who set margin_rate for this fill's side, not how big it is: unlevered
+    -- (spot/cash, rate always 1.0), fixed (exchange/regulator-set, e.g.
+    -- TAIFEX margin or Reg-T/融資), dynamic (trader-chosen leverage, e.g.
+    -- isolated-margin perps). Same leverage number means different things
+    -- under each mode — see librae/config/market_config.py's MarginMode.
+    margin_mode     TEXT,
+    -- Net cash impact of this fill on the account: negative on open/add
+    -- (outlay = notional*margin_rate + this row's commission+slippage+tax),
+    -- positive on reduce/close (proceeds = released margin + realized PnL -
+    -- exit costs). Already nets out commission/slippage/tax — not a second
+    -- copy of those columns, the total after them.
+    cash_flow       DOUBLE PRECISION,
     CONSTRAINT chk_event_side CHECK (side IN ('long', 'short')),
     CONSTRAINT chk_event_type CHECK (event_type IN ('open', 'add', 'reduce', 'close')),
     CONSTRAINT chk_event_mode CHECK (mode IN ('backtest', 'sim', 'live')),
-    CONSTRAINT chk_event_time_in_force CHECK (time_in_force IN ('day', 'gtc', 'ioc', 'fok'))
+    CONSTRAINT chk_event_time_in_force CHECK (time_in_force IN ('day', 'gtc', 'ioc', 'fok')),
+    CONSTRAINT chk_event_margin_mode CHECK (margin_mode IN ('unlevered', 'fixed', 'dynamic'))
 );
 SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);

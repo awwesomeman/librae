@@ -297,6 +297,8 @@ LEVERAGED = CostModel(
     long_margin_rate=0.1,
     short_margin_rate=0.1,
     maintenance_margin_rate=0.05,
+    long_margin_mode="dynamic",
+    short_margin_mode="dynamic",
 )
 
 
@@ -311,6 +313,7 @@ class TestMarginFields:
         assert e.margin_locked == 200.0  # 2 * 100 price, margin_rate=1.0
         assert e.leverage == 1.0
         assert e.liquidation_price is None  # maintenance_margin_rate=0 disables it
+        assert e.margin_mode == "unlevered"
 
     def test_leveraged_open_margin_and_leverage(self):
         events, _, _ = _run(
@@ -321,6 +324,7 @@ class TestMarginFields:
         assert np.isclose(e.margin_locked, 20.0)  # 200 notional * 0.1
         assert np.isclose(e.leverage, 10.0)
         assert np.isclose(e.liquidation_price, 95.0)  # 100 * (1 + 0.05 - 0.1)
+        assert e.margin_mode == "dynamic"
 
     def test_leveraged_short_liquidation_price_is_mirrored(self):
         events, _, _ = _run(
@@ -367,6 +371,7 @@ class TestMarginFields:
         assert e.margin_locked == 0.0
         assert e.leverage is None
         assert e.liquidation_price is None  # remaining_quantity == 0
+        assert e.margin_mode == "dynamic"  # still labels how it was financed
 
     def test_partial_reduce_keeps_remaining_margin_locked(self):
         positions = {

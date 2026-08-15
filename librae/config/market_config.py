@@ -36,6 +36,16 @@ Per-instrument details (symbol, min_qty, exchange) belong to the broker layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+# Who sets margin_rate, not how big it is:
+# - unlevered: rate is always 1.0, nothing to set (cash/spot).
+# - fixed: rate is set by the exchange/regulator (TAIFEX's published margin,
+#   Reg-T/融資 rules) — a position can't choose a different one.
+# - dynamic: rate is a trader-chosen leverage (isolated/cross-margin perps).
+# See librae/core/cost_model.py's CostModel docstring for how this feeds
+# per-instrument margin_mode resolution.
+MarginMode = Literal["unlevered", "fixed", "dynamic"]
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,19 @@ class MarketConfig:
     short_margin_rate: float
     volume_impact_ticks: float = 0.0
     maintenance_margin_rate: float = 0.0
+    long_margin_mode: MarginMode = "unlevered"
+    short_margin_mode: MarginMode = "unlevered"
+
+    def __post_init__(self) -> None:
+        for rate_name, mode_name in (
+            ("long_margin_rate", "long_margin_mode"),
+            ("short_margin_rate", "short_margin_mode"),
+        ):
+            if getattr(self, mode_name) == "unlevered" and getattr(self, rate_name) != 1.0:
+                raise ValueError(
+                    f"{mode_name}='unlevered' requires {rate_name}=1.0, "
+                    f"got {getattr(self, rate_name)}"
+                )
 
 
 # Built-in reference markets — see this module's docstring for why these
@@ -104,6 +127,9 @@ _BUILTIN_MARKETS: dict[str, MarketConfig] = {
         # https://www.taifex.com.tw/cht/5/indexMarging when it matters.
         long_margin_rate=0.075,
         short_margin_rate=0.075,
+        # Exchange-published, not a leverage the trader picks — see MarginMode.
+        long_margin_mode="fixed",
+        short_margin_mode="fixed",
     ),
     "us_equity": MarketConfig(
         name="us_equity",
@@ -114,6 +140,7 @@ _BUILTIN_MARKETS: dict[str, MarketConfig] = {
         tick_size=0.01,
         long_margin_rate=1.0,
         short_margin_rate=0.5,  # Reg T 50% initial margin for short selling
+        short_margin_mode="fixed",  # Reg T sets the 50%, not the trader
     ),
 }
 

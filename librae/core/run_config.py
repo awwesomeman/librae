@@ -276,8 +276,8 @@ class RunConfig:
     # {"MYSYM": {"multiplier": 1.0}}) and for multi-asset runs mixing
     # symbols with different multipliers (e.g. TXFR1=200 + MXFR1=50 in the
     # same tw_futures run).
-    cost_overrides: dict[str, float] | None = None
-    symbol_cost_overrides: dict[str, dict[str, float]] | None = None
+    cost_overrides: dict[str, float | str] | None = None
+    symbol_cost_overrides: dict[str, dict[str, float | str]] | None = None
     # Broker/data routing metadata for one symbol. Cost fields remain in
     # symbol_cost_overrides so accounting inputs and venue identifiers cannot be
     # accidentally mixed into CostModel construction.
