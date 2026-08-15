@@ -32,27 +32,11 @@ def _color_override(name: str, color: str) -> dict:
 
 
 # Who sets margin_rate (see librae/config/market_config.py's MarginMode) —
-# shared across every panel that surfaces the Margin Mode column/field, so
-# the same financing regime always reads as the same color.
+# shared by every panel that surfaces the Margin Mode field, so the same
+# financing regime always reads as the same color. Trade Events/Position
+# Snapshot show Margin Mode as plain text (consistent with their other enum
+# columns, e.g. Event/Side); only Margin Locked by Mode's bar gauge colors it.
 _MARGIN_MODE_COLORS = {"unlevered": "text", "fixed": "blue", "dynamic": "orange"}
-
-
-def _enum_color_override(name: str, colors: dict[str, str]) -> dict:
-    """Table column override that colors each distinct text value via colored
-    text (not a numeric/threshold mapping) — e.g. Margin Mode's
-    unlevered/fixed/dynamic."""
-    return {
-        "matcher": {"id": "byName", "options": name},
-        "properties": [
-            {
-                "id": "mappings",
-                "value": [
-                    {"type": "value", "options": {v: {"color": c} for v, c in colors.items()}}
-                ],
-            },
-            {"id": "custom.cellOptions", "value": {"type": "color-text"}},
-        ],
-    }
 
 
 def _width_override(name: str, px: int) -> dict:
@@ -720,7 +704,6 @@ BASE_PANELS_DEF: list[dict] = [
             "  open→close round-trip.\n"
             "- Periods — elapsed bars, not clock time — multiply by the run's\n"
             "  timeframe for actual duration.\n"
-            "- Currency — account currency.\n"
             "- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n"
             "  take_profit, liquidation, drawdown_breach, force_close."
         ),
@@ -749,7 +732,6 @@ BASE_PANELS_DEF: list[dict] = [
                 " symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS')"
                 ' AS "Trade ID",'
                 ' periods_held AS "Periods",'
-                ' currency AS "Currency",'
                 ' reason AS "Reason"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
                 " AND account_id = '${account_id}'"
@@ -774,7 +756,6 @@ BASE_PANELS_DEF: list[dict] = [
                         {"id": "unit", "value": "percent"},
                     ],
                 },
-                _enum_color_override("Margin Mode", _MARGIN_MODE_COLORS),
                 # Widths sized to actual content (timestamps/symbols need room,
                 # short enums/numbers don't) instead of Grafana's equal-split
                 # default. Reason is left unset — free-text, takes the remainder.
@@ -796,7 +777,6 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("Group", 140),
                 _width_override("Trade ID", 260),  # "symbol @ entry_at" — both concatenated
                 _width_override("Periods", 80),
-                _width_override("Currency", 80),
             ],
         },
         "options": {
@@ -995,7 +975,6 @@ BASE_PANELS_DEF: list[dict] = [
                     "matcher": {"id": "byName", "options": "Liquidation Buffer"},
                     "properties": [{"id": "unit", "value": "percentunit"}],
                 },
-                _enum_color_override("Margin Mode", _MARGIN_MODE_COLORS),
                 _width_override("#", 40),
                 _width_override("Time", 180),
                 _width_override("Symbol", 90),
@@ -1344,6 +1323,16 @@ def render_unified_dashboard() -> dict:
         "SELECT DISTINCT account_id FROM equity_curve WHERE run_id='${run_id}' ORDER BY account_id",
         label="Account",
     )
+    # Read-only context, not a filter: every symbol in a run is validated at
+    # resolve_symbol() to share the account's currency (librae has no FX —
+    # see RunConfig.account's docstring), so this is always exactly one
+    # value. Shown once here instead of repeating it on every $ panel/row.
+    currency_var = _make_query_variable(
+        "currency",
+        "SELECT currency FROM strategy_performance"
+        " WHERE run_id='${run_id}' AND account_id='${account_id}' LIMIT 1",
+        label="Currency",
+    )
     symbol_var = _make_query_variable(
         "symbol",
         "SELECT jsonb_array_elements_text(symbols) AS symbol"
@@ -1361,7 +1350,7 @@ def render_unified_dashboard() -> dict:
         "time": {"from": "now-1y", "to": "now"},
         "refresh": "5m",
         "templating": {
-            "list": [mode_var, strategy_var, run_id_var, account_id_var, symbol_var],
+            "list": [mode_var, strategy_var, run_id_var, account_id_var, currency_var, symbol_var],
         },
         "graphTooltip": 1,
         "annotations": {"list": []},

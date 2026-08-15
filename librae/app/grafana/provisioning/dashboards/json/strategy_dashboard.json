@@ -100,6 +100,25 @@
         "label": "Account"
       },
       {
+        "name": "currency",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "P40AE60E18F02DE32"
+        },
+        "definition": "SELECT currency FROM strategy_performance WHERE run_id='${run_id}' AND account_id='${account_id}' LIMIT 1",
+        "query": "SELECT currency FROM strategy_performance WHERE run_id='${run_id}' AND account_id='${account_id}' LIMIT 1",
+        "rawQuery": true,
+        "refresh": 2,
+        "regex": "",
+        "includeAll": false,
+        "sort": 0,
+        "current": {},
+        "hide": 0,
+        "multi": false,
+        "label": "Currency"
+      },
+      {
         "name": "symbol",
         "type": "query",
         "datasource": {
@@ -1029,11 +1048,11 @@
     },
     {
       "title": "Trade Events",
-      "description": "One row per fill event, all symbols in the run — filter via the Symbol\ncolumn's icon. Lifecycle: open/add = entry, reduce/close = exit;\nP&L/Notional Return/Margin Return only populate on reduce/close rows.\n\n- `#` — row index.\n- Time — event timestamp.\n- Symbol — trading pair.\n- Event — open / add / reduce / close.\n- Side — long / short.\n- Quantity — this event's fill size (base-asset units).\n- Trade Price — this event's fill price.\n- Cash Flow — net cash impact of this event, account currency:\n  negative on open/add (capital deployed), positive on reduce/close\n  (capital + PnL returned). Already nets out Cost — not another copy\n  of it.\n- P&L — realized profit/loss on this event, account currency\n  (reduce/close only).\n- Notional Return — price return, % of notional (reduce/close only).\n- Margin Return — % return on the capital locked for the closed qty;\n  = Notional Return for spot, amplified by leverage for futures.\n- Margin Mode — who sets this side's margin rate: unlevered (spot/\n  cash), fixed (exchange/regulator-set, e.g. TAIFEX margin or Reg-T),\n  dynamic (trader-chosen leverage, e.g. isolated-margin perps). Same\n  Leverage number means different things under each mode.\n- Entry Price — weighted-average cost basis after this event, not\n  this row's own Trade Price.\n- Position — running position size after this event, not this\n  event's Quantity.\n- Cost — commission + slippage + tax for this event, account currency.\n- Group — ties every leg of one atomic multi-leg decision (e.g. a\n  spot+perp arb pair) — legs fill together or the group is rejected.\n- Trade ID — symbol + this trade's open time; identifies one\n  open→close round-trip.\n- Periods — elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Currency — account currency.\n- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n  take_profit, liquidation, drawdown_breach, force_close.",
+      "description": "One row per fill event, all symbols in the run — filter via the Symbol\ncolumn's icon. Lifecycle: open/add = entry, reduce/close = exit;\nP&L/Notional Return/Margin Return only populate on reduce/close rows.\n\n- `#` — row index.\n- Time — event timestamp.\n- Symbol — trading pair.\n- Event — open / add / reduce / close.\n- Side — long / short.\n- Quantity — this event's fill size (base-asset units).\n- Trade Price — this event's fill price.\n- Cash Flow — net cash impact of this event, account currency:\n  negative on open/add (capital deployed), positive on reduce/close\n  (capital + PnL returned). Already nets out Cost — not another copy\n  of it.\n- P&L — realized profit/loss on this event, account currency\n  (reduce/close only).\n- Notional Return — price return, % of notional (reduce/close only).\n- Margin Return — % return on the capital locked for the closed qty;\n  = Notional Return for spot, amplified by leverage for futures.\n- Margin Mode — who sets this side's margin rate: unlevered (spot/\n  cash), fixed (exchange/regulator-set, e.g. TAIFEX margin or Reg-T),\n  dynamic (trader-chosen leverage, e.g. isolated-margin perps). Same\n  Leverage number means different things under each mode.\n- Entry Price — weighted-average cost basis after this event, not\n  this row's own Trade Price.\n- Position — running position size after this event, not this\n  event's Quantity.\n- Cost — commission + slippage + tax for this event, account currency.\n- Group — ties every leg of one atomic multi-leg decision (e.g. a\n  spot+perp arb pair) — legs fill together or the group is rejected.\n- Trade ID — symbol + this trade's open time; identifies one\n  open→close round-trip.\n- Periods — elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n  take_profit, liquidation, drawdown_breach, force_close.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(cash_flow::numeric,2) AS \"Cash Flow\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Notional Return\", ROUND(margin_roi::numeric,2) AS \"Margin Return\", margin_mode AS \"Margin Mode\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", currency AS \"Currency\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(cash_flow::numeric,2) AS \"Cash Flow\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Notional Return\", ROUND(margin_roi::numeric,2) AS \"Margin Return\", margin_mode AS \"Margin Mode\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1070,39 +1089,6 @@
               {
                 "id": "unit",
                 "value": "percent"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Margin Mode"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "unlevered": {
-                        "color": "text"
-                      },
-                      "fixed": {
-                        "color": "blue"
-                      },
-                      "dynamic": {
-                        "color": "orange"
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
               }
             ]
           },
@@ -1321,18 +1307,6 @@
                 "value": 80
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Currency"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
           }
         ]
       },
@@ -1526,39 +1500,6 @@
               {
                 "id": "unit",
                 "value": "percentunit"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Margin Mode"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "unlevered": {
-                        "color": "text"
-                      },
-                      "fixed": {
-                        "color": "blue"
-                      },
-                      "dynamic": {
-                        "color": "orange"
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
               }
             ]
           },
