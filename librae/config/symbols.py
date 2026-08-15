@@ -352,8 +352,19 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "currency": "TWD",
             "calendar_id": "XTAIFEX",
             "continuous_alias": True,
-            "multiplier": 200.0,  # 臺股期貨（大台）— required, no safe default for contract_* types
+            "multiplier": 200.0,  # TAIFEX large contract — required, no safe default for contract_* types
             "tick_size": 1.0,  # 1 index point; venue price limits remain contract-specific
+        },
+        "TXFR2": {
+            "market": "tw_futures",
+            "data_source": "shioaji",
+            "instrument_type": "contract_monthly",
+            "data_adapter": "shioaji",
+            "currency": "TWD",
+            "calendar_id": "XTAIFEX",
+            "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest) — see shioaji_adapter.py
+            "multiplier": 200.0,  # same contract as TXFR1, just the next-nearest month
+            "tick_size": 1.0,
         },
         "MXFR1": {
             "market": "tw_futures",
@@ -363,7 +374,18 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "currency": "TWD",
             "calendar_id": "XTAIFEX",
             "continuous_alias": True,
-            "multiplier": 50.0,  # 小型臺指期貨（小台）— TAIFEX 契約規格：指數 x 50 元
+            "multiplier": 50.0,  # TAIFEX mini contract — contract spec: index x 50 TWD
+            "tick_size": 1.0,
+        },
+        "MXFR2": {
+            "market": "tw_futures",
+            "data_source": "shioaji",
+            "instrument_type": "contract_monthly",
+            "data_adapter": "shioaji",
+            "currency": "TWD",
+            "calendar_id": "XTAIFEX",
+            "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
+            "multiplier": 50.0,  # same contract as MXFR1, just the next-nearest month
             "tick_size": 1.0,
         },
         "TMFR1": {
@@ -374,7 +396,18 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "currency": "TWD",
             "calendar_id": "XTAIFEX",
             "continuous_alias": True,
-            "multiplier": 10.0,  # 微型臺指期貨（微台）— TAIFEX 契約規格：指數 x 10 元
+            "multiplier": 10.0,  # TAIFEX micro contract — contract spec: index x 10 TWD
+            "tick_size": 1.0,
+        },
+        "TMFR2": {
+            "market": "tw_futures",
+            "data_source": "shioaji",
+            "instrument_type": "contract_monthly",
+            "data_adapter": "shioaji",
+            "currency": "TWD",
+            "calendar_id": "XTAIFEX",
+            "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
+            "multiplier": 10.0,  # same contract as TMFR1, just the next-nearest month
             "tick_size": 1.0,
         },
         "MU": {

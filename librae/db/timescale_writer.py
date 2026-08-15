@@ -527,6 +527,16 @@ def write_ohlcv(
     contract's expiry structure (see librae/config/symbols.py) — part of
     the row's identity, not just metadata, so spot/perpetual/etc. sharing a
     symbol+data_source can't silently overwrite each other.
+
+    Upserts on (ts, symbol, timeframe, data_source, instrument_type):
+    a later write for the same bar replaces open/high/low/close/volume
+    rather than being silently dropped. This matters for any workflow that
+    writes the same bar more than once with different completeness — e.g.
+    a narrow validation backfill followed by the full-range run: if the
+    narrow run's raw fetch didn't cover a whole session, its aggregated
+    bar is incomplete, and the later full run's correct recomputation must
+    win, not lose to whichever write happened first.
+
     Returns number of rows written.
     """
     if df is None or df.empty:
@@ -577,7 +587,9 @@ def write_ohlcv(
             """INSERT INTO ohlcv (ts, symbol, timeframe, data_source, instrument_type,
                open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type) DO NOTHING""",
+               ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type) DO UPDATE SET
+                 open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
+                 close=EXCLUDED.close, volume=EXCLUDED.volume""",
             rows,
             page_size=2000,
         )
