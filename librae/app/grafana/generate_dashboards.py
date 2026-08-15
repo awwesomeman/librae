@@ -31,6 +31,30 @@ def _color_override(name: str, color: str) -> dict:
     }
 
 
+# Who sets margin_rate (see librae/config/market_config.py's MarginMode) —
+# shared across every panel that surfaces the Margin Mode column/field, so
+# the same financing regime always reads as the same color.
+_MARGIN_MODE_COLORS = {"unlevered": "text", "fixed": "blue", "dynamic": "orange"}
+
+
+def _enum_color_override(name: str, colors: dict[str, str]) -> dict:
+    """Table column override that colors each distinct text value via colored
+    text (not a numeric/threshold mapping) — e.g. Margin Mode's
+    unlevered/fixed/dynamic."""
+    return {
+        "matcher": {"id": "byName", "options": name},
+        "properties": [
+            {
+                "id": "mappings",
+                "value": [
+                    {"type": "value", "options": {v: {"color": c} for v, c in colors.items()}}
+                ],
+            },
+            {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+        ],
+    }
+
+
 def _width_override(name: str, px: int) -> dict:
     """Fixed pixel width for a table column, sized to its actual content
     (e.g. 'reduce'/'short' vs. a full timestamp) instead of Grafana's
@@ -194,13 +218,23 @@ def _poll_seconds_panel(w: int) -> dict:
 # Edit DEFAULT_KPIS to control which KPIs appear on the dashboard.
 # ---------------------------------------------------------------------------
 
+# All of strategy_performance (every KPI below) is realized-only: it's
+# recomputed and written when a trade closes/reduces or funding accrues
+# (see live/engine.py's _performance_dirty), never on open/add and never
+# per-bar. Unrealized P&L is the one number on this dashboard computed live
+# on every query — the two are expected to move independently, most visibly
+# right after opening a first position, where Unrealized P&L already
+# reflects the live mark while every KPI here still reads the pre-trade
+# baseline (see register_run's seeded $0/0.0% row) until the first close.
+_REALIZED_CADENCE_NOTE = " Realized-only: updates on close/reduce or funding, not every bar."
+
 _KPI_CATALOGUE: dict[str, dict] = {
     "total_return": {
         "_type": "kpi",
         "title": "Total Return",
         "description": (
             "Compounded return over the full stored sample, shown as "
-            '"$ / %". Not annualized. Net of cost.'
+            '"$ / %". Not annualized. Net of cost.' + _REALIZED_CADENCE_NOTE
         ),
         "type": "stat",
         "h": 4,
@@ -235,7 +269,13 @@ _KPI_CATALOGUE: dict[str, dict] = {
     "max_drawdown": {
         "_type": "kpi",
         "title": "Max Drawdown",
-        "description": 'Largest peak-to-trough decline, shown as "$ / %". Always ≤ 0.',
+        "description": (
+            'Largest peak-to-trough decline, shown as "$ / %". Always ≤ 0. '
+            "The $ figure is live (equity_curve, updated every bar, includes "
+            "unrealized swings); the % figure is realized-only (strategy_"
+            "performance, updates on close/reduce/funding) — the two can "
+            "diverge before the first close."
+        ),
         "type": "stat",
         "h": 4,
         "w": 4,
@@ -276,7 +316,10 @@ _KPI_CATALOGUE: dict[str, dict] = {
             {"color": "red", "value": None},
             {"color": "green", "value": 0},
         ],
-        description="Mean period return / sample period volatility. Not annualized; compare only like-frequency observations. Net of cost.",
+        description=(
+            "Mean period return / sample period volatility. Not annualized; "
+            "compare only like-frequency observations. Net of cost." + _REALIZED_CADENCE_NOTE
+        ),
     ),
     "period_sortino": _stat_panel(
         "Period Sortino",
@@ -286,14 +329,21 @@ _KPI_CATALOGUE: dict[str, dict] = {
             {"color": "red", "value": None},
             {"color": "green", "value": 0},
         ],
-        description="Mean period return / period downside deviation. Not annualized. Net of cost.",
+        description=(
+            "Mean period return / period downside deviation. Not annualized. Net of cost."
+            + _REALIZED_CADENCE_NOTE
+        ),
     ),
     "win_rate": _stat_panel(
         "Win Rate",
         _account_metric_sql("win_rate"),
         "percentunit",
         [{"color": "red", "value": None}, {"color": "green", "value": 0.5}],
-        description="Winning trades (net_pnl > 0) / total trades. Read together with Profit Factor — low win rate + high profit factor means trend following.",
+        description=(
+            "Winning trades (net_pnl > 0) / total trades. Read together with "
+            "Profit Factor — low win rate + high profit factor means trend "
+            "following." + _REALIZED_CADENCE_NOTE
+        ),
     ),
     "profit_factor": _stat_panel(
         "Profit Factor",
@@ -304,7 +354,10 @@ _KPI_CATALOGUE: dict[str, dict] = {
             {"color": "yellow", "value": 1.0},
             {"color": "green", "value": 1.5},
         ],
-        description="Sum of winning net P&L / sum of losing net P&L. Blank if there are no losing trades yet. >1.5 healthy, <1.0 losing.",
+        description=(
+            "Sum of winning net P&L / sum of losing net P&L. Blank if there are "
+            "no losing trades yet. >1.5 healthy, <1.0 losing." + _REALIZED_CADENCE_NOTE
+        ),
     ),
     "trades": _stat_panel(
         "Trades",
@@ -386,10 +439,13 @@ BASE_PANELS_DEF: list[dict] = [
         "title": "Unrealized P&L",
         "description": (
             'Mark-to-market P&L across all open positions, shown as "$ / % of '
-            "equity\" — same figure as Position Snapshot's MTM P&L footer. Already "
-            "included in Total Return (equity is mark-to-market), not additional "
-            "profit. Backtest runs mark against the run's own ended_at, not a "
-            "live price, so a finished run's number won't drift."
+            "equity\" — same figure as Position Snapshot's MTM P&L footer, "
+            "computed live on every query. Total Return picks this up only as of "
+            "its last refresh (close/reduce/funding, not per-bar — see its own "
+            "note); between refreshes the two can diverge by exactly today's "
+            "unrealized move, not double-counted profit. Backtest runs mark "
+            "against the run's own ended_at, not a live price, so a finished "
+            "run's number won't drift."
         ),
         "type": "stat",
         "h": 4,
@@ -455,36 +511,61 @@ BASE_PANELS_DEF: list[dict] = [
             "justifyMode": "center",
         },
     },
-    _stat_panel(
-        "Margin Utilization",
-        (
-            "WITH equity AS (\n"
-            "  SELECT equity FROM equity_curve\n"
-            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
-            "  ORDER BY ts DESC LIMIT 1\n"
-            "),\n"
-            "positions AS (\n"
-            "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n"
-            "  FROM trade_events\n"
-            "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
-            "  ORDER BY symbol, ts DESC\n"
-            ")\n"
-            'SELECT SUM(p.margin_locked) / NULLIF(MAX(e.equity),0) AS "Utilization"\n'
-            "FROM positions p CROSS JOIN equity e\n"
-            "WHERE p.remaining_quantity > 0"
+    {
+        "_type": "kpi",
+        "title": "Margin Utilization",
+        "description": (
+            'Margin locked across open positions, shown as "$ / % of equity" — '
+            "same quantity, two formats, not two different numbers (unlike "
+            "Portfolio Exposure's notional %, this is capital actually committed, "
+            "see that panel's description). Equals gross exposure for spot-only "
+            "runs (margin_rate=1.0). Breakdown by financing regime (who set the "
+            "rate — unlevered/fixed/dynamic) is in Margin Locked by Mode next to "
+            "Portfolio Exposure; per-position detail is in Position Snapshot's "
+            "Margin Mode column."
         ),
-        "percentunit",
-        [
-            {"color": "green", "value": None},
-            {"color": "orange", "value": 0.5},
-            {"color": "red", "value": 0.8},
+        "type": "stat",
+        "h": 4,
+        "w": 4,
+        "targets": [
+            _stat_target(
+                "WITH equity AS (\n"
+                "  SELECT equity FROM equity_curve\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  ORDER BY ts DESC LIMIT 1\n"
+                "),\n"
+                "positions AS (\n"
+                "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n"
+                "  FROM trade_events\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  ORDER BY symbol, ts DESC\n"
+                "),\n"
+                "locked AS (\n"
+                "  SELECT COALESCE(SUM(p.margin_locked), 0) AS margin_locked\n"
+                "  FROM positions p WHERE p.remaining_quantity > 0\n"
+                ")\n"
+                "SELECT ROUND(l.margin_locked::numeric,0)::text || ' / ' ||\n"
+                "  ROUND((l.margin_locked/NULLIF(e.equity,0)*100)::numeric,1)::text || '%'\n"
+                '  AS "Margin Utilization"\n'
+                "FROM locked l CROSS JOIN equity e"
+            )
         ],
-        description=(
-            "Margin locked across open positions, as % of equity — the capital\n"
-            "actually committed to current exposure (vs. Portfolio Exposure's\n"
-            "notional %). Equals gross exposure for spot-only runs (margin_rate=1.0)."
-        ),
-    ),
+        "fieldConfig": {
+            "defaults": {
+                "color": {"fixedColor": "blue", "mode": "fixed"},
+            },
+            "overrides": [],
+        },
+        "options": {
+            # Formatted text ("920 / 0.9%"), not a bare number — default
+            # reduceOptions.fields (numeric-only) would show "No data" — see
+            # Total Return's comment above for the same gotcha.
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/"},
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+        },
+    },
     {"_type": "break"},
     # Row 2: how has it done overall — the whole-run summary, secondary to
     # "what's happening right now" in a monitoring-first dashboard.
@@ -527,7 +608,7 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed",
         "_x": 12,
-        "_dy": 5,
+        "_dy": 10,
         "title": "Trade Return Distribution",
         "description": (
             "Realized return % per closed trade (reduce/close only), binned. Return\n"
@@ -536,7 +617,7 @@ BASE_PANELS_DEF: list[dict] = [
         ),
         "type": "histogram",
         "h": 5,
-        "w": 12,
+        "w": 6,
         "targets": [
             _target(
                 'SELECT ROUND(net_return::numeric,4)::float8 AS "Return"'
@@ -606,7 +687,7 @@ BASE_PANELS_DEF: list[dict] = [
         "description": (
             "One row per fill event, all symbols in the run — filter via the Symbol\n"
             "column's icon. Lifecycle: open/add = entry, reduce/close = exit;\n"
-            "P&L/Return/Margin ROI only populate on reduce/close rows.\n"
+            "P&L/Notional Return/Margin Return only populate on reduce/close rows.\n"
             "\n"
             "- `#` — row index.\n"
             "- Time — event timestamp.\n"
@@ -615,11 +696,19 @@ BASE_PANELS_DEF: list[dict] = [
             "- Side — long / short.\n"
             "- Quantity — this event's fill size (base-asset units).\n"
             "- Trade Price — this event's fill price.\n"
+            "- Cash Flow — net cash impact of this event, account currency:\n"
+            "  negative on open/add (capital deployed), positive on reduce/close\n"
+            "  (capital + PnL returned). Already nets out Cost — not another copy\n"
+            "  of it.\n"
             "- P&L — realized profit/loss on this event, account currency\n"
             "  (reduce/close only).\n"
-            "- Return — price return, % of notional (reduce/close only).\n"
-            "- Margin ROI — % return on the capital locked for the closed qty;\n"
-            "  = Return for spot, amplified by leverage for futures.\n"
+            "- Notional Return — price return, % of notional (reduce/close only).\n"
+            "- Margin Return — % return on the capital locked for the closed qty;\n"
+            "  = Notional Return for spot, amplified by leverage for futures.\n"
+            "- Margin Mode — who sets this side's margin rate: unlevered (spot/\n"
+            "  cash), fixed (exchange/regulator-set, e.g. TAIFEX margin or Reg-T),\n"
+            "  dynamic (trader-chosen leverage, e.g. isolated-margin perps). Same\n"
+            "  Leverage number means different things under each mode.\n"
             "- Entry Price — weighted-average cost basis after this event, not\n"
             "  this row's own Trade Price.\n"
             "- Position — running position size after this event, not this\n"
@@ -648,9 +737,11 @@ BASE_PANELS_DEF: list[dict] = [
                 ' side AS "Side",'
                 ' ROUND(fill_quantity::numeric,4) AS "Quantity",'
                 ' ROUND(price::numeric,2) AS "Trade Price",'
+                ' ROUND(cash_flow::numeric,2) AS "Cash Flow",'
                 ' ROUND(pnl::numeric,2) AS "P&L",'
-                ' ROUND(net_return::numeric,2) AS "Return",'
-                ' ROUND(margin_roi::numeric,2) AS "Margin ROI",'
+                ' ROUND(net_return::numeric,2) AS "Notional Return",'
+                ' ROUND(margin_roi::numeric,2) AS "Margin Return",'
+                ' margin_mode AS "Margin Mode",'
                 ' ROUND(entry_price::numeric,2) AS "Entry Price",'
                 ' ROUND(remaining_quantity::numeric,4) AS "Position",'
                 ' ROUND((commission + slippage + tax)::numeric,2) AS "Cost",'
@@ -672,17 +763,18 @@ BASE_PANELS_DEF: list[dict] = [
             "defaults": {"custom": {"filterable": True}},
             "overrides": [
                 {
-                    "matcher": {"id": "byName", "options": "Return"},
+                    "matcher": {"id": "byName", "options": "Notional Return"},
                     "properties": [
                         {"id": "unit", "value": "percent"},
                     ],
                 },
                 {
-                    "matcher": {"id": "byName", "options": "Margin ROI"},
+                    "matcher": {"id": "byName", "options": "Margin Return"},
                     "properties": [
                         {"id": "unit", "value": "percent"},
                     ],
                 },
+                _enum_color_override("Margin Mode", _MARGIN_MODE_COLORS),
                 # Widths sized to actual content (timestamps/symbols need room,
                 # short enums/numbers don't) instead of Grafana's equal-split
                 # default. Reason is left unset — free-text, takes the remainder.
@@ -693,9 +785,11 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("Side", 70),
                 _width_override("Quantity", 100),
                 _width_override("Trade Price", 110),
+                _width_override("Cash Flow", 110),
                 _width_override("P&L", 100),
-                _width_override("Return", 100),
-                _width_override("Margin ROI", 110),
+                _width_override("Notional Return", 120),
+                _width_override("Margin Return", 120),
+                _width_override("Margin Mode", 100),
                 _width_override("Entry Price", 110),
                 _width_override("Position", 100),
                 _width_override("Cost", 80),
@@ -796,6 +890,10 @@ BASE_PANELS_DEF: list[dict] = [
             "- Margin Locked — capital committed to this position, account\n"
             "  currency (= notional for spot).\n"
             "- Leverage — notional / Margin Locked (1.0 for spot).\n"
+            "- Margin Mode — who sets this side's margin rate: unlevered (spot/\n"
+            "  cash), fixed (exchange/regulator-set, e.g. TAIFEX margin or Reg-T),\n"
+            "  dynamic (trader-chosen leverage, e.g. isolated-margin perps). Same\n"
+            "  Leverage number means different things under each mode.\n"
             "- Liquidation Price — price at which this position liquidates;\n"
             "  null unless the market's maintenance_margin_rate is set.\n"
             "- Liquidation Buffer — how far Market Price sits from Liquidation\n"
@@ -820,6 +918,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n"
                 "    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n"
+                "    margin_mode,\n"
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
                 "  FROM trade_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
@@ -836,7 +935,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "sized AS (\n"
                 "  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n"
-                "    p.margin_locked, p.leverage, p.liquidation_price,\n"
+                "    p.margin_locked, p.leverage, p.liquidation_price, p.margin_mode,\n"
                 "    mk.market_price, p.multiplier,\n"
                 "    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n"
                 "      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n"
@@ -859,6 +958,7 @@ BASE_PANELS_DEF: list[dict] = [
                 '    ::numeric,4) AS "MTM Return",\n'
                 '  ROUND(s.margin_locked::numeric,2) AS "Margin Locked",\n'
                 '  ROUND(s.leverage::numeric,2) AS "Leverage",\n'
+                '  s.margin_mode AS "Margin Mode",\n'
                 '  ROUND(s.liquidation_price::numeric,2) AS "Liquidation Price",\n'
                 "  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n"
                 "    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n"
@@ -895,6 +995,7 @@ BASE_PANELS_DEF: list[dict] = [
                     "matcher": {"id": "byName", "options": "Liquidation Buffer"},
                     "properties": [{"id": "unit", "value": "percentunit"}],
                 },
+                _enum_color_override("Margin Mode", _MARGIN_MODE_COLORS),
                 _width_override("#", 40),
                 _width_override("Time", 180),
                 _width_override("Symbol", 90),
@@ -907,6 +1008,7 @@ BASE_PANELS_DEF: list[dict] = [
                 _width_override("MTM Return", 90),
                 _width_override("Margin Locked", 100),
                 _width_override("Leverage", 80),
+                _width_override("Margin Mode", 100),
                 _width_override("Liquidation Price", 110),
                 _width_override("Liquidation Buffer", 130),
                 _width_override("Trade ID", 220),
@@ -922,7 +1024,7 @@ BASE_PANELS_DEF: list[dict] = [
     {
         "_type": "fixed",
         "_x": 12,
-        "_dy": 10,
+        "_dy": 5,
         "title": "Portfolio Exposure",
         "description": "Gross/Net/Concentration as % of current equity — notional exposure, not margin usage. Concentration is whichever position is currently largest; it can shift between symbols, so check Position Snapshot to see which one.",
         "type": "timeseries",
@@ -950,6 +1052,64 @@ BASE_PANELS_DEF: list[dict] = [
         "options": {
             "tooltip": {"mode": "multi"},
             "legend": {"displayMode": "list", "placement": "bottom"},
+        },
+    },
+    {
+        "_type": "fixed",
+        "_x": 18,
+        "_dy": 10,
+        "title": "Margin Locked by Mode",
+        "description": (
+            "Current margin_locked across open positions, split by who sets the\n"
+            "rate (unlevered/fixed/dynamic — see Position Snapshot's Margin Mode\n"
+            "column), as % of equity. Same total as Margin Utilization, broken\n"
+            "down by composition instead of blended into one number — a fixed\n"
+            "(exchange-set) bar and a dynamic (self-chosen leverage) bar of equal\n"
+            "size carry very different headroom-to-add-risk implications."
+        ),
+        "type": "bargauge",
+        "h": 5,
+        "w": 6,
+        "targets": [
+            _stat_target(
+                "WITH equity AS (\n"
+                "  SELECT equity FROM equity_curve\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  ORDER BY ts DESC LIMIT 1\n"
+                "),\n"
+                "positions AS (\n"
+                "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n"
+                "  FROM trade_events\n"
+                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  ORDER BY symbol, ts DESC\n"
+                ")\n"
+                "SELECT\n"
+                "  SUM(CASE WHEN p.margin_mode='unlevered' THEN p.margin_locked ELSE 0 END)\n"
+                '    / NULLIF(MAX(e.equity),0) AS "Unlevered",\n'
+                "  SUM(CASE WHEN p.margin_mode='fixed' THEN p.margin_locked ELSE 0 END)\n"
+                '    / NULLIF(MAX(e.equity),0) AS "Fixed",\n'
+                "  SUM(CASE WHEN p.margin_mode='dynamic' THEN p.margin_locked ELSE 0 END)\n"
+                '    / NULLIF(MAX(e.equity),0) AS "Dynamic"\n'
+                "FROM positions p CROSS JOIN equity e\n"
+                "WHERE p.remaining_quantity > 0"
+            )
+        ],
+        "fieldConfig": {
+            "defaults": {
+                "unit": "percentunit",
+                "min": 0,
+                "color": {"mode": "fixed"},
+            },
+            "overrides": [
+                _color_override("Unlevered", _MARGIN_MODE_COLORS["unlevered"]),
+                _color_override("Fixed", _MARGIN_MODE_COLORS["fixed"]),
+                _color_override("Dynamic", _MARGIN_MODE_COLORS["dynamic"]),
+            ],
+        },
+        "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/"},
+            "orientation": "horizontal",
+            "displayMode": "gradient",
         },
     },
     {

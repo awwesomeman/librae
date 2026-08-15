@@ -373,7 +373,7 @@
     },
     {
       "title": "Unrealized P&L",
-      "description": "Mark-to-market P&L across all open positions, shown as \"$ / % of equity\" — same figure as Position Snapshot's MTM P&L footer. Already included in Total Return (equity is mark-to-market), not additional profit. Backtest runs mark against the run's own ended_at, not a live price, so a finished run's number won't drift.",
+      "description": "Mark-to-market P&L across all open positions, shown as \"$ / % of equity\" — same figure as Position Snapshot's MTM P&L footer, computed live on every query. Total Return picks this up only as of its last refresh (close/reduce/funding, not per-bar — see its own note); between refreshes the two can diverge by exactly today's unrealized move, not double-counted profit. Backtest runs mark against the run's own ended_at, not a live price, so a finished run's number won't drift.",
       "type": "stat",
       "targets": [
         {
@@ -456,10 +456,11 @@
     },
     {
       "title": "Margin Utilization",
+      "description": "Margin locked across open positions, shown as \"$ / % of equity\" — same quantity, two formats, not two different numbers (unlike Portfolio Exposure's notional %, this is capital actually committed, see that panel's description). Equals gross exposure for spot-only runs (margin_rate=1.0). Breakdown by financing regime (who set the rate — unlevered/fixed/dynamic) is in Margin Locked by Mode next to Portfolio Exposure; per-position detail is in Position Snapshot's Margin Mode column.",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n)\nSELECT SUM(p.margin_locked) / NULLIF(MAX(e.equity),0) AS \"Utilization\"\nFROM positions p CROSS JOIN equity e\nWHERE p.remaining_quantity > 0",
+          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n),\nlocked AS (\n  SELECT COALESCE(SUM(p.margin_locked), 0) AS margin_locked\n  FROM positions p WHERE p.remaining_quantity > 0\n)\nSELECT ROUND(l.margin_locked::numeric,0)::text || ' / ' ||\n  ROUND((l.margin_locked/NULLIF(e.equity,0)*100)::numeric,1)::text || '%'\n  AS \"Margin Utilization\"\nFROM locked l CROSS JOIN equity e",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -470,27 +471,10 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0.5
-              },
-              {
-                "color": "red",
-                "value": 0.8
-              }
-            ]
-          },
           "color": {
-            "mode": "thresholds"
-          },
-          "unit": "percentunit"
+            "fixedColor": "blue",
+            "mode": "fixed"
+          }
         },
         "overrides": []
       },
@@ -498,12 +482,13 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "/.*/"
         },
         "colorMode": "value",
-        "graphMode": "none"
+        "graphMode": "none",
+        "justifyMode": "center"
       },
-      "description": "Margin locked across open positions, as % of equity — the capital\nactually committed to current exposure (vs. Portfolio Exposure's\nnotional %). Equals gross exposure for spot-only runs (margin_rate=1.0).",
       "id": 7,
       "gridPos": {
         "h": 4,
@@ -518,7 +503,7 @@
     },
     {
       "title": "Total Return",
-      "description": "Compounded return over the full stored sample, shown as \"$ / %\". Not annualized. Net of cost.",
+      "description": "Compounded return over the full stored sample, shown as \"$ / %\". Not annualized. Net of cost. Realized-only: updates on close/reduce or funding, not every bar.",
       "type": "stat",
       "targets": [
         {
@@ -593,7 +578,7 @@
     },
     {
       "title": "Max Drawdown",
-      "description": "Largest peak-to-trough decline, shown as \"$ / %\". Always ≤ 0.",
+      "description": "Largest peak-to-trough decline, shown as \"$ / %\". Always ≤ 0. The $ figure is live (equity_curve, updated every bar, includes unrealized swings); the % figure is realized-only (strategy_performance, updates on close/reduce/funding) — the two can diverge before the first close.",
       "type": "stat",
       "targets": [
         {
@@ -682,7 +667,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Mean period return / sample period volatility. Not annualized; compare only like-frequency observations. Net of cost.",
+      "description": "Mean period return / sample period volatility. Not annualized; compare only like-frequency observations. Net of cost. Realized-only: updates on close/reduce or funding, not every bar.",
       "id": 10,
       "gridPos": {
         "h": 4,
@@ -739,7 +724,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Mean period return / period downside deviation. Not annualized. Net of cost.",
+      "description": "Mean period return / period downside deviation. Not annualized. Net of cost. Realized-only: updates on close/reduce or funding, not every bar.",
       "id": 11,
       "gridPos": {
         "h": 4,
@@ -797,7 +782,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Winning trades (net_pnl > 0) / total trades. Read together with Profit Factor — low win rate + high profit factor means trend following.",
+      "description": "Winning trades (net_pnl > 0) / total trades. Read together with Profit Factor — low win rate + high profit factor means trend following. Realized-only: updates on close/reduce or funding, not every bar.",
       "id": 12,
       "gridPos": {
         "h": 4,
@@ -858,7 +843,7 @@
         "colorMode": "value",
         "graphMode": "none"
       },
-      "description": "Sum of winning net P&L / sum of losing net P&L. Blank if there are no losing trades yet. >1.5 healthy, <1.0 losing.",
+      "description": "Sum of winning net P&L / sum of losing net P&L. Blank if there are no losing trades yet. >1.5 healthy, <1.0 losing. Realized-only: updates on close/reduce or funding, not every bar.",
       "id": 13,
       "gridPos": {
         "h": 4,
@@ -984,9 +969,9 @@
       "id": 16,
       "gridPos": {
         "h": 5,
-        "w": 12,
+        "w": 6,
         "x": 12,
-        "y": 15
+        "y": 20
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1044,11 +1029,11 @@
     },
     {
       "title": "Trade Events",
-      "description": "One row per fill event, all symbols in the run — filter via the Symbol\ncolumn's icon. Lifecycle: open/add = entry, reduce/close = exit;\nP&L/Return/Margin ROI only populate on reduce/close rows.\n\n- `#` — row index.\n- Time — event timestamp.\n- Symbol — trading pair.\n- Event — open / add / reduce / close.\n- Side — long / short.\n- Quantity — this event's fill size (base-asset units).\n- Trade Price — this event's fill price.\n- P&L — realized profit/loss on this event, account currency\n  (reduce/close only).\n- Return — price return, % of notional (reduce/close only).\n- Margin ROI — % return on the capital locked for the closed qty;\n  = Return for spot, amplified by leverage for futures.\n- Entry Price — weighted-average cost basis after this event, not\n  this row's own Trade Price.\n- Position — running position size after this event, not this\n  event's Quantity.\n- Cost — commission + slippage + tax for this event, account currency.\n- Group — ties every leg of one atomic multi-leg decision (e.g. a\n  spot+perp arb pair) — legs fill together or the group is rejected.\n- Trade ID — symbol + this trade's open time; identifies one\n  open→close round-trip.\n- Periods — elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Currency — account currency.\n- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n  take_profit, liquidation, drawdown_breach, force_close.",
+      "description": "One row per fill event, all symbols in the run — filter via the Symbol\ncolumn's icon. Lifecycle: open/add = entry, reduce/close = exit;\nP&L/Notional Return/Margin Return only populate on reduce/close rows.\n\n- `#` — row index.\n- Time — event timestamp.\n- Symbol — trading pair.\n- Event — open / add / reduce / close.\n- Side — long / short.\n- Quantity — this event's fill size (base-asset units).\n- Trade Price — this event's fill price.\n- Cash Flow — net cash impact of this event, account currency:\n  negative on open/add (capital deployed), positive on reduce/close\n  (capital + PnL returned). Already nets out Cost — not another copy\n  of it.\n- P&L — realized profit/loss on this event, account currency\n  (reduce/close only).\n- Notional Return — price return, % of notional (reduce/close only).\n- Margin Return — % return on the capital locked for the closed qty;\n  = Notional Return for spot, amplified by leverage for futures.\n- Margin Mode — who sets this side's margin rate: unlevered (spot/\n  cash), fixed (exchange/regulator-set, e.g. TAIFEX margin or Reg-T),\n  dynamic (trader-chosen leverage, e.g. isolated-margin perps). Same\n  Leverage number means different things under each mode.\n- Entry Price — weighted-average cost basis after this event, not\n  this row's own Trade Price.\n- Position — running position size after this event, not this\n  event's Quantity.\n- Cost — commission + slippage + tax for this event, account currency.\n- Group — ties every leg of one atomic multi-leg decision (e.g. a\n  spot+perp arb pair) — legs fill together or the group is rejected.\n- Trade ID — symbol + this trade's open time; identifies one\n  open→close round-trip.\n- Periods — elapsed bars, not clock time — multiply by the run's\n  timeframe for actual duration.\n- Currency — account currency.\n- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n  take_profit, liquidation, drawdown_breach, force_close.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Return\", ROUND(margin_roi::numeric,2) AS \"Margin ROI\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", currency AS \"Currency\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(cash_flow::numeric,2) AS \"Cash Flow\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Notional Return\", ROUND(margin_roi::numeric,2) AS \"Margin Return\", margin_mode AS \"Margin Mode\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", currency AS \"Currency\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1067,7 +1052,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Return"
+              "options": "Notional Return"
             },
             "properties": [
               {
@@ -1079,12 +1064,45 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Margin ROI"
+              "options": "Margin Return"
             },
             "properties": [
               {
                 "id": "unit",
                 "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Margin Mode"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "unlevered": {
+                        "color": "text"
+                      },
+                      "fixed": {
+                        "color": "blue"
+                      },
+                      "dynamic": {
+                        "color": "orange"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
               }
             ]
           },
@@ -1175,6 +1193,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Cash Flow"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "P&L"
             },
             "properties": [
@@ -1187,24 +1217,36 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Return"
+              "options": "Notional Return"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 100
+                "value": 120
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "Margin ROI"
+              "options": "Margin Return"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 110
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Margin Mode"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
               }
             ]
           },
@@ -1403,11 +1445,11 @@
     },
     {
       "title": "Position Snapshot",
-      "description": "Holdings as of the time range's end (top-right picker) — one row per\nsymbol, sorted by |Weight| (biggest exposure first). Point-in-time\nreconstruction, not an explicit rebalance list — drag the picker to a\npast date to see positions as of that point instead.\n\n- `#` — rank by |Weight|, largest exposure first.\n- Time — this position's open time (entry_at).\n- Symbol — trading pair.\n- Side — long / short.\n- Weight — position notional as % of equity, signed by side\n  (negative = short).\n- Entry Price — weighted-average cost basis across all fills to date.\n- Position — current running size (base-asset units).\n- Market Price — latest close at/before the picker's end time.\n- MTM P&L — mark-to-market P&L at that time, account currency —\n  not 'unrealized' in the live sense, a past date's position may\n  since be closed.\n- MTM Return — same, as % of Entry Price.\n- Margin Locked — capital committed to this position, account\n  currency (= notional for spot).\n- Leverage — notional / Margin Locked (1.0 for spot).\n- Liquidation Price — price at which this position liquidates;\n  null unless the market's maintenance_margin_rate is set.\n- Liquidation Buffer — how far Market Price sits from Liquidation\n  Price, % of Market Price; null under the same condition.\n- Trade ID — symbol + this position's open time; filter it in Trade\n  Events for the full fill history behind this row.",
+      "description": "Holdings as of the time range's end (top-right picker) — one row per\nsymbol, sorted by |Weight| (biggest exposure first). Point-in-time\nreconstruction, not an explicit rebalance list — drag the picker to a\npast date to see positions as of that point instead.\n\n- `#` — rank by |Weight|, largest exposure first.\n- Time — this position's open time (entry_at).\n- Symbol — trading pair.\n- Side — long / short.\n- Weight — position notional as % of equity, signed by side\n  (negative = short).\n- Entry Price — weighted-average cost basis across all fills to date.\n- Position — current running size (base-asset units).\n- Market Price — latest close at/before the picker's end time.\n- MTM P&L — mark-to-market P&L at that time, account currency —\n  not 'unrealized' in the live sense, a past date's position may\n  since be closed.\n- MTM Return — same, as % of Entry Price.\n- Margin Locked — capital committed to this position, account\n  currency (= notional for spot).\n- Leverage — notional / Margin Locked (1.0 for spot).\n- Margin Mode — who sets this side's margin rate: unlevered (spot/\n  cash), fixed (exchange/regulator-set, e.g. TAIFEX margin or Reg-T),\n  dynamic (trader-chosen leverage, e.g. isolated-margin perps). Same\n  Leverage number means different things under each mode.\n- Liquidation Price — price at which this position liquidates;\n  null unless the market's maintenance_margin_rate is set.\n- Liquidation Buffer — how far Market Price sits from Liquidation\n  Price, % of Market Price; null under the same condition.\n- Trade ID — symbol + this position's open time; filter it in Trade\n  Events for the full fill history behind this row.",
       "type": "table",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= $__timeTo()\n  ORDER BY o.symbol, o.ts DESC\n),\nsized AS (\n  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n    p.margin_locked, p.leverage, p.liquidation_price,\n    mk.market_price, p.multiplier,\n    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n)\nSELECT ROW_NUMBER() OVER (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS \"#\",\n  s.entry_at AS \"Time\",\n  s.symbol AS \"Symbol\", s.side AS \"Side\",\n  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS \"Weight\",\n  ROUND(s.entry_price::numeric,2) AS \"Entry Price\",\n  ROUND(s.remaining_quantity::numeric,4) AS \"Position\",\n  ROUND(s.market_price::numeric,2) AS \"Market Price\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)    ::numeric,2) AS \"MTM P&L\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))    ::numeric,4) AS \"MTM Return\",\n  ROUND(s.margin_locked::numeric,2) AS \"Margin Locked\",\n  ROUND(s.leverage::numeric,2) AS \"Leverage\",\n  ROUND(s.liquidation_price::numeric,2) AS \"Liquidation Price\",\n  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)    ::numeric,4) AS \"Liquidation Buffer\",\n  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\"\nFROM sized s CROSS JOIN equity e\nORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n    margin_mode,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= $__timeTo()\n  ORDER BY o.symbol, o.ts DESC\n),\nsized AS (\n  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n    p.margin_locked, p.leverage, p.liquidation_price, p.margin_mode,\n    mk.market_price, p.multiplier,\n    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n)\nSELECT ROW_NUMBER() OVER (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS \"#\",\n  s.entry_at AS \"Time\",\n  s.symbol AS \"Symbol\", s.side AS \"Side\",\n  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS \"Weight\",\n  ROUND(s.entry_price::numeric,2) AS \"Entry Price\",\n  ROUND(s.remaining_quantity::numeric,4) AS \"Position\",\n  ROUND(s.market_price::numeric,2) AS \"Market Price\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)    ::numeric,2) AS \"MTM P&L\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))    ::numeric,4) AS \"MTM Return\",\n  ROUND(s.margin_locked::numeric,2) AS \"Margin Locked\",\n  ROUND(s.leverage::numeric,2) AS \"Leverage\",\n  s.margin_mode AS \"Margin Mode\",\n  ROUND(s.liquidation_price::numeric,2) AS \"Liquidation Price\",\n  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)    ::numeric,4) AS \"Liquidation Buffer\",\n  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\"\nFROM sized s CROSS JOIN equity e\nORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1484,6 +1526,39 @@
               {
                 "id": "unit",
                 "value": "percentunit"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Margin Mode"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "unlevered": {
+                        "color": "text"
+                      },
+                      "fixed": {
+                        "color": "blue"
+                      },
+                      "dynamic": {
+                        "color": "orange"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
               }
             ]
           },
@@ -1634,6 +1709,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Margin Mode"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Liquidation Price"
             },
             "properties": [
@@ -1770,6 +1857,99 @@
         "h": 5,
         "w": 12,
         "x": 12,
+        "y": 15
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "P40AE60E18F02DE32"
+      }
+    },
+    {
+      "title": "Margin Locked by Mode",
+      "description": "Current margin_locked across open positions, split by who sets the\nrate (unlevered/fixed/dynamic — see Position Snapshot's Margin Mode\ncolumn), as % of equity. Same total as Margin Utilization, broken\ndown by composition instead of blended into one number — a fixed\n(exchange-set) bar and a dynamic (self-chosen leverage) bar of equal\nsize carry very different headroom-to-add-risk implications.",
+      "type": "bargauge",
+      "targets": [
+        {
+          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n)\nSELECT\n  SUM(CASE WHEN p.margin_mode='unlevered' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Unlevered\",\n  SUM(CASE WHEN p.margin_mode='fixed' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Fixed\",\n  SUM(CASE WHEN p.margin_mode='dynamic' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Dynamic\"\nFROM positions p CROSS JOIN equity e\nWHERE p.remaining_quantity > 0",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "P40AE60E18F02DE32"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unlevered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fixed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dynamic"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      },
+      "id": 22,
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
         "y": 20
       },
       "datasource": {
@@ -1870,7 +2050,7 @@
           }
         ]
       },
-      "id": 22,
+      "id": 23,
       "gridPos": {
         "h": 8,
         "w": 24,
