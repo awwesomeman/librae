@@ -324,6 +324,11 @@ The target must provide Bash, rsync, and Docker Compose. Its SSH account must
 permit local TCP forwarding from the caller to the target's `localhost:3000`.
 The deployment fails when any required capability is unavailable.
 
+The steps below reach Grafana and TimescaleDB over an SSH tunnel. On a VPS
+with Tailscale, `GF_BIND`/`TSDB_BIND` can instead be set to the VPS's
+Tailscale IP for direct access without a tunnel; avoid `0.0.0.0`, which has
+been used as an intrusion entry point before.
+
 1. On the build machine, set `TRADE_STRATEGY_PATH` and `TRADE_IMAGE` in the
    Librae checkout's `.env`.
 2. Run `deploy/build_push.sh` and copy its printed `TRADE_IMAGE_REF` into the
