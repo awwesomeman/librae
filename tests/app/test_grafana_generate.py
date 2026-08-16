@@ -51,7 +51,7 @@ class TestRenderUnifiedDashboard:
 
     def test_has_required_fields(self):
         d = render_unified_dashboard()
-        assert d["uid"] == "strategy_dashboard"
+        assert d["uid"] == "strategy-dashboard"
         assert "templating" in d
         assert "panels" in d
         assert d["schemaVersion"] == 39
@@ -216,7 +216,7 @@ class TestRenderSignalMonitor:
 
     def test_has_required_fields(self):
         d = render_signal_monitor()
-        assert d["uid"] == "signal-monitor"
+        assert d["uid"] == "signal-dashboard"
         assert d["schemaVersion"] == 39
 
     def test_variables(self):
