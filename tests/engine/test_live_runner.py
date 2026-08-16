@@ -12,7 +12,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import perf_counter
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -1061,22 +1061,21 @@ class TestLiveTrader:
         )
         runner.run(max_iterations=3)
 
-        expected_calls = [
-            call(
-                strategy="test",
-                symbol="BTCUSDT",
-                side="LONG",
-                price=103.5,
-            ),
-            call(
-                strategy="test",
-                symbol="BTCUSDT",
-                side="EXIT",
-                price=103.5,
-            ),
-        ]
-        assert notifier.send_signal.call_count == len(expected_calls)
-        notifier.send_signal.assert_has_calls(expected_calls, any_order=True)
+        assert notifier.send_signal.call_count == 1
+        notifier.send_signal.assert_called_once_with(
+            strategy="test",
+            symbol="BTCUSDT",
+            side="LONG",
+            price=103.5,
+            quantity=1.0,
+            notional=103.5,
+        )
+        assert notifier.send_exit.call_count == 1
+        exit_call = notifier.send_exit.call_args
+        assert exit_call.kwargs["strategy"] == "test"
+        assert exit_call.kwargs["symbol"] == "BTCUSDT"
+        assert exit_call.kwargs["side"] == "long"
+        assert exit_call.kwargs["exit_price"] == 103.5
 
     def test_open_calls_notify_entry(self):
         call_num = 0
@@ -1099,6 +1098,8 @@ class TestLiveTrader:
             symbol="BTCUSDT",
             side="LONG",
             price=103.5,
+            quantity=1.0,
+            notional=103.5,
         )
 
     def test_status_interval_requires_notifier(self):

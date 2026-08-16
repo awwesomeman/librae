@@ -38,6 +38,28 @@ class Notifier(Protocol):
         symbol: str,
         side: str,
         price: float,
+        quantity: float | None = None,
+        notional: float | None = None,
+    ) -> object: ...
+
+    def send_exit(
+        self,
+        *,
+        strategy: str,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        exit_price: float,
+        net_pnl: float,
+        net_return: float,
+        periods_held: int,
+    ) -> object: ...
+
+    def send_batch(
+        self,
+        *,
+        strategy: str,
+        fills: list[dict[str, object]],
     ) -> object: ...
 
     def send_startup(

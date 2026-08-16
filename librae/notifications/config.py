@@ -55,6 +55,9 @@ class TelegramConfig:
     enabled: bool = False
     chat_id: str = ""
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
+    # Optional per-message-type str.format() templates, e.g. {"signal": "{emoji} {side} {symbol} @ {price}"}.
+    # Missing keys fall back to the adapter's built-in format.
+    templates: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> TelegramConfig:
@@ -62,8 +65,12 @@ class TelegramConfig:
         notif_raw = d.get("notifications", {})
         if not isinstance(notif_raw, dict):
             notif_raw = {}
+        templates_raw = d.get("templates", {})
+        if not isinstance(templates_raw, dict):
+            templates_raw = {}
         return cls(
             enabled=bool(d.get("enabled", cls.enabled)),
             chat_id=str(d.get("chat_id", cls.chat_id) or ""),
             notifications=NotificationConfig.from_dict(notif_raw),
+            templates={str(k): str(v) for k, v in templates_raw.items()},
         )

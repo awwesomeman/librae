@@ -29,6 +29,13 @@ MAX_RETRIES = 3
 BACKOFF_BASE = 1.0  # seconds
 EMOJI_WARNING = "\u26a0\ufe0f"  # ⚠️
 EMOJI_SUCCESS = "\u2714\ufe0f"  # ✔️
+EMOJI_BUY = "\U0001f7e2"  # 🟢
+EMOJI_SELL = "\U0001f534"  # 🔴
+RUN_ID_SUFFIX_LEN = 8
+
+
+def _timestamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
 
 @dataclass
@@ -76,6 +83,7 @@ class TelegramAdapter:
         self._chat_id = config.chat_id or creds.chat_id
         self._enabled = config.enabled
         self._notifications = config.notifications
+        self._templates = config.templates
 
         if self._enabled and (not self._token or not self._chat_id):
             logger.warning(
@@ -134,39 +142,152 @@ class TelegramAdapter:
 
         return False
 
+    def _render(self, key: str, default_lines: list[str], fields: dict[str, Any]) -> str:
+        """Render via config.templates[key].format(**fields) if set, else default_lines."""
+        template = self._templates.get(key)
+        if not template:
+            return "\n".join(default_lines)
+        try:
+            return template.format(**fields)
+        except (KeyError, IndexError, ValueError):
+            logger.warning("Invalid Telegram template for %r, using default format", key)
+            return "\n".join(default_lines)
+
     def send_signal(
         self,
         strategy: str,
         symbol: str,
         side: str,
         price: float,
-        stop: float | None = None,
-        target: float | None = None,
+        quantity: float | None = None,
+        notional: float | None = None,
         extra: dict[str, Any] | None = None,
     ) -> bool:
-        """Send a formatted trading signal message."""
+        """Send an open/add fill notification."""
         if not self._notifications.signal:
             return False
         safe_strategy = html.escape(strategy)
         safe_symbol = html.escape(symbol)
+        side_upper = side.upper()
+        direction = "LONG" if "LONG" in side_upper else "SHORT"
+        emoji = EMOJI_BUY if direction == "LONG" else EMOJI_SELL
+        verb = "added" if "ADD" in side_upper else "opened"
+        size_str = ""
+        if quantity is not None:
+            size_str = f"{quantity:+.4f}" if "ADD" in side_upper else f"{quantity:.4f}"
+            if notional is not None:
+                size_str += f" (~${notional:,.0f})"
         lines = [
-            f"<b>[{safe_strategy}] {html.escape(side.upper())} {safe_symbol}</b>",
-            f"Price: <code>{price:.2f}</code>",
+            f"<b>{emoji} {safe_strategy} · {safe_symbol}</b>",
+            f"{direction} {verb}",
+            f"Fill: <code>{price:,.2f}</code>"
+            + (f"   Size: <code>{size_str}</code>" if size_str else ""),
         ]
-        if stop is not None:
-            lines.append(f"Stop: <code>{stop:.2f}</code>")
-        if target is not None:
-            lines.append(f"Target: <code>{target:.2f}</code>")
         if extra:
             for k, v in extra.items():
                 lines.append(f"{html.escape(str(k))}: <code>{html.escape(str(v))}</code>")
+        lines.append(f"<i>{_timestamp()}</i>")
+        text = self._render(
+            "signal",
+            lines,
+            {
+                "emoji": emoji,
+                "strategy": safe_strategy,
+                "symbol": safe_symbol,
+                "side": side_upper,
+                "direction": direction,
+                "verb": verb,
+                "price": f"{price:,.2f}",
+                "quantity": f"{quantity:.4f}" if quantity is not None else "",
+                "notional": f"{notional:,.0f}" if notional is not None else "",
+                "timestamp": _timestamp(),
+            },
+        )
+        return self.send_text(text)
+
+    def send_exit(
+        self,
+        strategy: str,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        exit_price: float,
+        net_pnl: float,
+        net_return: float,
+        periods_held: int,
+    ) -> bool:
+        """Send a position-close notification with realized P&L."""
+        if not self._notifications.signal:
+            return False
+        safe_strategy = html.escape(strategy)
+        safe_symbol = html.escape(symbol)
+        direction = side.upper()
+        emoji = EMOJI_BUY if net_pnl >= 0 else EMOJI_SELL
+        pnl_str = f"{net_return:+.2%} (${net_pnl:+,.2f})"
+        lines = [
+            f"<b>{emoji} {safe_strategy} · {safe_symbol}</b>",
+            f"{html.escape(direction)} closed  {pnl_str}",
+            f"Entry: <code>{entry_price:,.2f}</code> → Exit: <code>{exit_price:,.2f}</code>",
+            f"Held: <code>{periods_held}</code> periods",
+        ]
+        lines.append(f"<i>{_timestamp()}</i>")
+        text = self._render(
+            "exit",
+            lines,
+            {
+                "emoji": emoji,
+                "strategy": safe_strategy,
+                "symbol": safe_symbol,
+                "side": direction,
+                "entry_price": f"{entry_price:,.2f}",
+                "exit_price": f"{exit_price:,.2f}",
+                "net_pnl": f"{net_pnl:+,.2f}",
+                "net_return": f"{net_return:+.2%}",
+                "periods_held": str(periods_held),
+                "timestamp": _timestamp(),
+            },
+        )
+        return self.send_text(text)
+
+    def send_batch(self, strategy: str, fills: list[dict[str, Any]]) -> bool:
+        """Send a digest of many fills from one decision cycle (e.g. a rebalance)."""
+        if not self._notifications.signal:
+            return False
+        safe_strategy = html.escape(strategy)
+        lines = [f"<b>{safe_strategy} · rebalance ({len(fills)} fills)</b>"]
+        for fill in fills:
+            symbol = html.escape(str(fill["symbol"]))
+            if fill["type"] == "exit":
+                direction = str(fill["side"]).upper()
+                net_pnl = float(fill["net_pnl"])
+                net_return = float(fill["net_return"])
+                emoji = EMOJI_BUY if net_pnl >= 0 else EMOJI_SELL
+                lines.append(
+                    f"{emoji} {direction} {symbol} closed  {net_return:+.2%} (${net_pnl:+,.2f})"
+                )
+            else:
+                side_upper = str(fill["side"]).upper()
+                direction = "LONG" if "LONG" in side_upper else "SHORT"
+                emoji = EMOJI_BUY if direction == "LONG" else EMOJI_SELL
+                verb = "added" if "ADD" in side_upper else "opened"
+                price = float(fill["price"])
+                lines.append(f"{emoji} {direction} {verb} {symbol} @ {price:,.2f}")
+        lines.append(f"<i>{_timestamp()}</i>")
         return self.send_text("\n".join(lines))
 
     def send_alert(self, title: str, message: str) -> bool:
         """Send a system alert (e.g. consecutive poll errors)."""
         if not self._notifications.error:
             return False
-        return self.send_text(f"<b>{html.escape(title)}</b>\n{html.escape(message)}")
+        safe_title = html.escape(title)
+        safe_message = html.escape(message)
+        lines = [f"<b>{safe_title}</b>", safe_message, f"<i>{_timestamp()}</i>"]
+        text = self._render(
+            "alert",
+            lines,
+            {"title": safe_title, "message": safe_message, "timestamp": _timestamp()},
+        )
+        return self.send_text(text)
 
     def send_startup(
         self,
@@ -178,14 +299,32 @@ class TelegramAdapter:
         """Send service startup notification."""
         if not self._notifications.startup:
             return False
+        safe_strategy = html.escape(strategy)
+        safe_symbol = html.escape(symbol)
+        safe_mode = html.escape(mode)
+        run_id_short = (
+            ("…" + run_id[-RUN_ID_SUFFIX_LEN:]) if len(run_id) > RUN_ID_SUFFIX_LEN else run_id
+        )
         lines = [
-            f"<b>[{html.escape(strategy)}] Started</b>",
-            f"Symbol: <code>{html.escape(symbol)}</code>",
-            f"Mode: <code>{html.escape(mode)}</code>",
+            f"<b>[{safe_strategy}] Started</b>",
+            f"Symbol: <code>{safe_symbol}</code>",
+            f"Mode: <code>{safe_mode}</code>",
         ]
-        if run_id:
-            lines.append(f"Run ID: <code>{html.escape(run_id)}</code>")
-        return self.send_text("\n".join(lines))
+        if run_id_short:
+            lines.append(f"Run ID: <code>{html.escape(run_id_short)}</code>")
+        lines.append(f"<i>{_timestamp()}</i>")
+        text = self._render(
+            "startup",
+            lines,
+            {
+                "strategy": safe_strategy,
+                "symbol": safe_symbol,
+                "mode": safe_mode,
+                "run_id": html.escape(run_id_short),
+                "timestamp": _timestamp(),
+            },
+        )
+        return self.send_text(text)
 
     def send_shutdown(
         self,
@@ -197,12 +336,27 @@ class TelegramAdapter:
         if not self._notifications.startup:
             return False
         icon = EMOJI_WARNING if reason != "normal" else EMOJI_SUCCESS
+        safe_strategy = html.escape(strategy)
+        safe_symbol = html.escape(symbol)
+        safe_reason = html.escape(reason)
         lines = [
-            f"<b>{icon} [{html.escape(strategy)}] Stopped</b>",
-            f"Symbol: <code>{html.escape(symbol)}</code>",
-            f"Reason: <code>{html.escape(reason)}</code>",
+            f"<b>{icon} [{safe_strategy}] Stopped</b>",
+            f"Symbol: <code>{safe_symbol}</code>",
+            f"Reason: <code>{safe_reason}</code>",
+            f"<i>{_timestamp()}</i>",
         ]
-        return self.send_text("\n".join(lines))
+        text = self._render(
+            "shutdown",
+            lines,
+            {
+                "icon": icon,
+                "strategy": safe_strategy,
+                "symbol": safe_symbol,
+                "reason": safe_reason,
+                "timestamp": _timestamp(),
+            },
+        )
+        return self.send_text(text)
 
     def send_status(
         self,
@@ -216,12 +370,32 @@ class TelegramAdapter:
         """Send periodic status summary."""
         if not self._notifications.status.enabled:
             return False
+        safe_strategy = html.escape(strategy)
+        safe_symbol = html.escape(symbol)
+        safe_position = html.escape(position)
+        equity_str = f"{equity:,.0f}"
+        drawdown_str = f"{drawdown:+.2%}"
+        daily_pnl_str = f"{daily_pnl:+,.2f}"
         lines = [
-            f"<b>[{html.escape(strategy)}] Status</b>",
-            f"Symbol: <code>{html.escape(symbol)}</code>",
-            f"Equity: <code>{equity:,.2f}</code>",
-            f"Drawdown: <code>{drawdown:+.2%}</code>",
-            f"Daily PnL: <code>{daily_pnl:+,.2f}</code>",
-            f"Position: <code>{html.escape(position)}</code>",
+            f"<b>[{safe_strategy}] Status</b>",
+            f"Symbol: <code>{safe_symbol}</code>",
+            f"Equity: <code>{equity_str}</code>",
+            f"Drawdown: <code>{drawdown_str}</code>",
+            f"Daily PnL: <code>{daily_pnl_str}</code>",
+            f"Position: <code>{safe_position}</code>",
+            f"<i>{_timestamp()}</i>",
         ]
-        return self.send_text("\n".join(lines))
+        text = self._render(
+            "status",
+            lines,
+            {
+                "strategy": safe_strategy,
+                "symbol": safe_symbol,
+                "equity": equity_str,
+                "drawdown": drawdown_str,
+                "daily_pnl": daily_pnl_str,
+                "position": safe_position,
+                "timestamp": _timestamp(),
+            },
+        )
+        return self.send_text(text)

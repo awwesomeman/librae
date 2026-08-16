@@ -558,6 +558,12 @@ class LiveTrader:
     # than submitting decisions from obsolete market snapshots.
     STALE_DATA_TOLERANCE_BARS = 2
 
+    # WHY: a portfolio-level decision (rebalance, multi-symbol entry) can fill
+    # many symbols in one cycle — pushing one Telegram message per fill floods
+    # the operator's phone. Above this count, fills are summarized in a single
+    # digest message instead of sent individually.
+    SIGNAL_BATCH_THRESHOLD = 3
+
     def _utc_now(self) -> datetime:
         now = self._clock()
         if now.tzinfo is None:
@@ -1248,6 +1254,8 @@ class LiveTrader:
 
     def _publish_action_results(self, result: ExecutionResult) -> None:
         """Publish notifications and analytics after state is committed."""
+        fills: list[dict[str, object]] = []
+
         for event in result.events:
             self._event_sequence += 1
             self._pending_traded_notional += abs(event.notional)
@@ -1271,24 +1279,64 @@ class LiveTrader:
                     else f"{event.side.upper()} ADD"
                 )
                 logger.info("SIGNAL %s %s @ %.2f", label, event.symbol, event.price)
-                self._notify(
-                    "send_signal",
-                    strategy=self._executor.strategy_name,
-                    symbol=event.symbol,
-                    side=label,
-                    price=event.price,
+                fills.append(
+                    {
+                        "type": "entry",
+                        "symbol": event.symbol,
+                        "side": label,
+                        "price": event.price,
+                        "quantity": event.fill_quantity,
+                        "notional": event.notional,
+                    }
                 )
 
         for trade in result.trades:
             logger.info("SIGNAL EXIT %s @ %.2f", trade.symbol, trade.exit_price)
-            self._notify(
-                "send_signal",
-                strategy=self._executor.strategy_name,
-                symbol=trade.symbol,
-                side="EXIT",
-                price=trade.exit_price,
+            fills.append(
+                {
+                    "type": "exit",
+                    "symbol": trade.symbol,
+                    "side": trade.side,
+                    "entry_price": trade.entry_price,
+                    "exit_price": trade.exit_price,
+                    "net_pnl": trade.net_pnl,
+                    "net_return": trade.net_return,
+                    "periods_held": trade.periods_held,
+                }
             )
             logger.info("Position closed: %s @ %.2f", trade.symbol, trade.exit_price)
+
+        if len(fills) > self.SIGNAL_BATCH_THRESHOLD:
+            self._notify(
+                "send_batch",
+                strategy=self._executor.strategy_name,
+                fills=fills,
+            )
+            return
+
+        for fill in fills:
+            if fill["type"] == "entry":
+                self._notify(
+                    "send_signal",
+                    strategy=self._executor.strategy_name,
+                    symbol=fill["symbol"],
+                    side=fill["side"],
+                    price=fill["price"],
+                    quantity=fill["quantity"],
+                    notional=fill["notional"],
+                )
+            else:
+                self._notify(
+                    "send_exit",
+                    strategy=self._executor.strategy_name,
+                    symbol=fill["symbol"],
+                    side=fill["side"],
+                    entry_price=fill["entry_price"],
+                    exit_price=fill["exit_price"],
+                    net_pnl=fill["net_pnl"],
+                    net_return=fill["net_return"],
+                    periods_held=fill["periods_held"],
+                )
 
         if self._on_runtime_event:
             for runtime_event in result.runtime_events:
