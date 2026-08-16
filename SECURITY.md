@@ -19,13 +19,15 @@ publishes the port on every host interface.
 ### 2. Replace every placeholder password
 
 Replace `POSTGRES_PASSWORD`, `POSTGRES_APP_PASSWORD`,
-`POSTGRES_GRAFANA_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, and the password in
-`TIMESCALE_DSN`. Use independent random values.
+`POSTGRES_GRAFANA_PASSWORD`, and `GF_SECURITY_ADMIN_PASSWORD` in
+`.env.secrets` (never `.env` — that file gets scp'd to the VM), and the
+password in `TIMESCALE_DSN` in `.env`. Use independent random values.
 
-On an existing deployment, changing `.env` does not rotate database roles.
-Rotate `quant` from a trusted admin session, then rerun `timescale_init.sql`
-inside the database container for the two managed roles. Reset an existing
-Grafana admin password with `grafana cli admin reset-admin-password`.
+On an existing deployment, changing `.env.secrets` does not rotate database
+roles. Rotate `quant` from a trusted admin session, then rerun
+`timescale_init.sql` inside the database container for the two managed
+roles. Reset an existing Grafana admin password with
+`grafana cli admin reset-admin-password`.
 
 ### 3. Keep container versions explicit
 

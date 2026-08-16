@@ -8,8 +8,9 @@
 #   ./deploy/db_backup.sh [output_dir]   # default: ./backups (gitignored)
 #
 # Runs pg_dump inside the container as the quant superuser (set via
-# POSTGRES_PASSWORD in .env) so the dump captures every role's objects, not
-# just quant_app's. Custom format (-Fc) is what db_restore.sh expects.
+# POSTGRES_PASSWORD in .env.secrets) so the dump captures every role's
+# objects, not just quant_app's. Custom format (-Fc) is what db_restore.sh
+# expects.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,13 +18,13 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${1:-${PROJECT_ROOT}/backups}"
 CONTAINER="quant_timescaledb"
 
-if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+if [[ -f "${PROJECT_ROOT}/.env.secrets" ]]; then
     set -a
     # shellcheck source=/dev/null
-    source "${PROJECT_ROOT}/.env"
+    source "${PROJECT_ROOT}/.env.secrets"
     set +a
 fi
-: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.secrets}"
 
 if ! docker inspect "${CONTAINER}" >/dev/null 2>&1; then
     echo "${CONTAINER} is not running — start it first: cd deploy && docker compose up -d timescaledb" >&2

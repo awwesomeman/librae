@@ -123,11 +123,13 @@ For a local Grafana instance connected to an existing database:
 
 ```bash
 cd deploy
-docker compose --env-file ../.env -f docker-compose.local.yml up -d
+docker compose --env-file ../.env --env-file ../.env.secrets -f docker-compose.local.yml up -d
 ```
 
-Open `http://localhost:3000`. Credentials and the remote database connection
-come from the repository `.env` file as documented in the compose file.
+Open `http://localhost:3000`. The remote database connection comes from
+`.env`; admin/Grafana passwords come from `.env.secrets` (copy
+`.env.secrets.example` and fill in the Docker Compose infra secrets section)
+as documented in the compose file.
 
 The Signal Monitor dashboard's forward-return/MFE/MAE panels (Cumulative
 Signal Return, Rolling Mean Return, Rolling Edge Ratio) recompute that logic
@@ -333,9 +335,19 @@ been used as an intrusion entry point before.
    Librae checkout's `.env`.
 2. Run `deploy/build_push.sh` and copy its printed `TRADE_IMAGE_REF` into the
    `.env` that `cloud_deploy.sh` will sync.
-3. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
+3. Before the first deploy to a new VM, create `.env.secrets` directly on the
+   VM with the Docker Compose infra secrets (`POSTGRES_PASSWORD`,
+   `POSTGRES_APP_PASSWORD`, `POSTGRES_GRAFANA_PASSWORD`,
+   `GF_SECURITY_ADMIN_PASSWORD`) — `cloud_deploy.sh` never syncs this file:
+
+   ```bash
+   scp .env.secrets.example <user>@<host>:quant-deploy/.env.secrets
+   ssh <user>@<host> "vi quant-deploy/.env.secrets"   # fill in real values
+   ```
+
+4. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
    start TimescaleDB and Grafana. It does not start a strategy.
-4. Create account configuration files and copy `.env.secrets.example` to one
+5. Create account configuration files and copy `.env.secrets.example` to one
    `.credentials/<account>.env` file per live account directly on the VM.
    Deployment scripts never sync broker credentials.
 
@@ -345,7 +357,7 @@ been used as an intrusion entry point before.
    chmod 600 .credentials/ibkr-main.env
    ```
 
-5. On the VM, start each deployment with a stable id, the account id and
+6. On the VM, start each deployment with a stable id, the account id and
    currency declared by its selected configuration, and a strategy name:
 
    ```bash

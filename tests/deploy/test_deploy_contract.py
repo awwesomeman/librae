@@ -738,7 +738,12 @@ def test_remote_schema_path_matches_compose_source() -> None:
         "POSTGRES_GRAFANA_PASSWORD",
         "GF_SECURITY_ADMIN_PASSWORD",
     ):
-        assert f"${{{variable}:?Set {variable} in .env}}" in script
+        assert f"${{{variable}:?Set {variable} in .env.secrets}}" in script
+    scp_block = script[script.index("scp -q") : script.index("scp -q") + 200]
+    assert '"${PROJECT_ROOT}/.env"' in scp_block
+    assert '"${PROJECT_ROOT}/.env.secrets.example"' in scp_block
+    assert '"${PROJECT_ROOT}/.env.secrets"' not in scp_block
+    assert "docker compose --env-file ../.env --env-file ../.env.secrets up" in script
 
 
 def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
@@ -747,7 +752,8 @@ def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
     script_dir.mkdir(parents=True)
     script = script_dir / "cloud_deploy.sh"
     shutil.copy2(DEPLOY / "cloud_deploy.sh", script)
-    (project / ".env").write_text(
+    (project / ".env").write_text("", encoding="utf-8", newline="\n")
+    (project / ".env.secrets").write_text(
         "\n".join(
             (
                 "POSTGRES_PASSWORD=test",

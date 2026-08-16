@@ -27,13 +27,13 @@ if [[ ! -f "${DUMP_FILE}" ]]; then
     exit 1
 fi
 
-if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+if [[ -f "${PROJECT_ROOT}/.env.secrets" ]]; then
     set -a
     # shellcheck source=/dev/null
-    source "${PROJECT_ROOT}/.env"
+    source "${PROJECT_ROOT}/.env.secrets"
     set +a
 fi
-: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.secrets}"
 
 if ! docker inspect "${CONTAINER}" >/dev/null 2>&1; then
     echo "${CONTAINER} is not running — start it first: cd deploy && docker compose up -d timescaledb" >&2

@@ -5,9 +5,10 @@
 # containers; it only controls how the required files reach the host.
 #
 # Deliberately syncs only .env and the empty credential template, never account
-# credential files. Copy the template to .credentials/<account>.env directly
-# on the remote host, so a re-run cannot clobber a live key and the key never
-# has to exist on the development machine.
+# credential files or .env.secrets. Copy .env.secrets.example to
+# .env.secrets and .credentials/<account>.env directly on the remote host,
+# so a re-run cannot clobber a live key and the key never has to exist on
+# the development machine.
 #
 # Usage: ./deploy/cloud_deploy.sh <user>@<host>
 # Requires locally: rsync, ssh, curl, python3 (scripts/dev_push_dashboard.py).
@@ -55,14 +56,20 @@ if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
     echo "Missing ${PROJECT_ROOT}/.env; copy .env.example and configure it first." >&2
     exit 1
 fi
+if [[ ! -f "${PROJECT_ROOT}/.env.secrets" ]]; then
+    echo "Missing ${PROJECT_ROOT}/.env.secrets; copy .env.secrets.example and fill in the Docker Compose infra secrets section." >&2
+    exit 1
+fi
 set -a
 # shellcheck source=/dev/null
 source "${PROJECT_ROOT}/.env"
+# shellcheck source=/dev/null
+source "${PROJECT_ROOT}/.env.secrets"
 set +a
-: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
-: "${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}"
-: "${POSTGRES_GRAFANA_PASSWORD:?Set POSTGRES_GRAFANA_PASSWORD in .env}"
-: "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env}"
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.secrets}"
+: "${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env.secrets}"
+: "${POSTGRES_GRAFANA_PASSWORD:?Set POSTGRES_GRAFANA_PASSWORD in .env.secrets}"
+: "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env.secrets}"
 
 STAGE="file transfer"
 echo "[1/6] Syncing deployment files to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
@@ -81,7 +88,11 @@ scp -q \
 
 STAGE="Compose startup"
 echo "[2/6] Starting timescaledb + grafana (same docker-compose.yml as VPS-native deploy)..."
-ssh "${TARGET}" "cd ${REMOTE_DIR}/deploy && docker compose --env-file ../.env up -d timescaledb grafana"
+if ! ssh "${TARGET}" "test -f ${REMOTE_DIR}/.env.secrets"; then
+    echo "Missing ${REMOTE_DIR}/.env.secrets on ${TARGET}; cloud_deploy.sh never syncs it — scp .env.secrets.example there as .env.secrets and fill in the Docker Compose infra secrets section." >&2
+    exit 1
+fi
+ssh "${TARGET}" "cd ${REMOTE_DIR}/deploy && docker compose --env-file ../.env --env-file ../.env.secrets up -d timescaledb grafana"
 
 STAGE="TimescaleDB readiness"
 echo "[3/6] Waiting for TimescaleDB..."

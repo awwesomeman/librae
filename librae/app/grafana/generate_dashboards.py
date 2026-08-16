@@ -1715,6 +1715,11 @@ def render_signal_monitor() -> dict:
 
 
 def main() -> None:
+    # WHY: cloud_deploy.sh syncs provisioning/ with `rsync --delete`, which
+    # only removes files no longer present in the repo — it can't tell that a
+    # same-named file's uid changed. Keep each dashboard's filename in sync
+    # with its uid (rename both together) so a uid change is always also a
+    # file rename, and --delete actually cleans up the old uid on deploy.
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Strategy Dashboard

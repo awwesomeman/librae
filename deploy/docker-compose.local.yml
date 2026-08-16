@@ -1,13 +1,14 @@
 # Local development: Grafana only, connecting to remote VPS DB.
 #
-# Prerequisites: copy ../.env.example to ../.env and set VPS_DB_HOST,
-# POSTGRES_GRAFANA_PASSWORD, and GF_SECURITY_ADMIN_PASSWORD.
+# Prerequisites: copy ../.env.example to ../.env and set VPS_DB_HOST;
+# copy ../.env.secrets.example to ../.env.secrets and set
+# POSTGRES_GRAFANA_PASSWORD and GF_SECURITY_ADMIN_PASSWORD there.
 #
 # Usage:
 #   cd deploy
-#   docker compose --env-file ../.env -f docker-compose.local.yml up -d
+#   docker compose --env-file ../.env --env-file ../.env.secrets -f docker-compose.local.yml up -d
 #
-# Then open http://localhost:3000 (admin / password from .env)
+# Then open http://localhost:3000 (admin / password from .env.secrets)
 # Dashboards auto-refresh every 30 seconds from provisioning directory.
 # After running `python -m librae.app.grafana.generate_dashboards`, dashboards
 # update automatically — no restart needed.
