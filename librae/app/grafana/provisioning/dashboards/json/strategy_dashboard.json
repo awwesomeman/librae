@@ -92,11 +92,16 @@
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
-        "includeAll": false,
+        "includeAll": true,
         "sort": 0,
-        "current": {},
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
         "hide": 0,
-        "multi": false,
+        "multi": true,
         "label": "Account"
       },
       {
@@ -106,8 +111,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT currency FROM strategy_performance WHERE run_id='${run_id}' AND account_id='${account_id}' LIMIT 1",
-        "query": "SELECT currency FROM strategy_performance WHERE run_id='${run_id}' AND account_id='${account_id}' LIMIT 1",
+        "definition": "SELECT currency FROM strategy_performance WHERE run_id='${run_id}' AND account_id IN (${account_id:sqlstring}) LIMIT 1",
+        "query": "SELECT currency FROM strategy_performance WHERE run_id='${run_id}' AND account_id IN (${account_id:sqlstring}) LIMIT 1",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -288,7 +293,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT COUNT(*) AS \"Count\" FROM (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n) p\nWHERE p.remaining_quantity > 0",
+          "rawSql": "SELECT COUNT(*) AS \"Count\" FROM (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY symbol, ts DESC\n) p\nWHERE p.remaining_quantity > 0",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -342,7 +347,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT trades FROM strategy_performance WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -396,7 +401,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT timeframe, data_source, mode, ended_at FROM backtest_runs WHERE run_id='${run_id}'),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n  ORDER BY o.symbol, o.ts DESC\n),\npnl AS (\n  SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n    ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier) AS value\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT COALESCE(\n  ROUND(pnl.value::numeric,0)::text || ' / ' ||\n    ROUND((pnl.value/NULLIF(e.equity,0)*100)::numeric,1)::text || '%',\n  'Flat'\n) AS \"Unrealized P&L\"\nFROM pnl CROSS JOIN equity e",
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source, mode, ended_at FROM backtest_runs WHERE run_id='${run_id}'),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n  ORDER BY o.symbol, o.ts DESC\n),\npnl AS (\n  SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n    ELSE p.entry_price - mk.mark END) * p.remaining_quantity * p.multiplier) AS value\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY ts DESC LIMIT 1\n)\nSELECT COALESCE(\n  ROUND(pnl.value::numeric,0)::text || ' / ' ||\n    ROUND((pnl.value/NULLIF(e.equity,0)*100)::numeric,1)::text || '%',\n  'Flat'\n) AS \"Unrealized P&L\"\nFROM pnl CROSS JOIN equity e",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -479,7 +484,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n),\nlocked AS (\n  SELECT COALESCE(SUM(p.margin_locked), 0) AS margin_locked\n  FROM positions p WHERE p.remaining_quantity > 0\n)\nSELECT ROUND(l.margin_locked::numeric,0)::text || ' / ' ||\n  ROUND((l.margin_locked/NULLIF(e.equity,0)*100)::numeric,1)::text || '%'\n  AS \"Margin Utilization\"\nFROM locked l CROSS JOIN equity e",
+          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY symbol, ts DESC\n),\nlocked AS (\n  SELECT COALESCE(SUM(p.margin_locked), 0) AS margin_locked\n  FROM positions p WHERE p.remaining_quantity > 0\n)\nSELECT ROUND(l.margin_locked::numeric,0)::text || ' / ' ||\n  ROUND((l.margin_locked/NULLIF(e.equity,0)*100)::numeric,1)::text || '%'\n  AS \"Margin Utilization\"\nFROM locked l CROSS JOIN equity e",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -526,7 +531,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT ROUND(net_pnl::numeric,0)::text || ' / ' ||\n  ROUND((total_return*100)::numeric,1)::text || '%' AS \"Total Return\"\nFROM strategy_performance\nWHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT ROUND(net_pnl::numeric,0)::text || ' / ' ||\n  ROUND((total_return*100)::numeric,1)::text || '%' AS \"Total Return\"\nFROM strategy_performance\nWHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -601,7 +606,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "WITH curve AS (\n  SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak\n  FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n),\ndd AS (\n  SELECT MAX(peak - equity) AS dollar_dd FROM curve\n)\nSELECT ROUND((-dd.dollar_dd)::numeric,0)::text || ' / ' ||\n  ROUND((sp.max_drawdown*100)::numeric,1)::text || '%' AS \"Max Drawdown\"\nFROM dd CROSS JOIN strategy_performance sp\nWHERE sp.run_id = '${run_id}' AND sp.account_id = '${account_id}'",
+          "rawSql": "WITH curve AS (\n  SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak\n  FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n),\ndd AS (\n  SELECT MAX(peak - equity) AS dollar_dd FROM curve\n)\nSELECT ROUND((-dd.dollar_dd)::numeric,0)::text || ' / ' ||\n  ROUND((sp.max_drawdown*100)::numeric,1)::text || '%' AS \"Max Drawdown\"\nFROM dd CROSS JOIN strategy_performance sp\nWHERE sp.run_id = '${run_id}' AND sp.account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -647,7 +652,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT period_sharpe FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT period_sharpe FROM strategy_performance WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -704,7 +709,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT period_sortino FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT period_sortino FROM strategy_performance WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -761,7 +766,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT win_rate FROM strategy_performance WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -819,7 +824,7 @@
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}' AND account_id = '${account_id}'",
+          "rawSql": "SELECT profit_factor FROM strategy_performance WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -894,7 +899,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, equity AS \"Strategy\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, equity AS \"Strategy\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring}) AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -957,7 +962,7 @@
       "type": "histogram",
       "targets": [
         {
-          "rawSql": "SELECT ROUND(net_return::numeric,4)::float8 AS \"Return\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND net_return IS NOT NULL AND $__timeFilter(ts)",
+          "rawSql": "SELECT ROUND(net_return::numeric,4)::float8 AS \"Return\" FROM trade_events WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring}) AND net_return IS NOT NULL AND $__timeFilter(ts)",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1052,7 +1057,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(cash_flow::numeric,2) AS \"Cash Flow\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Notional Return\", ROUND(margin_roi::numeric,2) AS \"Margin Return\", margin_mode AS \"Margin Mode\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ROW_NUMBER() OVER (ORDER BY ts) AS \"#\", ts AS \"Time\", symbol AS \"Symbol\", event_type AS \"Event\", side AS \"Side\", ROUND(fill_quantity::numeric,4) AS \"Quantity\", ROUND(price::numeric,2) AS \"Trade Price\", ROUND(cash_flow::numeric,2) AS \"Cash Flow\", ROUND(pnl::numeric,2) AS \"P&L\", ROUND(net_return::numeric,2) AS \"Notional Return\", ROUND(margin_roi::numeric,2) AS \"Margin Return\", margin_mode AS \"Margin Mode\", ROUND(entry_price::numeric,2) AS \"Entry Price\", ROUND(remaining_quantity::numeric,4) AS \"Position\", ROUND((commission + slippage + tax)::numeric,2) AS \"Cost\", group_id AS \"Group\", symbol || ' @ ' || to_char(entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\", periods_held AS \"Periods\", reason AS \"Reason\" FROM trade_events WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring}) AND $__timeFilter(ts) ORDER BY ts",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1337,7 +1342,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Entry\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.symbol = '${symbol}' AND te.event_type IN ('open', 'add') AND $__timeFilter(te.ts)",
+          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Entry\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id IN (${account_id:sqlstring}) AND te.symbol = '${symbol}' AND te.event_type IN ('open', 'add') AND $__timeFilter(te.ts)",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -1346,7 +1351,7 @@
           }
         },
         {
-          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Exit\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id = '${account_id}' AND te.symbol = '${symbol}' AND te.event_type IN ('reduce', 'close') AND $__timeFilter(te.ts)",
+          "rawSql": "SELECT te.ts - CASE UPPER(br.timeframe) WHEN 'H1' THEN interval '1 hour' WHEN '1H' THEN interval '1 hour' WHEN 'M5' THEN interval '5 minutes' WHEN '5M' THEN interval '5 minutes' WHEN 'M15' THEN interval '15 minutes' WHEN '15M' THEN interval '15 minutes' WHEN 'H4' THEN interval '4 hours' WHEN '4H' THEN interval '4 hours' WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day' ELSE interval '1 hour' END AS time, te.price AS \"Exit\" FROM trade_events te JOIN backtest_runs br ON br.run_id = te.run_id WHERE te.run_id = '${run_id}' AND te.account_id IN (${account_id:sqlstring}) AND te.symbol = '${symbol}' AND te.event_type IN ('reduce', 'close') AND $__timeFilter(te.ts)",
           "format": "time_series",
           "refId": "B",
           "datasource": {
@@ -1423,7 +1428,7 @@
       "type": "table",
       "targets": [
         {
-          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n    margin_mode,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n    AND ts <= $__timeTo()\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= $__timeTo()\n  ORDER BY o.symbol, o.ts DESC\n),\nsized AS (\n  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n    p.margin_locked, p.leverage, p.liquidation_price, p.margin_mode,\n    mk.market_price, p.multiplier,\n    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n)\nSELECT ROW_NUMBER() OVER (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS \"#\",\n  s.entry_at AS \"Time\",\n  s.symbol AS \"Symbol\", s.side AS \"Side\",\n  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS \"Weight\",\n  ROUND(s.entry_price::numeric,2) AS \"Entry Price\",\n  ROUND(s.remaining_quantity::numeric,4) AS \"Position\",\n  ROUND(s.market_price::numeric,2) AS \"Market Price\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)    ::numeric,2) AS \"MTM P&L\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))    ::numeric,4) AS \"MTM Return\",\n  ROUND(s.margin_locked::numeric,2) AS \"Margin Locked\",\n  ROUND(s.leverage::numeric,2) AS \"Leverage\",\n  s.margin_mode AS \"Margin Mode\",\n  ROUND(s.liquidation_price::numeric,2) AS \"Liquidation Price\",\n  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)    ::numeric,4) AS \"Liquidation Buffer\",\n  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\"\nFROM sized s CROSS JOIN equity e\nORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
+          "rawSql": "WITH meta AS ( SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'),\nequity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n    AND ts <= $__timeTo()\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity,\n    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n    margin_mode,\n    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n    AND ts <= $__timeTo()\n  ORDER BY symbol, ts DESC\n),\nmarks AS (\n  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n  FROM ohlcv o, meta m\n  WHERE o.timeframe = m.timeframe\n    AND (m.data_source IS NULL OR m.data_source = 'multi' OR o.data_source = m.data_source)\n    AND o.ts <= $__timeTo()\n  ORDER BY o.symbol, o.ts DESC\n),\nsized AS (\n  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n    p.margin_locked, p.leverage, p.liquidation_price, p.margin_mode,\n    mk.market_price, p.multiplier,\n    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n  WHERE p.remaining_quantity > 0\n)\nSELECT ROW_NUMBER() OVER (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS \"#\",\n  s.entry_at AS \"Time\",\n  s.symbol AS \"Symbol\", s.side AS \"Side\",\n  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS \"Weight\",\n  ROUND(s.entry_price::numeric,2) AS \"Entry Price\",\n  ROUND(s.remaining_quantity::numeric,4) AS \"Position\",\n  ROUND(s.market_price::numeric,2) AS \"Market Price\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) * s.remaining_quantity * s.multiplier)    ::numeric,2) AS \"MTM P&L\",\n  ROUND(((CASE WHEN s.side='long' THEN s.market_price - s.entry_price\n    ELSE s.entry_price - s.market_price END) / NULLIF(s.entry_price,0))    ::numeric,4) AS \"MTM Return\",\n  ROUND(s.margin_locked::numeric,2) AS \"Margin Locked\",\n  ROUND(s.leverage::numeric,2) AS \"Leverage\",\n  s.margin_mode AS \"Margin Mode\",\n  ROUND(s.liquidation_price::numeric,2) AS \"Liquidation Price\",\n  ROUND((CASE WHEN s.liquidation_price IS NULL THEN NULL\n    WHEN s.side='long' THEN (s.market_price - s.liquidation_price) / NULLIF(s.market_price,0)\n    ELSE (s.liquidation_price - s.market_price) / NULLIF(s.market_price,0) END)    ::numeric,4) AS \"Liquidation Buffer\",\n  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS') AS \"Trade ID\"\nFROM sized s CROSS JOIN equity e\nORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
           "format": "table",
           "refId": "A",
           "datasource": {
@@ -1718,7 +1723,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "rawSql": "SELECT ts AS time, gross_exposure AS \"Gross\", net_exposure AS \"Net\", concentration AS \"Concentration\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts",
+          "rawSql": "SELECT ts AS time, gross_exposure AS \"Gross\", net_exposure AS \"Net\", concentration AS \"Concentration\" FROM equity_curve WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring}) AND $__timeFilter(ts) ORDER BY ts",
           "format": "time_series",
           "refId": "A",
           "datasource": {
@@ -1811,7 +1816,7 @@
       "type": "bargauge",
       "targets": [
         {
-          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n  ORDER BY symbol, ts DESC\n)\nSELECT\n  SUM(CASE WHEN p.margin_mode='unlevered' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Unlevered\",\n  SUM(CASE WHEN p.margin_mode='fixed' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Fixed\",\n  SUM(CASE WHEN p.margin_mode='dynamic' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Dynamic\"\nFROM positions p CROSS JOIN equity e\nWHERE p.remaining_quantity > 0",
+          "rawSql": "WITH equity AS (\n  SELECT equity FROM equity_curve\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY ts DESC LIMIT 1\n),\npositions AS (\n  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n  FROM trade_events\n  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n  ORDER BY symbol, ts DESC\n)\nSELECT\n  SUM(CASE WHEN p.margin_mode='unlevered' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Unlevered\",\n  SUM(CASE WHEN p.margin_mode='fixed' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Fixed\",\n  SUM(CASE WHEN p.margin_mode='dynamic' THEN p.margin_locked ELSE 0 END)\n    / NULLIF(MAX(e.equity),0) AS \"Dynamic\"\nFROM positions p CROSS JOIN equity e\nWHERE p.remaining_quantity > 0",
           "format": "table",
           "refId": "A",
           "datasource": {

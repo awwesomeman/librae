@@ -113,7 +113,7 @@ def _stat_panel(
 def _account_metric_sql(column: str) -> str:
     return (
         f"SELECT {column} FROM strategy_performance"
-        " WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
+        " WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})"
     )
 
 
@@ -228,7 +228,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
                 "SELECT ROUND(net_pnl::numeric,0)::text || ' / ' ||\n"
                 "  ROUND((total_return*100)::numeric,1)::text || '%' AS \"Total Return\"\n"
                 "FROM strategy_performance\n"
-                "WHERE run_id = '${run_id}' AND account_id = '${account_id}'"
+                "WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})"
             )
         ],
         "fieldConfig": {
@@ -268,7 +268,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
                 "WITH curve AS (\n"
                 "  SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak\n"
                 "  FROM equity_curve\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "),\n"
                 "dd AS (\n"
                 "  SELECT MAX(peak - equity) AS dollar_dd FROM curve\n"
@@ -276,7 +276,7 @@ _KPI_CATALOGUE: dict[str, dict] = {
                 "SELECT ROUND((-dd.dollar_dd)::numeric,0)::text || ' / ' ||\n"
                 "  ROUND((sp.max_drawdown*100)::numeric,1)::text || '%' AS \"Max Drawdown\"\n"
                 "FROM dd CROSS JOIN strategy_performance sp\n"
-                "WHERE sp.run_id = '${run_id}' AND sp.account_id = '${account_id}'"
+                "WHERE sp.run_id = '${run_id}' AND sp.account_id IN (${account_id:sqlstring})"
             )
         ],
         "fieldConfig": {
@@ -397,7 +397,7 @@ _OPEN_POSITIONS_PANEL = _stat_panel(
         'SELECT COUNT(*) AS "Count" FROM (\n'
         "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
         "  FROM trade_events\n"
-        "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+        "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
         "  ORDER BY symbol, ts DESC\n"
         ") p\n"
         "WHERE p.remaining_quantity > 0"
@@ -444,7 +444,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
                 "  FROM trade_events\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY symbol, ts DESC\n"
                 "),\n"
                 "marks AS (\n"
@@ -463,7 +463,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "equity AS (\n"
                 "  SELECT equity FROM equity_curve\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY ts DESC LIMIT 1\n"
                 ")\n"
                 "SELECT COALESCE(\n"
@@ -515,13 +515,13 @@ BASE_PANELS_DEF: list[dict] = [
             _stat_target(
                 "WITH equity AS (\n"
                 "  SELECT equity FROM equity_curve\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY ts DESC LIMIT 1\n"
                 "),\n"
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n"
                 "  FROM trade_events\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY symbol, ts DESC\n"
                 "),\n"
                 "locked AS (\n"
@@ -568,7 +568,7 @@ BASE_PANELS_DEF: list[dict] = [
             _target(
                 'SELECT ts AS time, equity AS "Strategy"'
                 " FROM equity_curve WHERE run_id = '${run_id}'"
-                " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
+                " AND account_id IN (${account_id:sqlstring}) AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
         "fieldConfig": {
@@ -606,7 +606,7 @@ BASE_PANELS_DEF: list[dict] = [
             _target(
                 'SELECT ROUND(net_return::numeric,4)::float8 AS "Return"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
-                " AND account_id = '${account_id}' AND net_return IS NOT NULL"
+                " AND account_id IN (${account_id:sqlstring}) AND net_return IS NOT NULL"
                 " AND $__timeFilter(ts)",
                 "A",
                 "table",
@@ -734,7 +734,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' periods_held AS "Periods",'
                 ' reason AS "Reason"'
                 " FROM trade_events WHERE run_id = '${run_id}'"
-                " AND account_id = '${account_id}'"
+                " AND account_id IN (${account_id:sqlstring})"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
                 "A",
@@ -806,7 +806,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " FROM trade_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
-                " AND te.account_id = '${account_id}'"
+                " AND te.account_id IN (${account_id:sqlstring})"
                 " AND te.symbol = '${symbol}'"
                 " AND te.event_type IN ('open', 'add')"
                 " AND $__timeFilter(te.ts)",
@@ -824,7 +824,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " FROM trade_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
-                " AND te.account_id = '${account_id}'"
+                " AND te.account_id IN (${account_id:sqlstring})"
                 " AND te.symbol = '${symbol}'"
                 " AND te.event_type IN ('reduce', 'close')"
                 " AND $__timeFilter(te.ts)",
@@ -891,7 +891,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "equity AS (\n"
                 "  SELECT equity FROM equity_curve\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "    AND ts <= $__timeTo()\n"
                 "  ORDER BY ts DESC LIMIT 1\n"
                 "),\n"
@@ -901,7 +901,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "    margin_mode,\n"
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
                 "  FROM trade_events\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "    AND ts <= $__timeTo()\n"
                 "  ORDER BY symbol, ts DESC\n"
                 "),\n"
@@ -1014,7 +1014,7 @@ BASE_PANELS_DEF: list[dict] = [
                 'SELECT ts AS time, gross_exposure AS "Gross", net_exposure AS "Net",'
                 ' concentration AS "Concentration"'
                 " FROM equity_curve WHERE run_id = '${run_id}'"
-                " AND account_id = '${account_id}' AND $__timeFilter(ts) ORDER BY ts"
+                " AND account_id IN (${account_id:sqlstring}) AND $__timeFilter(ts) ORDER BY ts"
             )
         ],
         "fieldConfig": {
@@ -1053,13 +1053,13 @@ BASE_PANELS_DEF: list[dict] = [
             _stat_target(
                 "WITH equity AS (\n"
                 "  SELECT equity FROM equity_curve\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY ts DESC LIMIT 1\n"
                 "),\n"
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n"
                 "  FROM trade_events\n"
-                "  WHERE run_id = '${run_id}' AND account_id = '${account_id}'\n"
+                "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY symbol, ts DESC\n"
                 ")\n"
                 "SELECT\n"
@@ -1318,10 +1318,17 @@ def render_unified_dashboard() -> dict:
         " ORDER BY run_at DESC LIMIT 20",
         label="Run ID",
     )
+    # multi + includeAll: defaults to "All", which re-resolves to whatever
+    # accounts are actually valid for the selected run_id — a single stale
+    # account selection can't survive a run_id switch and go silently
+    # unmatched (Grafana doesn't reset an invalid current value on its own
+    # when a parent variable changes; this sidesteps that instead of relying
+    # on it). Still narrowable to one account manually when comparing.
     account_id_var = _make_query_variable(
         "account_id",
         "SELECT DISTINCT account_id FROM equity_curve WHERE run_id='${run_id}' ORDER BY account_id",
         label="Account",
+        multi=True,
     )
     # Read-only context, not a filter: every symbol in a run is validated at
     # resolve_symbol() to share the account's currency (librae has no FX —
@@ -1330,7 +1337,7 @@ def render_unified_dashboard() -> dict:
     currency_var = _make_query_variable(
         "currency",
         "SELECT currency FROM strategy_performance"
-        " WHERE run_id='${run_id}' AND account_id='${account_id}' LIMIT 1",
+        " WHERE run_id='${run_id}' AND account_id IN (${account_id:sqlstring}) LIMIT 1",
         label="Currency",
     )
     symbol_var = _make_query_variable(

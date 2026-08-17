@@ -81,7 +81,7 @@ class TestRenderUnifiedDashboard:
             for target in panel.get("targets", []):
                 sql = target["rawSql"]
                 if any(table in sql for table in accounting_tables):
-                    assert "${account_id}" in sql
+                    assert "${account_id:sqlstring}" in sql
 
     def test_no_strategy_signals_references(self):
         """Ensure no panel SQL references the deleted strategy_signals table."""
@@ -115,7 +115,7 @@ class TestRenderUnifiedDashboard:
         panel = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
         sql = panel["targets"][0]["rawSql"]
         assert "trade_events" in sql
-        assert "${account_id}" in sql
+        assert "${account_id:sqlstring}" in sql
         assert '"Symbol"' in sql
         assert "slot" not in sql.lower()
         assert "base" not in sql.lower()
