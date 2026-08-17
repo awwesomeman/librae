@@ -309,7 +309,7 @@ cmd_start() {
     container="$(container_name "${deployment_id}")"
     local ready_file="${READY_FILE}-${deployment_id}"
     local ready_token="${deployment_id}-$(date +%s)-$$-${RANDOM}-${RANDOM}"
-    local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env}"
+    local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env.secrets}"
 
     local credential_args=()
     local secret_mount_args=()
@@ -766,11 +766,19 @@ shift
 
 # Load non-trading deployment settings from the project root. Live credentials
 # are never sourced by this shell; start passes the explicitly selected file to
-# Docker with --env-file.
+# Docker with --env-file. .env.secrets carries TRADE_TIMESCALE_DSN (and other
+# infra secrets); it is not the trading-credential file the previous
+# paragraph refers to.
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     set -a
     # shellcheck source=/dev/null
     source "${PROJECT_ROOT}/.env"
+    set +a
+fi
+if [[ -f "${PROJECT_ROOT}/.env.secrets" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "${PROJECT_ROOT}/.env.secrets"
     set +a
 fi
 

@@ -233,6 +233,15 @@ def _run_trade_script(
     bash = _find_bash()
 
     tmp_path.mkdir(parents=True, exist_ok=True)
+    # Isolate PROJECT_ROOT (trade.sh derives it from $0's directory) from the
+    # real repo root, so a developer's real .env/.env.secrets can't leak
+    # values (e.g. TRADE_TIMESCALE_DSN) into this subprocess and shadow the
+    # env-injected ones the test controls below.
+    isolated_deploy_dir = tmp_path / "deploy"
+    isolated_deploy_dir.mkdir(parents=True, exist_ok=True)
+    isolated_trade_script = isolated_deploy_dir / "trade.sh"
+    if not isolated_trade_script.exists():
+        isolated_trade_script.symlink_to(DEPLOY / "trade.sh")
     docker_log = tmp_path / "docker.log"
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
@@ -349,7 +358,7 @@ fi
     )
     command = [
         bash,
-        str(DEPLOY / "trade.sh"),
+        str(isolated_trade_script),
         "start",
         deployment_id,
         account_id,
@@ -686,12 +695,16 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     secrets_env = (ROOT / ".env.secrets.example").read_text(encoding="utf-8")
     script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
 
+    assert "TIMESCALE_DSN=" not in public_env
+    assert "TRADE_TIMESCALE_DSN=" not in public_env
     assert (
-        "TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@localhost:5432/quant" in public_env
-    )
+        "TIMESCALE_DSN=postgresql://quant_app:REPLACE_WITH_POSTGRES_APP_PASSWORD"
+        "@localhost:5432/quant"
+    ) in secrets_env
     assert (
-        "TRADE_TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@quant_timescaledb:5432/quant"
-    ) in public_env
+        "TRADE_TIMESCALE_DSN=postgresql://quant_app:REPLACE_WITH_POSTGRES_APP_PASSWORD"
+        "@quant_timescaledb:5432/quant"
+    ) in secrets_env
     assert "\nIBKR_HOST=\n" in secrets_env
     assert "IBKR_HOST=127.0.0.1" not in secrets_env
     assert "host.docker.internal" in secrets_env
@@ -703,7 +716,10 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert '-e TIMESCALE_DSN="${trade_timescale_dsn}"' in script
     assert '--add-host "host.docker.internal:host-gateway"' in script
     assert "IBKR_HOST cannot use container loopback" in script
-    assert 'source "${PROJECT_ROOT}/.env.secrets"' not in script
+    # .env.secrets (shared infra secrets, e.g. TRADE_TIMESCALE_DSN) is sourced
+    # into trade.sh's own shell; per-account credential files are not — those
+    # are only ever passed to Docker via --env-file, never sourced.
+    assert 'source "${PROJECT_ROOT}/.env.secrets"' in script
     assert 'credential_args+=(--env-file "${credentials_file}")' in script
     assert '--filter "label=io.librae.managed=true"' in script
     assert "container_ready_file()" in script

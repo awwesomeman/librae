@@ -202,13 +202,26 @@ jobs:
           PY
           docker run --rm "${TRADE_IMAGE_REF}" python -m strategies.smoke.run --once
 
+      - name: Write CI .env.secrets
+        run: |
+          printf '%s\n' \
+            'POSTGRES_PASSWORD=quant_secret' \
+            'POSTGRES_APP_PASSWORD=quant_app_secret' \
+            'POSTGRES_GRAFANA_PASSWORD=grafana_reader_secret' \
+            'GF_SECURITY_ADMIN_PASSWORD=admin' \
+            'TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@localhost:5432/quant' \
+            'TRADE_TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@quant_timescaledb:5432/quant' \
+            > .env.secrets
+
       - name: Verify TimescaleDB container endpoint
         run: |
           set -a
           source .env.example
+          source .env.secrets
           set +a
           docker compose \
             --env-file .env.example \
+            --env-file .env.secrets \
             --file deploy/docker-compose.yml \
             up --detach timescaledb
           connected=false
@@ -232,6 +245,7 @@ jobs:
         run: |
           set -a
           source .env.example
+          source .env.secrets
           set +a
           ./deploy/trade.sh start smoke-ci ci USD smoke sim 60
           test "$(
@@ -271,6 +285,7 @@ jobs:
         run: |
           set -a
           source .env.example
+          source .env.secrets
           set +a
           docker run --detach \
             --name librae-account-lease-owner \
@@ -296,6 +311,7 @@ jobs:
         run: |
           set -a
           source .env.example
+          source .env.secrets
           set +a
           docker run --rm --interactive \
             --network quant_network \
@@ -363,6 +379,7 @@ jobs:
         run: |
           docker compose \
             --env-file .env.example \
+            --env-file .env.secrets \
             --file deploy/docker-compose.yml \
             down --volumes
 
@@ -473,6 +490,8 @@ jobs:
         run: |
           cp .env.example .env
           printf '\nTRADE_IMAGE_REF=%s\n' "${TRADE_IMAGE_REF}" >> .env
+          ssh deployment-target 'mkdir -p quant-deploy'
+          scp .env.secrets deployment-target:quant-deploy/.env.secrets
           mkdir -p .credentials
           printf '%s\n' \
             'BINANCE_API_SECRET=must-not-transfer' \
@@ -489,7 +508,7 @@ jobs:
         run: |
           test "$(
             ssh deployment-target 'cd quant-deploy && ls -A1 | sort'
-          )" = "$(printf '%s\n' .env .env.secrets.example deploy librae)"
+          )" = "$(printf '%s\n' .env .env.secrets .env.secrets.example deploy librae)"
           ssh deployment-target '
             set -eu
             test ! -e quant-deploy/.git
@@ -562,6 +581,7 @@ jobs:
                 ./deploy/trade.sh stop --all --force || true
                 docker compose \
                   --env-file .env \
+                  --env-file .env.secrets \
                   --file deploy/docker-compose.yml \
                   down --volumes --remove-orphans || true
               fi
