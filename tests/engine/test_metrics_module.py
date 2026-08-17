@@ -384,6 +384,70 @@ class TestComputeAllMetrics:
                 trade_notionals=[invalid_notional],
             )
 
+    def test_grouped_trades_net_before_win_rate_and_avg_return(self) -> None:
+        """A hedge's spot+perp legs (same group_id) must count as one trade,
+        netting PnL/notional — not two independently volatile legs."""
+        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
+        # Perp leg alone looks like a big loser (-30%); spot leg alone looks
+        # like a modest winner (+5%). Netted: pnl=-5 on notional=600 (-0.833%).
+        perp_leg = _make_trade_pnl(gross_pnl=-30.0, net_pnl=-30.0, net_return=-30.0)
+        spot_leg = _make_trade_pnl(gross_pnl=25.0, net_pnl=25.0, net_return=5.0)
+
+        m = compute_all(
+            equity_values=[10_000.0, 9_990.0, 9_995.0],
+            timestamps=timestamps,
+            trade_pnls=[perp_leg, spot_leg],
+            total_periods=3,
+            trade_notionals=[100.0, 500.0],
+            trade_group_ids=["hedge-1", "hedge-1"],
+        )
+
+        assert m.trades == 1
+        assert np.isclose(m.win_rate, 0.0)  # the netted trade lost, not "1 win, 1 loss"
+        assert m.avg_trade_return == pytest.approx(-5.0 / 600.0)
+
+    def test_grouped_and_ungrouped_trades_coexist(self) -> None:
+        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
+        leg_a = _make_trade_pnl(net_pnl=-10.0, net_return=-10.0)
+        leg_b = _make_trade_pnl(net_pnl=10.0, net_return=2.0)
+        standalone = _make_trade_pnl(net_pnl=5.0, net_return=1.0)
+
+        m = compute_all(
+            equity_values=[10_000.0, 10_005.0, 10_005.0],
+            timestamps=timestamps,
+            trade_pnls=[leg_a, leg_b, standalone],
+            total_periods=3,
+            trade_notionals=[100.0, 500.0, 500.0],
+            trade_group_ids=["hedge-1", "hedge-1", None],
+        )
+
+        assert m.trades == 2  # one netted hedge trade + one standalone trade
+
+    def test_trade_group_ids_requires_trade_notionals(self) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match="trade_notionals"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
+                total_periods=2,
+                trade_group_ids=["hedge-1"],
+            )
+
+    def test_trade_group_ids_length_must_match_trade_pnls(self) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match="trade_group_ids length"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
+                total_periods=2,
+                trade_notionals=[100.0],
+                trade_group_ids=["hedge-1", "hedge-2"],
+            )
+
     def test_portfolio_diagnostics(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
         m = compute_all(

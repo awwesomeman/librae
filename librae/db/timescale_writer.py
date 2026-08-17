@@ -1233,6 +1233,9 @@ def refresh_performance(
     trade_notionals = [
         abs(float(r["notional"] * r["entry_price"] / r["price"])) for r in trade_rows
     ]
+    trade_group_ids = [
+        r.get("group_id") if pd.notna(r.get("group_id")) else None for r in trade_rows
+    ]
 
     def complete_optional_series(field: str) -> list[float] | None:
         values = [row.get(field) for row in eq_records]
@@ -1254,6 +1257,7 @@ def refresh_performance(
         total_periods=len(equity_values),
         exposed_periods=exposed_periods,
         trade_notionals=trade_notionals,
+        trade_group_ids=trade_group_ids,
         turnover_values=complete_optional_series("turnover"),
         gross_exposure_values=complete_optional_series("gross_exposure"),
         net_exposure_values=complete_optional_series("net_exposure"),

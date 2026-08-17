@@ -800,6 +800,7 @@ class Backtest:
                 )
                 for trade in result.trades
             ],
+            trade_group_ids=[trade.group_id for trade in result.trades],
             turnover_values=[snapshot.turnover for snapshot in account.portfolio_snapshots],
             gross_exposure_values=[
                 snapshot.gross_exposure for snapshot in account.portfolio_snapshots

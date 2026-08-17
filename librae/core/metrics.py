@@ -267,6 +267,59 @@ def _as_positive_finite_array(values: Sequence[float], name: str) -> np.ndarray:
     return array
 
 
+def _collapse_trades_by_group(
+    trade_pnls: Sequence[TradePnL],
+    trade_notionals: Sequence[float],
+    trade_group_ids: Sequence[str | None],
+) -> tuple[list[TradePnL], list[float]]:
+    """Merge trades sharing a non-None group_id into one synthetic trade
+    before any stat below treats each leg as its own trade — e.g. a hedge's
+    spot+perp legs, opened/closed together under one OrderIntent.group_id
+    (see librae.core.strategy.OrderIntent.group_id), net to one combined P&L
+    and combined notional instead of two individually-volatile legs. A trade
+    with group_id=None is its own singleton group (current, non-hedged
+    behavior, unchanged).
+    """
+    from librae.core.executor import TradePnL as _TradePnL
+
+    if len(trade_group_ids) != len(trade_pnls):
+        raise ValueError("trade_group_ids length must match trade_pnls length")
+    if len(trade_notionals) != len(trade_pnls):
+        raise ValueError("trade_notionals length must match trade_pnls length")
+
+    groups: dict[str, list[int]] = {}
+    collapsed_pnls: list[TradePnL] = []
+    collapsed_notionals: list[float] = []
+    for i, group_id in enumerate(trade_group_ids):
+        if group_id is None:
+            collapsed_pnls.append(trade_pnls[i])
+            collapsed_notionals.append(trade_notionals[i])
+        else:
+            groups.setdefault(group_id, []).append(i)
+
+    for members in groups.values():
+        pnls = [trade_pnls[i] for i in members]
+        notional = float(sum(trade_notionals[i] for i in members))
+        net_pnl = float(sum(p.net_pnl for p in pnls))
+        gross_pnl = float(sum(p.gross_pnl for p in pnls))
+        collapsed_pnls.append(
+            _TradePnL(
+                gross_pnl=gross_pnl,
+                net_pnl=net_pnl,
+                commission=float(sum(p.commission for p in pnls)),
+                slippage=float(sum(p.slippage for p in pnls)),
+                tax=float(sum(p.tax for p in pnls)),
+                gross_return=(gross_pnl / notional * 100.0) if notional > EPSILON else 0.0,
+                net_return=(net_pnl / notional * 100.0) if notional > EPSILON else 0.0,
+                exit_commission=float(sum(p.exit_commission for p in pnls)),
+                exit_slippage=float(sum(p.exit_slippage for p in pnls)),
+                exit_tax=float(sum(p.exit_tax for p in pnls)),
+            )
+        )
+        collapsed_notionals.append(notional)
+    return collapsed_pnls, collapsed_notionals
+
+
 def compute_all(
     equity_values: Sequence[float],
     timestamps: Sequence[datetime],
@@ -274,6 +327,7 @@ def compute_all(
     total_periods: int,
     exposed_periods: int | None = None,
     trade_notionals: Sequence[float] | None = None,
+    trade_group_ids: Sequence[str | None] | None = None,
     turnover_values: Sequence[float] | None = None,
     gross_exposure_values: Sequence[float] | None = None,
     net_exposure_values: Sequence[float] | None = None,
@@ -290,6 +344,13 @@ def compute_all(
         exposed_periods: Number of bars with at least one open position.
         trade_notionals: Per-trade absolute notional weight for averaging returns
             across instruments with different prices or multipliers.
+        trade_group_ids: Per-trade OrderIntent.group_id (or None), same length
+            as trade_pnls/trade_notionals. When given, trades sharing a
+            non-None group_id are combined into one trade (see
+            _collapse_trades_by_group) before every trade-level stat below —
+            win_rate, profit_factor, payoff_ratio, avg_trade_return, trades
+            count. Requires trade_notionals. Omit for the unchanged
+            per-trade-row behavior.
         turnover_values: Per-event absolute traded notional divided by equity.
         gross_exposure_values: Per-event sum of absolute realized weights.
         net_exposure_values: Per-event sum of signed realized weights.
@@ -306,6 +367,12 @@ def compute_all(
         return StrategyMetrics(total_return=0.0, trades=0)
     if len(timestamps) != len(equity_values):
         raise ValueError("timestamps length must match equity_values")
+    if trade_group_ids is not None:
+        if trade_notionals is None:
+            raise ValueError("trade_group_ids requires trade_notionals")
+        trade_pnls, trade_notionals = _collapse_trades_by_group(
+            trade_pnls, trade_notionals, trade_group_ids
+        )
     eq_arr = _as_positive_finite_array(equity_values, "equity_values")
 
     with np.errstate(over="ignore", invalid="ignore"):
