@@ -62,6 +62,18 @@ def _calendar_session(calendar: ExchangeCalendar, value: date) -> pd.Timestamp:
     return label
 
 
+@cache
+def _taifex_candidate_labels(calendar_id: str, local_date: date) -> tuple[date, ...]:
+    # WHY: cached — every bar sharing the same Taipei calendar date (hundreds
+    # to thousands per session, replayed again per resample frequency) hits
+    # the same exchange_calendars lookups otherwise.
+    xtai = _exchange_calendar(calendar_id)
+    if xtai.is_session(pd.Timestamp(local_date)):
+        return (local_date, xtai.next_session(pd.Timestamp(local_date)).date())
+    prior_session = _calendar_session(xtai, local_date - timedelta(days=1))
+    return (xtai.next_session(prior_session).date(),)
+
+
 def _taifex_session_label(timestamp: pd.Timestamp, calendar_id: str) -> date:
     """Resolve the session label by testing it against _session_segments.
 
@@ -71,13 +83,7 @@ def _taifex_session_label(timestamp: pd.Timestamp, calendar_id: str) -> date:
     the boundary semantics can never drift out of sync between the two.
     """
     local_date = timestamp.tz_convert(_TAIPEI).date()
-    xtai = _exchange_calendar(calendar_id)
-
-    if xtai.is_session(pd.Timestamp(local_date)):
-        candidates = [local_date, xtai.next_session(pd.Timestamp(local_date)).date()]
-    else:
-        prior_session = _calendar_session(xtai, local_date - timedelta(days=1))
-        candidates = [xtai.next_session(prior_session).date()]
+    candidates = _taifex_candidate_labels(calendar_id, local_date)
 
     for label in candidates:
         for segment_open, segment_close in _session_segments(calendar_id, label):
@@ -124,6 +130,7 @@ def _local_timestamp(day: date, clock: time, timezone: str) -> pd.Timestamp:
     return pd.Timestamp.combine(day, clock).tz_localize(timezone).tz_convert("UTC")
 
 
+@cache
 def _session_segments(
     calendar_id: str, label: date
 ) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
