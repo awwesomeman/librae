@@ -127,6 +127,7 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
                 "price": 110.0,
                 "entry_price": 100.0,
                 "notional": 220.0,
+                "entry_at": timestamps[0],
             }
         ]
     )

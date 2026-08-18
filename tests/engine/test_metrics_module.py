@@ -400,11 +400,36 @@ class TestComputeAllMetrics:
             total_periods=3,
             trade_notionals=[100.0, 500.0],
             trade_group_ids=["hedge-1", "hedge-1"],
+            trade_entry_ats=[START, START],
         )
 
         assert m.trades == 1
         assert np.isclose(m.win_rate, 0.0)  # the netted trade lost, not "1 win, 1 loss"
         assert m.avg_trade_return == pytest.approx(-5.0 / 600.0)
+
+    def test_grouped_trades_scope_to_entry_at_not_just_group_id(self) -> None:
+        """A strategy that reuses one literal group_id for every round-trip
+        of a run must still net each round-trip's legs separately — group_id
+        alone is not a unique key across a run."""
+        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
+        entry_1 = START
+        entry_2 = START + pd.Timedelta(hours=1)
+        cycle_1_perp = _make_trade_pnl(net_pnl=-30.0, net_return=-30.0)
+        cycle_1_spot = _make_trade_pnl(net_pnl=25.0, net_return=5.0)
+        cycle_2_perp = _make_trade_pnl(net_pnl=10.0, net_return=10.0)
+        cycle_2_spot = _make_trade_pnl(net_pnl=-8.0, net_return=-1.6)
+
+        m = compute_all(
+            equity_values=[10_000.0, 9_990.0, 9_995.0],
+            timestamps=timestamps,
+            trade_pnls=[cycle_1_perp, cycle_1_spot, cycle_2_perp, cycle_2_spot],
+            total_periods=3,
+            trade_notionals=[100.0, 500.0, 100.0, 500.0],
+            trade_group_ids=["funding_arb", "funding_arb", "funding_arb", "funding_arb"],
+            trade_entry_ats=[entry_1, entry_1, entry_2, entry_2],
+        )
+
+        assert m.trades == 2  # one netted trade per round-trip, not one for the whole run
 
     def test_grouped_and_ungrouped_trades_coexist(self) -> None:
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
@@ -419,6 +444,7 @@ class TestComputeAllMetrics:
             total_periods=3,
             trade_notionals=[100.0, 500.0, 500.0],
             trade_group_ids=["hedge-1", "hedge-1", None],
+            trade_entry_ats=[START, START, START],
         )
 
         assert m.trades == 2  # one netted hedge trade + one standalone trade
@@ -435,6 +461,19 @@ class TestComputeAllMetrics:
                 trade_group_ids=["hedge-1"],
             )
 
+    def test_trade_group_ids_requires_trade_entry_ats(self) -> None:
+        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
+
+        with pytest.raises(ValueError, match="trade_entry_ats"):
+            compute_all(
+                equity_values=[100.0, 101.0],
+                timestamps=timestamps,
+                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
+                total_periods=2,
+                trade_notionals=[100.0],
+                trade_group_ids=["hedge-1"],
+            )
+
     def test_trade_group_ids_length_must_match_trade_pnls(self) -> None:
         timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
 
@@ -446,6 +485,7 @@ class TestComputeAllMetrics:
                 total_periods=2,
                 trade_notionals=[100.0],
                 trade_group_ids=["hedge-1", "hedge-2"],
+                trade_entry_ats=[START, START],
             )
 
     def test_portfolio_diagnostics(self) -> None:

@@ -271,6 +271,7 @@ def _collapse_trades_by_group(
     trade_pnls: Sequence[TradePnL],
     trade_notionals: Sequence[float],
     trade_group_ids: Sequence[str | None],
+    trade_entry_ats: Sequence[datetime],
 ) -> tuple[list[TradePnL], list[float]]:
     """Merge trades sharing a non-None group_id into one synthetic trade
     before any stat below treats each leg as its own trade — e.g. a hedge's
@@ -279,6 +280,10 @@ def _collapse_trades_by_group(
     and combined notional instead of two individually-volatile legs. A trade
     with group_id=None is its own singleton group (current, non-hedged
     behavior, unchanged).
+
+    group_id alone is not a unique key — a strategy may reuse the same
+    literal group_id across every round-trip of a run. The merge key is
+    therefore (group_id, entry_at): legs of the same round-trip share both.
     """
     from librae.core.executor import TradePnL as _TradePnL
 
@@ -286,8 +291,10 @@ def _collapse_trades_by_group(
         raise ValueError("trade_group_ids length must match trade_pnls length")
     if len(trade_notionals) != len(trade_pnls):
         raise ValueError("trade_notionals length must match trade_pnls length")
+    if len(trade_entry_ats) != len(trade_pnls):
+        raise ValueError("trade_entry_ats length must match trade_pnls length")
 
-    groups: dict[str, list[int]] = {}
+    groups: dict[tuple[str, datetime], list[int]] = {}
     collapsed_pnls: list[TradePnL] = []
     collapsed_notionals: list[float] = []
     for i, group_id in enumerate(trade_group_ids):
@@ -295,7 +302,7 @@ def _collapse_trades_by_group(
             collapsed_pnls.append(trade_pnls[i])
             collapsed_notionals.append(trade_notionals[i])
         else:
-            groups.setdefault(group_id, []).append(i)
+            groups.setdefault((group_id, trade_entry_ats[i]), []).append(i)
 
     for members in groups.values():
         pnls = [trade_pnls[i] for i in members]
@@ -328,6 +335,7 @@ def compute_all(
     exposed_periods: int | None = None,
     trade_notionals: Sequence[float] | None = None,
     trade_group_ids: Sequence[str | None] | None = None,
+    trade_entry_ats: Sequence[datetime] | None = None,
     turnover_values: Sequence[float] | None = None,
     gross_exposure_values: Sequence[float] | None = None,
     net_exposure_values: Sequence[float] | None = None,
@@ -346,11 +354,15 @@ def compute_all(
             across instruments with different prices or multipliers.
         trade_group_ids: Per-trade OrderIntent.group_id (or None), same length
             as trade_pnls/trade_notionals. When given, trades sharing a
-            non-None group_id are combined into one trade (see
-            _collapse_trades_by_group) before every trade-level stat below —
-            win_rate, profit_factor, payoff_ratio, avg_trade_return, trades
-            count. Requires trade_notionals. Omit for the unchanged
-            per-trade-row behavior.
+            non-None group_id AND entry_at (see trade_entry_ats) are combined
+            into one trade (see _collapse_trades_by_group) before every
+            trade-level stat below — win_rate, profit_factor, payoff_ratio,
+            avg_trade_return, trades count. Requires trade_notionals and
+            trade_entry_ats. Omit for the unchanged per-trade-row behavior.
+        trade_entry_ats: Per-trade entry timestamp, same length as
+            trade_pnls. Required when trade_group_ids is given — group_id
+            alone may repeat across an entire run's round-trips, so entry_at
+            scopes the merge to one round-trip's legs.
         turnover_values: Per-event absolute traded notional divided by equity.
         gross_exposure_values: Per-event sum of absolute realized weights.
         net_exposure_values: Per-event sum of signed realized weights.
@@ -370,8 +382,10 @@ def compute_all(
     if trade_group_ids is not None:
         if trade_notionals is None:
             raise ValueError("trade_group_ids requires trade_notionals")
+        if trade_entry_ats is None:
+            raise ValueError("trade_group_ids requires trade_entry_ats")
         trade_pnls, trade_notionals = _collapse_trades_by_group(
-            trade_pnls, trade_notionals, trade_group_ids
+            trade_pnls, trade_notionals, trade_group_ids, trade_entry_ats
         )
     eq_arr = _as_positive_finite_array(equity_values, "equity_values")
 
