@@ -45,7 +45,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 19
+_STATE_SCHEMA_VERSION = 20
 
 
 def normalize_runtime_revision(
@@ -213,6 +213,7 @@ class LiveRuntimeState:
     live_rebalance: LiveRebalance | None = None
     equity_peak: float = 0.0
     prev_equity: float = 0.0
+    status_window_equity: float = 0.0
     trade_count: int = 0
     event_sequence: int = 0
     period_index: int = 0
@@ -228,7 +229,10 @@ class LiveRuntimeState:
             self.runtime_revision,
             required=self.mode == "live",
         )
-        if any(not isfinite(value) for value in (self.cash, self.equity_peak, self.prev_equity)):
+        if any(
+            not isfinite(value)
+            for value in (self.cash, self.equity_peak, self.prev_equity, self.status_window_equity)
+        ):
             raise ValueError("live runtime account values must be finite")
 
     def to_dict(self) -> dict:
@@ -260,6 +264,7 @@ class LiveRuntimeState:
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
             "equity_peak": self.equity_peak,
             "prev_equity": self.prev_equity,
+            "status_window_equity": self.status_window_equity,
             "trade_count": self.trade_count,
             "event_sequence": self.event_sequence,
             "period_index": self.period_index,
@@ -307,6 +312,7 @@ class LiveRuntimeState:
             ),
             equity_peak=float(raw["equity_peak"]),
             prev_equity=float(raw["prev_equity"]),
+            status_window_equity=float(raw["status_window_equity"]),
             trade_count=int(raw["trade_count"]),
             event_sequence=int(raw["event_sequence"]),
             period_index=int(raw["period_index"]),

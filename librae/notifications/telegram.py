@@ -364,7 +364,8 @@ class TelegramAdapter:
         symbol: str,
         equity: float,
         drawdown: float,
-        daily_pnl: float,
+        period_pnl: float,
+        num_periods: int,
         position: str = "flat",
     ) -> bool:
         """Send periodic status summary."""
@@ -375,13 +376,13 @@ class TelegramAdapter:
         safe_position = html.escape(position)
         equity_str = f"{equity:,.0f}"
         drawdown_str = f"{drawdown:+.2%}"
-        daily_pnl_str = f"{daily_pnl:+,.2f}"
+        period_pnl_str = f"{period_pnl:+,.2f}"
         lines = [
             f"<b>[{safe_strategy}] Status</b>",
             f"Symbol: <code>{safe_symbol}</code>",
             f"Equity: <code>{equity_str}</code>",
             f"Drawdown: <code>{drawdown_str}</code>",
-            f"Daily PnL: <code>{daily_pnl_str}</code>",
+            f"PnL (last {num_periods} periods): <code>{period_pnl_str}</code>",
             f"Position: <code>{safe_position}</code>",
             f"<i>{_timestamp()}</i>",
         ]
@@ -393,7 +394,8 @@ class TelegramAdapter:
                 "symbol": safe_symbol,
                 "equity": equity_str,
                 "drawdown": drawdown_str,
-                "daily_pnl": daily_pnl_str,
+                "period_pnl": period_pnl_str,
+                "num_periods": str(num_periods),
                 "position": safe_position,
                 "timestamp": _timestamp(),
             },

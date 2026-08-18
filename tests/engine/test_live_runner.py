@@ -1114,6 +1114,28 @@ class TestLiveTrader:
                 status_interval_periods=interval,
             )
 
+    def test_status_notification_accumulates_pnl_over_the_full_window(self):
+        """period_pnl must be the change over all `num_periods` bars since
+        the last status notification, not just the most recent bar — a
+        constant per-bar accounting update (like _prev_equity) must not
+        reset the window early."""
+        notifier = MagicMock(enabled=True)
+        runner = self._make_runner(
+            notifier=notifier,
+            status_interval_periods=3,
+        )
+        equity_sequence = iter([100_010.0, 100_005.0, 100_030.0, 999_999.0])
+        runner._calc_account_snapshot = lambda: (next(equity_sequence), {})
+
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
+        for _ in range(3):
+            runner._record_equity(ts, {})
+
+        notifier.send_status.assert_called_once()
+        kwargs = notifier.send_status.call_args.kwargs
+        assert kwargs["period_pnl"] == pytest.approx(100_030.0 - 100_000.0)
+        assert kwargs["num_periods"] == 3
+
     def test_cash_deducted_on_entry(self):
         """Cash should decrease after a buy."""
         cash_values: list[float] = []

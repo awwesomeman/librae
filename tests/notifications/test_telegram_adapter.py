@@ -89,7 +89,7 @@ class TestTelegramAdapter:
 
     def test_send_status_noop_when_flag_off(self):
         adapter = self._make_adapter(enabled=True, status_enabled=False)
-        assert adapter.send_status("s", "BTC", 100_000, -0.05, 500) is False
+        assert adapter.send_status("s", "BTC", 100_000, -0.05, 500, 12) is False
 
     # --- Disabled adapter always returns False ---
 
@@ -107,7 +107,7 @@ class TestTelegramAdapter:
 
     def test_send_status_noop_when_disabled(self):
         adapter = self._make_adapter(enabled=False)
-        assert adapter.send_status("s", "BTC", 100_000, -0.05, 500) is False
+        assert adapter.send_status("s", "BTC", 100_000, -0.05, 500, 12) is False
 
     # --- chat_id override from config ---
 

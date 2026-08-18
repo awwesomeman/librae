@@ -600,7 +600,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `send_startup` | `strategy, symbol, mode, run_id` |
 | `send_shutdown` | `strategy, symbol, reason` |
 | `send_alert` | `title, message` |
-| `send_status` | `strategy, symbol, equity, drawdown, daily_pnl, position` |
+| `send_status` | `strategy, symbol, equity, drawdown, period_pnl, num_periods, position` |
 
 All integrations default to `None` in direct `LiveTrader` construction except
 the required market-data adapter. Live mode rejects construction without an

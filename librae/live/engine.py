@@ -373,6 +373,7 @@ class LiveTrader:
         self._live_rebalance: LiveRebalance | None = None
         self._equity_peak = self._cash
         self._prev_equity = self._cash
+        self._status_window_equity = self._cash
         self._trade_count: int = 0
         self._event_sequence: int = 0
         self._performance_dirty: bool = False
@@ -469,6 +470,7 @@ class LiveTrader:
             live_rebalance=deepcopy(self._live_rebalance),
             equity_peak=self._equity_peak,
             prev_equity=self._prev_equity,
+            status_window_equity=self._status_window_equity,
             trade_count=self._trade_count,
             event_sequence=self._event_sequence,
             period_index=self._period_index,
@@ -506,6 +508,7 @@ class LiveTrader:
         self._live_rebalance = state.live_rebalance
         self._equity_peak = state.equity_peak
         self._prev_equity = state.prev_equity
+        self._status_window_equity = state.status_window_equity
         self._trade_count = state.trade_count
         self._event_sequence = state.event_sequence
         self._period_index = state.period_index
@@ -1111,6 +1114,7 @@ class LiveTrader:
         self._halted = False
         self._equity_peak = equity
         self._prev_equity = equity
+        self._status_window_equity = equity
         self._persist_state()
 
     def _setup_signal_handlers(self) -> None:
@@ -2414,6 +2418,7 @@ class LiveTrader:
         if self._status_interval is not None:
             self._status_period_count += 1
             if self._status_period_count >= self._status_interval:
+                num_periods = self._status_period_count
                 self._status_period_count = 0
                 pos_str = "flat"
                 if self._positions:
@@ -2428,9 +2433,11 @@ class LiveTrader:
                     symbol=",".join(self._positions),
                     equity=equity,
                     drawdown=drawdown,
-                    daily_pnl=period_return * equity,
+                    period_pnl=equity - self._status_window_equity,
+                    num_periods=num_periods,
                     position=pos_str,
                 )
+                self._status_window_equity = equity
 
     def _flatten_account_and_halt(
         self,

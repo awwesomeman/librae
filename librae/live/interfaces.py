@@ -88,7 +88,8 @@ class Notifier(Protocol):
         symbol: str,
         equity: float,
         drawdown: float,
-        daily_pnl: float,
+        period_pnl: float,
+        num_periods: int,
         position: str,
     ) -> object: ...
 
