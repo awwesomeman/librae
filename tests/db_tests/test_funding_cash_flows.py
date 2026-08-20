@@ -44,6 +44,8 @@ def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) 
         multiplier=1.0,
         rate=0.0001,
         cash_flow=-20.0,
+        group_id="funding_arb",
+        entry_at=ts,
     )
 
     sql, values = cursor.execute.call_args.args
@@ -60,6 +62,8 @@ def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) 
         1.0,
         0.0001,
         -20.0,
+        "funding_arb",
+        ts,
     )
 
 
@@ -112,6 +116,8 @@ def test_save_backtest_output_batches_funding_diagnostics(
                 multiplier=1.0,
                 rate=0.0001,
                 cash_flow=-20.0,
+                group_id=None,
+                entry_at=ts,
             ),
         ),
     )
@@ -124,4 +130,4 @@ def test_save_backtest_output_batches_funding_diagnostics(
         for call in mock_execute_values.call_args_list
         if "INSERT INTO funding_cash_flows" in call.args[1]
     )
-    assert funding_call.args[2][0][-1] == -20.0
+    assert funding_call.args[2][0][-3] == -20.0

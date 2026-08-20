@@ -17,7 +17,14 @@ FUNDING_MARK_PRICE_FIELD = "funding_mark_price"
 
 @dataclass(frozen=True, slots=True)
 class FundingCashFlow:
-    """One funding payment calculated from a confirmed open position."""
+    """One funding payment calculated from a confirmed open position.
+
+    group_id/entry_at are copied from the accruing PositionState so this
+    payment can be attributed back to the trade it belongs to (see
+    librae.core.metrics._collapse_trades_by_group's (group_id, entry_at) key)
+    — entry_at is stable across a position's whole hold (only set on open,
+    untouched by scale-ins).
+    """
 
     ts: datetime
     symbol: str
@@ -27,6 +34,8 @@ class FundingCashFlow:
     multiplier: float
     rate: float
     cash_flow: float
+    group_id: str | None
+    entry_at: datetime
 
 
 def _optional_finite_float(value: object, *, field: str, symbol: str) -> float | None:
@@ -108,6 +117,8 @@ def calculate_funding_cash_flows(
                 multiplier=float(cost_model.multiplier),
                 rate=rate,
                 cash_flow=float(cash_flow),
+                group_id=position.group_id,
+                entry_at=position.entry_at,
             )
         )
     return tuple(observed_symbols), cash_flows

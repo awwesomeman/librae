@@ -406,6 +406,8 @@ def save_backtest_output(
                     cash_flow.multiplier,
                     cash_flow.rate,
                     cash_flow.cash_flow,
+                    cash_flow.group_id,
+                    _to_dt(cash_flow.entry_at),
                 )
                 for cash_flow in output.funding_cash_flows
             ]
@@ -413,7 +415,8 @@ def save_backtest_output(
                 cur,
                 """INSERT INTO funding_cash_flows
                    (ts, run_id, account_id, currency, symbol, side,
-                    quantity, mark_price, multiplier, rate, cash_flow)
+                    quantity, mark_price, multiplier, rate, cash_flow,
+                    group_id, entry_at)
                    VALUES %s
                    ON CONFLICT (run_id, account_id, symbol, ts) DO UPDATE SET
                      currency=EXCLUDED.currency,
@@ -422,7 +425,9 @@ def save_backtest_output(
                      mark_price=EXCLUDED.mark_price,
                      multiplier=EXCLUDED.multiplier,
                      rate=EXCLUDED.rate,
-                     cash_flow=EXCLUDED.cash_flow""",
+                     cash_flow=EXCLUDED.cash_flow,
+                     group_id=EXCLUDED.group_id,
+                     entry_at=EXCLUDED.entry_at""",
                 funding_rows,
                 page_size=500,
             )
@@ -996,6 +1001,8 @@ def write_funding_cash_flow(
     multiplier: float,
     rate: float,
     cash_flow: float,
+    group_id: str | None,
+    entry_at: datetime,
     dsn: str | None = None,
 ) -> None:
     """Write one idempotent funding payment."""
@@ -1004,8 +1011,9 @@ def write_funding_cash_flow(
         cur.execute(
             """INSERT INTO funding_cash_flows
                (ts, run_id, account_id, currency, symbol, side,
-                quantity, mark_price, multiplier, rate, cash_flow)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                quantity, mark_price, multiplier, rate, cash_flow,
+                group_id, entry_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, account_id, symbol, ts) DO UPDATE SET
                  currency=EXCLUDED.currency,
                  side=EXCLUDED.side,
@@ -1013,7 +1021,9 @@ def write_funding_cash_flow(
                  mark_price=EXCLUDED.mark_price,
                  multiplier=EXCLUDED.multiplier,
                  rate=EXCLUDED.rate,
-                 cash_flow=EXCLUDED.cash_flow""",
+                 cash_flow=EXCLUDED.cash_flow,
+                 group_id=EXCLUDED.group_id,
+                 entry_at=EXCLUDED.entry_at""",
             (
                 _to_dt(ts),
                 run_id,
@@ -1026,6 +1036,8 @@ def write_funding_cash_flow(
                 multiplier,
                 rate,
                 cash_flow,
+                group_id,
+                _to_dt(entry_at),
             ),
         )
         cur.close()
@@ -1165,7 +1177,12 @@ def refresh_performance(
     """
     from types import SimpleNamespace as _NS
 
-    from librae.db.timescale_reader import load_equity_curve, load_trade_events
+    from librae.core import EPSILON
+    from librae.db.timescale_reader import (
+        load_equity_curve,
+        load_funding_cash_flows,
+        load_trade_events,
+    )
 
     _CLOSE_TYPES = ["close", "reduce"]
     from librae.core.metrics import compute_all
@@ -1204,36 +1221,62 @@ def refresh_performance(
                 "closed trade event missing required performance fields: " + ", ".join(missing)
             )
 
+    funding_df = load_funding_cash_flows(run_id, account_id=account_id)
+    funding_by_trade: dict[tuple[str, object], float] = {}
+    for row in funding_df.to_dict("records") if not funding_df.empty else []:
+        key = (row["symbol"], row["entry_at"])
+        funding_by_trade[key] = funding_by_trade.get(key, 0.0) + float(row["cash_flow"])
+
+    # A partial close writes multiple trade_events rows sharing one
+    # (symbol, entry_at) — split that round-trip's funding across them by
+    # closed-quantity share, mirroring core.executor.reduce_position's
+    # pro-rating of entry costs across partial closes.
+    quantity_by_trade: dict[tuple[str, object], float] = {}
+    for r in trade_rows:
+        key = (r["symbol"], r["entry_at"])
+        quantity_by_trade[key] = quantity_by_trade.get(key, 0.0) + float(r["fill_quantity"])
+
     # WHY: compute_all accepts primitive sequences — build them from DB rows
     eq_records = eq_df.to_dict("records")
     equity_values = [float(r["equity"]) for r in eq_records]
     timestamps = [r["_time"] for r in eq_records]
-    trade_pnls = [
-        _NS(
-            gross_pnl=float(
-                r["pnl"]
-                + r["entry_commission"]
-                + r["entry_slippage"]
-                + r["entry_tax"]
-                + r["commission"]
-                + r["slippage"]
-                + r["tax"]
-            ),
-            net_pnl=float(r["pnl"]),
-            commission=float(r["entry_commission"] + r["commission"]),
-            slippage=float(r["entry_slippage"] + r["slippage"]),
-            tax=float(r["entry_tax"] + r["tax"]),
-            gross_return=0.0,
-            net_return=float(r["net_return"]),
-            exit_commission=0.0,
-            exit_slippage=0.0,
-            exit_tax=0.0,
-        )
-        for r in trade_rows
-    ]
     trade_notionals = [
         abs(float(r["notional"] * r["entry_price"] / r["price"])) for r in trade_rows
     ]
+    trade_pnls = []
+    for r, notional in zip(trade_rows, trade_notionals, strict=True):
+        key = (r["symbol"], r["entry_at"])
+        total_funding = funding_by_trade.get(key, 0.0)
+        total_quantity = quantity_by_trade[key]
+        funding_pnl = (
+            total_funding * (float(r["fill_quantity"]) / total_quantity)
+            if total_funding != 0.0 and total_quantity > EPSILON
+            else 0.0
+        )
+        funding_return = (funding_pnl / notional * 100.0) if notional > EPSILON else 0.0
+        trade_pnls.append(
+            _NS(
+                gross_pnl=float(
+                    r["pnl"]
+                    + r["entry_commission"]
+                    + r["entry_slippage"]
+                    + r["entry_tax"]
+                    + r["commission"]
+                    + r["slippage"]
+                    + r["tax"]
+                    + funding_pnl
+                ),
+                net_pnl=float(r["pnl"]) + funding_pnl,
+                commission=float(r["entry_commission"] + r["commission"]),
+                slippage=float(r["entry_slippage"] + r["slippage"]),
+                tax=float(r["entry_tax"] + r["tax"]),
+                gross_return=0.0 + funding_return,
+                net_return=float(r["net_return"]) + funding_return,
+                exit_commission=0.0,
+                exit_slippage=0.0,
+                exit_tax=0.0,
+            )
+        )
     trade_group_ids = [
         r.get("group_id") if pd.notna(r.get("group_id")) else None for r in trade_rows
     ]

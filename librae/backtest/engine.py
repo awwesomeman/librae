@@ -199,6 +199,60 @@ def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None
     return data_timeframe
 
 
+def _attribute_funding_to_trades(
+    trades: Sequence[TradeResult],
+    trade_notionals: Sequence[float],
+    funding_cash_flows: Sequence[FundingCashFlow],
+) -> list[TradePnL]:
+    """Fold each round-trip's accrued funding into its closed trade(s)'
+    PnL/return before metrics — trade_events keeps the fill-only PnL
+    untouched; only the derived TradePnL fed to compute_all changes, so
+    win_rate/profit_factor/avg_trade_return see a perpetual position's real
+    edge (see librae.core.funding.FundingCashFlow).
+
+    A partial close produces multiple TradeResults sharing one (symbol,
+    entry_at) — funding accrued over that round-trip is split across them
+    by closed-quantity share, mirroring how core.executor.reduce_position
+    pro-rates entry costs across partial closes.
+    """
+    funding_by_key: dict[tuple[str, datetime], float] = {}
+    for flow in funding_cash_flows:
+        key = (flow.symbol, flow.entry_at)
+        funding_by_key[key] = funding_by_key.get(key, 0.0) + flow.cash_flow
+
+    quantity_by_key: dict[tuple[str, datetime], float] = {}
+    for trade in trades:
+        key = (trade.symbol, trade.entry_at)
+        quantity_by_key[key] = quantity_by_key.get(key, 0.0) + trade.quantity
+
+    trade_pnls = []
+    for trade, notional in zip(trades, trade_notionals, strict=True):
+        key = (trade.symbol, trade.entry_at)
+        total_funding = funding_by_key.get(key, 0.0)
+        total_quantity = quantity_by_key[key]
+        funding_pnl = (
+            total_funding * (trade.quantity / total_quantity)
+            if total_funding != 0.0 and total_quantity > EPSILON
+            else 0.0
+        )
+        funding_return = (funding_pnl / notional * 100.0) if notional > EPSILON else 0.0
+        trade_pnls.append(
+            TradePnL(
+                gross_pnl=trade.gross_pnl + funding_pnl,
+                net_pnl=trade.net_pnl + funding_pnl,
+                commission=trade.commission,
+                slippage=trade.slippage,
+                tax=trade.tax,
+                gross_return=trade.gross_return + funding_return,
+                net_return=trade.net_return + funding_return,
+                exit_commission=0.0,
+                exit_slippage=0.0,
+                exit_tax=trade.tax,
+            )
+        )
+    return trade_pnls
+
+
 # ---------------------------------------------------------------------------
 # Backtest class
 # ---------------------------------------------------------------------------
@@ -771,35 +825,20 @@ class Backtest:
         timeframe = self._timeframe
 
         account = result.account
-        trade_pnls = [
-            TradePnL(
-                gross_pnl=trade.gross_pnl,
-                net_pnl=trade.net_pnl,
-                commission=trade.commission,
-                slippage=trade.slippage,
-                tax=trade.tax,
-                gross_return=trade.gross_return,
-                net_return=trade.net_return,
-                exit_commission=0.0,
-                exit_slippage=0.0,
-                exit_tax=trade.tax,
-            )
+        trade_notionals = [
+            abs(trade.entry_price * trade.quantity * self._get_cost_model(trade.symbol).multiplier)
             for trade in result.trades
         ]
+        trade_pnls = _attribute_funding_to_trades(
+            result.trades, trade_notionals, result.funding_cash_flows
+        )
         metrics = compute_all(
             equity_values=[snapshot.equity for snapshot in account.equity_curve],
             timestamps=[snapshot.ts for snapshot in account.equity_curve],
             trade_pnls=trade_pnls,
             total_periods=len(account.equity_curve),
             exposed_periods=account.exposed_periods,
-            trade_notionals=[
-                abs(
-                    trade.entry_price
-                    * trade.quantity
-                    * self._get_cost_model(trade.symbol).multiplier
-                )
-                for trade in result.trades
-            ],
+            trade_notionals=trade_notionals,
             trade_group_ids=[trade.group_id for trade in result.trades],
             trade_entry_ats=[trade.entry_at for trade in result.trades],
             turnover_values=[snapshot.turnover for snapshot in account.portfolio_snapshots],
@@ -968,6 +1007,8 @@ class Backtest:
                 multiplier=cash_flow.multiplier,
                 rate=cash_flow.rate,
                 cash_flow=cash_flow.cash_flow,
+                group_id=cash_flow.group_id,
+                entry_at=cash_flow.entry_at,
             )
             for cash_flow in result.funding_cash_flows
         ]

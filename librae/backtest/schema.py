@@ -150,6 +150,8 @@ class FundingCashFlowRecord:
     multiplier: float
     rate: float
     cash_flow: float
+    group_id: str | None
+    entry_at: datetime
 
 
 @dataclass(frozen=True)

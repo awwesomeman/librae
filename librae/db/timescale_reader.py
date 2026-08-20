@@ -194,8 +194,11 @@ def load_trade_events(
     sql += " ORDER BY ts"
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=params)
-    if not df.empty and "_time" in df.columns:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    if not df.empty:
+        if "_time" in df.columns:
+            df["_time"] = pd.to_datetime(df["_time"], utc=True)
+        if "entry_at" in df.columns:
+            df["entry_at"] = pd.to_datetime(df["entry_at"], utc=True)
     return df
 
 
@@ -208,7 +211,8 @@ def load_funding_cash_flows(
     """Load applied perpetual-funding payments for a run."""
     sql = """
         SELECT ts AS _time, account_id, currency, symbol, side,
-               quantity, mark_price, multiplier, rate, cash_flow
+               quantity, mark_price, multiplier, rate, cash_flow,
+               group_id, entry_at
         FROM funding_cash_flows
         WHERE run_id = %s
     """
@@ -219,8 +223,11 @@ def load_funding_cash_flows(
     sql += " ORDER BY account_id, ts, symbol"
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=params)
-    if not df.empty and "_time" in df.columns:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    if not df.empty:
+        if "_time" in df.columns:
+            df["_time"] = pd.to_datetime(df["_time"], utc=True)
+        if "entry_at" in df.columns:
+            df["entry_at"] = pd.to_datetime(df["entry_at"], utc=True)
     return df
 
 

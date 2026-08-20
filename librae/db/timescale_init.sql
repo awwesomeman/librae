@@ -223,6 +223,8 @@ CREATE TABLE IF NOT EXISTS funding_cash_flows (
     multiplier      DOUBLE PRECISION NOT NULL,
     rate            DOUBLE PRECISION NOT NULL,
     cash_flow       DOUBLE PRECISION NOT NULL,
+    group_id        TEXT,
+    entry_at        TIMESTAMPTZ NOT NULL,
     CONSTRAINT chk_funding_side CHECK (side IN ('long', 'short')),
     CONSTRAINT chk_funding_quantity CHECK (quantity > 0),
     CONSTRAINT chk_funding_mark_price CHECK (mark_price > 0),

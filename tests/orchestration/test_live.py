@@ -627,6 +627,8 @@ def test_timescale_callbacks_mark_one_shot_writes_critical(
                     multiplier=1.0,
                     rate=0.0001,
                     cash_flow=-0.01,
+                    group_id=None,
+                    entry_at=datetime.now(UTC),
                 )
             )
         else:

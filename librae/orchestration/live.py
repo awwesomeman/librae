@@ -307,6 +307,8 @@ class _TimescaleCallbacks:
             multiplier=cash_flow.multiplier,
             rate=cash_flow.rate,
             cash_flow=cash_flow.cash_flow,
+            group_id=cash_flow.group_id,
+            entry_at=cash_flow.entry_at,
         )
 
     def on_runtime_event(self, event: RuntimeEvent) -> None:

@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
-from librae.core.funding import calculate_funding_cash_flows
+from librae.backtest.engine import _attribute_funding_to_trades
+from librae.core.executor import TradeResult
+from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
 from librae.core.strategy import PositionState
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
@@ -79,6 +81,25 @@ class _OpenOnce(Strategy):
     def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if ctx.period_index == 0:
             return [OrderIntent(action=self.side, symbol=ctx.symbol, quantity=2.0)]
+        return []
+
+
+class _OpenThenClose(Strategy):
+    """Opens on bar 0, signals close one bar before the end (so the close
+    fills normally on the last bar instead of via end-of-run forced
+    liquidation) — trade-level stats then see a single closed round-trip
+    whose only PnL source is funding accrued while held (flat price + zero
+    costs leave basis convergence at 0)."""
+
+    def __init__(self, side: str, n_bars: int) -> None:
+        self.side = side
+        self._n_bars = n_bars
+
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        if ctx.period_index == 0:
+            return [OrderIntent(action=self.side, symbol=ctx.symbol, quantity=2.0)]
+        if ctx.period_index == self._n_bars - 2:
+            return [OrderIntent(action="close", symbol=ctx.symbol)]
         return []
 
 
@@ -177,6 +198,110 @@ def test_backtest_uses_explicit_funding_mark_price_and_multiplier() -> None:
     assert len(result.funding_cash_flows) == 1
     assert result.funding_cash_flows[0].cash_flow == pytest.approx(11.0)
     assert result.final_equity == pytest.approx(10_011.0)
+
+
+def test_funding_cash_flow_carries_the_accruing_position_group_id_and_entry_at() -> None:
+    position = _position()
+    observed, cash_flows = calculate_funding_cash_flows(
+        datetime(2026, 1, 1, 1, tzinfo=UTC),
+        {"PERP": {"close": 100.0, "funding_rate": 0.01}},
+        {"PERP": position},
+        get_cost_model=lambda _symbol: _cost_model(),
+    )
+
+    assert observed == ("PERP",)
+    assert cash_flows[0].group_id == position.group_id
+    assert cash_flows[0].entry_at == position.entry_at
+
+
+def test_funding_accrued_while_held_is_folded_into_the_closed_trade_stats() -> None:
+    """Flat price + zero costs mean the only real PnL for this round-trip is
+    the funding received while short — win_rate/avg_trade_return must see
+    it, not just the (zero) basis-convergence PnL trade_events records."""
+    data = _backtest_frame([np.nan, 0.01, np.nan, np.nan, np.nan])
+    backtest = Backtest(
+        data,
+        _OpenThenClose(side="short", n_bars=5),
+        initial_balance=10_000.0,
+        cost_model=_cost_model(),
+        data_source="test",
+    )
+    backtest.run()
+    output = backtest.build_output()
+
+    assert [item.cash_flow for item in output.funding_cash_flows] == pytest.approx([20.0])
+    assert output.metrics.trades == 1
+    assert output.metrics.win_rate == pytest.approx(1.0)
+    # notional = entry_price(100) * quantity(2) * multiplier(10) = 2_000;
+    # funding(20)/notional*100 = 1.0% — the only PnL, since price is flat
+    # and costs are zero.
+    assert output.metrics.avg_trade_return == pytest.approx(0.01)
+
+
+def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -> None:
+    """A partial close writes multiple TradeResults sharing one (symbol,
+    entry_at). Funding accrued over that round-trip must be split across
+    them by closed-quantity share — attributing the full amount to each row
+    independently would double (or N-times) count it."""
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    trades = [
+        TradeResult(
+            symbol="PERP",
+            entry_at=entry_at,
+            exit_at=datetime(2026, 1, 1, 2, tzinfo=UTC),
+            side="short",
+            entry_price=100.0,
+            exit_price=100.0,
+            quantity=3.0,
+            gross_pnl=0.0,
+            commission=0.0,
+            slippage=0.0,
+            tax=0.0,
+            net_pnl=0.0,
+            gross_return=0.0,
+            net_return=0.0,
+            periods_held=2,
+        ),
+        TradeResult(
+            symbol="PERP",
+            entry_at=entry_at,
+            exit_at=datetime(2026, 1, 1, 3, tzinfo=UTC),
+            side="short",
+            entry_price=100.0,
+            exit_price=100.0,
+            quantity=2.0,
+            gross_pnl=0.0,
+            commission=0.0,
+            slippage=0.0,
+            tax=0.0,
+            net_pnl=0.0,
+            gross_return=0.0,
+            net_return=0.0,
+            periods_held=3,
+        ),
+    ]
+    funding_cash_flows = [
+        FundingCashFlow(
+            ts=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            symbol="PERP",
+            side="short",
+            quantity=5.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=50.0,
+            group_id=None,
+            entry_at=entry_at,
+        )
+    ]
+    notionals = [300.0, 200.0]  # entry_price(100) * quantity
+
+    trade_pnls = _attribute_funding_to_trades(trades, notionals, funding_cash_flows)
+
+    # Split 3:2 by closed quantity (5 total) — not 50.0 attributed to each.
+    assert trade_pnls[0].net_pnl == pytest.approx(30.0)
+    assert trade_pnls[1].net_pnl == pytest.approx(20.0)
+    assert sum(pnl.net_pnl for pnl in trade_pnls) == pytest.approx(50.0)
 
 
 def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
