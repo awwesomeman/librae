@@ -534,6 +534,11 @@ def reset_realtime_state(config: RunConfig) -> None:
     fresh run_id. Does not touch position_events/equity_curve/etc — those are
     real execution history, not derivable from the checkpoint, and require
     a separate, explicit decision to discard.
+
+    Works on a checkpoint this build cannot read, which is the situation that
+    most often sends an operator here: after a _STATE_SCHEMA_VERSION bump the
+    engine refuses to start, and the only way forward is to clear the old
+    checkpoint.
     """
     if config.mode == "backtest":
         raise ValueError("--reset-state applies to sim/live only; backtest has no checkpoint")
@@ -551,7 +556,21 @@ def reset_realtime_state(config: RunConfig) -> None:
             "currently holds its lease — stop it first"
         )
     try:
-        existing = store.load(state_key)
+        try:
+            existing = store.load(state_key)
+        except ValueError as exc:
+            # A checkpoint this build cannot parse — a runtime-state schema
+            # bump is the usual cause — is the case this command exists for,
+            # so clearing one must never require parsing it first. Reaching
+            # here means a row was read, so there is something to delete.
+            store.delete(state_key)
+            logger.info(
+                "Deleted unreadable checkpoint for state_key=%s (%s); next start "
+                "begins a fresh run — trade/equity history is untouched",
+                state_key,
+                exc,
+            )
+            return
         if existing is None:
             logger.info("No checkpoint found for state_key=%s; nothing to reset", state_key)
             return

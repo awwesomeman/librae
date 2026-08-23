@@ -759,6 +759,23 @@ class TestResetRealtimeState:
         store.delete.assert_called_once_with(state_key)
         store.release_lease.assert_called_once_with(state_key)
 
+    def test_deletes_a_checkpoint_this_build_cannot_parse(self):
+        """The escape hatch must not depend on parsing what it clears — a
+        state-schema bump is the very case that sends an operator here."""
+        config = _make_cfg(mode="sim")
+        state_key = f"sim:{config.config_hash}"
+        store = MagicMock()
+        store.acquire_lease.return_value = True
+        store.load.side_effect = ValueError(
+            "unsupported live runtime-state schema: expected 21, got 20"
+        )
+
+        with patch("librae.db.timescale_state.TimescaleLiveStateStore", return_value=store):
+            reset_realtime_state(config)
+
+        store.delete.assert_called_once_with(state_key)
+        store.release_lease.assert_called_once_with(state_key)
+
     def test_raises_when_another_process_holds_the_lease(self):
         config = _make_cfg(mode="sim")
         store = MagicMock()
