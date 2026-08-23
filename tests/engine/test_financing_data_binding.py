@@ -1,8 +1,12 @@
-"""_bind_market_data_source() merges funding_rate onto perpetual OHLCV bars."""
+"""_bind_market_data_source() merges financing rates onto OHLCV bars:
+funding for perpetuals, borrow interest for everything else."""
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
+import pytest
 from librae.config.symbols import SymbolInfo
 from librae.live.engine import _bind_market_data_source
 
@@ -112,3 +116,86 @@ def test_funding_far_from_any_bar_is_not_attributed():
     bars = fetcher("BTC-PERP", "8h", 2)
 
     assert bars["funding_rate"].isna().all()
+
+
+# ---------------------------------------------------------------------------
+# Borrow rate — a step function, not a discrete settlement
+# ---------------------------------------------------------------------------
+
+
+class _BorrowAdapter(_FakeCryptoAdapter):
+    """Publishes one daily rate before the first bar, as Binance does."""
+
+    borrow_ts: ClassVar[list[str]] = ["2025-12-31T00:00:00Z"]
+    borrow_rates: ClassVar[list[float]] = [0.00024]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.borrow_calls: list[tuple[str, int]] = []
+
+    def fetch_borrow_rate_history(self, symbol, limit=100, *, since=None):
+        self.borrow_calls.append((symbol, limit))
+        return pd.DataFrame(
+            {
+                "ts": pd.to_datetime(self.borrow_ts, utc=True),
+                "borrow_rate": self.borrow_rates,
+                "rate_period_seconds": [86_400.0] * len(self.borrow_ts),
+            }
+        )
+
+
+def test_borrow_rate_is_scaled_from_its_own_period_to_the_bar():
+    adapter = _BorrowAdapter()
+    fetcher = _bind_market_data_source(adapter, _instrument("spot"))
+
+    bars = fetcher("BTC-SPOT", "8h", 2)
+
+    # A 0.00024 daily rate over an 8h bar is a third of a day.
+    assert bars["borrow_rate"].tolist() == [pytest.approx(0.00008), pytest.approx(0.00008)]
+    assert adapter.borrow_calls == [("BTC/USDT:USDT", 2)]
+
+
+def test_one_publication_charges_every_later_bar():
+    """A borrow rate stays in force until the next publication, so it must
+    carry forward — a nearest-match join would charge one bar and leave the
+    rest free."""
+    adapter = _BorrowAdapter()
+    fetcher = _bind_market_data_source(adapter, _instrument("spot"))
+
+    bars = fetcher("BTC-SPOT", "8h", 2)
+
+    assert not bars["borrow_rate"].isna().any()
+
+
+def test_a_rate_older_than_its_staleness_bound_is_not_carried_forward():
+    class _StaleBorrowAdapter(_BorrowAdapter):
+        borrow_ts: ClassVar[list[str]] = ["2025-12-01T00:00:00Z"]
+
+    fetcher = _bind_market_data_source(_StaleBorrowAdapter(), _instrument("spot"))
+
+    bars = fetcher("BTC-SPOT", "8h", 2)
+
+    # Left NaN: the engine skips an unknown rate rather than reading it as free.
+    assert bars["borrow_rate"].isna().all()
+
+
+def test_perpetuals_get_funding_and_never_borrow():
+    """Charging both would double-count a perpetual's holding cost."""
+    adapter = _BorrowAdapter()
+    fetcher = _bind_market_data_source(adapter, _instrument("contract_perpetual"))
+
+    bars = fetcher("BTC-PERP", "8h", 2)
+
+    assert "funding_rate" in bars.columns
+    assert "borrow_rate" not in bars.columns
+    assert adapter.borrow_calls == []
+
+
+def test_spot_without_a_borrow_fetcher_is_left_alone():
+    adapter = _FakeCryptoAdapter()
+    fetcher = _bind_market_data_source(adapter, _instrument("spot"))
+
+    bars = fetcher("BTC-SPOT", "8h", 2)
+
+    assert "borrow_rate" not in bars.columns
+    assert adapter.funding_calls == []

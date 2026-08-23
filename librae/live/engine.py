@@ -58,6 +58,7 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import session_label, session_labels, validate_calendar_id
+from librae.core.utils import interval_to_timedelta
 
 from .executor import ExecutionReport, LiveExecutor, OrderRequest
 from .interfaces import (
@@ -92,6 +93,11 @@ logger = logging.getLogger(__name__)
 # be attributed to it — far above exchange millisecond jitter, far below any
 # supported bar interval.
 _FUNDING_TS_TOLERANCE = pd.Timedelta("1min")
+
+# How many of the exchange's own publication periods a borrow rate keeps
+# describing the market. A rate is a step function, so it must carry forward
+# past its publication bar -- but not indefinitely.
+_BORROW_RATE_MAX_AGE_PERIODS = 3
 
 
 @dataclass(frozen=True)
@@ -159,31 +165,71 @@ def _bind_market_data_source(
             drop_incomplete=drop_incomplete,
         )
 
+    is_perpetual = instrument.instrument_type == "contract_perpetual"
     fetch_funding_rate_history = getattr(source, "fetch_funding_rate_history", None)
-    if instrument.instrument_type != "contract_perpetual" or not callable(
-        fetch_funding_rate_history
-    ):
-        return base_fetcher
+    fetch_borrow_rate_history = getattr(source, "fetch_borrow_rate_history", None)
 
-    def _with_funding(_symbol, tf, limit, *, drop_incomplete=False):
-        bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
-        if bars.empty:
-            return bars
-        funding = fetch_funding_rate_history(instrument.venue_symbol, limit=limit)
-        if funding.empty:
-            return bars
-        # Settlement timestamps jitter off the bar grid by milliseconds (Binance
-        # fundingTime 08:00:00.003), so an exact-equality merge silently drops
-        # roughly half of all payments.
-        return pd.merge_asof(
-            bars,
-            funding.sort_values("ts"),
-            on="ts",
-            direction="nearest",
-            tolerance=_FUNDING_TS_TOLERANCE,
-        )
+    # A perpetual's holding cost is funding; anything else that can be sold
+    # short is borrowed and pays interest. Never both, or the position is
+    # charged twice (see librae.core.financing).
+    if is_perpetual and callable(fetch_funding_rate_history):
 
-    return _with_funding
+        def _with_funding(_symbol, tf, limit, *, drop_incomplete=False):
+            bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
+            if bars.empty:
+                return bars
+            funding = fetch_funding_rate_history(instrument.venue_symbol, limit=limit)
+            if funding.empty:
+                return bars
+            # A settlement is a discrete payment, so it attaches to the one bar
+            # it lands on. Timestamps jitter off the bar grid by milliseconds
+            # (Binance fundingTime 08:00:00.003), so an exact-equality merge
+            # silently drops roughly half of all payments.
+            return pd.merge_asof(
+                bars,
+                funding.sort_values("ts"),
+                on="ts",
+                direction="nearest",
+                tolerance=_FUNDING_TS_TOLERANCE,
+            )
+
+        return _with_funding
+
+    if not is_perpetual and callable(fetch_borrow_rate_history):
+
+        def _with_borrow(_symbol, tf, limit, *, drop_incomplete=False):
+            bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
+            if bars.empty:
+                return bars
+            borrow = fetch_borrow_rate_history(instrument.venue_symbol, limit=limit)
+            if borrow.empty:
+                return bars
+            # Unlike a funding settlement, a borrow rate is a step function:
+            # the last published rate stays in force until the next one, so
+            # every bar after it accrues at that rate. A "nearest" join would
+            # charge one bar per publication and leave the rest free.
+            period = borrow["rate_period_seconds"].astype(float)
+            bar_seconds = interval_to_timedelta(tf).total_seconds()
+            # The exchange quotes a rate over its own period (Binance: daily);
+            # the engine charges once per bar.
+            scaled = borrow.assign(
+                borrow_rate=borrow["borrow_rate"].astype(float) * bar_seconds / period
+            ).sort_values("ts")
+            # Past a few publication periods the last rate no longer describes
+            # the market. Leaving it NaN charges nothing, which the engine reads
+            # as "unknown", not as "free" -- see librae.core.financing.
+            max_age = pd.Timedelta(seconds=float(period.max()) * _BORROW_RATE_MAX_AGE_PERIODS)
+            return pd.merge_asof(
+                bars,
+                scaled[["ts", "borrow_rate"]],
+                on="ts",
+                direction="backward",
+                tolerance=max_age,
+            )
+
+        return _with_borrow
+
+    return base_fetcher
 
 
 class LiveTrader:

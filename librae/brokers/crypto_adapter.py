@@ -360,6 +360,42 @@ class CryptoAdapter:
         df["ts"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         return df[["ts", "funding_rate"]].astype({"funding_rate": float})
 
+    def fetch_borrow_rate_history(
+        self,
+        symbol: str,
+        limit: int = 100,
+        *,
+        since: int | None = None,
+    ) -> pd.DataFrame:
+        """Fetch margin borrow rates for the asset a short of *symbol* borrows.
+
+        Selling spot short means borrowing the pair's base asset, so this
+        queries by that currency (``"BTC"`` for ``"BTC/USDT"``), unlike
+        funding, which is quoted per contract. Meaningless for perpetuals:
+        their holding cost is funding, and charging both double-counts it.
+
+        Returns columns ``[ts, borrow_rate, rate_period_seconds]`` where
+        ``borrow_rate`` is the exchange's quoted rate over
+        ``rate_period_seconds`` (Binance quotes a daily rate, so 86400) --
+        the caller scales it to its own bar interval. Both are returned
+        because a rate without its period is not interpretable.
+
+        Requires API credentials: unlike funding-rate history this is a
+        signed endpoint, so a data-only deployment cannot reach it.
+        """
+        self._exchange.load_markets()
+        base = self._exchange.market(symbol)["base"]
+        raw = self._exchange.fetch_borrow_rate_history(base, since=since, limit=limit)
+        df = pd.DataFrame(raw)
+        if df.empty:
+            return pd.DataFrame(columns=["ts", "borrow_rate", "rate_period_seconds"])
+        df = df.rename(columns={"rate": "borrow_rate"})
+        df["ts"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df["rate_period_seconds"] = df["period"].astype(float) / 1000.0
+        return df[["ts", "borrow_rate", "rate_period_seconds"]].astype(
+            {"borrow_rate": float, "rate_period_seconds": float}
+        )
+
     def fetch_continuous_ohlcv(
         self,
         pair: str,
