@@ -986,12 +986,15 @@ def liquidate_all(
 ) -> ExecutionResult:
     """Force-close every open position right now, at this bar's close price.
 
-    Shared by end-of-run liquidation and the max-drawdown circuit breaker —
-    both need identical liquidity and impact semantics. Mutates *positions*
-    in place. A constrained exit can be partial and is retried on a later bar.
+    Mutates *positions* in place. A position the bar's liquidity budget
+    cannot absorb is closed partially — or not at all — and stays in
+    *positions*; there is no later bar to retry on, so every residual is
+    reported as a ``decision_skipped`` event with reason
+    ``force_close_incomplete``.
     """
     trades: list[TradeResult] = []
     events: list[OrderEvent] = []
+    runtime_events: list[RuntimeEvent] = []
     cash_delta = 0.0
 
     for sym in list(positions.keys()):
@@ -1048,7 +1051,14 @@ def liquidate_all(
         else:
             reduce_position(pos, close_quantity)
 
-    return ExecutionResult(trades=trades, events=events, cash_delta=cash_delta)
+    for sym, pos in positions.items():
+        runtime_events.append(
+            _skipped(ts, "force_close_incomplete", symbol=sym, remaining_quantity=pos.quantity)
+        )
+
+    return ExecutionResult(
+        trades=trades, events=events, cash_delta=cash_delta, runtime_events=runtime_events
+    )
 
 
 # ---------------------------------------------------------------------------

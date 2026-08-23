@@ -854,14 +854,22 @@ class TestMultiAsset:
                     return [OrderIntent(action="long", symbol="AAA", quantity=1.0)]
                 return []
 
-        with pytest.raises(ValueError, match=r"cannot force-close.*AAA"):
-            Backtest(
-                df,
-                BuyAaa(),
-                initial_balance=1_000.0,
-                cost_model=_zero_cost(),
-                data_source="test",
-            ).run()
+        result = Backtest(
+            df,
+            BuyAaa(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        assert not [trade for trade in result.trades if trade.symbol == "AAA"]
+        skips = [
+            event
+            for event in result.runtime_events
+            if event.detail.get("reason") == "force_close_incomplete"
+        ]
+        assert [event.symbol for event in skips] == ["AAA"]
+        assert skips[0].detail["remaining_quantity"] == 1.0
 
     def test_end_of_run_does_not_invent_liquidity_for_untradable_exit(self) -> None:
         df = _make_multiindex_df([100.0] * 5, symbol="AAA")
@@ -875,14 +883,58 @@ class TestMultiAsset:
                     return [OrderIntent(action="long", symbol="AAA", quantity=1.0)]
                 return []
 
-        with pytest.raises(ValueError, match=r"cannot force-close.*AAA"):
-            Backtest(
-                df,
-                BuyAaa(),
-                initial_balance=1_000.0,
-                cost_model=_zero_cost(),
-                data_source="test",
-            ).run()
+        result = Backtest(
+            df,
+            BuyAaa(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+        ).run()
+
+        assert not [trade for trade in result.trades if trade.symbol == "AAA"]
+        skips = [
+            event
+            for event in result.runtime_events
+            if event.detail.get("reason") == "force_close_incomplete"
+        ]
+        assert [event.symbol for event in skips] == ["AAA"]
+        # Equity still marks the position that could not be sold.
+        assert result.equity_curve[-1].equity == pytest.approx(1_000.0)
+
+    def test_end_of_run_partially_closes_under_the_volume_cap(self) -> None:
+        """A thin final bar closes what it can and reports the rest."""
+        df = _make_multiindex_df([100.0] * 5, symbol="AAA")
+        # Thick bars while trading, thin only at the end: the entry must not be
+        # capped too, or nothing is left over to report.
+        df["volume"] = 1_000.0
+        df.loc[("AAA", df.index.get_level_values("datetime")[-1]), "volume"] = 10.0
+
+        class BuyAaa(Strategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol="AAA", quantity=5.0)]
+                return []
+
+        result = Backtest(
+            df,
+            BuyAaa(),
+            initial_balance=1_000.0,
+            cost_model=_zero_cost(),
+            data_source="test",
+            execution=ExecutionPolicy(max_bar_volume_participation_rate=0.1),
+        ).run()
+
+        # 10% of a 10-unit bar sells 1 of the 5 units held, so the forced exit
+        # lands as a partial reduce rather than a close.
+        exits = [event for event in result.order_events if event.event_type == "reduce"]
+        assert [event.fill_quantity for event in exits] == [pytest.approx(1.0)]
+        skips = [
+            event
+            for event in result.runtime_events
+            if event.detail.get("reason") == "force_close_incomplete"
+        ]
+        assert [event.symbol for event in skips] == ["AAA"]
+        assert skips[0].detail["remaining_quantity"] == pytest.approx(4.0)
 
     def test_per_symbol_multiplier_resolved_independently_via_cfg(self) -> None:
         """Regression: a multi-asset config= run used to build exactly one

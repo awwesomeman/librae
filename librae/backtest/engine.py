@@ -734,26 +734,26 @@ class Backtest:
             trades.extend(close_result.trades)
             all_events.extend(close_result.events)
             cash += close_result.cash_delta
-            if positions:
-                raise ValueError(
-                    "cannot force-close all positions at the backtest end under "
-                    "available price/volume constraints: "
-                    f"{sorted(positions)}"
-                )
+            # WHY: the last bar's liquidity budget can be too small to absorb a
+            # position, and there is no later bar to retry on. Report what is
+            # left rather than discarding the whole run — the residual is
+            # carried into the terminal marks below, so equity stays honest.
+            runtime_events.extend(close_result.runtime_events)
             # WHY: forced liquidation happens after the bar snapshot. Replace
             # that point so the curve, metrics, and final account cash reconcile
             # without creating a duplicate timestamp.
+            terminal_equity, _ = self._calc_equity_snapshot(cash, positions, last_prices)
             if equity_curve:
-                equity_curve[-1] = EquitySnapshot(ts=last_ts, equity=cash)
+                equity_curve[-1] = EquitySnapshot(ts=last_ts, equity=terminal_equity)
             terminal_events = [event for event in all_events if event.ts == last_ts]
             portfolio_snapshots[-1] = self._snapshot_portfolio(
                 last_ts,
-                {},
+                positions,
                 last_prices,
-                cash,
+                terminal_equity,
                 (
-                    sum(event.notional for event in terminal_events) / cash
-                    if cash > EPSILON
+                    sum(event.notional for event in terminal_events) / terminal_equity
+                    if terminal_equity > EPSILON
                     else 0.0
                 ),
                 exposed=portfolio_snapshots[-1].exposed,
@@ -762,15 +762,18 @@ class Backtest:
                 position_snapshots = [
                     snapshot for snapshot in position_snapshots if snapshot.ts != last_ts
                 ]
+                position_snapshots.extend(
+                    self._snapshot_positions(last_ts, positions, last_prices, terminal_equity)
+                )
                 allocation_snapshots = [
                     snapshot for snapshot in allocation_snapshots if snapshot.ts != last_ts
                 ]
                 allocation_snapshots.extend(
                     self._snapshot_allocations(
                         last_ts,
-                        {},
+                        positions,
                         last_prices,
-                        cash,
+                        terminal_equity,
                         active_target_weights,
                     )
                 )
