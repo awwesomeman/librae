@@ -697,6 +697,11 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
 
     assert "TIMESCALE_DSN=" not in public_env
     assert "TRADE_TIMESCALE_DSN=" not in public_env
+    # A bot token can send as the bot and read what it receives; .env is
+    # scp'd wholesale, so the token belongs with the other credentials.
+    assert "TELEGRAM_BOT_TOKEN=" not in public_env
+    assert "TELEGRAM_BOT_TOKEN=" in secrets_env
+    assert "TELEGRAM_CHAT_ID=" in public_env
     assert (
         "TIMESCALE_DSN=postgresql://quant_app:REPLACE_WITH_POSTGRES_APP_PASSWORD"
         "@localhost:5432/quant"

@@ -20,8 +20,8 @@ publishes the port on every host interface.
 
 Replace `POSTGRES_PASSWORD`, `POSTGRES_APP_PASSWORD`,
 `POSTGRES_GRAFANA_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, `TIMESCALE_DSN`,
-and `TRADE_TIMESCALE_DSN` in `.env.secrets` (never `.env` — that file gets
-scp'd to the VM). `TIMESCALE_DSN`/`TRADE_TIMESCALE_DSN`'s password must
+`TRADE_TIMESCALE_DSN`, and `TELEGRAM_BOT_TOKEN` in `.env.secrets` (never
+`.env` — that file gets scp'd to the VM). `TIMESCALE_DSN`/`TRADE_TIMESCALE_DSN`'s password must
 match `POSTGRES_APP_PASSWORD`. Use independent random values.
 
 On an existing deployment, changing `.env.secrets` does not rotate database
