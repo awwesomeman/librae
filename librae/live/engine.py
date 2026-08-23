@@ -85,6 +85,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Max distance a funding settlement may sit from a bar timestamp and still
+# be attributed to it — far above exchange millisecond jitter, far below any
+# supported bar interval.
+_FUNDING_TS_TOLERANCE = pd.Timedelta("1min")
+
 
 @dataclass(frozen=True)
 class _BrokerPosition:
@@ -164,7 +169,16 @@ def _bind_market_data_source(
         funding = fetch_funding_rate_history(instrument.venue_symbol, limit=limit)
         if funding.empty:
             return bars
-        return bars.merge(funding, on="ts", how="left")
+        # Settlement timestamps jitter off the bar grid by milliseconds (Binance
+        # fundingTime 08:00:00.003), so an exact-equality merge silently drops
+        # roughly half of all payments.
+        return pd.merge_asof(
+            bars,
+            funding.sort_values("ts"),
+            on="ts",
+            direction="nearest",
+            tolerance=_FUNDING_TS_TOLERANCE,
+        )
 
     return _with_funding
 
