@@ -575,6 +575,26 @@ def test_trade_script_accepts_optional_credentials_in_sim_mode(tmp_path: Path) -
     assert "--label io.librae.mode=sim" in final_run
 
 
+def test_sim_receives_the_same_runtime_revision_as_live(tmp_path: Path) -> None:
+    """sim is the mode used to watch engine behaviour, so it is the mode that
+    most needs to record which engine produced it. The image digest is
+    resolved for every mode, and config_hash cannot stand in for it: it
+    covers configuration values only, so it does not move when the engine
+    changes underneath an unchanged config."""
+    image_reference = f"registry.example/librae-trade@sha256:{'e' * 64}"
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        mode="sim",
+    )
+
+    assert result.returncode == 0, result.stderr
+    final_run = next(call for call in docker_calls if call.startswith("run -d "))
+    assert "--label io.librae.mode=sim" in final_run
+    assert "--runtime-revision sha256:" in final_run
+
+
 def test_trade_script_allows_same_strategy_for_independent_deployments(tmp_path: Path) -> None:
     image_reference = f"registry.example/librae-trade@sha256:{'d' * 64}"
 

@@ -580,11 +580,6 @@ finally:
         docker rm "${container}" >/dev/null
     fi
 
-    local runtime_revision_args=()
-    if [[ "${mode}" == "live" ]]; then
-        runtime_revision_args+=(--runtime-revision "${runtime_revision}")
-    fi
-
     echo "Starting ${container}: account=${account_id}, currency=${currency}, strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
 
     docker run -d \
@@ -609,7 +604,7 @@ finally:
         python -m "strategies.${strategy}.run" \
         --mode "${mode}" \
         --poll-seconds "${poll_seconds}" \
-        "${runtime_revision_args[@]+"${runtime_revision_args[@]}"}" \
+        --runtime-revision "${runtime_revision}" \
         "${runner_config_args[@]+"${runner_config_args[@]}"}"
 
     wait_until_ready "${container}" ""
