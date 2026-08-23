@@ -1,4 +1,24 @@
-"""Side-effect-free result models produced by the backtest engine."""
+"""Side-effect-free result models produced by the backtest engine.
+
+These are the engine's raw facts. ``librae.backtest.schema`` holds the
+flattened, persistable view of the same run, and the two layers are not
+1:1 -- most notably ``EquityCurvePoint`` is one ``EquitySnapshot`` joined
+with the matching ``PortfolioSnapshot``, which is why it carries exposure
+and turnover fields no ``EquitySnapshot`` has. The mapping:
+
+===========================  ==================================
+this module                  schema.py
+===========================  ==================================
+EquitySnapshot               EquityCurvePoint (+ PortfolioSnapshot)
+PortfolioSnapshot            EquityCurvePoint (merged, see above)
+PositionEvent (core)         PositionEventRecord
+PositionSnapshot             PositionSnapshotPoint
+AllocationSnapshot           AllocationSnapshotPoint
+FinancingCashFlow (core)     FinancingCashFlowRecord
+RuntimeEvent (core)          RuntimeEvent (reused as-is)
+TradeResult (core)           -- folded into StrategyMetrics
+===========================  ==================================
+"""
 
 from __future__ import annotations
 

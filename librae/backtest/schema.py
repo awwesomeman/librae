@@ -1,5 +1,9 @@
 """Standardized backtest output schema + data contracts.
 
+The flattened, persistable view of a run. ``librae.backtest.result`` holds
+the engine's raw facts; see its module docstring for the (not 1:1) mapping
+between the two layers.
+
 All field names: strict snake_case.
 Unit fields stored alongside values for multi-market support (USDT, TWD, contracts, etc.).
 Cost/slippage fields are optional (may be None for simple backtests).
