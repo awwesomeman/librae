@@ -380,6 +380,11 @@ class CryptoAdapter:
         the caller scales it to its own bar interval. Both are returned
         because a rate without its period is not interpretable.
 
+        ``rate_period_seconds`` is the rate's *quoting* basis, not how often
+        the venue republishes: Binance quotes a daily rate but reprices it
+        several times a day. ccxt hardcodes the field per exchange, so it
+        cannot describe cadence even in principle.
+
         Requires API credentials: unlike funding-rate history this is a
         signed endpoint, so a data-only deployment cannot reach it.
         """

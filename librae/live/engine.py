@@ -94,10 +94,17 @@ logger = logging.getLogger(__name__)
 # supported bar interval.
 _FUNDING_TS_TOLERANCE = pd.Timedelta("1min")
 
-# How many of the exchange's own publication periods a borrow rate keeps
-# describing the market. A rate is a step function, so it must carry forward
-# past its publication bar -- but not indefinitely.
-_BORROW_RATE_MAX_AGE_PERIODS = 3
+# How many *quoting* periods a borrow rate keeps describing the market. A rate
+# is a step function, so it must carry forward past the bar it was published
+# on -- but not indefinitely.
+#
+# The quoting period is what the venue tells us (Binance quotes a daily rate,
+# so 1 day); how often it republishes is not, and is far shorter -- observed
+# every 1-20h on Binance. So this bound is generous by roughly an order of
+# magnitude, deliberately: erring long keeps charging a slightly stale rate,
+# while erring short stops charging at all, and a cost model should fail
+# toward overcharging.
+_BORROW_RATE_MAX_AGE_QUOTING_PERIODS = 3
 
 
 @dataclass(frozen=True)
@@ -215,10 +222,12 @@ def _bind_market_data_source(
             scaled = borrow.assign(
                 borrow_rate=borrow["borrow_rate"].astype(float) * bar_seconds / period
             ).sort_values("ts")
-            # Past a few publication periods the last rate no longer describes
-            # the market. Leaving it NaN charges nothing, which the engine reads
-            # as "unknown", not as "free" -- see librae.core.financing.
-            max_age = pd.Timedelta(seconds=float(period.max()) * _BORROW_RATE_MAX_AGE_PERIODS)
+            # Past this the last rate no longer describes the market. Leaving
+            # it NaN charges nothing, which the engine reads as "unknown", not
+            # as "free" -- see librae.core.financing.
+            max_age = pd.Timedelta(
+                seconds=float(period.max()) * _BORROW_RATE_MAX_AGE_QUOTING_PERIODS
+            )
             return pd.merge_asof(
                 bars,
                 scaled[["ts", "borrow_rate"]],

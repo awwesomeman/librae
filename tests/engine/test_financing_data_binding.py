@@ -168,6 +168,9 @@ def test_one_publication_charges_every_later_bar():
 
 
 def test_a_rate_older_than_its_staleness_bound_is_not_carried_forward():
+    """The bound is three *quoting* periods (Binance: 3 days), not three
+    republications -- the venue tells us the former and not the latter."""
+
     class _StaleBorrowAdapter(_BorrowAdapter):
         borrow_ts: ClassVar[list[str]] = ["2025-12-01T00:00:00Z"]
 
