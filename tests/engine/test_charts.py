@@ -7,10 +7,10 @@ from datetime import UTC, datetime
 import pandas as pd
 import pytest
 from librae.backtest.charts import _build_markers, _prepare_ohlcv
-from librae.backtest.schema import OrderEventRecord
+from librae.backtest.schema import PositionEventRecord
 
 
-def _make_event(**kwargs) -> OrderEventRecord:
+def _make_event(**kwargs) -> PositionEventRecord:
     defaults = dict(
         event_id="e1",
         ts=datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC),
@@ -26,7 +26,7 @@ def _make_event(**kwargs) -> OrderEventRecord:
         notional=50_000.0,
     )
     defaults.update(kwargs)
-    return OrderEventRecord(**defaults)
+    return PositionEventRecord(**defaults)
 
 
 def test_build_markers_filters_by_symbol():

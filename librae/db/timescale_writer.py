@@ -291,7 +291,7 @@ def save_backtest_output(
 
         # Clear old data (idempotent re-run)
         cur.execute("DELETE FROM equity_curve WHERE run_id = %s", (meta.run_id,))
-        cur.execute("DELETE FROM trade_events WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM position_events WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM financing_cash_flows WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
@@ -329,8 +329,8 @@ def save_backtest_output(
             )
             counts["equity_curve"] = len(eq_rows)
 
-        # trade_events (batch)
-        if output.order_events:
+        # position_events (batch)
+        if output.position_events:
             event_rows = [
                 (
                     ev.event_id,
@@ -355,7 +355,7 @@ def save_backtest_output(
                     ev.entry_commission,
                     ev.entry_slippage,
                     ev.entry_tax,
-                    ev.pnl,
+                    ev.realized_pnl,
                     ev.net_return,
                     _to_dt(ev.entry_at) if ev.entry_at else None,
                     ev.periods_held,
@@ -369,11 +369,11 @@ def save_backtest_output(
                     ev.margin_mode,
                     ev.cash_flow,
                 )
-                for ev in output.order_events
+                for ev in output.position_events
             ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO trade_events
+                """INSERT INTO position_events
                    (event_id, run_id, account_id, currency,
                     strategy, mode, timeframe,
                     ts, symbol, side, event_type,
@@ -381,7 +381,7 @@ def save_backtest_output(
                     remaining_quantity, notional,
                     commission, slippage, tax,
                     entry_commission, entry_slippage, entry_tax,
-                    pnl, net_return,
+                    realized_pnl, net_return,
                     entry_at, periods_held, reason, group_id, time_in_force,
                     margin_locked, leverage, liquidation_price, margin_roi, margin_mode,
                     cash_flow)
@@ -390,7 +390,7 @@ def save_backtest_output(
                 event_rows,
                 page_size=500,
             )
-            counts["trade_events"] = len(event_rows)
+            counts["position_events"] = len(event_rows)
 
         if output.financing_cash_flows:
             funding_rows = [
@@ -911,7 +911,7 @@ def write_trade_event(
     commission: float = 0.0,
     slippage: float = 0.0,
     tax: float = 0.0,
-    pnl: float | None = None,
+    realized_pnl: float | None = None,
     net_return: float | None = None,
     entry_at: datetime | None = None,
     periods_held: int | None = None,
@@ -933,7 +933,7 @@ def write_trade_event(
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO trade_events
+            """INSERT INTO position_events
                (event_id, run_id, account_id, currency,
                 strategy, mode, timeframe,
                 ts, symbol, side, event_type,
@@ -941,7 +941,7 @@ def write_trade_event(
                 remaining_quantity, notional,
                 commission, slippage, tax,
                 entry_commission, entry_slippage, entry_tax,
-                pnl, net_return,
+                realized_pnl, net_return,
                 entry_at, periods_held, reason, group_id, time_in_force,
                 margin_locked, leverage, liquidation_price, margin_roi, margin_mode,
                 cash_flow)
@@ -972,7 +972,7 @@ def write_trade_event(
                 entry_commission,
                 entry_slippage,
                 entry_tax,
-                pnl,
+                realized_pnl,
                 net_return,
                 _to_dt(entry_at) if entry_at else None,
                 periods_held,
@@ -1174,7 +1174,7 @@ def refresh_performance(
     config: RunConfig | None = None,
     dsn: str | None = None,
 ) -> None:
-    """Recompute KPI metrics from DB equity_curve + trade_events and upsert.
+    """Recompute KPI metrics from DB equity_curve + position_events and upsert.
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
     """
@@ -1184,7 +1184,7 @@ def refresh_performance(
     from librae.db.timescale_reader import (
         load_equity_curve,
         load_financing_cash_flows,
-        load_trade_events,
+        load_position_events,
     )
 
     _CLOSE_TYPES = ["close", "reduce"]
@@ -1194,14 +1194,14 @@ def refresh_performance(
     if eq_df.empty or len(eq_df) < 2:
         return
 
-    closed_df = load_trade_events(
+    closed_df = load_position_events(
         run_id,
         event_types=_CLOSE_TYPES,
         account_id=account_id,
     )
     trade_rows = closed_df.to_dict("records") if not closed_df.empty else []
     required_trade_fields = (
-        "pnl",
+        "realized_pnl",
         "commission",
         "slippage",
         "tax",
@@ -1230,7 +1230,7 @@ def refresh_performance(
         key = (row["symbol"], row["entry_at"])
         funding_by_trade[key] = funding_by_trade.get(key, 0.0) + float(row["cash_flow"])
 
-    # A partial close writes multiple trade_events rows sharing one
+    # A partial close writes multiple position_events rows sharing one
     # (symbol, entry_at) — split that round-trip's funding across them by
     # closed-quantity share, mirroring core.executor.reduce_position's
     # pro-rating of entry costs across partial closes.
@@ -1260,7 +1260,7 @@ def refresh_performance(
         trade_pnls.append(
             _NS(
                 gross_pnl=float(
-                    r["pnl"]
+                    r["realized_pnl"]
                     + r["entry_commission"]
                     + r["entry_slippage"]
                     + r["entry_tax"]
@@ -1269,7 +1269,7 @@ def refresh_performance(
                     + r["tax"]
                     + funding_pnl
                 ),
-                net_pnl=float(r["pnl"]) + funding_pnl,
+                net_pnl=float(r["realized_pnl"]) + funding_pnl,
                 commission=float(r["entry_commission"] + r["commission"]),
                 slippage=float(r["entry_slippage"] + r["slippage"]),
                 tax=float(r["entry_tax"] + r["tax"]),
@@ -1447,7 +1447,7 @@ def save_strategy_results(
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 
-    Writes: backtest_runs, equity_curve, trade_events, financing_cash_flows,
+    Writes: backtest_runs, equity_curve, position_events, financing_cash_flows,
     strategy_performance, signal_events, ohlcv.
     """
     timeframe = config.timeframe

@@ -302,7 +302,7 @@ class TestStopTargetIntegration:
         assert len(result.trades) == 1
         trade = result.trades[0]
         assert trade.exit_price == pytest.approx(80.0)  # gapped through -> fills at open
-        close_events = [e for e in result.order_events if e.event_type == "close"]
+        close_events = [e for e in result.position_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_STOP_LOSS
 
@@ -320,7 +320,7 @@ class TestStopTargetIntegration:
 
         assert len(result.trades) == 1
         assert result.trades[0].exit_price == pytest.approx(110.0)
-        close_events = [e for e in result.order_events if e.event_type == "close"]
+        close_events = [e for e in result.position_events if e.event_type == "close"]
         assert close_events[0].reason == REASON_TAKE_PROFIT
 
     def test_no_stop_target_set_runs_to_force_close(self):
@@ -335,7 +335,7 @@ class TestStopTargetIntegration:
         bt = Backtest(_make_multiindex_df(bars), strategy, cost_model=_zero_cost())
         result = bt.run()
 
-        close_events = [e for e in result.order_events if e.event_type == "close"]
+        close_events = [e for e in result.position_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_FORCE_CLOSE
 
@@ -355,6 +355,6 @@ class TestStopTargetIntegration:
 
         assert len(result.trades) == 1
         assert result.trades[0].exit_price == pytest.approx(90.0)  # gapped through -> fills at open
-        close_events = [e for e in result.order_events if e.event_type == "close"]
+        close_events = [e for e in result.position_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_LIQUIDATION

@@ -138,7 +138,7 @@ class TestBacktestBasics:
             cost_model=_zero_cost(),
         ).run()
 
-        open_event = next(event for event in result.order_events if event.event_type == "open")
+        open_event = next(event for event in result.position_events if event.event_type == "open")
         assert open_event.fill_quantity == pytest.approx(10.0)
 
     @pytest.mark.parametrize(
@@ -208,7 +208,7 @@ class TestBacktestBasics:
             execution=policy,
         ).run()
 
-        open_event = next(event for event in result.order_events if event.event_type == "open")
+        open_event = next(event for event in result.position_events if event.event_type == "open")
         # Execution bar volume is 1,000, but lagged ADV is (100+200+300)/3=200.
         assert open_event.fill_quantity == pytest.approx(20.0)
 
@@ -265,7 +265,7 @@ class TestBacktestBasics:
         ).run()
 
         entry_events = [
-            event for event in result.order_events if event.event_type in ("open", "add")
+            event for event in result.position_events if event.event_type in ("open", "add")
         ]
         assert [event.fill_quantity for event in entry_events] == pytest.approx([15.0, 5.0])
 
@@ -660,7 +660,7 @@ class TestMultiAsset:
     def test_two_concurrent_groups_execute_independently_in_one_decision(self) -> None:
         """A single on_bar return can carry multiple independent arbitrage
         groups at once — this is the core scenario group_id exists for.
-        Each group fills atomically and its OrderEvents/TradeResults carry
+        Each group fills atomically and its PositionEvents/TradeResults carry
         its own group_id; the two groups never interact."""
         timeline = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
         rows = []
@@ -698,7 +698,7 @@ class TestMultiAsset:
             data_source="test",
         ).run()
 
-        events_by_symbol = {e.symbol: e for e in result.order_events if e.event_type == "open"}
+        events_by_symbol = {e.symbol: e for e in result.position_events if e.event_type == "open"}
         assert events_by_symbol["A"].group_id == "pair_ab"
         assert events_by_symbol["B"].group_id == "pair_ab"
         assert events_by_symbol["C"].group_id == "pair_cd"
@@ -706,7 +706,7 @@ class TestMultiAsset:
 
     def test_time_in_force_flows_from_order_intent_to_order_event(self) -> None:
         """time_in_force is a live-only hint that backtest ignores for fill
-        logic, but it must still round-trip onto the resulting OrderEvent so
+        logic, but it must still round-trip onto the resulting PositionEvent so
         it's visible in output regardless of run mode."""
         df = _make_multiindex_df([100.0] * 5)
 
@@ -728,7 +728,7 @@ class TestMultiAsset:
             data_source="test",
         ).run()
 
-        open_event = next(e for e in result.order_events if e.event_type == "open")
+        open_event = next(e for e in result.position_events if e.event_type == "open")
         assert open_event.time_in_force == "ioc"
 
     def test_partial_bars_run_strategy_without_consuming_other_symbol_intent(self) -> None:
@@ -767,7 +767,7 @@ class TestMultiAsset:
             data_source="test",
         ).run()
 
-        open_event = next(event for event in result.order_events if event.event_type == "open")
+        open_event = next(event for event in result.position_events if event.event_type == "open")
         assert open_event.ts == timeline[2]
         assert open_event.price == pytest.approx(220.0)
         assert [cycle[0] for cycle in seen_cycles] == [
@@ -926,7 +926,7 @@ class TestMultiAsset:
 
         # 10% of a 10-unit bar sells 1 of the 5 units held, so the forced exit
         # lands as a partial reduce rather than a close.
-        exits = [event for event in result.order_events if event.event_type == "reduce"]
+        exits = [event for event in result.position_events if event.event_type == "reduce"]
         assert [event.fill_quantity for event in exits] == [pytest.approx(1.0)]
         skips = [
             event

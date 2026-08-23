@@ -10,10 +10,10 @@
 -- Cleanup:
 --   psql "$TIMESCALE_DSN" -c "
 --     DELETE FROM backtest_runs WHERE run_id = 'seed_pnl_dist_run';
---     DELETE FROM trade_events WHERE run_id = 'seed_pnl_dist_run';
+--     DELETE FROM position_events WHERE run_id = 'seed_pnl_dist_run';
 --   "
 
-DELETE FROM trade_events WHERE run_id = 'seed_pnl_dist_run';
+DELETE FROM position_events WHERE run_id = 'seed_pnl_dist_run';
 DELETE FROM backtest_runs WHERE run_id = 'seed_pnl_dist_run';
 
 INSERT INTO backtest_runs
@@ -36,7 +36,7 @@ WITH pnl_gen AS (
     SELECT i, (random() + random() + random() + random() - 2) * 400 AS pnl_value
     FROM generate_series(1, 200) AS i
 )
-INSERT INTO trade_events
+INSERT INTO position_events
     (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
      symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,

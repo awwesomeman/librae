@@ -75,13 +75,17 @@ def test_refresh_performance_matches_in_memory_backtest_metrics() -> None:
 
     equity = pd.DataFrame([{**asdict(point), "_time": point.ts} for point in output.equity_curve])
     closed = pd.DataFrame(
-        [asdict(event) for event in output.order_events if event.event_type in {"close", "reduce"}]
+        [
+            asdict(event)
+            for event in output.position_events
+            if event.event_type in {"close", "reduce"}
+        ]
     )
     config = _config(account_id="default", initial_cash=1_000.0)
 
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_position_events", return_value=closed),
         patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=pd.DataFrame()),
         patch("librae.db.timescale_writer.write_strategy_performance") as write,
     ):
@@ -117,7 +121,7 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
         [
             {
                 "symbol": "BTC/USDT:USDT",
-                "pnl": 7.0,
+                "realized_pnl": 7.0,
                 "commission": 0.7,
                 "slippage": 0.8,
                 "tax": 1.0,
@@ -140,7 +144,7 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
 
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_position_events", return_value=closed),
         patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=funding),
         patch("librae.core.metrics.compute_all", return_value=metrics) as compute,
         patch("librae.db.timescale_writer.write_strategy_performance") as write,
@@ -164,7 +168,7 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
 
 
 def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() -> None:
-    """A partial close writes multiple trade_events rows sharing one
+    """A partial close writes multiple position_events rows sharing one
     (symbol, entry_at) — the accrued funding must be split between them by
     closed-quantity share, not attributed in full to each row."""
     timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=2, freq="h")
@@ -174,7 +178,7 @@ def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() 
     def _row(fill_quantity: float) -> dict:
         return {
             "symbol": "BTC/USDT:USDT",
-            "pnl": 0.0,
+            "realized_pnl": 0.0,
             "commission": 0.0,
             "slippage": 0.0,
             "tax": 0.0,
@@ -195,7 +199,7 @@ def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() 
 
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_position_events", return_value=closed),
         patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=funding),
         patch("librae.core.metrics.compute_all", return_value=metrics) as compute,
         patch("librae.db.timescale_writer.write_strategy_performance"),
@@ -225,7 +229,7 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
     closed = pd.DataFrame(
         [
             {
-                "pnl": 1.0,
+                "realized_pnl": 1.0,
                 "commission": 0.1,
                 "slippage": 0.0,
                 "tax": 0.0,
@@ -243,7 +247,7 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
 
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
-        patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_position_events", return_value=closed),
         pytest.raises(ValueError, match="entry_commission"),
     ):
         refresh_performance("run-1", "alpha", config=_config())

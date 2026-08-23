@@ -145,15 +145,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique
     ON equity_curve(run_id, account_id, ts);
 
 -- ============================================================
--- trade_events — 部位生命週期事件 (hypertable, 獨立)
+-- position_events — 部位生命週期事件 (hypertable, 獨立)
 -- ============================================================
 -- event_type: open/add = entry side, reduce/close = exit side.
--- pnl/net_return/entry_at/periods_held are populated on reduce/close rows
+-- realized_pnl/net_return/entry_at/periods_held are populated on reduce/close
 -- only (computed against the weighted-average entry_price), not on open/add.
 -- entry_price = running weighted-average entry basis, not this row's fill
 -- price; remaining_quantity = position size AFTER this event (not the
 -- fill_quantity of this event).
-CREATE TABLE IF NOT EXISTS trade_events (
+CREATE TABLE IF NOT EXISTS position_events (
     event_id        TEXT NOT NULL,
     run_id          TEXT,
     strategy        TEXT NOT NULL,
@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS trade_events (
     entry_commission DOUBLE PRECISION,
     entry_slippage  DOUBLE PRECISION,
     entry_tax       DOUBLE PRECISION,
-    pnl             DOUBLE PRECISION,
+    realized_pnl    DOUBLE PRECISION,
     net_return      DOUBLE PRECISION,
     entry_at        TIMESTAMPTZ,
     periods_held       INTEGER,
@@ -205,10 +205,10 @@ CREATE TABLE IF NOT EXISTS trade_events (
     CONSTRAINT chk_event_time_in_force CHECK (time_in_force IN ('day', 'gtc', 'ioc', 'fok')),
     CONSTRAINT chk_event_margin_mode CHECK (margin_mode IN ('unlevered', 'fixed', 'dynamic'))
 );
-SELECT create_hypertable('trade_events', 'ts', if_not_exists => TRUE);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, ts);
-CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);
+SELECT create_hypertable('position_events', 'ts', if_not_exists => TRUE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_position_events_pk ON position_events(event_id, ts);
+CREATE INDEX IF NOT EXISTS idx_position_events_run_id ON position_events(run_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_position_events_strategy ON position_events(strategy, mode, symbol, ts DESC);
 
 -- Timestamped position-financing cash flows applied by research runtimes:
 -- perpetual funding settlements and interest on a short's borrowed asset.

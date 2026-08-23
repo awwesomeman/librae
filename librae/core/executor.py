@@ -272,7 +272,7 @@ class TradePnL:
 
 
 @dataclass(frozen=True)
-class OrderEvent:
+class PositionEvent:
     """Single position lifecycle event with costs from this execution only."""
 
     ts: datetime
@@ -287,7 +287,7 @@ class OrderEvent:
     commission: float
     slippage: float
     tax: float
-    pnl: float | None = None
+    realized_pnl: float | None = None
     net_return: float | None = None
     entry_at: datetime | None = None
     periods_held: int | None = None
@@ -347,7 +347,7 @@ class ExecutionResult:
     """Results from executing one decision on one bar."""
 
     trades: list[TradeResult]
-    events: list[OrderEvent]
+    events: list[PositionEvent]
     cash_delta: float
     runtime_events: list[RuntimeEvent] = field(default_factory=list)
 
@@ -364,7 +364,7 @@ def _margin_fields(
     cost_model: CostModel,
 ) -> tuple[float, float | None, float | None, str]:
     """(margin_locked, leverage, liquidation_price, margin_mode) for the
-    position left after an OrderEvent — zero margin_locked/no leverage once
+    position left after an PositionEvent — zero margin_locked/no leverage once
     fully closed (remaining_quantity == 0). margin_mode always reflects the
     side's financing regime (unlevered/fixed/dynamic — see MarginMode), even
     when the position is fully closed."""
@@ -577,13 +577,13 @@ def build_close_event(
     quantity: float | None = None,
     bar_volume: float | None = None,
     time_in_force: TimeInForce | None = None,
-) -> tuple[TradeResult, OrderEvent, float, bool]:
-    """Close a position (full/partial) and build its TradeResult + OrderEvent together.
+) -> tuple[TradeResult, PositionEvent, float, bool]:
+    """Close a position (full/partial) and build its TradeResult + PositionEvent together.
 
     Single place that turns a "close at this price" decision into the trade
     record + lifecycle event, whoever the caller is (strategy-driven close,
     stop-loss/take-profit trigger, end-of-run force-close). Keeps the three
-    call sites from hand-rolling slightly different OrderEvent constructions.
+    call sites from hand-rolling slightly different PositionEvent constructions.
 
     Returns (trade, event, cash_proceeds, fully_closed).
     """
@@ -602,7 +602,7 @@ def build_close_event(
     )
     closed_margin, _, _, _ = _margin_fields(pos.entry_price, close_qty, pos.side, cost_model)
     margin_roi = _margin_roi(pnl.net_pnl, closed_margin)
-    event = OrderEvent(
+    event = PositionEvent(
         ts=ts,
         symbol=pos.symbol,
         side=pos.side,
@@ -618,7 +618,7 @@ def build_close_event(
         entry_commission=pnl.commission - pnl.exit_commission,
         entry_slippage=pnl.slippage - pnl.exit_slippage,
         entry_tax=pnl.tax - pnl.exit_tax,
-        pnl=pnl.net_pnl,
+        realized_pnl=pnl.net_pnl,
         net_return=pnl.net_return,
         entry_at=pos.entry_at,
         periods_held=pos.periods_held,
@@ -703,7 +703,7 @@ def apply_execution_fill(
         margin_locked, leverage, liq_price, margin_mode = _margin_fields(
             position.entry_price, position.quantity, entry_side, cost_model
         )
-        event = OrderEvent(
+        event = PositionEvent(
             ts=ts,
             symbol=symbol,
             side=entry_side,
@@ -769,7 +769,7 @@ def apply_execution_fill(
     closed_margin = entry_notional * cost_model.margin_rate(position.side)
     margin_roi = _margin_roi(net_pnl, closed_margin)
     proceeds = closed_margin + gross_pnl - costs
-    event = OrderEvent(
+    event = PositionEvent(
         ts=ts,
         symbol=symbol,
         side=position.side,
@@ -785,7 +785,7 @@ def apply_execution_fill(
         entry_commission=entry_commission,
         entry_slippage=entry_slippage,
         entry_tax=entry_tax,
-        pnl=net_pnl,
+        realized_pnl=net_pnl,
         net_return=net_return,
         entry_at=position.entry_at,
         periods_held=position.periods_held,
@@ -891,7 +891,7 @@ def check_stop_targets(
     Mutates *positions* in place.
     """
     trades: list[TradeResult] = []
-    events: list[OrderEvent] = []
+    events: list[PositionEvent] = []
     cash_delta = 0.0
 
     for sym in list(positions.keys()):
@@ -993,7 +993,7 @@ def liquidate_all(
     ``force_close_incomplete``.
     """
     trades: list[TradeResult] = []
-    events: list[OrderEvent] = []
+    events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
     cash_delta = 0.0
 
@@ -1505,7 +1505,7 @@ def execute_order_intents(
     bar in the current trading session.
     """
     trades: list[TradeResult] = []
-    events: list[OrderEvent] = []
+    events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
     cash_delta = 0.0
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
@@ -1597,7 +1597,7 @@ def execute_order_intents(
                         price, fill.quantity, fill.side, cost_model
                     )
                     events.append(
-                        OrderEvent(
+                        PositionEvent(
                             ts=ts,
                             symbol=sym,
                             side=fill.side,
@@ -1664,7 +1664,7 @@ def execute_order_intents(
                         pos.entry_price, pos.quantity, pos.side, cost_model
                     )
                     events.append(
-                        OrderEvent(
+                        PositionEvent(
                             ts=ts,
                             symbol=sym,
                             side=pos.side,
@@ -2172,7 +2172,7 @@ def execute_pending_decision_and_stops(
     Returns (updated cash, combined ExecutionResult for both steps).
     """
     trades: list[TradeResult] = []
-    events: list[OrderEvent] = []
+    events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
     cash_delta_total = 0.0
     used_bar_quantity_by_symbol: dict[str, float] = {}

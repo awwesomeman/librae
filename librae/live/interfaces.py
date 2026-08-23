@@ -8,7 +8,7 @@ from typing import Protocol
 
 import pandas as pd
 
-from librae.core.executor import OrderEvent, RuntimeEvent
+from librae.core.executor import PositionEvent, RuntimeEvent
 from librae.core.financing import FinancingCashFlow
 
 
@@ -98,7 +98,7 @@ type BarCallback = Callable[
     [str, datetime, str, str, float, float, float, float, float, float, float],
     None,
 ]
-type OrderEventCallback = Callable[[OrderEvent, int], None]
+type PositionEventCallback = Callable[[PositionEvent, int], None]
 type OhlcvCallback = Callable[[str, str, dict[str, float], datetime], None]
 type HeartbeatCallback = Callable[[str], None]
 type FinancingCashFlowCallback = Callable[[FinancingCashFlow], None]

@@ -270,7 +270,7 @@ class TestBacktestRebalance:
         )
 
         result = backtest.run()
-        open_events = [event for event in result.order_events if event.event_type == "open"]
+        open_events = [event for event in result.position_events if event.event_type == "open"]
 
         assert strategy.seen_equity[0] == 1_000.0
         assert [event.price for event in open_events] == [120.0, 240.0]

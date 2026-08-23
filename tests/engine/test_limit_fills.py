@@ -216,7 +216,7 @@ def test_unfilled_limit_does_not_roll_to_a_later_bar(caplog) -> None:
             data_source="test",
         ).run()
 
-    assert result.order_events == []
+    assert result.position_events == []
     assert result.trades == []
     assert "expired unfilled" in caplog.text
 

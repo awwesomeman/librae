@@ -70,7 +70,7 @@ class EquityCurvePoint:
 
 
 @dataclass(frozen=True)
-class OrderEventRecord:
+class PositionEventRecord:
     """Position lifecycle event whose costs belong only to this execution."""
 
     event_id: str
@@ -88,7 +88,7 @@ class OrderEventRecord:
     commission: float = 0.0
     slippage: float = 0.0
     tax: float = 0.0
-    pnl: float | None = None
+    realized_pnl: float | None = None
     net_return: float | None = None
     entry_at: datetime | None = None
     periods_held: int | None = None
@@ -234,7 +234,7 @@ class BacktestOutput:
 
     run_metadata: RunMetadata
     account: AccountPerformance
-    order_events: Sequence[OrderEventRecord]
+    position_events: Sequence[PositionEventRecord]
     position_snapshots: Sequence[PositionSnapshotPoint]
     allocation_snapshots: Sequence[AllocationSnapshotPoint]
     financing_cash_flows: Sequence[FinancingCashFlowRecord] = ()
@@ -279,7 +279,7 @@ class BacktestOutput:
         if not self.run_metadata.timeframe:
             raise ValueError("run_metadata.timeframe is required")
         account_records = (
-            *self.order_events,
+            *self.position_events,
             *self.position_snapshots,
             *self.allocation_snapshots,
             *self.financing_cash_flows,

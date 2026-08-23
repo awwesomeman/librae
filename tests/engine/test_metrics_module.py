@@ -389,7 +389,7 @@ class TestComputeAllMetrics:
         netting PnL/notional — not two independently volatile legs."""
         timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
         # Perp leg alone looks like a big loser (-30%); spot leg alone looks
-        # like a modest winner (+5%). Netted: pnl=-5 on notional=600 (-0.833%).
+        # like a modest winner (+5%). Netted: realized_pnl=-5 on notional=600 (-0.833%).
         perp_leg = _make_trade_pnl(gross_pnl=-30.0, net_pnl=-30.0, net_return=-30.0)
         spot_leg = _make_trade_pnl(gross_pnl=25.0, net_pnl=25.0, net_return=5.0)
 
@@ -776,13 +776,13 @@ class TestSummarizeSignalMaeMfe:
 
 def test_kernel_shared_by_trade_entry_and_signal_outcomes():
     """Equivalent trade and signal anchors share one walk-forward contract."""
-    from librae.backtest.schema import OrderEventRecord
+    from librae.backtest.schema import PositionEventRecord
 
     ohlcv = _signal_fixture_ohlcv()
     entry_ts = ohlcv.index[1]  # matches the signal fixture's resolved fill bar
     entry_price = 100.0
 
-    ev_open = OrderEventRecord(
+    ev_open = PositionEventRecord(
         event_id="e1",
         ts=entry_ts,
         account_id="default",
@@ -796,7 +796,7 @@ def test_kernel_shared_by_trade_entry_and_signal_outcomes():
         remaining_quantity=1.0,
         notional=entry_price,
     )
-    ev_close = OrderEventRecord(
+    ev_close = PositionEventRecord(
         event_id="e2",
         ts=ohlcv.index[-1],
         account_id="default",
@@ -809,7 +809,7 @@ def test_kernel_shared_by_trade_entry_and_signal_outcomes():
         entry_price=entry_price,
         remaining_quantity=0.0,
         notional=100.0,
-        pnl=0.0,
+        realized_pnl=0.0,
     )
 
     trade_curve = compute_trade_entry_outcomes([ev_open, ev_close], {"X": ohlcv}, max_periods=3)

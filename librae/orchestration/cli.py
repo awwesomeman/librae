@@ -531,7 +531,7 @@ def check_existing_run(
 
 def reset_realtime_state(config: RunConfig) -> None:
     """Delete this config's sim/live checkpoint so the next start begins a
-    fresh run_id. Does not touch trade_events/equity_curve/etc — those are
+    fresh run_id. Does not touch position_events/equity_curve/etc — those are
     real execution history, not derivable from the checkpoint, and require
     a separate, explicit decision to discard.
     """

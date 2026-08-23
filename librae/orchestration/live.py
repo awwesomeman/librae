@@ -23,7 +23,7 @@ from librae.live.state import normalize_runtime_revision
 
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
-    from librae.core.executor import OrderEvent, RuntimeEvent
+    from librae.core.executor import PositionEvent, RuntimeEvent
     from librae.core.financing import FinancingCashFlow
     from librae.core.run_config import RunConfig
     from librae.core.strategy import Strategy
@@ -275,7 +275,7 @@ class _TimescaleCallbacks:
             strategy=self._config.strategy_name,
         )
 
-    def on_order_event(self, event: OrderEvent, sequence: int) -> None:
+    def on_position_event(self, event: PositionEvent, sequence: int) -> None:
         from librae.db.timescale_writer import write_trade_event
 
         fields = asdict(event)
@@ -520,7 +520,7 @@ def build_live_trader(
         state_store=resolved_state_store,
         runtime_revision=resolved_runtime_revision,
         on_bar=callbacks.on_bar if callbacks else None,
-        on_order_event=callbacks.on_order_event if callbacks else None,
+        on_position_event=callbacks.on_position_event if callbacks else None,
         on_ohlcv=callbacks.on_ohlcv if callbacks else None,
         on_heartbeat=callbacks.on_heartbeat if callbacks else None,
         on_signal_outcome=callbacks.on_signal_outcome if callbacks else None,

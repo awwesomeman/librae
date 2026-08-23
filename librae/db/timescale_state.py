@@ -152,7 +152,7 @@ class TimescaleLiveStateStore:
 
     def delete(self, state_key: str) -> bool:
         """Drop this state_key's checkpoint. broker_orders cascades (FK ON
-        DELETE CASCADE). Does not touch trade_events/equity_curve/etc — those
+        DELETE CASCADE). Does not touch position_events/equity_curve/etc — those
         are the real execution history, keyed by run_id, not state_key.
 
         Returns True if a checkpoint existed and was removed.

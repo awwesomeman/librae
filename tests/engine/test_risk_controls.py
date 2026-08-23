@@ -694,7 +694,7 @@ class TestMaxDrawdownBreaker:
         )
         result = bt.run()
 
-        close_events = [e for e in result.order_events if e.event_type == "close"]
+        close_events = [e for e in result.position_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_DRAWDOWN_BREACH
         assert len(result.trades) == 1  # no further trades after the breach
@@ -733,7 +733,7 @@ class TestMaxDrawdownBreaker:
 
         result = bt.run()
 
-        close_event = next(event for event in result.order_events if event.event_type == "close")
+        close_event = next(event for event in result.position_events if event.event_type == "close")
         breach_ts = result.equity_curve[3].ts
         exit_ts = result.equity_curve[4].ts
         assert close_event.reason == REASON_DRAWDOWN_BREACH
@@ -756,7 +756,7 @@ class TestMaxDrawdownBreaker:
         bt = Backtest(_make_multiindex_df(bars), OpenOnceStrategy(), cost_model=_zero_cost())
         result = bt.run()
 
-        close_events = [e for e in result.order_events if e.event_type == "close"]
+        close_events = [e for e in result.position_events if e.event_type == "close"]
         assert len(close_events) == 1
         assert close_events[0].reason == REASON_FORCE_CLOSE  # only closed by end-of-run liquidation
 
@@ -905,7 +905,7 @@ class TestDynamicSlippage:
                 execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
             )
             result = bt.run()
-            open_events = [e for e in result.order_events if e.event_type == "open"]
+            open_events = [e for e in result.position_events if e.event_type == "open"]
             assert len(open_events) == 1
             return open_events[0].slippage
 

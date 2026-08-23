@@ -7,9 +7,9 @@
 -- NOT enough for that — most rows below are keyed off NOW(), so a second run
 -- produces different timestamps and inserts *new* rows instead of no-oping
 -- on the old ones, silently piling up stale duplicates (this bit us once —
--- trade_events isn't FK-cascaded from backtest_runs, see the note below).
+-- position_events isn't FK-cascaded from backtest_runs, see the note below).
 --
--- trade_events/signal_events deliberately have no FK to backtest_runs
+-- position_events/signal_events deliberately have no FK to backtest_runs
 -- (`ff9baf4c "unify field naming"` — standalone queryability without
 -- joining backtest_runs), so deleting backtest_runs does NOT cascade to
 -- them; they're cleaned up explicitly below along with ohlcv/
@@ -18,14 +18,14 @@
 -- Manual cleanup (equity_curve/strategy_performance cascade with backtest_runs):
 --   psql "$TIMESCALE_DSN" -c "
 --     DELETE FROM backtest_runs WHERE run_id = 'seed_test_run';
---     DELETE FROM trade_events WHERE run_id = 'seed_test_run';
+--     DELETE FROM position_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM signal_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM runtime_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM ohlcv WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
 --     DELETE FROM ohlcv_coverage_ranges WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
 --   "
 
-DELETE FROM trade_events WHERE run_id = 'seed_test_run';
+DELETE FROM position_events WHERE run_id = 'seed_test_run';
 DELETE FROM signal_events WHERE run_id = 'seed_test_run';
 DELETE FROM ohlcv WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
 DELETE FROM ohlcv_coverage_ranges WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
@@ -46,7 +46,7 @@ ON CONFLICT (run_id) DO NOTHING;
 
 -- Hourly OHLCV over the full 14-day window — smooth trend + small noise, one
 -- per symbol. Only feeds Price Trend/Entry-Exit Signals; Position Weight
--- reads trade_events.price directly, so this doesn't need to line up with
+-- reads position_events.price directly, so this doesn't need to line up with
 -- the trade narrative below.
 INSERT INTO ohlcv (ts, symbol, timeframe, data_source, open, high, low, close, volume)
 SELECT
@@ -136,7 +136,7 @@ ON CONFLICT (run_id, account_id, ts) DO NOTHING;
 -- reduce/close = closed_margin + pnl (folds entry-vs-exit cost attribution
 -- into the given net pnl rather than re-deriving gross_pnl — fine for fake
 -- demo data, not meant to reconcile to the cent).
-INSERT INTO trade_events
+INSERT INTO position_events
     (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
      symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,
@@ -266,7 +266,7 @@ VALUES
     (NOW() - INTERVAL '1 day', 'seed_test_run', 'seed_test', 'BTCUSDT', 'backtest', 'H1', 1.0, 65000, 'entry')
 ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type) DO NOTHING;
 
--- Cascades with backtest_runs (real FK), unlike trade_events/signal_events above.
+-- Cascades with backtest_runs (real FK), unlike position_events/signal_events above.
 INSERT INTO runtime_events (ts, run_id, event_type, symbol, detail)
 VALUES
     (NOW() - INTERVAL '13 days' + INTERVAL '5 minutes', 'seed_test_run', 'state_recovered', NULL,

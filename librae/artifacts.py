@@ -13,7 +13,7 @@ from librae.backtest.schema import (
     AllocationSnapshotPoint,
     EquityCurvePoint,
     FinancingCashFlowRecord,
-    OrderEventRecord,
+    PositionEventRecord,
     PositionSnapshotPoint,
     StrategyMetrics,
 )
@@ -207,9 +207,9 @@ def build_backtest_artifact(
                 *(field.name for field in fields(EquityCurvePoint)),
             ],
         ),
-        "order_events": _records_frame(
-            output.order_events,
-            OrderEventRecord,
+        "position_events": _records_frame(
+            output.position_events,
+            PositionEventRecord,
             run_id=run_id,
         ),
         "position_snapshots": _records_frame(

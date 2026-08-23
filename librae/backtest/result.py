@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from librae.core.executor import OrderEvent, RuntimeEvent, TradeResult
+from librae.core.executor import PositionEvent, RuntimeEvent, TradeResult
 from librae.core.financing import FinancingCashFlow
 
 
@@ -73,7 +73,7 @@ class BacktestResult:
     """Raw backtest facts without derived performance metrics."""
 
     trades: Sequence[TradeResult]
-    order_events: Sequence[OrderEvent]
+    position_events: Sequence[PositionEvent]
     position_snapshots: Sequence[PositionSnapshot]
     allocation_snapshots: Sequence[AllocationSnapshot]
     financing_cash_flows: Sequence[FinancingCashFlow]

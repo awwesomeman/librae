@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
-from librae.core.executor import REASON_DRAWDOWN_BREACH, OrderEvent
+from librae.core.executor import REASON_DRAWDOWN_BREACH, PositionEvent
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
@@ -333,7 +333,7 @@ class TestLiveExecutor:
             fee=0.4,
         )
         ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
-        event = OrderEvent(
+        event = PositionEvent(
             ts=datetime(2025, 1, 1, tzinfo=UTC),
             symbol="BTCUSDT",
             side=side,
@@ -372,7 +372,7 @@ class TestLiveExecutor:
             strategy_name="a_reasonably_long_strategy_name",
             order_adapter=MagicMock(),
         )
-        event = OrderEvent(
+        event = PositionEvent(
             ts=datetime(2025, 1, 1, tzinfo=UTC),
             symbol=symbol,
             side="long",
@@ -493,7 +493,7 @@ class TestLiveTrader:
                 executor.get_cost_model(test_config.symbol) if executor else _zero_cost_model()
             ),
             on_bar=None,
-            on_order_event=None,
+            on_position_event=None,
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
@@ -1756,7 +1756,7 @@ class TestLiveTrader:
                     return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
                 return []
 
-        def on_order_event(event, _sequence):
+        def on_position_event(event, _sequence):
             if event.event_type == "open":
                 fill_prices.append(event.price)
 
@@ -1765,7 +1765,7 @@ class TestLiveTrader:
             fetcher=fetcher,
             feature_fn=flaky_feature_fn,
         )
-        runner._on_order_event = on_order_event
+        runner._on_position_event = on_position_event
         runner.run(max_iterations=3)
 
         # bar1 (level=100): strategy queues a buy. bar2 (level=200): feature_fn
@@ -1903,8 +1903,8 @@ class TestLiveTrader:
         assert runner._prev_equity == pytest.approx(50_000.0)
 
 
-def _make_fill_event() -> OrderEvent:
-    return OrderEvent(
+def _make_fill_event() -> PositionEvent:
+    return PositionEvent(
         ts=datetime(2025, 1, 1, tzinfo=UTC),
         symbol="BTCUSDT",
         side="long",
@@ -1941,7 +1941,7 @@ class TestLiveExecutionLifecycle:
             cost_model=_zero_cost_model(),
             order_adapter=adapter,
             on_bar=None,
-            on_order_event=None,
+            on_position_event=None,
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
@@ -2563,7 +2563,7 @@ class TestLiveExecutionLifecycle:
             cost_model=_zero_cost_model(),
             order_adapter=adapter,
             on_bar=None,
-            on_order_event=None,
+            on_position_event=None,
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
@@ -3018,7 +3018,7 @@ class TestLiveExecutionLifecycle:
                 executed_at=second_fill_at,
             ),
         ]
-        events: list[OrderEvent] = []
+        events: list[PositionEvent] = []
         store = MemoryLiveStateStore()
 
         runner = self._make_trader(
@@ -3026,7 +3026,7 @@ class TestLiveExecutionLifecycle:
             adapter,
             state_store=store,
         )
-        runner._on_order_event = lambda event, _sequence: events.append(event)
+        runner._on_position_event = lambda event, _sequence: events.append(event)
         first_frame = _make_ohlcv_df(start_hour=0)
         second_frame = _make_ohlcv_df(start_hour=1)
         runner._process_bar(
@@ -3045,7 +3045,7 @@ class TestLiveExecutionLifecycle:
         assert [event.ts for event in events] == [first_fill_at, second_fill_at]
         assert events[-1].price == 110.0
         assert events[-1].commission == 2.0
-        assert events[-1].pnl == 7.0
+        assert events[-1].realized_pnl == 7.0
         checkpoint = store.load(runner._state_key)
         assert checkpoint is not None
         assert checkpoint.trade_count == 1
@@ -3264,7 +3264,7 @@ class TestMultiAdapterRouting:
             config=cfg,
             adapter=fetchers,
             on_bar=None,
-            on_order_event=None,
+            on_position_event=None,
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,

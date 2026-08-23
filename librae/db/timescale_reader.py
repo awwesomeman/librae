@@ -162,14 +162,14 @@ def load_equity_curve(
     return df
 
 
-def load_trade_events(
+def load_position_events(
     run_id: str,
     *,
     event_types: list[str] | None = None,
     account_id: str | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
-    """Load trade_events for a run, ordered by timestamp.
+    """Load position_events for a run, ordered by timestamp.
 
     Args:
         event_types: Optional filter, e.g. ["close", "reduce"] for closed trades only.
@@ -181,7 +181,7 @@ def load_trade_events(
                commission, slippage, tax,
                entry_commission, entry_slippage, entry_tax,
                pnl, net_return, entry_at, periods_held, reason, group_id, time_in_force
-        FROM trade_events
+        FROM position_events
         WHERE run_id = %s
     """
     params: list = [run_id]
@@ -274,7 +274,7 @@ def row_to_strategy_metrics(row: Mapping[str, Any]) -> StrategyMetrics:
 
 
 def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
-    """Derive a synthetic entry/exit signal series from trade_events (open=entry,
+    """Derive a synthetic entry/exit signal series from position_events (open=entry,
     close/reduce=exit) — i.e. the strategy's actual executed fills, NOT a read of
     the separate signal_events table (which stores raw pre-execution signals for
     quality monitoring)."""
@@ -288,7 +288,7 @@ def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
                     ELSE 1.0
                END AS signal_strength,
                run_id
-        FROM trade_events
+        FROM position_events
         WHERE run_id = %s
         ORDER BY ts
     """

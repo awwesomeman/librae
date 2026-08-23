@@ -23,7 +23,7 @@ from librae.core.utils import validate_contract_month
 
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
-    from librae.core.executor import OrderEvent
+    from librae.core.executor import PositionEvent
 
 logger = logging.getLogger(__name__)
 
@@ -420,7 +420,7 @@ class LiveExecutor:
 
     def request_from_event(
         self,
-        event: OrderEvent,
+        event: PositionEvent,
         *,
         order_type: OrderType = "market",
         limit_price: float | None = None,

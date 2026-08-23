@@ -183,7 +183,7 @@ def test_backtest_applies_only_same_timestamp_observations() -> None:
     assert output.account.net_pnl == pytest.approx(-10.0)
     assert output.metrics.total_return == pytest.approx(-0.001)
     assert [item.cash_flow for item in output.financing_cash_flows] == pytest.approx([-20.0, 10.0])
-    assert all(event.price == 100.0 for event in output.order_events)
+    assert all(event.price == 100.0 for event in output.position_events)
 
 
 def test_backtest_uses_explicit_funding_mark_price_and_multiplier() -> None:
@@ -221,7 +221,7 @@ def test_financing_cash_flow_carries_the_accruing_position_group_id_and_entry_at
 def test_funding_accrued_while_held_is_folded_into_the_closed_trade_stats() -> None:
     """Flat price + zero costs mean the only real PnL for this round-trip is
     the funding received while short — win_rate/avg_trade_return must see
-    it, not just the (zero) basis-convergence PnL trade_events records."""
+    it, not just the (zero) basis-convergence PnL position_events records."""
     data = _backtest_frame([np.nan, 0.01, np.nan, np.nan, np.nan])
     backtest = Backtest(
         data,
@@ -346,7 +346,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
         cost_model=_cost_model(),
         state_store=store,
         on_bar=None,
-        on_order_event=None,
+        on_position_event=None,
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,
@@ -369,7 +369,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
         cost_model=_cost_model(),
         state_store=store,
         on_bar=None,
-        on_order_event=None,
+        on_position_event=None,
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,

@@ -396,7 +396,7 @@ _OPEN_POSITIONS_PANEL = _stat_panel(
     (
         'SELECT COUNT(*) AS "Count" FROM (\n'
         "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
-        "  FROM trade_events\n"
+        "  FROM position_events\n"
         "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
         "  ORDER BY symbol, ts DESC\n"
         ") p\n"
@@ -443,7 +443,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, side, remaining_quantity, entry_price,\n"
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
-                "  FROM trade_events\n"
+                "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY symbol, ts DESC\n"
                 "),\n"
@@ -520,7 +520,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n"
-                "  FROM trade_events\n"
+                "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY symbol, ts DESC\n"
                 "),\n"
@@ -605,7 +605,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 'SELECT ROUND(net_return::numeric,4)::float8 AS "Return"'
-                " FROM trade_events WHERE run_id = '${run_id}'"
+                " FROM position_events WHERE run_id = '${run_id}'"
                 " AND account_id IN (${account_id:sqlstring}) AND net_return IS NOT NULL"
                 " AND $__timeFilter(ts)",
                 "A",
@@ -733,7 +733,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' AS "Trade ID",'
                 ' periods_held AS "Periods",'
                 ' reason AS "Reason"'
-                " FROM trade_events WHERE run_id = '${run_id}'"
+                " FROM position_events WHERE run_id = '${run_id}'"
                 " AND account_id IN (${account_id:sqlstring})"
                 " AND $__timeFilter(ts)"
                 " ORDER BY ts",
@@ -803,7 +803,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day'"
                 " ELSE interval '1 hour' END AS time,"
                 ' te.price AS "Entry"'
-                " FROM trade_events te"
+                " FROM position_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
                 " AND te.account_id IN (${account_id:sqlstring})"
@@ -821,7 +821,7 @@ BASE_PANELS_DEF: list[dict] = [
                 " WHEN 'D1' THEN interval '1 day' WHEN '1D' THEN interval '1 day'"
                 " ELSE interval '1 hour' END AS time,"
                 ' te.price AS "Exit"'
-                " FROM trade_events te"
+                " FROM position_events te"
                 " JOIN backtest_runs br ON br.run_id = te.run_id"
                 " WHERE te.run_id = '${run_id}'"
                 " AND te.account_id IN (${account_id:sqlstring})"
@@ -900,7 +900,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "    entry_price, entry_at, margin_locked, leverage, liquidation_price,\n"
                 "    margin_mode,\n"
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
-                "  FROM trade_events\n"
+                "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "    AND ts <= $__timeTo()\n"
                 "  ORDER BY symbol, ts DESC\n"
@@ -1058,7 +1058,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "),\n"
                 "positions AS (\n"
                 "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n"
-                "  FROM trade_events\n"
+                "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY symbol, ts DESC\n"
                 ")\n"

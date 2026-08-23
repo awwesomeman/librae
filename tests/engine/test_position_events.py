@@ -1,4 +1,4 @@
-"""Tests for OrderEvent generation in execute_order_intents and engine.
+"""Tests for PositionEvent generation in execute_order_intents and engine.
 
 Verifies open/add/reduce/close events have correct
 entry_price, remaining_quantity, pnl, net_return, and reason.
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.executor import OrderEvent, apply_execution_fill, execute_order_intents
+from librae.core.executor import PositionEvent, apply_execution_fill, execute_order_intents
 from librae.core.strategy import Fill, OrderIntent, PositionState, Strategy
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
@@ -63,7 +63,7 @@ class TestOpenEvent:
 
     def test_open_has_no_pnl(self):
         events, _, _ = _run([OrderIntent(action="long", symbol="TEST")])
-        assert events[0].pnl is None
+        assert events[0].realized_pnl is None
         assert events[0].net_return is None
         assert events[0].periods_held is None
 
@@ -103,7 +103,7 @@ class TestAddEvent:
         assert e.remaining_quantity == 10.0
         # entry_price = (450 + 500) / 10 = 95.0
         assert np.isclose(e.entry_price, 95.0)
-        assert e.pnl is None
+        assert e.realized_pnl is None
         assert e.entry_at == TS  # unchanged by scaling in — fixed at the original open
 
 
@@ -134,12 +134,12 @@ class TestReduceCloseEvents:
         assert e.fill_quantity == 4.0
         assert e.remaining_quantity == 6.0
         assert e.entry_price == 80.0
-        assert e.pnl is not None
+        assert e.realized_pnl is not None
         assert e.net_return is not None
         assert e.entry_at == TS
         assert e.periods_held == 5
         # PnL: (100 - 80) * 4 = 80
-        assert np.isclose(e.pnl, 80.0)
+        assert np.isclose(e.realized_pnl, 80.0)
 
     def test_full_close_produces_close(self):
         positions = {
@@ -497,7 +497,7 @@ class TestComplexLifecycle:
 
     def test_full_lifecycle_events(self):
         positions: dict[str, PositionState] = {}
-        all_events: list[OrderEvent] = []
+        all_events: list[PositionEvent] = []
 
         def run_at(actions, price, positions, periods_held_increment=0):
             for p in positions.values():
@@ -528,7 +528,7 @@ class TestComplexLifecycle:
         run_at([OrderIntent(action="close", symbol="TEST", quantity=3)], 130.0, positions, 2)
         assert all_events[-1].event_type == "reduce"
         assert all_events[-1].remaining_quantity == 12.0
-        assert all_events[-1].pnl is not None
+        assert all_events[-1].realized_pnl is not None
 
         # 4. buy 8@110 (scale in again)
         run_at([OrderIntent(action="long", symbol="TEST", quantity=8)], 110.0, positions, 1)
@@ -539,7 +539,7 @@ class TestComplexLifecycle:
         run_at([OrderIntent(action="close", symbol="TEST")], 140.0, positions, 5)
         assert all_events[-1].event_type == "close"
         assert all_events[-1].remaining_quantity == 0.0
-        assert all_events[-1].pnl is not None
+        assert all_events[-1].realized_pnl is not None
 
         assert len(all_events) == 5
         types = [e.event_type for e in all_events]
@@ -549,7 +549,7 @@ class TestComplexLifecycle:
 class TestShortLifecycle:
     def test_short_open_add_close(self):
         positions: dict[str, PositionState] = {}
-        all_events: list[OrderEvent] = []
+        all_events: list[PositionEvent] = []
 
         def run_at(actions, price, positions):
             result = execute_order_intents(
@@ -574,11 +574,11 @@ class TestShortLifecycle:
         assert all_events[2].event_type == "close"
         assert all_events[2].remaining_quantity == 0.0
         # Short profit: (avg_entry - 90) * 15
-        assert all_events[2].pnl > 0
+        assert all_events[2].realized_pnl > 0
 
 
 class TestEngineIntegration:
-    """Engine.run() produces order_events in BacktestResult."""
+    """Engine.run() produces position_events in BacktestResult."""
 
     def test_engine_produces_events(self):
         n = 50
@@ -617,12 +617,12 @@ class TestEngineIntegration:
         result = bt.run()
 
         # Should have open + close events (+ possible force_close at end)
-        assert len(result.order_events) >= 2
-        types = [e.event_type for e in result.order_events]
+        assert len(result.position_events) >= 2
+        types = [e.event_type for e in result.position_events]
         assert "open" in types
         assert "close" in types
 
         # Verify build_output includes events
         output = bt.build_output()
-        assert len(output.order_events) >= 2
-        assert output.order_events[0].event_id.startswith(bt._run_id)
+        assert len(output.position_events) >= 2
+        assert output.position_events[0].event_id.startswith(bt._run_id)

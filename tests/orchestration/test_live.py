@@ -155,7 +155,7 @@ def test_restored_run_also_calls_register_run() -> None:
     """A restarted process must re-sync callback state too, not just skip
     straight to trading — _TimescaleCallbacks caches run_id purely from
     register_run() and has no other way to learn it after a restart, since
-    on_order_event/on_financing_cash_flow/on_runtime_event all read that
+    on_position_event/on_financing_cash_flow/on_runtime_event all read that
     cached value rather than receiving run_id as an argument. Without this,
     every DB write after a restart silently fails on the run_id foreign
     key (caught by _write's best-effort try/except) — invisible short of
@@ -448,7 +448,7 @@ def test_factory_rejects_two_notifier_sources() -> None:
 
 
 def test_timescale_callbacks_writes_trade_event() -> None:
-    """asdict(OrderEvent) must match write_trade_event's real signature —
+    """asdict(PositionEvent) must match write_trade_event's real signature —
     autospec enforces this; a plain MagicMock would hide a mismatch since
     _write() swallows the resulting TypeError as a logged DB failure."""
     config = make_test_cfg(mode="sim")
@@ -456,9 +456,9 @@ def test_timescale_callbacks_writes_trade_event() -> None:
     callbacks._run_id = "run-1"
     ts = datetime.now(UTC)
 
-    from librae.core.executor import OrderEvent
+    from librae.core.executor import PositionEvent
 
-    event = OrderEvent(
+    event = PositionEvent(
         ts=ts,
         symbol="BTCUSDT",
         side="long",
@@ -471,7 +471,7 @@ def test_timescale_callbacks_writes_trade_event() -> None:
         commission=0.1,
         slippage=0.05,
         tax=0.0,
-        pnl=10.0,
+        realized_pnl=10.0,
         net_return=11.1,
         entry_at=ts,
         periods_held=3,
@@ -488,7 +488,7 @@ def test_timescale_callbacks_writes_trade_event() -> None:
     )
 
     with patch("librae.db.timescale_writer.write_trade_event", autospec=True) as write:
-        callbacks.on_order_event(event, sequence=1)
+        callbacks.on_position_event(event, sequence=1)
 
     assert callbacks._failures.get("write_trade_event", 0) == 0
     write.assert_called_once()
@@ -642,15 +642,15 @@ def test_timescale_callbacks_mark_one_shot_writes_critical(
     assert matching[0].kwargs["critical"] is True
 
 
-def test_timescale_callbacks_on_order_event_marks_write_trade_event_critical() -> None:
+def test_timescale_callbacks_on_position_event_marks_write_trade_event_critical() -> None:
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(config, {}, None)
     callbacks._run_id = "run-1"
 
-    from librae.core.executor import OrderEvent
+    from librae.core.executor import PositionEvent
 
     ts = datetime.now(UTC)
-    event = OrderEvent(
+    event = PositionEvent(
         ts=ts,
         symbol="BTCUSDT",
         side="long",
@@ -663,7 +663,7 @@ def test_timescale_callbacks_on_order_event_marks_write_trade_event_critical() -
         commission=0.1,
         slippage=0.05,
         tax=0.0,
-        pnl=None,
+        realized_pnl=None,
         net_return=None,
         entry_at=ts,
         periods_held=0,
@@ -680,7 +680,7 @@ def test_timescale_callbacks_on_order_event_marks_write_trade_event_critical() -
     )
 
     with patch.object(callbacks, "_write") as write:
-        callbacks.on_order_event(event, sequence=1)
+        callbacks.on_position_event(event, sequence=1)
 
     assert write.call_args.args[0].__name__ == "write_trade_event"
     assert write.call_args.kwargs["critical"] is True

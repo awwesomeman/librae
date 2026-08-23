@@ -67,8 +67,8 @@ from .interfaces import (
     HeartbeatCallback,
     Notifier,
     OhlcvCallback,
-    OrderEventCallback,
     PerformanceCallback,
+    PositionEventCallback,
     RuntimeEventCallback,
     SignalOutcomeCallback,
     WarmupFetcher,
@@ -234,7 +234,7 @@ class LiveTrader:
         notifier: Notifier | None = None,
         status_interval_periods: int | None = None,
         on_bar: BarCallback | None = None,
-        on_order_event: OrderEventCallback | None = None,
+        on_position_event: PositionEventCallback | None = None,
         on_ohlcv: OhlcvCallback | None = None,
         on_heartbeat: HeartbeatCallback | None = None,
         on_signal_outcome: SignalOutcomeCallback | None = None,
@@ -419,7 +419,7 @@ class LiveTrader:
         self._warmup_periods = max(configured_warmup, adv_warmup)
 
         self._on_bar = on_bar
-        self._on_order_event = on_order_event
+        self._on_position_event = on_position_event
         self._on_ohlcv = on_ohlcv
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
@@ -1290,8 +1290,8 @@ class LiveTrader:
             )
             if event.event_type in ("close", "reduce"):
                 self._performance_dirty = True
-            if self._on_order_event:
-                self._on_order_event(event, self._event_sequence)
+            if self._on_position_event:
+                self._on_position_event(event, self._event_sequence)
 
             if event.event_type in ("open", "add"):
                 label = (

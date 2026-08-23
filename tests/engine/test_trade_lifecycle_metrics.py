@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-from librae.backtest.schema import OrderEventRecord
+from librae.backtest.schema import PositionEventRecord
 from librae.core.metrics import (
     compute_trade_entry_outcomes,
     compute_trade_lifecycle_outcomes,
@@ -31,10 +31,10 @@ def _event(
     price: float = 100.0,
     entry_price: float = 100.0,
     remaining_quantity: float = 1.0,
-    pnl: float | None = None,
+    realized_pnl: float | None = None,
     periods_held: int | None = None,
-) -> OrderEventRecord:
-    return OrderEventRecord(
+) -> PositionEventRecord:
+    return PositionEventRecord(
         event_id=event_id,
         ts=T0 + timedelta(hours=hour),
         account_id="default",
@@ -47,7 +47,7 @@ def _event(
         entry_price=entry_price,
         remaining_quantity=remaining_quantity,
         notional=price * fill_quantity,
-        pnl=pnl,
+        realized_pnl=realized_pnl,
         periods_held=periods_held,
     )
 
@@ -101,7 +101,7 @@ def test_interleaved_symbols_reconstruct_independent_lifecycles() -> None:
             symbol="A",
             price=105.0,
             remaining_quantity=0.0,
-            pnl=5.0,
+            realized_pnl=5.0,
             periods_held=3,
         ),
         _event(
@@ -112,7 +112,7 @@ def test_interleaved_symbols_reconstruct_independent_lifecycles() -> None:
             price=190.0,
             entry_price=200.0,
             remaining_quantity=0.0,
-            pnl=-10.0,
+            realized_pnl=-10.0,
             periods_held=3,
         ),
     ]
@@ -159,7 +159,7 @@ def test_scale_in_basis_applies_prospectively_and_reductions_aggregate() -> None
             price=180.0,
             entry_price=150.0,
             remaining_quantity=3.0,
-            pnl=30.0,
+            realized_pnl=30.0,
         ),
         _event(
             "reduce-2",
@@ -168,7 +168,7 @@ def test_scale_in_basis_applies_prospectively_and_reductions_aggregate() -> None
             price=160.0,
             entry_price=150.0,
             remaining_quantity=2.0,
-            pnl=10.0,
+            realized_pnl=10.0,
         ),
         _event(
             "close",
@@ -178,7 +178,7 @@ def test_scale_in_basis_applies_prospectively_and_reductions_aggregate() -> None
             price=120.0,
             entry_price=150.0,
             remaining_quantity=0.0,
-            pnl=-40.0,
+            realized_pnl=-40.0,
             periods_held=6,
         ),
     ]
@@ -209,7 +209,7 @@ def test_short_excursion_uses_direction_and_excludes_event_bar_ranges() -> None:
             side="short",
             price=90.0,
             remaining_quantity=0.0,
-            pnl=10.0,
+            realized_pnl=10.0,
             periods_held=3,
         ),
     ]
@@ -250,7 +250,7 @@ def test_partial_broker_fills_use_open_then_add_without_new_event_type() -> None
             price=112.0,
             entry_price=106.0,
             remaining_quantity=0.0,
-            pnl=60.0,
+            realized_pnl=60.0,
             periods_held=2,
         ),
     ]
@@ -270,7 +270,7 @@ def test_incomplete_lifecycle_is_surfaced_and_excluded_from_summary() -> None:
             2,
             "close",
             remaining_quantity=0.0,
-            pnl=0.0,
+            realized_pnl=0.0,
             periods_held=2,
         ),
         _event("incomplete-open", 3, "open"),
@@ -292,7 +292,7 @@ def test_entry_outcomes_include_each_open_add_anchor_and_horizon_counts() -> Non
             2,
             "close",
             remaining_quantity=0.0,
-            pnl=0.0,
+            realized_pnl=0.0,
             periods_held=2,
         ),
         _event("second-open", 4, "open"),
@@ -339,11 +339,11 @@ def test_lifecycle_summary_reports_pooled_and_per_symbol_equal_weights() -> None
     ("events", "message"),
     [
         (
-            [_event("close", 1, "close", remaining_quantity=0.0, pnl=0.0)],
+            [_event("close", 1, "close", remaining_quantity=0.0, realized_pnl=0.0)],
             "requires an active position",
         ),
         (
-            [_event("reduce", 1, "reduce", remaining_quantity=0.5, pnl=0.0)],
+            [_event("reduce", 1, "reduce", remaining_quantity=0.5, realized_pnl=0.0)],
             "requires an active position",
         ),
         (
@@ -359,7 +359,7 @@ def test_lifecycle_summary_reports_pooled_and_per_symbol_equal_weights() -> None
                     "close",
                     side="short",
                     remaining_quantity=0.0,
-                    pnl=0.0,
+                    realized_pnl=0.0,
                 ),
             ],
             "side cannot change",
@@ -386,7 +386,7 @@ def test_lifecycle_summary_reports_pooled_and_per_symbol_equal_weights() -> None
                     1,
                     "reduce",
                     remaining_quantity=0.0,
-                    pnl=0.0,
+                    realized_pnl=0.0,
                 ),
             ],
             "must leave a positive position",
@@ -400,7 +400,7 @@ def test_lifecycle_summary_reports_pooled_and_per_symbol_equal_weights() -> None
                     "close",
                     fill_quantity=0.5,
                     remaining_quantity=0.0,
-                    pnl=0.0,
+                    realized_pnl=0.0,
                 ),
             ],
             "must fully flatten",
@@ -413,7 +413,7 @@ def test_lifecycle_summary_reports_pooled_and_per_symbol_equal_weights() -> None
                     1,
                     "close",
                     remaining_quantity=0.0,
-                    pnl=0.0,
+                    realized_pnl=0.0,
                 ),
             ],
             "event_id must be unique",
@@ -426,14 +426,14 @@ def test_lifecycle_summary_reports_pooled_and_per_symbol_equal_weights() -> None
                     1,
                     "close",
                     remaining_quantity=0.0,
-                    pnl=0.0,
+                    realized_pnl=0.0,
                 ),
             ],
             "must not move backwards",
         ),
     ],
 )
-def test_malformed_lifecycle_events_fail(events: list[OrderEventRecord], message: str) -> None:
+def test_malformed_lifecycle_events_fail(events: list[PositionEventRecord], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         compute_trade_lifecycle_outcomes(events, {"X": _ohlcv()})
 
@@ -457,7 +457,7 @@ def test_trade_market_data_contract_is_explicit(
 ) -> None:
     events = [
         _event("open", 0, "open"),
-        _event("close", 2, "close", remaining_quantity=0.0, pnl=0.0),
+        _event("close", 2, "close", remaining_quantity=0.0, realized_pnl=0.0),
     ]
     with pytest.raises(error_type, match=message):
         compute_trade_lifecycle_outcomes(events, market_data)
@@ -466,7 +466,7 @@ def test_trade_market_data_contract_is_explicit(
 def test_naive_event_timestamp_fails() -> None:
     events = [
         _event("open", 0, "open"),
-        _event("close", 2, "close", remaining_quantity=0.0, pnl=0.0),
+        _event("close", 2, "close", remaining_quantity=0.0, realized_pnl=0.0),
     ]
     events[0] = replace(events[0], ts=events[0].ts.replace(tzinfo=None))
 
@@ -479,7 +479,7 @@ def test_invalid_trade_ohlcv_fails() -> None:
     frame.loc[frame.index[1], "high"] = np.inf
     events = [
         _event("open", 0, "open"),
-        _event("close", 2, "close", remaining_quantity=0.0, pnl=0.0),
+        _event("close", 2, "close", remaining_quantity=0.0, realized_pnl=0.0),
     ]
 
     with pytest.raises(ValueError, match="finite and positive"):
@@ -505,7 +505,7 @@ def test_same_timestamp_events_keep_input_sequence() -> None:
             price=110.0,
             entry_price=110.0,
             remaining_quantity=0.0,
-            pnl=0.0,
+            realized_pnl=0.0,
         ),
     ]
 

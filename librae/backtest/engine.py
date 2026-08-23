@@ -43,7 +43,7 @@ if TYPE_CHECKING:
         BacktestOutput,
         EquityCurvePoint,
         FinancingCashFlowRecord,
-        OrderEventRecord,
+        PositionEventRecord,
         PositionSnapshotPoint,
         StrategyMetrics,
     )
@@ -54,7 +54,7 @@ from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     REASON_FORCE_CLOSE,
     ExecutionResult,
-    OrderEvent,
+    PositionEvent,
     RuntimeEvent,
     TradePnL,
     TradeResult,
@@ -210,7 +210,7 @@ def _attribute_funding_to_trades(
     financing_cash_flows: Sequence[FinancingCashFlow],
 ) -> list[TradePnL]:
     """Fold each round-trip's accrued funding into its closed trade(s)'
-    PnL/return before metrics — trade_events keeps the fill-only PnL
+    PnL/return before metrics — position_events keeps the fill-only PnL
     untouched; only the derived TradePnL fed to compute_all changes, so
     win_rate/profit_factor/avg_trade_return see a perpetual position's real
     edge (see librae.core.financing.FinancingCashFlow).
@@ -513,7 +513,7 @@ class Backtest:
         cash = self._initial_cash
         positions: dict[str, PositionState] = {}
         trades: list[TradeResult] = []
-        all_events: list[OrderEvent] = []
+        all_events: list[PositionEvent] = []
         equity_curve: list[EquitySnapshot] = []
         exposed_periods = 0
         primary_symbol = self._symbols[0]
@@ -791,7 +791,7 @@ class Backtest:
 
         self._result = BacktestResult(
             trades=trades,
-            order_events=all_events,
+            position_events=all_events,
             position_snapshots=position_snapshots,
             allocation_snapshots=allocation_snapshots,
             financing_cash_flows=financing_cash_flows,
@@ -903,7 +903,7 @@ class Backtest:
         return BacktestOutput(
             run_metadata=run_metadata,
             account=account_output,
-            order_events=tuple(event_records),
+            position_events=tuple(event_records),
             position_snapshots=tuple(position_snapshot_points),
             allocation_snapshots=tuple(allocation_snapshot_points),
             financing_cash_flows=tuple(financing_cash_flow_records),
@@ -920,12 +920,12 @@ class Backtest:
         self,
         result: BacktestResult,
         run_id: str,
-    ) -> list[OrderEventRecord]:
-        """Map OrderEvent -> OrderEventRecord."""
-        from librae.backtest.schema import OrderEventRecord
+    ) -> list[PositionEventRecord]:
+        """Map PositionEvent -> PositionEventRecord."""
+        from librae.backtest.schema import PositionEventRecord
 
         return [
-            OrderEventRecord(
+            PositionEventRecord(
                 event_id=make_event_id(run_id, i),
                 ts=e.ts,
                 account_id=self._account_id,
@@ -946,7 +946,7 @@ class Backtest:
                 ),
                 entry_slippage=(float(e.entry_slippage) if e.entry_slippage is not None else None),
                 entry_tax=float(e.entry_tax) if e.entry_tax is not None else None,
-                pnl=float(e.pnl) if e.pnl is not None else None,
+                realized_pnl=float(e.realized_pnl) if e.realized_pnl is not None else None,
                 net_return=float(e.net_return) if e.net_return is not None else None,
                 entry_at=e.entry_at,
                 periods_held=e.periods_held,
@@ -962,7 +962,7 @@ class Backtest:
                 margin_mode=e.margin_mode,
                 cash_flow=float(e.cash_flow) if e.cash_flow is not None else None,
             )
-            for i, e in enumerate(result.order_events)
+            for i, e in enumerate(result.position_events)
         ]
 
     def _build_position_snapshot_records(
@@ -1261,7 +1261,7 @@ class Backtest:
         )
 
     @staticmethod
-    def _filled_quantities(events: Iterable[OrderEvent]) -> dict[str, float]:
+    def _filled_quantities(events: Iterable[PositionEvent]) -> dict[str, float]:
         """Aggregate quantity already matched per symbol in one data event."""
         quantities: dict[str, float] = {}
         for event in events:

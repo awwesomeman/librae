@@ -95,7 +95,7 @@ def test_backtest_output_validate_passes() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
         account=_make_account(_make_equity_curve()),
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -106,7 +106,7 @@ def test_backtest_output_serializes_scalar_account() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
         account=_make_account(_make_equity_curve()),
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -122,7 +122,7 @@ def test_backtest_output_validate_empty_run_id_raises() -> None:
     output = BacktestOutput(
         run_metadata=meta,
         account=_make_account(),
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -135,7 +135,7 @@ def test_backtest_output_validate_empty_strategy_raises() -> None:
     output = BacktestOutput(
         run_metadata=meta,
         account=_make_account(),
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -148,7 +148,7 @@ def test_backtest_output_exposes_single_account() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
         account=account,
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )

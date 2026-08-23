@@ -76,7 +76,7 @@ class TestRenderUnifiedDashboard:
 
     def test_accounting_panels_filter_the_selected_account(self):
         d = render_unified_dashboard()
-        accounting_tables = ("strategy_performance", "equity_curve", "trade_events")
+        accounting_tables = ("strategy_performance", "equity_curve", "position_events")
         for panel in d["panels"]:
             for target in panel.get("targets", []):
                 sql = target["rawSql"]
@@ -114,7 +114,7 @@ class TestRenderUnifiedDashboard:
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
         sql = panel["targets"][0]["rawSql"]
-        assert "trade_events" in sql
+        assert "position_events" in sql
         assert "${account_id:sqlstring}" in sql
         assert '"Symbol"' in sql
         assert "slot" not in sql.lower()
@@ -139,7 +139,7 @@ class TestRenderUnifiedDashboard:
         """Every 'latest' lookup (position, mark, equity) must be bounded by
         $__timeTo(), not just $__timeFilter(ts) on ts's own row — otherwise
         dragging the time picker to a past date wouldn't move this panel at
-        all, since trade_events/ohlcv/equity_curve are read via DISTINCT
+        all, since position_events/ohlcv/equity_curve are read via DISTINCT
         ON/ORDER BY...LIMIT 1 subqueries that $__timeFilter never touches.
         This is what makes History tracking a time-range drag, not a new
         panel or a new DB table. A table (not a per-symbol line chart) is
@@ -161,7 +161,7 @@ class TestRenderUnifiedDashboard:
         assert "net_exposure" in sql
         assert "concentration" in sql
 
-    def test_trade_events_surfaces_group_id(self):
+    def test_position_events_surfaces_group_id(self):
         """group_id (OrderIntent's atomic multi-leg grouping) is the correct
         way to pair related rows (e.g. a funding-arb spot+perp leg) — not
         coincidental symbol-name sorting."""
@@ -183,7 +183,7 @@ class TestRenderUnifiedDashboard:
         assert "entry_at" in sql
         assert '"Group"' not in sql
 
-    def test_trade_events_shows_all_symbols_with_in_panel_filtering(self):
+    def test_position_events_shows_all_symbols_with_in_panel_filtering(self):
         """Trade Events shows every symbol by default (a multi-leg arb
         position's paired legs need to stay visible together, and it's
         independent of the Price Trend/Entry-Exit ${symbol} selector) —

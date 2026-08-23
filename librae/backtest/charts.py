@@ -1,6 +1,6 @@
-"""Trade chart rendering — lightweight-charts overlay of order_events on OHLCV.
+"""Trade chart rendering — lightweight-charts overlay of position_events on OHLCV.
 
-Pure rendering only: consumes already-computed BacktestOutput.order_events
+Pure rendering only: consumes already-computed BacktestOutput.position_events
 and never recomputes fills or PnL. Aggregate performance remains owned by
 librae.core.metrics.
 """
@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 if TYPE_CHECKING:
-    from librae.backtest.schema import OrderEventRecord
+    from librae.backtest.schema import PositionEventRecord
 
 _ENTRY_EVENTS = {"open", "add"}
 _EXIT_EVENTS = {"close", "reduce"}
@@ -50,15 +50,15 @@ def _to_utc(ts) -> pd.Timestamp:
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 
-def _build_markers(order_events: Sequence[OrderEventRecord], symbol: str) -> list[dict]:
-    """Convert one symbol's OrderEventRecords into lightweight-charts markers.
+def _build_markers(position_events: Sequence[PositionEventRecord], symbol: str) -> list[dict]:
+    """Convert one symbol's PositionEventRecords into lightweight-charts markers.
 
     entry = open/add (covers scale-ins), exit = close/reduce (covers partial
-    closes) — using OrderEvent instead of TradeResult avoids duplicate entry
+    closes) — using PositionEvent instead of TradeResult avoids duplicate entry
     markers when a position is closed in multiple tranches.
     """
     markers = []
-    for ev in order_events:
+    for ev in position_events:
         if ev.symbol != symbol:
             continue
         is_long = ev.side == "long"
@@ -107,7 +107,7 @@ def _prepare_ohlcv(ohlcv: pd.DataFrame) -> pd.DataFrame:
 
 def plot_kbars(
     ohlcv: pd.DataFrame,
-    order_events: Sequence[OrderEventRecord],
+    position_events: Sequence[PositionEventRecord],
     symbol: str,
     *,
     block: bool = True,
@@ -117,7 +117,7 @@ def plot_kbars(
     Args:
         ohlcv: Single-symbol OHLCV DataFrame with DatetimeIndex, already
             sliced for `symbol` (e.g. df.xs(symbol, level="symbol")).
-        order_events: BacktestOutput.order_events — filtered here by symbol,
+        position_events: BacktestOutput.position_events — filtered here by symbol,
             so the full (possibly multi-symbol) list can be passed as-is.
         symbol: Which symbol's events to overlay.
         block: Passed to Chart.show() — False for scripted/headless use.
@@ -137,7 +137,7 @@ def plot_kbars(
     )
     chart.volume_config(up_color=_VOLUME_UP, down_color=_VOLUME_DOWN)  # must precede set()
     chart.set(_prepare_ohlcv(ohlcv))
-    for m in _build_markers(order_events, symbol):
+    for m in _build_markers(position_events, symbol):
         chart.marker(
             time=m["time"],
             position=m["position"],

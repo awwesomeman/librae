@@ -60,7 +60,7 @@ def _backtest_output() -> BacktestOutput:
             ),
             metrics=StrategyMetrics(total_return=0.01),
         ),
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
     )
@@ -144,7 +144,7 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
     assert set(artifact.tables) == {
         "accounts",
         "equity_curve",
-        "order_events",
+        "position_events",
         "position_snapshots",
         "allocation_snapshots",
         "financing_cash_flows",
@@ -153,7 +153,7 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
     assert set(artifact.tables["accounts"]["run_id"]) == {"demo-20260729t1200-abcdef"}
     assert artifact.tables["accounts"].loc[0, "total_return"] == pytest.approx(0.01)
     assert artifact.tables["equity_curve"].loc[0, "account_id"] == "main"
-    assert artifact.tables["order_events"].empty
+    assert artifact.tables["position_events"].empty
     json.dumps(artifact.manifest)
 
 

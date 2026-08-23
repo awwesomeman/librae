@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from librae.backtest.schema import OrderEventRecord, StrategyMetrics
+    from librae.backtest.schema import PositionEventRecord, StrategyMetrics
     from librae.core.executor import TradePnL
 
 from librae.core import EPSILON
@@ -243,7 +243,7 @@ class _PositionLifecycle:
     ordinal: int
     start_sequence: int
     side: SignalDirection
-    events: tuple[OrderEventRecord, ...]
+    events: tuple[PositionEventRecord, ...]
     status: LifecycleStatus
 
 
@@ -256,7 +256,7 @@ class _LifecycleState:
     side: SignalDirection
     quantity: float
     entry_price: float
-    events: list[OrderEventRecord]
+    events: list[PositionEventRecord]
 
 
 def _as_positive_finite_array(values: Sequence[float], name: str) -> np.ndarray:
@@ -498,11 +498,11 @@ def _max_optional(values: Sequence[float] | None) -> float | None:
     return float(np.max(values)) if values is not None and len(values) > 0 else None
 
 
-def _lifecycle_error(event: OrderEventRecord, message: str) -> ValueError:
+def _lifecycle_error(event: PositionEventRecord, message: str) -> ValueError:
     return ValueError(f"{event.symbol} event {event.event_id}: {message}")
 
 
-def _validate_event_values(event: OrderEventRecord) -> pd.Timestamp:
+def _validate_event_values(event: PositionEventRecord) -> pd.Timestamp:
     if not event.event_id:
         raise ValueError("order event IDs must be non-empty")
     if not event.symbol:
@@ -523,9 +523,9 @@ def _validate_event_values(event: OrderEventRecord) -> pd.Timestamp:
     if not np.isfinite(event.remaining_quantity) or event.remaining_quantity < 0:
         raise _lifecycle_error(event, "remaining_quantity must be finite and non-negative")
     if event.event_type in {"reduce", "close"} and (
-        event.pnl is None or not np.isfinite(event.pnl)
+        event.realized_pnl is None or not np.isfinite(event.realized_pnl)
     ):
-        raise _lifecycle_error(event, "realized exit events require finite pnl")
+        raise _lifecycle_error(event, "realized exit events require finite realized_pnl")
 
     timestamp = pd.Timestamp(event.ts)
     if pd.isna(timestamp):
@@ -540,7 +540,7 @@ def _quantities_match(left: float, right: float) -> bool:
 
 
 def _reconstruct_position_lifecycles(
-    order_events: Sequence[OrderEventRecord],
+    position_events: Sequence[PositionEventRecord],
 ) -> list[_PositionLifecycle]:
     """Validate events and reconstruct independent per-symbol 0 -> N -> 0 lifecycles."""
     active: dict[str, _LifecycleState] = {}
@@ -549,7 +549,7 @@ def _reconstruct_position_lifecycles(
     seen_event_ids: set[str] = set()
     lifecycles: list[_PositionLifecycle] = []
 
-    for sequence, event in enumerate(order_events):
+    for sequence, event in enumerate(position_events):
         timestamp = _validate_event_values(event)
         if event.event_id in seen_event_ids:
             raise _lifecycle_error(event, "event_id must be unique")
@@ -1002,7 +1002,7 @@ def _update_bar_excursion(
 
 
 def compute_trade_lifecycle_outcomes(
-    order_events: Sequence[OrderEventRecord],
+    position_events: Sequence[PositionEventRecord],
     ohlcv_by_symbol: Mapping[str, pd.DataFrame],
 ) -> pd.DataFrame:
     """Return one actual-excursion fact row per complete or incomplete position lifecycle.
@@ -1024,7 +1024,7 @@ def compute_trade_lifecycle_outcomes(
         "mfe",
         "mae",
     ]
-    lifecycles = _reconstruct_position_lifecycles(order_events)
+    lifecycles = _reconstruct_position_lifecycles(position_events)
     if not lifecycles:
         return pd.DataFrame(columns=columns)
     normalized = _normalize_trade_ohlcv(
@@ -1081,7 +1081,7 @@ def compute_trade_lifecycle_outcomes(
                 "closed_at": close_event.ts if close_event is not None else pd.NaT,
                 "realized_exits": len(exit_events),
                 "periods_held": (close_event.periods_held if close_event is not None else None),
-                "net_pnl": float(sum(event.pnl for event in exit_events)),
+                "net_pnl": float(sum(event.realized_pnl for event in exit_events)),
                 "mfe": float(mfe),
                 "mae": float(mae),
             }
@@ -1137,7 +1137,7 @@ def summarize_trade_lifecycle_outcomes(outcomes: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_trade_entry_outcomes(
-    order_events: Sequence[OrderEventRecord],
+    position_events: Sequence[PositionEventRecord],
     ohlcv_by_symbol: Mapping[str, pd.DataFrame],
     max_periods: int,
 ) -> pd.DataFrame:
@@ -1154,14 +1154,14 @@ def compute_trade_entry_outcomes(
         "mae",
     ]
     _validate_positive_integer(max_periods, "max_periods")
-    lifecycles = _reconstruct_position_lifecycles(order_events)
+    lifecycles = _reconstruct_position_lifecycles(position_events)
     if not lifecycles:
         return pd.DataFrame(columns=columns)
     normalized = _normalize_trade_ohlcv(
         {lifecycle.symbol for lifecycle in lifecycles}, ohlcv_by_symbol
     )
 
-    anchors_by_symbol: dict[str, list[tuple[_PositionLifecycle, OrderEventRecord]]] = {}
+    anchors_by_symbol: dict[str, list[tuple[_PositionLifecycle, PositionEventRecord]]] = {}
     for lifecycle in lifecycles:
         anchors_by_symbol.setdefault(lifecycle.symbol, []).extend(
             (lifecycle, event) for event in lifecycle.events if event.event_type in {"open", "add"}
@@ -1244,7 +1244,7 @@ def split_lifecycle_by_oos_start(
     `completed`/`entry_outcomes` must come from `compute_trade_lifecycle_outcomes()`/
     `compute_trade_entry_outcomes()` run on the *full* event stream — lifecycle
     reconstruction needs every event to classify a lifecycle as complete, so
-    split the resulting tables rather than pre-filtering `order_events`; a
+    split the resulting tables rather than pre-filtering `position_events`; a
     lifecycle opened in-sample and closed out-of-sample is bucketed by
     `closed_at` and stays correctly `complete` either way.
 

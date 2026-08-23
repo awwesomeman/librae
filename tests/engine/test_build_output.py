@@ -111,7 +111,7 @@ class TestBuildOutputValid:
         bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
         bt.run()
         output = bt.build_output()
-        close_events = [e for e in output.order_events if e.event_type == "close"]
+        close_events = [e for e in output.position_events if e.event_type == "close"]
         assert len(close_events) >= 1
 
     def test_has_equity_curve(self) -> None:

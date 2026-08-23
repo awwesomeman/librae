@@ -103,7 +103,7 @@ def test_save_backtest_output_batches_funding_diagnostics(
             equity_curve=(),
             metrics=StrategyMetrics(total_return=-0.02),
         ),
-        order_events=(),
+        position_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
         financing_cash_flows=(
