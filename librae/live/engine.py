@@ -41,6 +41,7 @@ from librae.core.executor import (
     validate_strategy_decision,
 )
 from librae.core.financing import (
+    attach_borrow_rate,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
@@ -58,7 +59,6 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import session_label, session_labels, validate_calendar_id
-from librae.core.utils import interval_to_timedelta
 
 from .executor import ExecutionReport, LiveExecutor, OrderRequest
 from .interfaces import (
@@ -93,18 +93,6 @@ logger = logging.getLogger(__name__)
 # be attributed to it — far above exchange millisecond jitter, far below any
 # supported bar interval.
 _FUNDING_TS_TOLERANCE = pd.Timedelta("1min")
-
-# How many *quoting* periods a borrow rate keeps describing the market. A rate
-# is a step function, so it must carry forward past the bar it was published
-# on -- but not indefinitely.
-#
-# The quoting period is what the venue tells us (Binance quotes a daily rate,
-# so 1 day); how often it republishes is not, and is far shorter -- observed
-# every 1-20h on Binance. So this bound is generous by roughly an order of
-# magnitude, deliberately: erring long keeps charging a slightly stale rate,
-# while erring short stops charging at all, and a cost model should fail
-# toward overcharging.
-_BORROW_RATE_MAX_AGE_QUOTING_PERIODS = 3
 
 
 @dataclass(frozen=True)
@@ -220,26 +208,10 @@ def _bind_market_data_source(
             # the last published rate stays in force until the next one, so
             # every bar after it accrues at that rate. A "nearest" join would
             # charge one bar per publication and leave the rest free.
-            period = borrow["rate_period_seconds"].astype(float)
-            bar_seconds = interval_to_timedelta(tf).total_seconds()
-            # The exchange quotes a rate over its own period (Binance: daily);
-            # the engine charges once per bar.
-            scaled = borrow.assign(
-                borrow_rate=borrow["borrow_rate"].astype(float) * bar_seconds / period
-            ).sort_values("ts")
-            # Past this the last rate no longer describes the market. Leaving
-            # it NaN charges nothing, which the engine reads as "unknown", not
-            # as "free" -- see librae.core.financing.
-            max_age = pd.Timedelta(
-                seconds=float(period.max()) * _BORROW_RATE_MAX_AGE_QUOTING_PERIODS
-            )
-            return pd.merge_asof(
-                bars,
-                scaled[["ts", "borrow_rate"]],
-                on="ts",
-                direction="backward",
-                tolerance=max_age,
-            )
+            # Scaling, join direction and staleness all live in one place so a
+            # caller's backtest binding expires a rate at the same moment this
+            # does -- see librae.core.financing.attach_borrow_rate.
+            return attach_borrow_rate(bars, borrow, timeframe=tf)
 
         return _with_borrow
 

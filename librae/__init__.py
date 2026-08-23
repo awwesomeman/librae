@@ -59,7 +59,11 @@ from .core.executor import (
     side_multiplier,
     simulate_fill,
 )
-from .core.financing import FinancingCashFlow
+from .core.financing import (
+    BORROW_RATE_MAX_AGE_QUOTING_PERIODS,
+    FinancingCashFlow,
+    attach_borrow_rate,
+)
 from .core.metrics import (
     DEFAULT_SERIES_METRICS,
     DEFAULT_SUMMARY_METRICS,
@@ -135,7 +139,9 @@ __all__ = [
     "PositionEventType",
     "PositionSide",
     "TradePnL",
+    "BORROW_RATE_MAX_AGE_QUOTING_PERIODS",
     "FinancingCashFlow",
+    "attach_borrow_rate",
     "calc_trade_pnl",
     "side_multiplier",
     "simulate_fill",

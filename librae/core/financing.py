@@ -8,15 +8,30 @@ from datetime import datetime
 from math import isfinite, isnan
 from typing import Literal
 
+import pandas as pd
+
 from librae.core.cost_model import CostModel
 from librae.core.executor import side_multiplier
 from librae.core.strategy import PositionSide, PositionState
+from librae.core.utils import interval_to_timedelta
 
 FUNDING_RATE_FIELD = "funding_rate"
 FUNDING_MARK_PRICE_FIELD = "funding_mark_price"
 BORROW_RATE_FIELD = "borrow_rate"
 
 FinancingKind = Literal["funding", "borrow"]
+
+# How many *quoting* periods a borrow rate keeps describing the market. A rate
+# is a step function, so it must carry forward past the bar it was published
+# on -- but not indefinitely.
+#
+# The quoting period is what a venue reports (Binance quotes a daily rate, so
+# 1 day); how often it republishes is not, and is far shorter -- observed every
+# 1-20h on Binance. So this bound is generous by roughly an order of magnitude,
+# deliberately: erring long keeps charging a slightly stale rate, while erring
+# short stops charging at all, and a cost model should fail toward
+# overcharging.
+BORROW_RATE_MAX_AGE_QUOTING_PERIODS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,4 +202,60 @@ def calculate_borrow_cash_flows(
         rate_field=BORROW_RATE_FIELD,
         kind="borrow",
         mark_price_field=None,
+    )
+
+
+def attach_borrow_rate(
+    bars: pd.DataFrame,
+    rates: pd.DataFrame,
+    *,
+    timeframe: str,
+) -> pd.DataFrame:
+    """Turn a venue's borrow-rate series into a per-bar ``borrow_rate`` column.
+
+    Use this wherever bars are assembled -- a caller's backtest data layer as
+    much as the live market-data binding -- so both charge the same position
+    the same interest. Three rules have to agree for that to hold, and each is
+    easy to get wrong on its own:
+
+    - **Scaling.** A venue quotes a rate over its own period (Binance: daily)
+      while the engine charges once per bar, so the rate is scaled by the bar
+      interval. Hardcoding the ratio is correct only for the bar size it was
+      written for.
+    - **Direction.** A borrow rate is a step function, not a settlement: the
+      last published rate stays in force until the next one, so it is joined
+      backward as-of and every later bar accrues at it. Matching the nearest
+      rate instead would charge one bar per publication and leave the rest
+      free.
+    - **Staleness.** The carry stops after
+      ``BORROW_RATE_MAX_AGE_QUOTING_PERIODS`` quoting periods, leaving the
+      column NaN so the engine reads "unknown" rather than "free". An
+      unbounded carry keeps charging a rate the venue stopped standing behind.
+
+    Args:
+        bars: Bars with a ``ts`` column, ascending.
+        rates: ``[ts, borrow_rate, rate_period_seconds]`` as returned by an
+            adapter's ``fetch_borrow_rate_history``. ``rate_period_seconds``
+            is the quoting basis, not the republication cadence.
+        timeframe: The bars' interval, in either ccxt or canonical form.
+
+    Returns ``bars`` with a ``borrow_rate`` column, NaN where no rate applies.
+    Returns it unchanged when ``rates`` is empty -- absent means unknown, and
+    the engine skips a missing rate rather than treating it as zero.
+    """
+    if bars.empty or rates.empty:
+        return bars
+
+    period = rates["rate_period_seconds"].astype(float)
+    bar_seconds = interval_to_timedelta(timeframe).total_seconds()
+    scaled = rates.assign(
+        borrow_rate=rates[BORROW_RATE_FIELD].astype(float) * bar_seconds / period
+    ).sort_values("ts")
+    max_age = pd.Timedelta(seconds=float(period.max()) * BORROW_RATE_MAX_AGE_QUOTING_PERIODS)
+    return pd.merge_asof(
+        bars,
+        scaled[["ts", BORROW_RATE_FIELD]],
+        on="ts",
+        direction="backward",
+        tolerance=max_age,
     )

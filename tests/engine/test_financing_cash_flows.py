@@ -11,7 +11,9 @@ from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 from librae.backtest.engine import _attribute_funding_to_trades
 from librae.core.executor import TradeResult
 from librae.core.financing import (
+    BORROW_RATE_MAX_AGE_QUOTING_PERIODS,
     FinancingCashFlow,
+    attach_borrow_rate,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
@@ -470,3 +472,63 @@ def test_a_long_pays_no_borrow_interest_over_a_whole_backtest() -> None:
     backtest.run()
 
     assert backtest.build_output().financing_cash_flows == ()
+
+
+# ---------------------------------------------------------------------------
+# attach_borrow_rate — the one place backtest and live agree on the rules
+# ---------------------------------------------------------------------------
+
+
+def _rate_series(timestamps: list[str], rates: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts": pd.to_datetime(timestamps, utc=True),
+            "borrow_rate": rates,
+            "rate_period_seconds": [86_400.0] * len(timestamps),
+        }
+    )
+
+
+def _bar_frame(timestamps: list[str]) -> pd.DataFrame:
+    return pd.DataFrame({"ts": pd.to_datetime(timestamps, utc=True), "close": 100.0})
+
+
+def test_attach_borrow_rate_scales_a_quoted_rate_to_the_bar() -> None:
+    bars = _bar_frame(["2026-01-01T00:00:00Z", "2026-01-01T08:00:00Z"])
+    rates = _rate_series(["2025-12-31T00:00:00Z"], [0.00024])
+
+    attached = attach_borrow_rate(bars, rates, timeframe="8h")
+
+    # A daily rate over an 8h bar is a third of a day.
+    assert attached["borrow_rate"].tolist() == [pytest.approx(0.00008)] * 2
+
+
+def test_attach_borrow_rate_carries_one_publication_across_later_bars() -> None:
+    bars = _bar_frame([f"2026-01-0{day}T00:00:00Z" for day in (1, 2, 3)])
+    rates = _rate_series(["2026-01-01T00:00:00Z"], [0.001])
+
+    attached = attach_borrow_rate(bars, rates, timeframe="1d")
+
+    assert not attached["borrow_rate"].isna().any()
+
+
+def test_attach_borrow_rate_stops_carrying_past_the_staleness_bound() -> None:
+    stale_days = BORROW_RATE_MAX_AGE_QUOTING_PERIODS + 1
+    bars = _bar_frame(["2026-01-10T00:00:00Z"])
+    rates = _rate_series(
+        [(pd.Timestamp("2026-01-10T00:00:00Z") - pd.Timedelta(days=stale_days)).isoformat()],
+        [0.001],
+    )
+
+    attached = attach_borrow_rate(bars, rates, timeframe="1d")
+
+    assert attached["borrow_rate"].isna().all()
+
+
+def test_attach_borrow_rate_leaves_bars_alone_when_there_are_no_rates() -> None:
+    bars = _bar_frame(["2026-01-01T00:00:00Z"])
+    empty = _rate_series([], [])
+
+    attached = attach_borrow_rate(bars, empty, timeframe="1d")
+
+    assert "borrow_rate" not in attached.columns
