@@ -1307,14 +1307,14 @@ def render_unified_dashboard() -> dict:
         label="Mode",
     )
     strategy_var = _make_query_variable(
-        "strategy",
-        "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        "strategy_name",
+        "SELECT DISTINCT strategy_name FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy_name",
         label="Strategy",
     )
     run_id_var = _make_query_variable(
         "run_id",
         "SELECT run_id FROM backtest_runs"
-        " WHERE mode='${mode}' AND strategy='${strategy}'"
+        " WHERE mode='${mode}' AND strategy_name='${strategy_name}'"
         " ORDER BY run_at DESC LIMIT 20",
         label="Run ID",
     )
@@ -1673,14 +1673,14 @@ def render_signal_monitor() -> dict:
             label="Mode",
         ),
         _make_query_variable(
-            "strategy",
-            "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+            "strategy_name",
+            "SELECT DISTINCT strategy_name FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy_name",
             label="Strategy",
         ),
         _make_query_variable(
             "run_id",
             "SELECT run_id FROM backtest_runs"
-            " WHERE mode='${mode}' AND strategy='${strategy}'"
+            " WHERE mode='${mode}' AND strategy_name='${strategy_name}'"
             " ORDER BY run_at DESC LIMIT 20",
             label="Run ID",
         ),

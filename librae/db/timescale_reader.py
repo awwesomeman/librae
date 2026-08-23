@@ -78,12 +78,12 @@ def get_run_by_config_hash(
 def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     """Look up one run's identity by its primary key, or None if not found.
 
-    Returns the run's RunMetadata (strategy/symbols/timeframe/data_source/
+    Returns the run's RunMetadata (strategy_name/symbols/timeframe/data_source/
     started_at/ended_at/run_at/mode) — the identity fields a caller needs to
     label a report or chart. For the resolved config used to decide backtest
     cache reuse, see get_run_by_config_hash()/get_run_by_backtest_cache_key().
     """
-    sql = """SELECT run_id, strategy, symbols, timeframe, data_source,
+    sql = """SELECT run_id, strategy_name, symbols, timeframe, data_source,
                      started_at, ended_at, run_at, mode
              FROM backtest_runs
              WHERE run_id = %s"""
@@ -96,7 +96,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
         return None
     return RunMetadata(
         run_id=row[0],
-        strategy=row[1],
+        strategy_name=row[1],
         symbols=json.loads(row[2]),
         timeframe=row[3],
         data_source=row[4],
@@ -107,13 +107,13 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     )
 
 
-def get_latest_run_id(strategy: str | None = None, dsn: str | None = None) -> str | None:
+def get_latest_run_id(strategy_name: str | None = None, dsn: str | None = None) -> str | None:
     """Return the most recent run_id, optionally filtered by strategy."""
     sql = "SELECT run_id FROM backtest_runs"
     params: list = []
-    if strategy:
-        sql += " WHERE strategy = %s"
-        params.append(strategy)
+    if strategy_name:
+        sql += " WHERE strategy_name = %s"
+        params.append(strategy_name)
     sql += " ORDER BY run_at DESC LIMIT 1"
     with get_conn(dsn) as conn:
         cur = conn.cursor()
@@ -126,7 +126,7 @@ def get_latest_run_id(strategy: str | None = None, dsn: str | None = None) -> st
 def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
     """List recent backtest runs."""
     sql = """
-        SELECT run_id, strategy, symbols, timeframe,
+        SELECT run_id, strategy_name, symbols, timeframe,
                mode, data_source, started_at, ended_at, run_at
         FROM backtest_runs
         ORDER BY run_at DESC
@@ -252,7 +252,7 @@ def load_performance(
                sp.average_gross_exposure, sp.max_gross_exposure,
                sp.max_abs_net_exposure, sp.max_concentration,
                sp.total_commission, sp.total_slippage, sp.total_tax,
-               br.strategy, br.symbols, br.timeframe
+               br.strategy_name, br.symbols, br.timeframe
         FROM strategy_performance sp
         JOIN backtest_runs br ON sp.run_id = br.run_id
         WHERE sp.run_id = %s
@@ -275,7 +275,7 @@ def row_to_strategy_metrics(row: Mapping[str, Any]) -> StrategyMetrics:
 
 def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     """Derive a synthetic entry/exit signal series from position_events (open=entry,
-    close/reduce=exit) — i.e. the strategy's actual executed fills, NOT a read of
+    close/reduce=exit) — i.e. the strategy_name's actual executed fills, NOT a read of
     the separate signal_events table (which stores raw pre-execution signals for
     quality monitoring)."""
     sql = """
@@ -328,7 +328,7 @@ def get_ohlcv_coverage_ranges(
 def get_external_factor_coverage_ranges(
     symbol: str,
     factor_name: str,
-    source: str,
+    data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
 ) -> list[tuple[datetime, datetime]]:
@@ -336,12 +336,12 @@ def get_external_factor_coverage_ranges(
     sorted. Same shape/semantics as get_ohlcv_coverage_ranges()."""
     sql = """
         SELECT range_started_at, range_ended_at FROM external_factor_coverage_ranges
-        WHERE symbol = %s AND factor_name = %s AND source = %s AND instrument_type = %s
+        WHERE symbol = %s AND factor_name = %s AND data_source = %s AND instrument_type = %s
         ORDER BY range_started_at
     """
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(sql, (symbol, factor_name, source, instrument_type))
+        cur.execute(sql, (symbol, factor_name, data_source, instrument_type))
         rows = cur.fetchall()
         cur.close()
     return [(r[0], r[1]) for r in rows]
@@ -350,23 +350,23 @@ def get_external_factor_coverage_ranges(
 def load_external_factor(
     symbol: str,
     factor_name: str,
-    source: str,
+    data_source: str,
     *,
     instrument_type: str = "spot",
     started_at: str | None = None,
     ended_at: str | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
-    """Load cached factor values for (symbol, factor_name, source, instrument_type).
+    """Load cached factor values for (symbol, factor_name, data_source, instrument_type).
 
     Returns DataFrame with columns [timestamp, value], tz-aware UTC, sorted
     ascending — same shape get_factor()'s fetchers must return.
     """
     sql = """
         SELECT ts AS timestamp, value FROM external_factors
-        WHERE symbol = %s AND factor_name = %s AND source = %s AND instrument_type = %s
+        WHERE symbol = %s AND factor_name = %s AND data_source = %s AND instrument_type = %s
     """
-    params: list = [symbol, factor_name, source, instrument_type]
+    params: list = [symbol, factor_name, data_source, instrument_type]
     if started_at:
         sql += " AND ts >= %s"
         params.append(started_at)

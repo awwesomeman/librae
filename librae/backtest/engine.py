@@ -886,7 +886,7 @@ class Backtest:
 
         run_metadata = RunMetadata(
             run_id=run_id,
-            strategy=self._strategy_name,
+            strategy_name=self._strategy_name,
             symbols=tuple(self._symbols),
             timeframe=timeframe,
             data_source=self._data_source,

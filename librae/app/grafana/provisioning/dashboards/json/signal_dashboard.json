@@ -38,14 +38,14 @@
         "label": "Mode"
       },
       {
-        "name": "strategy",
+        "name": "strategy_name",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
-        "query": "SELECT DISTINCT strategy FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy",
+        "definition": "SELECT DISTINCT strategy_name FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy_name",
+        "query": "SELECT DISTINCT strategy_name FROM backtest_runs WHERE mode='${mode}' ORDER BY strategy_name",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",
@@ -63,8 +63,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "P40AE60E18F02DE32"
         },
-        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy='${strategy}' ORDER BY run_at DESC LIMIT 20",
-        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy='${strategy}' ORDER BY run_at DESC LIMIT 20",
+        "definition": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy_name='${strategy_name}' ORDER BY run_at DESC LIMIT 20",
+        "query": "SELECT run_id FROM backtest_runs WHERE mode='${mode}' AND strategy_name='${strategy_name}' ORDER BY run_at DESC LIMIT 20",
         "rawQuery": true,
         "refresh": 2,
         "regex": "",

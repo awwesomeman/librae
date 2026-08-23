@@ -203,7 +203,7 @@ class TestWriteEquityCurvePoint:
             equity=105_000.0,
             drawdown=-0.02,
             period_return=0.01,
-            strategy="test_strat",
+            strategy_name="test_strat",
         )
 
         sql = mock_cur.execute.call_args[0][0]
@@ -218,7 +218,7 @@ class TestWriteEquityCurvePoint:
             "concentration",
             "turnover",
             "exposed",
-            "strategy",
+            "strategy_name",
         ):
             assert f"{col}=EXCLUDED.{col}" in sql
 
@@ -237,7 +237,7 @@ def test_write_trade_event_sql_matches_persisted_cost_fields(mock_conn_ctx) -> N
         run_id="run-1",
         account_id="alpha",
         currency="USD",
-        strategy="test",
+        strategy_name="test",
         mode="backtest",
         timeframe="H1",
         ts=datetime(2024, 6, 1, tzinfo=UTC),
@@ -306,7 +306,7 @@ class TestWriteSignalEvent:
         write_signal_event(
             ts=ts,
             run_id="test-run-001",
-            strategy="test_strat",
+            strategy_name="test_strat",
             symbol="BTCUSDT",
             mode="sim",
             timeframe="H1",
@@ -322,7 +322,9 @@ class TestWriteSignalEvent:
         # Regression test: run_id must be part of the dedup key, or two
         # different runs' signals for the same (ts, strategy, symbol, ...)
         # would collide and silently drop one run's row.
-        assert "ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)" in sql
+        assert (
+            "ON CONFLICT (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type)" in sql
+        )
 
     @patch("librae.db.timescale_writer.get_conn")
     def test_accepts_cursor(self, mock_conn_ctx):
@@ -333,7 +335,7 @@ class TestWriteSignalEvent:
         write_signal_event(
             ts=ts,
             run_id="test-run-001",
-            strategy="s",
+            strategy_name="s",
             symbol="S",
             mode="sim",
             timeframe="H1",

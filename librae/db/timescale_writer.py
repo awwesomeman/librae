@@ -62,10 +62,10 @@ def _to_dt(ts: Any) -> datetime | None:
 
 
 _SIGNAL_INSERT_SQL = """INSERT INTO signal_events
-           (ts, run_id, strategy, symbol, mode, timeframe,
+           (ts, run_id, strategy_name, symbol, mode, timeframe,
             signal_value, price, signal_type)
            VALUES %s
-           ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)
+           ON CONFLICT (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type)
            DO NOTHING"""
 
 
@@ -96,7 +96,7 @@ def _extract_signals(
 
 def write_run_metadata(
     run_id: str,
-    strategy: str,
+    strategy_name: str,
     symbols: tuple[str, ...] | list[str],
     timeframe: str,
     mode: str,
@@ -122,13 +122,13 @@ def write_run_metadata(
     """
     timeframe = to_canonical(timeframe)
     sql = """INSERT INTO backtest_runs
-               (run_id, strategy, symbols, timeframe, data_source,
+               (run_id, strategy_name, symbols, timeframe, data_source,
                 started_at, ended_at, run_at, mode, poll_seconds,
                 params, execution_policy, risk_policy, config_hash,
                 backtest_revision, backtest_cache_key)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
-                 strategy=EXCLUDED.strategy, run_at=EXCLUDED.run_at,
+                 strategy_name=EXCLUDED.strategy_name, run_at=EXCLUDED.run_at,
                  mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
@@ -141,7 +141,7 @@ def write_run_metadata(
     risk_policy_val = json.dumps(risk_policy) if risk_policy is not None else None
     values = (
         run_id,
-        strategy,
+        strategy_name,
         json.dumps(symbols),
         timeframe,
         data_source,
@@ -233,11 +233,11 @@ def save_backtest_output(
         output: BacktestOutput to write.
         signal_series_by_symbol: Optional entry-signal series keyed by symbol.
         exit_signal_series_by_symbol: Optional exit-signal series keyed by symbol.
-        params: Optional strategy parameters dict to store as JSONB.
+        params: Optional strategy_name parameters dict to store as JSONB.
         execution_policy: Resolved fill and liquidity assumptions to store.
         risk_policy: Resolved engine-level portfolio limits to store.
         config_hash: Deterministic engine-configuration hash.
-        backtest_revision: Optional caller-owned strategy-code and input-data
+        backtest_revision: Optional caller-owned strategy_name-code and input-data
             revision. Cache reuse is disabled when omitted.
         replace_existing: Replace the canonical run for the derived cache key.
         dsn: TimescaleDB DSN.
@@ -269,7 +269,7 @@ def save_backtest_output(
 
         write_run_metadata(
             run_id=meta.run_id,
-            strategy=meta.strategy,
+            strategy_name=meta.strategy_name,
             symbols=meta.symbols,
             timeframe=meta.timeframe,
             mode=meta.mode,
@@ -312,7 +312,7 @@ def save_backtest_output(
                     eq.concentration,
                     eq.turnover,
                     eq.exposed,
-                    meta.strategy,
+                    meta.strategy_name,
                 )
                 for eq in account.equity_curve
             ]
@@ -322,7 +322,7 @@ def save_backtest_output(
                    (ts, run_id, account_id, currency,
                     equity, drawdown, period_return,
                     gross_exposure, net_exposure,
-                    concentration, turnover, exposed, strategy)
+                    concentration, turnover, exposed, strategy_name)
                    VALUES %s""",
                 eq_rows,
                 page_size=1000,
@@ -337,7 +337,7 @@ def save_backtest_output(
                     meta.run_id,
                     ev.account_id,
                     ev.currency,
-                    meta.strategy,
+                    meta.strategy_name,
                     meta.mode,
                     tf,
                     _to_dt(ev.ts),
@@ -375,7 +375,7 @@ def save_backtest_output(
                 cur,
                 """INSERT INTO position_events
                    (event_id, run_id, account_id, currency,
-                    strategy, mode, timeframe,
+                    strategy_name, mode, timeframe,
                     ts, symbol, side, event_type,
                     fill_quantity, price, entry_price,
                     remaining_quantity, notional,
@@ -445,12 +445,12 @@ def save_backtest_output(
             exits = exit_signals.get(signal_symbol)
             cur.execute(
                 """DELETE FROM signal_events
-                   WHERE run_id = %s AND strategy = %s AND symbol = %s AND mode = 'backtest'
+                   WHERE run_id = %s AND strategy_name = %s AND symbol = %s AND mode = 'backtest'
                      AND timeframe = %s
                      AND ts BETWEEN %s AND %s""",
                 (
                     meta.run_id,
-                    meta.strategy,
+                    meta.strategy_name,
                     signal_symbol,
                     tf,
                     _to_dt(meta.started_at),
@@ -462,7 +462,7 @@ def save_backtest_output(
                     (
                         _to_dt(ts),
                         meta.run_id,
-                        meta.strategy,
+                        meta.strategy_name,
                         signal_symbol,
                         "backtest",
                         tf,
@@ -484,7 +484,7 @@ def save_backtest_output(
                     (
                         _to_dt(ts),
                         meta.run_id,
-                        meta.strategy,
+                        meta.strategy_name,
                         signal_symbol,
                         "backtest",
                         tf,
@@ -687,7 +687,7 @@ def write_external_factor(
     df: pd.DataFrame,
     symbol: str,
     factor_name: str,
-    source: str,
+    data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
 ) -> int:
@@ -714,7 +714,7 @@ def write_external_factor(
             ts_utc.apply(_to_dt),
             [symbol] * len(df),
             [factor_name] * len(df),
-            [source] * len(df),
+            [data_source] * len(df),
             [instrument_type] * len(df),
             df["value"].astype(float),
             strict=True,
@@ -725,9 +725,9 @@ def write_external_factor(
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO external_factors (ts, symbol, factor_name, source, instrument_type, value)
+            """INSERT INTO external_factors (ts, symbol, factor_name, data_source, instrument_type, value)
                VALUES %s
-               ON CONFLICT (ts, symbol, factor_name, source, instrument_type) DO NOTHING""",
+               ON CONFLICT (ts, symbol, factor_name, data_source, instrument_type) DO NOTHING""",
             rows,
             page_size=2000,
         )
@@ -737,7 +737,7 @@ def write_external_factor(
 
 
 def write_factor_registry(entries: list[dict], dsn: str | None = None) -> int:
-    """Upsert (factor_name, source, frequency) rows into factor_registry.
+    """Upsert (factor_name, data_source, timeframe) rows into factor_registry.
 
     One row per factor_name — not a per-cached-row write like
     write_external_factor(). Called by the factor data-access layer's
@@ -746,16 +746,16 @@ def write_factor_registry(entries: list[dict], dsn: str | None = None) -> int:
     if not entries:
         return 0
 
-    rows = [(e["factor_name"], e["source"], e["frequency"]) for e in entries]
+    rows = [(e["factor_name"], e["data_source"], e["timeframe"]) for e in entries]
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO factor_registry (factor_name, source, frequency)
+            """INSERT INTO factor_registry (factor_name, data_source, timeframe)
                VALUES %s
                ON CONFLICT (factor_name) DO UPDATE SET
-                   source = EXCLUDED.source, frequency = EXCLUDED.frequency""",
+                   data_source = EXCLUDED.data_source, timeframe = EXCLUDED.timeframe""",
             rows,
         )
         cur.close()
@@ -766,7 +766,7 @@ def write_factor_registry(entries: list[dict], dsn: str | None = None) -> int:
 def merge_external_factor_coverage_ranges(
     symbol: str,
     factor_name: str,
-    source: str,
+    data_source: str,
     range_started_at: datetime,
     range_ended_at: datetime,
     instrument_type: str = "spot",
@@ -775,7 +775,7 @@ def merge_external_factor_coverage_ranges(
     """Record [range_started_at, range_ended_at] as cached for this factor key.
 
     Same merge semantics as merge_ohlcv_coverage_ranges(), keyed by
-    (symbol, factor_name, source, instrument_type) instead of
+    (symbol, factor_name, data_source, instrument_type) instead of
     (symbol, timeframe, data_source, instrument_type).
     """
     validate_instrument_type(instrument_type)
@@ -785,8 +785,8 @@ def merge_external_factor_coverage_ranges(
         _merge_coverage_ranges(
             cur,
             "external_factor_coverage_ranges",
-            ("symbol", "factor_name", "source", "instrument_type"),
-            (symbol, factor_name, source, instrument_type),
+            ("symbol", "factor_name", "data_source", "instrument_type"),
+            (symbol, factor_name, data_source, instrument_type),
             range_started_at,
             range_ended_at,
         )
@@ -796,7 +796,7 @@ def merge_external_factor_coverage_ranges(
 def write_signal_event(
     ts: datetime,
     run_id: str,
-    strategy: str,
+    strategy_name: str,
     symbol: str,
     mode: str,
     timeframe: str,
@@ -813,14 +813,14 @@ def write_signal_event(
     transaction).  Otherwise opens its own connection and commits.
     """
     sql = """INSERT INTO signal_events
-               (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price, signal_type)
+               (ts, run_id, strategy_name, symbol, mode, timeframe, signal_value, price, signal_type)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type)
+               ON CONFLICT (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type)
                DO NOTHING"""
     values = (
         _to_dt(ts),
         run_id,
-        strategy,
+        strategy_name,
         symbol,
         mode,
         timeframe,
@@ -843,6 +843,7 @@ def write_equity_curve_point(
     account_id: str,
     currency: str,
     equity: float,
+    strategy_name: str,
     drawdown: float = 0.0,
     period_return: float = 0.0,
     gross_exposure: float | None = None,
@@ -850,7 +851,6 @@ def write_equity_curve_point(
     concentration: float | None = None,
     turnover: float | None = None,
     exposed: bool | None = None,
-    strategy: str | None = None,
     dsn: str | None = None,
 ) -> None:
     """Write one account equity point."""
@@ -860,7 +860,7 @@ def write_equity_curve_point(
             """INSERT INTO equity_curve
                (ts, run_id, account_id, currency,
                 equity, drawdown, period_return, gross_exposure, net_exposure,
-                concentration, turnover, exposed, strategy)
+                concentration, turnover, exposed, strategy_name)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, account_id, ts) DO UPDATE SET
                  currency=EXCLUDED.currency,
@@ -871,7 +871,7 @@ def write_equity_curve_point(
                  concentration=EXCLUDED.concentration,
                  turnover=EXCLUDED.turnover,
                  exposed=EXCLUDED.exposed,
-                 strategy=EXCLUDED.strategy""",
+                 strategy_name=EXCLUDED.strategy_name""",
             (
                 _to_dt(ts),
                 run_id,
@@ -885,7 +885,7 @@ def write_equity_curve_point(
                 concentration,
                 turnover,
                 exposed,
-                strategy,
+                strategy_name,
             ),
         )
         cur.close()
@@ -896,7 +896,7 @@ def write_trade_event(
     run_id: str,
     account_id: str,
     currency: str,
-    strategy: str,
+    strategy_name: str,
     mode: str,
     timeframe: str,
     ts: datetime,
@@ -935,7 +935,7 @@ def write_trade_event(
         cur.execute(
             """INSERT INTO position_events
                (event_id, run_id, account_id, currency,
-                strategy, mode, timeframe,
+                strategy_name, mode, timeframe,
                 ts, symbol, side, event_type,
                 fill_quantity, price, entry_price,
                 remaining_quantity, notional,
@@ -954,7 +954,7 @@ def write_trade_event(
                 run_id,
                 account_id,
                 currency,
-                strategy,
+                strategy_name,
                 mode,
                 timeframe,
                 _to_dt(ts),
@@ -1085,7 +1085,7 @@ def write_strategy_performance(
     cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> None:
-    """Write/update one account's strategy performance.
+    """Write/update one account's strategy_name performance.
 
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
@@ -1334,7 +1334,7 @@ def save_signal_results(
     df: pd.DataFrame,
     symbol: str,
     timeframe: str,
-    strategy: str,
+    strategy_name: str,
     data_source: str,
     run_id: str | None = None,
     mode: str = "backtest",
@@ -1385,7 +1385,7 @@ def save_signal_results(
                     return {"backtest_runs": 0}
                 write_run_metadata(
                     run_id,
-                    strategy,
+                    strategy_name,
                     [symbol],
                     tf,
                     mode,
@@ -1408,21 +1408,21 @@ def save_signal_results(
             cur.execute(
                 """DELETE FROM signal_events
                    WHERE run_id IS NOT DISTINCT FROM %s
-                     AND strategy = %s AND symbol = %s AND mode = %s
+                     AND strategy_name = %s AND symbol = %s AND mode = %s
                      AND timeframe = %s
                      AND ts BETWEEN %s AND %s""",
-                (run_id, strategy, symbol, mode, tf, _to_dt(started_at), _to_dt(ended_at)),
+                (run_id, strategy_name, symbol, mode, tf, _to_dt(started_at), _to_dt(ended_at)),
             )
             if has_entry:
                 entry_rows = [
-                    (_to_dt(ts), run_id, strategy, symbol, mode, tf, float(val), None, "entry")
+                    (_to_dt(ts), run_id, strategy_name, symbol, mode, tf, float(val), None, "entry")
                     for ts, val in signal_series.items()
                 ]
                 psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, entry_rows, page_size=1000)
                 sig_count += len(entry_rows)
             if has_exit:
                 exit_rows = [
-                    (_to_dt(ts), run_id, strategy, symbol, mode, tf, float(val), None, "exit")
+                    (_to_dt(ts), run_id, strategy_name, symbol, mode, tf, float(val), None, "exit")
                     for ts, val in exit_signal_series.items()
                 ]
                 psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
@@ -1445,7 +1445,7 @@ def save_strategy_results(
     replace_existing: bool = False,
     backtest_revision: str | None = None,
 ) -> dict:
-    """Write strategy backtest results + signal history to DB.
+    """Write strategy_name backtest results + signal history to DB.
 
     Writes: backtest_runs, equity_curve, position_events, financing_cash_flows,
     strategy_performance, signal_events, ohlcv.

@@ -36,7 +36,7 @@ def _backtest_output() -> BacktestOutput:
     return BacktestOutput(
         run_metadata=RunMetadata(
             run_id="demo-20260729t1200-abcdef",
-            strategy="demo",
+            strategy_name="demo",
             symbols=("BTCUSDT",),
             timeframe="1h",
             data_source="fixture",

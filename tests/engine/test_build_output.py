@@ -97,14 +97,14 @@ class TestBuildOutputValid:
         assert meta.run_id == bt.run_id
         assert meta.symbols == ("BTCUSDT",)
         assert meta.timeframe == "H1"
-        assert meta.strategy == "buy_bar5_close_bar15"
+        assert meta.strategy_name == "buy_bar5_close_bar15"
 
     def test_explicit_strategy_name(self) -> None:
         df = _make_df()
         bt = Backtest(df, BuyBar5CloseBar15(), strategy_name="my_custom_name", data_source="test")
         bt.run()
         output = bt.build_output()
-        assert output.run_metadata.strategy == "my_custom_name"
+        assert output.run_metadata.strategy_name == "my_custom_name"
 
     def test_has_close_events(self) -> None:
         df = _make_df()

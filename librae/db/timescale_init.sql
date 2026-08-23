@@ -49,7 +49,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
 -- ============================================================
 CREATE TABLE IF NOT EXISTS backtest_runs (
     run_id          TEXT PRIMARY KEY,
-    strategy        TEXT NOT NULL,
+    strategy_name   TEXT NOT NULL,
     symbols         JSONB NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT,
@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     concentration       DOUBLE PRECISION,
     turnover            DOUBLE PRECISION,
     exposed             BOOLEAN,
-    strategy            TEXT
+    strategy_name       TEXT NOT NULL
 );
 SELECT create_hypertable('equity_curve', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_equity_curve_run_id ON equity_curve(run_id, ts DESC);
@@ -156,7 +156,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_curve_unique
 CREATE TABLE IF NOT EXISTS position_events (
     event_id        TEXT NOT NULL,
     run_id          TEXT,
-    strategy        TEXT NOT NULL,
+    strategy_name   TEXT NOT NULL,
     mode            TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     ts              TIMESTAMPTZ NOT NULL,
@@ -208,7 +208,7 @@ CREATE TABLE IF NOT EXISTS position_events (
 SELECT create_hypertable('position_events', 'ts', if_not_exists => TRUE);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_position_events_pk ON position_events(event_id, ts);
 CREATE INDEX IF NOT EXISTS idx_position_events_run_id ON position_events(run_id, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_position_events_strategy ON position_events(strategy, mode, symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_position_events_strategy ON position_events(strategy_name, mode, symbol, ts DESC);
 
 -- Timestamped position-financing cash flows applied by research runtimes:
 -- perpetual funding settlements and interest on a short's borrowed asset.
@@ -299,6 +299,15 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
 );
 
 -- ============================================================
+-- instrument_type — one definition for every table that stores it.
+-- Adding a new instrument type (e.g. options) is a single edit here;
+-- keep librae/config/symbols.py's ALLOWED_INSTRUMENT_TYPES in step.
+-- ============================================================
+CREATE DOMAIN instrument_type_t AS TEXT
+    CONSTRAINT chk_instrument_type
+    CHECK (VALUE IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly'));
+
+-- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)
 -- ============================================================
 -- instrument_type: contract expiry structure, orthogonal to continuous
@@ -309,20 +318,17 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
-    -- Caller-selectable axis (register_ohlcv_fetcher) — same symbol
+    -- Caller-selectable axis (register_ohlcv_fetcher) — the same symbol
     -- legitimately has multiple valid values (research: 'yahoo', live:
-    -- 'ibkr'). Unlike external_factors.source, this IS meant to be chosen
-    -- per call, not just a fixed provenance tag.
+    -- 'ibkr'), so it is chosen per call. external_factors.data_source
+    -- names the same concept but is fixed per factor_name, not selectable.
     data_source     TEXT NOT NULL,
-    instrument_type TEXT NOT NULL DEFAULT 'spot',
+    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,
     low             DOUBLE PRECISION,
     close           DOUBLE PRECISION,
-    volume          DOUBLE PRECISION,
-    CONSTRAINT chk_ohlcv_instrument_type CHECK (
-        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
-    )
+    volume          DOUBLE PRECISION
 );
 SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, data_source, ts DESC);
@@ -334,7 +340,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timefra
 CREATE TABLE IF NOT EXISTS signal_events (
     ts              TIMESTAMPTZ NOT NULL,
     run_id          TEXT,
-    strategy        TEXT NOT NULL,
+    strategy_name   TEXT NOT NULL,
     symbol          TEXT NOT NULL,
     mode            TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
@@ -347,12 +353,12 @@ CREATE TABLE IF NOT EXISTS signal_events (
 SELECT create_hypertable('signal_events', 'ts', if_not_exists => TRUE);
 -- run_id is part of the dedup key so re-writing one run's signals (e.g. a
 -- parameter-sweep re-run) can never collide with / silently overwrite
--- another run's rows for the same (ts, strategy, symbol, ...).
+-- another run's rows for the same (ts, strategy_name, symbol, ...).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_events_unique
-    ON signal_events (ts, run_id, strategy, symbol, mode, timeframe, signal_type);
+    ON signal_events (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type);
 CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
-    ON signal_events (strategy, symbol, mode, ts DESC);
+    ON signal_events (strategy_name, symbol, mode, ts DESC);
 
 -- ============================================================
 -- ohlcv_coverage_ranges — get_ohlcv() cache 覆蓋區間追蹤 (非 hypertable)
@@ -362,12 +368,9 @@ CREATE TABLE IF NOT EXISTS ohlcv_coverage_ranges (
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT NOT NULL,
-    instrument_type TEXT NOT NULL DEFAULT 'spot',
+    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
     range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL,
-    CONSTRAINT chk_ohlcv_coverage_instrument_type CHECK (
-        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
-    )
+    range_ended_at       TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
     ON ohlcv_coverage_ranges(symbol, timeframe, data_source, instrument_type, range_started_at);
@@ -383,20 +386,17 @@ CREATE TABLE IF NOT EXISTS external_factors (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
-    -- Descriptive provenance tag, NOT a caller-selectable axis like
-    -- ohlcv.data_source — fixed 1:1 per factor_name at registration time
-    -- (register_factor_fetcher), recorded for audit/debugging only. Don't
-    -- expect two rows with the same factor_name and different source.
-    source          TEXT NOT NULL,
-    instrument_type TEXT NOT NULL DEFAULT 'spot',
-    value           DOUBLE PRECISION NOT NULL,
-    CONSTRAINT chk_external_factors_instrument_type CHECK (
-        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
-    )
+    -- Same concept as ohlcv.data_source (which upstream produced this),
+    -- but fixed 1:1 per factor_name at registration time
+    -- (register_factor_fetcher) rather than chosen per call. Don't expect
+    -- two rows with the same factor_name and different data_source.
+    data_source     TEXT NOT NULL,
+    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
+    value           DOUBLE PRECISION NOT NULL
 );
 SELECT create_hypertable('external_factors', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, source, instrument_type);
+CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, data_source, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, data_source, instrument_type);
 
 -- ============================================================
 -- external_factor_coverage_ranges — get_factor() cache 覆蓋區間追蹤
@@ -406,29 +406,26 @@ CREATE TABLE IF NOT EXISTS external_factor_coverage_ranges (
     id              SERIAL PRIMARY KEY,
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
-    source          TEXT NOT NULL,
-    instrument_type TEXT NOT NULL DEFAULT 'spot',
+    data_source     TEXT NOT NULL,
+    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
     range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL,
-    CONSTRAINT chk_external_factor_coverage_instrument_type CHECK (
-        instrument_type IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly')
-    )
+    range_ended_at       TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
-    ON external_factor_coverage_ranges(symbol, factor_name, source, instrument_type, range_started_at);
+    ON external_factor_coverage_ranges(symbol, factor_name, data_source, instrument_type, range_started_at);
 
 -- ============================================================
--- factor_registry — 每個 factor_name 的更新頻率（一 factor_name 一行，
+-- factor_registry — 每個 factor_name 的更新頻率 (timeframe)（一 factor_name 一行，
 -- 不是每筆 fact row 都存一次）。由 register_factor_fetcher() 呼叫時的
 -- domain 知識寫死，不是從 ts 間隔統計推算——sync_factor_registry() 寫入。
--- frequency 沿用 librae/core/utils.py 既有的 canonical 字母代碼
+-- timeframe 沿用 librae/core/utils.py 既有的 canonical 字母代碼
 -- (M5/H8/D1/W2/MN3 ...)，另加 'IRREGULAR' 給沒有固定格點的真實事件資料
 -- (股利、分割)。
 -- ============================================================
 CREATE TABLE IF NOT EXISTS factor_registry (
     factor_name TEXT PRIMARY KEY,
-    source      TEXT NOT NULL,
-    frequency   TEXT NOT NULL
+    data_source TEXT NOT NULL,
+    timeframe   TEXT NOT NULL
 );
 
 -- ============================================================
@@ -437,8 +434,8 @@ CREATE TABLE IF NOT EXISTS factor_registry (
 -- 文件——避免命名/清單 drift（見 2026-07 決策討論：不建 UUID catalog table，
 -- 靠 DB 自身當唯一真相）。
 --
--- frequency：ohlcv 直接用自己本來就有、規則的 timeframe 欄位；
--- external_factors 沒有等效欄位，改 JOIN factor_registry（domain 知識寫死，
+-- timeframe：ohlcv 直接用自己本來就有的欄位；external_factors 每筆 fact
+-- row 沒有存，改 JOIN factor_registry（domain 知識寫死，
 -- 見上面 factor_registry 的註解）——不再用相鄰 ts 統計推算，因為樣本少的
 -- factor（例如目前只有 2 筆的 us_short_interest）統計出來的間隔不可靠，
 -- 也會隨新資料進來一直變動，不是穩定的描述。
@@ -447,8 +444,8 @@ CREATE OR REPLACE VIEW data_inventory AS
 SELECT
     'ohlcv' AS table_name,
     symbol,
-    data_source AS source,
-    timeframe AS frequency,
+    data_source,
+    timeframe,
     instrument_type,
     NULL::TEXT AS factor_name,
     count(*) AS rows,
@@ -462,8 +459,8 @@ UNION ALL
 SELECT
     'external_factors' AS table_name,
     ef.symbol,
-    ef.source,
-    fr.frequency,
+    ef.data_source,
+    fr.timeframe,
     ef.instrument_type,
     ef.factor_name,
     count(*) AS rows,
@@ -471,6 +468,6 @@ SELECT
     max(ef.ts) AS end_ts
 FROM external_factors ef
 LEFT JOIN factor_registry fr USING (factor_name)
-GROUP BY ef.symbol, ef.source, fr.frequency, ef.instrument_type, ef.factor_name
+GROUP BY ef.symbol, ef.data_source, fr.timeframe, ef.instrument_type, ef.factor_name
 
 ORDER BY table_name, symbol, factor_name;

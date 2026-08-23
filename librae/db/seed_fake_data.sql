@@ -33,7 +33,7 @@ DELETE FROM ohlcv_coverage_ranges WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSD
 DELETE FROM backtest_runs WHERE run_id = 'seed_test_run';
 
 INSERT INTO backtest_runs
-    (run_id, strategy, symbols, timeframe, data_source, started_at, ended_at, run_at,
+    (run_id, strategy_name, symbols, timeframe, data_source, started_at, ended_at, run_at,
      mode, poll_seconds, params, execution_policy, risk_policy, config_hash)
 VALUES
     ('seed_test_run', 'seed_test', '["BTCUSDT", "ETHUSDT", "SOLUSDT"]'::jsonb, 'H1', 'binance_spot',
@@ -80,7 +80,7 @@ WHERE NOT EXISTS (
 -- at-or-before row here via a LATERAL join.
 INSERT INTO equity_curve
     (ts, run_id, account_id, currency, equity, drawdown, period_return,
-     gross_exposure, net_exposure, concentration, turnover, strategy)
+     gross_exposure, net_exposure, concentration, turnover, strategy_name)
 SELECT
     NOW() - INTERVAL '14 days' + (i || ' hours')::interval,
     'seed_test_run', 'default', 'USDT',
@@ -133,14 +133,14 @@ ON CONFLICT (run_id, account_id, ts) DO NOTHING;
 -- cash_flow values below approximate the engine's outlay/proceeds formula
 -- (see executor.py's _margin_fields/build_close_event): open/add =
 -- -(this fill's notional*margin_rate + this row's commission+slippage+tax);
--- reduce/close = closed_margin + pnl (folds entry-vs-exit cost attribution
--- into the given net pnl rather than re-deriving gross_pnl — fine for fake
+-- reduce/close = closed_margin + realized_pnl (folds entry-vs-exit cost attribution
+-- into the given net PnL rather than re-deriving gross_pnl — fine for fake
 -- demo data, not meant to reconcile to the cent).
 INSERT INTO position_events
-    (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
+    (event_id, run_id, account_id, currency, strategy_name, mode, timeframe, ts,
      symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,
-     commission, slippage, tax, pnl, net_return, entry_at, periods_held, reason,
+     commission, slippage, tax, realized_pnl, net_return, entry_at, periods_held, reason,
      group_id, time_in_force, margin_locked, leverage, liquidation_price, margin_roi,
      margin_mode, cash_flow)
 VALUES
@@ -257,14 +257,14 @@ VALUES
 ON CONFLICT (run_id, account_id) DO NOTHING;
 
 INSERT INTO signal_events
-    (ts, run_id, strategy, symbol, mode, timeframe, signal_value, price, signal_type)
+    (ts, run_id, strategy_name, symbol, mode, timeframe, signal_value, price, signal_type)
 VALUES
     (NOW() - INTERVAL '13 days', 'seed_test_run', 'seed_test', 'BTCUSDT', 'backtest', 'H1', 1.0, 60000, 'entry'),
     (NOW() - INTERVAL '9 days' - INTERVAL '1 hour', 'seed_test_run', 'seed_test', 'BTCUSDT', 'backtest', 'H1', -1.0, 62000, 'exit'),
     (NOW() - INTERVAL '9 days', 'seed_test_run', 'seed_test', 'ETHUSDT', 'backtest', 'H1', 1.0, 3100, 'entry'),
     (NOW() - INTERVAL '4 days', 'seed_test_run', 'seed_test', 'ETHUSDT', 'backtest', 'H1', -1.0, 3400, 'exit'),
     (NOW() - INTERVAL '1 day', 'seed_test_run', 'seed_test', 'BTCUSDT', 'backtest', 'H1', 1.0, 65000, 'entry')
-ON CONFLICT (ts, run_id, strategy, symbol, mode, timeframe, signal_type) DO NOTHING;
+ON CONFLICT (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type) DO NOTHING;
 
 -- Cascades with backtest_runs (real FK), unlike position_events/signal_events above.
 INSERT INTO runtime_events (ts, run_id, event_type, symbol, detail)

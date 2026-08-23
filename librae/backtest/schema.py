@@ -38,7 +38,7 @@ class RunMetadata:
     """Identifies and describes a backtest run."""
 
     run_id: str
-    strategy: str
+    strategy_name: str
     symbols: tuple[str, ...]
     timeframe: str
     data_source: str
@@ -65,7 +65,7 @@ class EquityCurvePoint:
     net_exposure: float = 0.0
     concentration: float = 0.0
     turnover: float = 0.0
-    strategy: str | None = None
+    strategy_name: str | None = None
     exposed: bool = False
 
 
@@ -272,8 +272,8 @@ class BacktestOutput:
                 f"'<strategy>-<symbol>-<timeframe>-<YYYYMMDDThhmm>-<hex6>', "
                 f"got {self.run_metadata.run_id!r}"
             )
-        if not self.run_metadata.strategy:
-            raise ValueError("run_metadata.strategy is required")
+        if not self.run_metadata.strategy_name:
+            raise ValueError("run_metadata.strategy_name is required")
         if not self.run_metadata.symbols or any(not symbol for symbol in self.run_metadata.symbols):
             raise ValueError("run_metadata.symbols must contain non-empty identifiers")
         if not self.run_metadata.timeframe:

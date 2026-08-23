@@ -214,7 +214,7 @@ class _TimescaleCallbacks:
             write_run_metadata,
             critical=True,
             run_id=run_id,
-            strategy=self._config.strategy_name,
+            strategy_name=self._config.strategy_name,
             symbols=self._config.symbols,
             timeframe=self._config.timeframe,
             mode=self._config.mode,
@@ -272,7 +272,7 @@ class _TimescaleCallbacks:
             concentration=concentration,
             turnover=turnover,
             exposed=gross_exposure > 0,
-            strategy=self._config.strategy_name,
+            strategy_name=self._config.strategy_name,
         )
 
     def on_position_event(self, event: PositionEvent, sequence: int) -> None:
@@ -282,7 +282,7 @@ class _TimescaleCallbacks:
         fields.update(
             event_id=make_event_id(self._run_id, sequence),
             run_id=self._run_id,
-            strategy=self._config.strategy_name,
+            strategy_name=self._config.strategy_name,
             mode=self._config.mode,
             timeframe=self._config.timeframe,
             account_id=self._config.account_id,
@@ -374,7 +374,7 @@ class _TimescaleCallbacks:
             write_signal_event,
             ts=ts,
             run_id=self._run_id,
-            strategy=self._config.strategy_name,
+            strategy_name=self._config.strategy_name,
             symbol=symbol,
             mode=self._config.mode,
             timeframe=self._config.timeframe,
@@ -390,7 +390,7 @@ class _TimescaleCallbacks:
 
 
 def build_live_trader(
-    strategy: Strategy,
+    strategy_name: Strategy,
     feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
     *,
     config: RunConfig,
@@ -509,7 +509,7 @@ def build_live_trader(
         _TimescaleCallbacks(config, instruments, resolved_notifier) if database_enabled else None
     )
     trader = LiveTrader(
-        strategy,
+        strategy_name,
         feature_fn,
         config=config,
         adapter=data_adapters,

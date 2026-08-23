@@ -86,7 +86,7 @@ def test_save_backtest_output_batches_funding_diagnostics(
     output = BacktestOutput(
         run_metadata=RunMetadata(
             run_id="funding-20260101t0000-abcdef",
-            strategy="funding",
+            strategy_name="funding",
             symbols=("BTC/USDT:USDT",),
             timeframe="H1",
             data_source="test",

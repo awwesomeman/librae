@@ -17,7 +17,7 @@ DELETE FROM position_events WHERE run_id = 'seed_pnl_dist_run';
 DELETE FROM backtest_runs WHERE run_id = 'seed_pnl_dist_run';
 
 INSERT INTO backtest_runs
-    (run_id, strategy, symbols, timeframe, data_source, started_at, ended_at, run_at,
+    (run_id, strategy_name, symbols, timeframe, data_source, started_at, ended_at, run_at,
      mode, poll_seconds, params, execution_policy, risk_policy, config_hash)
 VALUES
     ('seed_pnl_dist_run', 'seed_test', '["BTCUSDT", "ETHUSDT", "SOLUSDT"]'::jsonb, 'H1', 'binance_spot',
@@ -37,10 +37,10 @@ WITH pnl_gen AS (
     FROM generate_series(1, 200) AS i
 )
 INSERT INTO position_events
-    (event_id, run_id, account_id, currency, strategy, mode, timeframe, ts,
+    (event_id, run_id, account_id, currency, strategy_name, mode, timeframe, ts,
      symbol, side, event_type,
      fill_quantity, price, entry_price, remaining_quantity, notional,
-     commission, slippage, tax, pnl, net_return, entry_at, periods_held, reason)
+     commission, slippage, tax, realized_pnl, net_return, entry_at, periods_held, reason)
 SELECT
     'seed_pnl_dist_evt_' || i,
     'seed_pnl_dist_run', 'default', 'USDT', 'seed_test', 'backtest', 'H1',
