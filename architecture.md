@@ -578,8 +578,8 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 |---|---|
 | `adapter` | callable `adapter(symbol, timeframe, limit, *, drop_incomplete=False) -> pd.DataFrame`, a concrete object with `fetch_ohlcv`, or a per-symbol mapping; UTC `ts` + OHLCV are required and extra point-in-time columns are preserved |
 | `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return, gross_exposure, net_exposure, concentration, turnover)` |
-| `on_order_event` | `on_order_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close |
-| `on_funding_cash_flow` | `on_funding_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
+| `on_position_event` | `on_position_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close |
+| `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions), not a fill |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
@@ -627,11 +627,38 @@ args = parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
 These are optional persistence integrations, not the engine's acquisition
 path. `get_ohlcv()`/`get_factor()` are external, caller-owned functions (not
 shipped by Librae); the first subgraph only illustrates how such a data layer
-could use the reference `librae/db/` primitives. The other subgraphs show optional
-engine result/runtime writes. Per the [Failure handling policy](#failure-handling-policy),
-the "DB unavailable" branch is the reference-data fallback case, not the
-fail-fast case — a caller implementing it must still log a warning when it
-triggers, not fall back to the API silently.
+could use the reference `librae/db/` primitives. The other subgraphs show
+optional engine result/runtime writes. Per the
+[Failure handling policy](#failure-handling-policy), the "DB unavailable"
+branch is the reference-data fallback case, not the fail-fast case — a caller
+implementing it must still log a warning when it triggers, not fall back to
+the API silently.
+
+### Who owns which half of the data layer
+
+Librae owns the **data model** — every table in `timescale_init.sql`,
+including `ohlcv`, `external_factors`, `symbols`, and the two
+`*_coverage_ranges` tables it never fetches into. The caller owns the
+**behavior**: fetcher registration, DB-first reads, coverage gap-filling,
+retries, and rate limits.
+
+The split is deliberate rather than accidental. A schema is a contract
+between deployments, and several of them read the same database; a data
+layer is one deployment's implementation of how rows get there. Two callers
+may fetch OHLCV completely differently and still have to agree on what an
+`ohlcv` row is, which is why the definition sits with the engine that reads
+those rows and the caller-side fetching does not.
+
+Two consequences worth stating so they do not have to be rediscovered per
+table:
+
+- **A new table for data librae does not fetch still belongs here** if
+  librae, or more than one caller, reads it. Propose it against this schema
+  rather than creating it caller-side, or the deployments stop agreeing.
+- **A table librae neither reads nor defines behavior for belongs to the
+  caller.** Instrument-specific stores that no engine path consumes (an
+  option chain, a vendor's raw payload) are the caller's, and they can join
+  to `symbols` without being defined here.
 
 ```mermaid
 flowchart TD
@@ -646,6 +673,8 @@ flowchart TD
         get_factor -- "DB has a gap" --> factorfill["backfill via fetcher → write back to DB"]
         factorfill --> r_factors[("external_factors")]
         factorfill --> r_factor_cov[("external_factor_coverage_ranges")]
+
+        sync_symbols["write_symbols()"] --> r_symbols[("symbols")]
     end
 
     subgraph backtest["Backtest result writes"]
@@ -654,16 +683,16 @@ flowchart TD
 
         save_strategy["save_strategy_results()"] --> b_backtest_runs[("backtest_runs")]
         save_strategy --> b_equity_curve[("equity_curve")]
-        save_strategy --> b_trade_events[("trade_events")]
-        save_strategy --> b_funding[("funding_cash_flows")]
+        save_strategy --> b_position_events[("position_events")]
+        save_strategy --> b_funding[("financing_cash_flows")]
         save_strategy --> b_strategy_perf[("strategy_performance")]
         save_strategy --> b_signal_events
         save_strategy --> b_ohlcv
     end
 
     subgraph live["sim/live real-time writes"]
-        callbacks["LiveTrader callbacks"] -- on_order_event --> l_trade_events[("trade_events")]
-        callbacks -- on_funding_cash_flow --> l_funding[("funding_cash_flows")]
+        callbacks["LiveTrader callbacks"] -- on_position_event --> l_position_events[("position_events")]
+        callbacks -- on_financing_cash_flow --> l_funding[("financing_cash_flows")]
         callbacks -- on_signal_outcome --> l_signal_events[("signal_events")]
         callbacks -- on_bar --> l_equity_curve[("equity_curve")]
         callbacks -- on_ohlcv --> l_ohlcv[("ohlcv")]
@@ -678,13 +707,13 @@ flowchart TD
 
 | Type | Rule | Example |
 |---|---|---|
-| Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `trade_events`, `signal_events`, `ohlcv_coverage_ranges` |
+| Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `position_events`, `signal_events`, `ohlcv_coverage_ranges` |
 | Domain term for a continuous time series as a whole (each row is one point in the series, but the table name refers to the series itself) | keep the domain's conventional singular term | `equity_curve`, `ohlcv` |
 | Singleton state table (one current snapshot per key) | singular | `execution_runtime_state` |
 
 ### Timestamp naming rules
 
-**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`trade_events`/`funding_cash_flows`/`signal_events`, representing "when this row happened").
+**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`, representing "when this row happened").
 **Every other point-in-time metadata field uses the `_at` suffix**, consistently — even when it's a query range filter parameter (e.g. `load_ohlcv(started_at=..., ended_at=...)`), to avoid the same root word being called `ts` in one function signature and something else in another.
 
 | Field | Meaning | Where it appears |
@@ -692,28 +721,29 @@ flowchart TD
 | `started_at` | start of a run's data range | `backtest_runs`, `RunMetadata`, `load_ohlcv()` query params |
 | `ended_at` | end of a run's data range | same as above |
 | `run_at` | when the run was executed/created | `backtest_runs`, `RunMetadata` |
-| `entry_at` | when a position was entered | `trade_events`, `Position`, `PositionState`, `TradeResult`, `OrderEvent`, `OrderEventRecord` |
+| `entry_at` | when a position was entered | `position_events`, `Position`, `PositionState`, `TradeResult`, `PositionEvent`, `PositionEventRecord` |
 | `exit_at` | when a trade was exited | `TradeResult` |
 | `last_heartbeat_at` | last time the running process reported itself alive | `backtest_runs` |
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
-### Current 14 tables
+### Current 15 tables
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
 | `backtest_runs` | run hub and resolved strategy/execution/risk configuration, 1 row / run | PK `run_id` | no |
 | `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
-| `trade_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
-| `funding_cash_flows` | applied perpetual-funding rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
+| `position_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
+| `financing_cash_flows` | applied financing (perpetual funding or short borrow) rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, kind, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `runtime_events` | operational audit trail (restarts, skipped decisions) — not a fill; `event_type` is a small, deliberately closed set (`state_recovered`, `decision_skipped`), with the specific skip reason as a free string in `detail` | unique `(run_id, ts, event_type, COALESCE(symbol, ''))`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |
-| `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically | no FK (unique index: ts+symbol+factor_name+source+instrument_type) | yes (`ts`) |
+| `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically | no FK (unique index: ts+symbol+factor_name+timeframe+data_source+instrument_type) | yes (`ts`) |
 | `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
-| `factor_registry` | one row per `factor_name` — its update frequency + source, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
+| `factor_registry` | one row per `factor_name` — the frequency + data source it is registered at, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
+| `symbols` | instrument master: what a fact table's bare `symbol` string means (market, multiplier, tick size, venue symbol, calendar, ...) | PK `(symbol, data_source, instrument_type)`; deliberately no FK from the fact tables | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
 

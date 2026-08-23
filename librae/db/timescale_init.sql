@@ -308,6 +308,47 @@ CREATE DOMAIN instrument_type_t AS TEXT
     CHECK (VALUE IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly'));
 
 -- ============================================================
+-- symbols — instrument master. The fact tables store `symbol` as a bare
+-- string; this is what that string means. Keyed by the same
+-- (symbol, data_source, instrument_type) triple the fact tables already
+-- carry, so it joins to ohlcv/external_factors without touching them --
+-- deliberately no foreign keys: a hypertable FK costs a lookup per inserted
+-- row, and reference data arriving after the facts is normal, not an error.
+--
+-- Populated from librae.config.symbols' registry via write_symbols(). The
+-- YAML is a deployment-time file; the database is shared across
+-- deployments, so data that lands here without its identity is data nobody
+-- else can interpret.
+--
+-- Columns mirror SymbolInfo exactly. Attributes for instrument types librae
+-- does not model yet (an option's strike/expiry/right) belong with whatever
+-- adds that type and the SymbolInfo fields to populate them -- an empty
+-- column is worse than an absent one.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS symbols (
+    symbol           TEXT NOT NULL,
+    data_source      TEXT NOT NULL,
+    instrument_type  instrument_type_t NOT NULL,
+    market           TEXT NOT NULL,
+    multiplier       DOUBLE PRECISION NOT NULL,
+    data_adapter     TEXT NOT NULL,
+    venue_symbol     TEXT NOT NULL,
+    currency         TEXT NOT NULL,
+    continuous_alias BOOLEAN NOT NULL DEFAULT FALSE,
+    contract_month   TEXT,
+    tick_size        DOUBLE PRECISION,
+    security_type    TEXT,
+    exchange         TEXT,
+    calendar_id      TEXT,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_symbols PRIMARY KEY (symbol, data_source, instrument_type),
+    CONSTRAINT chk_symbols_multiplier CHECK (multiplier > 0),
+    CONSTRAINT chk_symbols_tick_size CHECK (tick_size IS NULL OR tick_size > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_symbols_market ON symbols(market, instrument_type);
+CREATE INDEX IF NOT EXISTS idx_symbols_calendar ON symbols(calendar_id);
+
+-- ============================================================
 -- ohlcv — 共用市場資料 (hypertable)
 -- ============================================================
 -- instrument_type: contract expiry structure, orthogonal to continuous
@@ -386,17 +427,31 @@ CREATE TABLE IF NOT EXISTS external_factors (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
+    -- Observation frequency of THIS row, the factor-family counterpart of
+    -- ohlcv.timeframe. In the fact key so one factor can be stored at
+    -- several frequencies; packing it into factor_name instead
+    -- ('x_1d'/'x_1h') would hide a real dimension inside a string.
+    timeframe       TEXT NOT NULL,
     -- Same concept as ohlcv.data_source (which upstream produced this),
     -- but fixed 1:1 per factor_name at registration time
     -- (register_factor_fetcher) rather than chosen per call. Don't expect
     -- two rows with the same factor_name and different data_source.
     data_source     TEXT NOT NULL,
     instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
+    -- Deliberately one scalar number. An observation that is non-numeric
+    -- (a regime label) or multi-dimensional (a term structure, an option
+    -- chain row) gets its OWN fact table with its own columns and
+    -- constraints -- it does not get a value_json/value_text sibling here.
+    -- Two nullable value columns with no way to require exactly one is the
+    -- point where a fact table stops being queryable or checkable, and the
+    -- extra dimensions (strike, expiry, tenor) would still have nowhere to
+    -- live. Storing them as several factor_names is the same mistake in a
+    -- different place.
     value           DOUBLE PRECISION NOT NULL
 );
 SELECT create_hypertable('external_factors', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, data_source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, data_source, instrument_type);
+CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, timeframe, data_source, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, timeframe, data_source, instrument_type);
 
 -- ============================================================
 -- external_factor_coverage_ranges — get_factor() cache 覆蓋區間追蹤
@@ -406,13 +461,14 @@ CREATE TABLE IF NOT EXISTS external_factor_coverage_ranges (
     id              SERIAL PRIMARY KEY,
     symbol          TEXT NOT NULL,
     factor_name     TEXT NOT NULL,
+    timeframe       TEXT NOT NULL,
     data_source     TEXT NOT NULL,
     instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
     range_started_at     TIMESTAMPTZ NOT NULL,
     range_ended_at       TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
-    ON external_factor_coverage_ranges(symbol, factor_name, data_source, instrument_type, range_started_at);
+    ON external_factor_coverage_ranges(symbol, factor_name, timeframe, data_source, instrument_type, range_started_at);
 
 -- ============================================================
 -- factor_registry — 每個 factor_name 的更新頻率 (timeframe)（一 factor_name 一行，
@@ -422,6 +478,9 @@ CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
 -- (M5/H8/D1/W2/MN3 ...)，另加 'IRREGULAR' 給沒有固定格點的真實事件資料
 -- (股利、分割)。
 -- ============================================================
+-- timeframe here is the frequency a factor is REGISTERED at, which a factor
+-- with no rows yet still has; external_factors.timeframe is what each stored
+-- row actually is. They normally agree.
 CREATE TABLE IF NOT EXISTS factor_registry (
     factor_name TEXT PRIMARY KEY,
     data_source TEXT NOT NULL,
@@ -434,8 +493,7 @@ CREATE TABLE IF NOT EXISTS factor_registry (
 -- 文件——避免命名/清單 drift（見 2026-07 決策討論：不建 UUID catalog table，
 -- 靠 DB 自身當唯一真相）。
 --
--- timeframe：ohlcv 直接用自己本來就有的欄位；external_factors 每筆 fact
--- row 沒有存，改 JOIN factor_registry（domain 知識寫死，
+-- timeframe：兩個家族的 fact row 都自己帶，不需要 JOIN factor_registry（domain 知識寫死，
 -- 見上面 factor_registry 的註解）——不再用相鄰 ts 統計推算，因為樣本少的
 -- factor（例如目前只有 2 筆的 us_short_interest）統計出來的間隔不可靠，
 -- 也會隨新資料進來一直變動，不是穩定的描述。
@@ -460,14 +518,13 @@ SELECT
     'external_factors' AS table_name,
     ef.symbol,
     ef.data_source,
-    fr.timeframe,
+    ef.timeframe,
     ef.instrument_type,
     ef.factor_name,
     count(*) AS rows,
     min(ef.ts) AS start_ts,
     max(ef.ts) AS end_ts
 FROM external_factors ef
-LEFT JOIN factor_registry fr USING (factor_name)
-GROUP BY ef.symbol, ef.data_source, fr.timeframe, ef.instrument_type, ef.factor_name
+GROUP BY ef.symbol, ef.data_source, ef.timeframe, ef.instrument_type, ef.factor_name
 
 ORDER BY table_name, symbol, factor_name;

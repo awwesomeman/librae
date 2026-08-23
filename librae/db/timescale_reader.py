@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from librae.backtest.schema import RunMetadata, StrategyMetrics
+from librae.config.symbols import validate_instrument_type
 from librae.db import get_conn
 
 if TYPE_CHECKING:
@@ -202,6 +203,35 @@ def load_position_events(
     return df
 
 
+def load_symbols(
+    *,
+    market: str | None = None,
+    instrument_type: str | None = None,
+    dsn: str | None = None,
+) -> pd.DataFrame:
+    """Load the instrument master, optionally narrowed to one market or type.
+
+    Join it to a fact table on (symbol, data_source, instrument_type) to
+    answer questions the bare `symbol` string cannot -- which contracts share
+    a market, what a symbol's multiplier or trading calendar is.
+    """
+    sql = "SELECT * FROM symbols"
+    conditions: list[str] = []
+    params: list = []
+    if market is not None:
+        conditions.append("market = %s")
+        params.append(market)
+    if instrument_type is not None:
+        validate_instrument_type(instrument_type)
+        conditions.append("instrument_type = %s")
+        params.append(instrument_type)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY market, symbol, data_source"
+    with get_conn(dsn) as conn:
+        return pd.read_sql(sql, conn, params=params or None)
+
+
 def load_financing_cash_flows(
     run_id: str,
     *,
@@ -328,6 +358,7 @@ def get_ohlcv_coverage_ranges(
 def get_external_factor_coverage_ranges(
     symbol: str,
     factor_name: str,
+    timeframe: str,
     data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
@@ -336,12 +367,13 @@ def get_external_factor_coverage_ranges(
     sorted. Same shape/semantics as get_ohlcv_coverage_ranges()."""
     sql = """
         SELECT range_started_at, range_ended_at FROM external_factor_coverage_ranges
-        WHERE symbol = %s AND factor_name = %s AND data_source = %s AND instrument_type = %s
+        WHERE symbol = %s AND factor_name = %s AND timeframe = %s
+              AND data_source = %s AND instrument_type = %s
         ORDER BY range_started_at
     """
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(sql, (symbol, factor_name, data_source, instrument_type))
+        cur.execute(sql, (symbol, factor_name, timeframe, data_source, instrument_type))
         rows = cur.fetchall()
         cur.close()
     return [(r[0], r[1]) for r in rows]
@@ -350,6 +382,7 @@ def get_external_factor_coverage_ranges(
 def load_external_factor(
     symbol: str,
     factor_name: str,
+    timeframe: str,
     data_source: str,
     *,
     instrument_type: str = "spot",
@@ -357,16 +390,18 @@ def load_external_factor(
     ended_at: str | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
-    """Load cached factor values for (symbol, factor_name, data_source, instrument_type).
+    """Load cached factor values for (symbol, factor_name, timeframe,
+    data_source, instrument_type).
 
     Returns DataFrame with columns [timestamp, value], tz-aware UTC, sorted
     ascending — same shape get_factor()'s fetchers must return.
     """
     sql = """
         SELECT ts AS timestamp, value FROM external_factors
-        WHERE symbol = %s AND factor_name = %s AND data_source = %s AND instrument_type = %s
+        WHERE symbol = %s AND factor_name = %s AND timeframe = %s
+              AND data_source = %s AND instrument_type = %s
     """
-    params: list = [symbol, factor_name, data_source, instrument_type]
+    params: list = [symbol, factor_name, timeframe, data_source, instrument_type]
     if started_at:
         sql += " AND ts >= %s"
         params.append(started_at)

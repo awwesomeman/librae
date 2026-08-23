@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -34,7 +34,7 @@ import pandas as pd
 
 from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
 from librae.backtest.schema import BacktestOutput
-from librae.config.symbols import validate_instrument_type
+from librae.config.symbols import SymbolInfo, validate_instrument_type
 from librae.core.utils import to_canonical
 from librae.db import get_conn
 
@@ -687,6 +687,7 @@ def write_external_factor(
     df: pd.DataFrame,
     symbol: str,
     factor_name: str,
+    timeframe: str,
     data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
@@ -714,6 +715,7 @@ def write_external_factor(
             ts_utc.apply(_to_dt),
             [symbol] * len(df),
             [factor_name] * len(df),
+            [timeframe] * len(df),
             [data_source] * len(df),
             [instrument_type] * len(df),
             df["value"].astype(float),
@@ -725,14 +727,76 @@ def write_external_factor(
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO external_factors (ts, symbol, factor_name, data_source, instrument_type, value)
+            """INSERT INTO external_factors
+                   (ts, symbol, factor_name, timeframe, data_source, instrument_type, value)
                VALUES %s
-               ON CONFLICT (ts, symbol, factor_name, data_source, instrument_type) DO NOTHING""",
+               ON CONFLICT (ts, symbol, factor_name, timeframe, data_source, instrument_type)
+                   DO NOTHING""",
             rows,
             page_size=2000,
         )
         cur.close()
 
+    return len(rows)
+
+
+def write_symbols(symbols: Iterable[SymbolInfo], dsn: str | None = None) -> int:
+    """Upsert instrument-master rows from the resolved symbol registry.
+
+    One row per (symbol, data_source, instrument_type) — reference data, not
+    a time series. Call it from the data/orchestration layer with
+    ``load_symbol_registry().values()``, or with a registry that already has
+    the run's instrument_overrides applied, so the database describes the
+    symbols the facts were actually written under.
+    """
+    rows = [
+        (
+            info.symbol,
+            info.data_source,
+            info.instrument_type,
+            info.market,
+            info.multiplier,
+            info.data_adapter,
+            info.venue_symbol,
+            info.currency,
+            info.continuous_alias,
+            info.contract_month,
+            info.tick_size,
+            info.security_type,
+            info.exchange,
+            info.calendar_id,
+        )
+        for info in symbols
+    ]
+    if not rows:
+        return 0
+
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO symbols
+                   (symbol, data_source, instrument_type, market, multiplier,
+                    data_adapter, venue_symbol, currency, continuous_alias,
+                    contract_month, tick_size, security_type, exchange, calendar_id)
+               VALUES %s
+               ON CONFLICT (symbol, data_source, instrument_type) DO UPDATE SET
+                 market=EXCLUDED.market,
+                 multiplier=EXCLUDED.multiplier,
+                 data_adapter=EXCLUDED.data_adapter,
+                 venue_symbol=EXCLUDED.venue_symbol,
+                 currency=EXCLUDED.currency,
+                 continuous_alias=EXCLUDED.continuous_alias,
+                 contract_month=EXCLUDED.contract_month,
+                 tick_size=EXCLUDED.tick_size,
+                 security_type=EXCLUDED.security_type,
+                 exchange=EXCLUDED.exchange,
+                 calendar_id=EXCLUDED.calendar_id,
+                 updated_at=NOW()""",
+            rows,
+            page_size=500,
+        )
+        cur.close()
     return len(rows)
 
 
@@ -766,6 +830,7 @@ def write_factor_registry(entries: list[dict], dsn: str | None = None) -> int:
 def merge_external_factor_coverage_ranges(
     symbol: str,
     factor_name: str,
+    timeframe: str,
     data_source: str,
     range_started_at: datetime,
     range_ended_at: datetime,
@@ -775,8 +840,8 @@ def merge_external_factor_coverage_ranges(
     """Record [range_started_at, range_ended_at] as cached for this factor key.
 
     Same merge semantics as merge_ohlcv_coverage_ranges(), keyed by
-    (symbol, factor_name, data_source, instrument_type) instead of
-    (symbol, timeframe, data_source, instrument_type).
+    (symbol, factor_name, timeframe, data_source, instrument_type) instead
+    of (symbol, timeframe, data_source, instrument_type).
     """
     validate_instrument_type(instrument_type)
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
@@ -785,8 +850,8 @@ def merge_external_factor_coverage_ranges(
         _merge_coverage_ranges(
             cur,
             "external_factor_coverage_ranges",
-            ("symbol", "factor_name", "data_source", "instrument_type"),
-            (symbol, factor_name, data_source, instrument_type),
+            ("symbol", "factor_name", "timeframe", "data_source", "instrument_type"),
+            (symbol, factor_name, timeframe, data_source, instrument_type),
             range_started_at,
             range_ended_at,
         )

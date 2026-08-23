@@ -2,7 +2,7 @@
 the generic third-party-factor cache (funding rate, open interest, ...).
 Mirrors test_ohlcv_coverage.py + write_ohlcv's coverage since it's the same
 DB-first + gap-tracked-cache design, generalized to (symbol, factor_name,
-source) instead of (symbol, timeframe, data_source)."""
+timeframe, data_source) instead of (symbol, timeframe, data_source)."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class TestGetExternalFactorCoverage:
         mock_cur.fetchall.return_value = [r1]
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
-        result = get_external_factor_coverage_ranges("BTCUSDT", "funding_rate", "binanceusdm")
+        result = get_external_factor_coverage_ranges("BTCUSDT", "funding_rate", "H8", "binanceusdm")
 
         assert result == [r1]
         sql = mock_cur.execute.call_args[0][0]
@@ -50,6 +50,7 @@ class TestMergeExternalFactorCoverage:
         merge_external_factor_coverage_ranges(
             "BTCUSDT",
             "funding_rate",
+            "H8",
             "binanceusdm",
             datetime(2024, 1, 2, tzinfo=UTC),
             datetime(2024, 1, 3, tzinfo=UTC),
@@ -61,8 +62,8 @@ class TestMergeExternalFactorCoverage:
 
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 1
-        assert inserted_rows[0][4] == datetime(2024, 1, 1, tzinfo=UTC)
-        assert inserted_rows[0][5] == datetime(2024, 1, 3, tzinfo=UTC)
+        assert inserted_rows[0][5] == datetime(2024, 1, 1, tzinfo=UTC)
+        assert inserted_rows[0][6] == datetime(2024, 1, 3, tzinfo=UTC)
 
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
@@ -75,6 +76,7 @@ class TestMergeExternalFactorCoverage:
         merge_external_factor_coverage_ranges(
             "BTCUSDT",
             "funding_rate",
+            "H8",
             "binanceusdm",
             datetime(2024, 1, 10, tzinfo=UTC),
             datetime(2024, 1, 11, tzinfo=UTC),
@@ -88,6 +90,7 @@ class TestMergeExternalFactorCoverage:
             merge_external_factor_coverage_ranges(
                 "BTCUSDT",
                 "funding_rate",
+                "H8",
                 "binanceusdm",
                 datetime(2024, 1, 2, tzinfo=UTC),
                 datetime(2024, 1, 3, tzinfo=UTC),
@@ -97,20 +100,23 @@ class TestMergeExternalFactorCoverage:
 
 class TestWriteExternalFactor:
     def test_empty_df_writes_nothing(self):
-        assert write_external_factor(pd.DataFrame(), "BTCUSDT", "funding_rate", "binanceusdm") == 0
+        assert (
+            write_external_factor(pd.DataFrame(), "BTCUSDT", "funding_rate", "H8", "binanceusdm")
+            == 0
+        )
 
     def test_naive_timestamp_raises(self):
         df = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-01"]), "value": [0.01]})
 
         with pytest.raises(ValueError, match="timezone-naive"):
-            write_external_factor(df, "BTCUSDT", "funding_rate", "binanceusdm")
+            write_external_factor(df, "BTCUSDT", "funding_rate", "H8", "binanceusdm")
 
     def test_rejects_invalid_instrument_type(self):
         df = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-01T00:00:00Z"]), "value": [0.01]})
 
         with pytest.raises(ValueError, match="instrument_type"):
             write_external_factor(
-                df, "BTCUSDT", "funding_rate", "binanceusdm", instrument_type="daily"
+                df, "BTCUSDT", "funding_rate", "H8", "binanceusdm", instrument_type="daily"
             )
 
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
@@ -125,11 +131,11 @@ class TestWriteExternalFactor:
             }
         )
 
-        n = write_external_factor(df, "BTC/USDT:USDT", "funding_rate", "binanceusdm")
+        n = write_external_factor(df, "BTC/USDT:USDT", "funding_rate", "H8", "binanceusdm")
 
         assert n == 2
         rows = mock_exec_values.call_args[0][2]
-        assert rows[0][1:4] == ("BTC/USDT:USDT", "funding_rate", "binanceusdm")
+        assert rows[0][1:5] == ("BTC/USDT:USDT", "funding_rate", "H8", "binanceusdm")
 
 
 class TestLoadExternalFactor:
@@ -143,6 +149,6 @@ class TestLoadExternalFactor:
                     "value": [0.0001],
                 }
             )
-            result = load_external_factor("BTCUSDT", "open_interest", "data.binance.vision")
+            result = load_external_factor("BTCUSDT", "open_interest", "H1", "data.binance.vision")
 
         assert result["timestamp"].dt.tz is not None
