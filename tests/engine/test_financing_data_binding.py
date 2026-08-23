@@ -3,6 +3,7 @@ funding for perpetuals, borrow interest for everything else."""
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 import pandas as pd
@@ -215,3 +216,55 @@ def test_a_realistic_bar_limit_is_never_forwarded_to_the_borrow_endpoint():
     fetcher("BTC-SPOT", "1h", 1000)
 
     assert adapter.borrow_calls == [("BTC/USDT:USDT", None)]
+
+
+# ---------------------------------------------------------------------------
+# A rate endpoint failing must not take the bars down with it
+# ---------------------------------------------------------------------------
+
+
+class _UnauthorizedBorrowAdapter(_FakeCryptoAdapter):
+    """A signed borrow endpoint reached without credentials, as sim does."""
+
+    def fetch_borrow_rate_history(self, symbol, limit=None, *, since=None):
+        raise RuntimeError('binance requires "apiKey" credential')
+
+
+def test_a_failing_borrow_endpoint_still_yields_bars(caplog):
+    fetcher = _bind_market_data_source(_UnauthorizedBorrowAdapter(), _instrument("spot"))
+
+    with caplog.at_level(logging.WARNING):
+        bars = fetcher("BTC-SPOT", "8h", 2)
+
+    # Bars are the primary product; the rate only enriches them. Letting the
+    # error escape would reach _fetch_with_cache and freeze the symbol.
+    assert len(bars) == 2
+    assert "borrow_rate" not in bars.columns
+    assert "will not be charged borrow" in caplog.text
+
+
+def test_a_failing_rate_endpoint_warns_once_not_every_cycle(caplog):
+    fetcher = _bind_market_data_source(_UnauthorizedBorrowAdapter(), _instrument("spot"))
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            fetcher("BTC-SPOT", "8h", 2)
+
+    assert caplog.text.count("will not be charged borrow") == 1
+
+
+class _UnreachableFundingAdapter(_FakeCryptoAdapter):
+    def fetch_funding_rate_history(self, symbol, limit=100, *, since=None):
+        raise RuntimeError("connection reset")
+
+
+def test_a_failing_funding_endpoint_still_yields_bars(caplog):
+    fetcher = _bind_market_data_source(
+        _UnreachableFundingAdapter(), _instrument("contract_perpetual")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        bars = fetcher("BTC-PERP", "8h", 2)
+
+    assert len(bars) == 2
+    assert "funding_rate" not in bars.columns

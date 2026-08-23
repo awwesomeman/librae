@@ -163,6 +163,33 @@ def _bind_market_data_source(
     is_perpetual = instrument.instrument_type == "contract_perpetual"
     fetch_funding_rate_history = getattr(source, "fetch_funding_rate_history", None)
     fetch_borrow_rate_history = getattr(source, "fetch_borrow_rate_history", None)
+    reported_rate_failures: set[str] = set()
+
+    def _rates_or_none(fetch, kind, *args, **kwargs):
+        """Fetch a financing-rate series without letting it take the bars down.
+
+        The rate enriches a bar; it is not the bar. Letting it raise reaches
+        _fetch_with_cache's catch-all, which drops the whole symbol back to its
+        previous cache -- so a rate endpoint being unreachable would quietly
+        freeze market data instead of merely leaving a position uncharged.
+        Warn once per binding: a missing rate repeats every cycle, and the
+        operator needs to see it, not scroll past it.
+        """
+        try:
+            return fetch(*args, **kwargs)
+        except Exception:
+            if kind not in reported_rate_failures:
+                reported_rate_failures.add(kind)
+                logger.warning(
+                    "%s %s rates unavailable for %s; bars continue but positions in it "
+                    "will not be charged %s until this is resolved",
+                    instrument.symbol,
+                    kind,
+                    instrument.venue_symbol,
+                    kind,
+                    exc_info=True,
+                )
+            return None
 
     # A perpetual's holding cost is funding; anything else that can be sold
     # short is borrowed and pays interest. Never both, or the position is
@@ -173,8 +200,10 @@ def _bind_market_data_source(
             bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
             if bars.empty:
                 return bars
-            funding = fetch_funding_rate_history(instrument.venue_symbol, limit=limit)
-            if funding.empty:
+            funding = _rates_or_none(
+                fetch_funding_rate_history, "funding", instrument.venue_symbol, limit=limit
+            )
+            if funding is None or funding.empty:
                 return bars
             # A settlement is a discrete payment, so it attaches to the one bar
             # it lands on. Timestamps jitter off the bar grid by milliseconds
@@ -201,8 +230,8 @@ def _bind_market_data_source(
             # _apply_financing_cash_flows), so the fetch needs to reach back
             # one staleness bound, not across the warmup window -- and this
             # endpoint rejects a bar-sized limit outright.
-            borrow = fetch_borrow_rate_history(instrument.venue_symbol)
-            if borrow.empty:
+            borrow = _rates_or_none(fetch_borrow_rate_history, "borrow", instrument.venue_symbol)
+            if borrow is None or borrow.empty:
                 return bars
             # Unlike a funding settlement, a borrow rate is a step function:
             # the last published rate stays in force until the next one, so

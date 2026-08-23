@@ -103,9 +103,13 @@ def _build_adapter(
         from librae.brokers.crypto_adapter import CryptoAdapter, CryptoCredentials
 
         exchange_id = "binance" if instrument_type in (None, "spot") else "binanceusdm"
-        credentials = (
-            CryptoCredentials.from_env("BINANCE", exchange_id=exchange_id) if trading else None
-        )
+        # Not gated on `trading`: some market data is behind a signed endpoint
+        # (borrow rates), and reading one is not placing an order. from_env
+        # leaves the keys empty when the environment has none, which is the
+        # same read-only adapter as before -- so a deployment that passes
+        # credentials gets the signed reads it asked for, and one that does
+        # not keeps working on public data.
+        credentials = CryptoCredentials.from_env("BINANCE", exchange_id=exchange_id)
         return CryptoAdapter(exchange_id=exchange_id, credentials=credentials)
     raise ValueError(f"unsupported adapter: {name!r}")
 

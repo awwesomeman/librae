@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -292,6 +293,36 @@ def test_build_adapter_selects_spot_binance_by_default() -> None:
 
     assert spot_adapter._exchange_id == "binance"
     assert omitted_adapter._exchange_id == "binance"
+
+
+def test_build_adapter_reads_credentials_even_when_not_trading() -> None:
+    """Borrow rates sit behind a signed endpoint, and reading one is not
+    placing an order — sim must be able to use credentials the operator
+    explicitly supplied, or it silently stops charging shorts."""
+    binance = MagicMock(return_value=MagicMock())
+    with (
+        patch("librae.brokers.crypto_adapter._require_ccxt") as mock_require_ccxt,
+        patch.dict(
+            os.environ,
+            {"BINANCE_API_KEY": "key-from-env", "BINANCE_API_SECRET": "secret-from-env"},
+        ),
+    ):
+        mock_require_ccxt.return_value = MagicMock(binance=binance)
+        _build_adapter("crypto", trading=False, instrument_type="spot")
+
+    assert binance.call_args[0][0]["apiKey"] == "key-from-env"
+
+
+def test_build_adapter_stays_read_only_without_credentials_in_the_environment() -> None:
+    binance = MagicMock(return_value=MagicMock())
+    with (
+        patch("librae.brokers.crypto_adapter._require_ccxt") as mock_require_ccxt,
+        patch.dict(os.environ, {}, clear=True),
+    ):
+        mock_require_ccxt.return_value = MagicMock(binance=binance)
+        _build_adapter("crypto", trading=False, instrument_type="spot")
+
+    assert "apiKey" not in binance.call_args[0][0]
 
 
 def test_data_adapters_are_not_shared_across_differing_instrument_types() -> None:
