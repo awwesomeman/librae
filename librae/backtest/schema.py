@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
+from librae.core.executor import RuntimeEvent
 from librae.core.run_config import RunMode
 from librae.core.strategy import PositionEventType, PositionSide, TimeInForce
 
@@ -235,6 +236,7 @@ class BacktestOutput:
     position_snapshots: Sequence[PositionSnapshotPoint]
     allocation_snapshots: Sequence[AllocationSnapshotPoint]
     funding_cash_flows: Sequence[FundingCashFlowRecord] = ()
+    runtime_events: Sequence[RuntimeEvent] = ()
 
     @property
     def equity_curve(self) -> Sequence[EquityCurvePoint]:

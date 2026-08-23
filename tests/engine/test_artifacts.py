@@ -148,6 +148,7 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
         "position_snapshots",
         "allocation_snapshots",
         "funding_cash_flows",
+        "runtime_events",
     }
     assert set(artifact.tables["accounts"]["run_id"]) == {"demo-20260729t1200-abcdef"}
     assert artifact.tables["accounts"].loc[0, "total_return"] == pytest.approx(0.01)

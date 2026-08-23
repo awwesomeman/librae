@@ -18,6 +18,7 @@ from librae.backtest.schema import (
     StrategyMetrics,
 )
 from librae.config.symbols import validate_instrument_type
+from librae.core.executor import RuntimeEvent
 from librae.core.market_data import validate_ohlcv_values
 
 if TYPE_CHECKING:
@@ -224,6 +225,11 @@ def build_backtest_artifact(
         "funding_cash_flows": _records_frame(
             output.funding_cash_flows,
             FundingCashFlowRecord,
+            run_id=run_id,
+        ),
+        "runtime_events": _records_frame(
+            output.runtime_events,
+            RuntimeEvent,
             run_id=run_id,
         ),
     }

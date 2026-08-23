@@ -55,6 +55,7 @@ from librae.core.executor import (
     REASON_FORCE_CLOSE,
     ExecutionResult,
     OrderEvent,
+    RuntimeEvent,
     TradePnL,
     TradeResult,
     calc_equity,
@@ -517,6 +518,7 @@ class Backtest:
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
         funding_cash_flows: list[FundingCashFlow] = []
+        runtime_events: list[RuntimeEvent] = []
         portfolio_snapshots: list[PortfolioSnapshot] = []
         active_target_weights: dict[str, float] | None = None
         last_prices: dict[str, float] = {}
@@ -581,6 +583,7 @@ class Backtest:
             )
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
+            runtime_events.extend(step_result.runtime_events)
             _, event_funding_cash_flows = calculate_funding_cash_flows(
                 ts,
                 bars,
@@ -778,6 +781,7 @@ class Backtest:
             position_snapshots=position_snapshots,
             allocation_snapshots=allocation_snapshots,
             funding_cash_flows=funding_cash_flows,
+            runtime_events=runtime_events,
             account=AccountBacktestResult(
                 account_id=self._account_id,
                 currency=self._currency,
@@ -889,6 +893,7 @@ class Backtest:
             position_snapshots=tuple(position_snapshot_points),
             allocation_snapshots=tuple(allocation_snapshot_points),
             funding_cash_flows=tuple(funding_cash_flow_records),
+            runtime_events=tuple(result.runtime_events),
         )
 
     @property

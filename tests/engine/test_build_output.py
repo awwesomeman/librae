@@ -55,6 +55,17 @@ class BuyBar5AndHold(Strategy):
         return []
 
 
+class LongThenReverseWhileOpen(Strategy):
+    """Requests the opposite side while already long — a skipped decision."""
+
+    def on_bar(self, ctx):
+        if ctx.period_index == 5 and ctx.symbol not in ctx.positions:
+            return [OrderIntent(action="long", symbol=ctx.symbol)]
+        if ctx.period_index == 10:
+            return [OrderIntent(action="short", symbol=ctx.symbol)]
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -177,3 +188,23 @@ class TestPeriodMetrics:
         output = bt.build_output()
         assert output.metrics.mean_period_return is not None
         assert output.metrics.period_volatility is not None
+
+
+class TestRuntimeEvents:
+    """Operationally skipped decisions reach the output, not just the logger."""
+
+    def test_skipped_decision_is_reported(self) -> None:
+        df = _make_df()
+        bt = Backtest(df, LongThenReverseWhileOpen(), data_source="test")
+        bt.run()
+        output = bt.build_output()
+
+        skips = [e for e in output.runtime_events if e.event_type == "decision_skipped"]
+        assert [e.detail["reason"] for e in skips] == ["opposite_side"]
+        assert skips[0].symbol == "BTCUSDT"
+
+    def test_clean_run_reports_no_events(self) -> None:
+        df = _make_df()
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test")
+        bt.run()
+        assert bt.build_output().runtime_events == ()
