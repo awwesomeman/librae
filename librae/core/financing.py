@@ -1,4 +1,28 @@
-"""Deterministic perpetual-funding and short-borrow cash-flow accounting."""
+"""Deterministic perpetual-funding and short-borrow cash-flow accounting.
+
+Funding and borrow share a record, a table and an accrual pass, which makes
+it tempting to give a new borrow feature the shape of the funding one beside
+it. Their premises differ at almost every point, and three bugs have come
+from copying across that line -- one shipped, two caught in review:
+
+===================  ==============================  ==========================
+                     funding                         borrow
+===================  ==============================  ==========================
+what it is           a discrete settlement            a rate that stays in
+                                                      force until repriced
+who pays             both sides, sign follows the     the short only
+                     position
+joined onto bars     nearest match, tight tolerance   backward as-of, bounded
+                     (the payment owns one bar)       carry (see
+                                                      attach_borrow_rate)
+quoted per           contract                         borrowed currency
+endpoint             public                           signed -- needs
+                                                      credentials, and its
+                                                      limit is not a bar count
+===================  ==============================  ==========================
+
+Before extending either one, check which column the new code belongs in.
+"""
 
 from __future__ import annotations
 
