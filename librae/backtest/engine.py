@@ -42,7 +42,7 @@ if TYPE_CHECKING:
         AllocationSnapshotPoint,
         BacktestOutput,
         EquityCurvePoint,
-        FundingCashFlowRecord,
+        FinancingCashFlowRecord,
         OrderEventRecord,
         PositionSnapshotPoint,
         StrategyMetrics,
@@ -69,7 +69,11 @@ from librae.core.executor import (
     queue_market_exit_all,
     validate_strategy_decision,
 )
-from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
+from librae.core.financing import (
+    FinancingCashFlow,
+    calculate_borrow_cash_flows,
+    calculate_funding_cash_flows,
+)
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
@@ -203,13 +207,13 @@ def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None
 def _attribute_funding_to_trades(
     trades: Sequence[TradeResult],
     trade_notionals: Sequence[float],
-    funding_cash_flows: Sequence[FundingCashFlow],
+    financing_cash_flows: Sequence[FinancingCashFlow],
 ) -> list[TradePnL]:
     """Fold each round-trip's accrued funding into its closed trade(s)'
     PnL/return before metrics — trade_events keeps the fill-only PnL
     untouched; only the derived TradePnL fed to compute_all changes, so
     win_rate/profit_factor/avg_trade_return see a perpetual position's real
-    edge (see librae.core.funding.FundingCashFlow).
+    edge (see librae.core.financing.FinancingCashFlow).
 
     A partial close produces multiple TradeResults sharing one (symbol,
     entry_at) — funding accrued over that round-trip is split across them
@@ -217,7 +221,7 @@ def _attribute_funding_to_trades(
     pro-rates entry costs across partial closes.
     """
     funding_by_key: dict[tuple[str, datetime], float] = {}
-    for flow in funding_cash_flows:
+    for flow in financing_cash_flows:
         key = (flow.symbol, flow.entry_at)
         funding_by_key[key] = funding_by_key.get(key, 0.0) + flow.cash_flow
 
@@ -517,7 +521,7 @@ class Backtest:
         pending_decision: StrategyDecision = []
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
-        funding_cash_flows: list[FundingCashFlow] = []
+        financing_cash_flows: list[FinancingCashFlow] = []
         runtime_events: list[RuntimeEvent] = []
         portfolio_snapshots: list[PortfolioSnapshot] = []
         active_target_weights: dict[str, float] | None = None
@@ -584,15 +588,22 @@ class Backtest:
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             runtime_events.extend(step_result.runtime_events)
-            _, event_funding_cash_flows = calculate_funding_cash_flows(
+            _, event_financing_cash_flows = calculate_funding_cash_flows(
                 ts,
                 bars,
                 positions,
                 get_cost_model=self._get_cost_model,
             )
-            for cash_flow in event_funding_cash_flows:
+            _, event_borrow_cash_flows = calculate_borrow_cash_flows(
+                ts,
+                bars,
+                positions,
+                get_cost_model=self._get_cost_model,
+            )
+            event_financing_cash_flows.extend(event_borrow_cash_flows)
+            for cash_flow in event_financing_cash_flows:
                 cash += cash_flow.cash_flow
-            funding_cash_flows.extend(event_funding_cash_flows)
+            financing_cash_flows.extend(event_financing_cash_flows)
             # ── Step 2: equity and drawdown check ──
             mtm, position_view = self._calc_equity_snapshot(
                 cash,
@@ -783,7 +794,7 @@ class Backtest:
             order_events=all_events,
             position_snapshots=position_snapshots,
             allocation_snapshots=allocation_snapshots,
-            funding_cash_flows=funding_cash_flows,
+            financing_cash_flows=financing_cash_flows,
             runtime_events=runtime_events,
             account=AccountBacktestResult(
                 account_id=self._account_id,
@@ -837,7 +848,7 @@ class Backtest:
             for trade in result.trades
         ]
         trade_pnls = _attribute_funding_to_trades(
-            result.trades, trade_notionals, result.funding_cash_flows
+            result.trades, trade_notionals, result.financing_cash_flows
         )
         metrics = compute_all(
             equity_values=[snapshot.equity for snapshot in account.equity_curve],
@@ -887,7 +898,7 @@ class Backtest:
         event_records = self._build_event_records(result, run_id)
         position_snapshot_points = self._build_position_snapshot_records(result)
         allocation_snapshot_points = self._build_allocation_snapshot_records(result)
-        funding_cash_flow_records = self._build_funding_cash_flow_records(result)
+        financing_cash_flow_records = self._build_financing_cash_flow_records(result)
 
         return BacktestOutput(
             run_metadata=run_metadata,
@@ -895,7 +906,7 @@ class Backtest:
             order_events=tuple(event_records),
             position_snapshots=tuple(position_snapshot_points),
             allocation_snapshots=tuple(allocation_snapshot_points),
-            funding_cash_flows=tuple(funding_cash_flow_records),
+            financing_cash_flows=tuple(financing_cash_flow_records),
             runtime_events=tuple(result.runtime_events),
         )
 
@@ -996,19 +1007,20 @@ class Backtest:
             for snapshot in result.allocation_snapshots
         ]
 
-    def _build_funding_cash_flow_records(
+    def _build_financing_cash_flow_records(
         self,
         result: BacktestResult,
-    ) -> list[FundingCashFlowRecord]:
-        """Map funding cash flows to the canonical output schema."""
-        from librae.backtest.schema import FundingCashFlowRecord
+    ) -> list[FinancingCashFlowRecord]:
+        """Map financing cash flows to the canonical output schema."""
+        from librae.backtest.schema import FinancingCashFlowRecord
 
         return [
-            FundingCashFlowRecord(
+            FinancingCashFlowRecord(
                 ts=cash_flow.ts,
                 account_id=self._account_id,
                 currency=self._currency,
                 symbol=cash_flow.symbol,
+                kind=cash_flow.kind,
                 side=cash_flow.side,
                 quantity=cash_flow.quantity,
                 mark_price=cash_flow.mark_price,
@@ -1018,7 +1030,7 @@ class Backtest:
                 group_id=cash_flow.group_id,
                 entry_at=cash_flow.entry_at,
             )
-            for cash_flow in result.funding_cash_flows
+            for cash_flow in result.financing_cash_flows
         ]
 
     @staticmethod

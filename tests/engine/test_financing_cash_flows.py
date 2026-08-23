@@ -1,4 +1,4 @@
-"""Perpetual-funding cash-flow accounting tests."""
+"""Perpetual-funding and short-borrow cash-flow accounting tests."""
 
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ import pytest
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 from librae.backtest.engine import _attribute_funding_to_trades
 from librae.core.executor import TradeResult
-from librae.core.funding import FundingCashFlow, calculate_funding_cash_flows
+from librae.core.financing import (
+    FinancingCashFlow,
+    calculate_borrow_cash_flows,
+    calculate_funding_cash_flows,
+)
 from librae.core.strategy import PositionState
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
@@ -152,7 +156,7 @@ def test_missing_rate_and_flat_position_do_not_create_payments() -> None:
     ],
 )
 def test_invalid_funding_inputs_fail_closed(bar: dict[str, float]) -> None:
-    with pytest.raises(ValueError, match="funding"):
+    with pytest.raises(ValueError, match=r"funding|financing"):
         calculate_funding_cash_flows(
             datetime(2026, 1, 1, tzinfo=UTC),
             {"PERP": bar},
@@ -174,11 +178,11 @@ def test_backtest_applies_only_same_timestamp_observations() -> None:
     result = backtest.run()
     output = backtest.build_output()
 
-    assert [item.cash_flow for item in result.funding_cash_flows] == pytest.approx([-20.0, 10.0])
+    assert [item.cash_flow for item in result.financing_cash_flows] == pytest.approx([-20.0, 10.0])
     assert result.final_equity == pytest.approx(9_990.0)
     assert output.account.net_pnl == pytest.approx(-10.0)
     assert output.metrics.total_return == pytest.approx(-0.001)
-    assert [item.cash_flow for item in output.funding_cash_flows] == pytest.approx([-20.0, 10.0])
+    assert [item.cash_flow for item in output.financing_cash_flows] == pytest.approx([-20.0, 10.0])
     assert all(event.price == 100.0 for event in output.order_events)
 
 
@@ -195,12 +199,12 @@ def test_backtest_uses_explicit_funding_mark_price_and_multiplier() -> None:
         data_source="test",
     ).run()
 
-    assert len(result.funding_cash_flows) == 1
-    assert result.funding_cash_flows[0].cash_flow == pytest.approx(11.0)
+    assert len(result.financing_cash_flows) == 1
+    assert result.financing_cash_flows[0].cash_flow == pytest.approx(11.0)
     assert result.final_equity == pytest.approx(10_011.0)
 
 
-def test_funding_cash_flow_carries_the_accruing_position_group_id_and_entry_at() -> None:
+def test_financing_cash_flow_carries_the_accruing_position_group_id_and_entry_at() -> None:
     position = _position()
     observed, cash_flows = calculate_funding_cash_flows(
         datetime(2026, 1, 1, 1, tzinfo=UTC),
@@ -229,7 +233,7 @@ def test_funding_accrued_while_held_is_folded_into_the_closed_trade_stats() -> N
     backtest.run()
     output = backtest.build_output()
 
-    assert [item.cash_flow for item in output.funding_cash_flows] == pytest.approx([20.0])
+    assert [item.cash_flow for item in output.financing_cash_flows] == pytest.approx([20.0])
     assert output.metrics.trades == 1
     assert output.metrics.win_rate == pytest.approx(1.0)
     # notional = entry_price(100) * quantity(2) * multiplier(10) = 2_000;
@@ -280,8 +284,8 @@ def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -
             periods_held=3,
         ),
     ]
-    funding_cash_flows = [
-        FundingCashFlow(
+    financing_cash_flows = [
+        FinancingCashFlow(
             ts=datetime(2026, 1, 1, 1, tzinfo=UTC),
             symbol="PERP",
             side="short",
@@ -296,7 +300,7 @@ def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -
     ]
     notionals = [300.0, 200.0]  # entry_price(100) * quantity
 
-    trade_pnls = _attribute_funding_to_trades(trades, notionals, funding_cash_flows)
+    trade_pnls = _attribute_funding_to_trades(trades, notionals, financing_cash_flows)
 
     # Split 3:2 by closed quantity (5 total) — not 50.0 attributed to each.
     assert trade_pnls[0].net_pnl == pytest.approx(30.0)
@@ -346,7 +350,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,
-        on_funding_cash_flow=recorded.append,
+        on_financing_cash_flow=recorded.append,
         warmup_fetcher=None,
         notifier=None,
         clock=lambda: datetime(2026, 1, 1, 3, tzinfo=UTC),
@@ -369,7 +373,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,
-        on_funding_cash_flow=recorded.append,
+        on_financing_cash_flow=recorded.append,
         warmup_fetcher=None,
         notifier=None,
         clock=lambda: datetime(2026, 1, 1, 3, tzinfo=UTC),
@@ -379,3 +383,90 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
 
     assert restored._cash == pytest.approx(99_790.0)
     assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
+
+
+# ---------------------------------------------------------------------------
+# Short borrow
+# ---------------------------------------------------------------------------
+
+
+def _borrow_bar(rate: float | None = 0.0001) -> dict[str, dict[str, object]]:
+    return {"PERP": {"close": 100.0, "borrow_rate": rate}}
+
+
+def test_only_shorts_pay_borrow_interest() -> None:
+    ts = datetime(2026, 1, 1, 8, tzinfo=UTC)
+
+    _, short_flows = calculate_borrow_cash_flows(
+        ts,
+        _borrow_bar(),
+        {"PERP": _position("short")},
+        get_cost_model=lambda _symbol: _cost_model(),
+    )
+    _, long_flows = calculate_borrow_cash_flows(
+        ts,
+        _borrow_bar(),
+        {"PERP": _position("long")},
+        get_cost_model=lambda _symbol: _cost_model(),
+    )
+
+    # 2 units * 100 * multiplier 10 * 0.0001, paid out.
+    assert [flow.cash_flow for flow in short_flows] == [-0.2]
+    assert short_flows[0].kind == "borrow"
+    assert long_flows == []
+
+
+def test_missing_borrow_rate_is_not_free() -> None:
+    ts = datetime(2026, 1, 1, 8, tzinfo=UTC)
+    positions = {"PERP": _position("short")}
+    get_cost_model = lambda _symbol: _cost_model()  # noqa: E731
+
+    observed, flows = calculate_borrow_cash_flows(
+        ts, _borrow_bar(None), positions, get_cost_model=get_cost_model
+    )
+    assert (observed, flows) == ((), [])
+
+    observed, flows = calculate_borrow_cash_flows(
+        ts, {"PERP": {"close": 100.0}}, positions, get_cost_model=get_cost_model
+    )
+    assert (observed, flows) == ((), [])
+
+
+def test_borrow_cost_is_charged_to_the_short_and_folded_into_the_closed_trade() -> None:
+    """The mirror of the funding test above: same short, same 1% rate, but
+    borrow interest is a cost the short pays rather than income it receives,
+    so the identical setup flips the round-trip from a winner to a loser."""
+    data = _backtest_frame([np.nan] * 5).drop(columns=["funding_rate"])
+    data["borrow_rate"] = [np.nan, 0.01, np.nan, np.nan, np.nan]
+
+    backtest = Backtest(
+        data,
+        _OpenThenClose(side="short", n_bars=5),
+        initial_balance=10_000.0,
+        cost_model=_cost_model(),
+        data_source="test",
+    )
+    backtest.run()
+    output = backtest.build_output()
+
+    assert [item.cash_flow for item in output.financing_cash_flows] == pytest.approx([-20.0])
+    assert [item.kind for item in output.financing_cash_flows] == ["borrow"]
+    assert output.metrics.trades == 1
+    assert output.metrics.win_rate == pytest.approx(0.0)
+    assert output.metrics.avg_trade_return == pytest.approx(-0.01)
+
+
+def test_a_long_pays_no_borrow_interest_over_a_whole_backtest() -> None:
+    data = _backtest_frame([np.nan] * 5).drop(columns=["funding_rate"])
+    data["borrow_rate"] = [np.nan, 0.01, np.nan, np.nan, np.nan]
+
+    backtest = Backtest(
+        data,
+        _OpenThenClose(side="long", n_bars=5),
+        initial_balance=10_000.0,
+        cost_model=_cost_model(),
+        data_source="test",
+    )
+    backtest.run()
+
+    assert backtest.build_output().financing_cash_flows == ()

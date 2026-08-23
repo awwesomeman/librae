@@ -12,7 +12,7 @@ import pandas as pd
 from librae.backtest.schema import (
     AllocationSnapshotPoint,
     EquityCurvePoint,
-    FundingCashFlowRecord,
+    FinancingCashFlowRecord,
     OrderEventRecord,
     PositionSnapshotPoint,
     StrategyMetrics,
@@ -222,9 +222,9 @@ def build_backtest_artifact(
             AllocationSnapshotPoint,
             run_id=run_id,
         ),
-        "funding_cash_flows": _records_frame(
-            output.funding_cash_flows,
-            FundingCashFlowRecord,
+        "financing_cash_flows": _records_frame(
+            output.financing_cash_flows,
+            FinancingCashFlowRecord,
             run_id=run_id,
         ),
         "runtime_events": _records_frame(

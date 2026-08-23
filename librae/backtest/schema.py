@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from librae.core.executor import RuntimeEvent
+from librae.core.financing import FinancingKind
 from librae.core.run_config import RunMode
 from librae.core.strategy import PositionEventType, PositionSide, TimeInForce
 
@@ -138,13 +139,14 @@ class AllocationSnapshotPoint:
 
 
 @dataclass(frozen=True)
-class FundingCashFlowRecord:
-    """One timestamped perpetual-funding payment."""
+class FinancingCashFlowRecord:
+    """One timestamped position-financing payment (funding or short borrow)."""
 
     ts: datetime
     account_id: str
     currency: str
     symbol: str
+    kind: FinancingKind
     side: PositionSide
     quantity: float
     mark_price: float
@@ -235,7 +237,7 @@ class BacktestOutput:
     order_events: Sequence[OrderEventRecord]
     position_snapshots: Sequence[PositionSnapshotPoint]
     allocation_snapshots: Sequence[AllocationSnapshotPoint]
-    funding_cash_flows: Sequence[FundingCashFlowRecord] = ()
+    financing_cash_flows: Sequence[FinancingCashFlowRecord] = ()
     runtime_events: Sequence[RuntimeEvent] = ()
 
     @property
@@ -280,7 +282,7 @@ class BacktestOutput:
             *self.order_events,
             *self.position_snapshots,
             *self.allocation_snapshots,
-            *self.funding_cash_flows,
+            *self.financing_cash_flows,
         )
         for record in account_records:
             if record.account_id != self.account.account_id:

@@ -24,7 +24,7 @@ from librae.live.state import normalize_runtime_revision
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
     from librae.core.executor import OrderEvent, RuntimeEvent
-    from librae.core.funding import FundingCashFlow
+    from librae.core.financing import FinancingCashFlow
     from librae.core.run_config import RunConfig
     from librae.core.strategy import Strategy
     from librae.live.state import LiveStateStore
@@ -290,17 +290,18 @@ class _TimescaleCallbacks:
         )
         self._write(write_trade_event, critical=True, **fields)
 
-    def on_funding_cash_flow(self, cash_flow: FundingCashFlow) -> None:
-        from librae.db.timescale_writer import write_funding_cash_flow
+    def on_financing_cash_flow(self, cash_flow: FinancingCashFlow) -> None:
+        from librae.db.timescale_writer import write_financing_cash_flow
 
         self._write(
-            write_funding_cash_flow,
+            write_financing_cash_flow,
             critical=True,
             run_id=self._run_id,
             account_id=self._config.account_id,
             currency=self._config.account.currency,
             ts=cash_flow.ts,
             symbol=cash_flow.symbol,
+            kind=cash_flow.kind,
             side=cash_flow.side,
             quantity=cash_flow.quantity,
             mark_price=cash_flow.mark_price,
@@ -523,7 +524,7 @@ def build_live_trader(
         on_ohlcv=callbacks.on_ohlcv if callbacks else None,
         on_heartbeat=callbacks.on_heartbeat if callbacks else None,
         on_signal_outcome=callbacks.on_signal_outcome if callbacks else None,
-        on_funding_cash_flow=callbacks.on_funding_cash_flow if callbacks else None,
+        on_financing_cash_flow=callbacks.on_financing_cash_flow if callbacks else None,
         on_runtime_event=callbacks.on_runtime_event if callbacks else None,
         on_performance=callbacks.on_performance if callbacks else None,
         on_ready=_combine_ready_callbacks(on_ready),

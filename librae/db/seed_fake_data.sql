@@ -221,21 +221,26 @@ ON CONFLICT (event_id, ts) DO NOTHING;
 -- day -2, every 8h) — populates the Cumulative Funding P&L panel, which the
 -- rest of this file's spot-only symbols never write to. Sign convention:
 -- longs pay (negative) when rate > 0, shorts receive (positive) — see
--- calculate_funding_cash_flows() in librae/core/funding.py.
-INSERT INTO funding_cash_flows
-    (ts, run_id, account_id, currency, symbol, side, quantity, mark_price, multiplier, rate, cash_flow)
+-- calculate_funding_cash_flows() in librae/core/financing.py.
+INSERT INTO financing_cash_flows
+    (ts, run_id, account_id, currency, symbol, kind, side, quantity, mark_price,
+     multiplier, rate, cash_flow, entry_at)
 SELECT
     NOW() - INTERVAL '6 days' + (i * 8 || ' hours')::interval,
-    'seed_test_run', 'default', 'USDT', 'BTCUSDT', 'long', 0.08, 63000 + i * 60, 1.0, 0.0001,
-    -(0.08 * (63000 + i * 60) * 1.0 * 0.0001)
+    'seed_test_run', 'default', 'USDT', 'BTCUSDT', 'funding', 'long', 0.08, 63000 + i * 60,
+    1.0, 0.0001,
+    -(0.08 * (63000 + i * 60) * 1.0 * 0.0001),
+    NOW() - INTERVAL '6 days'
 FROM generate_series(0, 11) AS i
 UNION ALL
 SELECT
     NOW() - INTERVAL '6 days' + (i * 8 || ' hours')::interval,
-    'seed_test_run', 'default', 'USDT', 'SOLUSDT', 'short', 15, 135 - i * 0.2, 1.0, 0.0001,
-    15 * (135 - i * 0.2) * 1.0 * 0.0001
+    'seed_test_run', 'default', 'USDT', 'SOLUSDT', 'funding', 'short', 15, 135 - i * 0.2,
+    1.0, 0.0001,
+    15 * (135 - i * 0.2) * 1.0 * 0.0001,
+    NOW() - INTERVAL '6 days'
 FROM generate_series(0, 11) AS i
-ON CONFLICT (run_id, account_id, symbol, ts) DO NOTHING;
+ON CONFLICT (run_id, account_id, symbol, kind, ts) DO NOTHING;
 
 INSERT INTO strategy_performance
     (run_id, account_id, currency, initial_cash, final_equity, net_pnl,

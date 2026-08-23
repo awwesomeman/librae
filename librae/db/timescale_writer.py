@@ -292,7 +292,7 @@ def save_backtest_output(
         # Clear old data (idempotent re-run)
         cur.execute("DELETE FROM equity_curve WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM trade_events WHERE run_id = %s", (meta.run_id,))
-        cur.execute("DELETE FROM funding_cash_flows WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM financing_cash_flows WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
 
         # equity_curve (batch)
@@ -392,7 +392,7 @@ def save_backtest_output(
             )
             counts["trade_events"] = len(event_rows)
 
-        if output.funding_cash_flows:
+        if output.financing_cash_flows:
             funding_rows = [
                 (
                     _to_dt(cash_flow.ts),
@@ -400,6 +400,7 @@ def save_backtest_output(
                     cash_flow.account_id,
                     cash_flow.currency,
                     cash_flow.symbol,
+                    cash_flow.kind,
                     cash_flow.side,
                     cash_flow.quantity,
                     cash_flow.mark_price,
@@ -409,16 +410,16 @@ def save_backtest_output(
                     cash_flow.group_id,
                     _to_dt(cash_flow.entry_at),
                 )
-                for cash_flow in output.funding_cash_flows
+                for cash_flow in output.financing_cash_flows
             ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO funding_cash_flows
-                   (ts, run_id, account_id, currency, symbol, side,
+                """INSERT INTO financing_cash_flows
+                   (ts, run_id, account_id, currency, symbol, kind, side,
                     quantity, mark_price, multiplier, rate, cash_flow,
                     group_id, entry_at)
                    VALUES %s
-                   ON CONFLICT (run_id, account_id, symbol, ts) DO UPDATE SET
+                   ON CONFLICT (run_id, account_id, symbol, kind, ts) DO UPDATE SET
                      currency=EXCLUDED.currency,
                      side=EXCLUDED.side,
                      quantity=EXCLUDED.quantity,
@@ -431,7 +432,7 @@ def save_backtest_output(
                 funding_rows,
                 page_size=500,
             )
-            counts["funding_cash_flows"] = len(funding_rows)
+            counts["financing_cash_flows"] = len(funding_rows)
 
         # signal_events (from feature-layer signal_series)
         entry_signals = dict(signal_series_by_symbol or {})
@@ -989,12 +990,13 @@ def write_trade_event(
         cur.close()
 
 
-def write_funding_cash_flow(
+def write_financing_cash_flow(
     run_id: str,
     account_id: str,
     currency: str,
     ts: datetime,
     symbol: str,
+    kind: str,
     side: str,
     quantity: float,
     mark_price: float,
@@ -1005,16 +1007,16 @@ def write_funding_cash_flow(
     entry_at: datetime,
     dsn: str | None = None,
 ) -> None:
-    """Write one idempotent funding payment."""
+    """Write one idempotent financing payment."""
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO funding_cash_flows
-               (ts, run_id, account_id, currency, symbol, side,
+            """INSERT INTO financing_cash_flows
+               (ts, run_id, account_id, currency, symbol, kind, side,
                 quantity, mark_price, multiplier, rate, cash_flow,
                 group_id, entry_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id, account_id, symbol, ts) DO UPDATE SET
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (run_id, account_id, symbol, kind, ts) DO UPDATE SET
                  currency=EXCLUDED.currency,
                  side=EXCLUDED.side,
                  quantity=EXCLUDED.quantity,
@@ -1030,6 +1032,7 @@ def write_funding_cash_flow(
                 account_id,
                 currency,
                 symbol,
+                kind,
                 side,
                 quantity,
                 mark_price,
@@ -1180,7 +1183,7 @@ def refresh_performance(
     from librae.core import EPSILON
     from librae.db.timescale_reader import (
         load_equity_curve,
-        load_funding_cash_flows,
+        load_financing_cash_flows,
         load_trade_events,
     )
 
@@ -1221,7 +1224,7 @@ def refresh_performance(
                 "closed trade event missing required performance fields: " + ", ".join(missing)
             )
 
-    funding_df = load_funding_cash_flows(run_id, account_id=account_id)
+    funding_df = load_financing_cash_flows(run_id, account_id=account_id)
     funding_by_trade: dict[tuple[str, object], float] = {}
     for row in funding_df.to_dict("records") if not funding_df.empty else []:
         key = (row["symbol"], row["entry_at"])
@@ -1444,7 +1447,7 @@ def save_strategy_results(
 ) -> dict:
     """Write strategy backtest results + signal history to DB.
 
-    Writes: backtest_runs, equity_curve, trade_events, funding_cash_flows,
+    Writes: backtest_runs, equity_curve, trade_events, financing_cash_flows,
     strategy_performance, signal_events, ohlcv.
     """
     timeframe = config.timeframe

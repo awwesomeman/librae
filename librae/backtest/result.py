@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Literal
 
 from librae.core.executor import OrderEvent, RuntimeEvent, TradeResult
-from librae.core.funding import FundingCashFlow
+from librae.core.financing import FinancingCashFlow
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ class BacktestResult:
     order_events: Sequence[OrderEvent]
     position_snapshots: Sequence[PositionSnapshot]
     allocation_snapshots: Sequence[AllocationSnapshot]
-    funding_cash_flows: Sequence[FundingCashFlow]
+    financing_cash_flows: Sequence[FinancingCashFlow]
     runtime_events: Sequence[RuntimeEvent]
     account: AccountBacktestResult
 

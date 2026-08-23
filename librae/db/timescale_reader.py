@@ -202,25 +202,25 @@ def load_trade_events(
     return df
 
 
-def load_funding_cash_flows(
+def load_financing_cash_flows(
     run_id: str,
     *,
     account_id: str | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
-    """Load applied perpetual-funding payments for a run."""
+    """Load applied financing payments (funding and short borrow) for a run."""
     sql = """
-        SELECT ts AS _time, account_id, currency, symbol, side,
+        SELECT ts AS _time, account_id, currency, symbol, kind, side,
                quantity, mark_price, multiplier, rate, cash_flow,
                group_id, entry_at
-        FROM funding_cash_flows
+        FROM financing_cash_flows
         WHERE run_id = %s
     """
     params: list = [run_id]
     if account_id is not None:
         sql += " AND account_id = %s"
         params.append(account_id)
-    sql += " ORDER BY account_id, ts, symbol"
+    sql += " ORDER BY account_id, ts, symbol, kind"
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=params)
     if not df.empty:

@@ -40,7 +40,10 @@ from librae.core.executor import (
     validate_exposure_transition,
     validate_strategy_decision,
 )
-from librae.core.funding import calculate_funding_cash_flows
+from librae.core.financing import (
+    calculate_borrow_cash_flows,
+    calculate_funding_cash_flows,
+)
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
 from librae.core.strategy import (
@@ -60,7 +63,7 @@ from .executor import ExecutionReport, LiveExecutor, OrderRequest
 from .interfaces import (
     BarCallback,
     BarDataFetcher,
-    FundingCashFlowCallback,
+    FinancingCashFlowCallback,
     HeartbeatCallback,
     Notifier,
     OhlcvCallback,
@@ -235,7 +238,7 @@ class LiveTrader:
         on_ohlcv: OhlcvCallback | None = None,
         on_heartbeat: HeartbeatCallback | None = None,
         on_signal_outcome: SignalOutcomeCallback | None = None,
-        on_funding_cash_flow: FundingCashFlowCallback | None = None,
+        on_financing_cash_flow: FinancingCashFlowCallback | None = None,
         on_runtime_event: RuntimeEventCallback | None = None,
         on_performance: PerformanceCallback | None = None,
         on_ready: Callable[[str], None] | None = None,
@@ -376,7 +379,7 @@ class LiveTrader:
         self._consecutive_errors: int = 0
         self._last_cycle_ts: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
-        self._last_funding_ts: dict[str, datetime] = {}
+        self._last_financing_ts: dict[str, datetime] = {}
         self._stale_alerted: dict[str, bool] = {}
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -420,7 +423,7 @@ class LiveTrader:
         self._on_ohlcv = on_ohlcv
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
-        self._on_funding_cash_flow = on_funding_cash_flow
+        self._on_financing_cash_flow = on_financing_cash_flow
         self._on_performance = on_performance
         self._on_ready = on_ready
         self._warmup_fetcher = warmup_fetcher
@@ -478,7 +481,7 @@ class LiveTrader:
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
             last_bar_ts=dict(self._last_bar_ts),
-            last_funding_ts=dict(self._last_funding_ts),
+            last_financing_ts=dict(self._last_financing_ts),
             pending_decision=deepcopy(self._pending_decision),
             active_orders=deepcopy(self._active_orders),
             live_rebalance=deepcopy(self._live_rebalance),
@@ -516,7 +519,7 @@ class LiveTrader:
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
         self._last_bar_ts = state.last_bar_ts
-        self._last_funding_ts = state.last_funding_ts
+        self._last_financing_ts = state.last_financing_ts
         self._pending_decision = state.pending_decision
         self._active_orders = state.active_orders
         self._live_rebalance = state.live_rebalance
@@ -2142,7 +2145,7 @@ class LiveTrader:
                 positions=self._positions,
                 result=step_result,
             )
-            self._apply_funding_cash_flows(ts, raw_bars)
+            self._apply_financing_cash_flows(ts, raw_bars)
             for event in step_result.events:
                 cycle_used_bar_quantity_by_symbol[event.symbol] = (
                     cycle_used_bar_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
@@ -2324,17 +2327,21 @@ class LiveTrader:
     def _get_cost_model(self, sym: str) -> CostModel:
         return self._executor.get_cost_model(sym)
 
-    def _apply_funding_cash_flows(
+    def _apply_financing_cash_flows(
         self,
         ts: datetime,
         bars: Mapping[str, Mapping[str, object]],
     ) -> None:
-        """Apply each simulation funding observation at most once."""
+        """Apply each simulation financing observation at most once.
+
+        Funding and borrow accrue off the same bar event and share one
+        per-symbol gate: both are consumed together or not at all.
+        """
         eligible_bars = {
             symbol: bar
             for symbol, bar in bars.items()
             if ts
-            > self._last_funding_ts.get(
+            > self._last_financing_ts.get(
                 symbol,
                 datetime.min.replace(tzinfo=UTC),
             )
@@ -2345,12 +2352,19 @@ class LiveTrader:
             self._positions,
             get_cost_model=self._get_cost_model,
         )
-        for symbol in observed_symbols:
-            self._last_funding_ts[symbol] = ts
+        borrow_symbols, borrow_cash_flows = calculate_borrow_cash_flows(
+            ts,
+            eligible_bars,
+            self._positions,
+            get_cost_model=self._get_cost_model,
+        )
+        cash_flows.extend(borrow_cash_flows)
+        for symbol in (*observed_symbols, *borrow_symbols):
+            self._last_financing_ts[symbol] = ts
         for cash_flow in cash_flows:
             self._cash += cash_flow.cash_flow
-            if self._on_funding_cash_flow:
-                self._on_funding_cash_flow(cash_flow)
+            if self._on_financing_cash_flow:
+                self._on_financing_cash_flow(cash_flow)
         if cash_flows:
             self._performance_dirty = True
 

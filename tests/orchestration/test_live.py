@@ -155,7 +155,7 @@ def test_restored_run_also_calls_register_run() -> None:
     """A restarted process must re-sync callback state too, not just skip
     straight to trading — _TimescaleCallbacks caches run_id purely from
     register_run() and has no other way to learn it after a restart, since
-    on_order_event/on_funding_cash_flow/on_runtime_event all read that
+    on_order_event/on_financing_cash_flow/on_runtime_event all read that
     cached value rather than receiving run_id as an argument. Without this,
     every DB write after a restart silently fails on the run_id foreign
     key (caught by _write's best-effort try/except) — invisible short of
@@ -600,13 +600,13 @@ def test_timescale_callbacks_critical_write_alerts_on_first_failure() -> None:
     ("method", "callback_name", "call_kwargs"),
     [
         ("register_run", "write_run_metadata", {"run_id": "run-1"}),
-        ("on_funding_cash_flow", "write_funding_cash_flow", {}),
+        ("on_financing_cash_flow", "write_financing_cash_flow", {}),
     ],
 )
 def test_timescale_callbacks_mark_one_shot_writes_critical(
     method: str, callback_name: str, call_kwargs: dict
 ) -> None:
-    """Wiring check: register_run and on_funding_cash_flow must pass
+    """Wiring check: register_run and on_financing_cash_flow must pass
     critical=True through to _write, or the first-failure alert silently
     stops firing for these irreplaceable writes."""
     config = make_test_cfg(mode="sim")
@@ -614,11 +614,11 @@ def test_timescale_callbacks_mark_one_shot_writes_critical(
     callbacks._run_id = "run-1"
 
     with patch.object(callbacks, "_write") as write:
-        if method == "on_funding_cash_flow":
-            from librae.core.funding import FundingCashFlow
+        if method == "on_financing_cash_flow":
+            from librae.core.financing import FinancingCashFlow
 
             getattr(callbacks, method)(
-                FundingCashFlow(
+                FinancingCashFlow(
                     ts=datetime.now(UTC),
                     symbol="BTCUSDT",
                     side="long",

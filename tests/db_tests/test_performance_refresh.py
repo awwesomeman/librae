@@ -82,7 +82,7 @@ def test_refresh_performance_matches_in_memory_backtest_metrics() -> None:
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
         patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
-        patch("librae.db.timescale_reader.load_funding_cash_flows", return_value=pd.DataFrame()),
+        patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=pd.DataFrame()),
         patch("librae.db.timescale_writer.write_strategy_performance") as write,
     ):
         refresh_performance(output.run_metadata.run_id, "default", config=config)
@@ -141,7 +141,7 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
         patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
-        patch("librae.db.timescale_reader.load_funding_cash_flows", return_value=funding),
+        patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=funding),
         patch("librae.core.metrics.compute_all", return_value=metrics) as compute,
         patch("librae.db.timescale_writer.write_strategy_performance") as write,
     ):
@@ -196,7 +196,7 @@ def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() 
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
         patch("librae.db.timescale_reader.load_trade_events", return_value=closed),
-        patch("librae.db.timescale_reader.load_funding_cash_flows", return_value=funding),
+        patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=funding),
         patch("librae.core.metrics.compute_all", return_value=metrics) as compute,
         patch("librae.db.timescale_writer.write_strategy_performance"),
     ):

@@ -210,13 +210,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_pk ON trade_events(event_id, 
 CREATE INDEX IF NOT EXISTS idx_trade_events_run_id ON trade_events(run_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_events_strategy ON trade_events(strategy, mode, symbol, ts DESC);
 
--- Timestamped perpetual-funding payments applied by research runtimes.
-CREATE TABLE IF NOT EXISTS funding_cash_flows (
+-- Timestamped position-financing cash flows applied by research runtimes:
+-- perpetual funding settlements and interest on a short's borrowed asset.
+CREATE TABLE IF NOT EXISTS financing_cash_flows (
     ts              TIMESTAMPTZ NOT NULL,
     run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
     account_id      TEXT NOT NULL,
     currency        TEXT NOT NULL,
     symbol          TEXT NOT NULL,
+    kind            TEXT NOT NULL,
     side            TEXT NOT NULL,
     quantity        DOUBLE PRECISION NOT NULL,
     mark_price      DOUBLE PRECISION NOT NULL,
@@ -225,16 +227,19 @@ CREATE TABLE IF NOT EXISTS funding_cash_flows (
     cash_flow       DOUBLE PRECISION NOT NULL,
     group_id        TEXT,
     entry_at        TIMESTAMPTZ NOT NULL,
-    CONSTRAINT chk_funding_side CHECK (side IN ('long', 'short')),
-    CONSTRAINT chk_funding_quantity CHECK (quantity > 0),
-    CONSTRAINT chk_funding_mark_price CHECK (mark_price > 0),
-    CONSTRAINT chk_funding_multiplier CHECK (multiplier > 0)
+    CONSTRAINT chk_financing_kind CHECK (kind IN ('funding', 'borrow')),
+    CONSTRAINT chk_financing_side CHECK (side IN ('long', 'short')),
+    CONSTRAINT chk_financing_quantity CHECK (quantity > 0),
+    CONSTRAINT chk_financing_mark_price CHECK (mark_price > 0),
+    CONSTRAINT chk_financing_multiplier CHECK (multiplier > 0)
 );
-SELECT create_hypertable('funding_cash_flows', 'ts', if_not_exists => TRUE);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_funding_cash_flows_unique
-    ON funding_cash_flows(run_id, account_id, symbol, ts);
-CREATE INDEX IF NOT EXISTS idx_funding_cash_flows_run_id
-    ON funding_cash_flows(run_id, account_id, ts DESC);
+SELECT create_hypertable('financing_cash_flows', 'ts', if_not_exists => TRUE);
+-- kind belongs in the key: a funding settlement and a borrow accrual land on
+-- the same symbol at the same ts and must not overwrite each other.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_financing_cash_flows_unique
+    ON financing_cash_flows(run_id, account_id, symbol, kind, ts);
+CREATE INDEX IF NOT EXISTS idx_financing_cash_flows_run_id
+    ON financing_cash_flows(run_id, account_id, ts DESC);
 
 -- ============================================================
 -- runtime_events — operational audit trail (restarts, skipped decisions),

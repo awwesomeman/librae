@@ -147,7 +147,7 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
         "order_events",
         "position_snapshots",
         "allocation_snapshots",
-        "funding_cash_flows",
+        "financing_cash_flows",
         "runtime_events",
     }
     assert set(artifact.tables["accounts"]["run_id"]) == {"demo-20260729t1200-abcdef"}

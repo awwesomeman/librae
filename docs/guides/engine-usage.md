@@ -617,7 +617,7 @@ reporting package. The `DEFAULT_*_METRICS` tuples remain selection defaults,
 not the capability boundary, so defaults may later become a supported subset
 without making other metrics invalid.
 
-## Perpetual funding cash flows
+## Position financing cash flows
 
 Backtest and shadow-simulation bars may contain a `funding_rate` observation,
 expressed as a decimal rate for that payment. `funding_mark_price` is optional;
@@ -635,9 +635,31 @@ pay shorts:
 
 where `side_sign` is `+1` for long and `-1` for short. Only the confirmed open
 quantity at that timestamp participates. Payments update account cash, equity,
-returns, and drawdown without changing execution prices or trade PnL.
-`FundingCashFlowRecord` and `funding_cash_flows` retain the rate, mark,
-quantity, multiplier, side, and realized cash flow for audit.
+returns, and drawdown without changing execution prices.
+`FinancingCashFlowRecord` and `financing_cash_flows` retain the kind, rate,
+mark, quantity, multiplier, side, and realized cash flow for audit. Each
+payment carries the accruing position's `group_id`/`entry_at`, so it is folded
+into that round-trip's PnL and return before trade-level metrics run — a
+strategy whose edge is carry rather than price convergence is not scored as if
+it had no edge.
+
+### Short borrow interest
+
+Bars may also carry a `borrow_rate`, the decimal rate for *that* accrual event
+— like `funding_rate` it is applied as given and never annualized by the
+engine. Only shorts accrue it:
+
+`cash_flow = -quantity * mark_price * multiplier * borrow_rate`
+
+Borrowing an asset in order to sell it costs interest and the long side
+receives nothing in return, so unlike funding the sign never flips with the
+position side. A missing rate means "unknown", not "free": it is skipped, never
+forward-filled or defaulted to zero.
+
+A perpetual's holding cost is already expressed by funding, so a perpetual bar
+must not carry `borrow_rate` or the position is charged twice. Deciding which
+instruments borrow belongs to whoever binds the market data, exactly as
+`funding_rate` is bound only for perpetuals.
 
 Paper and live broker modes do not apply these research observations. Broker
 balances and exchange funding records remain authoritative. This contract

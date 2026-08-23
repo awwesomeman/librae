@@ -9,35 +9,36 @@ from unittest.mock import MagicMock, patch
 from librae.backtest.schema import (
     AccountPerformance,
     BacktestOutput,
-    FundingCashFlowRecord,
+    FinancingCashFlowRecord,
     RunMetadata,
     StrategyMetrics,
 )
-from librae.db.timescale_writer import save_backtest_output, write_funding_cash_flow
+from librae.db.timescale_writer import save_backtest_output, write_financing_cash_flow
 
 
 def test_schema_defines_idempotent_funding_event_key() -> None:
     sql = Path("librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
-    assert "CREATE TABLE IF NOT EXISTS funding_cash_flows" in sql
-    assert "ON funding_cash_flows(run_id, account_id, symbol, ts)" in sql
+    assert "CREATE TABLE IF NOT EXISTS financing_cash_flows" in sql
+    assert "ON financing_cash_flows(run_id, account_id, symbol, kind, ts)" in sql
     assert "REFERENCES backtest_runs(run_id) ON DELETE CASCADE" in sql
 
 
 @patch("librae.db.timescale_writer.get_conn")
-def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) -> None:
+def test_write_financing_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) -> None:
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     mock_get_conn.return_value = connection
     ts = datetime(2026, 1, 1, tzinfo=UTC)
 
-    write_funding_cash_flow(
+    write_financing_cash_flow(
         run_id="run-1",
         account_id="perp",
         currency="USDT",
         ts=ts,
         symbol="BTC/USDT:USDT",
+        kind="funding",
         side="long",
         quantity=2.0,
         mark_price=100_000.0,
@@ -49,13 +50,14 @@ def test_write_funding_cash_flow_upserts_same_payment(mock_get_conn: MagicMock) 
     )
 
     sql, values = cursor.execute.call_args.args
-    assert "ON CONFLICT (run_id, account_id, symbol, ts) DO UPDATE" in sql
+    assert "ON CONFLICT (run_id, account_id, symbol, kind, ts) DO UPDATE" in sql
     assert values == (
         ts,
         "run-1",
         "perp",
         "USDT",
         "BTC/USDT:USDT",
+        "funding",
         "long",
         2.0,
         100_000.0,
@@ -104,12 +106,13 @@ def test_save_backtest_output_batches_funding_diagnostics(
         order_events=(),
         position_snapshots=(),
         allocation_snapshots=(),
-        funding_cash_flows=(
-            FundingCashFlowRecord(
+        financing_cash_flows=(
+            FinancingCashFlowRecord(
                 ts=ts,
                 account_id="perp",
                 currency="USDT",
                 symbol="BTC/USDT:USDT",
+                kind="funding",
                 side="long",
                 quantity=2.0,
                 mark_price=100_000.0,
@@ -124,10 +127,10 @@ def test_save_backtest_output_batches_funding_diagnostics(
 
     counts = save_backtest_output(output)
 
-    assert counts["funding_cash_flows"] == 1
+    assert counts["financing_cash_flows"] == 1
     funding_call = next(
         call
         for call in mock_execute_values.call_args_list
-        if "INSERT INTO funding_cash_flows" in call.args[1]
+        if "INSERT INTO financing_cash_flows" in call.args[1]
     )
     assert funding_call.args[2][0][-3] == -20.0

@@ -45,7 +45,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 20
+_STATE_SCHEMA_VERSION = 21
 
 
 def normalize_runtime_revision(
@@ -207,7 +207,7 @@ class LiveRuntimeState:
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
-    last_funding_ts: dict[str, datetime] = field(default_factory=dict)
+    last_financing_ts: dict[str, datetime] = field(default_factory=dict)
     pending_decision: list[OrderIntent] = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
@@ -256,8 +256,9 @@ class LiveRuntimeState:
             "last_bar_ts": {
                 symbol: timestamp.isoformat() for symbol, timestamp in self.last_bar_ts.items()
             },
-            "last_funding_ts": {
-                symbol: timestamp.isoformat() for symbol, timestamp in self.last_funding_ts.items()
+            "last_financing_ts": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.last_financing_ts.items()
             },
             "pending_decision": _pending_intents_to_list(self.pending_decision),
             "active_orders": [order.to_dict() for order in self.active_orders],
@@ -299,9 +300,9 @@ class LiveRuntimeState:
             last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},
             last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
             last_bar_ts=_timestamps_from_dict(raw["last_bar_ts"], field="last_bar_ts"),
-            last_funding_ts=_timestamps_from_dict(
-                raw["last_funding_ts"],
-                field="last_funding_ts",
+            last_financing_ts=_timestamps_from_dict(
+                raw["last_financing_ts"],
+                field="last_financing_ts",
             ),
             pending_decision=_pending_intents_from_list(raw["pending_decision"]),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
