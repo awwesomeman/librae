@@ -208,7 +208,12 @@ def _bind_market_data_source(
             bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
             if bars.empty:
                 return bars
-            borrow = fetch_borrow_rate_history(instrument.venue_symbol, limit=limit)
+            # Deliberately not the bar limit funding uses. Only the newest
+            # bar ever accrues (the engine charges the current event, see
+            # _apply_financing_cash_flows), so the fetch needs to reach back
+            # one staleness bound, not across the warmup window -- and this
+            # endpoint rejects a bar-sized limit outright.
+            borrow = fetch_borrow_rate_history(instrument.venue_symbol)
             if borrow.empty:
                 return bars
             # Unlike a funding settlement, a borrow rate is a step function:

@@ -363,7 +363,7 @@ class CryptoAdapter:
     def fetch_borrow_rate_history(
         self,
         symbol: str,
-        limit: int = 100,
+        limit: int | None = None,
         *,
         since: int | None = None,
     ) -> pd.DataFrame:
@@ -384,6 +384,12 @@ class CryptoAdapter:
         the venue republishes: Binance quotes a daily rate but reprices it
         several times a day. ccxt hardcodes the field per exchange, so it
         cannot describe cadence even in principle.
+
+        ``limit`` is not the bar count its OHLCV siblings take: ccxt rejects
+        anything above 93 outright, and without ``since`` the venue answers
+        over its own recent window regardless of the value. Leave both unset
+        to get that recent window, or pass ``since`` to ask for an explicit
+        one -- ccxt then derives the end from ``limit`` in *days*.
 
         Requires API credentials: unlike funding-rate history this is a
         signed endpoint, so a data-only deployment cannot reach it.

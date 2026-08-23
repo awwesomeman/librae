@@ -133,7 +133,7 @@ class _BorrowAdapter(_FakeCryptoAdapter):
         super().__init__()
         self.borrow_calls: list[tuple[str, int]] = []
 
-    def fetch_borrow_rate_history(self, symbol, limit=100, *, since=None):
+    def fetch_borrow_rate_history(self, symbol, limit=None, *, since=None):
         self.borrow_calls.append((symbol, limit))
         return pd.DataFrame(
             {
@@ -152,7 +152,9 @@ def test_borrow_rate_is_scaled_from_its_own_period_to_the_bar():
 
     # A 0.00024 daily rate over an 8h bar is a third of a day.
     assert bars["borrow_rate"].tolist() == [pytest.approx(0.00008), pytest.approx(0.00008)]
-    assert adapter.borrow_calls == [("BTC/USDT:USDT", 2)]
+    # The bar limit is never forwarded: ccxt rejects anything above 93, and
+    # only the newest bar accrues, so no warmup-sized window is needed.
+    assert adapter.borrow_calls == [("BTC/USDT:USDT", None)]
 
 
 def test_one_publication_charges_every_later_bar():
@@ -202,3 +204,14 @@ def test_spot_without_a_borrow_fetcher_is_left_alone():
 
     assert "borrow_rate" not in bars.columns
     assert adapter.funding_calls == []
+
+
+def test_a_realistic_bar_limit_is_never_forwarded_to_the_borrow_endpoint():
+    """ccxt raises BadRequest above 93, and live bar limits are routinely
+    500-1000 — forwarding one would fail every poll rather than undercharge."""
+    adapter = _BorrowAdapter()
+    fetcher = _bind_market_data_source(adapter, _instrument("spot"))
+
+    fetcher("BTC-SPOT", "1h", 1000)
+
+    assert adapter.borrow_calls == [("BTC/USDT:USDT", None)]
