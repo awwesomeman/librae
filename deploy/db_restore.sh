@@ -54,8 +54,15 @@ docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
 
 echo "Restoring ${DUMP_FILE} -> ${CONTAINER}:quant ..."
 docker cp "${DUMP_FILE}" "${CONTAINER}:/tmp/restore.dump"
+# timescaledb_pre_restore/post_restore bracket the pg_restore per TimescaleDB's
+# restore procedure: they let pg_restore write the extension's internal catalog
+# (chunks, continuous aggregates — the circular-FK tables pg_dump warns about).
+docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
+    psql -U quant -d quant -v ON_ERROR_STOP=1 -c "SELECT timescaledb_pre_restore();"
 docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
     pg_restore -U quant -d quant --no-owner /tmp/restore.dump
+docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
+    psql -U quant -d quant -v ON_ERROR_STOP=1 -c "SELECT timescaledb_post_restore();"
 docker exec "${CONTAINER}" rm /tmp/restore.dump
 
 echo "Done. Sanity check: docker exec -it ${CONTAINER} psql -U quant -d quant -c '\\dt'"
