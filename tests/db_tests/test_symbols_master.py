@@ -36,6 +36,11 @@ def test_schema_keys_the_master_on_the_fact_tables_triple() -> None:
     assert sql.index("CREATE DOMAIN instrument_type_t") < sql.index(
         "CREATE TABLE IF NOT EXISTS symbols"
     )
+    # CREATE DOMAIN has no IF NOT EXISTS; unwrapped, a re-run against an
+    # already-initialized DB aborts (ON_ERROR_STOP) and skips everything after.
+    domain_block = sql[sql.index("DO $$") : sql.index("END $$;")]
+    assert "CREATE DOMAIN instrument_type_t" in domain_block
+    assert "EXCEPTION WHEN duplicate_object" in domain_block
 
 
 @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")

@@ -303,9 +303,14 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
 -- Adding a new instrument type (e.g. options) is a single edit here;
 -- keep librae/config/symbols.py's ALLOWED_INSTRUMENT_TYPES in step.
 -- ============================================================
-CREATE DOMAIN instrument_type_t AS TEXT
-    CONSTRAINT chk_instrument_type
-    CHECK (VALUE IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly'));
+-- CREATE DOMAIN has no IF NOT EXISTS; the DO block keeps re-runs idempotent
+-- (with ON_ERROR_STOP a bare duplicate aborts everything after this line).
+DO $$ BEGIN
+    CREATE DOMAIN instrument_type_t AS TEXT
+        CONSTRAINT chk_instrument_type
+        CHECK (VALUE IN ('spot', 'contract_perpetual', 'contract_monthly', 'contract_quarterly'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ============================================================
 -- symbols — instrument master. The fact tables store `symbol` as a bare
