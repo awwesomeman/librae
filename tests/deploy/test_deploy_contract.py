@@ -902,3 +902,10 @@ def test_local_trade_build_uses_explicit_strategy_context() -> None:
     assert '--build-context "strategy_source=${strategy_source}"' in script
     assert '"${strategy_source}/${strategy}/${required_file}"' in script
     assert '-f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"' in script
+
+
+def test_timescaledb_has_enlarged_shm() -> None:
+    # Docker's 64MB /dev/shm default makes parallel-worker queries fail with
+    # a misleading "No space left on device"; the compose file must raise it.
+    compose = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["services"]["timescaledb"]["shm_size"] == "1g"

@@ -697,7 +697,7 @@ def log_run_summary(config: RunConfig, options: RunOptions) -> None:
         f"  start:       {config.start}",
         f"  end:         {config.end}",
         f"  config_hash: {config.config_hash}",
-        f"  code_rev:    {_get_code_rev()}",
+        f"  code_rev:    {options.runtime_revision or _get_code_rev()}",
         "  --- strategy params (stored in DB) ---",
         f"  account:     {config.account}",
         f"  params:      {config.params}",

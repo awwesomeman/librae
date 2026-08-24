@@ -15,6 +15,7 @@ from librae.orchestration.cli import (
     base_parser,
     build_run,
     check_existing_run,
+    log_run_summary,
     parse_with_config,
     reset_realtime_state,
     run_dispatch,
@@ -790,3 +791,20 @@ class TestResetRealtimeState:
         store.load.assert_not_called()
         store.delete.assert_not_called()
         store.release_lease.assert_not_called()
+
+
+class TestLogRunSummaryCodeRev:
+    def test_explicit_runtime_revision_skips_git(self):
+        with patch("librae.orchestration.cli._get_code_rev") as get_rev:
+            log_run_summary(
+                _make_cfg(),
+                RunOptions(database_enabled=False, runtime_revision="sha256:abc123"),
+            )
+
+        get_rev.assert_not_called()
+
+    def test_without_runtime_revision_falls_back_to_git(self):
+        with patch("librae.orchestration.cli._get_code_rev", return_value="deadbee") as get_rev:
+            log_run_summary(_make_cfg(), RunOptions(database_enabled=False))
+
+        get_rev.assert_called_once()
