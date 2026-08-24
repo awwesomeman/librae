@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from librae.notifications.config import NotificationConfig, TelegramConfig
 from librae.notifications.telegram import TelegramAdapter, TelegramCredentials
@@ -122,3 +122,35 @@ class TestTelegramAdapter:
         creds = TelegramCredentials(bot_token="tok", chat_id="env_id")
         adapter = TelegramAdapter(config=config, credentials=creds)
         assert adapter._chat_id == "env_id"
+
+
+class TestTokenNeverReachesLogs:
+    """The bot token rides in the URL path; neither httpx's per-request INFO
+    line nor our own failure logging may write it into container logs."""
+
+    def _enabled_adapter(self) -> TelegramAdapter:
+        config = TelegramConfig(enabled=True)
+        creds = TelegramCredentials(bot_token="SECRET-TOKEN", chat_id="123")
+        return TelegramAdapter(config=config, credentials=creds)
+
+    def test_init_silences_httpx_request_logging(self):
+        import logging
+
+        logging.getLogger("httpx").setLevel(logging.NOTSET)
+        self._enabled_adapter()
+        assert logging.getLogger("httpx").level == logging.WARNING
+
+    def test_send_failure_log_redacts_token(self, caplog):
+        adapter = self._enabled_adapter()
+        adapter._client = MagicMock()
+        adapter._client.post.side_effect = RuntimeError(
+            "POST https://api.telegram.org/botSECRET-TOKEN/sendMessage failed"
+        )
+
+        with patch("librae.notifications.telegram.time.sleep"), caplog.at_level("WARNING"):
+            assert adapter.send_text("hi") is False
+
+        assert caplog.records
+        for record in caplog.records:
+            assert "SECRET-TOKEN" not in record.getMessage()
+        assert any("<bot-token>" in r.getMessage() for r in caplog.records)

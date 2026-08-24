@@ -97,6 +97,10 @@ class TelegramAdapter:
                 import httpx
 
                 self._client = httpx.Client(timeout=10)
+                # Telegram puts the bot token in the URL path, and httpx's
+                # per-request INFO line prints the full URL — straight into
+                # container logs. Errors still surface at WARNING and above.
+                logging.getLogger("httpx").setLevel(logging.WARNING)
             except ImportError:
                 logger.error(
                     "Telegram notifications require the 'telegram' extra; "
@@ -132,9 +136,16 @@ class TelegramAdapter:
                     time.sleep(retry_after)
                     continue
                 logger.warning("Telegram API error %d: %s", resp.status_code, resp.text)
-            except Exception:
-                logger.exception(
-                    "Failed to send Telegram message (attempt %d/%d)", attempt + 1, MAX_RETRIES
+            except Exception as exc:
+                # No logger.exception: httpx exception messages embed the
+                # request URL, which carries the bot token in its path.
+                detail = str(exc).replace(self._token, "<bot-token>")
+                logger.warning(
+                    "Failed to send Telegram message (attempt %d/%d): %s: %s",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    type(exc).__name__,
+                    detail,
                 )
 
             if attempt < MAX_RETRIES - 1:
