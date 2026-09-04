@@ -1700,6 +1700,11 @@ def execute_order_intents(
                 # SCALE IN — must specify quantity. Same severity as the
                 # opposite-side rejection below: both are a strategy action
                 # silently turned into a no-op, not a normal/expected path.
+                if group_id != positions[sym].group_id:
+                    raise ValueError(
+                        f"cannot scale {sym} across group identities: "
+                        f"position={positions[sym].group_id!r}, intent={group_id!r}"
+                    )
                 if action.quantity is None:
                     logger.warning("Scaling %s requires explicit quantity, skipping", sym)
                     runtime_events.append(_skipped(ts, "missing_quantity", symbol=sym))

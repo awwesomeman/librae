@@ -228,3 +228,61 @@ def test_group_preflight_raises_before_any_ungrouped_intent_fills() -> None:
         )
 
     assert positions == {}
+
+
+@pytest.mark.parametrize(
+    ("position_group", "intent_group"),
+    [
+        ("original", "different"),
+        ("original", None),
+        (None, "new-group"),
+    ],
+)
+def test_scale_in_rejects_cross_group_identity(
+    position_group: str | None,
+    intent_group: str | None,
+) -> None:
+    position = _position("A")
+    position.group_id = position_group
+    positions = {"A": position}
+
+    with pytest.raises(ValueError, match="across group identities"):
+        _execute(
+            positions,
+            1_000.0,
+            [
+                OrderIntent(
+                    action="long",
+                    symbol="A",
+                    quantity=1.0,
+                    group_id=intent_group,
+                )
+            ],
+            {"A": _bar(100.0)},
+        )
+
+    assert positions == {"A": position}
+    assert position.quantity == pytest.approx(1.0)
+    assert position.group_id == position_group
+
+
+def test_cross_group_scale_in_rolls_back_earlier_leg_in_atomic_group() -> None:
+    position = _position("A")
+    position.group_id = "original"
+    positions = {"A": position}
+    decision = [
+        OrderIntent(action="short", symbol="B", quantity=1.0, group_id="replacement"),
+        OrderIntent(action="long", symbol="A", quantity=1.0, group_id="replacement"),
+    ]
+
+    with pytest.raises(ValueError, match="across group identities"):
+        _execute(
+            positions,
+            1_000.0,
+            decision,
+            {"A": _bar(100.0), "B": _bar(100.0)},
+        )
+
+    assert positions == {"A": position}
+    assert position.quantity == pytest.approx(1.0)
+    assert "B" not in positions
