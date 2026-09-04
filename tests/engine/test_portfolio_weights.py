@@ -10,6 +10,7 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import ExecutionResult, execute_portfolio_weights
+from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import (
     Context,
     OrderIntent,
@@ -39,6 +40,7 @@ def _process(
         cash,
         TS,
         get_price=lambda symbol, _action: prices.get(symbol),
+        get_reference_price=prices.get,
         get_cost_model=lambda _symbol: model,
         primary_symbol="A",
         max_bar_volume_participation_rate=max_bar_volume_participation_rate,
@@ -337,6 +339,31 @@ class TestRebalanceExecution:
 
         assert positions == {}
 
+    def test_rebalance_checks_the_actual_order_side(self) -> None:
+        positions: dict[str, PositionState] = {}
+        first = _process(
+            PortfolioWeights(weights={"A": 1.0}),
+            positions,
+            1_000.0,
+            prices={"A": 100.0},
+        )
+        cash = 1_000.0 + first.cash_delta
+
+        result = execute_portfolio_weights(
+            PortfolioWeights(weights={"A": 0.5}),
+            positions,
+            cash,
+            TS,
+            get_price=lambda _symbol, action: 100.0 if action.action == "close" else None,
+            get_reference_price=lambda _symbol: 100.0,
+            get_cost_model=lambda _symbol: CostModel.zero(),
+            primary_symbol="A",
+        )
+
+        assert [(event.event_type, event.fill_quantity) for event in result.events] == [
+            ("reduce", pytest.approx(5.0))
+        ]
+
 
 class TestBacktestRebalance:
     def test_targets_fill_next_bar_at_execution_prices(self) -> None:
@@ -366,6 +393,142 @@ class TestBacktestRebalance:
             event.ts == frame.index.get_level_values("datetime").unique()[1]
             for event in open_events
         )
+
+    @pytest.mark.parametrize("closed_market_representation", ["missing", "untradable"])
+    def test_rebalance_defers_whole_book_until_every_leg_is_tradable(
+        self,
+        closed_market_representation: str,
+    ) -> None:
+        frame = _multi_asset_frame(
+            opens={
+                "A": [100.0, 110.0, 120.0, 120.0, 120.0],
+                "B": [200.0, 200.0, 240.0, 240.0, 240.0],
+            }
+        )
+        timestamps = frame.index.get_level_values("datetime").unique()
+        if closed_market_representation == "missing":
+            frame = frame.drop(index=("B", timestamps[1]))
+        else:
+            frame["can_buy"] = True
+            frame["can_sell"] = True
+            frame.loc[("B", timestamps[1]), ["can_buy", "can_sell"]] = False
+
+        result = Backtest(
+            frame,
+            OneRebalance(),
+            initial_balance=1_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                max_rebalance_delay_bars=1,
+            ),
+        ).run()
+
+        open_events = [event for event in result.position_events if event.event_type == "open"]
+        assert [(event.symbol, event.ts, event.price) for event in open_events] == [
+            ("A", timestamps[2], 120.0),
+            ("B", timestamps[2], 240.0),
+        ]
+
+    def test_rebalance_fails_when_delay_bound_is_exceeded(self) -> None:
+        frame = _multi_asset_frame(
+            opens={
+                "A": [100.0, 110.0, 120.0, 120.0, 120.0],
+                "B": [200.0, 200.0, 200.0, 240.0, 240.0],
+            }
+        )
+        timestamps = frame.index.get_level_values("datetime").unique()
+        frame = frame.drop(index=[("B", timestamps[1]), ("B", timestamps[2])])
+
+        with pytest.raises(
+            ValueError,
+            match=r"max_rebalance_delay_bars=1.*\['B'\]",
+        ):
+            Backtest(
+                frame,
+                OneRebalance(),
+                initial_balance=1_000.0,
+                cost_model=CostModel.zero(),
+                data_source="test",
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    max_rebalance_delay_bars=1,
+                ),
+            ).run()
+
+    def test_deferred_rebalance_fails_if_the_backtest_ends(self) -> None:
+        frame = _multi_asset_frame(
+            opens={
+                "A": [100.0, 100.0, 100.0, 100.0, 110.0],
+                "B": [200.0, 200.0, 200.0, 200.0, 200.0],
+            }
+        )
+        timestamps = frame.index.get_level_values("datetime").unique()
+        frame = frame.drop(index=("B", timestamps[-1]))
+
+        class LateRebalance(Strategy):
+            def on_bar(self, ctx: Context) -> StrategyDecision:
+                if ctx.period_index == 3:
+                    return PortfolioWeights(weights={"A": 0.5, "B": 0.5})
+                return []
+
+        with pytest.raises(ValueError, match="ended before deferred PortfolioWeights"):
+            Backtest(
+                frame,
+                LateRebalance(),
+                initial_balance=1_000.0,
+                cost_model=CostModel.zero(),
+                data_source="test",
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    max_rebalance_delay_bars=2,
+                ),
+            ).run()
+
+    def test_new_target_supersedes_a_deferred_rebalance(self) -> None:
+        frame = _multi_asset_frame(
+            opens={
+                "A": [100.0, 110.0, 120.0, 120.0, 120.0],
+                "B": [200.0, 200.0, 240.0, 240.0, 240.0],
+            }
+        )
+        frame["can_buy"] = True
+        frame["can_sell"] = True
+        timestamps = frame.index.get_level_values("datetime").unique()
+        frame.loc[("B", timestamps[1]), ["can_buy", "can_sell"]] = False
+
+        class RevisedRebalance(Strategy):
+            def on_bar(self, ctx: Context) -> StrategyDecision:
+                if ctx.period_index == 0:
+                    return PortfolioWeights(weights={"A": 0.5, "B": 0.5})
+                if ctx.period_index == 1:
+                    return PortfolioWeights(weights={"A": 0.25, "B": 0.75})
+                return []
+
+        result = Backtest(
+            frame,
+            RevisedRebalance(),
+            initial_balance=1_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                max_rebalance_delay_bars=1,
+            ),
+        ).run()
+
+        opens = [event for event in result.position_events if event.event_type == "open"]
+        assert [(event.symbol, event.ts, event.notional) for event in opens] == [
+            ("A", timestamps[2], pytest.approx(250.0)),
+            ("B", timestamps[2], pytest.approx(750.0)),
+        ]
+        superseded = [
+            event
+            for event in result.runtime_events
+            if event.detail.get("reason") == "rebalance_superseded"
+        ]
+        assert [(event.ts, event.symbol) for event in superseded] == [(timestamps[1], None)]
 
     def test_position_snapshots_include_realized_weights(self) -> None:
         frame = _multi_asset_frame(

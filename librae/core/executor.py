@@ -56,6 +56,15 @@ REASON_DRAWDOWN_BREACH = "drawdown_breach"
 REASON_LIQUIDATION = "liquidation"
 
 
+class ExecutionPriceUnavailableError(ValueError):
+    """A deterministic batch cannot resolve every required execution price."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        self.symbols = tuple(sorted(symbols))
+        joined = ", ".join(self.symbols)
+        super().__init__(f"rebalance requires a valid execution price for {joined}")
+
+
 def _intent_order_side(
     intent: OrderIntent,
     position_side: PositionSide | None,
@@ -1840,6 +1849,7 @@ def execute_portfolio_weights(
     ts: datetime,
     *,
     get_price: Callable[[str, OrderIntent], float | None],
+    get_reference_price: Callable[[str], float | None] | None = None,
     get_cost_model: Callable[[str], CostModel],
     primary_symbol: str,
     max_position_notional: float | None = None,
@@ -1866,6 +1876,7 @@ def execute_portfolio_weights(
         return ExecutionResult(trades=[], events=[], cash_delta=0.0)
 
     prices: dict[str, float] = {}
+    unavailable_prices: list[str] = []
     for symbol in relevant_symbols:
         target_weight = targets.weights.get(symbol, 0.0)
         action_type: OrderAction
@@ -1880,10 +1891,17 @@ def execute_portfolio_weights(
             symbol=symbol,
             reason=targets.reason,
         )
-        raw_price = get_price(symbol, price_action)
+        raw_price = (
+            get_reference_price(symbol)
+            if get_reference_price is not None
+            else get_price(symbol, price_action)
+        )
         if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
-            raise ValueError(f"rebalance requires a valid execution price for {symbol}")
+            unavailable_prices.append(symbol)
+            continue
         prices[symbol] = float(raw_price)
+    if unavailable_prices:
+        raise ExecutionPriceUnavailableError(unavailable_prices)
 
     equity, _ = calc_equity(
         cash,
@@ -1950,6 +1968,18 @@ def execute_portfolio_weights(
                 reason=targets.reason,
             )
         )
+
+    unavailable_actions = sorted(
+        {
+            action.symbol
+            for action in [*reductions, *additions]
+            if (price := get_price(action.symbol, action)) is None
+            or not isfinite(price)
+            or price <= 0
+        }
+    )
+    if unavailable_actions:
+        raise ExecutionPriceUnavailableError(unavailable_actions)
 
     reduction_result = execute_order_intents(
         reductions,
@@ -2127,17 +2157,22 @@ def merge_pending_decisions(
     *,
     primary_symbol: str,
 ) -> StrategyDecision:
-    """Merge independent per-symbol intents without replacing pending ones.
+    """Merge a new decision without replacing unresolved engine state.
 
-    `pending` is always a plain list here: partition_pending_decision never
-    leaves a PortfolioWeights or grouped OrderIntent waiting (see its
-    docstring) — only ungrouped OrderIntents can still be waiting on their
-    own symbol.
+    Pending values are normally independent per-symbol intents. A backtest
+    may also retain ``PortfolioWeights`` while its bounded whole-book
+    execution delay is active. A newer complete target supersedes the older
+    unfilled target; mixing a portfolio target with symbol-level intents is
+    rejected because there is no unambiguous merge rule.
     """
     if not pending:
         return new_decision
     if not new_decision:
         return pending
+    if isinstance(pending, PortfolioWeights):
+        if isinstance(new_decision, PortfolioWeights):
+            return new_decision
+        raise ValueError("cannot emit OrderIntents while a PortfolioWeights rebalance is deferred")
     if isinstance(new_decision, PortfolioWeights):
         raise ValueError(
             "cannot return PortfolioWeights while per-symbol intents are still pending"
@@ -2244,6 +2279,7 @@ def execute_pending_decision_and_stops(
                 execution_positions,
                 cash,
                 ts,
+                get_reference_price=lambda sym: bars.get(sym, {}).get(default_fill),
                 used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=adv_quantities,
                 **common_kwargs,

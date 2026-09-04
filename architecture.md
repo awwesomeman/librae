@@ -365,7 +365,7 @@ document scoped to layering, boundaries, and naming conventions.
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` ties it to other intents in the same decision that must fill together atomically; `time_in_force` (`day`/`gtc`/`ioc`/`fok`) is a live-only broker hint, ignored by backtest/sim |
-| `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest/sim, immediate market-order sizing in live |
+| `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest (optionally bounded whole-book deferral on explicit untradability), next-cycle simulation resolution, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |
 

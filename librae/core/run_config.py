@@ -71,6 +71,10 @@ class ExecutionPolicy:
     sessions, excluding the execution session. Intraday data therefore needs
     a calendar_id for every configured symbol.
 
+    ``max_rebalance_delay_bars`` bounds how many otherwise eligible backtest
+    events a ``PortfolioWeights`` decision may wait for every required order
+    side to become tradable. Zero preserves fail-fast next-bar execution.
+
     ``live_order_timeout_seconds`` is a local live-trading safety timeout.
     After the first placement attempt, a non-terminal broker order older than
     this wall-clock duration is canceled and the deployment halts for operator
@@ -86,6 +90,7 @@ class ExecutionPolicy:
     max_bar_volume_participation_rate: float | None = 0.1
     adv_lookback_sessions: int | None = None
     max_adv_participation_rate: float | None = None
+    max_rebalance_delay_bars: int = 0
     live_order_timeout_seconds: int | None = None
     warmup_periods: int = 720
 
@@ -116,6 +121,12 @@ class ExecutionPolicy:
             raise ValueError(
                 "adv_lookback_sessions and max_adv_participation_rate must be configured together"
             )
+        if (
+            isinstance(self.max_rebalance_delay_bars, bool)
+            or not isinstance(self.max_rebalance_delay_bars, int)
+            or self.max_rebalance_delay_bars < 0
+        ):
+            raise ValueError("max_rebalance_delay_bars must be a non-negative integer")
         timeout = self.live_order_timeout_seconds
         if timeout is not None and (
             isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0
@@ -323,6 +334,8 @@ class RunConfig:
             raise ValueError("symbols must contain non-empty string identifiers")
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"mode must be 'backtest', 'sim', or 'live', got {self.mode!r}")
+        if self.mode != "backtest" and self.execution.max_rebalance_delay_bars:
+            raise ValueError("max_rebalance_delay_bars is supported only when mode='backtest'")
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
         for field_name in ("strategy_name", "timeframe", "market", "data_source"):
@@ -342,6 +355,7 @@ class RunConfig:
             "max_bar_volume_participation_rate",
             "adv_lookback_sessions",
             "max_adv_participation_rate",
+            "max_rebalance_delay_bars",
             "live_order_timeout_seconds",
             "warmup_periods",
         }
