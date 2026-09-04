@@ -27,8 +27,8 @@ whole-book wait:
   normal T+1 eligibility point;
 - every actual reduction, close, addition, and reversal side is preflighted
   before any position mutation;
-- the target is recalculated from current positions, equity, and execution
-  prices on every retry;
+- while no leg has filled, the target is recalculated from current positions,
+  equity, and execution prices on every retry;
 - a newer complete target supersedes an older unfilled target, is recorded as
   `decision_skipped/rebalance_superseded`, and does not reset the delay budget;
 - exceeding the bound or reaching sample end raises instead of partially
@@ -55,3 +55,7 @@ still expose it to signals, holding age, and financing. Independent
 is unchanged. Supporting durable cross-cycle rebalance deferral in sim/live
 would require separate checkpoint and broker-order lifecycle semantics and is
 intentionally not implied by this backtest policy.
+
+Cross-bar volume/ADV residuals and independent-symbol progress are an explicit
+extension documented in
+[`2026-09-04-bounded-rebalance-residual-slicing.md`](2026-09-04-bounded-rebalance-residual-slicing.md).

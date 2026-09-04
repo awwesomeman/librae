@@ -55,7 +55,9 @@ from librae.core.executor import (
     REASON_FORCE_CLOSE,
     ExecutionResult,
     ExecutionUnavailableError,
+    PortfolioRebalanceState,
     PositionEvent,
+    RebalanceOrderState,
     RuntimeEvent,
     TradePnL,
     TradeResult,
@@ -63,6 +65,7 @@ from librae.core.executor import (
     calculate_position_weights,
     calculate_signed_position_notionals,
     check_stop_targets,
+    coalesce_runtime_events,
     execute_pending_decision_and_stops,
     liquidate_all,
     merge_pending_decisions,
@@ -97,6 +100,80 @@ from librae.core.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _rebalance_symbols(state: PortfolioRebalanceState) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {order.intent.symbol for order in state.orders}
+            | {leg.symbol for leg in state.unresolved_legs}
+        )
+    )
+
+
+def _superseded_rebalance_events(
+    ts: datetime,
+    state: PortfolioRebalanceState,
+) -> list[RuntimeEvent]:
+    """Build one persistence-safe supersession event per symbol."""
+    orders_by_symbol: dict[str, list[RebalanceOrderState]] = {}
+    for order in state.orders:
+        orders_by_symbol.setdefault(order.intent.symbol, []).append(order)
+
+    events: list[RuntimeEvent] = []
+    for symbol, raw_orders in orders_by_symbol.items():
+        orders = list(raw_orders)
+        phases = [
+            {
+                "phase": order.phase,
+                "action": order.intent.action,
+                "requested_quantity": order.requested_quantity,
+                "filled_quantity": order.requested_quantity - order.remaining_quantity,
+                "remaining_quantity": order.remaining_quantity,
+            }
+            for order in orders
+        ]
+        detail: dict[str, object] = {
+            "reason": "rebalance_superseded",
+            "quantity_scope": "target",
+            "requested_quantity": sum(order.requested_quantity for order in orders),
+            "filled_quantity": sum(
+                order.requested_quantity - order.remaining_quantity for order in orders
+            ),
+            "remaining_quantity": sum(order.remaining_quantity for order in orders),
+        }
+        if len(phases) == 1:
+            detail.update({"phase": phases[0]["phase"], "action": phases[0]["action"]})
+        else:
+            detail["phases"] = phases
+        events.append(
+            RuntimeEvent(
+                ts=ts,
+                event_type="decision_skipped",
+                symbol=symbol,
+                detail=detail,
+            )
+        )
+
+    for leg in state.unresolved_legs:
+        target_notional = abs(leg.target_signed_notional)
+        events.append(
+            RuntimeEvent(
+                ts=ts,
+                event_type="decision_skipped",
+                symbol=leg.symbol,
+                detail={
+                    "reason": "rebalance_superseded",
+                    "sizing_state": "superseded_before_quantity_resolution",
+                    "notional_scope": "target_allocation",
+                    "requested_notional": target_notional,
+                    "filled_notional": 0.0,
+                    "remaining_notional": target_notional,
+                },
+            )
+        )
+    return events
+
 
 _INDEX_NAMES = ["symbol", "datetime"]
 
@@ -391,6 +468,7 @@ class Backtest:
         self._adv_lookback_sessions = resolved_execution.adv_lookback_sessions
         self._max_adv_participation_rate = resolved_execution.max_adv_participation_rate
         self._max_rebalance_delay_bars = resolved_execution.max_rebalance_delay_bars
+        self._rebalance_residual_policy = resolved_execution.rebalance_residual_policy
         self._risk_policy = config.risk if config else risk or RiskPolicy()
 
         if strategy_name is not None:
@@ -442,6 +520,7 @@ class Backtest:
         get_lagged_adv: Callable[[str], float | None],
         used_adv_quantity_by_symbol: dict[str, float],
         exposure_prices: dict[str, float],
+        rebalance_state: PortfolioRebalanceState | None = None,
     ) -> tuple[float, ExecutionResult]:
         if halted:
             result = check_stop_targets(
@@ -478,6 +557,8 @@ class Backtest:
             max_gross_exposure=self._risk_policy.max_gross_exposure,
             max_net_exposure=self._risk_policy.max_net_exposure,
             exposure_prices=exposure_prices,
+            rebalance_state=rebalance_state,
+            rebalance_residual_policy=self._rebalance_residual_policy,
         )
 
     # --- Private helpers ---
@@ -521,6 +602,7 @@ class Backtest:
         primary_symbol = self._symbols[0]
         universe = set(self._symbols)
         pending_decision: StrategyDecision = []
+        pending_rebalance: PortfolioRebalanceState | None = None
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
         financing_cash_flows: list[FinancingCashFlow] = []
@@ -569,6 +651,11 @@ class Backtest:
                 positions,
                 primary_symbol=primary_symbol,
             )
+            if pending_rebalance is not None and decision_to_execute:
+                raise ValueError(
+                    "cannot execute a new decision while a rebalance residual is pending"
+                )
+
             # ── Steps 1+1.5: fill the previous pending decision at current
             # bar's price, then check stop-loss/take-profit — shared with
             # LiveTrader's simulation mode so deterministic runtimes cannot
@@ -586,6 +673,7 @@ class Backtest:
                     get_lagged_adv=get_lagged_adv,
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     exposure_prices=exposure_prices,
+                    rebalance_state=pending_rebalance,
                 )
                 # WHY: only an executed target is the active one. Recording it
                 # before this call would let a deferred target show up in the
@@ -598,6 +686,8 @@ class Backtest:
             # raised instance keeps naming which one it was.
             except ExecutionUnavailableError as exc:
                 if not isinstance(decision_to_execute, PortfolioWeights):
+                    raise
+                if self._rebalance_residual_policy == "fail":
                     raise
                 if rebalance_delay_bars >= self._max_rebalance_delay_bars:
                     if self._max_rebalance_delay_bars == 0:
@@ -631,7 +721,22 @@ class Backtest:
                     exposure_prices=exposure_prices,
                 )
             else:
-                if isinstance(decision_to_execute, PortfolioWeights):
+                was_rebalance = (
+                    isinstance(decision_to_execute, PortfolioWeights)
+                    or pending_rebalance is not None
+                )
+                pending_rebalance = step_result.pending_rebalance
+                if was_rebalance and pending_rebalance is not None:
+                    residual_symbols = _rebalance_symbols(pending_rebalance)
+                    if rebalance_delay_bars >= self._max_rebalance_delay_bars:
+                        raise ValueError(
+                            "PortfolioWeights exceeded "
+                            f"max_rebalance_delay_bars={self._max_rebalance_delay_bars}; "
+                            f"residual remains for {list(residual_symbols)} at {ts}"
+                        )
+                    rebalance_delay_bars += 1
+                    unavailable_rebalance_symbols = residual_symbols
+                elif was_rebalance:
                     rebalance_delay_bars = 0
                     unavailable_rebalance_symbols = ()
             trades.extend(step_result.trades)
@@ -727,6 +832,7 @@ class Backtest:
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
                 pending_decision = []
+                pending_rebalance = None
             else:
                 ctx = Context(
                     ts=ts,
@@ -748,6 +854,15 @@ class Backtest:
                     positions=positions,
                 )
                 new_decision = self._without_halted_account(new_decision, halted)
+                if pending_rebalance is not None:
+                    if isinstance(new_decision, PortfolioWeights):
+                        runtime_events.extend(_superseded_rebalance_events(ts, pending_rebalance))
+                        pending_rebalance = None
+                    elif new_decision:
+                        raise ValueError(
+                            "cannot emit OrderIntents while a PortfolioWeights "
+                            "rebalance is deferred"
+                        )
                 if isinstance(pending_decision, PortfolioWeights) and isinstance(
                     new_decision, PortfolioWeights
                 ):
@@ -767,7 +882,9 @@ class Backtest:
 
             self._increment_periods_held(positions, bars)
 
-        if isinstance(pending_decision, PortfolioWeights) and rebalance_delay_bars:
+        if (
+            isinstance(pending_decision, PortfolioWeights) or pending_rebalance is not None
+        ) and rebalance_delay_bars:
             raise ValueError(
                 "backtest ended before deferred PortfolioWeights could execute; "
                 f"still blocked on {list(unavailable_rebalance_symbols)}"
@@ -859,7 +976,7 @@ class Backtest:
             position_snapshots=position_snapshots,
             allocation_snapshots=allocation_snapshots,
             financing_cash_flows=financing_cash_flows,
-            runtime_events=runtime_events,
+            runtime_events=coalesce_runtime_events(runtime_events),
             account=AccountBacktestResult(
                 account_id=self._account_id,
                 currency=self._currency,

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from librae.core.executor import RuntimeEvent, coalesce_runtime_events
 from librae.db.timescale_writer import write_runtime_event
 
 
@@ -56,3 +57,46 @@ def test_write_runtime_event_allows_missing_symbol_and_detail(mock_get_conn: Mag
 
     _, values = cursor.execute.call_args.args
     assert values == (ts, "run-1", "state_recovered", None, None)
+
+
+@patch("librae.db.timescale_writer.get_conn")
+def test_phase_details_are_coalesced_before_writer_identity(
+    mock_get_conn: MagicMock,
+) -> None:
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    mock_get_conn.return_value = connection
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    events = coalesce_runtime_events(
+        [
+            RuntimeEvent(
+                ts=ts,
+                event_type="decision_skipped",
+                symbol="A",
+                detail={"reason": "rebalance_residual", "phase": "reduction"},
+            ),
+            RuntimeEvent(
+                ts=ts,
+                event_type="decision_skipped",
+                symbol="A",
+                detail={"reason": "rebalance_residual", "phase": "addition"},
+            ),
+        ]
+    )
+
+    for event in events:
+        write_runtime_event(
+            run_id="run-1",
+            ts=event.ts,
+            event_type=event.event_type,
+            symbol=event.symbol,
+            detail=event.detail,
+        )
+
+    assert len(events) == 1
+    assert events[0].detail["phase"] == "reduction"
+    assert events[0].detail["related_events"] == [
+        {"reason": "rebalance_residual", "phase": "addition"}
+    ]
+    assert cursor.execute.call_count == 1

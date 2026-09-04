@@ -117,7 +117,10 @@ the engine will not guess which came first. It declines to fill on that bar
 rather than picking a convention. With `max_rebalance_delay_bars` set, the
 whole-book target waits for a later bar and the protection executes alone on
 this one at its own price, which resolves the ordering instead of assuming
-it; on the zero default the run raises. Other bar-level engines answer the
+it; on the zero default the run raises. A residual carried by a deferred
+`rebalance_residual_policy` is covered by the same rule on every bar it
+slices, which is where the collision is most likely: the residual persists
+across bars while a protection can trigger on any of them. Other bar-level engines answer the
 same question with a documented heuristic or a configuration flag — see
 [the intrabar ambiguity ADR](../decisions/2026-09-07-intrabar-ambiguity-defers-rather-than-aborts.md)
 for why waiting is preferred here.
@@ -216,9 +219,15 @@ If an execution bar has a required order side marked untradable,
 required side is tradable on one event. No leg fills early. The zero default
 fails on the first unavailable execution event; a positive value is a strict
 upper bound, and reaching the end of the sample while deferred also raises.
+By default, liquidity-constrained fills retain the historical one-bar behavior.
+Set `rebalance_residual_policy="defer_all"` or `"defer_symbols"` to retain
+unfilled portfolio quantities across bars. The former waits when any residual
+symbol is unavailable; the latter lets independently tradable symbols progress.
+Both modes require a positive delay bound and are backtest-only.
 Positive weights are long, negative weights are short, and a held symbol
 omitted from `weights` targets zero. Reductions and closes execute first in
-symbol order, then additions. If entry costs exceed available cash, all
+symbol order, then additions use only the cash actually released. If entry
+costs exceed available cash, all
 addition quantities receive one common scale factor so symbol ordering does not
 starve later assets.
 
@@ -535,6 +544,8 @@ config = RunConfig(
         max_adv_participation_rate=0.01,
         # Backtest-only whole-book wait for a closed-market execution event.
         max_rebalance_delay_bars=2,
+        # Opt in to independent per-symbol residual slicing.
+        rebalance_residual_policy="defer_symbols",
         warmup_periods=720,
         # Client-side backstop; see OrderIntent.time_in_force for the
         # broker-native day/gtc/ioc/fok instruction.
@@ -586,10 +597,12 @@ exceeded `RunConfig.runtime.poll_seconds`.
   local liquidity constraint. Sim/live `ExecutionPolicy.warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
 - `max_rebalance_delay_bars`: non-negative, backtest-only bound for a
-  `PortfolioWeights` whole-book deferral. A value of N allows N unavailable
-  execution events after the normal T+1 eligibility point. The engine retries
-  from the then-current positions and prices, fills only when every required
-  order side is tradable, and raises on bound exhaustion or sample end. This
+  `PortfolioWeights` deferral. A value of N allows N additional execution
+  events after the normal T+1 eligibility point. At first eligibility, causal
+  marks freeze target notionals; a missing-market leg waits for its first fresh
+  execution price before resolving quantity. Resolved legs then retry explicit
+  per-symbol remaining quantities without weight drift. It raises on bound
+  exhaustion or sample end. This
   does not infer holidays: omit a closed market's row instead of carrying its
   OHLCV forward. A newer complete `PortfolioWeights` target supersedes the
   older unfilled target without resetting the existing delay budget; the
@@ -602,6 +615,20 @@ exceeded `RunConfig.runtime.poll_seconds`.
   keep the default of `0`. A deferred target is not yet an active target:
   allocation snapshots keep reporting the last *executed* target until the
   deferred one fills.
+- `rebalance_residual_policy`: typed portfolio-target behavior. `"discard"`
+  is the default and preserves the existing one-bar partial/drop path. `"fail"`
+  stages the complete rebalance and raises without committing any position or
+  ADV mutation if a residual remains. `"defer_all"` retains volume/ADV
+  residuals but waits whenever any residual symbol lacks a tradable side or
+  liquidity budget. `"defer_symbols"` retains the same quantities while
+  allowing other symbols to fill independently, including when another symbol
+  has no bar at initial eligibility. Deferred modes require a positive
+  `max_rebalance_delay_bars`. Resolved audit legs include requested, filled,
+  and remaining quantity; unresolved legs explicitly report target notionals
+  and `awaiting_fresh_price`. Events aggregate phase detail to the durable
+  `(timestamp, event type, symbol)` identity. Cash-scaled tails are final only
+  after all possible reductions complete, and a protective exit cancels the
+  same symbol's remaining target.
 - `warmup_periods`: positive live/sim feature-history retention count; it is
   typed engine configuration, not a strategy `params` fallback.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
@@ -629,7 +656,11 @@ contract). Each adapter maps the four values to its own SDK:
 | `"gtc"` | unsupported — raises | `"GTC"` | `"GTC"` |
 | `"ioc"` | `IOC` | `"IOC"` | `"IOC"` |
 | `"fok"` | `FOK` | `"FOK"` | `"FOK"` |
-- `max_position_weight`: both new entries and adds get capped (fills are recomputed with commission/slippage/tax after capping) — this isn't an outright rejection.
+- `max_position_weight`: ordinary new entries and adds get capped (fills are
+  recomputed with commission/slippage/tax after capping). A `fail` target that
+  exceeds this structural constraint is atomically rejected. Deferred targets
+  execute the permitted quantity and audit/cancel the excess; it is not
+  retained as a liquidity residual.
 - `max_order_notional`: hard-rejects an individual exposure-increasing open or
   add above this account-currency notional after normal position/liquidity
   sizing. Reductions, closes, and emergency exits remain available.
