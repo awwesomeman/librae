@@ -1531,6 +1531,7 @@ def execute_order_intents(
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
+    atomic_groups: bool = False,
 ) -> ExecutionResult:
     """Execute symbol-level intents: open, scale, partial/full close.
 
@@ -1547,7 +1548,32 @@ def execute_order_intents(
     CostModel.calc_slippage's participation-scaled impact component. The
     optional ADV limit uses a separate counter that accumulates across every
     bar in the current trading session.
+
+    ``atomic_groups`` is enabled by the backtest/simulation path. Each
+    non-None ``group_id`` then uses fill-or-kill semantics: every member must
+    fill its entire explicit quantity, otherwise all staged fills and
+    liquidity usage for that group are discarded. Live planning deliberately
+    leaves this disabled and performs broker-specific group handling itself.
     """
+    if atomic_groups and any(intent.group_id is not None for intent in intents):
+        return _execute_order_intent_groups_atomically(
+            intents,
+            positions,
+            cash,
+            ts,
+            get_price=get_price,
+            get_cost_model=get_cost_model,
+            primary_symbol=primary_symbol,
+            max_position_notional=max_position_notional,
+            max_order_notional=max_order_notional,
+            max_bar_volume_participation_rate=max_bar_volume_participation_rate,
+            max_adv_participation_rate=max_adv_participation_rate,
+            get_volume=get_volume,
+            get_lagged_adv=get_lagged_adv,
+            used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
+            used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+        )
+
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
@@ -1795,6 +1821,165 @@ def execute_order_intents(
 
     return ExecutionResult(
         trades=trades, events=events, cash_delta=cash_delta, runtime_events=runtime_events
+    )
+
+
+def _execute_order_intent_groups_atomically(
+    intents: list[OrderIntent],
+    positions: dict[str, PositionState],
+    cash: float,
+    ts: datetime,
+    *,
+    get_price: Callable[[str, OrderIntent], float | None],
+    get_cost_model: Callable[[str], CostModel],
+    primary_symbol: str,
+    max_position_notional: float | None,
+    max_order_notional: float | None,
+    max_bar_volume_participation_rate: float | None,
+    max_adv_participation_rate: float | None,
+    get_volume: Callable[[str], float | None] | None,
+    get_lagged_adv: Callable[[str], float | None] | None,
+    used_bar_quantity_by_symbol: dict[str, float] | None,
+    used_adv_quantity_by_symbol: dict[str, float] | None,
+) -> ExecutionResult:
+    """Execute grouped simulation intents against isolated staged state."""
+    units: list[tuple[str | None, list[OrderIntent]]] = []
+    grouped_units: dict[str, list[OrderIntent]] = {}
+    for intent in intents:
+        group_id = intent.group_id
+        if group_id is None:
+            units.append((None, [intent]))
+            continue
+        if group_id not in grouped_units:
+            grouped_units[group_id] = []
+            units.append((group_id, grouped_units[group_id]))
+        grouped_units[group_id].append(intent)
+
+    trades: list[TradeResult] = []
+    events: list[PositionEvent] = []
+    runtime_events: list[RuntimeEvent] = []
+    cash_delta = 0.0
+    volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
+    adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
+
+    common_kwargs = {
+        "get_cost_model": get_cost_model,
+        "primary_symbol": primary_symbol,
+        "max_position_notional": max_position_notional,
+        "max_order_notional": max_order_notional,
+        "max_bar_volume_participation_rate": max_bar_volume_participation_rate,
+        "max_adv_participation_rate": max_adv_participation_rate,
+        "get_volume": get_volume,
+        "get_lagged_adv": get_lagged_adv,
+    }
+
+    for group_id, members in units:
+        available_cash = cash + cash_delta
+        if group_id is None:
+            result = execute_order_intents(
+                members,
+                positions,
+                available_cash,
+                ts,
+                get_price=get_price,
+                used_bar_quantity_by_symbol=volume_consumed,
+                used_adv_quantity_by_symbol=adv_consumed,
+                **common_kwargs,
+            )
+            trades.extend(result.trades)
+            events.extend(result.events)
+            runtime_events.extend(result.runtime_events)
+            cash_delta += result.cash_delta
+            continue
+
+        symbols = [intent.symbol or primary_symbol for intent in members]
+        prices_by_intent = {
+            id(intent): get_price(symbol, intent)
+            for intent, symbol in zip(members, symbols, strict=True)
+        }
+        missing_prices: list[str] = []
+        for intent, symbol in zip(members, symbols, strict=True):
+            price = prices_by_intent[id(intent)]
+            if price is None or price <= 0:
+                missing_prices.append(symbol)
+        missing_quantities = [
+            symbol
+            for intent, symbol in zip(members, symbols, strict=True)
+            if intent.quantity is None
+        ]
+        if missing_prices or missing_quantities:
+            failure_reasons = []
+            if missing_prices:
+                failure_reasons.append("missing_price")
+            if missing_quantities:
+                failure_reasons.append("missing_quantity")
+            runtime_events.append(
+                _skipped(
+                    ts,
+                    "group_unfillable",
+                    group_id=group_id,
+                    symbols=symbols,
+                    failed_reasons=failure_reasons,
+                )
+            )
+            continue
+
+        staged_positions = deepcopy(positions)
+        staged_volume_consumed = dict(volume_consumed)
+        staged_adv_consumed = dict(adv_consumed)
+        result = execute_order_intents(
+            members,
+            staged_positions,
+            available_cash,
+            ts,
+            get_price=lambda _symbol, intent, _prices=prices_by_intent: _prices[id(intent)],
+            used_bar_quantity_by_symbol=staged_volume_consumed,
+            used_adv_quantity_by_symbol=staged_adv_consumed,
+            **common_kwargs,
+        )
+        fully_filled = len(result.events) == len(members) and all(
+            event.symbol == symbol
+            and intent.quantity is not None
+            and np.isclose(
+                event.fill_quantity,
+                intent.quantity,
+                rtol=0.0,
+                atol=EPSILON,
+            )
+            for intent, symbol, event in zip(members, symbols, result.events, strict=True)
+        )
+        if not fully_filled:
+            failed_reasons = sorted(
+                {str(event.detail.get("reason", "unfilled")) for event in result.runtime_events}
+                or {"partial_fill"}
+            )
+            runtime_events.append(
+                _skipped(
+                    ts,
+                    "group_unfillable",
+                    group_id=group_id,
+                    symbols=symbols,
+                    failed_reasons=failed_reasons,
+                )
+            )
+            continue
+
+        positions.clear()
+        positions.update(staged_positions)
+        volume_consumed.clear()
+        volume_consumed.update(staged_volume_consumed)
+        adv_consumed.clear()
+        adv_consumed.update(staged_adv_consumed)
+        trades.extend(result.trades)
+        events.extend(result.events)
+        runtime_events.extend(result.runtime_events)
+        cash_delta += result.cash_delta
+
+    return ExecutionResult(
+        trades=trades,
+        events=events,
+        cash_delta=cash_delta,
+        runtime_events=runtime_events,
     )
 
 
@@ -2390,6 +2575,7 @@ def execute_pending_decision_and_stops(
                 **common_kwargs,
                 used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=adv_quantities,
+                atomic_groups=True,
             )
         if enforce_portfolio_limits:
             assert exposure_prices is not None
