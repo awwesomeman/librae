@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
-from librae.core.executor import REASON_DRAWDOWN_BREACH, PositionEvent
+from librae.core.executor import REASON_DRAWDOWN_BREACH, PositionEvent, execute_order_intents
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
@@ -3115,6 +3115,117 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
         adapter.place_order.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("risk_policy", "requested_quantity", "prepared_quantity", "message"),
+        [
+            (RiskPolicy(max_order_notional=150.0), 1.0, 2.0, "max_order_notional"),
+            (RiskPolicy(max_position_weight=0.5), 400.0, 600.0, "post-adapter risk"),
+            (RiskPolicy(max_gross_exposure=0.5), 400.0, 600.0, "gross exposure"),
+        ],
+    )
+    def test_prepared_quantity_cannot_bypass_entry_risk_limits(
+        self,
+        risk_policy,
+        requested_quantity,
+        prepared_quantity,
+        message,
+    ):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {
+            **signal,
+            "quantity": prepared_quantity,
+        }
+
+        class Buy(Strategy):
+            def on_bar(self, ctx):
+                return [
+                    OrderIntent(
+                        action="long",
+                        symbol=ctx.symbol,
+                        quantity=requested_quantity,
+                    )
+                ]
+
+        runner = self._make_trader(Buy(), adapter)
+        runner._risk_policy = risk_policy
+        alerts: list[tuple[str, dict]] = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
+        assert any(message in kwargs.get("message", "") for _, kwargs in alerts)
+
+    def test_prepared_limit_price_cannot_bypass_order_notional_limit(self):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {
+            **signal,
+            "price": 200.0,
+        }
+
+        class LimitBuy(Strategy):
+            def on_bar(self, ctx):
+                return [
+                    OrderIntent(
+                        action="long",
+                        symbol=ctx.symbol,
+                        quantity=1.0,
+                        limit_price=100.0,
+                    )
+                ]
+
+        runner = self._make_trader(LimitBuy(), adapter)
+        runner._risk_policy = RiskPolicy(max_order_notional=150.0)
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        assert runner._active_orders == []
+        adapter.place_order.assert_not_called()
+
+    def test_post_adapter_replay_preserves_group_id_for_scale_in(self):
+        runner = self._make_trader(_HoldStrategy(), _mock_order_adapter())
+        runner._positions["BTCUSDT"] = PositionState(
+            symbol="BTCUSDT",
+            side="long",
+            entry_price=100.0,
+            quantity=1.0,
+            entry_at=TEST_CLOCK_NOW,
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=100.0,
+            group_id="pair",
+        )
+
+        with patch(
+            "librae.live.engine.execute_order_intents",
+            wraps=execute_order_intents,
+        ) as execute:
+            requests = runner._plan_live_orders(
+                [
+                    OrderIntent(
+                        action="long",
+                        symbol="BTCUSDT",
+                        quantity=1.0,
+                        group_id="pair",
+                    )
+                ],
+                {
+                    "BTCUSDT": {
+                        "close": 100.0,
+                        "volume": 1_000.0,
+                    }
+                },
+                TEST_CLOCK_NOW,
+            )
+
+        assert requests[0].group_id == "pair"
+        assert [call.args[0][0].group_id for call in execute.call_args_list] == ["pair", "pair"]
+
     def test_order_is_normalized_before_checkpoint_and_submission(self):
         store = MemoryLiveStateStore()
         adapter = _mock_order_adapter()
@@ -3142,6 +3253,7 @@ class TestLiveExecutionLifecycle:
                 ]
 
         runner = self._make_trader(LimitBuy(), adapter, state_store=store)
+        runner._risk_policy = RiskPolicy(max_order_notional=200.0)
         runner.run(max_iterations=1)
 
         signal = adapter.place_order.call_args.args[0]
@@ -3150,6 +3262,28 @@ class TestLiveExecutionLifecycle:
         assert signal["price"] == 99.5
         assert tracked.request.quantity == 1.0
         assert tracked.request.limit_price == 99.5
+
+    def test_identity_preparation_still_submits_under_risk_limits(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "market-1",
+            "status": "submitted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
+        runner._risk_policy = RiskPolicy(
+            max_order_notional=150.0,
+            max_position_weight=0.01,
+            max_gross_exposure=0.01,
+        )
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is False
+        signal = adapter.place_order.call_args.args[0]
+        assert signal["quantity"] == 1.0
+        assert signal["order_type"] == "market"
 
     def test_order_preflight_failure_halts_before_submission(self):
         adapter = _mock_order_adapter()

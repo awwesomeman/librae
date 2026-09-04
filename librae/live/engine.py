@@ -1492,19 +1492,95 @@ class LiveTrader:
         max_order_notional = (
             self._risk_policy.max_order_notional if apply_entry_risk_limits else None
         )
+        max_position_notional = (
+            self._risk_policy.max_position_weight * self._prev_equity
+            if apply_entry_risk_limits and self._risk_policy.max_position_weight
+            else None
+        )
         volume_limit = self._max_bar_volume_participation_rate if apply_volume_limit else None
         adv_limit = self._max_adv_participation_rate if apply_volume_limit else None
         staged_positions = deepcopy(self._positions)
         planned_bar_quantity_by_symbol = dict(used_bar_quantity_by_symbol or {})
         planned_adv_quantity_by_symbol = dict(self._adv_filled_quantities)
         lagged_adv = lagged_adv_by_symbol or {}
+        prepared_positions = deepcopy(self._positions)
+        prepared_cash = self._cash
+        prepared_exposure_prices = dict(exposure_prices)
+        prepared_bar_quantity_by_symbol = dict(used_bar_quantity_by_symbol or {})
+        prepared_adv_quantity_by_symbol = dict(self._adv_filled_quantities)
+
+        def prepare_and_validate(
+            request: OrderRequest,
+            *,
+            reference_price: float,
+        ) -> OrderRequest:
+            nonlocal prepared_cash
+            prepared = self._prepare_live_order(
+                request,
+                reference_price=reference_price,
+            )
+            risk_price = prepared.limit_price or reference_price
+            positions_before = deepcopy(prepared_positions)
+            cash_before = prepared_cash
+            if prepared.position_effect in ("open", "add"):
+                action = "long" if prepared.side == "buy" else "short"
+            else:
+                action = "close"
+            validation_result = execute_order_intents(
+                [
+                    OrderIntent(
+                        action=action,
+                        symbol=prepared.symbol,
+                        quantity=prepared.quantity,
+                        reason=prepared.reason,
+                        group_id=prepared.group_id,
+                    )
+                ],
+                prepared_positions,
+                prepared_cash,
+                ts,
+                get_price=lambda _symbol, _action: risk_price,
+                get_cost_model=self._get_cost_model,
+                primary_symbol=primary_symbol,
+                max_position_notional=max_position_notional,
+                max_order_notional=max_order_notional,
+                max_bar_volume_participation_rate=volume_limit,
+                max_adv_participation_rate=adv_limit,
+                get_volume=get_volume,
+                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
+                used_bar_quantity_by_symbol=prepared_bar_quantity_by_symbol,
+                used_adv_quantity_by_symbol=prepared_adv_quantity_by_symbol,
+            )
+            executable_quantity = sum(event.fill_quantity for event in validation_result.events)
+            if abs(executable_quantity - prepared.quantity) > EPSILON:
+                reasons = [
+                    str(event.detail["reason"])
+                    for event in validation_result.runtime_events
+                    if "reason" in event.detail
+                ]
+                reason = reasons[0] if reasons else "quantity_capped"
+                raise ValueError(
+                    f"{prepared.symbol} prepared order failed post-adapter risk "
+                    f"validation: quantity={prepared.quantity:.6f}, "
+                    f"executable={executable_quantity:.6f}, reason={reason}"
+                )
+
+            prepared_cash += validation_result.cash_delta
+            prepared_exposure_prices[prepared.symbol] = risk_price
+            if apply_entry_risk_limits:
+                validate_exposure_transition(
+                    positions_before=positions_before,
+                    cash_before=cash_before,
+                    positions_after=prepared_positions,
+                    cash_after=prepared_cash,
+                    prices=prepared_exposure_prices,
+                    get_cost_model=self._get_cost_model,
+                    max_gross_exposure=self._risk_policy.max_gross_exposure,
+                    max_net_exposure=self._risk_policy.max_net_exposure,
+                )
+            return prepared
 
         if isinstance(intent, PortfolioWeights):
-            max_position_notional = (
-                self._risk_policy.max_position_weight * self._prev_equity
-                if apply_entry_risk_limits and self._risk_policy.max_position_weight
-                else None
-            )
             result = execute_portfolio_weights(
                 intent,
                 staged_positions,
@@ -1585,7 +1661,7 @@ class LiveTrader:
                     sequence=sequence_start + index,
                 )
                 requests.append(
-                    self._prepare_live_order(
+                    prepare_and_validate(
                         request,
                         reference_price=prices[event.symbol],
                     )
@@ -1608,11 +1684,6 @@ class LiveTrader:
             symbol = action.symbol or primary_symbol
             positions_before_action = deepcopy(staged_positions)
             cash_before_action = planning_cash
-            max_position_notional = (
-                self._risk_policy.max_position_weight * self._prev_equity
-                if apply_entry_risk_limits and self._risk_policy.max_position_weight
-                else None
-            )
             result = execute_order_intents(
                 [planning_action],
                 staged_positions,
@@ -1656,7 +1727,7 @@ class LiveTrader:
                     sequence=sequence_offset + index,
                 )
                 requests.append(
-                    self._prepare_live_order(
+                    prepare_and_validate(
                         request,
                         reference_price=prices[event.symbol],
                     )
