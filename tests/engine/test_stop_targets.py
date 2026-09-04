@@ -266,6 +266,38 @@ class TestPendingFillStopOrdering:
         assert position.pending_market_exit_reason is None
         assert adv_usage == {"TEST": 3.0}
 
+    def test_carried_market_exit_is_not_ambiguous(self):
+        """A volume-capped exit carried from an earlier bar fills at this bar's
+        open, so it is unambiguously ahead of any close/high/low fill.
+
+        WHY: resolve_stop_exit returns non-None for such a residual before it
+        looks at any trigger level, so keying the guard on that return value
+        alone turns the engine's intended carry-forward into a fatal error.
+        """
+        position = _make_pos(side="long", stop=95.0)
+        position.pending_market_exit_reason = REASON_STOP_LOSS
+        positions = {"TEST": position}
+        bar = {
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 99.5,
+            "volume": 100.0,
+        }
+
+        execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            1_000.0,
+            PortfolioWeights(weights={"OTHER": 1.0}),
+            {"TEST": bar, "OTHER": bar},
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="close",
+            primary_symbol="TEST",
+        )
+
+        assert "OTHER" in positions
+
     def test_untradable_triggered_stop_still_rejects_ambiguous_fill(self):
         position = _make_pos(side="long", stop=95.0)
         positions = {"TEST": position}

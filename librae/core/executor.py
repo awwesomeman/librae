@@ -2231,7 +2231,9 @@ def _validate_no_ambiguous_stop_conflicts(
         return
 
     if isinstance(pending_decision, PortfolioWeights):
-        decision_symbols = set(positions) | set(pending_decision.weights)
+        # A whole-book target prices every open position, so each one overlaps
+        # the batch whether or not the symbol appears in the target weights.
+        decision_symbols = set(positions)
     else:
         decision_symbols = {
             intent.symbol or primary_symbol
@@ -2246,7 +2248,12 @@ def _validate_no_ambiguous_stop_conflicts(
     conflicts = sorted(
         symbol
         for symbol in set(positions) & decision_symbols & set(bars)
-        if resolve_stop_exit(positions[symbol], bars[symbol], get_cost_model(symbol)) is not None
+        # WHY: a market exit carried from an earlier bar resumes at this bar's
+        # open, ahead of any close/high/low fill, so its ordering is defined.
+        # resolve_stop_exit reports it before reading any trigger level, so
+        # only a level triggered by *this* bar is genuinely ambiguous.
+        if positions[symbol].pending_market_exit_reason is None
+        and resolve_stop_exit(positions[symbol], bars[symbol], get_cost_model(symbol)) is not None
     )
     if conflicts:
         raise ValueError(
