@@ -669,6 +669,8 @@ def apply_execution_fill(
     order_side: Literal["buy", "sell"],
     cost_model: CostModel,
     reason: str = "",
+    group_id: str | None = None,
+    time_in_force: TimeInForce | None = None,
 ) -> tuple[float, ExecutionResult]:
     """Apply one externally confirmed execution to portfolio state.
 
@@ -706,6 +708,11 @@ def apply_execution_fill(
     notional = fill.price * fill.quantity * cost_model.multiplier
 
     if position is None or position.side == entry_side:
+        if position is not None and group_id != position.group_id:
+            raise ValueError(
+                f"cannot scale {symbol} across group identities: "
+                f"position={position.group_id!r}, fill={group_id!r}"
+            )
         outlay = notional * cost_model.margin_rate(entry_side) + costs
         event_type: Literal["open", "add"] = "open" if position is None else "add"
         if position is None:
@@ -720,6 +727,7 @@ def apply_execution_fill(
                 entry_slippage=fill.slippage,
                 entry_tax=fill.tax,
                 total_entry_cost=notional,
+                group_id=group_id,
             )
             positions[symbol] = position
         else:
@@ -742,6 +750,8 @@ def apply_execution_fill(
             slippage=fill.slippage,
             tax=fill.tax,
             reason=reason,
+            group_id=position.group_id,
+            time_in_force=time_in_force,
             entry_at=position.entry_at,
             margin_locked=margin_locked,
             leverage=leverage,
@@ -815,6 +825,8 @@ def apply_execution_fill(
         entry_at=position.entry_at,
         periods_held=position.periods_held,
         reason=reason,
+        group_id=position.group_id,
+        time_in_force=time_in_force,
         margin_locked=margin_locked,
         leverage=leverage,
         liquidation_price=liq_price,

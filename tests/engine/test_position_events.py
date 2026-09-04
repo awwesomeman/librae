@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import PositionEvent, apply_execution_fill, execute_order_intents
@@ -38,6 +39,116 @@ def _run(
         primary_symbol="TEST",
     )
     return result.events, result.trades, positions
+
+
+class TestConfirmedFillGroupMetadata:
+    def test_group_metadata_survives_a_confirmed_round_trip(self) -> None:
+        positions: dict[str, PositionState] = {}
+        cash, open_result = apply_execution_fill(
+            positions,
+            1_000.0,
+            Fill(
+                symbol="TEST",
+                side="long",
+                price=100.0,
+                quantity=2.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="buy",
+            cost_model=ZERO_COST,
+            group_id="pair-1",
+            time_in_force="gtc",
+        )
+
+        assert positions["TEST"].group_id == "pair-1"
+        assert open_result.events[0].group_id == "pair-1"
+        assert open_result.events[0].time_in_force == "gtc"
+
+        cash, add_result = apply_execution_fill(
+            positions,
+            cash,
+            Fill(
+                symbol="TEST",
+                side="long",
+                price=100.0,
+                quantity=1.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="buy",
+            cost_model=ZERO_COST,
+            group_id="pair-1",
+            time_in_force="ioc",
+        )
+
+        assert add_result.events[0].group_id == "pair-1"
+        assert add_result.events[0].time_in_force == "ioc"
+
+        _, close_result = apply_execution_fill(
+            positions,
+            cash,
+            Fill(
+                symbol="TEST",
+                side="short",
+                price=110.0,
+                quantity=3.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="sell",
+            cost_model=ZERO_COST,
+            group_id="pair-1",
+            time_in_force="day",
+        )
+
+        assert close_result.events[0].group_id == "pair-1"
+        assert close_result.events[0].time_in_force == "day"
+        assert close_result.trades[0].group_id == "pair-1"
+
+    def test_confirmed_scale_in_rejects_a_different_group(self) -> None:
+        positions = {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=100.0,
+                quantity=1.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=100.0,
+                group_id="pair-1",
+            )
+        }
+
+        with pytest.raises(ValueError, match="across group identities"):
+            apply_execution_fill(
+                positions,
+                900.0,
+                Fill(
+                    symbol="TEST",
+                    side="long",
+                    price=100.0,
+                    quantity=1.0,
+                    commission=0.0,
+                    slippage=0.0,
+                    tax=0.0,
+                ),
+                TS,
+                order_side="buy",
+                cost_model=ZERO_COST,
+                group_id="pair-2",
+            )
+
+        assert positions["TEST"].quantity == 1.0
 
 
 class TestOpenEvent:
