@@ -2212,6 +2212,49 @@ def merge_pending_decisions(
     return [*pending_intents, *new_intents]
 
 
+def _validate_no_ambiguous_stop_conflicts(
+    pending_decision: StrategyDecision,
+    positions: dict[str, PositionState],
+    bars: dict[str, dict[str, float]],
+    *,
+    get_cost_model: Callable[[str], CostModel],
+    default_fill: str,
+    primary_symbol: str,
+) -> None:
+    """Reject non-open fills that overlap an already-triggered protection.
+
+    OHLCV bars cannot establish whether an intrabar stop/target occurred before
+    or after a close/high/low fill.  Detect the ambiguity before execution so
+    no cash, position, or liquidity-budget mutation can leak from the batch.
+    """
+    if not pending_decision or default_fill == "open":
+        return
+
+    if isinstance(pending_decision, PortfolioWeights):
+        decision_symbols = set(positions) | set(pending_decision.weights)
+    else:
+        decision_symbols = {
+            intent.symbol or primary_symbol
+            for intent in pending_decision
+            if not _intent_executes_at_open(
+                intent,
+                bars.get(intent.symbol or primary_symbol, {}),
+                default_fill,
+            )
+        }
+
+    conflicts = sorted(
+        symbol
+        for symbol in set(positions) & decision_symbols & set(bars)
+        if resolve_stop_exit(positions[symbol], bars[symbol], get_cost_model(symbol)) is not None
+    )
+    if conflicts:
+        raise ValueError(
+            "ambiguous same-bar ordering between non-open pending execution "
+            f"and triggered protection for {conflicts}"
+        )
+
+
 def execute_pending_decision_and_stops(
     ts: datetime,
     positions: dict[str, PositionState],
@@ -2251,6 +2294,14 @@ def execute_pending_decision_and_stops(
     same_bar_protection_symbols = set(positions)
 
     if pending_decision:
+        _validate_no_ambiguous_stop_conflicts(
+            pending_decision,
+            positions,
+            bars,
+            get_cost_model=get_cost_model,
+            default_fill=default_fill,
+            primary_symbol=primary_symbol,
+        )
         enforce_portfolio_limits = max_gross_exposure is not None or max_net_exposure is not None
         if enforce_portfolio_limits and exposure_prices is None:
             raise ValueError("portfolio exposure limits require explicit exposure_prices")
