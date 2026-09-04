@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from math import isfinite
+from math import isclose, isfinite
 from threading import Event
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
@@ -46,7 +46,7 @@ from librae.core.financing import (
     calculate_funding_cash_flows,
 )
 from librae.core.liquidity import calculate_lagged_adv
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import CAN_BUY_COLUMN, CAN_SELL_COLUMN, validate_ohlcv_values
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -1469,6 +1469,36 @@ class LiveTrader:
             )
         return prepared
 
+    def _report_group_preflight_rejection(
+        self,
+        group_id: str,
+        actions: list[OrderIntent],
+        ts: datetime,
+        error: ValueError,
+    ) -> None:
+        """Report one locally rejected group without halting unrelated work."""
+        symbols = [action.symbol or self._symbols[0] for action in actions]
+        message = f"group {group_id!r} rejected before submission: {error}"
+        logger.error("Live group preflight rejected: %s", message)
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=ts,
+                    event_type="decision_skipped",
+                    detail={
+                        "reason": "group_preflight_rejected",
+                        "group_id": group_id,
+                        "symbols": symbols,
+                        "message": str(error),
+                    },
+                )
+            )
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Live Group Preflight Rejected",
+            message=f"{message}; no leg was submitted, unrelated orders remain eligible.",
+        )
+
     def _plan_live_orders(
         self,
         intent: StrategyDecision,
@@ -1678,69 +1708,190 @@ class LiveTrader:
             return requests
 
         actions = intent
+        units: list[tuple[str | None, list[OrderIntent]]] = []
+        grouped_units: dict[str, list[OrderIntent]] = {}
+        for action in actions:
+            group_id = action.group_id
+            if group_id is None:
+                units.append((None, [action]))
+                continue
+            if group_id not in grouped_units:
+                grouped_units[group_id] = []
+                units.append((group_id, grouped_units[group_id]))
+            grouped_units[group_id].append(action)
+
         requests: list[OrderRequest] = []
         planning_cash = self._cash
         planning_exposure_prices = dict(exposure_prices)
-        for action in actions:
-            if action.stop_price is not None or action.take_profit_price is not None:
-                raise ValueError(
-                    "Live stop-loss/take-profit requires broker-native protective orders; "
-                    "completed-bar range checks are simulation-only"
-                )
-            order_type = "limit" if action.limit_price is not None else "market"
-            limit_price = action.limit_price
-            planning_action = replace(action, limit_price=None)
-            symbol = action.symbol or primary_symbol
-            positions_before_action = deepcopy(staged_positions)
-            cash_before_action = planning_cash
-            result = execute_order_intents(
-                [planning_action],
-                staged_positions,
-                planning_cash,
-                ts,
-                get_price=lambda requested_symbol, _action, _symbol=symbol, _limit=limit_price: (
-                    _limit
-                    if requested_symbol == _symbol and _limit is not None
-                    else prices.get(requested_symbol)
-                ),
-                get_cost_model=self._get_cost_model,
-                primary_symbol=primary_symbol,
-                max_position_notional=max_position_notional,
-                max_order_notional=max_order_notional,
-                max_bar_volume_participation_rate=volume_limit,
-                max_adv_participation_rate=adv_limit,
-                get_volume=get_volume,
-                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
-                used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
-                used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
+        for group_id, unit_actions in units:
+            grouped = group_id is not None
+            unit_positions = deepcopy(staged_positions) if grouped else staged_positions
+            unit_cash = planning_cash
+            unit_exposure_prices = (
+                dict(planning_exposure_prices) if grouped else planning_exposure_prices
             )
-            planning_cash += result.cash_delta
-            planning_exposure_prices.update({event.symbol: event.price for event in result.events})
-            if apply_entry_risk_limits:
-                validate_exposure_transition(
-                    positions_before=positions_before_action,
-                    cash_before=cash_before_action,
-                    positions_after=staged_positions,
-                    cash_after=planning_cash,
-                    prices=planning_exposure_prices,
-                    get_cost_model=self._get_cost_model,
-                    max_gross_exposure=self._risk_policy.max_gross_exposure,
-                    max_net_exposure=self._risk_policy.max_net_exposure,
-                )
-            sequence_offset = sequence_start + len(requests)
-            for index, event in enumerate(result.events):
-                request = self._executor.request_from_event(
-                    event,
-                    order_type=order_type,
-                    limit_price=limit_price,
-                    sequence=sequence_offset + index,
-                )
-                requests.append(
-                    prepare_and_validate(
-                        request,
-                        reference_price=prices[event.symbol],
+            unit_bar_quantities = (
+                dict(planned_bar_quantity_by_symbol) if grouped else planned_bar_quantity_by_symbol
+            )
+            unit_adv_quantities = (
+                dict(planned_adv_quantity_by_symbol) if grouped else planned_adv_quantity_by_symbol
+            )
+            unit_requests: list[OrderRequest] = []
+            preparation_scales: list[float] = []
+            prepared_positions_before_unit = (
+                deepcopy(prepared_positions) if grouped else prepared_positions
+            )
+            prepared_cash_before_unit = prepared_cash
+            prepared_exposure_prices_before_unit = (
+                dict(prepared_exposure_prices) if grouped else prepared_exposure_prices
+            )
+            prepared_bar_quantities_before_unit = (
+                dict(prepared_bar_quantity_by_symbol)
+                if grouped
+                else prepared_bar_quantity_by_symbol
+            )
+            prepared_adv_quantities_before_unit = (
+                dict(prepared_adv_quantity_by_symbol)
+                if grouped
+                else prepared_adv_quantity_by_symbol
+            )
+
+            try:
+                for action in unit_actions:
+                    if action.stop_price is not None or action.take_profit_price is not None:
+                        raise ValueError(
+                            "Live stop-loss/take-profit requires broker-native protective "
+                            "orders; completed-bar range checks are simulation-only"
+                        )
+                    symbol = action.symbol or primary_symbol
+                    reference_price = prices.get(symbol)
+                    if reference_price is None:
+                        raise ValueError(f"{symbol} has no positive live reference price")
+                    if grouped and action.quantity is None:
+                        raise ValueError(f"{symbol} grouped intent requires an explicit quantity")
+
+                    if action.action == "long":
+                        order_side = "buy"
+                    elif action.action == "short":
+                        order_side = "sell"
+                    else:
+                        position = unit_positions.get(symbol)
+                        if position is None:
+                            raise ValueError(f"{symbol} close intent has no open position")
+                        order_side = "sell" if position.side == "long" else "buy"
+                    tradability_field = CAN_BUY_COLUMN if order_side == "buy" else CAN_SELL_COLUMN
+                    if grouped and not bool(bars.get(symbol, {}).get(tradability_field, True)):
+                        raise ValueError(
+                            f"{symbol} {order_side} side is not tradable on the decision bar"
+                        )
+
+                    order_type = "limit" if action.limit_price is not None else "market"
+                    limit_price = action.limit_price
+                    planning_action = replace(action, limit_price=None)
+                    positions_before_action = deepcopy(unit_positions)
+                    cash_before_action = unit_cash
+                    result = execute_order_intents(
+                        [planning_action],
+                        unit_positions,
+                        unit_cash,
+                        ts,
+                        get_price=lambda requested_symbol, _action, _symbol=symbol, _limit=limit_price: (
+                            _limit
+                            if requested_symbol == _symbol and _limit is not None
+                            else prices.get(requested_symbol)
+                        ),
+                        get_cost_model=self._get_cost_model,
+                        primary_symbol=primary_symbol,
+                        max_position_notional=max_position_notional,
+                        max_order_notional=max_order_notional,
+                        max_bar_volume_participation_rate=volume_limit,
+                        max_adv_participation_rate=adv_limit,
+                        get_volume=get_volume,
+                        get_lagged_adv=lambda requested_symbol: lagged_adv.get(requested_symbol),
+                        used_bar_quantity_by_symbol=unit_bar_quantities,
+                        used_adv_quantity_by_symbol=unit_adv_quantities,
                     )
-                )
+                    if grouped and len(result.events) != 1:
+                        reasons = sorted(
+                            {
+                                str(event.detail.get("reason", "unplannable"))
+                                for event in result.runtime_events
+                            }
+                        )
+                        detail = ", ".join(reasons) if reasons else "no executable position delta"
+                        raise ValueError(f"{symbol} intent could not be planned: {detail}")
+                    if not result.events:
+                        continue
+                    event = result.events[0]
+                    if grouped and (
+                        action.quantity is None
+                        or not isclose(
+                            event.fill_quantity,
+                            action.quantity,
+                            rel_tol=0.0,
+                            abs_tol=EPSILON,
+                        )
+                    ):
+                        raise ValueError(
+                            f"{symbol} planned quantity {event.fill_quantity:.6f} does not "
+                            f"fully satisfy requested quantity {action.quantity:.6f}"
+                        )
+
+                    unit_cash += result.cash_delta
+                    unit_exposure_prices[event.symbol] = event.price
+                    if apply_entry_risk_limits:
+                        validate_exposure_transition(
+                            positions_before=positions_before_action,
+                            cash_before=cash_before_action,
+                            positions_after=unit_positions,
+                            cash_after=unit_cash,
+                            prices=unit_exposure_prices,
+                            get_cost_model=self._get_cost_model,
+                            max_gross_exposure=self._risk_policy.max_gross_exposure,
+                            max_net_exposure=self._risk_policy.max_net_exposure,
+                        )
+
+                    request = self._executor.request_from_event(
+                        event,
+                        order_type=order_type,
+                        limit_price=limit_price,
+                        sequence=sequence_start + len(requests) + len(unit_requests),
+                    )
+                    prepared = prepare_and_validate(
+                        request,
+                        reference_price=reference_price,
+                    )
+                    preparation_scales.append(prepared.quantity / request.quantity)
+                    unit_requests.append(prepared)
+
+                if grouped and preparation_scales:
+                    first_scale = preparation_scales[0]
+                    if any(
+                        not isclose(scale, first_scale, rel_tol=EPSILON, abs_tol=EPSILON)
+                        for scale in preparation_scales[1:]
+                    ):
+                        raise ValueError(
+                            "adapter quantity normalization changes relative leg ratios: "
+                            + ", ".join(f"{scale:.8f}" for scale in preparation_scales)
+                        )
+            except ValueError as exc:
+                if not grouped:
+                    raise
+                assert group_id is not None
+                prepared_positions = prepared_positions_before_unit
+                prepared_cash = prepared_cash_before_unit
+                prepared_exposure_prices = prepared_exposure_prices_before_unit
+                prepared_bar_quantity_by_symbol = prepared_bar_quantities_before_unit
+                prepared_adv_quantity_by_symbol = prepared_adv_quantities_before_unit
+                self._report_group_preflight_rejection(group_id, unit_actions, ts, exc)
+                continue
+
+            staged_positions = unit_positions
+            planning_cash = unit_cash
+            planning_exposure_prices = unit_exposure_prices
+            planned_bar_quantity_by_symbol = unit_bar_quantities
+            planned_adv_quantity_by_symbol = unit_adv_quantities
+            requests.extend(unit_requests)
         return requests
 
     def _execute_live_decision(
