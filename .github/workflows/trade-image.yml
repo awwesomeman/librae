@@ -75,6 +75,7 @@ jobs:
           parser.add_argument("--mode")
           parser.add_argument("--poll-seconds")
           parser.add_argument("--config")
+          parser.add_argument("--runtime-revision")
           parser.add_argument("--once", action="store_true")
           options = parser.parse_args()
           if options.once:
