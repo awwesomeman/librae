@@ -75,6 +75,7 @@ jobs:
           parser.add_argument("--mode")
           parser.add_argument("--poll-seconds")
           parser.add_argument("--config")
+          parser.add_argument("--runtime-revision")
           parser.add_argument("--once", action="store_true")
           options = parser.parse_args()
           if options.once:
@@ -332,7 +333,7 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, config_hash,
                        backtest_revision, backtest_cache_key)
                   VALUES (%s, 'smoke', '["MU"]', 'D1', %s, %s, %s)
                   """,
@@ -344,7 +345,7 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, config_hash,
                        backtest_revision, backtest_cache_key)
                   VALUES ('cache-run-c', 'smoke', '["MU"]', 'D1',
                           'config-b', 'revision-c', 'cache-a')

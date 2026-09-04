@@ -442,6 +442,10 @@ def build_live_trader(
     }
 
     overrides = dict(data_adapter_overrides or {})
+    unknown_overrides = set(overrides) - set(instruments)
+    if unknown_overrides:
+        raise ValueError(f"data_adapter_overrides has unknown symbols: {sorted(unknown_overrides)}")
+
     adapter_instances: dict[tuple[str, str, str], object] = {}
     data_adapters: dict[str, object] = {}
     for symbol, instrument in instruments.items():
@@ -471,10 +475,6 @@ def build_live_trader(
             )
             adapter_instances[key] = instance
         data_adapters[symbol] = instance
-
-    unknown_overrides = set(overrides) - set(instruments)
-    if unknown_overrides:
-        raise ValueError(f"data_adapter_overrides has unknown symbols: {sorted(unknown_overrides)}")
 
     order_adapters: dict[str, object] | None = None
     if config.mode == "live":

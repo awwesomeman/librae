@@ -51,7 +51,7 @@ tables. Librae owns validation and table shape. The caller owns Parquet,
 SQLite, DuckDB, or other serialization details, including paths, overwrite
 policy, transactions, partitioning, and retention. There is intentionally no
 storage registry or sink hierarchy. See the
-[local artifact guide](docs/guides/local-artifacts.md).
+[local artifact guide](local-artifacts.md).
 
 Artifacts are for research/export and do not satisfy live mode's durable
 state-store, active-order, reconciliation, or lease requirements.
@@ -608,7 +608,7 @@ contract. Alignment, resampling, annualization, grouping, active-period
 selection, attribution, and independent-run aggregation remain caller or
 optional-reporting policy. This avoids engine APIs that name a benchmark while
 leaving its economically important policies implicit. Examples are in the
-[performance analysis guide](docs/guides/performance-analysis.md).
+[performance analysis guide](performance-analysis.md).
 
 `available_metrics()` returns the static metric names supported by those two
 APIs, optionally filtered with `kind="summary"` or `kind="series"`. It performs
@@ -794,7 +794,7 @@ independently. The engine never selects these implementations from config.
 ## Use-case capability matrix
 
 Use this matrix to select an engine workflow, then apply the
-[strategy readiness checklist](docs/guides/strategy-readiness.md) before
+[strategy readiness checklist](strategy-readiness.md) before
 promoting a strategy between research, shadow simulation, broker paper, and
 live capital.
 

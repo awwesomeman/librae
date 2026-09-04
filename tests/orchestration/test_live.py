@@ -415,7 +415,10 @@ def test_data_adapter_overrides_injects_per_symbol_instance_directly() -> None:
 def test_data_adapter_overrides_rejects_unknown_symbol() -> None:
     config = make_test_cfg(mode="sim")
 
-    with pytest.raises(ValueError, match="unknown symbols"):
+    with (
+        patch("librae.orchestration.live._build_adapter") as build_adapter,
+        pytest.raises(ValueError, match="unknown symbols"),
+    ):
         build_live_trader(
             MagicMock(),
             lambda frame: frame,
@@ -423,6 +426,8 @@ def test_data_adapter_overrides_rejects_unknown_symbol() -> None:
             database_enabled=False,
             data_adapter_overrides={"NOT_A_SYMBOL": MagicMock()},
         )
+
+    build_adapter.assert_not_called()
 
 
 def test_factory_rejects_missing_live_revision_before_building_adapters() -> None:
