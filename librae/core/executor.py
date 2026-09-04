@@ -708,11 +708,6 @@ def apply_execution_fill(
     notional = fill.price * fill.quantity * cost_model.multiplier
 
     if position is None or position.side == entry_side:
-        if position is not None and group_id != position.group_id:
-            raise ValueError(
-                f"cannot scale {symbol} across group identities: "
-                f"position={position.group_id!r}, fill={group_id!r}"
-            )
         outlay = notional * cost_model.margin_rate(entry_side) + costs
         event_type: Literal["open", "add"] = "open" if position is None else "add"
         if position is None:
@@ -750,7 +745,7 @@ def apply_execution_fill(
             slippage=fill.slippage,
             tax=fill.tax,
             reason=reason,
-            group_id=position.group_id,
+            group_id=group_id,
             time_in_force=time_in_force,
             entry_at=position.entry_at,
             margin_locked=margin_locked,
