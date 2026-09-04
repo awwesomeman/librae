@@ -885,11 +885,14 @@ def test_database_schema_does_not_embed_migrations() -> None:
 
 def test_backtest_cache_identity_is_separate_from_config_hash() -> None:
     schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
 
     assert "backtest_revision TEXT" in schema
     assert "backtest_cache_key VARCHAR(32)" in schema
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_cache_key" in schema
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash" not in schema
+    assert workflow.count("(run_id, strategy_name, symbols, timeframe, config_hash,") == 2
+    assert "(run_id, strategy, symbols, timeframe, config_hash," not in workflow
 
 
 def test_local_trade_build_uses_explicit_strategy_context() -> None:

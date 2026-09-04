@@ -333,7 +333,7 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, config_hash,
                        backtest_revision, backtest_cache_key)
                   VALUES (%s, 'smoke', '["MU"]', 'D1', %s, %s, %s)
                   """,
@@ -345,7 +345,7 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, config_hash,
                        backtest_revision, backtest_cache_key)
                   VALUES ('cache-run-c', 'smoke', '["MU"]', 'D1',
                           'config-b', 'revision-c', 'cache-a')
