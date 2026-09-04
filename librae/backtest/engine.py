@@ -802,7 +802,10 @@ class Backtest:
                 equity_curve=tuple(equity_curve),
                 portfolio_snapshots=tuple(portfolio_snapshots),
                 initial_cash=self._initial_cash,
-                final_equity=cash,
+                # Terminal liquidation can leave an unfilled residual position.
+                # Account equity must include its final valuation mark, as the
+                # equity curve and metrics already do.
+                final_equity=equity_curve[-1].equity,
                 exposed_periods=exposed_periods,
             ),
         )
