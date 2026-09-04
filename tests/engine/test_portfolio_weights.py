@@ -29,6 +29,8 @@ def _process(
     *,
     prices: dict[str, float],
     cost_model: CostModel | None = None,
+    max_bar_volume_participation_rate: float | None = None,
+    volumes: dict[str, float] | None = None,
 ) -> ExecutionResult:
     model = cost_model or CostModel.zero()
     return execute_portfolio_weights(
@@ -39,6 +41,8 @@ def _process(
         get_price=lambda symbol, _action: prices.get(symbol),
         get_cost_model=lambda _symbol: model,
         primary_symbol="A",
+        max_bar_volume_participation_rate=max_bar_volume_participation_rate,
+        get_volume=(lambda symbol: volumes.get(symbol)) if volumes is not None else None,
     )
 
 
@@ -226,6 +230,88 @@ class TestRebalanceExecution:
         assert event.event_type == "decision_skipped"
         assert event.detail["reason"] == "insufficient_cash"
         assert event.detail["symbols"] == ["A"]
+
+    def test_zero_cash_additions_report_insufficient_cash(self) -> None:
+        positions: dict[str, PositionState] = {}
+        initial = _process(
+            PortfolioWeights(weights={"A": 1.0}),
+            positions,
+            1_000.0,
+            prices={"A": 100.0},
+        )
+        cash = 1_000.0 + initial.cash_delta
+
+        result = _process(
+            PortfolioWeights(weights={"A": 1.0, "B": 0.1}),
+            positions,
+            cash,
+            prices={"A": 100.0, "B": 50.0},
+        )
+
+        assert np.isclose(cash, 0.0)
+        assert result.events == []
+        assert "B" not in positions
+        assert len(result.runtime_events) == 1
+        event = result.runtime_events[0]
+        assert event.event_type == "decision_skipped"
+        assert event.detail == {
+            "reason": "insufficient_cash",
+            "symbols": ["B"],
+            "available_cash": pytest.approx(0.0),
+        }
+
+    def test_runtime_events_preserve_reduction_then_addition_order(self) -> None:
+        positions: dict[str, PositionState] = {}
+        initial = _process(
+            PortfolioWeights(weights={"A": 0.5}),
+            positions,
+            2_000.0,
+            prices={"A": 100.0},
+        )
+        cash = 2_000.0 + initial.cash_delta
+
+        result = _process(
+            PortfolioWeights(weights={"A": 0.25, "B": 0.25}),
+            positions,
+            cash,
+            prices={"A": 100.0, "B": 50.0},
+            max_bar_volume_participation_rate=0.1,
+            volumes={"A": 0.0, "B": 0.0},
+        )
+
+        assert result.events == []
+        assert [event.symbol for event in result.runtime_events] == ["A", "B"]
+        assert [event.detail["reason"] for event in result.runtime_events] == [
+            "volume_capped",
+            "volume_capped",
+        ]
+
+    def test_reduction_runtime_event_precedes_cash_event(self) -> None:
+        positions: dict[str, PositionState] = {}
+        initial = _process(
+            PortfolioWeights(weights={"A": 1.0}),
+            positions,
+            1_000.0,
+            prices={"A": 100.0},
+        )
+        cash = 1_000.0 + initial.cash_delta
+
+        result = _process(
+            PortfolioWeights(weights={"A": 0.5, "B": 0.5}),
+            positions,
+            cash,
+            prices={"A": 100.0, "B": 50.0},
+            max_bar_volume_participation_rate=0.1,
+            volumes={"A": 0.0, "B": 1_000.0},
+        )
+
+        assert result.events == []
+        assert [event.symbol for event in result.runtime_events] == ["A", None]
+        assert [event.detail["reason"] for event in result.runtime_events] == [
+            "volume_capped",
+            "insufficient_cash",
+        ]
+        assert result.runtime_events[1].detail["symbols"] == ["B"]
 
     def test_weight_remainder_stays_in_cash(self) -> None:
         positions: dict[str, PositionState] = {}

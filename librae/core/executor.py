@@ -1769,8 +1769,18 @@ def _scale_additions_to_cash(
     than accepting actions in symbol order until cash runs out. The binary
     search accounts for nonlinear minimum commissions.
     """
-    if not actions or available_cash <= EPSILON:
+    if not actions:
         return [], []
+
+    if available_cash <= EPSILON:
+        logger.warning("Rebalance additions skipped: insufficient cash after reductions")
+        event = _skipped(
+            ts,
+            "insufficient_cash",
+            symbols=sorted({action.symbol for action in actions}),
+            available_cash=available_cash,
+        )
+        return [], [event]
 
     def total_outlay(scale: float) -> float:
         total = 0.0
@@ -1986,7 +1996,11 @@ def execute_portfolio_weights(
         trades=[*reduction_result.trades, *addition_result.trades],
         events=[*reduction_result.events, *addition_result.events],
         cash_delta=reduction_result.cash_delta + addition_result.cash_delta,
-        runtime_events=cash_events,
+        runtime_events=[
+            *reduction_result.runtime_events,
+            *cash_events,
+            *addition_result.runtime_events,
+        ],
     )
 
 
