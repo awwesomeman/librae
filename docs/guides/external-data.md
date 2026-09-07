@@ -61,6 +61,12 @@ For sim/live, `LiveTrader(adapter=...)` accepts either:
 The result must contain UTC-aware `ts` plus OHLCV. Extra columns are preserved
 and passed to `feature_fn`.
 
+`feature_fn` must return a non-empty DataFrame with a timezone-aware,
+strictly increasing, unique `DatetimeIndex`. It may retain or drop older
+warm-up rows, but it must not add observations later than the current event,
+and its final row must represent that event exactly. A violation prevents
+strategy evaluation and leaves the data watermark uncommitted for retry.
+
 ## `timeframe` and `poll_seconds`
 
 They intentionally remain separate:
