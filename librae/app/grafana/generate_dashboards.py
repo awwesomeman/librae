@@ -12,9 +12,13 @@ import json
 import logging
 import pathlib
 
-from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
-
 logger = logging.getLogger(__name__)
+
+# WHY: restated, not imported. The deploy venv installs what the dashboard
+# push needs, not the engine, and importing anything under `librae` pulls in
+# librae/__init__.py and its numpy dependency. tests/deploy pins this value
+# against the runtime constant instead.
+HEARTBEAT_STALE_AFTER_POLLS = 3
 
 DATASOURCE: dict = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
 OUT_DIR: pathlib.Path = pathlib.Path(__file__).parent / "provisioning" / "dashboards" / "json"
