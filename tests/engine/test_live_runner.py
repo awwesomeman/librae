@@ -2111,7 +2111,9 @@ class TestLiveExecutionLifecycle:
             config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
         )
         alerts = []
+        events: list[PositionEvent] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner._on_position_event = lambda event, _sequence: events.append(event)
         runner._last_prices = {"SPOT": 100.0, "PERP": 100.0}
 
         complete = runner._execute_live_decision(
@@ -2134,7 +2136,9 @@ class TestLiveExecutionLifecycle:
         assert runner._halted is False
         assert runner._active_orders == []
         assert runner._positions["SPOT"].quantity == pytest.approx(1.0)
+        assert runner._positions["SPOT"].group_id == "basis"
         assert "PERP" not in runner._positions
+        assert [(event.symbol, event.group_id) for event in events] == [("SPOT", "basis")]
         assert any(m == "send_alert" and "'basis'" in kw["message"] for m, kw in alerts)
 
     def test_live_group_failure_does_not_block_other_groups(self):

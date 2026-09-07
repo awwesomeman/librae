@@ -28,6 +28,7 @@ def _position() -> PositionState:
         entry_tax=0.0,
         total_entry_cost=200.0,
         pending_market_exit_reason="stop_loss",
+        group_id="pair-1",
     )
 
 

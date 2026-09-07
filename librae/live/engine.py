@@ -1554,6 +1554,8 @@ class LiveTrader:
                         order_side=order_side,
                         cost_model=self._get_cost_model(event.symbol),
                         reason=event.reason,
+                        group_id=event.group_id,
+                        time_in_force=event.time_in_force,
                     )
                     replay_prices[event.symbol] = event.price
                     validate_exposure_transition(
@@ -1996,6 +1998,8 @@ class LiveTrader:
                 order_side=report.side,
                 cost_model=self._get_cost_model(report.symbol),
                 reason=request.reason,
+                group_id=request.group_id,
+                time_in_force=request.time_in_force,
             )
             self._record_adv_fill(report.symbol, delta_quantity, report.executed_at)
             if self._live_rebalance is not None:

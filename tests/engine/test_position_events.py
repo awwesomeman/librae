@@ -12,7 +12,12 @@ import numpy as np
 import pandas as pd
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
-from librae.core.executor import PositionEvent, apply_execution_fill, execute_order_intents
+from librae.core.executor import (
+    ExecutionResult,
+    PositionEvent,
+    apply_execution_fill,
+    execute_order_intents,
+)
 from librae.core.strategy import Fill, OrderIntent, PositionState, Strategy
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
@@ -38,6 +43,147 @@ def _run(
         primary_symbol="TEST",
     )
     return result.events, result.trades, positions
+
+
+class TestConfirmedFillGroupMetadata:
+    def test_group_metadata_survives_a_confirmed_round_trip(self) -> None:
+        positions: dict[str, PositionState] = {}
+        cash, open_result = apply_execution_fill(
+            positions,
+            1_000.0,
+            Fill(
+                symbol="TEST",
+                side="long",
+                price=100.0,
+                quantity=2.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="buy",
+            cost_model=ZERO_COST,
+            group_id="pair-1",
+            time_in_force="gtc",
+        )
+
+        assert positions["TEST"].group_id == "pair-1"
+        assert open_result.events[0].group_id == "pair-1"
+        assert open_result.events[0].time_in_force == "gtc"
+
+        cash, add_result = apply_execution_fill(
+            positions,
+            cash,
+            Fill(
+                symbol="TEST",
+                side="long",
+                price=100.0,
+                quantity=1.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="buy",
+            cost_model=ZERO_COST,
+            group_id="pair-1",
+            time_in_force="ioc",
+        )
+
+        assert add_result.events[0].group_id == "pair-1"
+        assert add_result.events[0].time_in_force == "ioc"
+
+        _, close_result = apply_execution_fill(
+            positions,
+            cash,
+            Fill(
+                symbol="TEST",
+                side="short",
+                price=110.0,
+                quantity=3.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="sell",
+            cost_model=ZERO_COST,
+            group_id="pair-1",
+            time_in_force="day",
+        )
+
+        assert close_result.events[0].group_id == "pair-1"
+        assert close_result.events[0].time_in_force == "day"
+        assert close_result.trades[0].group_id == "pair-1"
+
+    @staticmethod
+    def _grouped_long() -> dict[str, PositionState]:
+        return {
+            "TEST": PositionState(
+                symbol="TEST",
+                side="long",
+                entry_price=100.0,
+                quantity=1.0,
+                entry_at=TS,
+                periods_held=1,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=100.0,
+                group_id="pair-1",
+            )
+        }
+
+    @staticmethod
+    def _scale_in(positions: dict[str, PositionState], group_id: str | None) -> ExecutionResult:
+        _, result = apply_execution_fill(
+            positions,
+            900.0,
+            Fill(
+                symbol="TEST",
+                side="long",
+                price=100.0,
+                quantity=1.0,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+            ),
+            TS,
+            order_side="buy",
+            cost_model=ZERO_COST,
+            group_id=group_id,
+        )
+        return result
+
+    def test_confirmed_scale_in_applies_when_the_fill_group_differs(self) -> None:
+        """A confirmed fill is settled state, not a request -- it cannot be refused.
+
+        WHY: rejecting here would leave the broker holding a filled order the
+        engine never booked, so live positions would silently drift from the
+        venue's.
+        """
+        positions = self._grouped_long()
+
+        self._scale_in(positions, "pair-2")
+
+        assert positions["TEST"].quantity == 2.0
+        assert positions["TEST"].group_id == "pair-1"
+
+    def test_confirmed_ungrouped_scale_in_applies_to_a_grouped_position(self) -> None:
+        positions = self._grouped_long()
+
+        self._scale_in(positions, None)
+
+        assert positions["TEST"].quantity == 2.0
+        assert positions["TEST"].group_id == "pair-1"
+
+    def test_confirmed_scale_in_event_carries_the_fill_group(self) -> None:
+        """Matches execute_order_intents, whose add event carries the intent's
+        group_id rather than the position's."""
+        result = self._scale_in(self._grouped_long(), "pair-2")
+
+        assert result.events[0].event_type == "add"
+        assert result.events[0].group_id == "pair-2"
 
 
 class TestOpenEvent:
