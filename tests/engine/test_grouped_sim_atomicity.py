@@ -129,7 +129,10 @@ def test_partial_volume_rejects_one_group_without_blocking_another_group() -> No
     assert result.runtime_events[0].detail["failed_reasons"] == ["partial_fill"]
 
 
-def test_untradable_leg_rejects_group_without_mutating_existing_positions() -> None:
+def test_untradable_leg_raises_before_mutating_existing_positions() -> None:
+    """A leg that lost its price cannot fill, and a group that cannot fill
+    every leg fails loudly rather than as a skip event, per
+    docs/decisions/2026-08-05-grouped-decisions-no-engine-side-waiting.md."""
     positions = {
         "A": _position("A"),
         "B": _position("B"),
@@ -139,27 +142,26 @@ def test_untradable_leg_rejects_group_without_mutating_existing_positions() -> N
         OrderIntent(action="close", symbol="B", quantity=1.0, group_id="exit"),
     ]
 
-    cash, result = _execute(
-        positions,
-        0.0,
-        decision,
-        {
-            "A": _bar(100.0),
-            "B": _bar(100.0, can_sell=False),
-        },
-    )
+    with pytest.raises(ValueError, match="lost pricing"):
+        _execute(
+            positions,
+            0.0,
+            decision,
+            {
+                "A": _bar(100.0),
+                "B": _bar(100.0, can_sell=False),
+            },
+        )
 
     assert set(positions) == {"A", "B"}
     assert positions["A"].quantity == pytest.approx(1.0)
     assert positions["B"].quantity == pytest.approx(1.0)
-    assert cash == pytest.approx(0.0)
-    assert result.events == []
-    assert result.trades == []
-    assert result.runtime_events[0].detail["group_id"] == "exit"
-    assert result.runtime_events[0].detail["failed_reasons"] == ["missing_price"]
 
 
-def test_partial_close_quantity_rejects_whole_group() -> None:
+def test_close_leg_requesting_more_than_held_raises_before_mutation() -> None:
+    """The stated quantity no longer describes the book. Silently skipping
+    would leave the pair open and un-exitable by this group id on every later
+    bar; a close leg that means "all of it" omits the quantity instead."""
     positions = {
         "A": _position("A"),
         "B": _position("B"),
@@ -169,17 +171,60 @@ def test_partial_close_quantity_rejects_whole_group() -> None:
         OrderIntent(action="close", symbol="B", quantity=2.0, group_id="exit"),
     ]
 
-    cash, result = _execute(
-        positions,
-        0.0,
-        decision,
-        {"A": _bar(100.0), "B": _bar(100.0)},
-    )
+    with pytest.raises(ValueError, match="B"):
+        _execute(positions, 0.0, decision, {"A": _bar(100.0), "B": _bar(100.0)})
 
     assert set(positions) == {"A", "B"}
     assert positions["A"].quantity == pytest.approx(1.0)
     assert positions["B"].quantity == pytest.approx(1.0)
-    assert cash == pytest.approx(0.0)
-    assert result.events == []
-    assert result.trades == []
-    assert result.runtime_events[0].detail["failed_reasons"] == ["partial_fill"]
+
+
+def test_close_leg_on_a_flat_symbol_raises_before_mutation() -> None:
+    positions = {"A": _position("A")}
+    decision = [
+        OrderIntent(action="close", symbol="A", quantity=1.0, group_id="exit"),
+        OrderIntent(action="close", symbol="B", quantity=1.0, group_id="exit"),
+    ]
+
+    with pytest.raises(ValueError, match="B"):
+        _execute(positions, 0.0, decision, {"A": _bar(100.0), "B": _bar(100.0)})
+
+    assert positions["A"].quantity == pytest.approx(1.0)
+
+
+def test_close_legs_without_quantity_close_everything() -> None:
+    """The only way to exit a pair whose legs shrank underneath the strategy
+    (a volume-capped stop reduced one) is to say "all of it"."""
+    positions = {"A": _position("A", quantity=10.0), "B": _position("B", quantity=8.0)}
+    decision = [
+        OrderIntent(action="close", symbol="A", group_id="exit"),
+        OrderIntent(action="close", symbol="B", group_id="exit"),
+    ]
+
+    cash, result = _execute(positions, 0.0, decision, {"A": _bar(100.0), "B": _bar(100.0)})
+
+    assert positions == {}
+    assert cash == pytest.approx(1_800.0)
+    assert [event.event_type for event in result.events] == ["close", "close"]
+    assert result.runtime_events == []
+
+
+def test_group_preflight_raises_before_any_ungrouped_intent_fills() -> None:
+    """Ungrouped units commit straight into the caller's book, so a group
+    that will raise must be found before the first unit executes -- otherwise
+    the book moves while the cash delta is discarded with the exception."""
+    positions: dict[str, PositionState] = {}
+    decision = [
+        OrderIntent(action="long", symbol="C", quantity=1.0),
+        OrderIntent(action="close", symbol="A", quantity=1.0, group_id="exit"),
+    ]
+
+    with pytest.raises(ValueError, match="A"):
+        _execute(
+            positions,
+            10_000.0,
+            decision,
+            {"A": _bar(100.0), "C": _bar(50.0)},
+        )
+
+    assert positions == {}

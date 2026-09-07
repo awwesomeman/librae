@@ -1824,6 +1824,63 @@ def execute_order_intents(
     )
 
 
+def _preflight_intent_group(
+    group_id: str,
+    members: list[OrderIntent],
+    positions: dict[str, PositionState],
+    *,
+    get_price: Callable[[str, OrderIntent], float | None],
+    primary_symbol: str,
+) -> tuple[list[str], dict[int, float], list[float]]:
+    """Prove every leg can fill as specified, or raise before any mutation.
+
+    Returns (symbols, price by intent id, expected fill per leg). A leg that
+    cannot fill as written -- no price, no position to close, or a close
+    larger than the position -- fails loudly here: a group is the strategy's
+    request for fill-or-kill, and the ADR in
+    docs/decisions/2026-08-05-grouped-decisions-no-engine-side-waiting.md
+    settled that such a group raises rather than fills asymmetrically or is
+    skipped quietly.
+    """
+    symbols = [intent.symbol or primary_symbol for intent in members]
+    prices_by_intent: dict[int, float] = {}
+    missing_prices: list[str] = []
+    for intent, symbol in zip(members, symbols, strict=True):
+        price = get_price(symbol, intent)
+        if price is None or price <= 0:
+            missing_prices.append(symbol)
+        else:
+            prices_by_intent[id(intent)] = price
+    if missing_prices:
+        raise ValueError(
+            f"group {group_id!r} lost pricing for {sorted(missing_prices)} between decision "
+            "and execution; cannot fill some legs and not others"
+        )
+
+    expected_fills: list[float] = []
+    for intent, symbol in zip(members, symbols, strict=True):
+        if intent.action != "close":
+            if intent.quantity is None:
+                raise ValueError(
+                    f"group {group_id!r} requires explicit quantities on every entry leg"
+                )
+            expected_fills.append(intent.quantity)
+            continue
+        position = positions.get(symbol)
+        if position is None:
+            raise ValueError(f"group {group_id!r} closes {symbol} but no position is open")
+        if intent.quantity is None:
+            expected_fills.append(position.quantity)
+        elif intent.quantity > position.quantity + EPSILON:
+            raise ValueError(
+                f"group {group_id!r} closes {intent.quantity} {symbol} but only "
+                f"{position.quantity} is held; omit the quantity to close the position"
+            )
+        else:
+            expected_fills.append(intent.quantity)
+    return symbols, prices_by_intent, expected_fills
+
+
 def _execute_order_intent_groups_atomically(
     intents: list[OrderIntent],
     positions: dict[str, PositionState],
@@ -1873,6 +1930,24 @@ def _execute_order_intent_groups_atomically(
         "get_lagged_adv": get_lagged_adv,
     }
 
+    # WHY: ungrouped units commit straight into the caller's book as the loop
+    # runs, so every group is proven fillable-as-specified before the first
+    # unit executes. A raise later would leave positions moved while the cash
+    # delta is discarded with the exception. Reading position sizes here is
+    # sound because a decision holds at most one intent per symbol, so no
+    # earlier unit can resize a symbol a later group closes.
+    preflight = {
+        group_id: _preflight_intent_group(
+            group_id,
+            members,
+            positions,
+            get_price=get_price,
+            primary_symbol=primary_symbol,
+        )
+        for group_id, members in units
+        if group_id is not None
+    }
+
     for group_id, members in units:
         available_cash = cash + cash_delta
         if group_id is None:
@@ -1892,38 +1967,7 @@ def _execute_order_intent_groups_atomically(
             cash_delta += result.cash_delta
             continue
 
-        symbols = [intent.symbol or primary_symbol for intent in members]
-        prices_by_intent = {
-            id(intent): get_price(symbol, intent)
-            for intent, symbol in zip(members, symbols, strict=True)
-        }
-        missing_prices: list[str] = []
-        for intent, symbol in zip(members, symbols, strict=True):
-            price = prices_by_intent[id(intent)]
-            if price is None or price <= 0:
-                missing_prices.append(symbol)
-        missing_quantities = [
-            symbol
-            for intent, symbol in zip(members, symbols, strict=True)
-            if intent.quantity is None
-        ]
-        if missing_prices or missing_quantities:
-            failure_reasons = []
-            if missing_prices:
-                failure_reasons.append("missing_price")
-            if missing_quantities:
-                failure_reasons.append("missing_quantity")
-            runtime_events.append(
-                _skipped(
-                    ts,
-                    "group_unfillable",
-                    group_id=group_id,
-                    symbols=symbols,
-                    failed_reasons=failure_reasons,
-                )
-            )
-            continue
-
+        symbols, prices_by_intent, expected_fills = preflight[group_id]
         staged_positions = deepcopy(positions)
         staged_volume_consumed = dict(volume_consumed)
         staged_adv_consumed = dict(adv_consumed)
@@ -1937,16 +1981,12 @@ def _execute_order_intent_groups_atomically(
             used_adv_quantity_by_symbol=staged_adv_consumed,
             **common_kwargs,
         )
+        # Preflight settled that each leg can fill as written; what remains
+        # is whether the venue let it -- cash, bar volume, and ADV budgets.
         fully_filled = len(result.events) == len(members) and all(
             event.symbol == symbol
-            and intent.quantity is not None
-            and np.isclose(
-                event.fill_quantity,
-                intent.quantity,
-                rtol=0.0,
-                atol=EPSILON,
-            )
-            for intent, symbol, event in zip(members, symbols, result.events, strict=True)
+            and np.isclose(event.fill_quantity, expected, rtol=0.0, atol=EPSILON)
+            for symbol, expected, event in zip(symbols, expected_fills, result.events, strict=True)
         )
         if not fully_filled:
             failed_reasons = sorted(
@@ -2306,8 +2346,14 @@ def validate_strategy_decision(
             if intent.group_id is not None:
                 groups.setdefault(intent.group_id, []).append(intent)
         for group_id, members in groups.items():
-            if any(member.quantity is None for member in members):
-                raise ValueError(f"group {group_id!r} requires explicit quantities on every leg")
+            # WHY: an entry with no quantity sizes from available cash, which
+            # is not deterministic across legs. A close with no quantity means
+            # the whole position, which is -- and it is the only way to exit a
+            # leg whose size changed underneath the strategy.
+            if any(member.quantity is None and member.action != "close" for member in members):
+                raise ValueError(
+                    f"group {group_id!r} requires explicit quantities on every entry leg"
+                )
             group_symbols = {member.symbol or primary_symbol for member in members}
             missing = group_symbols - set(bars)
             if missing:
