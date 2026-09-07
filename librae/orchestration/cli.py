@@ -296,6 +296,7 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         "max_bar_volume_participation_rate",
         "adv_lookback_sessions",
         "max_adv_participation_rate",
+        "max_rebalance_delay_bars",
         "live_order_timeout_seconds",
         "warmup_periods",
     }

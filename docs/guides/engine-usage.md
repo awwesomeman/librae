@@ -92,6 +92,12 @@ pending until the required side is tradable; a terminal backtest raises rather
 than inventing liquidity. Omitting both columns explicitly means the data
 source supplied no side-tradability state. These facts must never be inferred
 from the selected execution broker because one broker may route many markets.
+Do not create forward-filled OHLCV rows for a closed market. Keep the panel
+sparse: the engine retains each open position's last observed close for
+valuation without exposing that mark to strategy signals, stops, holding age,
+or execution. `can_buy=false` / `can_sell=false` describe a real observed bar
+whose relevant side cannot trade (for example a halt or price limit); they do
+not mean that the row is valuation-only.
 Shioaji's per-contract `limit_up`/`limit_down` fields are used only to validate
 an outgoing limit price for that resolved venue contract; they are not a
 cross-market backtest rule.
@@ -194,6 +200,11 @@ The strategy timestamps the target implicitly by returning it for `ctx.ts`
 portfolio equity at those same execution prices. The run's `ExecutionPolicy`
 selects the simulated fill field; allocation intent does not override execution
 semantics.
+If an execution bar has a required order side marked untradable,
+`max_rebalance_delay_bars` may defer the entire backtest rebalance until every
+required side is tradable on one event. No leg fills early. The zero default
+fails on the first unavailable execution event; a positive value is a strict
+upper bound, and reaching the end of the sample while deferred also raises.
 Positive weights are long, negative weights are short, and a held symbol
 omitted from `weights` targets zero. Reductions and closes execute first in
 symbol order, then additions. If entry costs exceed available cash, all
@@ -476,6 +487,8 @@ config = RunConfig(
         # Optional session-level cap; both fields must be set together.
         adv_lookback_sessions=20,
         max_adv_participation_rate=0.01,
+        # Backtest-only whole-book wait for a closed-market execution event.
+        max_rebalance_delay_bars=2,
         warmup_periods=720,
         # Client-side backstop; see OrderIntent.time_in_force for the
         # broker-native day/gtc/ioc/fok instruction.
@@ -526,6 +539,23 @@ exceeded `RunConfig.runtime.poll_seconds`.
   intraday volume-profile estimate is needed: the current-bar cap remains the
   local liquidity constraint. Sim/live `ExecutionPolicy.warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
+- `max_rebalance_delay_bars`: non-negative, backtest-only bound for a
+  `PortfolioWeights` whole-book deferral. A value of N allows N unavailable
+  execution events after the normal T+1 eligibility point. The engine retries
+  from the then-current positions and prices, fills only when every required
+  order side is tradable, and raises on bound exhaustion or sample end. This
+  does not infer holidays: omit a closed market's row instead of carrying its
+  OHLCV forward. A newer complete `PortfolioWeights` target supersedes the
+  older unfilled target without resetting the existing delay budget; the
+  superseded decision is recorded in `runtime_events`. It does not apply to
+  independent `OrderIntent`s or live broker submission. While a target is
+  deferred the strategy may return nothing or a newer `PortfolioWeights`;
+  returning `OrderIntent`s raises, because a per-symbol order cannot be
+  sequenced against a whole-book target that has not executed. A strategy
+  that mixes `PortfolioWeights` with per-symbol intents on other bars should
+  keep the default of `0`. A deferred target is not yet an active target:
+  allocation snapshots keep reporting the last *executed* target until the
+  deferred one fills.
 - `warmup_periods`: positive live/sim feature-history retention count; it is
   typed engine configuration, not a strategy `params` fallback.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured

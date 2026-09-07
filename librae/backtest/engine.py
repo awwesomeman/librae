@@ -54,6 +54,7 @@ from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     REASON_FORCE_CLOSE,
     ExecutionResult,
+    ExecutionUnavailableError,
     PositionEvent,
     RuntimeEvent,
     TradePnL,
@@ -389,6 +390,7 @@ class Backtest:
         )
         self._adv_lookback_sessions = resolved_execution.adv_lookback_sessions
         self._max_adv_participation_rate = resolved_execution.max_adv_participation_rate
+        self._max_rebalance_delay_bars = resolved_execution.max_rebalance_delay_bars
         self._risk_policy = config.risk if config else risk or RiskPolicy()
 
         if strategy_name is not None:
@@ -532,6 +534,8 @@ class Backtest:
         halted = False
         adv_session_by_symbol: dict[str, object] = {}
         used_adv_quantity_by_symbol: dict[str, float] = {}
+        rebalance_delay_bars = 0
+        unavailable_rebalance_symbols: tuple[str, ...] = ()
 
         for ts in self._timeline:
             event_start_index = len(all_events)
@@ -565,26 +569,71 @@ class Backtest:
                 positions,
                 primary_symbol=primary_symbol,
             )
-            if isinstance(decision_to_execute, PortfolioWeights):
-                active_target_weights = dict(decision_to_execute.weights)
-
             # ── Steps 1+1.5: fill the previous pending decision at current
             # bar's price, then check stop-loss/take-profit — shared with
             # LiveTrader's simulation mode so deterministic runtimes cannot
             # drift on this sequence ──
-            cash, step_result = self._execute_steps(
-                ts,
-                positions,
-                cash,
-                decision_to_execute,
-                bars,
-                primary_symbol=primary_symbol,
-                last_equity=last_equity,
-                halted=halted,
-                get_lagged_adv=get_lagged_adv,
-                used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
-                exposure_prices=exposure_prices,
-            )
+            try:
+                cash, step_result = self._execute_steps(
+                    ts,
+                    positions,
+                    cash,
+                    decision_to_execute,
+                    bars,
+                    primary_symbol=primary_symbol,
+                    last_equity=last_equity,
+                    halted=halted,
+                    get_lagged_adv=get_lagged_adv,
+                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                    exposure_prices=exposure_prices,
+                )
+                # WHY: only an executed target is the active one. Recording it
+                # before this call would let a deferred target show up in the
+                # allocation snapshots of every deferral bar, with drift
+                # measured against a book that still reflects the last target.
+                if isinstance(decision_to_execute, PortfolioWeights):
+                    active_target_weights = dict(decision_to_execute.weights)
+            # WHY: catch the category, not one reason. Any condition that only
+            # this bar cannot satisfy reaches the same bounded retry, and the
+            # raised instance keeps naming which one it was.
+            except ExecutionUnavailableError as exc:
+                if not isinstance(decision_to_execute, PortfolioWeights):
+                    raise
+                if rebalance_delay_bars >= self._max_rebalance_delay_bars:
+                    if self._max_rebalance_delay_bars == 0:
+                        raise
+                    raise ValueError(
+                        "PortfolioWeights exceeded "
+                        f"max_rebalance_delay_bars={self._max_rebalance_delay_bars} "
+                        f"for {list(exc.symbols)} at {ts}: {exc}"
+                    ) from exc
+                rebalance_delay_bars += 1
+                unavailable_rebalance_symbols = exc.symbols
+                pending_decision = decision_to_execute
+                logger.info(
+                    "Deferring PortfolioWeights at %s (%d/%d bars): %s",
+                    ts,
+                    rebalance_delay_bars,
+                    self._max_rebalance_delay_bars,
+                    exc,
+                )
+                cash, step_result = self._execute_steps(
+                    ts,
+                    positions,
+                    cash,
+                    [],
+                    bars,
+                    primary_symbol=primary_symbol,
+                    last_equity=last_equity,
+                    halted=halted,
+                    get_lagged_adv=get_lagged_adv,
+                    used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                    exposure_prices=exposure_prices,
+                )
+            else:
+                if isinstance(decision_to_execute, PortfolioWeights):
+                    rebalance_delay_bars = 0
+                    unavailable_rebalance_symbols = ()
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             runtime_events.extend(step_result.runtime_events)
@@ -699,6 +748,16 @@ class Backtest:
                     positions=positions,
                 )
                 new_decision = self._without_halted_account(new_decision, halted)
+                if isinstance(pending_decision, PortfolioWeights) and isinstance(
+                    new_decision, PortfolioWeights
+                ):
+                    runtime_events.append(
+                        RuntimeEvent(
+                            ts=ts,
+                            event_type="decision_skipped",
+                            detail={"reason": "rebalance_superseded"},
+                        )
+                    )
                 pending_decision = merge_pending_decisions(
                     pending_decision,
                     new_decision,
@@ -708,6 +767,11 @@ class Backtest:
 
             self._increment_periods_held(positions, bars)
 
+        if isinstance(pending_decision, PortfolioWeights) and rebalance_delay_bars:
+            raise ValueError(
+                "backtest ended before deferred PortfolioWeights could execute; "
+                f"still blocked on {list(unavailable_rebalance_symbols)}"
+            )
         # WHY: the final intent is discarded because there is no T+1 bar to fill it.
         if pending_decision:
             logger.warning(

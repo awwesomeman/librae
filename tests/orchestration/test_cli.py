@@ -314,6 +314,7 @@ class TestBuildRun:
                   execution:
                     default_fill_price: close
                     max_bar_volume_participation_rate: null
+                    max_rebalance_delay_bars: 2
                     live_order_timeout_seconds: 120
                     warmup_periods: 900
                 """
@@ -322,6 +323,7 @@ class TestBuildRun:
         unlimited, _ = build_run("test_strat", str(tmp_path / "run.py"))
         assert unlimited.execution.default_fill_price == "close"
         assert unlimited.execution.max_bar_volume_participation_rate is None
+        assert unlimited.execution.max_rebalance_delay_bars == 2
         assert unlimited.execution.live_order_timeout_seconds == 120
         assert unlimited.execution.warmup_periods == 900
 
