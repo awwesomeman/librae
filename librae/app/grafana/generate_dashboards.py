@@ -126,6 +126,19 @@ def _data_source_filter(meta_alias: str, ohlcv_alias: str) -> str:
     )
 
 
+def _latest_position_event_order(alias: str = "") -> str:
+    """Return the canonical newest-position ordering for ``DISTINCT ON``.
+
+    Event ids zero-pad only the first four sequence digits, so length must
+    precede lexical order once a run reaches its ten-thousandth event.
+    """
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"ORDER BY {prefix}symbol, {prefix}ts DESC, "
+        f"length({prefix}event_id) DESC, {prefix}event_id DESC"
+    )
+
+
 # WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
 # Threshold = 2x strategy timeframe (not poll_seconds) to avoid false Offline on brief delays.
 _STATUS_SQL = (
@@ -398,7 +411,7 @@ _OPEN_POSITIONS_PANEL = _stat_panel(
         "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity\n"
         "  FROM position_events\n"
         "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
-        "  ORDER BY symbol, ts DESC\n"
+        f"  {_latest_position_event_order()}\n"
         ") p\n"
         "WHERE p.remaining_quantity > 0"
     ),
@@ -445,7 +458,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "    notional / NULLIF(price * fill_quantity, 0) AS multiplier\n"
                 "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
-                "  ORDER BY symbol, ts DESC\n"
+                f"  {_latest_position_event_order()}\n"
                 "),\n"
                 "marks AS (\n"
                 "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
@@ -522,7 +535,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked\n"
                 "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
-                "  ORDER BY symbol, ts DESC\n"
+                f"  {_latest_position_event_order()}\n"
                 "),\n"
                 "locked AS (\n"
                 "  SELECT COALESCE(SUM(p.margin_locked), 0) AS margin_locked\n"
@@ -904,7 +917,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "    AND ts <= $__timeTo()\n"
-                "  ORDER BY symbol, ts DESC\n"
+                f"  {_latest_position_event_order()}\n"
                 "),\n"
                 "marks AS (\n"
                 "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n"
@@ -1061,7 +1074,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  SELECT DISTINCT ON (symbol) symbol, remaining_quantity, margin_locked, margin_mode\n"
                 "  FROM position_events\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
-                "  ORDER BY symbol, ts DESC\n"
+                f"  {_latest_position_event_order()}\n"
                 ")\n"
                 "SELECT\n"
                 "  SUM(CASE WHEN p.margin_mode='unlevered' THEN p.margin_locked ELSE 0 END)\n"
@@ -1372,7 +1385,8 @@ def render_unified_dashboard() -> dict:
 # Account Overview Dashboard
 # ======================================================================
 
-_ACCOUNT_OVERVIEW_SQL = """WITH latest_equity AS (
+_ACCOUNT_OVERVIEW_SQL = (
+    """WITH latest_equity AS (
   SELECT DISTINCT ON (ec.run_id, ec.account_id)
     ec.run_id, ec.account_id, ec.currency, ec.ts, ec.equity,
     ec.gross_exposure, ec.net_exposure, ec.concentration
@@ -1395,9 +1409,9 @@ position_counts AS (
       AND pe.account_id = le.account_id
       AND pe.currency = le.currency
       AND pe.ts <= le.ts
-    -- event_id is zero-padded to four digits, so it stops sorting in write
-    -- order past 9999 events; compare length first to keep the newest event.
-    ORDER BY pe.symbol, pe.ts DESC, length(pe.event_id) DESC, pe.event_id DESC
+"""
+    f"    {_latest_position_event_order('pe')}"
+    """
   ) p ON true
   GROUP BY le.run_id, le.account_id
 )
@@ -1418,6 +1432,7 @@ JOIN backtest_runs br ON br.run_id = le.run_id
 JOIN position_counts pc
   ON pc.run_id = le.run_id AND pc.account_id = le.account_id
 ORDER BY le.ts DESC, br.strategy_name, le.run_id"""
+)
 
 
 def render_account_overview_dashboard() -> dict:
