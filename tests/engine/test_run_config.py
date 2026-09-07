@@ -53,6 +53,18 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
     assert backtest.config_hash != simulation.config_hash
 
 
+def test_run_config_normalizes_and_validates_timeframe() -> None:
+    canonical = _config(timeframe="H6")
+    ccxt = _config(timeframe="6h")
+
+    assert canonical.timeframe == "H6"
+    assert ccxt.timeframe == "H6"
+    assert canonical.config_hash == ccxt.config_hash
+    for timeframe in ("M0", "H0", "0m", "0h"):
+        with pytest.raises(ValueError, match="positive integer"):
+            _config(timeframe=timeframe)
+
+
 def test_run_requires_account_config() -> None:
     with pytest.raises(TypeError, match="AccountConfig"):
         _config(account={"currency": "USD", "initial_cash": 10_000.0})

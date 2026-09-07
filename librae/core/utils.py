@@ -128,6 +128,8 @@ def _parse_timeframe(interval: str) -> tuple[int, str]:
                 f"Unrecognized ccxt unit '{unit}' in '{interval}'. "
                 f"Supported: {list(_CCXT_UNIT_TO_PREFIX)}"
             )
+        if n <= 0:
+            raise ValueError(f"Timeframe count must be a positive integer, got {interval!r}")
         return n, prefix
 
     # Canonical format: letter prefix + digits (e.g. "M30", "H4", "MN1")
@@ -140,6 +142,8 @@ def _parse_timeframe(interval: str) -> tuple[int, str]:
                 f"Unrecognized canonical prefix '{prefix}' in '{interval}'. "
                 f"Supported: {list(_PREFIX_TO_CCXT_UNIT)}"
             )
+        if n <= 0:
+            raise ValueError(f"Timeframe count must be a positive integer, got {interval!r}")
         return n, prefix
 
     raise ValueError(

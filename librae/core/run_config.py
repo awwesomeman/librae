@@ -21,6 +21,8 @@ from math import isfinite
 from numbers import Real
 from typing import Any, Literal
 
+from librae.core.utils import to_canonical
+
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
 RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
@@ -379,6 +381,7 @@ class RunConfig:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{field_name} must be a non-empty string")
+        object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
         if self.calendar_id is not None and (
