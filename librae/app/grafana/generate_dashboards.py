@@ -1395,7 +1395,9 @@ position_counts AS (
       AND pe.account_id = le.account_id
       AND pe.currency = le.currency
       AND pe.ts <= le.ts
-    ORDER BY pe.symbol, pe.ts DESC, pe.event_id DESC
+    -- event_id is zero-padded to four digits, so it stops sorting in write
+    -- order past 9999 events; compare length first to keep the newest event.
+    ORDER BY pe.symbol, pe.ts DESC, length(pe.event_id) DESC, pe.event_id DESC
   ) p ON true
   GROUP BY le.run_id, le.account_id
 )

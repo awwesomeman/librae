@@ -12,6 +12,7 @@ from librae.app.grafana.generate_dashboards import (
     render_signal_monitor,
     render_unified_dashboard,
 )
+from librae.core.utils import make_event_id
 
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
@@ -286,8 +287,22 @@ class TestRenderAccountOverviewDashboard:
 
         assert "position_events" in sql
         assert "pe.ts <= le.ts" in sql
-        assert "ORDER BY pe.symbol, pe.ts DESC, pe.event_id DESC" in sql
         assert "remaining_quantity > 0" in sql
+
+    def test_same_timestamp_events_break_the_tie_on_event_order_not_text(self):
+        """make_event_id zero-pads the index to four digits, so past 9999
+        events the ids stop sorting in the order they were written: a plain
+        text DESC puts run-e9999 ahead of the newer run-e10000, and the count
+        would read a closed position as still open."""
+        earlier = make_event_id("run", 9999)
+        later = make_event_id("run", 10000)
+        assert sorted([earlier, later], reverse=True)[0] == earlier, (
+            "guard assumes the padding still overflows; widen it and this test can go"
+        )
+
+        sql = render_account_overview_dashboard()["panels"][0]["targets"][0]["rawSql"]
+
+        assert "ORDER BY pe.symbol, pe.ts DESC, length(pe.event_id) DESC, pe.event_id DESC" in sql
 
 
 class TestRenderSignalMonitor:
