@@ -22,16 +22,12 @@ import argparse
 import logging
 import time
 
+from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.db import get_conn
 from librae.notifications.config import TelegramConfig
 from librae.notifications.telegram import EMOJI_WARNING, TelegramAdapter, TelegramCredentials
 
 logger = logging.getLogger(__name__)
-
-# WHY: 3× poll_seconds allows for transient delays (network blips, GC pauses)
-# without false alarms. A single missed heartbeat is normal; 3 consecutive
-# misses strongly indicates the service is down.
-STALE_MULTIPLIER = 3
 
 
 def find_stale_runs() -> list[dict[str, str]]:
@@ -44,9 +40,9 @@ def find_stale_runs() -> list[dict[str, str]]:
             FROM backtest_runs
             WHERE mode IN ('sim', 'live')
               AND last_heartbeat_at IS NOT NULL
-              AND last_heartbeat_at < NOW() - (poll_seconds * %s || ' seconds')::interval
+              AND last_heartbeat_at < NOW() - make_interval(secs => poll_seconds * %s)
         """,
-            (STALE_MULTIPLIER,),
+            (HEARTBEAT_STALE_AFTER_POLLS,),
         )
         rows = cur.fetchall()
         cur.close()
@@ -110,7 +106,7 @@ def main() -> None:
         logger.info(
             "Heartbeat monitor started (interval=%ds, stale=%d×poll)",
             args.interval,
-            STALE_MULTIPLIER,
+            HEARTBEAT_STALE_AFTER_POLLS,
         )
         while True:
             try:

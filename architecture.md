@@ -166,6 +166,11 @@ Third-party data is joined point-in-time by the caller and returned as extra
 columns from the same adapter snapshot; see
 [External market data and factors](docs/guides/external-data.md).
 
+Runtime health follows that polling contract rather than the strategy bar
+timeframe. `poll_seconds` is persisted with run metadata, and a heartbeat is
+stale after three missed poll cycles. The standalone watchdog and generated
+Grafana dashboards consume the same multiplier.
+
 ## Broker Adapter Design (`librae/brokers/`)
 
 - One flat adapter class per observed broker-product protocol

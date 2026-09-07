@@ -12,6 +12,8 @@ import json
 import logging
 import pathlib
 
+from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
+
 logger = logging.getLogger(__name__)
 
 DATASOURCE: dict = {"type": "grafana-postgresql-datasource", "uid": "P40AE60E18F02DE32"}
@@ -139,51 +141,54 @@ def _latest_position_event_order(alias: str = "") -> str:
     )
 
 
-# WHY: Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A (no heartbeat).
-# Threshold = 2x strategy timeframe (not poll_seconds) to avoid false Offline on brief delays.
+def _runtime_status_case(alias: str = "") -> str:
+    """Return health status from the persisted runtime polling contract."""
+    prefix = f"{alias}." if alias else ""
+    heartbeat = f"{prefix}last_heartbeat_at"
+    poll_seconds = f"{prefix}poll_seconds"
+    return (
+        "CASE"
+        f" WHEN {heartbeat} IS NULL OR {poll_seconds} IS NULL OR {poll_seconds} <= 0 THEN -1"
+        f" WHEN {heartbeat} >= now() - make_interval("
+        f"secs => {poll_seconds} * {HEARTBEAT_STALE_AFTER_POLLS}) THEN 1"
+        " ELSE 0"
+        " END"
+    )
+
+
+def _status_value_mappings() -> list[dict]:
+    """Return consistent Grafana labels and colors for runtime health."""
+    return [
+        {
+            "type": "value",
+            "options": {
+                "1": {"text": "Online", "color": "green", "index": 0},
+                "0": {"text": "Offline", "color": "red", "index": 1},
+                "-1": {"text": "-", "color": "text", "index": 2},
+            },
+        }
+    ]
+
+
+# Returns integer for Grafana value mapping: 1=Online, 0=Offline, -1=N/A.
 _STATUS_SQL = (
-    "SELECT CASE"
-    " WHEN last_heartbeat_at IS NULL THEN -1"
-    " WHEN last_heartbeat_at > now() - "
-    "CASE UPPER(timeframe)"
-    " WHEN 'H1' THEN interval '2 hours'"
-    " WHEN '1H' THEN interval '2 hours'"
-    " WHEN 'M5' THEN interval '10 minutes'"
-    " WHEN '5M' THEN interval '10 minutes'"
-    " WHEN 'M15' THEN interval '30 minutes'"
-    " WHEN '15M' THEN interval '30 minutes'"
-    " WHEN 'H4' THEN interval '8 hours'"
-    " WHEN '4H' THEN interval '8 hours'"
-    " WHEN 'D1' THEN interval '2 days'"
-    " WHEN '1D' THEN interval '2 days'"
-    " ELSE interval '2 hours'"
-    " END"
-    " THEN 1"
-    " ELSE 0"
-    " END AS status"
-    " FROM backtest_runs WHERE run_id = '${run_id}'"
+    f"SELECT {_runtime_status_case()} AS status FROM backtest_runs WHERE run_id = '${{run_id}}'"
 )
 
 STATUS_PANEL: dict = {
     "_type": "kpi",
     "title": "Status",
-    "description": "Online if last_heartbeat_at within 2x timeframe. Offline = process may have stopped.",
+    "description": (
+        f"Online if the last heartbeat is within {HEARTBEAT_STALE_AFTER_POLLS} polling cycles. "
+        "Offline means the process may have stopped."
+    ),
     "type": "stat",
     "h": 4,
     "w": 4,
     "targets": [_stat_target(_STATUS_SQL)],
     "fieldConfig": {
         "defaults": {
-            "mappings": [
-                {
-                    "type": "value",
-                    "options": {
-                        "1": {"text": "Online", "color": "green", "index": 0},
-                        "0": {"text": "Offline", "color": "red", "index": 1},
-                        "-1": {"text": "-", "color": "text", "index": 2},
-                    },
-                },
-            ],
+            "mappings": _status_value_mappings(),
             "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
             "color": {"mode": "fixed"},
         },
@@ -1420,6 +1425,9 @@ SELECT
   br.mode AS "Mode",
   le.run_id AS "Run ID",
   le.ts AS "Last Equity",
+"""
+    f'  {_runtime_status_case("br")} AS "Status",'
+    """
   br.last_heartbeat_at AS "Heartbeat",
   ROUND(le.equity::numeric, 2)::float8 AS "Equity",
   le.currency AS "Currency",
@@ -1457,6 +1465,13 @@ def render_account_overview_dashboard() -> dict:
                 _width_override("Mode", 90),
                 _width_override("Run ID", 260),
                 _width_override("Last Equity", 180),
+                {
+                    "matcher": {"id": "byName", "options": "Status"},
+                    "properties": [
+                        {"id": "mappings", "value": _status_value_mappings()},
+                        {"id": "custom.width", "value": 90},
+                    ],
+                },
                 _width_override("Heartbeat", 180),
                 _width_override("Currency", 90),
                 {
