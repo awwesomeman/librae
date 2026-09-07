@@ -237,11 +237,15 @@ def _run_trade_script(
     # real repo root, so a developer's real .env/.env.secrets can't leak
     # values (e.g. TRADE_TIMESCALE_DSN) into this subprocess and shadow the
     # env-injected ones the test controls below.
+    # Copy rather than symlink: only the script's location matters here, and
+    # creating a symlink on Windows needs a privilege a developer account does
+    # not hold by default, which failed every test in this module before the
+    # first line of trade.sh ran.
     isolated_deploy_dir = tmp_path / "deploy"
     isolated_deploy_dir.mkdir(parents=True, exist_ok=True)
     isolated_trade_script = isolated_deploy_dir / "trade.sh"
     if not isolated_trade_script.exists():
-        isolated_trade_script.symlink_to(DEPLOY / "trade.sh")
+        shutil.copy2(DEPLOY / "trade.sh", isolated_trade_script)
     docker_log = tmp_path / "docker.log"
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
