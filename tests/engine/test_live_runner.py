@@ -2182,6 +2182,301 @@ class TestLiveExecutionLifecycle:
         assert runner._positions["D"].quantity == pytest.approx(1.0)
         assert runner._positions["SOLO"].quantity == pytest.approx(1.0)
 
+    def test_live_group_adapter_preflight_failure_submits_no_sibling(self):
+        adapter = _mock_order_adapter()
+
+        def prepare_order(signal):
+            if signal["canonical_symbol"] == "B":
+                raise ValueError("below minimum notional")
+            return signal
+
+        adapter.prepare_order.side_effect = prepare_order
+        adapter.place_order.side_effect = [
+            _broker_report(order_id="c-1", quantity=1.0, average=100.0),
+            _broker_report(order_id="d-1", quantity=1.0, average=100.0),
+            _broker_report(order_id="solo-1", quantity=1.0, average=100.0),
+        ]
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "B", "C", "D", "SOLO"]),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {symbol: 100.0 for symbol in ("A", "B", "C", "D", "SOLO")}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0, group_id="bad"),
+                OrderIntent(action="short", symbol="B", quantity=1.0, group_id="bad"),
+                OrderIntent(action="long", symbol="C", quantity=1.0, group_id="good"),
+                OrderIntent(action="short", symbol="D", quantity=1.0, group_id="good"),
+                OrderIntent(action="long", symbol="SOLO", quantity=1.0),
+            ],
+            {
+                symbol: {"close": 100.0, "volume": 10_000.0}
+                for symbol in ("A", "B", "C", "D", "SOLO")
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        submitted_symbols = [
+            call.args[0]["canonical_symbol"] for call in adapter.place_order.call_args_list
+        ]
+        assert complete is True
+        assert submitted_symbols == ["C", "D", "SOLO"]
+        assert set(runner._positions) == {"C", "D", "SOLO"}
+        assert runner._halted is False
+        assert len(runtime_events) == 1
+        assert runtime_events[0].detail["reason"] == "group_preflight_rejected"
+        assert runtime_events[0].detail["group_id"] == "bad"
+
+    def test_live_group_rejects_asymmetric_adapter_quantity_rounding(self):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {
+            **signal,
+            "quantity": (
+                signal["quantity"] / 2 if signal["canonical_symbol"] == "B" else signal["quantity"]
+            ),
+        }
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "B"]),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {"A": 100.0, "B": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0, group_id="ratio"),
+                OrderIntent(action="short", symbol="B", quantity=2.0, group_id="ratio"),
+            ],
+            {
+                "A": {"close": 100.0, "volume": 10_000.0},
+                "B": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert runner._active_orders == []
+        assert runner._positions == {}
+        adapter.place_order.assert_not_called()
+        assert "relative leg ratios" in runtime_events[0].detail["message"]
+
+    def test_live_group_rejects_equal_adapter_upsize_before_the_risk_replay(self):
+        """An equal upsize keeps the leg ratio, so the ratio guard passes; the
+        size guard still rejects it, and only that group -- the ungrouped
+        sibling the adapter leaves alone is submitted as requested."""
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {
+            **signal,
+            "quantity": signal["quantity"] * (2 if signal["canonical_symbol"] != "SOLO" else 1),
+        }
+        adapter.place_order.return_value = _broker_report(
+            order_id="solo-1", quantity=0.5, average=100.0
+        )
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "B", "SOLO"]),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {"A": 100.0, "B": 100.0, "SOLO": 100.0}
+        runner._risk_policy = RiskPolicy(max_order_notional=150.0)
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0, group_id="oversized"),
+                OrderIntent(action="short", symbol="B", quantity=1.0, group_id="oversized"),
+                OrderIntent(action="long", symbol="SOLO", quantity=0.5),
+            ],
+            {symbol: {"close": 100.0, "volume": 10_000.0} for symbol in ("A", "B", "SOLO")},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert set(runner._positions) == {"SOLO"}
+        submitted = adapter.place_order.call_args.args[0]
+        assert submitted["canonical_symbol"] == "SOLO"
+        assert submitted["quantity"] == pytest.approx(0.5)
+        assert "cannot increase quantity" in runtime_events[0].detail["message"]
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_message"),
+        [
+            ("cash", "insufficient_cash"),
+            ("tradability", "not tradable"),
+            ("risk", "net exposure"),
+        ],
+    )
+    def test_live_group_local_preflight_failure_isolated_from_ungrouped(
+        self,
+        failure,
+        expected_message,
+    ):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="solo-1", quantity=1.0, average=100.0
+        )
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "B", "SOLO"]),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {"A": 100.0, "B": 100.0, "SOLO": 100.0}
+        quantities = 600.0 if failure in ("cash", "risk") else 1.0
+        if failure == "risk":
+            runner._risk_policy = RiskPolicy(max_net_exposure=0.5)
+        bars = {
+            "A": {"close": 100.0, "volume": 10_000.0},
+            "B": {
+                "close": 100.0,
+                "volume": 10_000.0,
+                "can_buy": True,
+                "can_sell": failure != "tradability",
+            },
+            "SOLO": {"close": 100.0, "volume": 10_000.0},
+        }
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=quantities, group_id="rejected"),
+                OrderIntent(action="short", symbol="B", quantity=quantities, group_id="rejected"),
+                OrderIntent(action="long", symbol="SOLO", quantity=1.0),
+            ],
+            bars,
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert set(runner._positions) == {"SOLO"}
+        submitted = adapter.place_order.call_args.args[0]
+        assert submitted["canonical_symbol"] == "SOLO"
+        assert expected_message in runtime_events[0].detail["message"]
+
+    @pytest.mark.parametrize("quantity", [None, 1.0])
+    def test_ungrouped_close_of_a_flat_symbol_is_a_no_op(self, quantity):
+        """Matches simulated execution, where a close for a symbol with no
+        position is skipped. Reachable through an idempotent close, a pending
+        close whose position closed in the meantime, or restart drift; only a
+        grouped close, which asks for fill-or-kill, treats it as a failure."""
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(_HoldStrategy(), adapter)
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        complete = runner._execute_live_decision(
+            [OrderIntent(action="close", symbol="BTCUSDT", quantity=quantity)],
+            {"BTCUSDT": {"close": 100.0, "volume": 10_000.0}},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        adapter.place_order.assert_not_called()
+
+    def test_grouped_close_of_a_flat_symbol_rejects_its_group_only(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="solo-1", quantity=1.0, average=100.0
+        )
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "SOLO"]),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {"A": 100.0, "SOLO": 100.0}
+        bars = {
+            "A": {"close": 100.0, "volume": 10_000.0},
+            "SOLO": {"close": 100.0, "volume": 10_000.0},
+        }
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="close", symbol="A", quantity=1.0, group_id="exit"),
+                OrderIntent(action="long", symbol="SOLO", quantity=1.0),
+            ],
+            bars,
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert set(runner._positions) == {"SOLO"}
+        assert "no open position" in runtime_events[0].detail["message"]
+
+    def test_live_group_checkpoints_all_siblings_and_resumes_after_restart(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            state_store=store,
+            config=_test_cfg(mode="live", symbols=["A", "B"]),
+        )
+        runner._last_prices = {"A": 100.0, "B": 100.0}
+        checkpointed_before_submit: list[str] = []
+
+        def place_order(signal):
+            if not checkpointed_before_submit:
+                assert adapter.prepare_order.call_count == 2
+                checkpoint = store.load(runner._state_key)
+                assert checkpoint is not None
+                checkpointed_before_submit.extend(
+                    tracked.request.symbol for tracked in checkpoint.active_orders
+                )
+            if signal["canonical_symbol"] == "A":
+                return _broker_report(order_id="a-1", quantity=1.0, average=100.0)
+            return _broker_report(order_id="b-1", status="accepted", quantity=1.0, filled=0.0)
+
+        adapter.place_order.side_effect = place_order
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0, group_id="pair"),
+                OrderIntent(action="long", symbol="B", quantity=1.0, group_id="pair"),
+            ],
+            {
+                "A": {"close": 100.0, "volume": 10_000.0},
+                "B": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        assert checkpointed_before_submit == ["A", "B"]
+        assert runner._positions["A"].quantity == pytest.approx(1.0)
+        assert [tracked.request.symbol for tracked in runner._active_orders] == ["B"]
+
+        adapter.get_order.return_value = _broker_report(order_id="b-1", quantity=1.0, average=100.0)
+        adapter.get_position.side_effect = lambda request: {
+            "symbol": request.venue_symbol,
+            "size": 1.0,
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        restored = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            state_store=store,
+            config=_test_cfg(mode="live", symbols=["A", "B"]),
+        )
+        restored._initialize_run()
+
+        assert restored._halted is False
+        assert restored._active_orders == []
+        assert set(restored._positions) == {"A", "B"}
+        assert adapter.place_order.call_count == 2
+
     def test_live_group_ambiguous_placement_still_halts_whole_account(self):
         """A confirmed broker rejection scopes to its group (see above), but
         an *ambiguous* failure (submit and find_order both fail) means the
