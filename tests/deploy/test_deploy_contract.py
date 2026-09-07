@@ -841,11 +841,10 @@ def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
     assert "Cloud deployment failed during file transfer (exit 17)." in result.stderr
 
 
-def test_dashboard_generator_does_not_import_the_engine_package() -> None:
+def test_dashboard_generator_runs_as_package_module() -> None:
     script = (ROOT / "scripts/dev_push_dashboard.py").read_text(encoding="utf-8")
 
-    assert '"librae/app/grafana/generate_dashboards.py"' in script
-    assert '"librae.app.grafana.generate_dashboards"' not in script
+    assert '[sys.executable, "-m", "librae.app.grafana.generate_dashboards"]' in script
 
 
 def test_grafana_receives_only_its_database_password() -> None:

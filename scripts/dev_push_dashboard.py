@@ -77,7 +77,7 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Re-generate dashboard JSON and deploy to Grafana."""
     subprocess.run(
-        [sys.executable, "librae/app/grafana/generate_dashboards.py"],
+        [sys.executable, "-m", "librae.app.grafana.generate_dashboards"],
         check=True,
     )
     dashboard_dir = "librae/app/grafana/provisioning/dashboards/json"
