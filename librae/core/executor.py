@@ -81,6 +81,18 @@ class ExecutionPriceUnavailableError(ExecutionUnavailableError):
         super().__init__(symbols, f"rebalance requires a valid execution price for {joined}")
 
 
+class AmbiguousBarOrderingError(ExecutionUnavailableError):
+    """This bar cannot order a triggered protection against a non-open fill."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        joined = ", ".join(sorted(symbols))
+        super().__init__(
+            symbols,
+            "ambiguous same-bar ordering between non-open pending execution "
+            f"and triggered protection for {joined}",
+        )
+
+
 def _intent_order_side(
     intent: OrderIntent,
     position_side: PositionSide | None,
@@ -2212,6 +2224,57 @@ def merge_pending_decisions(
     return [*pending_intents, *new_intents]
 
 
+def _validate_no_ambiguous_stop_conflicts(
+    pending_decision: StrategyDecision,
+    positions: dict[str, PositionState],
+    bars: dict[str, dict[str, float]],
+    *,
+    get_cost_model: Callable[[str], CostModel],
+    default_fill: str,
+    primary_symbol: str,
+) -> None:
+    """Refuse to guess the order of a non-open fill and a triggered protection.
+
+    OHLCV bars cannot establish whether an intrabar stop/target occurred before
+    or after a close/high/low fill. Detect it before execution so no cash,
+    position, or liquidity-budget mutation can leak from the batch, and raise
+    it as a deferrable condition: moving the fill to a later bar leaves the
+    protection alone on this one, at its own price, so the ordering stops
+    being a question rather than being guessed. Where no deferral is
+    configured the caller sees the raise, which is the fail-closed default.
+    """
+    if not pending_decision or default_fill == "open":
+        return
+
+    if isinstance(pending_decision, PortfolioWeights):
+        # A whole-book target prices every open position, so each one overlaps
+        # the batch whether or not the symbol appears in the target weights.
+        decision_symbols = set(positions)
+    else:
+        decision_symbols = {
+            intent.symbol or primary_symbol
+            for intent in pending_decision
+            if not _intent_executes_at_open(
+                intent,
+                bars.get(intent.symbol or primary_symbol, {}),
+                default_fill,
+            )
+        }
+
+    conflicts = sorted(
+        symbol
+        for symbol in set(positions) & decision_symbols & set(bars)
+        # WHY: a market exit carried from an earlier bar resumes at this bar's
+        # open, ahead of any close/high/low fill, so its ordering is defined.
+        # resolve_stop_exit reports it before reading any trigger level, so
+        # only a level triggered by *this* bar is genuinely ambiguous.
+        if positions[symbol].pending_market_exit_reason is None
+        and resolve_stop_exit(positions[symbol], bars[symbol], get_cost_model(symbol)) is not None
+    )
+    if conflicts:
+        raise AmbiguousBarOrderingError(conflicts)
+
+
 def execute_pending_decision_and_stops(
     ts: datetime,
     positions: dict[str, PositionState],
@@ -2251,6 +2314,14 @@ def execute_pending_decision_and_stops(
     same_bar_protection_symbols = set(positions)
 
     if pending_decision:
+        _validate_no_ambiguous_stop_conflicts(
+            pending_decision,
+            positions,
+            bars,
+            get_cost_model=get_cost_model,
+            default_fill=default_fill,
+            primary_symbol=primary_symbol,
+        )
         enforce_portfolio_limits = max_gross_exposure is not None or max_net_exposure is not None
         if enforce_portfolio_limits and exposure_prices is None:
             raise ValueError("portfolio exposure limits require explicit exposure_prices")
