@@ -1443,7 +1443,16 @@ class LiveTrader:
         *,
         reference_price: float,
     ) -> OrderRequest:
-        """Apply venue normalization, then enforce the live limit-price collar."""
+        """Apply venue normalization, then enforce the live limit-price collar.
+
+        The executor already rejects a prepared order that changes symbol,
+        drops a limit price, or enlarges the quantity. A limit price the
+        adapter rounds toward the aggressive side is deliberately not
+        rejected outright: a tick of rounding is normal venue behaviour, and
+        halting the account for it would cost more than it protects. The
+        opt-in ``max_limit_price_deviation_rate`` collar below is the bound
+        on how far a prepared limit may sit from the reference price.
+        """
         prepared = self._executor.prepare_order(
             request,
             reference_price=reference_price,

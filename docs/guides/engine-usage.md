@@ -630,7 +630,12 @@ contract). Each adapter maps the four values to its own SDK:
 - `max_limit_price_deviation_rate`: in live mode, rejects a broker-normalized
   limit price whose absolute distance from the latest completed close exceeds
   this ratio. Market orders are unaffected because their execution price is
-  not known before submission.
+  not known before submission. Independently of any `RiskPolicy` setting,
+  adapter preparation may only round a quantity *down*: a prepared order
+  whose quantity exceeds the requested one, drops a limit price, or changes
+  the venue symbol halts the account before checkpointing or submission.
+  After preparation the order is replayed through the same notional, cash,
+  position, and exposure checks as the original request.
 - `max_gross_exposure` / `max_net_exposure`: backtest/sim validate every
   complete strategy decision batch (`list[OrderIntent]`, grouped or not, or
   `PortfolioWeights`) against staged post-decision positions before mutation.

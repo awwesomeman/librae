@@ -3118,12 +3118,16 @@ class TestLiveExecutionLifecycle:
     @pytest.mark.parametrize(
         ("risk_policy", "requested_quantity", "prepared_quantity", "message"),
         [
-            (RiskPolicy(max_order_notional=150.0), 1.0, 2.0, "max_order_notional"),
-            (RiskPolicy(max_position_weight=0.5), 400.0, 600.0, "post-adapter risk"),
-            (RiskPolicy(max_gross_exposure=0.5), 400.0, 600.0, "gross exposure"),
+            # WHY: the size check runs before the risk replay and does not
+            # depend on any limit being set, so every RiskPolicy -- including
+            # the all-None default -- rejects an enlargement the same way.
+            (RiskPolicy(), 1.0, 2.0, "cannot increase quantity"),
+            (RiskPolicy(max_order_notional=150.0), 1.0, 2.0, "cannot increase quantity"),
+            (RiskPolicy(max_position_weight=0.5), 400.0, 600.0, "cannot increase quantity"),
+            (RiskPolicy(max_gross_exposure=0.5), 400.0, 600.0, "cannot increase quantity"),
         ],
     )
-    def test_prepared_quantity_cannot_bypass_entry_risk_limits(
+    def test_enlarged_prepared_quantity_is_rejected_before_the_risk_replay(
         self,
         risk_policy,
         requested_quantity,
@@ -3157,6 +3161,29 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
         adapter.place_order.assert_not_called()
         assert any(message in kwargs.get("message", "") for _, kwargs in alerts)
+
+    def test_downward_lot_rounding_is_submitted_at_the_rounded_size(self):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {**signal, "quantity": 0.9}
+        adapter.place_order.return_value = {
+            "id": "market-1",
+            "status": "submitted",
+            "amount": 0.9,
+            "filled": 0.0,
+        }
+
+        class Buy(Strategy):
+            def on_bar(self, ctx):
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+
+        runner = self._make_trader(Buy(), adapter)
+        runner._risk_policy = RiskPolicy()
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is False
+        adapter.place_order.assert_called_once()
+        assert adapter.place_order.call_args[0][0]["quantity"] == pytest.approx(0.9)
 
     def test_prepared_limit_price_cannot_bypass_order_notional_limit(self):
         adapter = _mock_order_adapter()
