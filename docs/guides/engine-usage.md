@@ -292,6 +292,10 @@ intents for asynchronous cross-market execution.
 
 ## Related multi-leg order contract
 
+This section is the canonical `group_id` execution contract. Summaries in API,
+architecture, and operational surfaces must preserve the mode boundary below;
+`group_id` never upgrades serial broker requests into venue atomicity.
+
 `OrderIntent.group_id` ties explicitly sized, related orders together for
 synchronous research simulation. It covers spreads, rolls, inventory hedges,
 and ordered cross-instrument exposure transitions without encoding

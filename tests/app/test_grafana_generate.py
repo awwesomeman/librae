@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 from librae.app.grafana.generate_dashboards import (
     build_panels,
@@ -13,6 +16,33 @@ from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     make_signal_outcome_contract_ohlcv,
 )
+
+DASHBOARD_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "librae"
+    / "app"
+    / "grafana"
+    / "provisioning"
+    / "dashboards"
+    / "json"
+)
+
+
+def _json_value(value: dict) -> dict:
+    """Normalize tuples and other JSON-compatible containers."""
+    return json.loads(json.dumps(value))
+
+
+def test_checked_in_dashboards_match_the_generator() -> None:
+    """Generated dashboards are build artifacts, never a second source."""
+    expected = {
+        "strategy_dashboard.json": render_unified_dashboard(),
+        "signal_dashboard.json": render_signal_monitor(),
+    }
+
+    for filename, rendered in expected.items():
+        committed = json.loads((DASHBOARD_DIR / filename).read_text(encoding="utf-8"))
+        assert committed == _json_value(rendered), f"regenerate {filename}"
 
 
 def _kpi_def(title: str, w: int = 4, h: int = 4) -> dict:
@@ -162,14 +192,15 @@ class TestRenderUnifiedDashboard:
         assert "concentration" in sql
 
     def test_position_events_surfaces_group_id(self):
-        """group_id (OrderIntent's atomic multi-leg grouping) is the correct
-        way to pair related rows (e.g. a funding-arb spot+perp leg) — not
-        coincidental symbol-name sorting."""
+        """group_id is the correct way to pair related rows (e.g. a
+        funding-arb spot+perp leg), not coincidental symbol-name sorting."""
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Trade Events")
         sql = panel["targets"][0]["rawSql"]
         assert '"Group"' in sql
         assert "group_id" in sql
+        assert "Backtest/sim stages them all-or-none locally" in panel["description"]
+        assert "does not imply venue atomicity" in panel["description"]
 
     def test_position_snapshot_surfaces_trade_id_not_group(self):
         """Position Snapshot swaps Group for Trade ID (symbol + open time) —

@@ -698,8 +698,9 @@ BASE_PANELS_DEF: list[dict] = [
             "- Position — running position size after this event, not this\n"
             "  event's Quantity.\n"
             "- Cost — commission + slippage + tax for this event, account currency.\n"
-            "- Group — ties every leg of one atomic multi-leg decision (e.g. a\n"
-            "  spot+perp arb pair) — legs fill together or the group is rejected.\n"
+            "- Group — identifies related legs (e.g. a spot+perp arb pair).\n"
+            "  Backtest/sim stages them all-or-none locally. Live records serial\n"
+            "  broker fills; the label does not imply venue atomicity.\n"
             "- Trade ID — symbol + this trade's open time; identifies one\n"
             "  open→close round-trip.\n"
             "- Periods — elapsed bars, not clock time — multiply by the run's\n"
@@ -1732,13 +1733,19 @@ def main() -> None:
     # Strategy Dashboard
     dashboard = render_unified_dashboard()
     out_path = OUT_DIR / "strategy_dashboard.json"
-    out_path.write_text(json.dumps(dashboard, indent=2, ensure_ascii=False))
+    out_path.write_text(
+        json.dumps(dashboard, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     logger.info("%s — %d panels", out_path, len(dashboard["panels"]))
 
     # Signal Dashboard
     sig_mon = render_signal_monitor()
     sig_path = OUT_DIR / "signal_dashboard.json"
-    sig_path.write_text(json.dumps(sig_mon, indent=2, ensure_ascii=False))
+    sig_path.write_text(
+        json.dumps(sig_mon, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     logger.info("%s — %d panels", sig_path, len(sig_mon["panels"]))
 
 

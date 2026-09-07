@@ -364,7 +364,7 @@ document scoped to layering, boundaries, and naming conventions.
 | `Context` | immutable event snapshot: current bars, positions, one account snapshot, and callback period index |
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
-| `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` ties it to other intents in the same decision that must fill together atomically; `time_in_force` (`day`/`gtc`/`ioc`/`fok`) is a live-only broker hint, ignored by backtest/sim |
+| `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` identifies related legs — backtest/sim stage them as one local fill-or-kill unit, while live preflights them before serial broker submission and does not claim venue atomicity (see the [related multi-leg contract](docs/guides/engine-usage.md#related-multi-leg-order-contract)); `time_in_force` (`day`/`gtc`/`ioc`/`fok`) is a live-only broker hint, ignored by backtest/sim |
 | `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest (optionally bounded whole-book deferral on explicit untradability), next-cycle simulation resolution, immediate market-order sizing in live |
 | `Position` | frozen position (what the strategy sees): symbol, side, entry_price, quantity, unrealized_pnl |
 | `PositionState` | mutable position (engine-internal): tracks periods_held, entry_commission, entry_slippage, entry_tax, total_entry_cost |

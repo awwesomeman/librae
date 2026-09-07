@@ -12,6 +12,15 @@ def _decision() -> list[OrderIntent]:
     ]
 
 
+def test_public_grouped_execution_contract_is_mode_specific() -> None:
+    """The public API must not imply venue atomicity from group_id alone."""
+    contract = OrderIntent.__doc__ or ""
+
+    assert "Backtest/sim" in contract
+    assert "Live preflights" in contract
+    assert "does not claim broker or cross-venue atomicity" in contract
+
+
 def test_grouped_decision_rejected_when_a_required_symbol_has_no_bar() -> None:
     decision = _decision()
 

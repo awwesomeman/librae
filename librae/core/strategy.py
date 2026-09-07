@@ -3,10 +3,10 @@
 Defines the contract between strategies and the engine:
 - Strategy implements on_bar(ctx) → list[OrderIntent] | PortfolioWeights
 - Engine provides Context with market data + portfolio state
-- Engine executes symbol intents or portfolio weights. OrderIntents sharing
-  a non-None group_id form an atomic related-order group (spreads, rolls,
-  hedges); the engine fills every member together or raises, and any number
-  of independent groups may coexist in one decision.
+- Engine executes symbol intents or portfolio weights. A non-None group_id
+  identifies related legs, but its guarantee is mode-specific: backtest/sim
+  stage the group as one local fill-or-kill unit, while live preflights it
+  before serial broker requests and cannot guarantee venue atomicity.
 """
 
 from __future__ import annotations
@@ -142,12 +142,15 @@ class OrderIntent:
             For a new entry whose simulated fill time within the bar is
             ambiguous (for example, a resting limit), protection starts on the
             next bar. Entries known to fill at open may trigger it immediately.
-        group_id: Ties this intent to other OrderIntents in the same decision
-            that share the same group_id, forming one atomic related-order
-            group (spreads, rolls, inventory hedges). The engine fills every
-            member of a group together on one bar or raises — never partially.
-            None means independent execution (the default): the intent may
-            wait for its own symbol's next bar without blocking anything else.
+        group_id: Ties this intent to related OrderIntents in the same decision
+            (spreads, rolls, inventory hedges). Backtest/sim stage the group as
+            one local fill-or-kill unit: every leg fills as requested or the
+            staged mutation is rolled back. Live preflights and checkpoints the
+            complete group before submitting serial broker requests; a later
+            venue failure can still leave an already-filled leg, so group_id
+            does not claim broker or cross-venue atomicity. None means
+            independent execution (the default): the intent may wait for its
+            own symbol's next bar without blocking anything else.
         time_in_force: Broker time-in-force hint — "day" (rest until session
             end), "gtc" (rest until cancelled), "ioc" (fill immediately,
             cancel the remainder), or "fok" (fill the entire quantity
