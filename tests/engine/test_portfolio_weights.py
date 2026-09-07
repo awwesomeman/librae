@@ -15,7 +15,7 @@ from librae.core.executor import (
     execute_pending_decision_and_stops,
     execute_portfolio_weights,
 )
-from librae.core.run_config import ExecutionPolicy
+from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     Context,
     OrderIntent,
@@ -1028,6 +1028,75 @@ class TestBacktestRebalance:
             ("B", 0.0),
         ]
         assert all(event.detail["blocked_symbols"] == ["B"] for event in deferred)
+
+    def test_order_intents_while_a_residual_is_pending_raise(self) -> None:
+        """A per-symbol order cannot be sequenced against a whole-book target
+        that is still filling, so the strategy must return nothing or a
+        newer PortfolioWeights until the residual clears."""
+        frame = _multi_asset_frame(opens={"A": [100.0] * 5})
+        frame["volume"] = 1.0
+
+        class IntentDuringResidual(Strategy):
+            def on_bar(self, ctx: Context) -> StrategyDecision:
+                if ctx.period_index == 0:
+                    return PortfolioWeights(weights={"A": 0.3})
+                if ctx.period_index == 2:
+                    return [OrderIntent(action="close", symbol="A")]
+                return []
+
+        with pytest.raises(ValueError, match="rebalance is deferred"):
+            Backtest(
+                frame,
+                IntentDuringResidual(),
+                initial_balance=1_000.0,
+                cost_model=CostModel.zero(),
+                data_source="test",
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=1.0,
+                    max_rebalance_delay_bars=4,
+                    rebalance_residual_policy="defer_symbols",
+                ),
+            ).run()
+
+    def test_drawdown_halt_records_the_residual_it_cancels(self) -> None:
+        """Every other path that drops a residual leaves an audit event
+        (supersession, protective exit). A drawdown halt must too, or the
+        event log shows a target that simply stops filling."""
+        frame = _multi_asset_frame(opens={"A": [100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 50.0]})
+        timestamps = frame.index.get_level_values("datetime").unique()
+        frame["volume"] = 1.0
+
+        class SlowTarget(Strategy):
+            def on_bar(self, ctx: Context) -> StrategyDecision:
+                if ctx.period_index == 0:
+                    return PortfolioWeights(weights={"A": 0.5})
+                return []
+
+        result = Backtest(
+            frame,
+            SlowTarget(),
+            initial_balance=1_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=1.0,
+                max_rebalance_delay_bars=8,
+                rebalance_residual_policy="defer_symbols",
+            ),
+            risk=RiskPolicy(max_drawdown_rate=0.05),
+        ).run()
+
+        cancelled = [
+            event
+            for event in result.runtime_events
+            if event.detail.get("reason") == "rebalance_cancelled_by_halt"
+        ]
+        assert [(event.ts, event.symbol) for event in cancelled] == [(timestamps[3], "A")]
+        assert cancelled[0].detail["remaining_quantity"] > 0
+        assert not any(
+            event.ts > timestamps[3] and event.detail.get("reason") == "rebalance_residual"
+            for event in result.runtime_events
+        )
 
     def test_defer_symbols_allows_independent_progress(self) -> None:
         frame = _multi_asset_frame(

@@ -88,7 +88,10 @@ Historical data may additionally provide non-null boolean `can_buy` and
 market-specific price limits, halts, auctions, and empty-book states into these
 side-level facts. Entry, ordinary close, stop, liquidation, drawdown, and
 terminal fills share the rule. Triggered adverse stops/liquidations remain
-pending until the required side is tradable; a terminal backtest raises rather
+pending until the required side is tradable — or, on every
+`rebalance_residual_policy` including the default, until a bar's volume or
+ADV budget can fill any of it; a bar too thin to fill at all carries the exit
+to the next open rather than dropping it. A terminal backtest raises rather
 than inventing liquidity. Omitting both columns explicitly means the data
 source supplied no side-tradability state. These facts must never be inferred
 from the selected execution broker because one broker may route many markets.

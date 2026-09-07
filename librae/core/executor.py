@@ -429,6 +429,7 @@ def coalesce_runtime_events(events: list[RuntimeEvent]) -> list[RuntimeEvent]:
         "protective_exit_deferred": 2,
         "rebalance_superseded": 3,
         "rebalance_cancelled_by_protective_exit": 4,
+        "rebalance_cancelled_by_halt": 4,
     }
     by_key: dict[tuple[datetime, RuntimeEventType, str | None], int] = {}
     coalesced: list[RuntimeEvent] = []

@@ -114,8 +114,15 @@ def _rebalance_symbols(state: PortfolioRebalanceState) -> tuple[str, ...]:
 def _superseded_rebalance_events(
     ts: datetime,
     state: PortfolioRebalanceState,
+    *,
+    reason: str = "rebalance_superseded",
 ) -> list[RuntimeEvent]:
-    """Build one persistence-safe supersession event per symbol."""
+    """Build one persistence-safe cancellation event per symbol.
+
+    ``reason`` names what ended the residual; every path that drops one --
+    supersession, a protective exit, a halt -- must leave this audit trail so
+    the event log never shows a target that simply stops filling.
+    """
     orders_by_symbol: dict[str, list[RebalanceOrderState]] = {}
     for order in state.orders:
         orders_by_symbol.setdefault(order.intent.symbol, []).append(order)
@@ -134,7 +141,7 @@ def _superseded_rebalance_events(
             for order in orders
         ]
         detail: dict[str, object] = {
-            "reason": "rebalance_superseded",
+            "reason": reason,
             "quantity_scope": "target",
             "requested_quantity": sum(order.requested_quantity for order in orders),
             "filled_quantity": sum(
@@ -163,7 +170,7 @@ def _superseded_rebalance_events(
                 event_type="decision_skipped",
                 symbol=leg.symbol,
                 detail={
-                    "reason": "rebalance_superseded",
+                    "reason": reason,
                     "sizing_state": "superseded_before_quantity_resolution",
                     "notional_scope": "target_allocation",
                     "requested_notional": target_notional,
@@ -831,6 +838,12 @@ class Backtest:
 
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
+                if pending_rebalance is not None:
+                    runtime_events.extend(
+                        _superseded_rebalance_events(
+                            ts, pending_rebalance, reason="rebalance_cancelled_by_halt"
+                        )
+                    )
                 pending_decision = []
                 pending_rebalance = None
             else:
@@ -858,6 +871,7 @@ class Backtest:
                     if isinstance(new_decision, PortfolioWeights):
                         runtime_events.extend(_superseded_rebalance_events(ts, pending_rebalance))
                         pending_rebalance = None
+                        unavailable_rebalance_symbols = ()
                     elif new_decision:
                         raise ValueError(
                             "cannot emit OrderIntents while a PortfolioWeights "

@@ -66,3 +66,20 @@ executor, including cumulative per-bar and per-session budgets.
 This state is intentionally in-memory and backtest-only. Broker order IDs,
 cancel/replace behavior, durable recovery, and wall-clock scheduling remain
 live execution concerns and are not implied by this policy.
+
+One change here applies on every `rebalance_residual_policy`, including the
+`"discard"` default, and is deliberate: a triggered stop or liquidation that
+this bar's volume or ADV budget cannot fill at all now carries to the next
+open as a pending market exit, exactly as one whose side is untradable
+already did, and records a `protective_exit_deferred` event. Previously it
+was silently dropped and the level re-checked next bar, which could miss the
+exit entirely; a working stop at a venue does not evaporate because the bar
+was thin. The cost is the existing end-of-sample rule: a pending exit with
+no later tradable bar raises rather than inventing liquidity, so a run that
+used to finish quietly with a missed stop now fails loudly at its last bar.
+
+Every path that drops a residual leaves a cancellation event under the same
+`decision_skipped` identity — `rebalance_superseded`,
+`rebalance_cancelled_by_protective_exit`, and `rebalance_cancelled_by_halt`
+for a drawdown halt — so the event log never shows a target that simply
+stops filling.
