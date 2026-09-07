@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from librae.app.grafana.generate_dashboards import (
     build_panels,
+    render_account_overview_dashboard,
     render_signal_monitor,
     render_unified_dashboard,
 )
@@ -37,6 +38,7 @@ def test_checked_in_dashboards_match_the_generator() -> None:
     """Generated dashboards are build artifacts, never a second source."""
     expected = {
         "strategy_dashboard.json": render_unified_dashboard(),
+        "account_overview_dashboard.json": render_account_overview_dashboard(),
         "signal_dashboard.json": render_signal_monitor(),
     }
 
@@ -237,6 +239,55 @@ class TestRenderUnifiedDashboard:
         assert "${run_id}" in sql
         assert "detail->>'reason'" in sql
         assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
+
+
+class TestRenderAccountOverviewDashboard:
+    def test_has_required_fields_and_variables(self):
+        dashboard = render_account_overview_dashboard()
+
+        assert dashboard["uid"] == "account-overview-dashboard"
+        assert dashboard["schemaVersion"] == 39
+        assert [variable["name"] for variable in dashboard["templating"]["list"]] == [
+            "currency",
+            "account_id",
+            "mode",
+        ]
+        mode = dashboard["templating"]["list"][2]
+        assert mode["multi"] is True
+        assert mode["includeAll"] is True
+
+    def test_table_is_scoped_to_one_account_currency_and_selected_modes(self):
+        dashboard = render_account_overview_dashboard()
+        panel = dashboard["panels"][0]
+        sql = panel["targets"][0]["rawSql"]
+
+        assert panel["type"] == "table"
+        assert "ec.account_id IN (${account_id:sqlstring})" in sql
+        assert "ec.currency IN (${currency:sqlstring})" in sql
+        assert "br.mode IN (${mode:sqlstring})" in sql
+        assert "$__timeFilter(ec.ts)" in sql
+
+    def test_table_reports_per_run_state_without_financial_aggregation(self):
+        dashboard = render_account_overview_dashboard()
+        panel = dashboard["panels"][0]
+        sql = panel["targets"][0]["rawSql"]
+
+        assert "DISTINCT ON (ec.run_id, ec.account_id)" in sql
+        assert 'le.run_id AS "Run ID"' in sql
+        assert "le.equity" in sql
+        assert "SUM(le.equity)" not in sql
+        assert "strategy_performance" not in sql
+        assert "Sharpe" not in sql
+        assert "Drawdown" not in sql
+
+    def test_open_positions_are_reconstructed_at_the_equity_snapshot(self):
+        dashboard = render_account_overview_dashboard()
+        sql = dashboard["panels"][0]["targets"][0]["rawSql"]
+
+        assert "position_events" in sql
+        assert "pe.ts <= le.ts" in sql
+        assert "ORDER BY pe.symbol, pe.ts DESC, pe.event_id DESC" in sql
+        assert "remaining_quantity > 0" in sql
 
 
 class TestRenderSignalMonitor:
