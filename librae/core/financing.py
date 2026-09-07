@@ -26,17 +26,18 @@ Before extending either one, check which column the new code belongs in.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from math import isfinite, isnan
+from math import isclose, isfinite, isnan
 from typing import Literal
 
 import pandas as pd
 
+from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.executor import side_multiplier
-from librae.core.strategy import PositionSide, PositionState
+from librae.core.strategy import PositionEventType, PositionSide, PositionState
 from librae.core.utils import interval_to_timedelta
 
 FUNDING_RATE_FIELD = "funding_rate"
@@ -44,6 +45,25 @@ FUNDING_MARK_PRICE_FIELD = "funding_mark_price"
 BORROW_RATE_FIELD = "borrow_rate"
 
 FinancingKind = Literal["funding", "borrow"]
+
+
+@dataclass(frozen=True, slots=True)
+class FinancingLifecycleEvent:
+    """Quantity-changing position event used for financing attribution."""
+
+    ts: datetime
+    symbol: str
+    entry_at: datetime
+    event_type: PositionEventType
+    fill_quantity: float
+    remaining_quantity: float
+
+
+@dataclass(slots=True)
+class _FinancingBalance:
+    quantity: float
+    accrued: float = 0.0
+
 
 # How many *quoting* periods a borrow rate keeps describing the market. A rate
 # is a step function, so it must carry forward past the bar it was published
@@ -86,6 +106,112 @@ class FinancingCashFlow:
     group_id: str | None
     entry_at: datetime
     kind: FinancingKind = "funding"
+
+
+def attribute_financing_to_closes(
+    position_events: Sequence[FinancingLifecycleEvent],
+    cash_flows: Sequence[FinancingCashFlow],
+) -> list[float]:
+    """Allocate accrued financing to closes in position-event order.
+
+    Financing remains attached to the quantity that is open when it accrues.
+    A partial close releases the same fraction of the position's accumulated
+    balance that the fill removes, matching Librae's average-cost position
+    accounting. Position events precede financing at an equal timestamp,
+    which mirrors the engine's execution-then-accrual cycle.
+    """
+    close_event_indexes = [
+        index
+        for index, event in enumerate(position_events)
+        if event.event_type in ("reduce", "close")
+    ]
+    close_output_indexes = {
+        event_index: output_index for output_index, event_index in enumerate(close_event_indexes)
+    }
+    attributed = [0.0] * len(close_event_indexes)
+    balances: dict[tuple[str, datetime], _FinancingBalance] = {}
+    # WHY: a key leaves ``balances`` only by being fully closed, so a later
+    # flow for it would open a fresh balance nothing can ever release. Every
+    # other broken invariant here raises; silently discarding the charge is
+    # the one that would not surface as a wrong number anywhere.
+    closed_keys: set[tuple[str, datetime]] = set()
+
+    timeline = [(event.ts, 0, index, event) for index, event in enumerate(position_events)]
+    timeline.extend(
+        (cash_flow.ts, 1, index, cash_flow) for index, cash_flow in enumerate(cash_flows)
+    )
+    timeline.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    for _, item_type, item_index, item in timeline:
+        key = (item.symbol, item.entry_at)
+        if item_type == 1:
+            cash_flow = item
+            if cash_flow.quantity <= EPSILON:
+                raise ValueError("financing cash flow quantity must be positive")
+            balance = balances.get(key)
+            if balance is None:
+                if key in closed_keys:
+                    raise ValueError("financing cash flow accrues to a closed position")
+                balance = _FinancingBalance(quantity=cash_flow.quantity)
+                balances[key] = balance
+            elif not isclose(
+                balance.quantity,
+                cash_flow.quantity,
+                rel_tol=1e-9,
+                abs_tol=EPSILON,
+            ):
+                raise ValueError("financing cash flow quantity does not match lifecycle state")
+            balance.accrued += cash_flow.cash_flow
+            continue
+
+        event = item
+        if min(event.fill_quantity, event.remaining_quantity) < 0:
+            raise ValueError("financing lifecycle quantities must be non-negative")
+        balance = balances.get(key)
+        if event.event_type in ("open", "add"):
+            prior_quantity = event.remaining_quantity - event.fill_quantity
+            if event.event_type == "open":
+                prior_quantity = 0.0
+            if balance is not None and not isclose(
+                balance.quantity,
+                prior_quantity,
+                rel_tol=1e-9,
+                abs_tol=EPSILON,
+            ):
+                raise ValueError("position entry quantity does not match lifecycle state")
+            if balance is None:
+                balance = _FinancingBalance(quantity=prior_quantity)
+                balances[key] = balance
+            balance.quantity = event.remaining_quantity
+            continue
+
+        if event.event_type not in ("reduce", "close"):
+            continue
+        quantity_before_close = event.fill_quantity + event.remaining_quantity
+        if quantity_before_close <= EPSILON:
+            raise ValueError("position close must have positive pre-close quantity")
+        if balance is None:
+            balance = _FinancingBalance(quantity=quantity_before_close)
+            balances[key] = balance
+        elif not isclose(
+            balance.quantity,
+            quantity_before_close,
+            rel_tol=1e-9,
+            abs_tol=EPSILON,
+        ):
+            raise ValueError("position close quantity does not match lifecycle state")
+
+        if event.remaining_quantity <= EPSILON:
+            released = balance.accrued
+            balances.pop(key)
+            closed_keys.add(key)
+        else:
+            released = balance.accrued * event.fill_quantity / quantity_before_close
+            balance.accrued -= released
+            balance.quantity = event.remaining_quantity
+        attributed[close_output_indexes[item_index]] = released
+
+    return attributed
 
 
 def _optional_finite_float(value: object, *, field: str, symbol: str) -> float | None:

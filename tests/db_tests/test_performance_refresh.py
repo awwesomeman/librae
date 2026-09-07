@@ -120,7 +120,9 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
     closed = pd.DataFrame(
         [
             {
+                "_time": timestamps[2],
                 "symbol": "BTC/USDT:USDT",
+                "event_type": "close",
                 "realized_pnl": 7.0,
                 "commission": 0.7,
                 "slippage": 0.8,
@@ -130,6 +132,7 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
                 "entry_tax": 0.5,
                 "net_return": 3.5,
                 "fill_quantity": 2.0,
+                "remaining_quantity": 0.0,
                 "price": 110.0,
                 "entry_price": 100.0,
                 "notional": 220.0,
@@ -138,7 +141,21 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
         ]
     )
     funding = pd.DataFrame(
-        [{"symbol": "BTC/USDT:USDT", "entry_at": timestamps[0], "cash_flow": 3.0}]
+        [
+            {
+                "_time": timestamps[1],
+                "symbol": "BTC/USDT:USDT",
+                "kind": "funding",
+                "side": "long",
+                "quantity": 2.0,
+                "mark_price": 100.0,
+                "multiplier": 1.0,
+                "rate": -0.015,
+                "cash_flow": 3.0,
+                "group_id": None,
+                "entry_at": timestamps[0],
+            }
+        ]
     )
     metrics = StrategyMetrics(total_return=0.2)
 
@@ -167,17 +184,21 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
     write.assert_called_once()
 
 
-def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() -> None:
-    """A partial close writes multiple position_events rows sharing one
-    (symbol, entry_at) — the accrued funding must be split between them by
-    closed-quantity share, not attributed in full to each row."""
-    timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=2, freq="h")
-    equity = pd.DataFrame({"_time": timestamps, "equity": [100.0, 110.0]})
+def test_refresh_performance_attributes_funding_by_close_time() -> None:
+    timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=5, freq="h")
+    equity = pd.DataFrame({"_time": timestamps, "equity": [100.0, 102.0, 104.0, 108.0, 110.0]})
     entry_at = timestamps[0]
 
-    def _row(fill_quantity: float) -> dict:
+    def _row(
+        ts: datetime,
+        event_type: str,
+        fill_quantity: float,
+        remaining_quantity: float,
+    ) -> dict:
         return {
+            "_time": ts,
             "symbol": "BTC/USDT:USDT",
+            "event_type": event_type,
             "realized_pnl": 0.0,
             "commission": 0.0,
             "slippage": 0.0,
@@ -187,14 +208,49 @@ def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() 
             "entry_tax": 0.0,
             "net_return": 0.0,
             "fill_quantity": fill_quantity,
+            "remaining_quantity": remaining_quantity,
             "price": 100.0,
             "entry_price": 100.0,
             "notional": fill_quantity * 100.0,
             "entry_at": entry_at,
         }
 
-    closed = pd.DataFrame([_row(3.0), _row(2.0)])
-    funding = pd.DataFrame([{"symbol": "BTC/USDT:USDT", "entry_at": entry_at, "cash_flow": 50.0}])
+    closed = pd.DataFrame(
+        [
+            _row(timestamps[2], "reduce", 3.0, 2.0),
+            _row(timestamps[4], "close", 2.0, 0.0),
+        ]
+    )
+    funding = pd.DataFrame(
+        [
+            {
+                "_time": timestamps[1],
+                "symbol": "BTC/USDT:USDT",
+                "kind": "funding",
+                "side": "short",
+                "quantity": 5.0,
+                "mark_price": 100.0,
+                "multiplier": 1.0,
+                "rate": 0.01,
+                "cash_flow": 50.0,
+                "group_id": None,
+                "entry_at": entry_at,
+            },
+            {
+                "_time": timestamps[3],
+                "symbol": "BTC/USDT:USDT",
+                "kind": "funding",
+                "side": "short",
+                "quantity": 2.0,
+                "mark_price": 100.0,
+                "multiplier": 1.0,
+                "rate": 0.01,
+                "cash_flow": 20.0,
+                "group_id": None,
+                "entry_at": entry_at,
+            },
+        ]
+    )
     metrics = StrategyMetrics(total_return=0.2)
 
     with (
@@ -207,10 +263,10 @@ def test_refresh_performance_splits_funding_across_partial_closes_by_quantity() 
         refresh_performance("run-1", "alpha", config=_config())
 
     trades = compute.call_args.kwargs["trade_pnls"]
-    # Split 3:2 by closed quantity (5 total) — not 50.0 attributed to each.
+    # The later 20 belongs only to the two units still open after the first exit.
     assert trades[0].net_pnl == pytest.approx(30.0)
-    assert trades[1].net_pnl == pytest.approx(20.0)
-    assert sum(trade.net_pnl for trade in trades) == pytest.approx(50.0)
+    assert trades[1].net_pnl == pytest.approx(40.0)
+    assert sum(trade.net_pnl for trade in trades) == pytest.approx(70.0)
 
 
 def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:

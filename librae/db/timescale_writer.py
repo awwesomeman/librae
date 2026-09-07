@@ -1243,9 +1243,13 @@ def refresh_performance(
 
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
     """
-    from types import SimpleNamespace as _NS
-
     from librae.core import EPSILON
+    from librae.core.executor import TradePnL
+    from librae.core.financing import (
+        FinancingCashFlow,
+        FinancingLifecycleEvent,
+        attribute_financing_to_closes,
+    )
     from librae.db.timescale_reader import (
         load_equity_curve,
         load_financing_cash_flows,
@@ -1259,12 +1263,13 @@ def refresh_performance(
     if eq_df.empty or len(eq_df) < 2:
         return
 
-    closed_df = load_position_events(
-        run_id,
-        event_types=_CLOSE_TYPES,
-        account_id=account_id,
-    )
-    trade_rows = closed_df.to_dict("records") if not closed_df.empty else []
+    events_df = load_position_events(run_id, account_id=account_id)
+    event_rows = events_df.to_dict("records") if not events_df.empty else []
+    trade_rows = [
+        row
+        for row in event_rows
+        if row.get("event_type") in _CLOSE_TYPES or "event_type" not in row
+    ]
     required_trade_fields = (
         "realized_pnl",
         "commission",
@@ -1290,19 +1295,55 @@ def refresh_performance(
             )
 
     funding_df = load_financing_cash_flows(run_id, account_id=account_id)
-    funding_by_trade: dict[tuple[str, object], float] = {}
-    for row in funding_df.to_dict("records") if not funding_df.empty else []:
-        key = (row["symbol"], row["entry_at"])
-        funding_by_trade[key] = funding_by_trade.get(key, 0.0) + float(row["cash_flow"])
-
-    # A partial close writes multiple position_events rows sharing one
-    # (symbol, entry_at) — split that round-trip's funding across them by
-    # closed-quantity share, mirroring core.executor.reduce_position's
-    # pro-rating of entry costs across partial closes.
-    quantity_by_trade: dict[tuple[str, object], float] = {}
-    for r in trade_rows:
-        key = (r["symbol"], r["entry_at"])
-        quantity_by_trade[key] = quantity_by_trade.get(key, 0.0) + float(r["fill_quantity"])
+    funding_rows = funding_df.to_dict("records") if not funding_df.empty else []
+    financing_by_close = [0.0] * len(trade_rows)
+    if funding_rows:
+        required_lifecycle_fields = (
+            "_time",
+            "symbol",
+            "event_type",
+            "fill_quantity",
+            "remaining_quantity",
+            "entry_at",
+        )
+        for row in event_rows:
+            missing = [
+                field
+                for field in required_lifecycle_fields
+                if field not in row or pd.isna(row[field])
+            ]
+            if missing:
+                raise ValueError(
+                    "position event missing required financing fields: " + ", ".join(missing)
+                )
+        lifecycle_events = [
+            FinancingLifecycleEvent(
+                ts=row["_time"],
+                symbol=str(row["symbol"]),
+                entry_at=row["entry_at"],
+                event_type=row["event_type"],
+                fill_quantity=float(row["fill_quantity"]),
+                remaining_quantity=float(row["remaining_quantity"]),
+            )
+            for row in event_rows
+        ]
+        cash_flows = [
+            FinancingCashFlow(
+                ts=row["_time"],
+                symbol=str(row["symbol"]),
+                side=row["side"],
+                quantity=float(row["quantity"]),
+                mark_price=float(row["mark_price"]),
+                multiplier=float(row["multiplier"]),
+                rate=float(row["rate"]),
+                cash_flow=float(row["cash_flow"]),
+                group_id=row.get("group_id") if pd.notna(row.get("group_id")) else None,
+                entry_at=row["entry_at"],
+                kind=row["kind"],
+            )
+            for row in funding_rows
+        ]
+        financing_by_close = attribute_financing_to_closes(lifecycle_events, cash_flows)
 
     # WHY: compute_all accepts primitive sequences — build them from DB rows
     eq_records = eq_df.to_dict("records")
@@ -1312,18 +1353,15 @@ def refresh_performance(
         abs(float(r["notional"] * r["entry_price"] / r["price"])) for r in trade_rows
     ]
     trade_pnls = []
-    for r, notional in zip(trade_rows, trade_notionals, strict=True):
-        key = (r["symbol"], r["entry_at"])
-        total_funding = funding_by_trade.get(key, 0.0)
-        total_quantity = quantity_by_trade[key]
-        funding_pnl = (
-            total_funding * (float(r["fill_quantity"]) / total_quantity)
-            if total_funding != 0.0 and total_quantity > EPSILON
-            else 0.0
-        )
-        funding_return = (funding_pnl / notional * 100.0) if notional > EPSILON else 0.0
+    for r, notional, financing_pnl in zip(
+        trade_rows,
+        trade_notionals,
+        financing_by_close,
+        strict=True,
+    ):
+        financing_return = financing_pnl / notional * 100.0 if notional > EPSILON else 0.0
         trade_pnls.append(
-            _NS(
+            TradePnL(
                 gross_pnl=float(
                     r["realized_pnl"]
                     + r["entry_commission"]
@@ -1332,14 +1370,14 @@ def refresh_performance(
                     + r["commission"]
                     + r["slippage"]
                     + r["tax"]
-                    + funding_pnl
+                    + financing_pnl
                 ),
-                net_pnl=float(r["realized_pnl"]) + funding_pnl,
+                net_pnl=float(r["realized_pnl"]) + financing_pnl,
                 commission=float(r["entry_commission"] + r["commission"]),
                 slippage=float(r["entry_slippage"] + r["slippage"]),
                 tax=float(r["entry_tax"] + r["tax"]),
-                gross_return=0.0 + funding_return,
-                net_return=float(r["net_return"]) + funding_return,
+                gross_return=financing_return,
+                net_return=float(r["net_return"]) + financing_return,
                 exit_commission=0.0,
                 exit_slippage=0.0,
                 exit_tax=0.0,
