@@ -7,6 +7,7 @@ import pytest
 from librae.core.utils import (
     generate_run_id,
     infer_timeframe,
+    interval_to_timedelta,
     to_canonical,
     to_ccxt,
 )
@@ -77,6 +78,22 @@ class TestTimeframeConversion:
     def test_to_canonical_unknown_raises(self) -> None:
         with pytest.raises(ValueError, match="Cannot parse timeframe"):
             to_canonical("xyz")
+
+    @pytest.mark.parametrize("timeframe", ["M0", "H0", "MN0", "0m", "0h", "0M"])
+    def test_zero_count_is_rejected_by_every_conversion(self, timeframe: str) -> None:
+        for converter in (to_ccxt, to_canonical, interval_to_timedelta):
+            with pytest.raises(ValueError, match="positive integer"):
+                converter(timeframe)
+
+    @pytest.mark.parametrize("timeframe", ["M-1", "-1h"])
+    def test_negative_count_is_rejected(self, timeframe: str) -> None:
+        with pytest.raises(ValueError, match="Cannot parse timeframe"):
+            to_canonical(timeframe)
+
+    def test_custom_positive_count_uses_the_shared_parser(self) -> None:
+        assert to_ccxt("H6") == "6h"
+        assert to_canonical("45m") == "M45"
+        assert interval_to_timedelta("H6") == pd.Timedelta(hours=6)
 
 
 # ---------------------------------------------------------------------------
