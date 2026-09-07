@@ -75,6 +75,8 @@ from librae.core.executor import (
 )
 from librae.core.financing import (
     FinancingCashFlow,
+    FinancingLifecycleEvent,
+    attribute_financing_to_closes,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
@@ -289,52 +291,61 @@ def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None
     return data_timeframe
 
 
-def _attribute_funding_to_trades(
+def _attribute_financing_to_trades(
     trades: Sequence[TradeResult],
     trade_notionals: Sequence[float],
+    position_events: Sequence[PositionEvent],
     financing_cash_flows: Sequence[FinancingCashFlow],
 ) -> list[TradePnL]:
-    """Fold each round-trip's accrued funding into its closed trade(s)'
-    PnL/return before metrics — position_events keeps the fill-only PnL
-    untouched; only the derived TradePnL fed to compute_all changes, so
-    win_rate/profit_factor/avg_trade_return see a perpetual position's real
-    edge (see librae.core.financing.FinancingCashFlow).
+    """Fold causally accrued financing into closed-trade metrics."""
+    if any(event.entry_at is None for event in position_events):
+        raise RuntimeError("position lifecycle event is missing entry_at")
+    lifecycle_events = [
+        FinancingLifecycleEvent(
+            ts=event.ts,
+            symbol=event.symbol,
+            entry_at=event.entry_at,
+            event_type=event.event_type,
+            fill_quantity=event.fill_quantity,
+            remaining_quantity=event.remaining_quantity,
+        )
+        for event in position_events
+        if event.entry_at is not None
+    ]
+    close_events = [event for event in lifecycle_events if event.event_type in ("reduce", "close")]
+    if len(close_events) != len(trades):
+        raise RuntimeError("closed trades do not match position lifecycle events")
+    for trade, event in zip(trades, close_events, strict=True):
+        if (
+            trade.symbol != event.symbol
+            or trade.entry_at != event.entry_at
+            or trade.exit_at != event.ts
+            or abs(trade.quantity - event.fill_quantity) > EPSILON
+        ):
+            raise RuntimeError("closed trade identity does not match its lifecycle event")
 
-    A partial close produces multiple TradeResults sharing one (symbol,
-    entry_at) — funding accrued over that round-trip is split across them
-    by closed-quantity share, mirroring how core.executor.reduce_position
-    pro-rates entry costs across partial closes.
-    """
-    funding_by_key: dict[tuple[str, datetime], float] = {}
-    for flow in financing_cash_flows:
-        key = (flow.symbol, flow.entry_at)
-        funding_by_key[key] = funding_by_key.get(key, 0.0) + flow.cash_flow
-
-    quantity_by_key: dict[tuple[str, datetime], float] = {}
-    for trade in trades:
-        key = (trade.symbol, trade.entry_at)
-        quantity_by_key[key] = quantity_by_key.get(key, 0.0) + trade.quantity
+    financing_by_close = attribute_financing_to_closes(
+        lifecycle_events,
+        financing_cash_flows,
+    )
 
     trade_pnls = []
-    for trade, notional in zip(trades, trade_notionals, strict=True):
-        key = (trade.symbol, trade.entry_at)
-        total_funding = funding_by_key.get(key, 0.0)
-        total_quantity = quantity_by_key[key]
-        funding_pnl = (
-            total_funding * (trade.quantity / total_quantity)
-            if total_funding != 0.0 and total_quantity > EPSILON
-            else 0.0
-        )
-        funding_return = (funding_pnl / notional * 100.0) if notional > EPSILON else 0.0
+    for trade, notional, financing_pnl in zip(
+        trades,
+        trade_notionals,
+        financing_by_close,
+        strict=True,
+    ):
+        financing_return = financing_pnl / notional * 100.0 if notional > EPSILON else 0.0
         trade_pnls.append(
             TradePnL(
-                gross_pnl=trade.gross_pnl + funding_pnl,
-                net_pnl=trade.net_pnl + funding_pnl,
+                gross_pnl=trade.gross_pnl + financing_pnl,
+                net_pnl=trade.net_pnl + financing_pnl,
                 commission=trade.commission,
                 slippage=trade.slippage,
                 tax=trade.tax,
-                gross_return=trade.gross_return + funding_return,
-                net_return=trade.net_return + funding_return,
+                gross_return=trade.gross_return + financing_return,
+                net_return=trade.net_return + financing_return,
                 exit_commission=0.0,
                 exit_slippage=0.0,
                 exit_tax=trade.tax,
@@ -1045,8 +1056,11 @@ class Backtest:
             abs(trade.entry_price * trade.quantity * self._get_cost_model(trade.symbol).multiplier)
             for trade in result.trades
         ]
-        trade_pnls = _attribute_funding_to_trades(
-            result.trades, trade_notionals, result.financing_cash_flows
+        trade_pnls = _attribute_financing_to_trades(
+            result.trades,
+            trade_notionals,
+            result.position_events,
+            result.financing_cash_flows,
         )
         metrics = compute_all(
             equity_values=[snapshot.equity for snapshot in account.equity_curve],

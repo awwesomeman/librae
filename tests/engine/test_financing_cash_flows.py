@@ -8,12 +8,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
-from librae.backtest.engine import _attribute_funding_to_trades
-from librae.core.executor import TradeResult
+from librae.backtest.engine import _attribute_financing_to_trades
+from librae.core.executor import PositionEvent, TradeResult
 from librae.core.financing import (
     BORROW_RATE_MAX_AGE_QUOTING_PERIODS,
     FinancingCashFlow,
+    FinancingLifecycleEvent,
     attach_borrow_rate,
+    attribute_financing_to_closes,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
@@ -105,6 +107,17 @@ class _OpenThenClose(Strategy):
         if ctx.period_index == 0:
             return [OrderIntent(action=self.side, symbol=ctx.symbol, quantity=2.0)]
         if ctx.period_index == self._n_bars - 2:
+            return [OrderIntent(action="close", symbol=ctx.symbol)]
+        return []
+
+
+class _OpenThenPartialClose(Strategy):
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        if ctx.period_index == 0:
+            return [OrderIntent(action="long", symbol=ctx.symbol, quantity=4.0)]
+        if ctx.period_index == 1:
+            return [OrderIntent(action="close", symbol=ctx.symbol, quantity=2.0)]
+        if ctx.period_index == 3:
             return [OrderIntent(action="close", symbol=ctx.symbol)]
         return []
 
@@ -244,6 +257,25 @@ def test_funding_accrued_while_held_is_folded_into_the_closed_trade_stats() -> N
     assert output.metrics.avg_trade_return == pytest.approx(0.01)
 
 
+def test_backtest_metrics_assign_later_funding_only_to_remaining_quantity() -> None:
+    data = _backtest_frame([np.nan, 0.01, np.nan, 0.01, np.nan])
+    backtest = Backtest(
+        data,
+        _OpenThenPartialClose(),
+        initial_balance=10_000.0,
+        cost_model=_cost_model(),
+        data_source="test",
+    )
+    backtest.run()
+
+    output = backtest.build_output()
+
+    assert [flow.cash_flow for flow in output.financing_cash_flows] == pytest.approx([-40.0, -20.0])
+    assert output.equity_curve[-1].equity == pytest.approx(9_940.0)
+    assert output.metrics.trades == 2
+    assert output.metrics.avg_trade_return == pytest.approx(-0.015)
+
+
 def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -> None:
     """A partial close writes multiple TradeResults sharing one (symbol,
     entry_at). Funding accrued over that round-trip must be split across
@@ -301,13 +333,161 @@ def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -
         )
     ]
     notionals = [300.0, 200.0]  # entry_price(100) * quantity
+    lifecycle_events = [
+        FinancingLifecycleEvent(
+            ts=entry_at,
+            symbol="PERP",
+            entry_at=entry_at,
+            event_type="open",
+            fill_quantity=5.0,
+            remaining_quantity=5.0,
+        ),
+        FinancingLifecycleEvent(
+            ts=trades[0].exit_at,
+            symbol="PERP",
+            entry_at=entry_at,
+            event_type="reduce",
+            fill_quantity=3.0,
+            remaining_quantity=2.0,
+        ),
+        FinancingLifecycleEvent(
+            ts=trades[1].exit_at,
+            symbol="PERP",
+            entry_at=entry_at,
+            event_type="close",
+            fill_quantity=2.0,
+            remaining_quantity=0.0,
+        ),
+    ]
+    position_events = [
+        PositionEvent(
+            ts=event.ts,
+            symbol=event.symbol,
+            side="short",
+            event_type=event.event_type,
+            fill_quantity=event.fill_quantity,
+            price=100.0,
+            entry_price=100.0,
+            remaining_quantity=event.remaining_quantity,
+            notional=event.fill_quantity * 100.0,
+            commission=0.0,
+            slippage=0.0,
+            tax=0.0,
+            entry_at=event.entry_at,
+        )
+        for event in lifecycle_events
+    ]
 
-    trade_pnls = _attribute_funding_to_trades(trades, notionals, financing_cash_flows)
+    trade_pnls = _attribute_financing_to_trades(
+        trades,
+        notionals,
+        position_events,
+        financing_cash_flows,
+    )
 
     # Split 3:2 by closed quantity (5 total) — not 50.0 attributed to each.
     assert trade_pnls[0].net_pnl == pytest.approx(30.0)
     assert trade_pnls[1].net_pnl == pytest.approx(20.0)
     assert sum(pnl.net_pnl for pnl in trade_pnls) == pytest.approx(50.0)
+
+
+def test_financing_after_partial_close_is_not_assigned_to_the_closed_trade() -> None:
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first_exit = datetime(2026, 1, 1, 2, tzinfo=UTC)
+    final_exit = datetime(2026, 1, 1, 4, tzinfo=UTC)
+    events = [
+        FinancingLifecycleEvent(entry_at, "PERP", entry_at, "open", 5.0, 5.0),
+        FinancingLifecycleEvent(first_exit, "PERP", entry_at, "reduce", 3.0, 2.0),
+        FinancingLifecycleEvent(final_exit, "PERP", entry_at, "close", 2.0, 0.0),
+    ]
+    cash_flows = [
+        FinancingCashFlow(
+            ts=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            symbol="PERP",
+            side="short",
+            quantity=5.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=50.0,
+            group_id=None,
+            entry_at=entry_at,
+        ),
+        FinancingCashFlow(
+            ts=datetime(2026, 1, 1, 3, tzinfo=UTC),
+            symbol="PERP",
+            side="short",
+            quantity=2.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=20.0,
+            group_id=None,
+            entry_at=entry_at,
+        ),
+    ]
+
+    attributed = attribute_financing_to_closes(events, cash_flows)
+
+    assert attributed == pytest.approx([30.0, 40.0])
+
+
+def test_financing_pool_tracks_scale_in_and_same_timestamp_close_order() -> None:
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first_exit = datetime(2026, 1, 1, 3, tzinfo=UTC)
+    events = [
+        FinancingLifecycleEvent(entry_at, "PERP", entry_at, "open", 2.0, 2.0),
+        FinancingLifecycleEvent(
+            datetime(2026, 1, 1, 2, tzinfo=UTC),
+            "PERP",
+            entry_at,
+            "add",
+            2.0,
+            4.0,
+        ),
+        FinancingLifecycleEvent(first_exit, "PERP", entry_at, "reduce", 1.0, 3.0),
+        FinancingLifecycleEvent(
+            datetime(2026, 1, 1, 5, tzinfo=UTC),
+            "PERP",
+            entry_at,
+            "close",
+            3.0,
+            0.0,
+        ),
+    ]
+    cash_flows = [
+        FinancingCashFlow(
+            ts=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            symbol="PERP",
+            side="short",
+            quantity=2.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=20.0,
+            group_id=None,
+            entry_at=entry_at,
+        ),
+        FinancingCashFlow(
+            ts=first_exit,
+            symbol="PERP",
+            side="short",
+            quantity=3.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=30.0,
+            group_id=None,
+            entry_at=entry_at,
+        ),
+    ]
+
+    attributed = attribute_financing_to_closes(events, cash_flows)
+
+    # The first flow is pooled across four units after scale-in, so closing
+    # one releases 5. The same-timestamp flow accrues after that reduction
+    # and belongs entirely to the remaining three units.
+    assert attributed == pytest.approx([5.0, 45.0])
 
 
 def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:

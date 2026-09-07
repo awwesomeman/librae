@@ -192,7 +192,7 @@ def load_position_events(
     if event_types:
         sql += " AND event_type = ANY(%s)"
         params.append(event_types)
-    sql += " ORDER BY ts"
+    sql += " ORDER BY ts, event_id"
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=params)
     if not df.empty:
