@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-from librae.live.state import MemoryLiveStateStore
+from librae.core.strategy import PortfolioWeights
+from librae.live.state import LiveRuntimeState, MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import (
     _build_adapter,
     _ready_callback_from_env,
@@ -108,6 +111,70 @@ def test_factory_registers_timescale_callbacks() -> None:
         trader = build_live_trader(MagicMock(), lambda frame: frame, config=config)
 
     callbacks.register_run.assert_called_once_with(trader.run_id)
+
+
+def test_database_enabled_sim_checkpoints_portfolio_weights_decision() -> None:
+    class JsonRoundTripStateStore:
+        def __init__(self) -> None:
+            self.raw: dict[str, object] | None = None
+
+        def load(self, state_key: str) -> LiveRuntimeState | None:
+            if self.raw is None:
+                return None
+            return LiveRuntimeState.from_dict(self.raw)
+
+        def save(
+            self,
+            state: LiveRuntimeState,
+            orders: Sequence[TrackedOrder] = (),
+        ) -> None:
+            self.raw = json.loads(json.dumps(state.to_dict()))
+
+        def acquire_lease(self, state_key: str) -> bool:
+            return True
+
+        def release_lease(self, state_key: str) -> None:
+            pass
+
+    frame = pd.DataFrame(
+        {
+            "ts": pd.date_range("2025-01-01", periods=5, freq="h", tz=UTC),
+            "open": [100.0] * 5,
+            "high": [101.0] * 5,
+            "low": [99.0] * 5,
+            "close": [100.0] * 5,
+            "volume": [1_000.0] * 5,
+        }
+    )
+    adapter = MagicMock()
+    adapter.fetch_ohlcv.return_value = frame
+    strategy = MagicMock()
+    strategy.on_bar.return_value = PortfolioWeights(
+        weights={"BTCUSDT": 0.5},
+        reason="allocate",
+    )
+    store = JsonRoundTripStateStore()
+
+    with (
+        patch("librae.orchestration.live._build_state_store", return_value=store),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch("librae.orchestration.live._TimescaleCallbacks", return_value=MagicMock()),
+    ):
+        trader = build_live_trader(
+            strategy,
+            lambda history: history,
+            config=make_test_cfg(mode="sim"),
+            data_adapter_overrides={"BTCUSDT": adapter},
+        )
+
+    trader._poll_cycle()
+
+    assert store.raw is not None
+    restored = LiveRuntimeState.from_dict(store.raw)
+    assert restored.pending_decision == PortfolioWeights(
+        weights={"BTCUSDT": 0.5},
+        reason="allocate",
+    )
 
 
 def test_run_is_registered_before_first_checkpoint_write() -> None:
