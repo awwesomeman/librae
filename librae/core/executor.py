@@ -1555,6 +1555,7 @@ def execute_order_intents(
     liquidity usage for that group are discarded. Live planning deliberately
     leaves this disabled and performs broker-specific group handling itself.
     """
+    _validate_scale_in_group_identity(intents, positions, primary_symbol)
     if atomic_groups and any(intent.group_id is not None for intent in intents):
         return _execute_order_intent_groups_atomically(
             intents,
@@ -1822,6 +1823,35 @@ def execute_order_intents(
     return ExecutionResult(
         trades=trades, events=events, cash_delta=cash_delta, runtime_events=runtime_events
     )
+
+
+def _validate_scale_in_group_identity(
+    intents: list[OrderIntent],
+    positions: dict[str, PositionState],
+    primary_symbol: str,
+) -> None:
+    """Refuse a same-side add whose group_id differs from the position's.
+
+    One net position carries one group identity through its add, close,
+    trade, and financing records (issue #113), so it can only be scaled by
+    an intent of that identity -- grouped-to-ungrouped and ungrouped-to-
+    grouped included. Runs before any mutation so a violating intent
+    anywhere in the batch leaves the book untouched; venue attribution never
+    refuses a confirmed fill, which is why this lives at plan time and not
+    in apply_execution_fill.
+    """
+    for intent in intents:
+        if intent.action not in ("long", "short"):
+            continue
+        symbol = intent.symbol or primary_symbol
+        position = positions.get(symbol)
+        if position is None or position.side != intent.action:
+            continue
+        if intent.group_id != position.group_id:
+            raise ValueError(
+                f"cannot scale {symbol} across group identities: "
+                f"position={position.group_id!r}, intent={intent.group_id!r}"
+            )
 
 
 def _preflight_intent_group(
@@ -2174,6 +2204,7 @@ def execute_portfolio_weights(
 
     reductions: list[OrderIntent] = []
     additions: list[OrderIntent] = []
+    grouped_scale_ins: list[str] = []
     for symbol in relevant_symbols:
         position = positions.get(symbol)
         current_signed_quantity = 0.0
@@ -2203,6 +2234,8 @@ def execute_portfolio_weights(
                     )
                 )
             elif quantity_delta > EPSILON:
+                if position is not None and position.group_id is not None:
+                    grouped_scale_ins.append(symbol)
                 additions.append(
                     OrderIntent(
                         action="long" if target_signed_quantity > 0 else "short",
@@ -2227,6 +2260,20 @@ def execute_portfolio_weights(
                 quantity=abs(target_signed_quantity),
                 reason=targets.reason,
             )
+        )
+
+    # WHY: a whole-book target is ungrouped by nature, so adding to a position
+    # a group opened would break the one-position-one-group invariant (issue
+    # #113). Refuse here, before the reductions this target would otherwise
+    # execute first, so the book is untouched. Reductions and flips are not
+    # scale-ins: they carry the position's own group_id out with them. This
+    # runs ahead of the price check because it condemns the target itself:
+    # deferring to a later bar would only repeat it, while an unresolved price
+    # may well be available next bar.
+    if grouped_scale_ins:
+        raise ValueError(
+            f"PortfolioWeights cannot scale {sorted(grouped_scale_ins)}: held under a "
+            "group id; close the group first or manage the symbol with grouped intents"
         )
 
     unavailable_actions = sorted(

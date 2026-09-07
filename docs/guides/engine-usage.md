@@ -226,6 +226,19 @@ starve later assets.
 cross-account hedge or arbitrage strategy must coordinate explicitly sized
 orders across separate runs; hedge ratios remain strategy-owned.
 
+A symbol is managed by one attribution model at a time. A net position
+carries the `group_id` that opened it through every add, close, trade, and
+financing record, so it can only be scaled by an intent of that same
+identity — grouped-to-ungrouped and ungrouped-to-grouped included. A
+`PortfolioWeights` target is ungrouped by nature: it may reduce or flip a
+position a group opened (those carry the group's identity out with them),
+but a target that would *add* to one raises `ValueError` at planning time,
+before any reduction in the same target executes. Close the group first, or
+keep that symbol under grouped intents. The check runs on the intents a
+strategy returns, never on a confirmed broker fill — a fill is settled
+state and is always booked; see the
+[group identity ADR](../decisions/2026-09-07-group-identity-enforced-at-plan-time.md).
+
 Weights need not sum to one; any remainder stays in cash. When
 `Backtest(..., record_position_snapshots=True)` is enabled,
 `BacktestOutput.position_snapshots` contains quantity, signed market value, and
