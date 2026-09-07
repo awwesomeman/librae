@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from librae.core.cost_model import CostModel
 from librae.core.executor import execute_pending_decision_and_stops
-from librae.core.strategy import OrderIntent, PositionState
+from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState
 
 TS = datetime(2026, 1, 10, tzinfo=UTC)
 
@@ -266,12 +266,14 @@ def test_scale_in_rejects_cross_group_identity(
     assert position.group_id == position_group
 
 
-def test_cross_group_scale_in_rolls_back_earlier_leg_in_atomic_group() -> None:
+def test_cross_group_scale_in_leaves_an_earlier_ungrouped_intent_unfilled() -> None:
+    """Ungrouped units commit straight into the book, so the violation must
+    be found before the first unit runs -- not when the group is staged."""
     position = _position("A")
     position.group_id = "original"
     positions = {"A": position}
     decision = [
-        OrderIntent(action="short", symbol="B", quantity=1.0, group_id="replacement"),
+        OrderIntent(action="short", symbol="B", quantity=1.0),
         OrderIntent(action="long", symbol="A", quantity=1.0, group_id="replacement"),
     ]
 
@@ -286,3 +288,41 @@ def test_cross_group_scale_in_rolls_back_earlier_leg_in_atomic_group() -> None:
     assert positions == {"A": position}
     assert position.quantity == pytest.approx(1.0)
     assert "B" not in positions
+
+
+def test_portfolio_weights_refuses_to_scale_a_grouped_position_before_reducing() -> None:
+    """A whole-book target is ungrouped by nature; adding to a position a
+    group opened would break its identity, and the refusal lands before the
+    reductions the same target would otherwise execute first."""
+    grouped = _position("A", quantity=1.0)
+    grouped.group_id = "pair"
+    positions = {"A": grouped, "B": _position("B", quantity=4.0)}
+
+    with pytest.raises(ValueError, match="A"):
+        _execute(
+            positions,
+            0.0,
+            PortfolioWeights(weights={"A": 0.9, "B": 0.1}),
+            {"A": _bar(100.0), "B": _bar(100.0)},
+        )
+
+    assert positions["A"].quantity == pytest.approx(1.0)
+    assert positions["B"].quantity == pytest.approx(4.0)
+
+
+def test_portfolio_weights_may_reduce_a_grouped_position() -> None:
+    grouped = _position("A", quantity=4.0)
+    grouped.group_id = "pair"
+    positions = {"A": grouped}
+
+    _cash, result = _execute(
+        positions,
+        0.0,
+        PortfolioWeights(weights={"A": 0.5}),
+        {"A": _bar(100.0)},
+    )
+
+    assert positions["A"].quantity == pytest.approx(2.0)
+    assert positions["A"].group_id == "pair"
+    assert result.events[0].event_type == "reduce"
+    assert result.events[0].group_id == "pair"
