@@ -12,13 +12,44 @@ def _decision() -> list[OrderIntent]:
     ]
 
 
+def _collapsed(doc: str | None) -> str:
+    """Flatten a docstring to one line so assertions do not depend on where it
+    happens to wrap, which reflows whenever the paragraph is edited."""
+    return " ".join((doc or "").split())
+
+
 def test_public_grouped_execution_contract_is_mode_specific() -> None:
     """The public API must not imply venue atomicity from group_id alone."""
-    contract = OrderIntent.__doc__ or ""
+    contract = _collapsed(OrderIntent.__doc__)
 
     assert "Backtest/sim" in contract
     assert "Live preflights" in contract
     assert "does not claim broker or cross-venue atomicity" in contract
+
+
+def test_public_grouped_contract_states_who_can_act_on_each_failure() -> None:
+    """A strategy author decides differently for a decision error than for a
+    venue shortfall, so the split has to be on the public surface."""
+    contract = _collapsed(OrderIntent.__doc__)
+
+    assert "raises before anything is staged" in contract
+    assert "group_unfillable" in contract
+
+
+def test_public_grouped_contract_states_the_close_leg_quantity_rule() -> None:
+    contract = _collapsed(OrderIntent.__doc__)
+
+    assert "An entry leg requires an explicit quantity" in contract
+    assert "a close leg may omit one to mean the whole position" in contract
+
+
+def test_public_grouped_contract_states_group_identity_is_planned_not_settled() -> None:
+    """Refusing a confirmed fill would leave the book behind the venue with
+    nothing halted, so where the check runs is part of the contract."""
+    contract = _collapsed(OrderIntent.__doc__)
+
+    assert "refused when the order is planned" in contract
+    assert "a confirmed fill is always booked" in contract
 
 
 def test_grouped_decision_rejected_when_a_required_symbol_has_no_bar() -> None:

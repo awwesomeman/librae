@@ -144,13 +144,25 @@ class OrderIntent:
             next bar. Entries known to fill at open may trigger it immediately.
         group_id: Ties this intent to related OrderIntents in the same decision
             (spreads, rolls, inventory hedges). Backtest/sim stage the group as
-            one local fill-or-kill unit: every leg fills as requested or the
-            staged mutation is rolled back. Live preflights and checkpoints the
-            complete group before submitting serial broker requests; a later
-            venue failure can still leave an already-filled leg, so group_id
-            does not claim broker or cross-venue atomicity. None means
-            independent execution (the default): the intent may wait for its
-            own symbol's next bar without blocking anything else.
+            one local fill-or-kill unit, and split its failures by who can act
+            on them: a leg that cannot fill as written — no executable price, a
+            close for a symbol holding nothing, or a close larger than the
+            position — raises before anything is staged, while a shortfall the
+            venue decides (cash, bar volume, ADV) rolls the staged mutation
+            back and reports a group_unfillable runtime event. An entry leg
+            requires an explicit quantity; a close leg may omit one to mean the
+            whole position, which is the only way to exit a leg whose size
+            changed underneath the strategy. A position carries the group that
+            opened it through every later record, so scaling it under another
+            identity is refused when the order is planned; a confirmed fill is
+            always booked, because attribution is a reconciliation concern and
+            not grounds to refuse an execution the venue has made.
+            Live preflights and checkpoints the complete group before
+            submitting serial broker requests; a later venue failure can still
+            leave an already-filled leg, so
+            group_id does not claim broker or cross-venue atomicity.
+            None means independent execution (the default): the intent may
+            wait for its own symbol's next bar without blocking anything else.
         time_in_force: Broker time-in-force hint — "day" (rest until session
             end), "gtc" (rest until cancelled), "ioc" (fill immediately,
             cancel the remainder), or "fok" (fill the entire quantity
