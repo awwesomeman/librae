@@ -2253,14 +2253,18 @@ class LiveTrader:
     ) -> None:
         """Apply only the new cumulative-fill delta, then checkpoint it."""
         request = tracked.request
-        if report.symbol != request.symbol or report.side != request.side:
+        if (
+            report.client_order_id != request.client_order_id
+            or report.symbol != request.symbol
+            or report.side != request.side
+        ):
             raise ValueError("broker report identity does not match the tracked request")
         if tracked.order_id and report.order_id != tracked.order_id:
             raise ValueError("broker order id changed during its lifecycle")
         if report.filled_quantity + EPSILON < tracked.filled_quantity:
             raise ValueError("broker cumulative filled quantity moved backwards")
-        if report.requested_quantity > request.quantity + EPSILON:
-            raise ValueError("broker requested quantity exceeds the tracked request")
+        if abs(report.requested_quantity - request.quantity) > EPSILON:
+            raise ValueError("broker requested quantity does not match the tracked request")
 
         result: ExecutionResult | None = None
         cumulative_notional = (

@@ -404,6 +404,78 @@ class TestLiveExecutor:
         )
         assert ex.submit_order(request) is None
 
+    @pytest.mark.parametrize("route", ["placement", "polling", "restart"])
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("symbol", "ETH/USDT", "symbol"),
+            ("side", "sell", "side"),
+            ("clientOrderId", "wrong-client", "client order id"),
+            ("amount", 0.5, "requested quantity"),
+        ],
+    )
+    def test_order_routes_reject_mismatched_broker_identity(self, route, field, value, message):
+        adapter = MagicMock()
+        raw = {
+            "id": "broker-1",
+            "clientOrderId": "client-1",
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "status": "submitted",
+            "amount": 1.0,
+            field: value,
+        }
+        request = OrderRequest(
+            client_order_id="client-1",
+            symbol="BTCUSDT",
+            venue_symbol="BTC/USDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=adapter)
+
+        if route == "placement":
+            adapter.place_order.return_value = raw
+            assert ex.submit_order(request) is None
+        elif route == "polling":
+            adapter.get_order.return_value = raw
+            with pytest.raises(ValueError, match=message):
+                ex.get_order(request, "broker-1")
+        else:
+            adapter.find_order.return_value = raw
+            with pytest.raises(ValueError, match=message):
+                ex.find_order(request)
+
+    def test_normalized_report_retains_canonical_identity_after_raw_validation(self):
+        request = OrderRequest(
+            client_order_id="client-1",
+            symbol="BTCUSDT",
+            venue_symbol="BTC/USDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        report = LiveExecutor.normalize_report(
+            request,
+            {
+                "id": "broker-1",
+                "client_order_id": "client-1",
+                "symbol": "BTC/USDT",
+                "side": "BUY",
+                "status": "submitted",
+                "requested_quantity": 1.0,
+            },
+        )
+
+        assert report.client_order_id == "client-1"
+        assert report.symbol == "BTCUSDT"
+        assert report.side == "buy"
+        assert report.requested_quantity == 1.0
+
     def test_submit_order_preserves_rejected_state(self):
         mock_adapter = MagicMock()
         mock_adapter.place_order.return_value = {"id": "123", "status": "rejected"}
@@ -502,6 +574,49 @@ class TestLiveTrader:
         )
         runner._sleep = lambda _seconds: None  # no real delays in unit tests
         return runner
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("client_order_id", "wrong-client", "identity"),
+            ("symbol", "ETHUSDT", "identity"),
+            ("side", "sell", "identity"),
+            ("requested_quantity", 0.5, "requested quantity"),
+        ],
+    )
+    def test_report_validation_precedes_tracked_or_portfolio_mutation(self, field, value, message):
+        request = OrderRequest(
+            client_order_id="client-1",
+            symbol="BTCUSDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=TEST_CLOCK_NOW,
+        )
+        tracked = TrackedOrder(request=request, placement_attempted=True)
+        values = {
+            "order_id": "broker-1",
+            "client_order_id": request.client_order_id,
+            "symbol": request.symbol,
+            "side": request.side,
+            "status": "submitted",
+            "requested_quantity": request.quantity,
+            "filled_quantity": 0.0,
+            "average_price": None,
+            "commission": 0.0,
+            "slippage": 0.0,
+            "tax": 0.0,
+            "executed_at": None,
+            field: value,
+        }
+        before = tracked.to_dict()
+
+        with pytest.raises(ValueError, match=message):
+            LiveTrader._apply_order_report(
+                LiveTrader.__new__(LiveTrader), tracked, ExecutionReport(**values)
+            )
+
+        assert tracked.to_dict() == before
 
     def test_max_iterations_stops(self):
         runner = self._make_runner()
