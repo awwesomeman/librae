@@ -2267,14 +2267,17 @@ class TestLiveExecutionLifecycle:
         adapter.place_order.assert_not_called()
         assert "relative leg ratios" in runtime_events[0].detail["message"]
 
-    def test_live_group_rejects_equal_adapter_upsize_that_breaches_risk(self):
+    def test_live_group_rejects_equal_adapter_upsize_before_the_risk_replay(self):
+        """An equal upsize keeps the leg ratio, so the ratio guard passes; the
+        size guard still rejects it, and only that group -- the ungrouped
+        sibling the adapter leaves alone is submitted as requested."""
         adapter = _mock_order_adapter()
         adapter.prepare_order.side_effect = lambda signal: {
             **signal,
-            "quantity": signal["quantity"] * 2,
+            "quantity": signal["quantity"] * (2 if signal["canonical_symbol"] != "SOLO" else 1),
         }
         adapter.place_order.return_value = _broker_report(
-            order_id="solo-1", quantity=1.0, average=100.0
+            order_id="solo-1", quantity=0.5, average=100.0
         )
         runtime_events = []
         runner = self._make_trader(
@@ -2301,8 +2304,8 @@ class TestLiveExecutionLifecycle:
         assert set(runner._positions) == {"SOLO"}
         submitted = adapter.place_order.call_args.args[0]
         assert submitted["canonical_symbol"] == "SOLO"
-        assert submitted["quantity"] == pytest.approx(1.0)
-        assert "max_order_notional" in runtime_events[0].detail["message"]
+        assert submitted["quantity"] == pytest.approx(0.5)
+        assert "cannot increase quantity" in runtime_events[0].detail["message"]
 
     @pytest.mark.parametrize(
         ("failure", "expected_message"),
@@ -2359,6 +2362,58 @@ class TestLiveExecutionLifecycle:
         submitted = adapter.place_order.call_args.args[0]
         assert submitted["canonical_symbol"] == "SOLO"
         assert expected_message in runtime_events[0].detail["message"]
+
+    @pytest.mark.parametrize("quantity", [None, 1.0])
+    def test_ungrouped_close_of_a_flat_symbol_is_a_no_op(self, quantity):
+        """Matches simulated execution, where a close for a symbol with no
+        position is skipped. Reachable through an idempotent close, a pending
+        close whose position closed in the meantime, or restart drift; only a
+        grouped close, which asks for fill-or-kill, treats it as a failure."""
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(_HoldStrategy(), adapter)
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        complete = runner._execute_live_decision(
+            [OrderIntent(action="close", symbol="BTCUSDT", quantity=quantity)],
+            {"BTCUSDT": {"close": 100.0, "volume": 10_000.0}},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        adapter.place_order.assert_not_called()
+
+    def test_grouped_close_of_a_flat_symbol_rejects_its_group_only(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="solo-1", quantity=1.0, average=100.0
+        )
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["A", "SOLO"]),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {"A": 100.0, "SOLO": 100.0}
+        bars = {
+            "A": {"close": 100.0, "volume": 10_000.0},
+            "SOLO": {"close": 100.0, "volume": 10_000.0},
+        }
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="close", symbol="A", quantity=1.0, group_id="exit"),
+                OrderIntent(action="long", symbol="SOLO", quantity=1.0),
+            ],
+            bars,
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert set(runner._positions) == {"SOLO"}
+        assert "no open position" in runtime_events[0].detail["message"]
 
     def test_live_group_checkpoints_all_siblings_and_resumes_after_restart(self):
         store = MemoryLiveStateStore()

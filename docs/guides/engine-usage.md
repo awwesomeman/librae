@@ -297,7 +297,13 @@ leg of a group serially. If any leg in a group is rejected, cancelled, or
 times out, the engine cancels that group's remaining legs and alerts —
 unrelated groups and independent intents keep executing; it does not attempt
 to unwind legs that already filled. If a broker adds native combo support in
-the future, use that adapter-specific capability instead.
+the future, use that adapter-specific capability instead. Before anything is
+submitted, live planning preflights each group as a whole: a grouped `close`
+for a symbol with no open position, or a grouped leg with no reference
+price, fails its group and nothing in it is sent. The ungrouped form of
+either is skipped as a no-op, exactly as in simulation — a close may
+legitimately arrive after its position is already gone (an idempotent
+close, or restart drift), and that must not halt the account.
 
 Whether to close an already-filled leg after its sibling failed is a
 strategy risk decision, not something the engine can decide generically —

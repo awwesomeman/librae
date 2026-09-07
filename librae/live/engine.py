@@ -1765,7 +1765,15 @@ class LiveTrader:
                         )
                     symbol = action.symbol or primary_symbol
                     reference_price = prices.get(symbol)
+                    # WHY: a group asks for fill-or-kill, so a leg that cannot
+                    # be planned fails the group. An ungrouped intent keeps the
+                    # simulated semantics -- a missing price or a close with
+                    # nothing to close is skipped, not a halt -- because a
+                    # close can legitimately arrive after its position is
+                    # already gone (idempotent close, restart drift).
                     if reference_price is None:
+                        if not grouped:
+                            continue
                         raise ValueError(f"{symbol} has no positive live reference price")
                     if grouped and action.quantity is None:
                         raise ValueError(f"{symbol} grouped intent requires an explicit quantity")
@@ -1777,6 +1785,8 @@ class LiveTrader:
                     else:
                         position = unit_positions.get(symbol)
                         if position is None:
+                            if not grouped:
+                                continue
                             raise ValueError(f"{symbol} close intent has no open position")
                         order_side = "sell" if position.side == "long" else "buy"
                     tradability_field = CAN_BUY_COLUMN if order_side == "buy" else CAN_SELL_COLUMN
