@@ -226,9 +226,104 @@ def test_pending_order_intents_round_trip_through_to_dict():
         prev_equity=1_000.0,
     )
 
-    restored = LiveRuntimeState.from_dict(state.to_dict())
+    raw = state.to_dict()
+    restored = LiveRuntimeState.from_dict(raw)
 
+    assert raw["pending_decision"] == {
+        "type": "order_intents",
+        "intents": [
+            {
+                "action": "long",
+                "symbol": "AAA",
+                "quantity": 1.0,
+                "reason": "",
+                "limit_price": None,
+                "stop_price": None,
+                "take_profit_price": None,
+                "group_id": None,
+                "time_in_force": None,
+            },
+            {
+                "action": "short",
+                "symbol": "BBB",
+                "quantity": 2.0,
+                "reason": "",
+                "limit_price": None,
+                "stop_price": None,
+                "take_profit_price": None,
+                "group_id": None,
+                "time_in_force": None,
+            },
+        ],
+    }
     assert restored.pending_decision == decision
+
+
+def test_pending_portfolio_weights_round_trip_through_to_dict():
+    decision = PortfolioWeights(weights={"AAA": 0.6, "BBB": -0.4}, reason="rebalance")
+    state = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        account_id="default",
+        cash=1_000.0,
+        pending_decision=decision,
+        equity_peak=1_000.0,
+        prev_equity=1_000.0,
+    )
+
+    raw = state.to_dict()
+    restored = LiveRuntimeState.from_dict(raw)
+
+    assert raw["pending_decision"] == {
+        "type": "portfolio_weights",
+        "weights": {"AAA": 0.6, "BBB": -0.4},
+        "reason": "rebalance",
+    }
+    assert restored.pending_decision == decision
+
+
+@pytest.mark.parametrize(
+    ("pending_decision", "error", "match"),
+    [
+        ([], TypeError, "must be an object"),
+        ({"type": "unknown"}, ValueError, "unknown pending decision type"),
+        ({"type": "order_intents"}, ValueError, "malformed order_intents"),
+        (
+            {"type": "order_intents", "intents": {}},
+            TypeError,
+            "requires a list of objects",
+        ),
+        (
+            {"type": "portfolio_weights", "weights": {"AAA": 1.0}},
+            ValueError,
+            "malformed portfolio_weights",
+        ),
+        (
+            {"type": "portfolio_weights", "weights": [], "reason": ""},
+            TypeError,
+            "requires a weights object",
+        ),
+    ],
+)
+def test_runtime_state_rejects_malformed_pending_decision(
+    pending_decision: object,
+    error: type[Exception],
+    match: str,
+) -> None:
+    raw = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        account_id="default",
+        cash=1_000.0,
+    ).to_dict()
+    raw["pending_decision"] = pending_decision
+
+    with pytest.raises(error, match=match):
+        LiveRuntimeState.from_dict(raw)
 
 
 def test_memory_store_lease_is_exclusive_until_release():

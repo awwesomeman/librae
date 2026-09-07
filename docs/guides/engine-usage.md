@@ -863,11 +863,14 @@ During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
 prices, equity peak, halt/risk counters, target-rebalance lifecycle, funding
-watermarks, and active order queue. Runtime-state schema v16 persists scalar
-account state, the caller-owned `runtime_revision`, and exact/rolling contract
-identity nested in active `OrderRequest` values. Only the current v16
+watermarks, and active order queue. The current runtime-state schema persists
+scalar account state, the caller-owned `runtime_revision`, and exact/rolling contract
+identity nested in active `OrderRequest` values. Only the current
 checkpoint is accepted; every older schema requires an explicit external
 migration or removal.
+Pending strategy decisions use an explicit `order_intents` or
+`portfolio_weights` type tag so simulation checkpoints preserve the public
+decision variant exactly across JSON storage and restart.
 `_STATE_SCHEMA_VERSION` is the single code-level version constant and must be
 bumped whenever the checkpoint or any persisted nested dataclass changes
 shape; it is not a business/domain version.
