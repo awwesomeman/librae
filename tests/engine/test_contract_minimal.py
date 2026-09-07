@@ -70,6 +70,22 @@ def test_grouped_decision_rejects_unsafe_ambiguous_legs(decision) -> None:
         )
 
 
+def test_grouped_close_leg_may_omit_quantity() -> None:
+    """A close leg without a quantity means the whole position, which is
+    deterministic given the book; an entry leg without one sizes from cash
+    and stays rejected inside a group."""
+    validate_strategy_decision(
+        [
+            OrderIntent(action="close", symbol="NEAR", group_id="exit"),
+            OrderIntent(action="close", symbol="NEXT", group_id="exit"),
+        ],
+        {"NEAR", "NEXT"},
+        primary_symbol="NEAR",
+        bars={"NEAR": {"close": 100.0}, "NEXT": {"close": 101.0}},
+        positions={},
+    )
+
+
 @pytest.mark.parametrize("invalid", ["gtd", "GTC", "", 1])
 def test_order_intent_rejects_invalid_time_in_force(invalid) -> None:
     with pytest.raises(ValueError, match="time_in_force"):

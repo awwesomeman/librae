@@ -306,14 +306,30 @@ return [
 ]
 ```
 
-Every intent sharing a group_id requires an explicit quantity, and a symbol
-cannot appear twice in one decision (grouped or not). The strategy checks
-`ctx.available_symbols` for every member of a group *before* returning it —
-one event must already contain every member, or the engine rejects the
-decision rather than waiting across periods for it. Backtest/sim then
-executes a synchronous OHLCV approximation. This is useful for strategy
-research but does not claim intrabar sequencing, venue atomicity, or
-guaranteed recovery in production.
+Every entry intent sharing a group_id requires an explicit quantity, and a
+symbol cannot appear twice in one decision (grouped or not). A `close` leg
+may omit its quantity to mean the whole position — the one way to exit a
+leg whose size changed underneath the strategy, for example after a
+volume-capped stop reduced it. The strategy checks `ctx.available_symbols`
+for every member of a group *before* returning it — one event must already
+contain every member, or the engine rejects the decision rather than
+waiting across periods for it. Backtest/sim then executes a synchronous
+OHLCV approximation. This is useful for strategy research but does not
+claim intrabar sequencing, venue atomicity, or guaranteed recovery in
+production.
+
+A group is the strategy's request for fill-or-kill, so backtest/sim proves
+every leg can fill *as written* before any intent in the decision executes,
+and raises `ValueError` if one cannot: a leg with no executable price, a
+`close` for a symbol with no open position, or a `close` whose quantity
+exceeds the position. These are decision-time errors the strategy can see
+and fix on the first bar, so they fail loudly rather than as a skip event.
+Once past that gate, a group that the venue only partly fills — cash, bar
+volume, or ADV budget — is rolled back with no mutation and recorded as a
+`group_unfillable` runtime event with its `failed_reasons`; the ungrouped
+intents and other groups in the same decision still execute. See
+[the grouped-decisions ADR](../decisions/2026-08-05-grouped-decisions-no-engine-side-waiting.md)
+and [its follow-up on close legs](../decisions/2026-09-07-grouped-close-legs-and-loud-preflight.md).
 
 Examples include TAIFEX near/next-future/cash-proxy and Binance
 spot/perpetual/delivery-future spreads. Every member of one group belongs
