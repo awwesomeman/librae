@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from math import isfinite
-from typing import Protocol
+from typing import Literal, Protocol
 
 from librae.core.run_config import LiveMode
 from librae.core.strategy import (
@@ -22,6 +22,10 @@ from librae.core.strategy import (
 )
 
 from .executor import OrderRequest, OrderStatus
+
+# ``cancel_retry`` is engine-owned: unlike broker-acknowledged
+# ``cancel_pending``, it permits another idempotent cancel-by-order-id call.
+type TrackedOrderStatus = OrderStatus | Literal["cancel_retry"]
 
 
 def _to_utc(value: str | datetime | None) -> datetime | None:
@@ -87,7 +91,7 @@ class TrackedOrder:
     placement_attempted: bool = False
     placement_attempted_at: datetime | None = None
     order_id: str = ""
-    status: OrderStatus = "submitted"
+    status: TrackedOrderStatus = "submitted"
     filled_quantity: float = 0.0
     filled_notional: float = 0.0
     commission: float = 0.0
