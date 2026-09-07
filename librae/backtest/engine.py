@@ -535,6 +535,7 @@ class Backtest:
         primary_symbol: str,
         last_equity: float,
         halted: bool,
+        get_previous_volume: Callable[[str], float | None],
         get_lagged_adv: Callable[[str], float | None],
         used_adv_quantity_by_symbol: dict[str, float],
         exposure_prices: dict[str, float],
@@ -548,6 +549,7 @@ class Backtest:
                 get_cost_model=self._get_cost_model,
                 max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                 max_adv_participation_rate=self._max_adv_participation_rate,
+                get_volume=get_previous_volume,
                 get_lagged_adv=get_lagged_adv,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             )
@@ -570,6 +572,7 @@ class Backtest:
             max_order_notional=self._risk_policy.max_order_notional,
             max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
             max_adv_participation_rate=self._max_adv_participation_rate,
+            get_previous_volume=get_previous_volume,
             get_lagged_adv=get_lagged_adv,
             used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             max_gross_exposure=self._risk_policy.max_gross_exposure,
@@ -634,6 +637,7 @@ class Backtest:
         halted = False
         adv_session_by_symbol: dict[str, object] = {}
         used_adv_quantity_by_symbol: dict[str, float] = {}
+        previous_volumes: dict[str, float] = {}
         rebalance_delay_bars = 0
         unavailable_rebalance_symbols: tuple[str, ...] = ()
 
@@ -650,6 +654,12 @@ class Backtest:
             def get_lagged_adv(
                 symbol: str,
                 values: dict[str, float] = lagged_adv,
+            ) -> float | None:
+                return values.get(symbol)
+
+            def get_previous_volume(
+                symbol: str,
+                values: dict[str, float] = previous_volumes,
             ) -> float | None:
                 return values.get(symbol)
 
@@ -688,6 +698,7 @@ class Backtest:
                     primary_symbol=primary_symbol,
                     last_equity=last_equity,
                     halted=halted,
+                    get_previous_volume=get_previous_volume,
                     get_lagged_adv=get_lagged_adv,
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     exposure_prices=exposure_prices,
@@ -734,6 +745,7 @@ class Backtest:
                     primary_symbol=primary_symbol,
                     last_equity=last_equity,
                     halted=halted,
+                    get_previous_volume=get_previous_volume,
                     get_lagged_adv=get_lagged_adv,
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     exposure_prices=exposure_prices,
@@ -906,6 +918,13 @@ class Backtest:
                 decision_index += 1
 
             self._increment_periods_held(positions, bars)
+            previous_volumes.update(
+                {
+                    symbol: float(bar["volume"])
+                    for symbol, bar in bars.items()
+                    if bar.get("volume") is not None
+                }
+            )
 
         if (
             isinstance(pending_decision, PortfolioWeights) or pending_rebalance is not None

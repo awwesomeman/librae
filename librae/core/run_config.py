@@ -65,7 +65,10 @@ class ExecutionPolicy:
     ``max_bar_volume_participation_rate`` caps the cumulative filled quantity for
     one symbol in one bar. ``None`` disables the cap. With a cap enabled,
     missing volume rejects the fill and insufficient volume produces a partial
-    fill. The cap also applies to stops and forced exits.
+    fill. A simulated close fill uses that completed bar's volume. Open,
+    limit, other intrabar fills, and protective exits use the previous
+    completed bar's volume so later information cannot change an earlier fill.
+    Forced end-of-run exits fill at the completed final close and use its volume.
 
     ``adv_lookback_sessions`` and ``max_adv_participation_rate`` form one
     optional session-level capacity limit. ADV uses exactly N completed
