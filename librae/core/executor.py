@@ -1143,11 +1143,16 @@ def liquidate_all(
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
     cash_delta = 0.0
+    # WHY: a residual is already reported, but "still open" alone cannot tell a
+    # market halt from a data gap from a liquidity budget, and each one asks a
+    # different question of the operator.
+    causes: dict[str, str] = {}
 
     for sym in list(positions.keys()):
         pos = positions[sym]
         bar = bars.get(sym)
         if bar is None or bar.get("close") is None:
+            causes[sym] = "no_bar"
             continue
         close_side: Literal["buy", "sell"] = "sell" if pos.side == "long" else "buy"
         if not _order_side_is_tradable(bar, close_side):
@@ -1155,11 +1160,13 @@ def liquidate_all(
                 "Forced exit for %s cannot fill because the order side is not tradable",
                 sym,
             )
+            causes[sym] = "side_not_tradable"
             continue
         price = bar["close"]
         bar_volume = bar.get("volume")
         cost_model = get_cost_model(sym)
         if _impact_volume_unavailable(cost_model, bar_volume):
+            causes[sym] = "volume_unavailable"
             continue
         max_volume_qty = _volume_fill_limit(
             sym,
@@ -1202,7 +1209,13 @@ def liquidate_all(
 
     for sym, pos in positions.items():
         runtime_events.append(
-            _skipped(ts, "force_close_incomplete", symbol=sym, remaining_quantity=pos.quantity)
+            _skipped(
+                ts,
+                "force_close_incomplete",
+                symbol=sym,
+                remaining_quantity=pos.quantity,
+                cause=causes.get(sym, "liquidity_budget"),
+            )
         )
 
     return ExecutionResult(

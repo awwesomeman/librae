@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -163,6 +164,10 @@ class TestCapFillToVolume:
 # ---------------------------------------------------------------------------
 
 
+def _impact_cost() -> CostModel:
+    return replace(_zero_cost(), volume_impact_ticks=1.0, tick_size=0.01)
+
+
 class TestLiquidateAll:
     def test_closes_all_positions_and_sums_cash_delta(self):
         positions = {
@@ -195,6 +200,41 @@ class TestLiquidateAll:
         assert set(positions) == {"A"}
         assert result.trades == []
         assert result.events == []
+
+    @pytest.mark.parametrize(
+        ("bars", "cost_model", "cause"),
+        [
+            ({}, _zero_cost, "no_bar"),
+            (
+                {"A": {"close": 100.0, "volume": 1_000.0, "can_buy": True, "can_sell": False}},
+                _zero_cost,
+                "side_not_tradable",
+            ),
+            ({"A": {"close": 100.0}}, _impact_cost, "volume_unavailable"),
+        ],
+    )
+    def test_unliquidated_residual_names_what_blocked_it(self, bars, cost_model, cause):
+        """The residual is already reported; without a cause the operator sees
+        a position that stayed open and no way to tell a halt from a data gap
+        from a liquidity budget."""
+        positions = {"A": _make_pos(symbol="A", entry_price=100.0, quantity=1.0)}
+
+        result = liquidate_all(
+            positions,
+            bars,
+            TS,
+            get_cost_model=lambda _symbol: cost_model(),
+            reason=REASON_FORCE_CLOSE,
+        )
+
+        assert set(positions) == {"A"}
+        assert result.events == []
+        incomplete = [
+            event
+            for event in result.runtime_events
+            if event.detail.get("reason") == "force_close_incomplete"
+        ]
+        assert [event.detail.get("cause") for event in incomplete] == [cause]
 
     def test_volume_constrained_liquidation_is_partial(self):
         positions = {"A": _make_pos(symbol="A", entry_price=100.0, quantity=10.0)}

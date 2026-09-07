@@ -604,6 +604,12 @@ exceeded `RunConfig.runtime.poll_seconds`.
   previous completed bar's volume because the execution bar's final volume is
   not known at their fill timestamp. Live planning uses the latest completed
   bar, so this keeps the simulation and live information sets aligned.
+  "Previous" means that symbol's own last observed bar, not the previous
+  timestamp, so a sparse cross-market panel stays correct — and across a gap
+  that bar can be old. Volume is the one stale value the engine does expose to
+  execution: the alternative, refusing to trade after any gap, is worse, and
+  it caps size rather than pricing a fill. The session-level ADV cap below is
+  bounded by `adv_lookback_sessions`; this one is not.
   Missing volume rejects the fill. Constrained exits are explicit partial
   fills and retain the remaining position for a later observed bar. Once
   stop-market or liquidation has triggered, its remainder stays an active
