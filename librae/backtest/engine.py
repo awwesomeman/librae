@@ -569,9 +569,6 @@ class Backtest:
                 positions,
                 primary_symbol=primary_symbol,
             )
-            if isinstance(decision_to_execute, PortfolioWeights):
-                active_target_weights = dict(decision_to_execute.weights)
-
             # ── Steps 1+1.5: fill the previous pending decision at current
             # bar's price, then check stop-loss/take-profit — shared with
             # LiveTrader's simulation mode so deterministic runtimes cannot
@@ -590,6 +587,12 @@ class Backtest:
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     exposure_prices=exposure_prices,
                 )
+                # WHY: only an executed target is the active one. Recording it
+                # before this call would let a deferred target show up in the
+                # allocation snapshots of every deferral bar, with drift
+                # measured against a book that still reflects the last target.
+                if isinstance(decision_to_execute, PortfolioWeights):
+                    active_target_weights = dict(decision_to_execute.weights)
             except ExecutionPriceUnavailableError as exc:
                 if not isinstance(decision_to_execute, PortfolioWeights):
                     raise

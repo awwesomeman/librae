@@ -431,6 +431,45 @@ class TestBacktestRebalance:
             ("B", timestamps[2], 240.0),
         ]
 
+    def test_deferred_target_is_not_reported_as_active(self) -> None:
+        """A deferred target has not been attempted, so the allocation
+        snapshot on the deferral bar must not report it as the active target
+        or measure drift against a book that still reflects the last executed
+        one -- that would print a phantom target on every deferral bar."""
+        frame = _multi_asset_frame(
+            opens={
+                "A": [100.0, 110.0, 120.0, 120.0, 120.0],
+                "B": [200.0, 200.0, 240.0, 240.0, 240.0],
+            }
+        )
+        timestamps = frame.index.get_level_values("datetime").unique()
+        frame = frame.drop(index=("B", timestamps[1]))
+
+        backtest = Backtest(
+            frame,
+            OneRebalance(),
+            initial_balance=1_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                max_rebalance_delay_bars=1,
+            ),
+            record_position_snapshots=True,
+        )
+        backtest.run()
+        output = backtest.build_output()
+
+        by_ts = {}
+        for snapshot in output.allocation_snapshots:
+            by_ts.setdefault(snapshot.ts, {})[snapshot.symbol] = snapshot
+        deferred = by_ts[timestamps[1]]
+        executed = by_ts[timestamps[2]]
+
+        assert all(snapshot.target_weight is None for snapshot in deferred.values())
+        assert all(snapshot.weight_drift is None for snapshot in deferred.values())
+        assert all(np.isclose(snapshot.target_weight, 0.5) for snapshot in executed.values())
+
     def test_rebalance_fails_when_delay_bound_is_exceeded(self) -> None:
         frame = _multi_asset_frame(
             opens={

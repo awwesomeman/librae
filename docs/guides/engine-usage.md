@@ -548,7 +548,14 @@ exceeded `RunConfig.runtime.poll_seconds`.
   OHLCV forward. A newer complete `PortfolioWeights` target supersedes the
   older unfilled target without resetting the existing delay budget; the
   superseded decision is recorded in `runtime_events`. It does not apply to
-  independent `OrderIntent`s or live broker submission.
+  independent `OrderIntent`s or live broker submission. While a target is
+  deferred the strategy may return nothing or a newer `PortfolioWeights`;
+  returning `OrderIntent`s raises, because a per-symbol order cannot be
+  sequenced against a whole-book target that has not executed. A strategy
+  that mixes `PortfolioWeights` with per-symbol intents on other bars should
+  keep the default of `0`. A deferred target is not yet an active target:
+  allocation snapshots keep reporting the last *executed* target until the
+  deferred one fills.
 - `warmup_periods`: positive live/sim feature-history retention count; it is
   typed engine configuration, not a strategy `params` fallback.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
