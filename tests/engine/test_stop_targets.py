@@ -17,6 +17,7 @@ from librae.core.executor import (
     execute_pending_decision_and_stops,
     resolve_stop_exit,
 )
+from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import Context, OrderIntent, PortfolioWeights, PositionState, Strategy
 
 # ---------------------------------------------------------------------------
@@ -388,10 +389,86 @@ class TestPendingFillStopOrdering:
         assert positions == {}
         assert [event.reason for event in result.events] == [""]
 
+    # ---------------------------------------------------------------------------
+    # Unit tests: liquidation (resolve_stop_exit + CostModel.liquidation_price)
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Unit tests: liquidation (resolve_stop_exit + CostModel.liquidation_price)
-# ---------------------------------------------------------------------------
+    def test_ambiguous_bar_defers_a_rebalance_instead_of_aborting(self):
+        """Deferring the decision resolves the ordering rather than dodging it.
+
+        With the fill pushed to a later bar the protection is alone on this
+        one, so it executes at its own price and the question of which came
+        first never arises. Mainstream bar-level engines reach the same
+        outcome -- backtesting.py postpones the ambiguous contingent order to
+        the next bar, vectorbt forbids resolving a stop on the entry bar --
+        and none aborts the run. Only exhausting the deferral bound is fatal,
+        which is why the zero default still raises.
+        """
+        timestamps = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        rows = []
+        for symbol, lows in (("A", [100.0, 100.0, 100.0, 80.0, 100.0]), ("B", [100.0] * 5)):
+            for index, ts in enumerate(timestamps):
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "datetime": ts,
+                        "open": 100.0,
+                        "high": 105.0,
+                        "low": lows[index],
+                        "close": 100.0,
+                        "volume": 10_000.0,
+                    }
+                )
+        # B is missing exactly where the rebalance would execute, so that bar
+        # both defers the whole book and triggers A's stop.
+        frame = (
+            pd.DataFrame(rows).set_index(["symbol", "datetime"]).drop(index=("B", timestamps[3]))
+        )
+
+        class StopThenRebalance(Strategy):
+            def on_bar(self, ctx: Context):
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol="A", quantity=1.0, stop_price=95.0)]
+                if ctx.period_index == 2:
+                    return PortfolioWeights(weights={"A": 0.4, "B": 0.4})
+                return []
+
+        result = Backtest(
+            frame,
+            StopThenRebalance(),
+            initial_balance=1_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+            execution=ExecutionPolicy(
+                default_fill_price="close",
+                max_bar_volume_participation_rate=None,
+                max_rebalance_delay_bars=2,
+            ),
+        ).run()
+
+        stop_exits = [event for event in result.position_events if event.reason == REASON_STOP_LOSS]
+        assert [(event.symbol, event.ts) for event in stop_exits] == [("A", timestamps[3])]
+        opens = [event for event in result.position_events if event.event_type == "open"]
+        assert [(event.symbol, event.ts) for event in opens][-2:] == [
+            ("A", timestamps[4]),
+            ("B", timestamps[4]),
+        ]
+
+    def test_ambiguous_bar_still_raises_without_a_deferral_budget(self):
+        positions = {"TEST": _make_pos(side="long", stop=95.0)}
+        bar = {"open": 100.0, "high": 101.0, "low": 90.0, "close": 99.0, "volume": 100.0}
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                PortfolioWeights(weights={"TEST": 0.5}),
+                {"TEST": bar},
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="close",
+                primary_symbol="TEST",
+            )
 
 
 class TestLiquidation:

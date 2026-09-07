@@ -111,6 +111,17 @@ next observed bar. This conservative rule prevents a target reached before the
 entry from being recorded as profit without introducing an invented intrabar
 path model.
 
+The same limit applies to an existing position: when a pending decision would
+fill at a non-open price on a bar where that position's protection triggers,
+the engine will not guess which came first. It declines to fill on that bar
+rather than picking a convention. With `max_rebalance_delay_bars` set, the
+whole-book target waits for a later bar and the protection executes alone on
+this one at its own price, which resolves the ordering instead of assuming
+it; on the zero default the run raises. Other bar-level engines answer the
+same question with a documented heuristic or a configuration flag — see
+[the intrabar ambiguity ADR](../decisions/2026-09-07-intrabar-ambiguity-defers-rather-than-aborts.md)
+for why waiting is preferred here.
+
 ## Account and multi-asset / stock-picking strategies
 
 Each run owns exactly one named account, which is the cash and PnL SSOT for

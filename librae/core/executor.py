@@ -81,6 +81,18 @@ class ExecutionPriceUnavailableError(ExecutionUnavailableError):
         super().__init__(symbols, f"rebalance requires a valid execution price for {joined}")
 
 
+class AmbiguousBarOrderingError(ExecutionUnavailableError):
+    """This bar cannot order a triggered protection against a non-open fill."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        joined = ", ".join(sorted(symbols))
+        super().__init__(
+            symbols,
+            "ambiguous same-bar ordering between non-open pending execution "
+            f"and triggered protection for {joined}",
+        )
+
+
 def _intent_order_side(
     intent: OrderIntent,
     position_side: PositionSide | None,
@@ -2221,11 +2233,15 @@ def _validate_no_ambiguous_stop_conflicts(
     default_fill: str,
     primary_symbol: str,
 ) -> None:
-    """Reject non-open fills that overlap an already-triggered protection.
+    """Refuse to guess the order of a non-open fill and a triggered protection.
 
     OHLCV bars cannot establish whether an intrabar stop/target occurred before
-    or after a close/high/low fill.  Detect the ambiguity before execution so
-    no cash, position, or liquidity-budget mutation can leak from the batch.
+    or after a close/high/low fill. Detect it before execution so no cash,
+    position, or liquidity-budget mutation can leak from the batch, and raise
+    it as a deferrable condition: moving the fill to a later bar leaves the
+    protection alone on this one, at its own price, so the ordering stops
+    being a question rather than being guessed. Where no deferral is
+    configured the caller sees the raise, which is the fail-closed default.
     """
     if not pending_decision or default_fill == "open":
         return
@@ -2256,10 +2272,7 @@ def _validate_no_ambiguous_stop_conflicts(
         and resolve_stop_exit(positions[symbol], bars[symbol], get_cost_model(symbol)) is not None
     )
     if conflicts:
-        raise ValueError(
-            "ambiguous same-bar ordering between non-open pending execution "
-            f"and triggered protection for {conflicts}"
-        )
+        raise AmbiguousBarOrderingError(conflicts)
 
 
 def execute_pending_decision_and_stops(
