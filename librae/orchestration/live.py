@@ -40,6 +40,51 @@ _DB_FAILURE_ALERT_THRESHOLD = 3
 _READY_FILE_ENV = "LIBRAE_READY_FILE"
 _READY_TOKEN_ENV = "LIBRAE_READY_TOKEN"
 
+type _ExecutionRoute = tuple[str, str, str]
+
+
+def _resolve_live_execution_routes(
+    config: RunConfig,
+    instruments: Mapping[str, SymbolInfo],
+    factories: Mapping[str, AdapterFactory],
+) -> dict[str, _ExecutionRoute]:
+    """Resolve and validate the run's single execution-adapter route."""
+    routes: dict[str, _ExecutionRoute] = {}
+    for symbol, instrument in instruments.items():
+        override = (config.instrument_overrides or {}).get(symbol, {})
+        broker = override.get("broker") or config.broker
+        if not isinstance(broker, str) or not broker:
+            raise ValueError(
+                f"live execution broker is not configured for {symbol!r}; "
+                "set strategy.broker or instrument_overrides"
+            )
+
+        adapter_name = _DATA_ADAPTER_BY_BROKER.get(broker, broker)
+        if adapter_name not in _DATA_ADAPTER_BY_BROKER.values() and broker not in factories:
+            raise ValueError(f"unsupported execution broker: {broker!r}")
+
+        # CCXT uses separate Binance clients for spot and USDS-margined
+        # derivatives. Other built-in adapters use one client per account.
+        venue = adapter_name
+        if adapter_name == "crypto":
+            venue = "binance" if instrument.instrument_type == "spot" else "binanceusdm"
+        routes[symbol] = (broker, adapter_name, venue)
+
+    unique_routes = set(routes.values())
+    if len(unique_routes) > 1:
+        brokers = {route[0] for route in unique_routes}
+        if len(brokers) > 1:
+            raise ValueError(
+                "one live run owns one account and requires one execution broker; "
+                f"configured brokers: {sorted(brokers)}"
+            )
+        venues = sorted({route[2] for route in unique_routes})
+        raise ValueError(
+            "one live run requires one compatible execution adapter; "
+            f"broker {next(iter(brokers))!r} resolves to incompatible venues: {venues}"
+        )
+    return routes
+
 
 def _ready_callback_from_env() -> Callable[[str], None] | None:
     ready_file = os.environ.get(_READY_FILE_ENV)
@@ -440,6 +485,11 @@ def build_live_trader(
         )
         for symbol in config.symbols
     }
+    execution_routes = (
+        _resolve_live_execution_routes(config, instruments, factories)
+        if config.mode == "live"
+        else {}
+    )
 
     overrides = dict(data_adapter_overrides or {})
     unknown_overrides = set(overrides) - set(instruments)
@@ -478,20 +528,12 @@ def build_live_trader(
 
     order_adapters: dict[str, object] | None = None
     if config.mode == "live":
-        broker_instances: dict[str, object] = {}
+        route_instances: dict[_ExecutionRoute, object] = {}
         order_adapters = {}
         for symbol, instrument in instruments.items():
-            route = (config.instrument_overrides or {}).get(symbol, {})
-            broker = route.get("broker") or config.broker
-            if not broker:
-                raise ValueError(
-                    f"live execution broker is not configured for {symbol!r}; "
-                    "set strategy.broker or instrument_overrides"
-                )
-            adapter_name = _DATA_ADAPTER_BY_BROKER.get(broker, broker)
-            if adapter_name not in _DATA_ADAPTER_BY_BROKER.values() and broker not in factories:
-                raise ValueError(f"unsupported execution broker: {broker!r}")
-            instance = broker_instances.get(broker)
+            execution_route = execution_routes[symbol]
+            broker, adapter_name, _venue = execution_route
+            instance = route_instances.get(execution_route)
             if instance is None:
                 data_instance = data_adapters[symbol]
                 instance = (
@@ -501,9 +543,10 @@ def build_live_trader(
                         broker,
                         trading=True,
                         factories=factories,
+                        instrument_type=instrument.instrument_type,
                     )
                 )
-                broker_instances[broker] = instance
+                route_instances[execution_route] = instance
             order_adapters[symbol] = instance
 
     resolved_state_store = state_store

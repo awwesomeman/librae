@@ -428,6 +428,168 @@ def test_data_adapters_are_not_shared_across_differing_instrument_types() -> Non
     assert instrument_types == {"spot", "contract_perpetual"}
 
 
+def test_factory_rejects_different_live_brokers_before_building_adapters() -> None:
+    config = make_test_cfg(
+        mode="live",
+        broker=None,
+        symbols=["BTCUSDT", "ETHUSDT"],
+        symbol_cost_overrides={"ETHUSDT": {"multiplier": 1.0}},
+        instrument_overrides={
+            "BTCUSDT": {"broker": "binance"},
+            "ETHUSDT": {
+                "broker": "ibkr",
+                "data_adapter": "crypto",
+                "instrument_type": "spot",
+                "currency": "USDT",
+                "security_type": "STK",
+            },
+        },
+    )
+
+    with (
+        patch("librae.orchestration.live._build_adapter") as build_adapter,
+        pytest.raises(ValueError, match="requires one execution broker"),
+    ):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+            state_store=MemoryLiveStateStore(),
+            runtime_revision="test-runtime",
+        )
+
+    build_adapter.assert_not_called()
+
+
+def test_factory_rejects_mixed_binance_products_before_building_adapters() -> None:
+    config = make_test_cfg(
+        mode="live",
+        broker="binance",
+        symbols=["BTCUSDT", "BTCUSDT_PERP"],
+        symbol_cost_overrides={"BTCUSDT_PERP": {"multiplier": 1.0}},
+        instrument_overrides={
+            "BTCUSDT_PERP": {
+                "data_adapter": "crypto",
+                "data_source": "binance_futures_continuous",
+                "venue_symbol": "BTC/USDT:USDT",
+                "instrument_type": "contract_perpetual",
+                "currency": "USDT",
+            }
+        },
+    )
+
+    with (
+        patch("librae.orchestration.live._build_adapter") as build_adapter,
+        pytest.raises(ValueError, match="incompatible venues"),
+    ):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+            state_store=MemoryLiveStateStore(),
+            runtime_revision="test-runtime",
+        )
+
+    build_adapter.assert_not_called()
+
+
+def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
+    config = make_test_cfg(
+        mode="live",
+        broker="binance",
+        symbols=["BTC_PERP", "ETH_PERP"],
+        data_source="vendor_feed",
+        symbol_cost_overrides={
+            "BTC_PERP": {"multiplier": 1.0},
+            "ETH_PERP": {"multiplier": 1.0},
+        },
+        instrument_overrides={
+            symbol: {
+                "data_adapter": "vendor_plugin",
+                "instrument_type": "contract_perpetual",
+                "currency": "USDT",
+            }
+            for symbol in ("BTC_PERP", "ETH_PERP")
+        },
+    )
+    data_adapter = MagicMock()
+    order_adapter = MagicMock()
+
+    with patch(
+        "librae.orchestration.live._build_adapter",
+        side_effect=[data_adapter, order_adapter],
+    ) as build_adapter:
+        trader = build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            database_enabled=False,
+            adapter_factories={"vendor_plugin": MagicMock()},
+            state_store=MemoryLiveStateStore(),
+            runtime_revision="test-runtime",
+        )
+
+    assert build_adapter.call_count == 2
+    order_call = build_adapter.call_args_list[1]
+    assert order_call.args == ("binance",)
+    assert order_call.kwargs["trading"] is True
+    assert order_call.kwargs["instrument_type"] == "contract_perpetual"
+    assert trader._executor.get_order_adapter("BTC_PERP") is order_adapter
+    assert trader._executor.get_order_adapter("ETH_PERP") is order_adapter
+
+
+def test_live_execution_allows_independent_market_data_sources() -> None:
+    config = make_test_cfg(
+        mode="live",
+        broker="binance",
+        symbols=["BTC", "ETH"],
+        symbol_cost_overrides={
+            "BTC": {"multiplier": 1.0},
+            "ETH": {"multiplier": 1.0},
+        },
+        instrument_overrides={
+            "BTC": {
+                "data_adapter": "feed_a",
+                "data_source": "source_a",
+                "instrument_type": "spot",
+                "currency": "USDT",
+            },
+            "ETH": {
+                "data_adapter": "feed_b",
+                "data_source": "source_b",
+                "instrument_type": "spot",
+                "currency": "USDT",
+            },
+        },
+    )
+    first_feed = MagicMock()
+    second_feed = MagicMock()
+    order_adapter = MagicMock()
+    factories = {
+        "feed_a": MagicMock(return_value=first_feed),
+        "feed_b": MagicMock(return_value=second_feed),
+        "binance": MagicMock(return_value=order_adapter),
+    }
+
+    trader = build_live_trader(
+        MagicMock(),
+        lambda frame: frame,
+        config=config,
+        database_enabled=False,
+        adapter_factories=factories,
+        state_store=MemoryLiveStateStore(),
+        runtime_revision="test-runtime",
+    )
+
+    factories["feed_a"].assert_called_once_with(trading=False)
+    factories["feed_b"].assert_called_once_with(trading=False)
+    factories["binance"].assert_called_once_with(trading=True)
+    assert trader._executor.get_order_adapter("BTC") is order_adapter
+    assert trader._executor.get_order_adapter("ETH") is order_adapter
+
+
 def test_factory_reuses_external_adapter_for_live_orders() -> None:
     config = make_test_cfg(
         mode="live",

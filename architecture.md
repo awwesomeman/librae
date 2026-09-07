@@ -177,7 +177,7 @@ columns from the same adapter snapshot; see
   `OrderAdapter` contract includes `get_position(PositionRequest)` plus
   `prepare_order`, `place_order`, `find_order`, `get_order`,
   `list_open_orders`, and `cancel_order`.
-- `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, a per-symbol `instrument_overrides[symbol]["broker"]`, or an injected `order_adapter`; an unresolved route fails at startup. An explicitly selected broker may reuse the same adapter session as market data.
+- `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, compatible per-symbol `instrument_overrides[symbol]["broker"]` values, or an injected `order_adapter`; an unresolved or incompatible route fails before adapters are constructed. An explicitly selected broker may reuse the same adapter session as market data.
 - Cross-broker behavior is generalized only at an observed engine boundary. `LiveExecutor` builds one broker-neutral `PositionRequest` from the configured canonical/venue identity, currency, security type, exchange, `contract_month`/`continuous_alias`, and `CostModel.multiplier`; every adapter accepts that request and returns the same position shape. Contract lookup, broker-native symbol syntax, CCXT balance conventions, Shioaji direction enums, and IBKR `conId`/`avgCost` handling stay inside the concrete adapter. Add a shared field or helper only when more than one real adapter needs the same semantic; do not create broker hierarchies or speculative capability abstractions.
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A non-flat position snapshot must provide finite side/quantity and a positive average price; missing fields never mean flat or zero. A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
@@ -530,19 +530,22 @@ For a rolling route, omit `contract_month` and set
 symbols (for example `ES_202609` and `ES_202612`); no code infers expiry from
 those names.
 
-For a multi-broker run, omit the run-wide `broker` and set
-`instrument_overrides.<symbol>.broker` for every symbol. Registered symbol
-metadata may supply market/data identifiers and contract economics, but never
-selects an execution broker. An unregistered live symbol must explicitly
-declare `instrument_type` and `currency`; an IBKR route must also declare
+For a live run, set one run-wide `broker` or compatible per-symbol
+`instrument_overrides.<symbol>.broker` values. Registered symbol metadata may
+supply market/data identifiers and contract economics, but never selects an
+execution broker. An unregistered live symbol must explicitly declare
+`instrument_type` and `currency`; an IBKR route must also declare
 `security_type` and a futures `exchange`. These are execution/accounting facts,
 so they are not guessed from multiplier, market name, or ticker shape.
 
-One run maps its single account to one order-adapter instance. Separate broker
-accounts or currencies require separate `RunConfig` and runner instances so
-reconciliation cannot double-count balances or imply shared funding. A caller
-may group those runs for UI or database reporting, but combined PnL, Sharpe,
-drawdown, and reporting-currency conversion remain caller-owned.
+One run maps its single account to one order-adapter instance and venue. This
+also excludes mixing Binance spot and USDS-margined derivative clients in one
+run, even though both use the same broker name. Separate broker accounts,
+incompatible product venues, or currencies require separate `RunConfig` and
+runner instances so reconciliation cannot double-count balances or imply
+shared funding. Market-data adapters remain independently configurable per
+symbol. A caller may group runs for UI or database reporting, but combined PnL,
+Sharpe, drawdown, and reporting-currency conversion remain caller-owned.
 
 #### TelegramAdapter (notifications)
 
