@@ -8,9 +8,11 @@ from pathlib import Path
 import numpy as np
 from librae.app.grafana.generate_dashboards import (
     build_panels,
+    render_account_overview_dashboard,
     render_signal_monitor,
     render_unified_dashboard,
 )
+from librae.core.utils import make_event_id
 
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
@@ -37,6 +39,7 @@ def test_checked_in_dashboards_match_the_generator() -> None:
     """Generated dashboards are build artifacts, never a second source."""
     expected = {
         "strategy_dashboard.json": render_unified_dashboard(),
+        "account_overview_dashboard.json": render_account_overview_dashboard(),
         "signal_dashboard.json": render_signal_monitor(),
     }
 
@@ -237,6 +240,69 @@ class TestRenderUnifiedDashboard:
         assert "${run_id}" in sql
         assert "detail->>'reason'" in sql
         assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
+
+
+class TestRenderAccountOverviewDashboard:
+    def test_has_required_fields_and_variables(self):
+        dashboard = render_account_overview_dashboard()
+
+        assert dashboard["uid"] == "account-overview-dashboard"
+        assert dashboard["schemaVersion"] == 39
+        assert [variable["name"] for variable in dashboard["templating"]["list"]] == [
+            "currency",
+            "account_id",
+            "mode",
+        ]
+        mode = dashboard["templating"]["list"][2]
+        assert mode["multi"] is True
+        assert mode["includeAll"] is True
+
+    def test_table_is_scoped_to_one_account_currency_and_selected_modes(self):
+        dashboard = render_account_overview_dashboard()
+        panel = dashboard["panels"][0]
+        sql = panel["targets"][0]["rawSql"]
+
+        assert panel["type"] == "table"
+        assert "ec.account_id IN (${account_id:sqlstring})" in sql
+        assert "ec.currency IN (${currency:sqlstring})" in sql
+        assert "br.mode IN (${mode:sqlstring})" in sql
+        assert "$__timeFilter(ec.ts)" in sql
+
+    def test_table_reports_per_run_state_without_financial_aggregation(self):
+        dashboard = render_account_overview_dashboard()
+        panel = dashboard["panels"][0]
+        sql = panel["targets"][0]["rawSql"]
+
+        assert "DISTINCT ON (ec.run_id, ec.account_id)" in sql
+        assert 'le.run_id AS "Run ID"' in sql
+        assert "le.equity" in sql
+        assert "SUM(le.equity)" not in sql
+        assert "strategy_performance" not in sql
+        assert "Sharpe" not in sql
+        assert "Drawdown" not in sql
+
+    def test_open_positions_are_reconstructed_at_the_equity_snapshot(self):
+        dashboard = render_account_overview_dashboard()
+        sql = dashboard["panels"][0]["targets"][0]["rawSql"]
+
+        assert "position_events" in sql
+        assert "pe.ts <= le.ts" in sql
+        assert "remaining_quantity > 0" in sql
+
+    def test_same_timestamp_events_break_the_tie_on_event_order_not_text(self):
+        """make_event_id zero-pads the index to four digits, so past 9999
+        events the ids stop sorting in the order they were written: a plain
+        text DESC puts run-e9999 ahead of the newer run-e10000, and the count
+        would read a closed position as still open."""
+        earlier = make_event_id("run", 9999)
+        later = make_event_id("run", 10000)
+        assert sorted([earlier, later], reverse=True)[0] == earlier, (
+            "guard assumes the padding still overflows; widen it and this test can go"
+        )
+
+        sql = render_account_overview_dashboard()["panels"][0]["targets"][0]["rawSql"]
+
+        assert "ORDER BY pe.symbol, pe.ts DESC, length(pe.event_id) DESC, pe.event_id DESC" in sql
 
 
 class TestRenderSignalMonitor:

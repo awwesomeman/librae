@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Grafana Dashboard Generator.
+"""Grafana dashboard generator.
 
-Produces a single unified Strategy Dashboard with mode filtering.
+Produces the checked-in Strategy, Account Overview, and Signal dashboards.
 Usage: python -m librae.app.grafana.generate_dashboards
 """
 
@@ -1369,6 +1369,146 @@ def render_unified_dashboard() -> dict:
 
 
 # ======================================================================
+# Account Overview Dashboard
+# ======================================================================
+
+_ACCOUNT_OVERVIEW_SQL = """WITH latest_equity AS (
+  SELECT DISTINCT ON (ec.run_id, ec.account_id)
+    ec.run_id, ec.account_id, ec.currency, ec.ts, ec.equity,
+    ec.gross_exposure, ec.net_exposure, ec.concentration
+  FROM equity_curve ec
+  JOIN backtest_runs br ON br.run_id = ec.run_id
+  WHERE ec.account_id IN (${account_id:sqlstring})
+    AND ec.currency IN (${currency:sqlstring})
+    AND br.mode IN (${mode:sqlstring})
+    AND $__timeFilter(ec.ts)
+  ORDER BY ec.run_id, ec.account_id, ec.ts DESC
+),
+position_counts AS (
+  SELECT le.run_id, le.account_id,
+    COUNT(*) FILTER (WHERE p.remaining_quantity > 0) AS open_positions
+  FROM latest_equity le
+  LEFT JOIN LATERAL (
+    SELECT DISTINCT ON (pe.symbol) pe.remaining_quantity
+    FROM position_events pe
+    WHERE pe.run_id = le.run_id
+      AND pe.account_id = le.account_id
+      AND pe.currency = le.currency
+      AND pe.ts <= le.ts
+    -- event_id is zero-padded to four digits, so it stops sorting in write
+    -- order past 9999 events; compare length first to keep the newest event.
+    ORDER BY pe.symbol, pe.ts DESC, length(pe.event_id) DESC, pe.event_id DESC
+  ) p ON true
+  GROUP BY le.run_id, le.account_id
+)
+SELECT
+  br.strategy_name AS "Strategy",
+  br.mode AS "Mode",
+  le.run_id AS "Run ID",
+  le.ts AS "Last Equity",
+  br.last_heartbeat_at AS "Heartbeat",
+  ROUND(le.equity::numeric, 2)::float8 AS "Equity",
+  le.currency AS "Currency",
+  ROUND(le.gross_exposure::numeric, 4)::float8 AS "Gross Exposure",
+  ROUND(le.net_exposure::numeric, 4)::float8 AS "Net Exposure",
+  ROUND(le.concentration::numeric, 4)::float8 AS "Concentration",
+  pc.open_positions AS "Open Positions"
+FROM latest_equity le
+JOIN backtest_runs br ON br.run_id = le.run_id
+JOIN position_counts pc
+  ON pc.run_id = le.run_id AND pc.account_id = le.account_id
+ORDER BY le.ts DESC, br.strategy_name, le.run_id"""
+
+
+def render_account_overview_dashboard() -> dict:
+    """Build the same-currency, per-run account overview dashboard."""
+    table = {
+        "_type": "full_row",
+        "title": "Run Overview",
+        "description": (
+            "One latest-state row per run in the selected account, currency, modes, "
+            "and time range. Exposure values are per-run equity fractions. Financial "
+            "values are deliberately not summed across runs because portfolio-level "
+            "aggregation and reporting-currency conversion are caller-owned."
+        ),
+        "type": "table",
+        "h": 14,
+        "w": 24,
+        "targets": [_target(_ACCOUNT_OVERVIEW_SQL, fmt="table")],
+        "fieldConfig": {
+            "defaults": {"custom": {"filterable": True}},
+            "overrides": [
+                _width_override("Strategy", 180),
+                _width_override("Mode", 90),
+                _width_override("Run ID", 260),
+                _width_override("Last Equity", 180),
+                _width_override("Heartbeat", 180),
+                _width_override("Currency", 90),
+                {
+                    "matcher": {"id": "byName", "options": "Equity"},
+                    "properties": [{"id": "decimals", "value": 2}],
+                },
+                {
+                    "matcher": {
+                        "id": "byRegexp",
+                        "options": "/^(Gross Exposure|Net Exposure|Concentration)$/",
+                    },
+                    "properties": [
+                        {"id": "unit", "value": "percentunit"},
+                        {"id": "decimals", "value": 2},
+                    ],
+                },
+            ],
+        },
+        "options": {
+            "showHeader": True,
+            "sortBy": [{"displayName": "Last Equity", "desc": True}],
+        },
+    }
+
+    currency_var = _make_query_variable(
+        "currency",
+        "SELECT DISTINCT currency FROM equity_curve ORDER BY currency",
+        label="Currency",
+    )
+    account_id_var = _make_query_variable(
+        "account_id",
+        "SELECT DISTINCT account_id FROM equity_curve"
+        " WHERE currency IN (${currency:sqlstring}) ORDER BY account_id",
+        label="Account",
+    )
+    mode_var = _make_query_variable(
+        "mode",
+        "SELECT DISTINCT br.mode FROM backtest_runs br"
+        " JOIN equity_curve ec ON ec.run_id=br.run_id"
+        " WHERE ec.currency IN (${currency:sqlstring})"
+        " AND ec.account_id IN (${account_id:sqlstring})"
+        " ORDER BY br.mode",
+        label="Mode",
+        multi=True,
+    )
+
+    return {
+        "uid": "account-overview-dashboard",
+        "title": "Account Overview",
+        "description": (
+            "Same-currency per-run account overview — generated by generate_dashboards.py"
+        ),
+        "tags": [],
+        "timezone": "browser",
+        "editable": True,
+        "time": {"from": "now-24h", "to": "now"},
+        "refresh": "1m",
+        "templating": {"list": [currency_var, account_id_var, mode_var]},
+        "graphTooltip": 1,
+        "annotations": {"list": []},
+        "panels": build_panels([table]),
+        "schemaVersion": 39,
+        "version": 1,
+    }
+
+
+# ======================================================================
 # Signal Monitor Dashboard
 # ======================================================================
 
@@ -1738,6 +1878,15 @@ def main() -> None:
         encoding="utf-8",
     )
     logger.info("%s — %d panels", out_path, len(dashboard["panels"]))
+
+    # Account Overview Dashboard
+    account_overview = render_account_overview_dashboard()
+    account_path = OUT_DIR / "account_overview_dashboard.json"
+    account_path.write_text(
+        json.dumps(account_overview, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("%s — %d panels", account_path, len(account_overview["panels"]))
 
     # Signal Dashboard
     sig_mon = render_signal_monitor()

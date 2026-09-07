@@ -111,6 +111,17 @@ not combine accounts, including accounts that share a currency. Price Trend
 and Entry/Exit Signals show one symbol at a time — Open Positions and
 Portfolio Exposure cover the full multi-symbol/portfolio state.
 
+The account overview dashboard answers the other question: what every run in
+one account is doing right now. It shows one latest-state row per run —
+equity, exposure, concentration, open-position count, and last heartbeat —
+for a single currency and account over the selected time range, and its
+currency and account variables are single-select so a query cannot span
+either. Nothing is summed across rows: combined PnL, Sharpe, drawdown, and
+reporting-currency conversion stay caller-owned, per `architecture.md`. Open
+positions are reconstructed at each run's own equity timestamp rather than at
+"now", so a row never mixes moments. See
+[the dashboard-scope ADR](../decisions/2026-09-07-account-overview-is-a-separate-dashboard.md).
+
 Dashboards query the TimescaleDB tables and remain empty until a strategy has
 written data. To inspect the panels before running a real strategy, load the
 bundled fake rows:
