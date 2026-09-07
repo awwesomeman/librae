@@ -56,13 +56,29 @@ REASON_DRAWDOWN_BREACH = "drawdown_breach"
 REASON_LIQUIDATION = "liquidation"
 
 
-class ExecutionPriceUnavailableError(ValueError):
+class ExecutionUnavailableError(ValueError):
+    """A deterministic batch cannot execute on this bar; a later one may.
+
+    The category, not any one member of it, is what the engine's bounded
+    rebalance deferral catches, so a new reason for "not on this bar" reaches
+    the same retry without the loop learning about it. Exhausting the bound --
+    including its zero default -- is what makes the condition fatal.
+
+    ``symbols`` names what blocked the batch, for the deferral log and the
+    bound-exhaustion message; each subclass owns the wording of why.
+    """
+
+    def __init__(self, symbols: list[str], message: str) -> None:
+        self.symbols = tuple(sorted(symbols))
+        super().__init__(message)
+
+
+class ExecutionPriceUnavailableError(ExecutionUnavailableError):
     """A deterministic batch cannot resolve every required execution price."""
 
     def __init__(self, symbols: list[str]) -> None:
-        self.symbols = tuple(sorted(symbols))
-        joined = ", ".join(self.symbols)
-        super().__init__(f"rebalance requires a valid execution price for {joined}")
+        joined = ", ".join(sorted(symbols))
+        super().__init__(symbols, f"rebalance requires a valid execution price for {joined}")
 
 
 def _intent_order_side(

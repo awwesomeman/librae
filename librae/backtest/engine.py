@@ -53,8 +53,8 @@ from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
     REASON_FORCE_CLOSE,
-    ExecutionPriceUnavailableError,
     ExecutionResult,
+    ExecutionUnavailableError,
     PositionEvent,
     RuntimeEvent,
     TradePnL,
@@ -593,7 +593,10 @@ class Backtest:
                 # measured against a book that still reflects the last target.
                 if isinstance(decision_to_execute, PortfolioWeights):
                     active_target_weights = dict(decision_to_execute.weights)
-            except ExecutionPriceUnavailableError as exc:
+            # WHY: catch the category, not one reason. Any condition that only
+            # this bar cannot satisfy reaches the same bounded retry, and the
+            # raised instance keeps naming which one it was.
+            except ExecutionUnavailableError as exc:
                 if not isinstance(decision_to_execute, PortfolioWeights):
                     raise
                 if rebalance_delay_bars >= self._max_rebalance_delay_bars:
@@ -601,18 +604,18 @@ class Backtest:
                         raise
                     raise ValueError(
                         "PortfolioWeights exceeded "
-                        f"max_rebalance_delay_bars={self._max_rebalance_delay_bars}; "
-                        f"execution remains unavailable for {list(exc.symbols)} at {ts}"
+                        f"max_rebalance_delay_bars={self._max_rebalance_delay_bars} "
+                        f"for {list(exc.symbols)} at {ts}: {exc}"
                     ) from exc
                 rebalance_delay_bars += 1
                 unavailable_rebalance_symbols = exc.symbols
                 pending_decision = decision_to_execute
                 logger.info(
-                    "Deferring PortfolioWeights at %s (%d/%d bars); execution unavailable for %s",
+                    "Deferring PortfolioWeights at %s (%d/%d bars): %s",
                     ts,
                     rebalance_delay_bars,
                     self._max_rebalance_delay_bars,
-                    list(exc.symbols),
+                    exc,
                 )
                 cash, step_result = self._execute_steps(
                     ts,
@@ -767,7 +770,7 @@ class Backtest:
         if isinstance(pending_decision, PortfolioWeights) and rebalance_delay_bars:
             raise ValueError(
                 "backtest ended before deferred PortfolioWeights could execute; "
-                f"execution remains unavailable for {list(unavailable_rebalance_symbols)}"
+                f"still blocked on {list(unavailable_rebalance_symbols)}"
             )
         # WHY: the final intent is discarded because there is no T+1 bar to fill it.
         if pending_decision:
