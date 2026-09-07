@@ -185,6 +185,21 @@ class TestRenderUnifiedDashboard:
         assert sql.count("$__timeTo()") == 3
         assert panel["type"] == "table"
 
+    def test_current_position_panels_use_deterministic_event_order(self):
+        dashboard = render_unified_dashboard()
+        expected_order = "ORDER BY symbol, ts DESC, length(event_id) DESC, event_id DESC"
+
+        for title in (
+            "Open Positions",
+            "Unrealized P&L",
+            "Margin Utilization",
+            "Position Snapshot",
+            "Margin Locked by Mode",
+        ):
+            panel = next(item for item in dashboard["panels"] if item["title"] == title)
+            sql = panel["targets"][0]["rawSql"]
+            assert expected_order in sql, title
+
     def test_portfolio_exposure_panel_reads_equity_curve(self):
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Portfolio Exposure")
@@ -299,6 +314,7 @@ class TestRenderAccountOverviewDashboard:
         assert sorted([earlier, later], reverse=True)[0] == earlier, (
             "guard assumes the padding still overflows; widen it and this test can go"
         )
+        assert max([earlier, later], key=lambda event_id: (len(event_id), event_id)) == later
 
         sql = render_account_overview_dashboard()["panels"][0]["targets"][0]["rawSql"]
 
