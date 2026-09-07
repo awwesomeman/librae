@@ -58,6 +58,16 @@ Grouped decisions must be immediately actionable when returned:
   `list[OrderIntent]`, since it can no longer hold a grouped value. Checkpoint
   schema bumped `v16 -> v17`; old checkpoints are rejected outright, per this
   repo's established no-migration policy.
+  **Corrected by issue #125.** This bullet conflated two things the rest of
+  the decision keeps apart: waiting across periods *for data*, which this ADR
+  removed, and the T+1 *execution delay*, which it did not. A decision returned
+  on one event still executes on the next, so simulation does put a
+  `PortfolioWeights` in that slot, and narrowing the type made a durable sim
+  run fail on its first allocation decision. The field is `StrategyDecision`
+  again, persisted as an explicit `order_intents` / `portfolio_weights` tagged
+  union. Everything else in this decision stands: no grouped decision waits for
+  data, and `partition_pending_decision` still returns one as ready
+  unconditionally.
 
 This removes code rather than adding new engine state: no new pending-slot
 field, no new `Context` field, and `merge_pending_decisions` reverts to its
