@@ -2395,6 +2395,7 @@ class LiveTrader:
         primary_symbol = self._symbols[0]
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
+        previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
         for symbol, raw_df in raw_frames.items():
             history = raw_df[raw_df["ts"] <= ts].set_index("ts")
@@ -2407,6 +2408,10 @@ class LiveTrader:
             if not isfinite(close) or close <= 0:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
             raw_bars[symbol] = raw_bar
+            if len(history) > 1:
+                previous_volume = history.iloc[-2].get("volume")
+                if previous_volume is not None and not pd.isna(previous_volume):
+                    previous_volumes[symbol] = float(previous_volume)
             self._last_prices[symbol] = close
             self._reset_adv_session(symbol, ts)
             if self._adv_lookback_sessions is not None:
@@ -2453,6 +2458,7 @@ class LiveTrader:
                     get_cost_model=self._get_cost_model,
                     max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_volume=lambda symbol: previous_volumes.get(symbol),
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
@@ -2477,6 +2483,7 @@ class LiveTrader:
                     max_order_notional=self._risk_policy.max_order_notional,
                     max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
                     max_adv_participation_rate=self._max_adv_participation_rate,
+                    get_previous_volume=lambda symbol: previous_volumes.get(symbol),
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,

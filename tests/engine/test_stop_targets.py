@@ -567,6 +567,47 @@ class OpenWithStopAtBar1(Strategy):
 
 
 class TestStopTargetIntegration:
+    def test_protective_exit_uses_previous_completed_volume(self):
+        class OpenWithSizedStop(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 0:
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol=ctx.symbol,
+                            quantity=20.0,
+                            stop_price=95.0,
+                        )
+                    ]
+                return []
+
+        bars = [
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 99, "close": 100},
+            {"open": 100, "high": 101, "low": 90, "close": 92},
+            {"open": 91, "high": 93, "low": 89, "close": 90},
+            {"open": 90, "high": 91, "low": 89, "close": 90},
+        ]
+        data = _make_multiindex_df(bars)
+        data["volume"] = [100.0, 10.0, 2_000.0, 100.0, 100.0]
+        timestamps = data.index.get_level_values("datetime")
+
+        result = Backtest(
+            data,
+            OpenWithSizedStop(),
+            initial_balance=100_000.0,
+            cost_model=_zero_cost(),
+            execution=ExecutionPolicy(max_bar_volume_participation_rate=0.5),
+        ).run()
+
+        stop_events = [
+            event for event in result.position_events if event.reason == REASON_STOP_LOSS
+        ]
+        assert [(event.ts, event.event_type, event.fill_quantity) for event in stop_events] == [
+            (timestamps[2], "reduce", pytest.approx(5.0)),
+            (timestamps[3], "close", pytest.approx(15.0)),
+        ]
+
     def test_stop_loss_force_closes_before_strategy_would(self):
         # Fill at bar1's open=100 -> stop set at 90. Bar3 gaps down through it.
         bars = [

@@ -1259,8 +1259,8 @@ class TestBacktestRebalance:
         frame = _multi_asset_frame(opens={"A": [100.0] * 5})
         timestamps = frame.index.get_level_values("datetime").unique()
         frame["volume"] = 100.0
-        frame.loc[("A", timestamps[1]), "volume"] = 0.0
-        frame.loc[("A", timestamps[2]), "volume"] = 10.0
+        frame.loc[("A", timestamps[0]), "volume"] = 0.0
+        frame.loc[("A", timestamps[1]), "volume"] = 10.0
 
         class TargetA(Strategy):
             def on_bar(self, ctx: Context) -> StrategyDecision:
@@ -1487,7 +1487,7 @@ class TestBacktestRebalance:
         frame = _multi_asset_frame(opens={"A": [100.0] * 6})
         timestamps = frame.index.get_level_values("datetime").unique()
         frame["volume"] = 100.0
-        frame.loc[("A", timestamps[2]), "volume"] = 1.0
+        frame.loc[("A", timestamps[1]), "volume"] = 1.0
 
         class SupersedeReversal(Strategy):
             def on_bar(self, ctx: Context) -> StrategyDecision:
@@ -1537,8 +1537,8 @@ class TestBacktestRebalance:
         )
         timestamps = frame.index.get_level_values("datetime").unique()
         frame["volume"] = 100.0
-        frame.loc[("A", timestamps[2]), "volume"] = 1.0
-        frame.loc[("A", timestamps[3]), "volume"] = 9.0
+        frame.loc[("A", timestamps[1]), "volume"] = 1.0
+        frame.loc[("A", timestamps[2]), "volume"] = 9.0
 
         class Rotate(Strategy):
             def on_bar(self, ctx: Context) -> StrategyDecision:
@@ -1582,8 +1582,8 @@ class TestBacktestRebalance:
         frame = _multi_asset_frame(opens={"A": [100.0] * 6})
         timestamps = frame.index.get_level_values("datetime").unique()
         frame["volume"] = 100.0
-        frame.loc[("A", timestamps[2]), "volume"] = 1.0
-        frame.loc[("A", timestamps[3]), "volume"] = 3.0
+        frame.loc[("A", timestamps[1]), "volume"] = 1.0
+        frame.loc[("A", timestamps[2]), "volume"] = 3.0
 
         class Reverse(Strategy):
             def on_bar(self, ctx: Context) -> StrategyDecision:

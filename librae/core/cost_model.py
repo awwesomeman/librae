@@ -48,8 +48,9 @@ class CostModel:
             Spot=1.0 (pay full notional), futures=initial_margin/notional (e.g. 0.067).
         short_margin_rate: Fraction of notional deducted from cash when opening a short.
             US equity=0.5 (Reg T 50%), TW equity=0.9 (融券保證金 90%), futures same as long.
-        volume_impact_ticks: Extra slippage_ticks-equivalent at 100% single-bar volume
-            participation, scaled linearly down to 0 at 0% participation.
+        volume_impact_ticks: Extra slippage_ticks-equivalent at 100% participation
+            of the execution policy's causal reference volume, scaled linearly
+            down to 0 at 0% participation.
             0 (default) disables market impact entirely.
         maintenance_margin_rate: Fraction of entry notional required to keep
             a leveraged position open. Single rate for both sides (unlike

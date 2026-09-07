@@ -64,6 +64,7 @@ def _execute(
         default_fill="open",
         primary_symbol="A",
         max_bar_volume_participation_rate=max_bar_volume_participation_rate,
+        get_previous_volume=lambda symbol: bars.get(symbol, {}).get("volume"),
         used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
     )
 

@@ -644,6 +644,34 @@ class TestLiveTrader:
         assert second._positions["BTCUSDT"].quantity == 1.0
         assert second._period_index == 2
 
+    def test_sim_open_volume_limit_uses_decision_bar_volume(self):
+        class BuyOnce(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=100.0)]
+                return []
+
+        first = _make_ohlcv_df(start_hour=0)
+        first.loc[first.index[-1], "volume"] = 20.0
+        second = _make_ohlcv_df(start_hour=1)
+        second.loc[second.index[-2], "volume"] = 20.0
+        second.loc[second.index[-1], "volume"] = 2_000.0
+        frames = iter((first, second))
+        runner = self._make_runner(
+            strategy=BuyOnce(),
+            fetcher=lambda *args, **kwargs: next(frames),
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=0.5,
+                    warmup_periods=5,
+                )
+            ),
+        )
+
+        runner.run(max_iterations=2)
+
+        assert runner._positions["BTCUSDT"].quantity == pytest.approx(10.0)
+
     def test_failed_sim_cycle_is_not_checkpointed_as_processed(self):
         store = MemoryLiveStateStore()
         failing = self._make_runner(

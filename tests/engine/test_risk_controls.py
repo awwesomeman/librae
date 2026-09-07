@@ -809,33 +809,163 @@ class TestMaxPositionCap:
 
 
 class TestMaxVolumeParticipation:
-    def test_open_clamped_to_pct_of_bar_volume(self):
+    def test_open_uses_previous_completed_volume(self):
+        def filled_quantity(execution_bar_volume: float) -> float:
+            bars = [
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+                {
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": execution_bar_volume,
+                },
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
+            ]
+            cfg = make_test_cfg(
+                mode="backtest",
+                initial_balance=10_000.0,
+                execution=ExecutionPolicy(max_bar_volume_participation_rate=0.5),
+            )
+            result = Backtest(
+                _make_multiindex_df(bars),
+                OpenOnceStrategy(),
+                config=cfg,
+                cost_model=_zero_cost(),
+            ).run()
+
+            assert len(result.trades) == 1
+            return result.trades[0].quantity
+
+        # The order fills at bar 2 open, before bar 2's full volume exists.
+        assert filled_quantity(20.0) == pytest.approx(50.0)
+        assert filled_quantity(2_000.0) == pytest.approx(50.0)
+
+    @pytest.mark.parametrize(
+        ("default_fill", "limit_price"),
+        [("open", None), ("high", None), ("close", 100.0)],
+    )
+    def test_non_close_fills_use_previous_completed_volume(
+        self,
+        default_fill: str,
+        limit_price: float | None,
+    ) -> None:
+        positions: dict[str, PositionState] = {}
+
+        _, result = execute_pending_decision_and_stops(
+            TS,
+            positions,
+            100_000.0,
+            [
+                OrderIntent(
+                    action="long",
+                    symbol="TEST",
+                    quantity=100.0,
+                    limit_price=limit_price,
+                )
+            ],
+            {
+                "TEST": {
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+            },
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill=default_fill,
+            primary_symbol="TEST",
+            max_bar_volume_participation_rate=0.5,
+            get_previous_volume=lambda _symbol: 20.0,
+        )
+
+        assert result.events[0].fill_quantity == pytest.approx(10.0)
+
+    def test_open_without_causal_volume_is_rejected(self) -> None:
+        positions: dict[str, PositionState] = {}
+
+        _, result = execute_pending_decision_and_stops(
+            TS,
+            positions,
+            100_000.0,
+            [OrderIntent(action="long", symbol="TEST", quantity=1.0)],
+            {
+                "TEST": {
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+            },
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+            max_bar_volume_participation_rate=0.5,
+            get_previous_volume=lambda _symbol: None,
+        )
+
+        assert positions == {}
+        assert [event.detail["reason"] for event in result.runtime_events] == ["volume_capped"]
+
+    def test_open_impact_without_causal_volume_is_rejected(self) -> None:
+        positions: dict[str, PositionState] = {}
+        cost_model = CostModel(
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=1.0,
+            tax_rate=0.0,
+            volume_impact_ticks=1.0,
+        )
+
+        _, result = execute_pending_decision_and_stops(
+            TS,
+            positions,
+            100_000.0,
+            [OrderIntent(action="long", symbol="TEST", quantity=1.0)],
+            {
+                "TEST": {
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+            },
+            get_cost_model=lambda _symbol: cost_model,
+            default_fill="open",
+            primary_symbol="TEST",
+            max_bar_volume_participation_rate=None,
+            get_previous_volume=lambda _symbol: None,
+        )
+
+        assert positions == {}
+        assert [event.detail["reason"] for event in result.runtime_events] == ["volume_unavailable"]
+
+    def test_close_fill_uses_execution_bar_volume(self):
         bars = [
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-            {
-                "open": 100,
-                "high": 101,
-                "low": 99,
-                "close": 100,
-                "volume": 20.0,
-            },  # fill happens here
+            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 20.0},
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
             {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
         ]
-        cfg = make_test_cfg(
-            mode="backtest",
+        result = Backtest(
+            _make_multiindex_df(bars),
+            OpenOnceStrategy(),
             initial_balance=10_000.0,
-            execution=ExecutionPolicy(max_bar_volume_participation_rate=0.5),
-        )
-        bt = Backtest(
-            _make_multiindex_df(bars), OpenOnceStrategy(), config=cfg, cost_model=_zero_cost()
-        )
-        result = bt.run()
+            cost_model=_zero_cost(),
+            execution=ExecutionPolicy(
+                default_fill_price="close",
+                max_bar_volume_participation_rate=0.5,
+            ),
+        ).run()
 
-        assert len(result.trades) == 1
-        # Uncapped, all ~10_000 cash at price 100 would size ~100 units.
-        # max_bar_volume_participation_rate=0.5 * bar[2].volume(20) caps it at 10 units.
         assert result.trades[0].quantity == pytest.approx(10.0)
 
 
@@ -867,10 +997,7 @@ class TestDynamicSlippage:
         assert result.events[0].fill_quantity < 10.0
         assert cash + result.cash_delta >= -1e-9
 
-    def test_lower_bar_volume_produces_higher_slippage(self):
-        """Same fixed-size entry, only the fill bar's volume differs -> the
-        low-volume run's participation-scaled slippage must be strictly
-        higher, proving volume_impact_ticks actually moves the number end-to-end."""
+    def test_open_impact_uses_previous_completed_volume(self):
 
         class OpenFixedQtyStrategy(Strategy):
             def on_bar(self, ctx: Context) -> list[OrderIntent]:
@@ -888,18 +1015,33 @@ class TestDynamicSlippage:
             volume_impact_ticks=10.0,
         )
 
-        def _bars(fill_bar_volume: float) -> list[dict[str, float]]:
+        def _bars(
+            previous_bar_volume: float,
+            execution_bar_volume: float,
+        ) -> list[dict[str, float]]:
             return [
                 {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-                {"open": 100, "high": 101, "low": 99, "close": 100, "volume": fill_bar_volume},
+                {
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": previous_bar_volume,
+                },
+                {
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": execution_bar_volume,
+                },
                 {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
                 {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
             ]
 
-        def _open_slippage(fill_bar_volume: float) -> float:
+        def _open_slippage(previous_bar_volume: float, execution_bar_volume: float) -> float:
             bt = Backtest(
-                _make_multiindex_df(_bars(fill_bar_volume)),
+                _make_multiindex_df(_bars(previous_bar_volume, execution_bar_volume)),
                 OpenFixedQtyStrategy(),
                 cost_model=cost_model,
                 execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
@@ -909,9 +1051,11 @@ class TestDynamicSlippage:
             assert len(open_events) == 1
             return open_events[0].slippage
 
-        high_vol_slippage = _open_slippage(1000.0)  # 0.5% participation
-        low_vol_slippage = _open_slippage(10.0)  # 50% participation
+        high_vol_slippage = _open_slippage(1_000.0, 10.0)
+        same_reference_slippage = _open_slippage(1_000.0, 2_000.0)
+        low_vol_slippage = _open_slippage(10.0, 1_000.0)
 
+        assert same_reference_slippage == pytest.approx(high_vol_slippage)
         assert low_vol_slippage > high_vol_slippage
         # participation=0.005 -> +0.05 impact ticks -> 1.05 ticks -> 1.05*0.01*5 = 0.0525
         assert high_vol_slippage == pytest.approx(0.0525)

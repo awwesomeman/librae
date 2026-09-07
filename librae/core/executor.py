@@ -997,6 +997,7 @@ def check_stop_targets(
     get_cost_model: Callable[[str], CostModel],
     max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
+    get_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
@@ -1039,7 +1040,20 @@ def check_stop_targets(
                 sym,
             )
             continue
-        bar_volume = bar.get("volume")
+        bar_volume = get_volume(sym) if get_volume else bar.get("volume")
+        if _impact_volume_unavailable(cost_model, bar_volume):
+            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
+                pos.pending_market_exit_reason = reason
+            runtime_events.append(
+                _skipped(
+                    ts,
+                    "protective_exit_deferred",
+                    symbol=sym,
+                    exit_reason=reason,
+                    unavailable="volume",
+                )
+            )
+            continue
         max_volume_qty = _volume_fill_limit(
             sym,
             max_bar_volume_participation_rate,
@@ -1144,6 +1158,9 @@ def liquidate_all(
             continue
         price = bar["close"]
         bar_volume = bar.get("volume")
+        cost_model = get_cost_model(sym)
+        if _impact_volume_unavailable(cost_model, bar_volume):
+            continue
         max_volume_qty = _volume_fill_limit(
             sym,
             max_bar_volume_participation_rate,
@@ -1158,7 +1175,6 @@ def liquidate_all(
             close_quantity = min(close_quantity, max_volume_qty)
         if close_quantity <= EPSILON:
             continue
-        cost_model = get_cost_model(sym)
         trade, event, proceeds, fully_closed = build_close_event(
             pos,
             ts,
@@ -1472,6 +1488,16 @@ def _volume_fill_limit(
     return min(remaining_budgets)
 
 
+def _impact_volume_unavailable(
+    cost_model: CostModel,
+    bar_volume: float | None,
+) -> bool:
+    """Return whether configured impact lacks a usable causal volume."""
+    return cost_model.volume_impact_ticks > 0 and (
+        bar_volume is None or not isfinite(bar_volume) or bar_volume <= 0
+    )
+
+
 def simulate_fill(
     intent: OrderIntent,
     price: float,
@@ -1562,6 +1588,8 @@ def _try_fill(
 
     Returns (fill, outlay, None), or (None, 0.0, skip_reason) when rejected.
     """
+    if _impact_volume_unavailable(cost_model, bar_volume):
+        return None, 0.0, "volume_unavailable"
     fill = simulate_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
     if not fill or fill.quantity <= 0:
         return None, 0.0, "insufficient_cash"
@@ -1871,6 +1899,9 @@ def execute_order_intents(
             if close_qty is not None and close_qty <= 0:
                 continue
             bar_volume = get_volume(sym) if get_volume else None
+            if _impact_volume_unavailable(cost_model, bar_volume):
+                runtime_events.append(_skipped(ts, "volume_unavailable", symbol=sym))
+                continue
             max_volume_qty = _volume_fill_limit(
                 sym,
                 max_bar_volume_participation_rate,
@@ -3289,6 +3320,7 @@ def execute_pending_decision_and_stops(
     max_order_notional: float | None = None,
     max_bar_volume_participation_rate: float | None = None,
     max_adv_participation_rate: float | None = None,
+    get_previous_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     max_gross_exposure: float | None = None,
@@ -3304,7 +3336,10 @@ def execute_pending_decision_and_stops(
     limit or non-open field fill starts on the next bar because OHLCV cannot
     establish whether the bar's stop/target occurred before or after entry.
     Backtest and real-time simulation share this conservative convention.
-    Live broker execution intentionally does not call it.
+    Live broker execution intentionally does not call it. A fill at the bar
+    close may use that completed bar's volume. Open, limit, and other
+    non-close fills use ``get_previous_volume`` so their liquidity cap and
+    impact never depend on information completed after the fill timestamp.
 
     Returns (updated cash, combined ExecutionResult for both steps).
     """
@@ -3386,6 +3421,21 @@ def execute_pending_decision_and_stops(
         def get_valuation_price(sym: str) -> float | None:
             return get_fresh_reference_price(sym) or (exposure_prices or {}).get(sym)
 
+        intents_by_symbol = (
+            {intent.symbol or primary_symbol: intent for intent in pending_decision}
+            if isinstance(pending_decision, list)
+            else {}
+        )
+
+        def get_execution_volume(sym: str) -> float | None:
+            intent = intents_by_symbol.get(sym)
+            executes_at_close = default_fill == "close" and (
+                intent is None or intent.limit_price is None
+            )
+            if executes_at_close:
+                return bars.get(sym, {}).get("volume")
+            return get_previous_volume(sym) if get_previous_volume else None
+
         common_kwargs = {
             "get_price": get_price,
             "get_cost_model": get_cost_model,
@@ -3394,7 +3444,7 @@ def execute_pending_decision_and_stops(
             "max_order_notional": max_order_notional,
             "max_bar_volume_participation_rate": max_bar_volume_participation_rate,
             "max_adv_participation_rate": max_adv_participation_rate,
-            "get_volume": lambda sym: bars.get(sym, {}).get("volume"),
+            "get_volume": get_execution_volume,
             "get_lagged_adv": get_lagged_adv,
         }
         if isinstance(pending_decision, PortfolioWeights) or rebalance_state is not None:
@@ -3493,6 +3543,7 @@ def execute_pending_decision_and_stops(
             get_cost_model=get_cost_model,
             max_bar_volume_participation_rate=max_bar_volume_participation_rate,
             max_adv_participation_rate=max_adv_participation_rate,
+            get_volume=get_previous_volume,
             get_lagged_adv=get_lagged_adv,
             used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,

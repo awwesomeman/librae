@@ -599,6 +599,11 @@ exceeded `RunConfig.runtime.poll_seconds`.
 - `max_bar_volume_participation_rate`: one cumulative per-symbol volume budget per
   simulated data event across entries, additions, reductions, ordinary
   closes, stops, modeled liquidation, drawdown exits, and terminal exits.
+  A fill explicitly modeled at `close` uses that completed bar's volume.
+  Next-open, limit, other non-close-field fills, and protective exits use the
+  previous completed bar's volume because the execution bar's final volume is
+  not known at their fill timestamp. Live planning uses the latest completed
+  bar, so this keeps the simulation and live information sets aligned.
   Missing volume rejects the fill. Constrained exits are explicit partial
   fills and retain the remaining position for a later observed bar. Once
   stop-market or liquidation has triggered, its remainder stays an active
@@ -611,8 +616,9 @@ exceeded `RunConfig.runtime.poll_seconds`.
   rejects fills. Bar-volume and ADV usage are tracked separately, so available
   quantity is `min(bar cap - filled this bar, ADV cap - filled this session)`.
   This avoids granting the full ADV budget again on every intraday bar. No
-  intraday volume-profile estimate is needed: the current-bar cap remains the
-  local liquidity constraint. Sim/live `ExecutionPolicy.warmup_periods` must retain enough
+  intraday volume-profile estimate is needed: the causal bar-volume reference
+  remains the local liquidity constraint. Sim/live
+  `ExecutionPolicy.warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
 - `max_rebalance_delay_bars`: non-negative, backtest-only bound for a
   `PortfolioWeights` deferral. A value of N allows N additional execution
