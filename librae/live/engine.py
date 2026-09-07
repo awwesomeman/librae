@@ -2016,11 +2016,12 @@ class LiveTrader:
         while self._active_orders and (
             not self._halted
             or self._has_active_recovery_orders()
-            or self._active_orders[0].status in ("cancel_retry", "cancel_pending")
+            or self._active_orders[0].cancel_requested
+            or self._active_orders[0].status == "cancel_pending"
         ):
             tracked = self._active_orders[0]
             request = tracked.request
-            if tracked.status in ("cancel_retry", "cancel_pending"):
+            if tracked.cancel_requested or tracked.status == "cancel_pending":
                 self._cancel_tracked_order(tracked)
                 return
             if not tracked.placement_attempted:
@@ -2174,7 +2175,7 @@ class LiveTrader:
             return
         # Checkpoint cancellation intent before broker I/O. A restart can
         # retry this transition by order id without resubmitting placement.
-        tracked.status = "cancel_retry"
+        tracked.cancel_requested = True
         self._persist_state(tracked)
         try:
             cancel_report = self._timed_order_call(
@@ -2207,9 +2208,7 @@ class LiveTrader:
         else:
             # Cancellation itself didn't reach a confirmed terminal status —
             # still unknown broker state, always halt.
-            tracked.status = (
-                "cancel_pending" if cancel_report.status == "cancel_pending" else "cancel_retry"
-            )
+            tracked.status = cancel_report.status
             self._persist_state(tracked)
             self._halt_live(title="Order Timeout Cancellation Unresolved", message=message)
 
@@ -2296,8 +2295,8 @@ class LiveTrader:
             return
 
         cancellation_acknowledged = tracked.status == "cancel_pending"
-        if not cancellation_acknowledged:
-            tracked.status = "cancel_retry"
+        if not tracked.cancel_requested:
+            tracked.cancel_requested = True
             self._persist_state(tracked)
 
         try:
@@ -2330,8 +2329,6 @@ class LiveTrader:
                 self._persist_state(tracked)
             return
 
-        tracked.status = "cancel_retry"
-        self._persist_state(tracked)
         try:
             cancel_report = self._timed_order_call(
                 lambda request=tracked.request, order_id=report.order_id: (
@@ -2348,11 +2345,6 @@ class LiveTrader:
             return
 
         self._apply_order_report(tracked, cancel_report)
-        if cancel_report.status not in ("filled", "cancelled", "rejected"):
-            tracked.status = (
-                "cancel_pending" if cancel_report.status == "cancel_pending" else "cancel_retry"
-            )
-            self._persist_state(tracked)
 
     def _cancel_active_orders(self) -> None:
         """Best-effort cancellation used whenever live trading halts."""

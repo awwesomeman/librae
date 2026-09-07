@@ -113,6 +113,7 @@ class TimescaleLiveStateStore:
                             tracked.status,
                             tracked.placement_attempted,
                             tracked.placement_attempted_at,
+                            tracked.cancel_requested,
                             request.quantity,
                             tracked.filled_quantity,
                             tracked.filled_notional,
@@ -129,7 +130,7 @@ class TimescaleLiveStateStore:
                     """INSERT INTO broker_orders
                            (state_key, client_order_id, run_id, broker_order_id,
                             symbol, side, status, placement_attempted,
-                            placement_attempted_at,
+                            placement_attempted_at, cancel_requested,
                             requested_quantity,
                             filled_quantity, filled_notional, commission,
                             slippage, tax, submitted_at, executed_at, request)
@@ -139,6 +140,7 @@ class TimescaleLiveStateStore:
                          status=EXCLUDED.status,
                          placement_attempted=EXCLUDED.placement_attempted,
                          placement_attempted_at=EXCLUDED.placement_attempted_at,
+                         cancel_requested=EXCLUDED.cancel_requested,
                          filled_quantity=EXCLUDED.filled_quantity,
                          filled_notional=EXCLUDED.filled_notional,
                          commission=EXCLUDED.commission,

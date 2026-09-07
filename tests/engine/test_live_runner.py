@@ -3080,8 +3080,8 @@ class TestLiveExecutionLifecycle:
         first.halt("operator requested halt")
 
         assert first._halted is True
-        assert first._active_orders[0].status == "cancel_retry"
-        assert next(iter(store.orders.values())).status == "cancel_retry"
+        assert first._active_orders[0].cancel_requested is True
+        assert next(iter(store.orders.values())).cancel_requested is True
 
         second = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
         second.run(max_iterations=1)
@@ -3116,7 +3116,7 @@ class TestLiveExecutionLifecycle:
 
         assert runner._halted is True
         assert runner._active_orders[0].order_id == ""
-        assert runner._active_orders[0].status == "cancel_retry"
+        assert runner._active_orders[0].cancel_requested is True
 
         adapter.find_order.side_effect = None
         adapter.find_order.return_value = {
