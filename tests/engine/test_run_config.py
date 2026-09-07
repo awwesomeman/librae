@@ -93,12 +93,19 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
     delayed_rebalance = _config(
         execution=ExecutionPolicy(max_rebalance_delay_bars=2),
     )
+    sliced_rebalance = _config(
+        execution=ExecutionPolicy(
+            max_rebalance_delay_bars=2,
+            rebalance_residual_policy="defer_symbols",
+        ),
+    )
     short_warmup = _config(execution=ExecutionPolicy(warmup_periods=10))
 
     assert unlimited.config_hash != capped.config_hash
     assert capped.config_hash != adv_capped.config_hash
     assert capped.config_hash != timed_live_order.config_hash
     assert capped.config_hash != delayed_rebalance.config_hash
+    assert delayed_rebalance.config_hash != sliced_rebalance.config_hash
     assert capped.config_hash != short_warmup.config_hash
     with pytest.raises(ValueError, match="must be in"):
         ExecutionPolicy(max_bar_volume_participation_rate=1.1)
@@ -114,6 +121,10 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         ExecutionPolicy(max_rebalance_delay_bars=-1)
     with pytest.raises(ValueError, match="max_rebalance_delay_bars"):
         ExecutionPolicy(max_rebalance_delay_bars=True)
+    with pytest.raises(ValueError, match="rebalance_residual_policy"):
+        ExecutionPolicy(rebalance_residual_policy="retry")
+    with pytest.raises(ValueError, match="requires positive"):
+        ExecutionPolicy(rebalance_residual_policy="defer_all")
     with pytest.raises(ValueError, match="warmup_periods"):
         ExecutionPolicy(warmup_periods=0)
     with pytest.raises(ValueError, match="warmup_periods"):
@@ -131,6 +142,19 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         _config(execution={"max_bar_volume_participation_rate": 0.1})
 
 
+def test_execution_policy_preserves_existing_positional_argument_order() -> None:
+    policy = ExecutionPolicy("close", 0.2, 10, 0.03, 4, 90, 1_440)
+
+    assert policy.default_fill_price == "close"
+    assert policy.max_bar_volume_participation_rate == 0.2
+    assert policy.adv_lookback_sessions == 10
+    assert policy.max_adv_participation_rate == 0.03
+    assert policy.max_rebalance_delay_bars == 4
+    assert policy.live_order_timeout_seconds == 90
+    assert policy.warmup_periods == 1_440
+    assert policy.rebalance_residual_policy == "discard"
+
+
 def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
     disabled = _config()
     limited = _config(risk=RiskPolicy(max_drawdown_rate=0.2))
@@ -145,11 +169,15 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
 
 
 @pytest.mark.parametrize("mode", ["sim", "live"])
-def test_rebalance_delay_is_backtest_only(mode: str) -> None:
+@pytest.mark.parametrize("residual_policy", ["discard", "defer_symbols"])
+def test_rebalance_delay_is_backtest_only(mode: str, residual_policy: str) -> None:
     with pytest.raises(ValueError, match="only when mode='backtest'"):
         _config(
             mode=mode,
-            execution=ExecutionPolicy(max_rebalance_delay_bars=1),
+            execution=ExecutionPolicy(
+                max_rebalance_delay_bars=1,
+                rebalance_residual_policy=residual_policy,
+            ),
         )
 
 
@@ -178,6 +206,7 @@ def test_run_config_rejects_ambiguous_scalar_types(override, message: str) -> No
         "adv_lookback_sessions",
         "max_adv_participation_rate",
         "max_rebalance_delay_bars",
+        "rebalance_residual_policy",
         "live_order_timeout_seconds",
         "warmup_periods",
     ],

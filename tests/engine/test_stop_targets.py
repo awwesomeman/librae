@@ -177,6 +177,42 @@ class TestResolveStopExit:
         assert remainder.events[0].reason == REASON_STOP_LOSS
         assert positions == {}
 
+    def test_zero_volume_budget_keeps_stop_exit_pending(self):
+        """A triggered stop that this bar's volume budget cannot fill at all
+        carries to the next open instead of vanishing, exactly like one whose
+        side is untradable. A working stop at a venue does not evaporate
+        because the bar was thin; re-checking the level next bar could miss
+        it entirely. This holds on the default rebalance_residual_policy."""
+        pos = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": pos}
+
+        result = check_stop_targets(
+            positions,
+            {"TEST": {"open": 98.0, "high": 99.0, "low": 94.0, "close": 96.0, "volume": 0.0}},
+            datetime(2026, 1, 2, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+            max_bar_volume_participation_rate=0.25,
+        )
+
+        assert result.events == []
+        assert positions["TEST"].pending_market_exit_reason == REASON_STOP_LOSS
+        assert result.runtime_events[0].detail == {
+            "reason": "protective_exit_deferred",
+            "exit_reason": REASON_STOP_LOSS,
+        }
+
+        remainder = check_stop_targets(
+            positions,
+            {"TEST": {"open": 97.0, "high": 99.0, "low": 96.0, "close": 98.0, "volume": 20.0}},
+            datetime(2026, 1, 3, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+            max_bar_volume_participation_rate=0.25,
+        )
+
+        assert remainder.events[0].event_type == "close"
+        assert remainder.events[0].price == pytest.approx(97.0)
+        assert positions == {}
+
     def test_adverse_locked_limit_keeps_stop_exit_pending(self):
         pos = _make_pos(side="long", stop=95.0)
         positions = {"TEST": pos}

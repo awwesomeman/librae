@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
+RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
 DEFAULT_POLL_SECONDS = 60
 
 
@@ -75,6 +76,12 @@ class ExecutionPolicy:
     events a ``PortfolioWeights`` decision may wait for every required order
     side to become tradable. Zero preserves fail-fast next-bar execution.
 
+    ``rebalance_residual_policy`` opts portfolio targets into cross-bar
+    execution slicing. ``discard`` preserves the one-shot compatibility
+    behavior; ``fail`` rejects any incomplete staged rebalance without partial
+    mutation; ``defer_all`` waits whenever any residual symbol cannot execute,
+    while ``defer_symbols`` lets independently executable symbols make progress.
+
     ``live_order_timeout_seconds`` is a local live-trading safety timeout.
     After the first placement attempt, a non-terminal broker order older than
     this wall-clock duration is canceled and the deployment halts for operator
@@ -93,6 +100,7 @@ class ExecutionPolicy:
     max_rebalance_delay_bars: int = 0
     live_order_timeout_seconds: int | None = None
     warmup_periods: int = 720
+    rebalance_residual_policy: RebalanceResidualPolicy = "discard"
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
@@ -127,6 +135,27 @@ class ExecutionPolicy:
             or self.max_rebalance_delay_bars < 0
         ):
             raise ValueError("max_rebalance_delay_bars must be a non-negative integer")
+        if self.rebalance_residual_policy not in (
+            "discard",
+            "fail",
+            "defer_all",
+            "defer_symbols",
+        ):
+            raise ValueError(
+                "rebalance_residual_policy must be 'discard', 'fail', "
+                f"'defer_all', or 'defer_symbols', got {self.rebalance_residual_policy!r}"
+            )
+        if (
+            self.rebalance_residual_policy
+            in (
+                "defer_all",
+                "defer_symbols",
+            )
+            and self.max_rebalance_delay_bars == 0
+        ):
+            raise ValueError(
+                "deferred rebalance_residual_policy requires positive max_rebalance_delay_bars"
+            )
         timeout = self.live_order_timeout_seconds
         if timeout is not None and (
             isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0
@@ -334,8 +363,13 @@ class RunConfig:
             raise ValueError("symbols must contain non-empty string identifiers")
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"mode must be 'backtest', 'sim', or 'live', got {self.mode!r}")
-        if self.mode != "backtest" and self.execution.max_rebalance_delay_bars:
-            raise ValueError("max_rebalance_delay_bars is supported only when mode='backtest'")
+        if self.mode != "backtest" and (
+            self.execution.max_rebalance_delay_bars
+            or self.execution.rebalance_residual_policy != "discard"
+        ):
+            raise ValueError(
+                "deferred portfolio rebalancing is supported only when mode='backtest'"
+            )
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
         for field_name in ("strategy_name", "timeframe", "market", "data_source"):
@@ -356,6 +390,7 @@ class RunConfig:
             "adv_lookback_sessions",
             "max_adv_participation_rate",
             "max_rebalance_delay_bars",
+            "rebalance_residual_policy",
             "live_order_timeout_seconds",
             "warmup_periods",
         }

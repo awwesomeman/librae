@@ -397,6 +397,7 @@ class TestPersistBacktest:
             "adv_lookback_sessions": None,
             "max_adv_participation_rate": None,
             "max_rebalance_delay_bars": 0,
+            "rebalance_residual_policy": "discard",
             "live_order_timeout_seconds": None,
             "warmup_periods": 720,
         }

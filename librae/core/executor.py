@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from math import isfinite
 from typing import Literal
@@ -31,9 +31,9 @@ from librae.core import EPSILON
 
 from .cost_model import CostModel
 from .market_data import CAN_BUY_COLUMN, CAN_SELL_COLUMN
+from .run_config import RebalanceResidualPolicy
 from .strategy import (
     Fill,
-    OrderAction,
     OrderIntent,
     PortfolioWeights,
     Position,
@@ -365,6 +365,37 @@ class RuntimeEvent:
     detail: Mapping[str, object] = field(default_factory=dict)
 
 
+RebalancePhase = Literal["reduction", "addition"]
+
+
+@dataclass(frozen=True)
+class RebalanceOrderState:
+    """One fixed-quantity target leg that may span multiple data events."""
+
+    intent: OrderIntent
+    phase: RebalancePhase
+    requested_quantity: float
+    remaining_quantity: float
+
+
+@dataclass(frozen=True)
+class UnresolvedRebalanceLeg:
+    """A fixed target notional waiting for its first fresh execution price."""
+
+    symbol: str
+    target_signed_notional: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class PortfolioRebalanceState:
+    """Backtest-only residual state for one portfolio target."""
+
+    target: PortfolioWeights
+    orders: tuple[RebalanceOrderState, ...]
+    unresolved_legs: tuple[UnresolvedRebalanceLeg, ...] = ()
+
+
 def _skipped(
     ts: datetime, reason: str, *, symbol: str | None = None, **context: object
 ) -> RuntimeEvent:
@@ -387,6 +418,50 @@ class ExecutionResult:
     events: list[PositionEvent]
     cash_delta: float
     runtime_events: list[RuntimeEvent] = field(default_factory=list)
+    pending_rebalance: PortfolioRebalanceState | None = None
+
+
+def coalesce_runtime_events(events: list[RuntimeEvent]) -> list[RuntimeEvent]:
+    """Preserve all detail under the runtime-events persistence identity."""
+    reason_priority = {
+        "rebalance_residual": 0,
+        "rebalance_constrained_by_position_limit": 1,
+        "protective_exit_deferred": 2,
+        "rebalance_superseded": 3,
+        "rebalance_cancelled_by_protective_exit": 4,
+        "rebalance_cancelled_by_halt": 4,
+    }
+    by_key: dict[tuple[datetime, RuntimeEventType, str | None], int] = {}
+    coalesced: list[RuntimeEvent] = []
+
+    def split_detail(detail: Mapping[str, object]) -> tuple[dict[str, object], list[object]]:
+        primary = dict(detail)
+        raw_related = primary.pop("related_events", [])
+        related = list(raw_related) if isinstance(raw_related, list) else []
+        return primary, related
+
+    for event in events:
+        key = (event.ts, event.event_type, event.symbol)
+        existing_index = by_key.get(key)
+        if existing_index is None:
+            by_key[key] = len(coalesced)
+            coalesced.append(event)
+            continue
+        existing = coalesced[existing_index]
+        existing_priority = reason_priority.get(str(existing.detail.get("reason")), 0)
+        event_priority = reason_priority.get(str(event.detail.get("reason")), 0)
+        existing_detail, existing_related = split_detail(existing.detail)
+        event_detail, event_related = split_detail(event.detail)
+        if event_priority > existing_priority:
+            detail = event_detail
+            related = [existing_detail, *existing_related, *event_related]
+        else:
+            detail = existing_detail
+            related = [*existing_related, event_detail, *event_related]
+        detail["related_events"] = related
+        primary_event = event if event_priority > existing_priority else existing
+        coalesced[existing_index] = replace(primary_event, detail=detail)
+    return coalesced
 
 
 def side_multiplier(side: PositionSide) -> float:
@@ -936,6 +1011,7 @@ def check_stop_targets(
     """
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
+    runtime_events: list[RuntimeEvent] = []
     cash_delta = 0.0
 
     for sym in list(positions.keys()):
@@ -954,6 +1030,9 @@ def check_stop_targets(
         if not _order_side_is_tradable(bar, close_side):
             if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
                 pos.pending_market_exit_reason = reason
+            runtime_events.append(
+                _skipped(ts, "protective_exit_deferred", symbol=sym, exit_reason=reason)
+            )
             logger.info(
                 "%s exit for %s remains pending because the order side is not tradable",
                 reason,
@@ -974,6 +1053,11 @@ def check_stop_targets(
         if max_volume_qty is not None:
             close_quantity = min(close_quantity, max_volume_qty)
         if close_quantity <= EPSILON:
+            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
+                pos.pending_market_exit_reason = reason
+            runtime_events.append(
+                _skipped(ts, "protective_exit_deferred", symbol=sym, exit_reason=reason)
+            )
             continue
         trade, event, proceeds, fully_closed = build_close_event(
             pos,
@@ -1002,7 +1086,12 @@ def check_stop_targets(
                 pos.pending_market_exit_reason = reason
             reduce_position(pos, close_quantity)
 
-    return ExecutionResult(trades=trades, events=events, cash_delta=cash_delta)
+    return ExecutionResult(
+        trades=trades,
+        events=events,
+        cash_delta=cash_delta,
+        runtime_events=runtime_events,
+    )
 
 
 def queue_market_exit_all(
@@ -2132,6 +2221,168 @@ def _scale_additions_to_cash(
     ], []
 
 
+def _orders_for_target_notional(
+    symbol: str,
+    target_signed_notional: float,
+    reason: str,
+    positions: dict[str, PositionState],
+    price: float,
+    *,
+    get_cost_model: Callable[[str], CostModel],
+) -> list[RebalanceOrderState]:
+    """Resolve one fixed target notional into quantities at a fresh price."""
+    position = positions.get(symbol)
+    current_signed_quantity = (
+        position.quantity * side_multiplier(position.side) if position is not None else 0.0
+    )
+    target_signed_quantity = target_signed_notional / (price * get_cost_model(symbol).multiplier)
+
+    reductions: list[OrderIntent] = []
+    additions: list[OrderIntent] = []
+    current_is_flat = abs(current_signed_quantity) <= EPSILON
+    target_is_flat = abs(target_signed_quantity) <= EPSILON
+    same_direction = (
+        current_is_flat
+        or target_is_flat
+        or (current_signed_quantity > 0) == (target_signed_quantity > 0)
+    )
+    if same_direction:
+        quantity_delta = abs(target_signed_quantity) - abs(current_signed_quantity)
+        if quantity_delta < -EPSILON:
+            reductions.append(
+                OrderIntent(
+                    action="close",
+                    symbol=symbol,
+                    quantity=-quantity_delta,
+                    reason=reason,
+                )
+            )
+        elif quantity_delta > EPSILON:
+            additions.append(
+                OrderIntent(
+                    action="long" if target_signed_quantity > 0 else "short",
+                    symbol=symbol,
+                    quantity=quantity_delta,
+                    reason=reason,
+                )
+            )
+    else:
+        reductions.append(
+            OrderIntent(
+                action="close",
+                symbol=symbol,
+                quantity=position.quantity if position is not None else None,
+                reason=reason,
+            )
+        )
+        additions.append(
+            OrderIntent(
+                action="long" if target_signed_quantity > 0 else "short",
+                symbol=symbol,
+                quantity=abs(target_signed_quantity),
+                reason=reason,
+            )
+        )
+
+    return [
+        RebalanceOrderState(
+            intent=action,
+            phase=phase,
+            requested_quantity=action.quantity or 0.0,
+            remaining_quantity=action.quantity or 0.0,
+        )
+        for phase, actions in (("reduction", reductions), ("addition", additions))
+        for action in actions
+    ]
+
+
+def _plan_portfolio_weights(
+    targets: PortfolioWeights,
+    positions: dict[str, PositionState],
+    cash: float,
+    *,
+    get_reference_price: Callable[[str], float | None],
+    get_cost_model: Callable[[str], CostModel],
+    get_fresh_price: Callable[[str], float | None] | None = None,
+) -> tuple[PortfolioRebalanceState, dict[str, float]]:
+    """Freeze target notionals and resolve quantities only from fresh prices."""
+    target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
+    relevant_symbols = sorted(set(positions) | target_symbols)
+    if not relevant_symbols:
+        return PortfolioRebalanceState(target=targets, orders=()), {}
+
+    valuation_prices: dict[str, float] = {}
+    unavailable_positions: list[str] = []
+    for symbol in positions:
+        raw_price = get_reference_price(symbol)
+        if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
+            unavailable_positions.append(symbol)
+        else:
+            valuation_prices[symbol] = float(raw_price)
+    if unavailable_positions:
+        raise ExecutionPriceUnavailableError(unavailable_positions)
+
+    equity, _ = calc_equity(
+        cash,
+        positions,
+        get_price=lambda symbol, _position: valuation_prices[symbol],
+        get_cost_model=get_cost_model,
+    )
+    if equity <= EPSILON:
+        raise ValueError("rebalance requires positive execution-time equity")
+
+    fresh_price = get_fresh_price or get_reference_price
+    prices: dict[str, float] = {}
+    orders: list[RebalanceOrderState] = []
+    unresolved_legs: list[UnresolvedRebalanceLeg] = []
+    for symbol in relevant_symbols:
+        target_signed_notional = targets.weights.get(symbol, 0.0) * equity
+        raw_price = fresh_price(symbol)
+        if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
+            if abs(target_signed_notional) <= EPSILON:
+                position = positions.get(symbol)
+                if position is not None:
+                    orders.extend(
+                        _orders_for_target_notional(
+                            symbol,
+                            target_signed_notional,
+                            targets.reason,
+                            positions,
+                            position.entry_price,
+                            get_cost_model=get_cost_model,
+                        )
+                    )
+            else:
+                unresolved_legs.append(
+                    UnresolvedRebalanceLeg(
+                        symbol=symbol,
+                        target_signed_notional=target_signed_notional,
+                        reason=targets.reason,
+                    )
+                )
+            continue
+        price = float(raw_price)
+        prices[symbol] = price
+        orders.extend(
+            _orders_for_target_notional(
+                symbol,
+                target_signed_notional,
+                targets.reason,
+                positions,
+                price,
+                get_cost_model=get_cost_model,
+            )
+        )
+    return (
+        PortfolioRebalanceState(
+            target=targets,
+            orders=tuple(orders),
+            unresolved_legs=tuple(unresolved_legs),
+        ),
+        prices,
+    )
+
+
 def execute_portfolio_weights(
     targets: PortfolioWeights,
     positions: dict[str, PositionState],
@@ -2151,128 +2402,56 @@ def execute_portfolio_weights(
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
 ) -> ExecutionResult:
-    """Resolve and execute a portfolio rebalance as one deterministic batch.
-
-    All relevant execution prices are resolved before mutating the portfolio.
-    Existing exposure is reduced first, then additions are submitted in symbol
-    order. If transaction costs make the additions unaffordable, every addition
-    is scaled by the same factor instead of starving later symbols.
-    """
+    """Resolve and execute a portfolio rebalance as one deterministic batch."""
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
-    target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
-    relevant_symbols = sorted(set(positions) | target_symbols)
-    if not relevant_symbols:
-        return ExecutionResult(trades=[], events=[], cash_delta=0.0)
-
-    prices: dict[str, float] = {}
-    unavailable_prices: list[str] = []
-    for symbol in relevant_symbols:
-        target_weight = targets.weights.get(symbol, 0.0)
-        action_type: OrderAction
-        if target_weight > EPSILON:
-            action_type = "long"
-        elif target_weight < -EPSILON:
-            action_type = "short"
-        else:
-            action_type = "close"
-        price_action = OrderIntent(
-            action=action_type,
-            symbol=symbol,
-            reason=targets.reason,
+    reference_price = get_reference_price or (
+        lambda symbol: get_price(
+            symbol,
+            OrderIntent(
+                action=(
+                    "long"
+                    if targets.weights.get(symbol, 0.0) > EPSILON
+                    else "short"
+                    if targets.weights.get(symbol, 0.0) < -EPSILON
+                    else "close"
+                ),
+                symbol=symbol,
+                reason=targets.reason,
+            ),
         )
-        raw_price = (
-            get_reference_price(symbol)
-            if get_reference_price is not None
-            else get_price(symbol, price_action)
-        )
-        if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
-            unavailable_prices.append(symbol)
-            continue
-        prices[symbol] = float(raw_price)
-    if unavailable_prices:
-        raise ExecutionPriceUnavailableError(unavailable_prices)
-
-    equity, _ = calc_equity(
-        cash,
+    )
+    state, prices = _plan_portfolio_weights(
+        targets,
         positions,
-        get_price=lambda symbol, _position: prices[symbol],
+        cash,
+        get_reference_price=reference_price,
         get_cost_model=get_cost_model,
     )
-    if equity <= EPSILON:
-        raise ValueError("rebalance requires positive execution-time equity")
-
-    reductions: list[OrderIntent] = []
-    additions: list[OrderIntent] = []
-    grouped_scale_ins: list[str] = []
-    for symbol in relevant_symbols:
-        position = positions.get(symbol)
-        current_signed_quantity = 0.0
-        if position is not None:
-            current_signed_quantity = position.quantity * side_multiplier(position.side)
-
-        cost_model = get_cost_model(symbol)
-        target_weight = targets.weights.get(symbol, 0.0)
-        target_signed_quantity = target_weight * equity / (prices[symbol] * cost_model.multiplier)
-
-        current_is_flat = abs(current_signed_quantity) <= EPSILON
-        target_is_flat = abs(target_signed_quantity) <= EPSILON
-        same_direction = (
-            current_is_flat
-            or target_is_flat
-            or (current_signed_quantity > 0) == (target_signed_quantity > 0)
-        )
-        if same_direction:
-            quantity_delta = abs(target_signed_quantity) - abs(current_signed_quantity)
-            if quantity_delta < -EPSILON:
-                reductions.append(
-                    OrderIntent(
-                        action="close",
-                        symbol=symbol,
-                        quantity=-quantity_delta,
-                        reason=targets.reason,
-                    )
-                )
-            elif quantity_delta > EPSILON:
-                if position is not None and position.group_id is not None:
-                    grouped_scale_ins.append(symbol)
-                additions.append(
-                    OrderIntent(
-                        action="long" if target_signed_quantity > 0 else "short",
-                        symbol=symbol,
-                        quantity=quantity_delta,
-                        reason=targets.reason,
-                    )
-                )
-            continue
-
-        reductions.append(
-            OrderIntent(
-                action="close",
-                symbol=symbol,
-                reason=targets.reason,
-            )
-        )
-        additions.append(
-            OrderIntent(
-                action="long" if target_signed_quantity > 0 else "short",
-                symbol=symbol,
-                quantity=abs(target_signed_quantity),
-                reason=targets.reason,
-            )
-        )
+    if state.unresolved_legs:
+        raise ExecutionPriceUnavailableError([leg.symbol for leg in state.unresolved_legs])
+    reductions = [order.intent for order in state.orders if order.phase == "reduction"]
+    additions = [order.intent for order in state.orders if order.phase == "addition"]
 
     # WHY: a whole-book target is ungrouped by nature, so adding to a position
     # a group opened would break the one-position-one-group invariant (issue
-    # #113). Refuse here, before the reductions this target would otherwise
-    # execute first, so the book is untouched. Reductions and flips are not
-    # scale-ins: they carry the position's own group_id out with them. This
-    # runs ahead of the price check because it condemns the target itself:
-    # deferring to a later bar would only repeat it, while an unresolved price
-    # may well be available next bar.
+    # #113). Refuse before the reductions this target would otherwise execute
+    # first, so the book is untouched. A symbol planned in both phases is a
+    # flip, not a scale-in: its reduction carries the position's own group_id
+    # out before the addition opens a fresh one.
+    flipped = {intent.symbol for intent in reductions} & {intent.symbol for intent in additions}
+    grouped_scale_ins = sorted(
+        {
+            intent.symbol
+            for intent in additions
+            if intent.symbol not in flipped
+            and (position := positions.get(intent.symbol)) is not None
+            and position.group_id is not None
+        }
+    )
     if grouped_scale_ins:
         raise ValueError(
-            f"PortfolioWeights cannot scale {sorted(grouped_scale_ins)}: held under a "
+            f"PortfolioWeights cannot scale {grouped_scale_ins}: held under a "
             "group id; close the group first or manage the symbol with grouped intents"
         )
 
@@ -2338,6 +2517,539 @@ def execute_portfolio_weights(
             *cash_events,
             *addition_result.runtime_events,
         ],
+    )
+
+
+def _rebalance_residual_event(
+    ts: datetime,
+    order: RebalanceOrderState,
+    *,
+    requested_quantity: float,
+    filled_quantity: float,
+    remaining_quantity: float,
+    blocked_symbols: list[str] | None = None,
+) -> RuntimeEvent:
+    detail: dict[str, object] = {
+        "phase": order.phase,
+        "action": order.intent.action,
+        "quantity_scope": "attempt",
+        "requested_quantity": requested_quantity,
+        "filled_quantity": filled_quantity,
+        "remaining_quantity": remaining_quantity,
+    }
+    if blocked_symbols:
+        detail["blocked_symbols"] = blocked_symbols
+    return _skipped(ts, "rebalance_residual", symbol=order.intent.symbol, **detail)
+
+
+def _unresolved_rebalance_event(
+    ts: datetime,
+    leg: UnresolvedRebalanceLeg,
+    *,
+    blocked_symbols: list[str] | None = None,
+) -> RuntimeEvent:
+    target_notional = abs(leg.target_signed_notional)
+    detail: dict[str, object] = {
+        "sizing_state": "awaiting_fresh_price",
+        "notional_scope": "target_allocation",
+        "target_side": "long" if leg.target_signed_notional > 0 else "short",
+        "requested_notional": target_notional,
+        "filled_notional": 0.0,
+        "remaining_notional": target_notional,
+    }
+    if blocked_symbols:
+        detail["blocked_symbols"] = blocked_symbols
+    return _skipped(ts, "rebalance_residual", symbol=leg.symbol, **detail)
+
+
+def _rebalance_quantity_events(
+    ts: datetime,
+    records: list[tuple[RebalanceOrderState, float, float, float]],
+    *,
+    blocked_symbols: list[str] | None = None,
+    report_all_blocked: bool = False,
+) -> list[RuntimeEvent]:
+    """Emit at most one durable residual event per timestamp and symbol."""
+    records_by_symbol: dict[str, list[tuple[RebalanceOrderState, float, float, float]]] = {}
+    for record in records:
+        records_by_symbol.setdefault(record[0].intent.symbol, []).append(record)
+
+    events: list[RuntimeEvent] = []
+    for symbol, symbol_records in records_by_symbol.items():
+        if len(symbol_records) == 1:
+            order, requested, filled, remaining = symbol_records[0]
+            events.append(
+                _rebalance_residual_event(
+                    ts,
+                    order,
+                    requested_quantity=requested,
+                    filled_quantity=filled,
+                    remaining_quantity=remaining,
+                    blocked_symbols=(
+                        blocked_symbols
+                        if blocked_symbols and (report_all_blocked or symbol in blocked_symbols)
+                        else None
+                    ),
+                )
+            )
+            continue
+
+        phases = [
+            {
+                "phase": order.phase,
+                "action": order.intent.action,
+                "requested_quantity": requested,
+                "filled_quantity": filled,
+                "remaining_quantity": remaining,
+            }
+            for order, requested, filled, remaining in symbol_records
+        ]
+        detail: dict[str, object] = {
+            "reason": "rebalance_residual",
+            "quantity_scope": "attempt",
+            "requested_quantity": sum(record[1] for record in symbol_records),
+            "filled_quantity": sum(record[2] for record in symbol_records),
+            "remaining_quantity": sum(record[3] for record in symbol_records),
+            "phases": phases,
+        }
+        if blocked_symbols and (report_all_blocked or symbol in blocked_symbols):
+            detail["blocked_symbols"] = blocked_symbols
+        events.append(
+            RuntimeEvent(
+                ts=ts,
+                event_type="decision_skipped",
+                symbol=symbol,
+                detail=detail,
+            )
+        )
+    return events
+
+
+def _cancel_rebalance_symbols(
+    state: PortfolioRebalanceState,
+    exit_reasons: Mapping[str, str],
+    ts: datetime,
+) -> tuple[PortfolioRebalanceState | None, list[RuntimeEvent]]:
+    """Cancel target legs owned by a higher-priority protective exit."""
+    cancelled_orders: dict[str, list[RebalanceOrderState]] = {}
+    retained_orders: list[RebalanceOrderState] = []
+    for order in state.orders:
+        symbol = order.intent.symbol
+        if symbol in exit_reasons:
+            cancelled_orders.setdefault(symbol, []).append(order)
+        else:
+            retained_orders.append(order)
+
+    cancelled_legs: dict[str, UnresolvedRebalanceLeg] = {}
+    retained_legs: list[UnresolvedRebalanceLeg] = []
+    for leg in state.unresolved_legs:
+        if leg.symbol in exit_reasons:
+            cancelled_legs[leg.symbol] = leg
+        else:
+            retained_legs.append(leg)
+
+    events: list[RuntimeEvent] = []
+    for symbol in sorted(set(cancelled_orders) | set(cancelled_legs)):
+        phases = [
+            {
+                "phase": order.phase,
+                "action": order.intent.action,
+                "requested_quantity": order.requested_quantity,
+                "filled_quantity": order.requested_quantity - order.remaining_quantity,
+                "cancelled_quantity": order.remaining_quantity,
+            }
+            for order in cancelled_orders.get(symbol, [])
+        ]
+        detail: dict[str, object] = {
+            "exit_reason": exit_reasons[symbol],
+            "phases": phases,
+        }
+        leg = cancelled_legs.get(symbol)
+        if leg is not None:
+            detail.update(
+                {
+                    "sizing_state": "cancelled_before_quantity_resolution",
+                    "target_notional": abs(leg.target_signed_notional),
+                }
+            )
+        events.append(
+            _skipped(
+                ts,
+                "rebalance_cancelled_by_protective_exit",
+                symbol=symbol,
+                **detail,
+            )
+        )
+
+    next_state = (
+        PortfolioRebalanceState(
+            target=state.target,
+            orders=tuple(retained_orders),
+            unresolved_legs=tuple(retained_legs),
+        )
+        if retained_orders or retained_legs
+        else None
+    )
+    return next_state, events
+
+
+def execute_portfolio_rebalance_slice(
+    state: PortfolioRebalanceState,
+    positions: dict[str, PositionState],
+    cash: float,
+    ts: datetime,
+    *,
+    residual_policy: RebalanceResidualPolicy,
+    get_price: Callable[[str, OrderIntent], float | None],
+    get_fresh_price: Callable[[str], float | None],
+    get_cost_model: Callable[[str], CostModel],
+    primary_symbol: str,
+    max_position_notional: float | None = None,
+    max_order_notional: float | None = None,
+    max_bar_volume_participation_rate: float | None = None,
+    max_adv_participation_rate: float | None = None,
+    get_volume: Callable[[str], float | None] | None = None,
+    get_lagged_adv: Callable[[str], float | None] | None = None,
+    used_bar_quantity_by_symbol: dict[str, float] | None = None,
+    used_adv_quantity_by_symbol: dict[str, float] | None = None,
+) -> ExecutionResult:
+    """Execute one bounded-liquidity slice and retain only true residuals."""
+    if residual_policy == "discard":
+        raise ValueError("discard policy cannot retain a cross-bar rebalance state")
+
+    pending_exit_reasons = {
+        symbol: position.pending_market_exit_reason
+        for symbol, position in positions.items()
+        if position.pending_market_exit_reason is not None
+    }
+    cancellation_events: list[RuntimeEvent] = []
+    if pending_exit_reasons:
+        state_symbols = {order.intent.symbol for order in state.orders} | {
+            leg.symbol for leg in state.unresolved_legs
+        }
+        conflicts = sorted(state_symbols & set(pending_exit_reasons))
+        if residual_policy == "fail" and conflicts:
+            raise ValueError(
+                "PortfolioWeights fail policy conflicts with pending protective exits for "
+                f"{conflicts}"
+            )
+        retained_state, cancellation_events = _cancel_rebalance_symbols(
+            state,
+            pending_exit_reasons,
+            ts,
+        )
+        if retained_state is None:
+            return ExecutionResult(
+                trades=[],
+                events=[],
+                cash_delta=0.0,
+                runtime_events=cancellation_events,
+            )
+        state = retained_state
+
+    volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
+    adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
+    resolved_orders = list(state.orders)
+    unresolved_legs: list[UnresolvedRebalanceLeg] = []
+    for leg in state.unresolved_legs:
+        raw_price = get_fresh_price(leg.symbol)
+        if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
+            unresolved_legs.append(leg)
+            continue
+        resolved_orders.extend(
+            _orders_for_target_notional(
+                leg.symbol,
+                leg.target_signed_notional,
+                leg.reason,
+                positions,
+                float(raw_price),
+                get_cost_model=get_cost_model,
+            )
+        )
+
+    pending_orders: list[RebalanceOrderState] = []
+    for order in resolved_orders:
+        remaining_quantity = order.remaining_quantity
+        if order.phase == "reduction":
+            position = positions.get(order.intent.symbol)
+            remaining_quantity = (
+                min(remaining_quantity, position.quantity) if position is not None else 0.0
+            )
+        if remaining_quantity > EPSILON:
+            pending_orders.append(replace(order, remaining_quantity=remaining_quantity))
+    priced_intents: dict[tuple[RebalancePhase, str], tuple[OrderIntent, float | None]] = {}
+    blocked_symbols = {leg.symbol for leg in unresolved_legs}
+    for order in pending_orders:
+        symbol = order.intent.symbol
+        intent = replace(order.intent, quantity=order.remaining_quantity)
+        raw_price = get_price(symbol, intent)
+        price = (
+            float(raw_price)
+            if raw_price is not None and isfinite(raw_price) and raw_price > 0
+            else None
+        )
+        priced_intents[(order.phase, symbol)] = (intent, price)
+        max_volume_qty = _volume_fill_limit(
+            symbol,
+            max_bar_volume_participation_rate,
+            get_volume(symbol) if get_volume else None,
+            max_adv_participation_rate=max_adv_participation_rate,
+            lagged_adv=get_lagged_adv(symbol) if get_lagged_adv else None,
+            used_bar_quantity=volume_consumed.get(symbol, 0.0),
+            used_adv_quantity=adv_consumed.get(symbol, 0.0),
+        )
+        if price is None or (max_volume_qty is not None and max_volume_qty <= EPSILON):
+            blocked_symbols.add(symbol)
+
+    if residual_policy == "defer_all" and blocked_symbols:
+        blocked = sorted(blocked_symbols)
+        runtime_events = [
+            *cancellation_events,
+            *_rebalance_quantity_events(
+                ts,
+                [
+                    (order, order.remaining_quantity, 0.0, order.remaining_quantity)
+                    for order in pending_orders
+                ],
+                blocked_symbols=blocked,
+                report_all_blocked=True,
+            ),
+        ]
+        runtime_events.extend(
+            _unresolved_rebalance_event(ts, leg, blocked_symbols=blocked) for leg in unresolved_legs
+        )
+        return ExecutionResult(
+            trades=[],
+            events=[],
+            cash_delta=0.0,
+            runtime_events=runtime_events,
+            pending_rebalance=PortfolioRebalanceState(
+                target=state.target,
+                orders=tuple(pending_orders),
+                unresolved_legs=tuple(unresolved_legs),
+            ),
+        )
+
+    remaining_by_key = {
+        (order.phase, order.intent.symbol): order.remaining_quantity for order in pending_orders
+    }
+    requested_by_key = {
+        (order.phase, order.intent.symbol): order.requested_quantity for order in pending_orders
+    }
+    attempted_by_key: dict[tuple[RebalancePhase, str], float] = {}
+    filled_by_key: dict[tuple[RebalancePhase, str], float] = {}
+    blocked = sorted(blocked_symbols)
+
+    reduction_intents: list[OrderIntent] = []
+    reduction_prices: dict[str, float] = {}
+    for order in pending_orders:
+        if order.phase != "reduction" or order.intent.symbol in blocked_symbols:
+            continue
+        key = (order.phase, order.intent.symbol)
+        reconciled_quantity = order.remaining_quantity
+        _, price = priced_intents[key]
+        assert price is not None
+        reduction_intents.append(replace(order.intent, quantity=reconciled_quantity))
+        reduction_prices[order.intent.symbol] = price
+        attempted_by_key[key] = reconciled_quantity
+
+    reduction_result = execute_order_intents(
+        reduction_intents,
+        positions,
+        cash,
+        ts,
+        get_price=lambda symbol, _action: reduction_prices.get(symbol),
+        get_cost_model=get_cost_model,
+        primary_symbol=primary_symbol,
+        max_bar_volume_participation_rate=max_bar_volume_participation_rate,
+        max_adv_participation_rate=max_adv_participation_rate,
+        get_volume=get_volume,
+        get_lagged_adv=get_lagged_adv,
+        used_bar_quantity_by_symbol=volume_consumed,
+        used_adv_quantity_by_symbol=adv_consumed,
+    )
+    for event in reduction_result.events:
+        key = ("reduction", event.symbol)
+        filled_by_key[key] = filled_by_key.get(key, 0.0) + event.fill_quantity
+        remaining_by_key[key] = max(remaining_by_key[key] - event.fill_quantity, 0.0)
+
+    cash_after_reductions = cash + reduction_result.cash_delta
+    addition_intents: list[OrderIntent] = []
+    addition_prices: dict[str, float] = {}
+    position_limit_cancellations: dict[tuple[RebalancePhase, str], tuple[float, float]] = {}
+    for order in pending_orders:
+        if order.phase != "addition" or order.intent.symbol in blocked_symbols:
+            continue
+        key = (order.phase, order.intent.symbol)
+        reduction_remaining = remaining_by_key.get(("reduction", order.intent.symbol), 0.0)
+        if reduction_remaining > EPSILON:
+            continue
+        _, price = priced_intents[key]
+        assert price is not None
+        quantity = order.remaining_quantity
+        if max_position_notional is not None:
+            position = positions.get(order.intent.symbol)
+            existing_quantity = position.quantity if position is not None else 0.0
+            unit_notional = price * get_cost_model(order.intent.symbol).multiplier
+            available_quantity = max(max_position_notional / unit_notional - existing_quantity, 0.0)
+            if quantity > available_quantity + EPSILON:
+                if residual_policy == "fail":
+                    raise ValueError(
+                        "PortfolioWeights target exceeds max_position_notional for "
+                        f"{order.intent.symbol!r}"
+                    )
+                position_limit_cancellations[key] = (
+                    quantity,
+                    quantity - available_quantity,
+                )
+                requested_by_key[key] -= quantity - available_quantity
+                quantity = available_quantity
+                remaining_by_key[key] = quantity
+        if quantity <= EPSILON:
+            continue
+        addition_intents.append(replace(order.intent, quantity=quantity))
+        addition_prices[order.intent.symbol] = price
+        attempted_by_key[key] = quantity
+
+    scaled_additions, cash_events = _scale_additions_to_cash(
+        addition_intents,
+        cash_after_reductions,
+        ts,
+        prices=addition_prices,
+        get_cost_model=get_cost_model,
+        get_volume=get_volume,
+    )
+    has_future_reduction = any(
+        remaining_by_key.get(("reduction", order.intent.symbol), 0.0) > EPSILON
+        for order in pending_orders
+        if order.phase == "reduction"
+    ) or any(leg.symbol in positions for leg in unresolved_legs)
+    cash_limit_cancellations: dict[tuple[RebalancePhase, str], tuple[float, float]] = {}
+    if not has_future_reduction:
+        scaled_quantity_by_symbol = {
+            intent.symbol: intent.quantity or 0.0 for intent in scaled_additions
+        }
+        for intent in addition_intents:
+            key = ("addition", intent.symbol)
+            final_quantity = scaled_quantity_by_symbol.get(intent.symbol, 0.0)
+            cancelled_quantity = remaining_by_key[key] - final_quantity
+            if cancelled_quantity > EPSILON:
+                cash_limit_cancellations[key] = (
+                    remaining_by_key[key],
+                    cancelled_quantity,
+                )
+            requested_by_key[key] -= cancelled_quantity
+            remaining_by_key[key] = final_quantity
+            attempted_by_key[key] = final_quantity
+    addition_result = execute_order_intents(
+        scaled_additions,
+        positions,
+        cash_after_reductions,
+        ts,
+        get_price=lambda symbol, _action: addition_prices.get(symbol),
+        get_cost_model=get_cost_model,
+        primary_symbol=primary_symbol,
+        max_position_notional=max_position_notional,
+        max_order_notional=max_order_notional,
+        max_bar_volume_participation_rate=max_bar_volume_participation_rate,
+        max_adv_participation_rate=max_adv_participation_rate,
+        get_volume=get_volume,
+        get_lagged_adv=get_lagged_adv,
+        used_bar_quantity_by_symbol=volume_consumed,
+        used_adv_quantity_by_symbol=adv_consumed,
+    )
+    for event in addition_result.events:
+        key = ("addition", event.symbol)
+        filled_by_key[key] = filled_by_key.get(key, 0.0) + event.fill_quantity
+        remaining_by_key[key] = max(remaining_by_key[key] - event.fill_quantity, 0.0)
+
+    updated_orders = tuple(
+        replace(
+            order,
+            requested_quantity=requested_by_key[(order.phase, order.intent.symbol)],
+            remaining_quantity=remaining_by_key[(order.phase, order.intent.symbol)],
+        )
+        for order in pending_orders
+        if remaining_by_key[(order.phase, order.intent.symbol)] > EPSILON
+    )
+    runtime_events = [
+        *cancellation_events,
+        *reduction_result.runtime_events,
+        *cash_events,
+        *addition_result.runtime_events,
+    ]
+    for key, (requested_quantity, cancelled_quantity) in position_limit_cancellations.items():
+        _, symbol = key
+        runtime_events.append(
+            _skipped(
+                ts,
+                "rebalance_constrained_by_position_limit",
+                symbol=symbol,
+                phase="addition",
+                action=next(
+                    order.intent.action
+                    for order in pending_orders
+                    if (order.phase, order.intent.symbol) == key
+                ),
+                quantity_scope="target",
+                requested_quantity=requested_quantity,
+                filled_quantity=filled_by_key.get(key, 0.0),
+                cancelled_quantity=cancelled_quantity,
+                remaining_quantity=remaining_by_key[key],
+            )
+        )
+    for key, (requested_quantity, cancelled_quantity) in cash_limit_cancellations.items():
+        _, symbol = key
+        runtime_events.append(
+            _skipped(
+                ts,
+                "rebalance_constrained_by_cash",
+                symbol=symbol,
+                phase="addition",
+                action=next(
+                    order.intent.action
+                    for order in pending_orders
+                    if (order.phase, order.intent.symbol) == key
+                ),
+                quantity_scope="target",
+                requested_quantity=requested_quantity,
+                filled_quantity=filled_by_key.get(key, 0.0),
+                cancelled_quantity=cancelled_quantity,
+                remaining_quantity=remaining_by_key[key],
+            )
+        )
+    residual_records: list[tuple[RebalanceOrderState, float, float, float]] = []
+    for order in pending_orders:
+        key = (order.phase, order.intent.symbol)
+        remaining_quantity = remaining_by_key[key]
+        if remaining_quantity <= EPSILON:
+            continue
+        residual_records.append(
+            (
+                order,
+                attempted_by_key.get(key, order.remaining_quantity),
+                filled_by_key.get(key, 0.0),
+                remaining_quantity,
+            )
+        )
+    runtime_events.extend(_rebalance_quantity_events(ts, residual_records, blocked_symbols=blocked))
+    runtime_events.extend(_unresolved_rebalance_event(ts, leg) for leg in unresolved_legs)
+
+    next_state = (
+        PortfolioRebalanceState(
+            target=state.target,
+            orders=updated_orders,
+            unresolved_legs=tuple(unresolved_legs),
+        )
+        if updated_orders or unresolved_legs
+        else None
+    )
+    return ExecutionResult(
+        trades=[*reduction_result.trades, *addition_result.trades],
+        events=[*reduction_result.events, *addition_result.events],
+        cash_delta=reduction_result.cash_delta + addition_result.cash_delta,
+        runtime_events=runtime_events,
+        pending_rebalance=next_state,
     )
 
 
@@ -2510,6 +3222,7 @@ def _validate_no_ambiguous_stop_conflicts(
     get_cost_model: Callable[[str], CostModel],
     default_fill: str,
     primary_symbol: str,
+    rebalance_state: PortfolioRebalanceState | None = None,
 ) -> None:
     """Refuse to guess the order of a non-open fill and a triggered protection.
 
@@ -2521,7 +3234,7 @@ def _validate_no_ambiguous_stop_conflicts(
     being a question rather than being guessed. Where no deferral is
     configured the caller sees the raise, which is the fail-closed default.
     """
-    if not pending_decision or default_fill == "open":
+    if default_fill == "open":
         return
 
     if isinstance(pending_decision, PortfolioWeights):
@@ -2538,6 +3251,15 @@ def _validate_no_ambiguous_stop_conflicts(
                 default_fill,
             )
         }
+    # WHY: a carried residual fills at this bar's price like any other
+    # decision, and it reaches here with no pending decision of its own. Those
+    # are the bars most likely to collide, because a residual persists across
+    # bars while a protection can trigger on any of them.
+    if rebalance_state is not None:
+        decision_symbols |= {order.intent.symbol for order in rebalance_state.orders}
+        decision_symbols |= {leg.symbol for leg in rebalance_state.unresolved_legs}
+    if not decision_symbols:
+        return
 
     conflicts = sorted(
         symbol
@@ -2572,6 +3294,8 @@ def execute_pending_decision_and_stops(
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
     exposure_prices: Mapping[str, float] | None = None,
+    rebalance_state: PortfolioRebalanceState | None = None,
+    rebalance_residual_policy: RebalanceResidualPolicy = "discard",
 ) -> tuple[float, ExecutionResult]:
     """Fill pending decisions, then check causally eligible protective exits.
 
@@ -2588,10 +3312,14 @@ def execute_pending_decision_and_stops(
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
     cash_delta_total = 0.0
+    next_rebalance_state: PortfolioRebalanceState | None = None
     used_bar_quantity_by_symbol: dict[str, float] = {}
     same_bar_protection_symbols = set(positions)
 
-    if pending_decision:
+    if pending_decision and rebalance_state is not None:
+        raise ValueError("cannot execute a new decision while a portfolio residual is pending")
+
+    if pending_decision or rebalance_state is not None:
         _validate_no_ambiguous_stop_conflicts(
             pending_decision,
             positions,
@@ -2599,21 +3327,36 @@ def execute_pending_decision_and_stops(
             get_cost_model=get_cost_model,
             default_fill=default_fill,
             primary_symbol=primary_symbol,
+            rebalance_state=rebalance_state,
         )
         enforce_portfolio_limits = max_gross_exposure is not None or max_net_exposure is not None
+        strict_rebalance = (
+            isinstance(pending_decision, PortfolioWeights) and rebalance_residual_policy == "fail"
+        )
+        retained_rebalance = (
+            isinstance(pending_decision, PortfolioWeights) or rebalance_state is not None
+        ) and rebalance_residual_policy != "discard"
+        stage_execution = enforce_portfolio_limits or retained_rebalance
         if enforce_portfolio_limits and exposure_prices is None:
             raise ValueError("portfolio exposure limits require explicit exposure_prices")
-        execution_positions = deepcopy(positions) if enforce_portfolio_limits else positions
+        execution_positions = deepcopy(positions) if stage_execution else positions
         execution_adv_quantities = (
-            dict(used_adv_quantity_by_symbol or {}) if enforce_portfolio_limits else None
+            dict(used_adv_quantity_by_symbol or {}) if stage_execution else None
         )
         adv_quantities = (
-            execution_adv_quantities if enforce_portfolio_limits else used_adv_quantity_by_symbol
+            execution_adv_quantities if stage_execution else used_adv_quantity_by_symbol
         )
 
         if isinstance(pending_decision, PortfolioWeights):
             if default_fill == "open":
                 same_bar_protection_symbols.update(pending_decision.weights)
+        elif rebalance_state is not None:
+            if default_fill == "open":
+                same_bar_protection_symbols.update(
+                    order.intent.symbol
+                    for order in rebalance_state.orders
+                    if order.phase == "addition"
+                )
         else:
             for intent in pending_decision:
                 symbol = intent.symbol or primary_symbol
@@ -2634,6 +3377,15 @@ def execute_pending_decision_and_stops(
                 ),
             )
 
+        def get_fresh_reference_price(sym: str) -> float | None:
+            raw_price = bars.get(sym, {}).get(default_fill)
+            if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
+                return None
+            return float(raw_price)
+
+        def get_valuation_price(sym: str) -> float | None:
+            return get_fresh_reference_price(sym) or (exposure_prices or {}).get(sym)
+
         common_kwargs = {
             "get_price": get_price,
             "get_cost_model": get_cost_model,
@@ -2645,17 +3397,53 @@ def execute_pending_decision_and_stops(
             "get_volume": lambda sym: bars.get(sym, {}).get("volume"),
             "get_lagged_adv": get_lagged_adv,
         }
-        if isinstance(pending_decision, PortfolioWeights):
-            fill_result = execute_portfolio_weights(
-                pending_decision,
-                execution_positions,
-                cash,
-                ts,
-                get_reference_price=lambda sym: bars.get(sym, {}).get(default_fill),
-                used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
-                used_adv_quantity_by_symbol=adv_quantities,
-                **common_kwargs,
-            )
+        if isinstance(pending_decision, PortfolioWeights) or rebalance_state is not None:
+            if rebalance_residual_policy == "discard":
+                if rebalance_state is not None:
+                    raise ValueError("discard policy cannot retain a portfolio rebalance residual")
+                assert isinstance(pending_decision, PortfolioWeights)
+                fill_result = execute_portfolio_weights(
+                    pending_decision,
+                    execution_positions,
+                    cash,
+                    ts,
+                    get_reference_price=lambda sym: bars.get(sym, {}).get(default_fill),
+                    used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
+                    used_adv_quantity_by_symbol=adv_quantities,
+                    **common_kwargs,
+                )
+            else:
+                state = rebalance_state
+                if state is None:
+                    assert isinstance(pending_decision, PortfolioWeights)
+                    state, _ = _plan_portfolio_weights(
+                        pending_decision,
+                        execution_positions,
+                        cash,
+                        get_reference_price=get_valuation_price,
+                        get_fresh_price=get_fresh_reference_price,
+                        get_cost_model=get_cost_model,
+                    )
+                fill_result = execute_portfolio_rebalance_slice(
+                    state,
+                    execution_positions,
+                    cash,
+                    ts,
+                    residual_policy=rebalance_residual_policy,
+                    get_fresh_price=get_fresh_reference_price,
+                    used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
+                    used_adv_quantity_by_symbol=adv_quantities,
+                    **common_kwargs,
+                )
+                if strict_rebalance and fill_result.pending_rebalance is not None:
+                    residual_symbols = sorted(
+                        {order.intent.symbol for order in fill_result.pending_rebalance.orders}
+                        | {leg.symbol for leg in fill_result.pending_rebalance.unresolved_legs}
+                    )
+                    raise ValueError(
+                        "PortfolioWeights fail policy rejected incomplete execution; "
+                        f"residual remains for {residual_symbols}"
+                    )
         else:
             # execute_order_intents raises rather than silently skipping a
             # leg with no price, so a grouped decision never fills some legs
@@ -2684,6 +3472,7 @@ def execute_pending_decision_and_stops(
                 max_gross_exposure=max_gross_exposure,
                 max_net_exposure=max_net_exposure,
             )
+        if stage_execution:
             positions.clear()
             positions.update(execution_positions)
             if used_adv_quantity_by_symbol is not None and execution_adv_quantities is not None:
@@ -2692,6 +3481,7 @@ def execute_pending_decision_and_stops(
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)
         runtime_events.extend(fill_result.runtime_events)
+        next_rebalance_state = fill_result.pending_rebalance
         cash_delta_total += fill_result.cash_delta
         cash += fill_result.cash_delta
 
@@ -2710,9 +3500,34 @@ def execute_pending_decision_and_stops(
         )
         trades.extend(stop_result.trades)
         events.extend(stop_result.events)
+        runtime_events.extend(stop_result.runtime_events)
+        protective_exit_reasons = {
+            event.symbol: event.reason
+            for event in stop_result.events
+            if event.reason in (REASON_LIQUIDATION, REASON_STOP_LOSS, REASON_TAKE_PROFIT)
+        }
+        protective_exit_reasons.update(
+            {
+                event.symbol: str(event.detail["exit_reason"])
+                for event in stop_result.runtime_events
+                if event.symbol is not None
+                and event.detail.get("reason") == "protective_exit_deferred"
+            }
+        )
+        if next_rebalance_state is not None and protective_exit_reasons:
+            next_rebalance_state, cancellation_events = _cancel_rebalance_symbols(
+                next_rebalance_state,
+                protective_exit_reasons,
+                ts,
+            )
+            runtime_events.extend(cancellation_events)
         cash_delta_total += stop_result.cash_delta
         cash += stop_result.cash_delta
 
     return cash, ExecutionResult(
-        trades=trades, events=events, cash_delta=cash_delta_total, runtime_events=runtime_events
+        trades=trades,
+        events=events,
+        cash_delta=cash_delta_total,
+        runtime_events=coalesce_runtime_events(runtime_events),
+        pending_rebalance=next_rebalance_state,
     )

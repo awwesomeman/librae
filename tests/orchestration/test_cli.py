@@ -315,6 +315,7 @@ class TestBuildRun:
                     default_fill_price: close
                     max_bar_volume_participation_rate: null
                     max_rebalance_delay_bars: 2
+                    rebalance_residual_policy: defer_symbols
                     live_order_timeout_seconds: 120
                     warmup_periods: 900
                 """
@@ -324,6 +325,7 @@ class TestBuildRun:
         assert unlimited.execution.default_fill_price == "close"
         assert unlimited.execution.max_bar_volume_participation_rate is None
         assert unlimited.execution.max_rebalance_delay_bars == 2
+        assert unlimited.execution.rebalance_residual_policy == "defer_symbols"
         assert unlimited.execution.live_order_timeout_seconds == 120
         assert unlimited.execution.warmup_periods == 900
 
