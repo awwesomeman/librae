@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS broker_orders (
     status          TEXT NOT NULL,
     placement_attempted BOOLEAN NOT NULL DEFAULT FALSE,
     placement_attempted_at TIMESTAMPTZ,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     requested_quantity DOUBLE PRECISION NOT NULL,
     filled_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
     filled_notional DOUBLE PRECISION NOT NULL DEFAULT 0,

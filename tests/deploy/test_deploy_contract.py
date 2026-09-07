@@ -1,10 +1,12 @@
 """Deployment contract checks that do not require a Docker daemon."""
 
 import os
+import re
 import shutil
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import get_args, get_type_hints
 
 import pytest
 import yaml
@@ -884,6 +886,32 @@ def test_database_roles_match_runtime_boundaries() -> None:
         in schema
     )
     assert "INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO grafana_reader" not in schema
+
+
+def test_persisted_order_statuses_match_the_broker_orders_constraint() -> None:
+    """Every status the engine can checkpoint has to satisfy the CHECK, or the
+    durable store rejects the write on the recovery path that needs it most.
+
+    Live tests run against the in-memory store, which has no constraint, so
+    nothing else compares the two vocabularies.
+    """
+    from librae.live.state import TrackedOrder
+
+    def literal_values(annotation: object) -> set[str]:
+        """Collect every string a union of Literals and type aliases allows."""
+        annotation = getattr(annotation, "__value__", annotation)
+        args = get_args(annotation)
+        if not args:
+            return {annotation} if isinstance(annotation, str) else set()
+        return set().union(*(literal_values(arg) for arg in args))
+
+    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
+    constraint = schema.partition("CONSTRAINT chk_broker_order_status CHECK (")[2]
+    permitted = set(re.findall(r"'([a-z_]+)'", constraint.partition(")")[0]))
+
+    declared = literal_values(get_type_hints(TrackedOrder)["status"])
+    assert declared, "could not resolve the declared status values"
+    assert declared <= permitted, sorted(declared - permitted)
 
 
 def test_database_schema_does_not_embed_migrations() -> None:

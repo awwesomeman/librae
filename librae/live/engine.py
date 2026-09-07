@@ -2016,10 +2016,14 @@ class LiveTrader:
         while self._active_orders and (
             not self._halted
             or self._has_active_recovery_orders()
+            or self._active_orders[0].cancel_requested
             or self._active_orders[0].status == "cancel_pending"
         ):
             tracked = self._active_orders[0]
             request = tracked.request
+            if tracked.cancel_requested or tracked.status == "cancel_pending":
+                self._cancel_tracked_order(tracked)
+                return
             if not tracked.placement_attempted:
                 if not submit_planned:
                     return
@@ -2052,16 +2056,27 @@ class LiveTrader:
                             ),
                         )
                         return
-            elif tracked.order_id:
-                report = self._timed_order_call(
-                    lambda request=request, order_id=tracked.order_id: self._executor.get_order(
-                        request, order_id
-                    )
-                )
             else:
-                report = self._timed_order_call(
-                    lambda request=request: self._executor.find_order(request)
-                )
+                try:
+                    if tracked.order_id:
+                        report = self._timed_order_call(
+                            lambda request=request, order_id=tracked.order_id: (
+                                self._executor.get_order(request, order_id)
+                            )
+                        )
+                    else:
+                        report = self._timed_order_call(
+                            lambda request=request: self._executor.find_order(request)
+                        )
+                except Exception as exc:
+                    if not self._live_order_timed_out(tracked):
+                        raise
+                    logger.exception(
+                        "Order status unavailable after local timeout: %s",
+                        request.client_order_id,
+                    )
+                    self._cancel_timed_out_order(tracked, None, status_error=exc)
+                    return
                 if report is None:
                     # Same reasoning as "Ambiguous Order Placement" above:
                     # unknown broker state always halts, group or not.
@@ -2138,11 +2153,13 @@ class LiveTrader:
     def _cancel_timed_out_order(
         self,
         tracked: TrackedOrder,
-        latest_report: ExecutionReport,
+        latest_report: ExecutionReport | None,
+        *,
+        status_error: Exception | None = None,
     ) -> None:
         """Cancel one stale live order, preserving any cumulative broker fill."""
         request = tracked.request
-        order_id = latest_report.order_id or tracked.order_id
+        order_id = (latest_report.order_id if latest_report is not None else "") or tracked.order_id
         if not order_id:
             # No order id to even attempt a cancel with — unknown broker
             # state, always halt regardless of group_id (see
@@ -2152,9 +2169,14 @@ class LiveTrader:
                 message=(
                     f"{request.symbol} client_order_id={request.client_order_id} "
                     "exceeded its local timeout without a broker order id"
+                    + (f"; latest status error: {status_error}" if status_error else "")
                 ),
             )
             return
+        # Checkpoint cancellation intent before broker I/O. A restart can
+        # retry this transition by order id without resubmitting placement.
+        tracked.cancel_requested = True
+        self._persist_state(tracked)
         try:
             cancel_report = self._timed_order_call(
                 lambda: self._executor.cancel_order(request, order_id)
@@ -2168,6 +2190,7 @@ class LiveTrader:
                 title="Order Timeout Cancellation Failed",
                 message=(
                     f"{request.symbol} order_id={order_id} could not be confirmed cancelled: {exc}"
+                    + (f"; latest status error: {status_error}" if status_error else "")
                 ),
             )
             return
@@ -2185,7 +2208,7 @@ class LiveTrader:
         else:
             # Cancellation itself didn't reach a confirmed terminal status —
             # still unknown broker state, always halt.
-            tracked.status = "cancel_pending"
+            tracked.status = cancel_report.status
             self._persist_state(tracked)
             self._halt_live(title="Order Timeout Cancellation Unresolved", message=message)
 
@@ -2264,13 +2287,19 @@ class LiveTrader:
             self._publish_action_results(result)
 
     def _cancel_tracked_order(self, tracked: TrackedOrder) -> None:
-        """Best-effort cancellation of one tracked order."""
+        """Reconcile and cancel one tracked order without resubmitting it."""
+        if not tracked.placement_attempted:
+            tracked.status = "cancelled"
+            self._active_orders.remove(tracked)
+            self._persist_state(tracked)
+            return
+
+        cancellation_acknowledged = tracked.status == "cancel_pending"
+        if not tracked.cancel_requested:
+            tracked.cancel_requested = True
+            self._persist_state(tracked)
+
         try:
-            if not tracked.placement_attempted:
-                tracked.status = "cancelled"
-                self._active_orders.remove(tracked)
-                self._persist_state(tracked)
-                return
             report = self._timed_order_call(
                 lambda request=tracked.request, order_id=tracked.order_id: (
                     self._executor.get_order(request, order_id)
@@ -2284,30 +2313,38 @@ class LiveTrader:
                     tracked.request.client_order_id,
                 )
                 return
-            cancellation_was_pending = tracked.status == "cancel_pending"
-            if (
-                report.status not in ("filled", "cancelled", "rejected", "cancel_pending")
-                and not cancellation_was_pending
-            ):
-                report = self._timed_order_call(
-                    lambda request=tracked.request, order_id=report.order_id: (
-                        self._executor.cancel_order(
-                            request,
-                            order_id,
-                        )
-                    )
-                )
-                if report is None:
-                    raise RuntimeError("broker cancellation returned no execution report")
-            self._apply_order_report(tracked, report)
-            if report.status not in ("filled", "cancelled", "rejected"):
+        except Exception:
+            logger.exception(
+                "Failed to reconcile tracked order before cancellation %s",
+                tracked.request.client_order_id,
+            )
+            return
+
+        self._apply_order_report(tracked, report)
+        if report.status in ("filled", "cancelled", "rejected"):
+            return
+        if cancellation_acknowledged or report.status == "cancel_pending":
+            if report.status != "cancel_pending":
                 tracked.status = "cancel_pending"
                 self._persist_state(tracked)
+            return
+
+        try:
+            cancel_report = self._timed_order_call(
+                lambda request=tracked.request, order_id=report.order_id: (
+                    self._executor.cancel_order(request, order_id)
+                )
+            )
+            if cancel_report is None:
+                raise RuntimeError("broker cancellation returned no execution report")
         except Exception:
             logger.exception(
                 "Failed to cancel tracked order %s",
                 tracked.request.client_order_id,
             )
+            return
+
+        self._apply_order_report(tracked, cancel_report)
 
     def _cancel_active_orders(self) -> None:
         """Best-effort cancellation used whenever live trading halts."""

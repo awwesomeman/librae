@@ -84,6 +84,14 @@ An existing database must be recreated or migrated explicitly before this
 revision is used; re-running `timescale_init.sql` cannot replace the old unique
 index in place.
 
+`broker_orders.cancel_requested` is a schema change on the same terms. It
+records that the engine decided to cancel an order, which is separate from the
+broker having acknowledged one: `status` carries only what the broker reported
+and stays inside its `CHECK` vocabulary, so an engine-owned intent cannot be
+expressed by adding a value there. The flag is checkpointed before the cancel
+call, which is what lets a restart resume an unresolved cancellation rather
+than lose it.
+
 With repository database wiring disabled, local research remains free of
 implicit persistence. Call
 `build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then

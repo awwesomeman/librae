@@ -2978,6 +2978,165 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
         adapter.cancel_order.assert_called_once()
 
+    def test_timeout_cancels_when_status_lookup_raises(self):
+        adapter = _mock_order_adapter()
+        accepted = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.place_order.return_value = accepted
+        adapter.get_order.side_effect = ConnectionError("broker status unavailable")
+        adapter.cancel_order.return_value = {
+            "id": "open-1",
+            "status": "cancelled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        now = [TEST_CLOCK_NOW]
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+            ),
+            clock=lambda: now[0],
+        )
+        runner.run(max_iterations=1)
+
+        now[0] += timedelta(seconds=30)
+        runner._poll_cycle()
+
+        adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
+        assert runner._halted is True
+        assert runner._active_orders == []
+
+    def test_timeout_cancels_when_filled_status_report_is_incomplete(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.get_order.return_value = {
+            "id": "open-1",
+            "status": "filled",
+            "amount": 1.0,
+            "filled": 1.0,
+        }
+        adapter.cancel_order.return_value = {
+            "id": "open-1",
+            "status": "cancelled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        now = [TEST_CLOCK_NOW]
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+            ),
+            clock=lambda: now[0],
+        )
+        runner.run(max_iterations=1)
+
+        now[0] += timedelta(seconds=30)
+        runner._poll_cycle()
+
+        adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
+        assert runner._halted is True
+        assert runner._active_orders == []
+        assert runner._positions == {}
+
+    def test_halt_persists_failed_cancel_and_retries_after_restart(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        accepted = {
+            "id": "open-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        cancelled = {
+            "id": "open-1",
+            "status": "cancelled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.place_order.return_value = accepted
+        adapter.get_order.return_value = accepted
+        adapter.cancel_order.side_effect = [
+            ConnectionError("cancel endpoint unavailable"),
+            cancelled,
+        ]
+        first = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        first.run(max_iterations=1)
+
+        first.halt("operator requested halt")
+
+        assert first._halted is True
+        assert first._active_orders[0].cancel_requested is True
+        assert next(iter(store.orders.values())).cancel_requested is True
+
+        second = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        second.run(max_iterations=1)
+
+        assert second._halted is True
+        assert second._active_orders == []
+        assert adapter.cancel_order.call_count == 2
+        adapter.place_order.assert_called_once()
+
+    def test_timeout_without_order_id_keeps_client_lookup_until_cancelled(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = ConnectionError("placement response lost")
+        adapter.find_order.side_effect = [
+            ConnectionError("initial lookup unavailable"),
+            ConnectionError("timeout lookup unavailable"),
+            None,
+        ]
+        now = [TEST_CLOCK_NOW]
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+            ),
+            clock=lambda: now[0],
+        )
+        runner.run(max_iterations=1)
+
+        now[0] += timedelta(seconds=30)
+        runner._poll_cycle()
+
+        assert runner._halted is True
+        assert runner._active_orders[0].order_id == ""
+        assert runner._active_orders[0].cancel_requested is True
+
+        adapter.find_order.side_effect = None
+        adapter.find_order.return_value = {
+            "id": "recovered-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.cancel_order.return_value = {
+            "id": "recovered-1",
+            "status": "cancelled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        runner._poll_cycle()
+
+        adapter.cancel_order.assert_called_once_with("recovered-1", "BTC/USDT")
+        adapter.place_order.assert_called_once()
+        assert runner._active_orders == []
+
     def test_open_order_resumes_after_restart_without_resubmission(self):
         store = MemoryLiveStateStore()
         adapter = _mock_order_adapter()

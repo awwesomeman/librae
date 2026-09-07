@@ -87,7 +87,12 @@ class TrackedOrder:
     placement_attempted: bool = False
     placement_attempted_at: datetime | None = None
     order_id: str = ""
+    # WHY: status carries only what the broker reported, so it stays inside the
+    # vocabulary the durable store constrains. Wanting to cancel is the
+    # engine's own state and gets its own field -- unlike a broker-acknowledged
+    # ``cancel_pending``, it permits another idempotent cancel-by-order-id call.
     status: OrderStatus = "submitted"
+    cancel_requested: bool = False
     filled_quantity: float = 0.0
     filled_notional: float = 0.0
     commission: float = 0.0
@@ -106,6 +111,7 @@ class TrackedOrder:
             ),
             "order_id": self.order_id,
             "status": self.status,
+            "cancel_requested": self.cancel_requested,
             "filled_quantity": self.filled_quantity,
             "filled_notional": self.filled_notional,
             "commission": self.commission,
@@ -130,6 +136,7 @@ class TrackedOrder:
             placement_attempted_at=placement_attempted_at,
             order_id=str(raw["order_id"] or ""),
             status=raw["status"],
+            cancel_requested=bool(raw.get("cancel_requested", False)),
             filled_quantity=float(raw["filled_quantity"]),
             filled_notional=float(raw["filled_notional"]),
             commission=float(raw["commission"]),
