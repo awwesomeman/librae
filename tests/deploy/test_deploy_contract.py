@@ -228,6 +228,12 @@ def _run_trade_script(
     ready_marker: str = f"attempt-token:fixture-run:{'a' * 32}",
     ready_marker_exit_code: int = 0,
     status_after_ready_read: str = "",
+    # WHY: trade.sh only sees a status change on the poll *after* the one that
+    # read the marker, because the loop caches the status it read at the top.
+    # A test that expects a specific non-timeout failure has to leave room for
+    # that second poll, and each poll spawns several processes -- slow enough
+    # under Git Bash on Windows to exhaust a two-second budget first.
+    start_timeout_seconds: str = "2",
     stale_ready_marker: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
@@ -340,7 +346,7 @@ fi
             "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
             "TRADE_IMAGE_REF": image_reference,
             "TRADE_TIMESCALE_DSN": ("postgresql://quant_app:secret@quant_timescaledb:5432/quant"),
-            "TRADE_START_TIMEOUT_SECONDS": "2",
+            "TRADE_START_TIMEOUT_SECONDS": start_timeout_seconds,
             "TRADE_STOP_TIMEOUT_SECONDS": "2",
             "FAKE_IMAGE_ACCOUNT_ID": fake_image_account_id or account_id,
             "FAKE_IMAGE_CURRENCY": fake_image_currency or currency,
@@ -450,6 +456,7 @@ def test_trade_script_rechecks_container_after_reading_marker(tmp_path: Path) ->
         tmp_path,
         image_reference=image_reference,
         status_after_ready_read="exited",
+        start_timeout_seconds="30",
     )
 
     assert result.returncode != 0
