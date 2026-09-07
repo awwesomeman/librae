@@ -92,6 +92,24 @@ expressed by adding a value there. The flag is checkpointed before the cancel
 call, which is what lets a restart resume an unresolved cancellation rather
 than lose it.
 
+`config_hash` changed representation on the same terms, and it reaches further
+than the database. Hash-included mappings are now encoded with explicit type
+tags instead of a `default=str` fallback, and a timeframe is hashed in its
+canonical form, so a configuration that hashed one way before this revision
+hashes another way after it — including one written only in ccxt timeframe
+form. A backtest cache entry keyed on the old hash simply stops matching and
+the run recomputes.
+
+A live or sim deployment needs an operator decision before the upgrade,
+because its checkpoint key is `mode:config_hash`. Under the new hash the
+runner finds no checkpoint at the new key and starts from an empty book
+rather than refusing, so a restart mid-position would lose its positions,
+in-flight orders and halted flag while the venue still holds them. Stop each
+deployment flat before upgrading, or copy the checkpoint row to the new
+`state_key` first. This is the same class of decision as the runtime-revision
+mismatch the runner does refuse — that guard lives inside checkpoint restore
+and cannot see a key that no longer resolves.
+
 With repository database wiring disabled, local research remains free of
 implicit persistence. Call
 `build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then
