@@ -432,6 +432,40 @@ def test_financing_after_partial_close_is_not_assigned_to_the_closed_trade() -> 
     assert attributed == pytest.approx([30.0, 40.0])
 
 
+def test_financing_after_a_full_close_is_refused_rather_than_dropped() -> None:
+    """A flow can only accrue to quantity that is open, so one arriving after
+    the position is flat has nowhere to land.
+
+    The engine cannot produce this today -- financing is computed after
+    execution, over the positions that survived the bar -- but the allocator
+    is loud about every other broken invariant, and silently discarding money
+    is the one failure that would not show up as a wrong number anywhere.
+    """
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    exit_at = datetime(2026, 1, 1, 4, tzinfo=UTC)
+    events = [
+        FinancingLifecycleEvent(entry_at, "PERP", entry_at, "open", 2.0, 2.0),
+        FinancingLifecycleEvent(exit_at, "PERP", entry_at, "close", 2.0, 0.0),
+    ]
+    cash_flows = [
+        FinancingCashFlow(
+            ts=exit_at,
+            symbol="PERP",
+            side="short",
+            quantity=2.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=20.0,
+            group_id=None,
+            entry_at=entry_at,
+        )
+    ]
+
+    with pytest.raises(ValueError, match="closed position"):
+        attribute_financing_to_closes(events, cash_flows)
+
+
 def test_financing_pool_tracks_scale_in_and_same_timestamp_close_order() -> None:
     entry_at = datetime(2026, 1, 1, tzinfo=UTC)
     first_exit = datetime(2026, 1, 1, 3, tzinfo=UTC)

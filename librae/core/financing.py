@@ -130,6 +130,11 @@ def attribute_financing_to_closes(
     }
     attributed = [0.0] * len(close_event_indexes)
     balances: dict[tuple[str, datetime], _FinancingBalance] = {}
+    # WHY: a key leaves ``balances`` only by being fully closed, so a later
+    # flow for it would open a fresh balance nothing can ever release. Every
+    # other broken invariant here raises; silently discarding the charge is
+    # the one that would not surface as a wrong number anywhere.
+    closed_keys: set[tuple[str, datetime]] = set()
 
     timeline = [(event.ts, 0, index, event) for index, event in enumerate(position_events)]
     timeline.extend(
@@ -145,6 +150,8 @@ def attribute_financing_to_closes(
                 raise ValueError("financing cash flow quantity must be positive")
             balance = balances.get(key)
             if balance is None:
+                if key in closed_keys:
+                    raise ValueError("financing cash flow accrues to a closed position")
                 balance = _FinancingBalance(quantity=cash_flow.quantity)
                 balances[key] = balance
             elif not isclose(
@@ -197,6 +204,7 @@ def attribute_financing_to_closes(
         if event.remaining_quantity <= EPSILON:
             released = balance.accrued
             balances.pop(key)
+            closed_keys.add(key)
         else:
             released = balance.accrued * event.fill_quantity / quantity_before_close
             balance.accrued -= released
