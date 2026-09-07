@@ -30,16 +30,24 @@ from librae.notifications.telegram import EMOJI_WARNING, TelegramAdapter, Telegr
 logger = logging.getLogger(__name__)
 
 
-def find_stale_runs() -> list[dict[str, str]]:
+def _format_symbols(symbols: object) -> str:
+    """Return the JSONB symbol set in a compact operator-facing form."""
+    if isinstance(symbols, (list, tuple)):
+        return ", ".join(str(symbol) for symbol in symbols)
+    return str(symbols)
+
+
+def find_stale_runs() -> list[dict[str, object]]:
     """Query DB for sim/live runs with stale heartbeats."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT run_id, strategy, symbol, mode, poll_seconds, last_heartbeat_at
+            SELECT run_id, strategy_name, symbols, mode, poll_seconds, last_heartbeat_at
             FROM backtest_runs
             WHERE mode IN ('sim', 'live')
               AND last_heartbeat_at IS NOT NULL
+              AND poll_seconds > 0
               AND last_heartbeat_at < NOW() - make_interval(secs => poll_seconds * %s)
         """,
             (HEARTBEAT_STALE_AFTER_POLLS,),
@@ -51,7 +59,7 @@ def find_stale_runs() -> list[dict[str, str]]:
         {
             "run_id": r[0],
             "strategy": r[1],
-            "symbol": r[2],
+            "symbols": _format_symbols(r[2]),
             "mode": r[3],
             "poll_seconds": r[4],
             "last_heartbeat_at": r[5].isoformat() if r[5] else "unknown",
@@ -71,12 +79,12 @@ def check_and_alert(adapter: TelegramAdapter) -> int:
         logger.warning(
             "Stale heartbeat: %s/%s (last: %s)",
             run["strategy"],
-            run["symbol"],
+            run["symbols"],
             run["last_heartbeat_at"],
         )
         adapter.send_alert(
             title=f"{EMOJI_WARNING} [{run['strategy']}] Heartbeat Timeout",
-            message=f"Symbol: {run['symbol']}\nLast seen: {run['last_heartbeat_at']}\nService may be down. Check logs.",
+            message=f"Symbols: {run['symbols']}\nLast seen: {run['last_heartbeat_at']}\nService may be down. Check logs.",
         )
     return len(stale)
 
