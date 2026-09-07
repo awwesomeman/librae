@@ -114,6 +114,40 @@ class CycleDiagnostics:
     deadline_missed: bool
 
 
+def _validate_feature_output(
+    output: object,
+    *,
+    symbol: str,
+    event_ts: datetime,
+) -> pd.DataFrame:
+    """Require one causal, current-event feature frame."""
+    if not isinstance(output, pd.DataFrame):
+        raise TypeError(f"{symbol} feature_fn must return a pandas DataFrame")
+    if output.empty:
+        raise ValueError(f"{symbol} feature output must not be empty")
+    if not isinstance(output.index, pd.DatetimeIndex):
+        raise ValueError(f"{symbol} feature output must use a DatetimeIndex")
+
+    index = output.index
+    if index.tz is None:
+        raise ValueError(f"{symbol} feature output index must be timezone-aware")
+    if index.hasnans:
+        raise ValueError(f"{symbol} feature output index must not contain NaT")
+    if not index.is_unique:
+        raise ValueError(f"{symbol} feature output timestamps must be unique")
+    if not index.is_monotonic_increasing:
+        raise ValueError(f"{symbol} feature output timestamps must be strictly increasing")
+
+    event_timestamp = pd.Timestamp(event_ts)
+    if bool((index > event_timestamp).any()):
+        raise ValueError(f"{symbol} feature output contains a timestamp after event {event_ts}")
+    if index[-1] != event_timestamp:
+        raise ValueError(
+            f"{symbol} feature output final timestamp {index[-1]} does not match event {event_ts}"
+        )
+    return output
+
+
 def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
@@ -2523,13 +2557,21 @@ class LiveTrader:
             self._persist_state()
             return
 
-        bars: dict[str, dict[str, float]] = {}
+        evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
         for symbol, history in histories.items():
             try:
-                featured = self._feature_fn(history)
+                featured = _validate_feature_output(
+                    self._feature_fn(history),
+                    symbol=symbol,
+                    event_ts=ts,
+                )
+                bar = featured.iloc[-1].to_dict()
+                price = float(bar.get("close", float("nan")))
+                if not isfinite(price) or price <= 0:
+                    raise ValueError(f"{symbol} feature output has invalid close at {ts}: {price}")
             except Exception:
                 logger.exception(
-                    "Feature computation failed for %s; cycle %s remains uncommitted",
+                    "Feature processing failed for %s; cycle %s remains uncommitted",
                     symbol,
                     ts,
                 )
@@ -2538,12 +2580,14 @@ class LiveTrader:
                 # data watermark unchanged so the decision phase is retried.
                 self._persist_state()
                 raise
+            evaluated_bars[symbol] = (bar, price)
 
-            bar = featured.iloc[-1].to_dict()
+        # Validate every symbol before publishing feature-derived facts or
+        # invoking the strategy, so one malformed plugin result cannot leave a
+        # partially observed multi-asset event.
+        bars: dict[str, dict[str, float]] = {}
+        for symbol, (bar, price) in evaluated_bars.items():
             bars[symbol] = bar
-            price = float(bar.get("close", float("nan")))
-            if not isfinite(price) or price <= 0:
-                raise ValueError(f"{symbol} feature output has invalid close at {ts}: {price}")
             self._last_prices[symbol] = price
 
             if self._on_signal_outcome:

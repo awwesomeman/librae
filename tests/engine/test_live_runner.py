@@ -1801,6 +1801,118 @@ class TestLiveTrader:
         # (open=199.5) -- not silently deferred to bar3's price (299.5).
         assert fill_prices == [199.5]
 
+    @pytest.mark.parametrize(
+        ("shape", "message"),
+        [
+            ("not_dataframe", "pandas DataFrame"),
+            ("empty", "must not be empty"),
+            ("not_datetime_index", "DatetimeIndex"),
+            ("naive", "timezone-aware"),
+            ("descending", "strictly increasing"),
+            ("duplicate", "unique"),
+            ("future", "after event"),
+            ("stale", "final timestamp"),
+        ],
+    )
+    def test_feature_output_must_match_current_event(self, shape: str, message: str):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+
+        def malformed_feature(history: pd.DataFrame):
+            if shape == "not_dataframe":
+                return history.iloc[-1]
+            if shape == "empty":
+                return history.iloc[0:0]
+            if shape == "not_datetime_index":
+                return history.reset_index(drop=True)
+            if shape == "naive":
+                result = history.copy()
+                result.index = result.index.tz_localize(None)
+                return result
+            if shape == "descending":
+                return history.iloc[::-1]
+            if shape == "duplicate":
+                return pd.concat([history, history.iloc[[-1]]])
+            if shape == "future":
+                future = history.iloc[[-1]].copy()
+                future.index = pd.DatetimeIndex([history.index[-1] + pd.Timedelta(hours=1)])
+                return pd.concat([history, future])
+            return history.iloc[:-1]
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=lambda *_args, **_kwargs: _make_ohlcv_at([t0, t1]),
+            feature_fn=malformed_feature,
+        )
+
+        with pytest.raises((TypeError, ValueError), match=message):
+            runner._poll_cycle()
+
+        strategy.on_bar.assert_not_called()
+        assert runner._last_bar_ts == {}
+        assert runner._last_cycle_ts is None
+
+    def test_invalid_feature_output_retries_without_replaying_pending_fill(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        responses = iter(
+            [
+                _make_ohlcv_at([t0], price=100.0),
+                _make_ohlcv_at([t1], price=200.0),
+                _make_ohlcv_at([t1], price=200.0),
+            ]
+        )
+        feature_calls = 0
+        strategy_calls = 0
+        opened = []
+        state_store = MemoryLiveStateStore()
+
+        def feature_fn(history: pd.DataFrame) -> pd.DataFrame:
+            nonlocal feature_calls
+            feature_calls += 1
+            if feature_calls == 2:
+                return history.iloc[:-1]
+            return _simple_feature_fn(history)
+
+        class BuyOnceStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                nonlocal strategy_calls
+                strategy_calls += 1
+                if ctx.symbol not in ctx.positions:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        runner = self._make_runner(
+            strategy=BuyOnceStrategy(),
+            fetcher=lambda *_args, **_kwargs: next(responses),
+            feature_fn=feature_fn,
+            state_store=state_store,
+        )
+        runner._on_position_event = lambda event, _sequence: (
+            opened.append(event) if event.event_type == "open" else None
+        )
+
+        runner._poll_cycle()
+        with pytest.raises(ValueError, match="final timestamp"):
+            runner._poll_cycle()
+
+        assert runner._last_bar_ts == {"BTCUSDT": t0}
+        assert len(opened) == 1
+        assert runner._positions["BTCUSDT"].quantity == pytest.approx(1.0)
+        persisted = state_store.load(runner._state_key)
+        assert persisted is not None
+        assert persisted.last_bar_ts == {"BTCUSDT": t0}
+        assert persisted.positions["BTCUSDT"].quantity == pytest.approx(1.0)
+
+        runner._poll_cycle()
+
+        assert runner._last_bar_ts == {"BTCUSDT": t1}
+        assert len(opened) == 1
+        assert feature_calls == 3
+        assert strategy_calls == 2
+
     def test_order_failure_halts_without_committing_phantom_position(self):
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.place_order.side_effect = RuntimeError("connection refused")
