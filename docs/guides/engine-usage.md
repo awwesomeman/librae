@@ -292,6 +292,10 @@ intents for asynchronous cross-market execution.
 
 ## Related multi-leg order contract
 
+This section is the canonical `group_id` execution contract. Summaries in API,
+architecture, and operational surfaces must preserve the mode boundary below;
+`group_id` never upgrades serial broker requests into venue atomicity.
+
 `OrderIntent.group_id` ties explicitly sized, related orders together for
 synchronous research simulation. It covers spreads, rolls, inventory hedges,
 and ordered cross-instrument exposure transitions without encoding
@@ -361,6 +365,17 @@ volume, or ADV budget — is rolled back with no mutation and recorded as a
 intents and other groups in the same decision still execute. See
 [the grouped-decisions ADR](../decisions/2026-08-05-grouped-decisions-no-engine-side-waiting.md)
 and [its follow-up on close legs](../decisions/2026-09-07-grouped-close-legs-and-loud-preflight.md).
+
+A position carries the group that opened it through every add, close, trade,
+and financing record, so it can only be scaled by an intent of that same
+identity. That is checked when the order is planned, over the whole batch and
+before the first intent executes, so a violation anywhere leaves the book
+untouched — in live too, since live order planning replays the same simulated
+execution. A fill the broker has already confirmed is always booked: a
+mismatch there is a reconciliation concern, not grounds to refuse an
+execution the venue has made. See
+[the group identity ADR](../decisions/2026-09-07-group-identity-enforced-at-plan-time.md)
+and, for how this constrains `PortfolioWeights`, the account section above.
 
 Examples include TAIFEX near/next-future/cash-proxy and Binance
 spot/perpetual/delivery-future spreads. Every member of one group belongs
