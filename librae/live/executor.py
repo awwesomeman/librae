@@ -483,6 +483,15 @@ class LiveExecutor:
         quantity = float(prepared["quantity"])
         if not isfinite(quantity) or quantity <= 0:
             raise ValueError("prepared order quantity must be finite and positive")
+        # WHY: venue normalization may round a size down to a lot step but
+        # never up. Librae's pre-trade checks ran on the requested size, and
+        # with no RiskPolicy limit set nothing downstream would notice an
+        # enlargement, so the comparison has to be made here (issue #108).
+        if quantity > request.quantity + EPSILON:
+            raise ValueError(
+                f"order preparation cannot increase quantity: requested "
+                f"{request.quantity:.6f}, prepared {quantity:.6f}"
+            )
         price_raw = prepared.get("price")
         limit_price = float(price_raw) if price_raw is not None else None
         if request.order_type == "limit" and (
