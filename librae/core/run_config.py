@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from math import isfinite
 from numbers import Real
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from librae.core.utils import to_canonical
 
@@ -247,7 +247,7 @@ class RiskPolicy:
             )
 
 
-class FrozenDict(dict):
+class FrozenDict(dict[str, object]):
     """JSON-serializable dict that rejects mutation after construction."""
 
     def _immutable(self, *_args: object, **_kwargs: object) -> None:
@@ -263,29 +263,56 @@ class FrozenDict(dict):
     __ior__ = _immutable
 
 
-def _freeze(value: Any) -> Any:
-    """Recursively detach mutable caller-owned config values."""
-    if isinstance(value, dict):
-        return FrozenDict({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    return value
+def _freeze(value: object, *, path: str) -> object:
+    """Validate and detach one caller-owned JSON-like config value."""
+    value_type = type(value)
+    if value_type is dict or value_type is FrozenDict:
+        mapping = cast(dict[object, object], value)
+        frozen: dict[str, object] = {}
+        for key, item in mapping.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} mapping keys must be strings")
+            string_key = cast(str, key)
+            frozen[string_key] = _freeze(item, path=f"{path}[{string_key!r}]")
+        return FrozenDict(frozen)
+    if value_type is list or value_type is tuple:
+        sequence = cast(list[object] | tuple[object, ...], value)
+        return tuple(_freeze(item, path=f"{path}[{index}]") for index, item in enumerate(sequence))
+    if value is None or value_type is bool or value_type is int or value_type is str:
+        return value
+    if value_type is float:
+        number = cast(float, value)
+        if not isfinite(number):
+            raise ValueError(f"{path} float values must be finite")
+        return number
+    raise TypeError(
+        f"{path} contains unsupported {value_type.__name__}; "
+        "expected JSON-like scalars, dictionaries, lists, or tuples"
+    )
 
 
-def _sanitize_for_hash(obj: Any) -> Any:
-    """Recursively normalize numeric types for deterministic config_hash.
-
-    - float -> float.hex(): zero precision loss, e.g. (0.1).hex() -> '0x1.999999999999ap-4'
-    - int -> unchanged, json.dumps outputs "1"
-    - bool -> json.dumps outputs true/false (lowercase), already deterministic
-    """
+def _canonicalize_for_hash(obj: object) -> object:
+    """Encode config values with explicit type tags for a stable hash."""
+    if obj is None:
+        return ("null",)
+    if isinstance(obj, bool):
+        return ("bool", obj)
+    if isinstance(obj, int):
+        return ("int", str(obj))
     if isinstance(obj, float):
-        return obj.hex()
+        if not isfinite(obj):
+            raise ValueError("RunConfig float values must be finite")
+        return ("float", obj.hex())
+    if isinstance(obj, str):
+        return ("str", str(obj))
     if isinstance(obj, dict):
-        return {k: _sanitize_for_hash(v) for k, v in obj.items()}
+        return (
+            "mapping",
+            [(key, _canonicalize_for_hash(value)) for key, value in sorted(obj.items())],
+        )
     if isinstance(obj, (list, tuple)):
-        return [_sanitize_for_hash(v) for v in obj]
-    return obj
+        return ("sequence", [_canonicalize_for_hash(value) for value in obj])
+    raise TypeError(f"RunConfig contains unsupported {type(obj).__name__}")
 
 
 @dataclass(frozen=True)
@@ -360,7 +387,13 @@ class RunConfig:
         ):
             value = getattr(self, field_name)
             if value is not None:
-                object.__setattr__(self, field_name, _freeze(value))
+                if type(value) is not dict and type(value) is not FrozenDict:
+                    raise TypeError(f"{field_name} must be a dictionary or None")
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _freeze(value, path=f"RunConfig.{field_name}"),
+                )
 
         if not self.symbols or any(
             not isinstance(symbol, str) or not symbol for symbol in self.symbols
@@ -382,6 +415,10 @@ class RunConfig:
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{field_name} must be a non-empty string")
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
+        for field_name in ("start", "end"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{field_name} must be a string or None")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
         if self.calendar_id is not None and (
@@ -444,7 +481,7 @@ class RunConfig:
         Excludes: runtime behavior.
         """
         blob = json.dumps(
-            _sanitize_for_hash(
+            _canonicalize_for_hash(
                 {
                     "strategy_name": self.strategy_name,
                     # Primary-symbol order is observable engine behaviour.
@@ -466,7 +503,8 @@ class RunConfig:
                     "risk": asdict(self.risk),
                 }
             ),
-            sort_keys=True,
-            default=str,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:32]

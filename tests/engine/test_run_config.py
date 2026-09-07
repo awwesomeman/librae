@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
 import pytest
 from librae.core.run_config import (
     AccountConfig,
@@ -27,21 +33,104 @@ def _config(**overrides: object) -> RunConfig:
 
 def test_config_detaches_and_freezes_nested_inputs() -> None:
     symbols = ["AAA", "BBB"]
-    params = {"window": 20, "nested": {"enabled": True}}
+    windows = [5, 20]
+    params = {"window": 20, "windows": windows, "nested": {"enabled": True}}
     cfg = _config(symbols=symbols, params=params)
     original_hash = cfg.config_hash
 
     symbols.reverse()
+    windows.append(60)
     params["window"] = 99
     params["nested"]["enabled"] = False
 
     assert cfg.symbols == ("AAA", "BBB")
-    assert cfg.params == {"window": 20, "nested": {"enabled": True}}
+    assert cfg.params == {
+        "window": 20,
+        "windows": (5, 20),
+        "nested": {"enabled": True},
+    }
     assert cfg.config_hash == original_hash
     with pytest.raises(TypeError, match="immutable"):
         cfg.params["window"] = 10
     with pytest.raises(TypeError, match="immutable"):
         cfg.params["nested"]["enabled"] = False
+
+
+def test_equal_json_like_content_has_the_same_hash() -> None:
+    first = _config(params={"b": [1, 2], "a": {"rate": 0.1}})
+    reordered = _config(params={"a": {"rate": 0.1}, "b": (1, 2)})
+
+    assert first.config_hash == reordered.config_hash
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (True, 1),
+        (1, 1.0),
+        (1.0, "0x1.0000000000000p+0"),
+        (None, "null"),
+    ],
+)
+def test_config_hash_preserves_scalar_type_distinctions(left: object, right: object) -> None:
+    assert (
+        _config(params={"value": left}).config_hash != _config(params={"value": right}).config_hash
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.array([1.0]),
+        {1, 2},
+        bytearray(b"mutable"),
+        object(),
+    ],
+)
+def test_config_rejects_non_canonical_mapping_values(value: object) -> None:
+    with pytest.raises(TypeError, match="unsupported"):
+        _config(params={"value": value})
+
+
+def test_config_rejects_non_string_mapping_keys_and_non_finite_floats() -> None:
+    with pytest.raises(TypeError, match="mapping keys must be strings"):
+        _config(params={1: "value"})
+    with pytest.raises(ValueError, match="finite"):
+        _config(params={"value": float("nan")})
+
+
+def test_config_rejects_non_mapping_top_level_values() -> None:
+    with pytest.raises(TypeError, match="params must be a dictionary"):
+        _config(params=[("window", 20)])
+
+
+def test_config_hash_is_stable_across_processes() -> None:
+    config = _config(params={"z": [1, 0.5, None], "a": {"enabled": True}})
+    script = """
+from librae.core.run_config import AccountConfig, RunConfig
+
+config = RunConfig(
+    strategy_name="test",
+    symbols=["AAA", "BBB"],
+    timeframe="H1",
+    market="crypto",
+    data_source="test",
+    account=AccountConfig(currency="USD", initial_cash=10_000.0),
+    mode="backtest",
+    params={"a": {"enabled": True}, "z": [1, 0.5, None]},
+)
+print(config.config_hash)
+"""
+    environment = {**os.environ, "PYTHONHASHSEED": "random"}
+
+    child_hash = subprocess.check_output(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        text=True,
+    ).strip()
+
+    assert child_hash == config.config_hash
 
 
 def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:

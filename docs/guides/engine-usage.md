@@ -585,6 +585,15 @@ config = RunConfig(
 risk keys in `params` raises immediately; the engine never reparses a
 free-form strategy dictionary for portfolio controls.
 
+Hash-included mappings (`params`, cost overrides, and instrument overrides)
+accept JSON-like values only: string keys; `None`, booleans, integers, finite
+floats, and strings; plus nested dictionaries, lists, or tuples. Construction
+copies and freezes those containers. Arrays, sets, custom objects, non-finite
+floats, and non-string mapping keys are rejected instead of being converted to
+an unstable string representation. List and tuple inputs with equal content
+share one sequence representation; scalar types remain distinct in
+`config_hash`.
+
 `RunConfig.runtime.reconciliation_interval_seconds` and
 `RunConfig.runtime.market_data_workers` are operational settings rather than
 strategy semantics, so they do not change `config_hash`. Fetching is sequential
