@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from threading import Event
+from threading import Event, get_ident
 from time import perf_counter
 from unittest.mock import MagicMock, patch
 
@@ -1271,34 +1271,74 @@ class TestLiveTrader:
         assert restored._period_index == 2
         assert restored._last_bar_ts == {"BTCUSDT": t1}
 
-    def test_restart_audit_replay_deduplicates_overlapping_warmup_fetches(self):
+    def test_restart_audit_replay_sorts_suffix_windows_on_coordinator_thread(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
-        timestamps = [t0 + timedelta(hours=offset) for offset in range(3)]
-        history = _make_ohlcv_at(timestamps)
-        history["available_at"] = pd.DatetimeIndex(timestamps) + pd.Timedelta(hours=1)
-        requests: list[int] = []
+        timestamps = [t0 + timedelta(hours=offset) for offset in range(4)]
+        histories = {
+            symbol: _make_ohlcv_at(timestamps, price=price).assign(
+                available_at=pd.DatetimeIndex(timestamps) + pd.Timedelta(hours=1)
+            )
+            for symbol, price in (("BBB", 200.0), ("AAA", 100.0))
+        }
+        requests: dict[str, list[int]] = {symbol: [] for symbol in histories}
 
-        def fetcher(_symbol, _timeframe, limit, **_kwargs):
-            requests.append(limit)
-            return history.iloc[: min(len(requests) + 1, len(history))].copy()
+        def fetcher(symbol, _timeframe, limit, **_kwargs):
+            requests[symbol].append(limit)
+            history = histories[symbol]
+            return history.iloc[-2:].copy() if len(requests[symbol]) == 1 else history.copy()
 
         runner = self._make_runner(
             fetcher=fetcher,
-            config=_test_cfg(warmup_periods=5),
+            config=_test_cfg(
+                symbols=["BBB", "AAA"],
+                market_data_workers=2,
+                warmup_periods=5,
+            ),
             clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
         )
-        runner._last_bar_ts["BTCUSDT"] = timestamps[-1]
-        audit_versions: list[tuple[datetime, object]] = []
-        runner._on_ohlcv = lambda _symbol, _timeframe, bar, ts: audit_versions.append(
-            (ts, bar["available_at"])
+        runner._last_bar_ts = {symbol: timestamps[-1] for symbol in histories}
+        coordinator_thread = get_ident()
+        audit_versions: list[tuple[int, str, datetime, object]] = []
+        runner._on_ohlcv = lambda symbol, _timeframe, bar, ts: audit_versions.append(
+            (get_ident(), symbol, ts, bar["available_at"])
         )
 
         runner._fetch_runtime_frames()
 
-        assert requests == [6, 12, 24]
+        assert requests == {"BBB": [6, 12, 24], "AAA": [6, 12, 24]}
         assert audit_versions == [
-            (timestamp, pd.Timestamp(timestamp) + pd.Timedelta(hours=1)) for timestamp in timestamps
+            (
+                coordinator_thread,
+                symbol,
+                timestamp,
+                pd.Timestamp(timestamp) + pd.Timedelta(hours=1),
+            )
+            for symbol in ("BBB", "AAA")
+            for timestamp in timestamps
         ]
+
+    def test_restart_audit_delivery_failure_is_not_implicitly_retried(self):
+        timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+        history = _make_ohlcv_at([timestamp])
+        history["available_at"] = [timestamp + timedelta(hours=1)]
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: history.copy(),
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        runner._last_bar_ts["BTCUSDT"] = timestamp
+        failing_sink = MagicMock(side_effect=RuntimeError("sink unavailable"))
+        runner._on_ohlcv = failing_sink
+
+        with pytest.raises(RuntimeError, match="sink unavailable"):
+            runner._fetch_runtime_frames()
+
+        retry_sink = MagicMock()
+        runner._on_ohlcv = retry_sink
+        runner._fetch_runtime_frames()
+
+        failing_sink.assert_called_once()
+        retry_sink.assert_not_called()
 
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):

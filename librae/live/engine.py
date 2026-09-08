@@ -866,15 +866,16 @@ class LiveTrader:
             if frame is not None:
                 frames[symbol] = frame
             if self._on_ohlcv is not None:
-                emitted_versions: set[tuple[int, int]] = set()
+                audit_by_version: dict[tuple[int, int], _OhlcvAuditRow] = {}
                 for event_ts, audit_bar in audit_rows:
                     version = (
                         pd.Timestamp(event_ts).value,
                         pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
                     )
-                    if version in emitted_versions:
-                        continue
-                    emitted_versions.add(version)
+                    audit_by_version.setdefault(version, (event_ts, audit_bar))
+                for event_ts, audit_bar in (
+                    audit_by_version[version] for version in sorted(audit_by_version)
+                ):
                     self._on_ohlcv(symbol, self._timeframe, audit_bar, event_ts)
         return frames
 

@@ -604,7 +604,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_position_event` | `on_position_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close |
 | `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions), not a fill |
-| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
+| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — best-effort audit projection; `bar` includes OHLCV and `available_at`; fetched history can repeat after restart, delivery failure is not guaranteed to retry, and sinks must be idempotent |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
