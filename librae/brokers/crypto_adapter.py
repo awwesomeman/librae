@@ -136,6 +136,8 @@ class CryptoAdapter:
         params above are ignored.
     """
 
+    market_data_route = "crypto"
+
     def __init__(
         self,
         exchange_id: str = "binance",

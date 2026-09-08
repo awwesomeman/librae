@@ -256,6 +256,8 @@ class IBKRAdapter:
     calls between threads or event loops.
     """
 
+    market_data_route = "ibkr"
+
     def __init__(
         self,
         credentials: IBKRCredentials | None = None,

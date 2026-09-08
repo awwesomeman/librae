@@ -228,6 +228,8 @@ class TestWarmupFetcher:
         calls: list[dict[str, object]] = []
 
         class Adapter:
+            market_data_route = "ibkr"
+
             def fetch_ohlcv(self, *_args, **kwargs):
                 calls.append(kwargs)
                 if kwargs["limit"] == 6:
@@ -275,6 +277,119 @@ class TestWarmupFetcher:
         assert trader._last_bar_ts["AAPL"] == timestamps[-1]
         strategy.on_bar.assert_called_once()
 
+    def test_ibkr_style_duration_plateau_reaches_largest_rung(self):
+        """Adjacent row limits may map to the same broker duration."""
+        from librae.live.engine import LiveTrader
+
+        history = _bars(
+            [datetime(2025, 1, day, hour, tzinfo=UTC) for day in (2, 3) for hour in range(6)]
+        )
+        requests: list[int] = []
+
+        def fetcher(_symbol: str, _timeframe: str, limit: int, **_kwargs):
+            requests.append(limit)
+            # Mirrors IBKR's coarse mapping: 11 and 22 rows both request one
+            # day, while 44 rows cross the boundary into a two-day duration.
+            if limit < 44:
+                return history.iloc[-6:].reset_index(drop=True)
+            return history.copy()
+
+        strategy = MagicMock()
+        strategy.on_bar.return_value = []
+        trader = LiveTrader(
+            strategy,
+            lambda frame: frame,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=10,
+                )
+            ),
+            adapter=fetcher,
+            clock=lambda: datetime(2025, 1, 4, tzinfo=UTC),
+        )
+
+        result = trader._fetch_with_cache("BTCUSDT")
+
+        assert requests == [11, 22, 44]
+        assert result is not None
+        assert len(result) == 10
+        assert trader.warmup_ready
+        assert "BTCUSDT" not in trader._warmup_exhausted_fingerprints
+
+    def test_empty_intermediate_rungs_are_not_terminal(self):
+        from librae.live.engine import LiveTrader
+
+        history = _bars([datetime(2025, 1, 1, hour, tzinfo=UTC) for hour in range(5)])
+        requests: list[int] = []
+        runtime_events = []
+
+        def fetcher(_symbol: str, _timeframe: str, limit: int, **_kwargs):
+            requests.append(limit)
+            if limit < 24:
+                return history.iloc[:0].copy()
+            return history.copy()
+
+        strategy = MagicMock()
+        strategy.on_bar.return_value = []
+        trader = LiveTrader(
+            strategy,
+            lambda frame: frame,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=5,
+                )
+            ),
+            adapter=fetcher,
+            on_runtime_event=runtime_events.append,
+            clock=lambda: datetime(2025, 1, 1, 6, tzinfo=UTC),
+        )
+
+        trader._poll_cycle()
+
+        assert requests == [6, 12, 24]
+        assert trader.warmup_ready
+        assert not [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "warmup_backfill_exhausted"
+        ]
+
+    def test_largest_rung_must_plateau_before_terminal_state(self):
+        from librae.live.engine import LiveTrader
+
+        history = _bars([datetime(2025, 1, 1, hour, tzinfo=UTC) for hour in range(5)])
+        requests: list[int] = []
+
+        def fetcher(_symbol: str, _timeframe: str, limit: int, **_kwargs):
+            requests.append(limit)
+            row_count = 2 if limit < 24 else 3
+            return history.iloc[:row_count].copy()
+
+        trader = LiveTrader(
+            MagicMock(),
+            lambda frame: frame,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=5,
+                )
+            ),
+            adapter=fetcher,
+            clock=lambda: datetime(2025, 1, 1, 6, tzinfo=UTC),
+        )
+
+        trader._fetch_with_cache("BTCUSDT")
+
+        assert requests == [6, 12, 24]
+        assert "BTCUSDT" not in trader._warmup_exhausted_fingerprints
+
+        trader._fetch_with_cache("BTCUSDT")
+
+        assert requests == [6, 12, 24, 24]
+        assert "BTCUSDT" in trader._warmup_exhausted_fingerprints
+
     def test_bounded_shortfall_disables_all_symbols_without_advancing_watermarks(self):
         from librae.live.engine import LiveTrader
 
@@ -320,8 +435,9 @@ class TestWarmupFetcher:
             ("BTCUSDT", 6),
             ("ETHUSDT", 6),
             ("ETHUSDT", 12),
+            ("ETHUSDT", 24),
             ("BTCUSDT", 2),
-            ("ETHUSDT", 12),
+            ("ETHUSDT", 24),
         ]
         assert not trader.warmup_ready
         feature.assert_not_called()
@@ -337,8 +453,8 @@ class TestWarmupFetcher:
             "usable_periods": 2,
             "required_periods": 5,
             "missing_periods": 3,
-            "requested_periods": 12,
-            "attempts": 2,
+            "requested_periods": 24,
+            "attempts": 3,
             "max_attempts": 3,
             "terminal": True,
         }
@@ -387,8 +503,13 @@ class TestWarmupFetcher:
         usable_periods[0] = 3
         trader._fetch_with_cache("BTCUSDT")
 
-        assert requests == [6, 12, 12, 12, 24]
+        assert requests == [6, 12, 24, 24, 24]
         assert len(trader._ohlcv_cache["BTCUSDT"]) == 3
+        assert "BTCUSDT" not in trader._warmup_exhausted_fingerprints
+
+        trader._fetch_with_cache("BTCUSDT")
+
+        assert requests == [6, 12, 24, 24, 24, 24]
         assert "BTCUSDT" in trader._warmup_exhausted_fingerprints
 
     def test_exhausted_probe_commits_strictly_newer_row_version(self):
@@ -428,7 +549,7 @@ class TestWarmupFetcher:
         assert len(result) == 1
         assert result.loc[0, "close"] == 101.0
         assert result.loc[0, "available_at"] == pd.Timestamp("2025-01-01T02:00:00Z")
-        assert requests == [3, 6]
+        assert requests == [3, 6, 12]
 
     def test_replay_diagnostic_reports_history_missing_before_first_candidate(self):
         from librae.live.engine import LiveTrader
@@ -497,7 +618,7 @@ class TestWarmupFetcher:
         available_start[0] = 1
         trader._fetch_with_cache("BTCUSDT")
 
-        assert requests == [6, 6]
+        assert requests == [6, 12, 24, 24]
         assert trader._warmup_gap("BTCUSDT", trader._ohlcv_cache["BTCUSDT"]) is None
         assert "BTCUSDT" not in trader._warmup_exhausted_fingerprints
 
@@ -509,6 +630,7 @@ class TestWarmupFetcher:
         latest_period = [2]
         requests: list[tuple[str, int]] = []
         runtime_events = []
+        heartbeat = MagicMock()
 
         def fetcher(symbol: str, _timeframe: str, limit: int, **_kwargs):
             requests.append((symbol, limit))
@@ -545,6 +667,7 @@ class TestWarmupFetcher:
             ),
             adapter=fetcher,
             on_runtime_event=runtime_events.append,
+            on_heartbeat=heartbeat,
             clock=lambda: datetime(2025, 1, 2, tzinfo=UTC),
         )
         trader._ohlcv_cache["AAA"] = history.iloc[:2].copy()
@@ -557,11 +680,15 @@ class TestWarmupFetcher:
 
         max_rows = (trader._warmup_periods + 1) * trader.WARMUP_MAX_FETCH_MULTIPLIER
         aaa_requests_before_terminal_poll = sum(symbol == "AAA" for symbol, _ in requests)
+        heartbeat.reset_mock()
+        trader._market_data_fetch_failures["AAA"] = 2
         trader._poll_cycle()
 
         assert len(trader._ohlcv_cache["AAA"]) <= max_rows
         assert "AAA" in trader._replay_backlog_exhausted
         assert sum(symbol == "AAA" for symbol, _ in requests) == aaa_requests_before_terminal_poll
+        heartbeat.assert_not_called()
+        assert trader._market_data_fetch_failures["AAA"] == 2
         backlog_events = [
             event
             for event in runtime_events

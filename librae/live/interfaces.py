@@ -25,6 +25,24 @@ class BarDataFetcher(Protocol):
     ) -> pd.DataFrame: ...
 
 
+class MarketDataRouteOwner(Protocol):
+    """Optional capability declaring which native adapter contract is used.
+
+    A caller-owned fetcher that does not expose this capability owns its own
+    normalization contract. Repository adapters expose it so route-specific
+    startup validation and argument binding apply only when they are actually
+    in the market-data path.
+    """
+
+    market_data_route: str
+
+
+class MarketDataCalendarProvider(Protocol):
+    """Optional source capability supplying a missing subscription calendar."""
+
+    market_data_calendar_id: str
+
+
 class Notifier(Protocol):
     """Operational notification transport used by ``LiveTrader``."""
 

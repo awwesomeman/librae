@@ -33,7 +33,7 @@ from librae.core.strategy import (
     PositionState,
     Strategy,
 )
-from librae.live.engine import LiveTrader
+from librae.live.engine import LiveTrader, _market_data_calendar_id, _market_data_route_owner
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
 from librae.live.state import MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import build_live_trader
@@ -663,9 +663,11 @@ class TestLiveTrader:
             ),
         )
 
-        frames = runner._fetch_runtime_frames()
+        results = runner._fetch_runtime_frames()
 
-        assert list(frames) == ["AAA", "BBB"]
+        assert list(results) == ["AAA", "BBB"]
+        assert all(result.outcome == "success" for result in results.values())
+        assert all(result.frame is not None for result in results.values())
         assert set(runner._cycle_fetch_seconds) == {"AAA", "BBB"}
 
     def test_concrete_market_data_adapter_uses_resolved_route(self):
@@ -703,6 +705,8 @@ class TestLiveTrader:
         )
 
         class Adapter:
+            market_data_route = "ibkr"
+
             def fetch_ohlcv(self, *args, **kwargs):
                 calls.append((args, kwargs))
                 return frame
@@ -757,8 +761,155 @@ class TestLiveTrader:
             symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
         )
 
+        adapter = MagicMock()
+        adapter.market_data_route = "ibkr"
+
         with pytest.raises(ValueError, match=r"daily IBKR.*calendar_id.*AAPL"):
-            self._make_runner(fetcher=MagicMock(), config=config)
+            self._make_runner(fetcher=adapter, config=config)
+
+    def test_daily_caller_owned_fetcher_supplies_calendar_outside_instrument_route(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+
+        runner = self._make_runner(fetcher=fetcher, config=config)
+
+        assert runner._fetchers["AAPL"] is fetcher
+        assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
+
+    def test_intraday_adv_uses_source_supplied_effective_calendar(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="H1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+            execution=ExecutionPolicy(
+                adv_lookback_sessions=1,
+                max_adv_participation_rate=0.1,
+                warmup_periods=2,
+            ),
+        )
+
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+        runner = self._make_runner(fetcher=fetcher, config=config)
+        current = datetime(2025, 1, 3, 14, 30, tzinfo=UTC)
+        frame = _make_ohlcv_at([datetime(2025, 1, 2, 14, 30, tzinfo=UTC), current])
+
+        runner._process_cycle({"AAPL": frame}, current)
+
+        assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
+        assert runner._adv_session_labels == {"AAPL": "2025-01-03"}
+
+    def test_daily_native_route_uses_source_supplied_effective_calendar(self):
+        calls: list[dict[str, object]] = []
+
+        class Adapter:
+            market_data_route = "ibkr"
+            market_data_calendar_id = "XNYS"
+
+            def fetch_ohlcv(self, *_args, **kwargs):
+                calls.append(kwargs)
+                return _make_ohlcv_df()
+
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        runner = self._make_runner(fetcher=Adapter(), config=config)
+        runner._fetchers["AAPL"]("AAPL", "1d", 10)
+
+        assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
+        assert calls[0]["calendar_id"] == "XNYS"
+
+    def test_market_data_capabilities_support_properties_and_slots(self):
+        class PropertySource:
+            @property
+            def market_data_route(self) -> str:
+                return "ibkr"
+
+            @property
+            def market_data_calendar_id(self) -> str:
+                return "XNYS"
+
+        class SlottedSource:
+            __slots__ = ("market_data_calendar_id", "market_data_route")
+
+            def __init__(self) -> None:
+                self.market_data_route = "ibkr"
+                self.market_data_calendar_id = "XNYS"
+
+        for source in (PropertySource(), SlottedSource()):
+            assert _market_data_route_owner(source) == "ibkr"
+            assert _market_data_calendar_id(source) == "XNYS"
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("market_data_route", " ibkr"),
+            ("market_data_route", "ibkr "),
+            ("market_data_calendar_id", " XNYS"),
+            ("market_data_calendar_id", "XNYS "),
+        ],
+    )
+    def test_market_data_capabilities_reject_surrounding_whitespace(self, name, value):
+        class Source:
+            pass
+
+        source = Source()
+        setattr(source, name, value)
+        reader = (
+            _market_data_route_owner if name == "market_data_route" else _market_data_calendar_id
+        )
+
+        with pytest.raises(ValueError, match="leading or trailing whitespace"):
+            reader(source)
 
     def test_repeated_fetch_failure_suppresses_heartbeat_and_alerts_once(self):
         state = {"fail": True}
@@ -810,13 +961,189 @@ class TestLiveTrader:
             for event in runtime_events
             if event.detail.get("reason") == "market_data_fetch_failed"
         ]
-        assert len(failures) == 2
+        assert len(failures) == 1
         alerts = [
             call
             for call in runner._notify.call_args_list
             if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
         ]
-        assert len(alerts) == 2
+        assert len(alerts) == 1
+
+        state["fail"] = False
+        for _ in range(4):
+            runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == set()
+
+        state["fail"] = True
+        for _ in range(3):
+            runner._poll_cycle()
+
+        failures = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_failed"
+        ]
+        assert len(failures) == 2
+
+    def test_flapping_fetch_alerts_and_clears_rolling_diagnostic(self):
+        frame = _make_ohlcv_df()
+        outcomes = iter(
+            [
+                RuntimeError("feed unavailable"),
+                RuntimeError("feed unavailable"),
+                frame,
+                RuntimeError("feed unavailable"),
+                RuntimeError("feed unavailable"),
+                frame,
+                frame,
+                frame,
+            ]
+        )
+
+        def fetcher(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(warmup_periods=1),
+        )
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._poll_cycle()
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        degraded = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_degraded"
+        ]
+        assert len(degraded) == 1
+        assert degraded[0].detail["failed_polls"] == 4
+        assert degraded[0].detail["window_polls"] == 6
+        assert degraded[0].detail["failure_rate"] == pytest.approx(2 / 3)
+        assert degraded[0].detail["current_poll_failed"] is False
+        assert strategy.on_bar.call_count == 1
+
+        # Failed cycles never replay the cached strategy event. Two healthy
+        # polls move the bounded window below the recovery threshold without
+        # evaluating the same bar again.
+        runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        runner._poll_cycle()
+
+        assert runner._market_data_fetch_degraded == set()
+        assert strategy.on_bar.call_count == 1
+        health_titles = [
+            call.kwargs["title"]
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Market Data Fetch" in call.kwargs["title"]
+        ]
+        assert health_titles == [
+            "[test] Market Data Fetch Degraded: BTCUSDT",
+            "[test] Market Data Fetch Recovered: BTCUSDT",
+        ]
+
+    def test_consecutive_and_rolling_failures_share_one_incident(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("offline"))
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        reasons = [event.detail["reason"] for event in runtime_events]
+        assert reasons == ["market_data_fetch_failed"]
+        failure_alerts = [
+            call
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Fetch Failed" in call.kwargs["title"]
+        ]
+        assert len(failure_alerts) == 1
+
+        for _ in range(3):
+            runner._record_market_data_fetch_success("BTCUSDT")
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+
+        runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
+
+    def test_single_transient_fetch_failure_does_not_alert(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runner._notify = MagicMock()
+
+        runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("transient"))
+        for _ in range(5):
+            runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
+        runner._notify.assert_not_called()
+
+    def test_required_symbol_fetch_failure_skips_partial_universe_and_commit(self):
+        t0 = datetime(2025, 1, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        state = {"bbb_fails": True}
+        frames = {
+            "AAA": _make_ohlcv_at([t0, t1]),
+            "BBB": _make_ohlcv_at([t0, t1]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            if symbol == "BBB" and state["bbb_fails"]:
+                raise RuntimeError("BBB unavailable")
+            return frames[symbol]
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        order_adapter = _mock_order_adapter()
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                warmup_periods=1,
+            ),
+            order_adapter=order_adapter,
+        )
+        runner._ohlcv_cache = {symbol: _make_ohlcv_at([t0]) for symbol in ("AAA", "BBB")}
+        runner._last_bar_ts = {"AAA": t0, "BBB": t0}
+        runner._last_cycle_ts = t0
+        runner._last_reconciliation_at = TEST_CLOCK_NOW
+        runner._persist_state = MagicMock()
+        heartbeat = MagicMock()
+        runner._on_heartbeat = heartbeat
+
+        runner._poll_cycle()
+
+        heartbeat.assert_not_called()
+        strategy.on_bar.assert_not_called()
+        order_adapter.place_order.assert_not_called()
+        runner._persist_state.assert_not_called()
+        assert runner._last_bar_ts == {"AAA": t0, "BBB": t0}
+        assert runner._last_cycle_ts == t0
+        assert runner._ohlcv_cache["AAA"]["ts"].iloc[-1].to_pydatetime() == t1
+        assert runner._ohlcv_cache["BBB"]["ts"].iloc[-1].to_pydatetime() == t0
+        assert runner._market_data_fetch_failures == {"BBB": 1}
+
+        state["bbb_fails"] = False
+        runner._poll_cycle()
+
+        heartbeat.assert_called_once_with(runner.run_id)
+        strategy.on_bar.assert_called_once()
+        assert set(strategy.on_bar.call_args.args[0].bars) == {"AAA", "BBB"}
+        assert runner._market_data_fetch_failures == {}
 
     def test_factory_rejects_daily_ibkr_before_building_adapter(self):
         config = _test_cfg(
@@ -849,6 +1176,311 @@ class TestLiveTrader:
             )
 
         build_adapter.assert_not_called()
+
+    def test_factory_daily_override_supplies_calendar_outside_instrument_route(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+
+        with patch("librae.orchestration.live._build_adapter") as build_adapter:
+            runner = build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                database_enabled=False,
+                data_adapter_overrides={"AAPL": fetcher},
+            )
+
+        build_adapter.assert_not_called()
+        assert runner._fetchers["AAPL"] is fetcher
+
+    def test_factory_reads_source_capabilities_once_for_one_subscription_snapshot(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        class ChangingCapabilityAdapter:
+            def __init__(self) -> None:
+                self.route_reads = 0
+                self.calendar_reads = 0
+                self.fetch_kwargs: list[dict[str, object]] = []
+
+            @property
+            def market_data_route(self) -> str:
+                self.route_reads += 1
+                return "ibkr" if self.route_reads == 1 else "caller-owned"
+
+            @property
+            def market_data_calendar_id(self) -> str:
+                self.calendar_reads += 1
+                return "XNYS" if self.calendar_reads == 1 else "XHKG"
+
+            def fetch_ohlcv(self, *_args, **kwargs):
+                self.fetch_kwargs.append(kwargs)
+                return _make_ohlcv_df()
+
+        adapter = ChangingCapabilityAdapter()
+        callbacks = MagicMock()
+        with patch(
+            "librae.orchestration.live._TimescaleCallbacks", return_value=callbacks
+        ) as build:
+            runner = build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                data_adapter_overrides={"AAPL": adapter},
+                state_store=MemoryLiveStateStore(),
+            )
+
+        persisted_subscription = build.call_args.args[3]["AAPL"]
+        runtime_subscription = runner._market_data_subscriptions["AAPL"]
+        runner._fetchers["AAPL"]("AAPL", "1d", 10)
+
+        assert adapter.route_reads == 1
+        assert adapter.calendar_reads == 1
+        assert persisted_subscription == runtime_subscription
+        assert runtime_subscription.calendar_id == "XNYS"
+        assert adapter.fetch_kwargs[0]["calendar_id"] == "XNYS"
+
+    def test_registered_factory_product_owns_final_route_and_subscription_snapshot(self):
+        config = make_test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            calendar_id=None,
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "vendor_plugin",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        class RegisteredIBKRSource:
+            def __init__(self) -> None:
+                self.route_reads = 0
+                self.calendar_reads = 0
+                self.fetch_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            @property
+            def market_data_route(self) -> str:
+                self.route_reads += 1
+                return "ibkr" if self.route_reads == 1 else "caller-owned"
+
+            @property
+            def market_data_calendar_id(self) -> str:
+                self.calendar_reads += 1
+                return "XNYS" if self.calendar_reads == 1 else "XHKG"
+
+            def fetch_ohlcv(self, *args, **kwargs):
+                self.fetch_calls.append((args, kwargs))
+                return _make_ohlcv_df()
+
+        adapter = RegisteredIBKRSource()
+        factory = MagicMock(return_value=adapter)
+        callbacks = MagicMock()
+        with patch(
+            "librae.orchestration.live._TimescaleCallbacks", return_value=callbacks
+        ) as build:
+            runner = build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                adapter_factories={"vendor_plugin": factory},
+                state_store=MemoryLiveStateStore(),
+            )
+
+        persisted_subscription = build.call_args.args[3]["AAPL"]
+        runtime_subscription = runner._market_data_subscriptions["AAPL"]
+        runner._fetchers["AAPL"]("AAPL", "1d", 10, drop_incomplete=True)
+
+        factory.assert_called_once_with(trading=False)
+        assert adapter.route_reads == 1
+        assert adapter.calendar_reads == 1
+        assert persisted_subscription == runtime_subscription
+        assert runtime_subscription.calendar_id == "XNYS"
+        assert adapter.fetch_calls == [
+            (
+                ("AAPL", "1d"),
+                {
+                    "limit": 10,
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "continuous_alias": False,
+                    "contract_month": None,
+                    "calendar_id": "XNYS",
+                    "session_mode": "extended",
+                    "drop_incomplete": True,
+                },
+            )
+        ]
+
+    def test_registered_native_product_without_calendar_fails_before_db_or_polling(self):
+        config = make_test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            calendar_id=None,
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "vendor_plugin",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+        adapter = MagicMock(market_data_route="ibkr")
+        factory = MagicMock(return_value=adapter)
+
+        with (
+            patch("librae.orchestration.live._build_state_store") as build_state_store,
+            patch("librae.orchestration.live._TimescaleCallbacks") as build_callbacks,
+            pytest.raises(ValueError, match=r"daily IBKR.*calendar_id.*AAPL"),
+        ):
+            build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                adapter_factories={"vendor_plugin": factory},
+            )
+
+        factory.assert_called_once_with(trading=False)
+        build_state_store.assert_not_called()
+        build_callbacks.assert_not_called()
+        adapter.fetch_ohlcv.assert_not_called()
+
+    def test_registered_product_calendar_conflict_fails_before_db_or_polling(self):
+        config = _test_cfg(
+            symbols=["BTCUSDT"],
+            timeframe="D1",
+            data_source="vendor_feed",
+            instrument_overrides={
+                "BTCUSDT": {
+                    "data_adapter": "vendor_plugin",
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                }
+            },
+        )
+        adapter = MagicMock(
+            market_data_route="ibkr",
+            market_data_calendar_id="XNYS",
+        )
+        factory = MagicMock(return_value=adapter)
+
+        with (
+            patch("librae.orchestration.live._build_state_store") as build_state_store,
+            patch("librae.orchestration.live._TimescaleCallbacks") as build_callbacks,
+            pytest.raises(ValueError, match=r"source calendar_id='XNYS'.*configured.*'24/7'"),
+        ):
+            build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                adapter_factories={"vendor_plugin": factory},
+            )
+
+        factory.assert_called_once_with(trading=False)
+        build_state_store.assert_not_called()
+        build_callbacks.assert_not_called()
+        adapter.fetch_ohlcv.assert_not_called()
+
+    def test_daily_caller_owned_fetcher_without_any_calendar_identity_fails_closed(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        with pytest.raises(ValueError, match=r"must declare market_data_calendar_id"):
+            self._make_runner(fetcher=lambda *_args, **_kwargs: _make_ohlcv_df(), config=config)
+
+    def test_caller_owned_calendar_cannot_conflict_with_instrument_identity(self):
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+
+        with pytest.raises(ValueError, match=r"source calendar_id='XNYS'.*configured.*'24/7'"):
+            self._make_runner(fetcher=fetcher)
+
+    def test_fresh_run_registers_once_without_a_state_store(self):
+        on_run_registered = MagicMock()
+
+        runner = self._make_runner(
+            state_store=None,
+            on_run_registered=on_run_registered,
+        )
+
+        on_run_registered.assert_called_once_with(runner.run_id)
+
+    def test_registration_failure_without_a_state_store_propagates_once(self):
+        on_run_registered = MagicMock(side_effect=RuntimeError("registration failed"))
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            self._make_runner(
+                state_store=None,
+                on_run_registered=on_run_registered,
+            )
+
+        on_run_registered.assert_called_once()
 
     def test_non_ibkr_concrete_adapter_rejects_regular_session_request(self):
         class Adapter:

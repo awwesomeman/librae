@@ -393,9 +393,11 @@ def subscription_from_instrument(
     *,
     timeframe: str,
     session_mode: MarketDataSessionMode,
+    calendar_id: str | None = None,
 ) -> MarketDataSubscription:
     """Build a bar identity from one already-resolved ``SymbolInfo``-like value."""
-    calendar_id = getattr(instrument, "calendar_id", None)
+    if calendar_id is None:
+        calendar_id = getattr(instrument, "calendar_id", None)
     symbol = getattr(instrument, "symbol", None)
     if calendar_id is None:
         raise ValueError(f"market-data subscription for {symbol!r} requires a resolved calendar_id")

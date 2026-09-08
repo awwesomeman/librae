@@ -10,11 +10,13 @@ from __future__ import annotations
 import logging
 import signal
 import types
+from collections import deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from inspect import getattr_static
 from math import isclose, isfinite
 from threading import Event
 from time import perf_counter
@@ -56,6 +58,7 @@ from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
     BatchFeatureFn,
     FeatureBatch,
+    MarketDataSubscription,
     MarketDataView,
     evaluate_batch_features,
     normalize_bar_times,
@@ -133,6 +136,17 @@ class CycleDiagnostics:
 type _OhlcvAuditRow = tuple[datetime, dict[str, object]]
 
 
+@dataclass(frozen=True)
+class _MarketDataFetchResult:
+    """One required symbol's explicit outcome for the current poll."""
+
+    outcome: Literal["success", "error", "terminal"]
+    frame: pd.DataFrame | None
+    elapsed_seconds: float
+    audit_rows: tuple[_OhlcvAuditRow, ...] = ()
+    error: Exception | None = None
+
+
 def _validate_feature_output(
     output: object,
     *,
@@ -147,8 +161,12 @@ def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
     session_mode: MarketDataSessionMode = "extended",
+    *,
+    route_owner: str | None = None,
+    calendar_id: str | None = None,
 ) -> BarDataFetcher:
     """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
+    resolved_calendar_id = calendar_id if calendar_id is not None else instrument.calendar_id
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
     if not callable(fetch_ohlcv):
         if callable(source):
@@ -157,7 +175,7 @@ def _bind_market_data_source(
             "adapter must be a bar-data callable or expose a callable fetch_ohlcv method"
         )
 
-    if instrument.data_adapter == "ibkr":
+    if route_owner == "ibkr":
         return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
             instrument.venue_symbol,
             tf,
@@ -167,22 +185,22 @@ def _bind_market_data_source(
             currency=instrument.currency,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
-            calendar_id=instrument.calendar_id,
+            calendar_id=resolved_calendar_id,
             session_mode=session_mode,
             drop_incomplete=drop_incomplete,
         )
     if session_mode != "extended":
         raise ValueError(
-            f"data adapter {instrument.data_adapter!r} cannot honor "
+            f"data adapter route {route_owner or 'caller-owned'!r} cannot honor "
             f"session_mode={session_mode!r}; provide a session-filtered callable "
             "or use session_mode='extended'"
         )
-    if instrument.data_adapter == "shioaji":
+    if route_owner == "shioaji":
         return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
             instrument.venue_symbol,
             tf,
             limit=limit,
-            calendar_id=instrument.calendar_id,
+            calendar_id=resolved_calendar_id,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
             drop_incomplete=drop_incomplete,
@@ -285,9 +303,162 @@ def _bind_market_data_source(
     return base_fetcher
 
 
+_MISSING_MARKET_DATA_CAPABILITY = object()
+
+
+def _market_data_capability(source: object, name: str) -> str | None:
+    """Read one explicitly declared source capability without trusting ``__getattr__``."""
+    declaration = getattr_static(source, name, _MISSING_MARKET_DATA_CAPABILITY)
+    if declaration is _MISSING_MARKET_DATA_CAPABILITY:
+        return None
+    value = getattr(source, name)
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a non-empty string when supplied")
+    if not value.strip():
+        raise ValueError(f"{name} must be a non-empty string when supplied")
+    if value != value.strip():
+        raise ValueError(f"{name} must not contain leading or trailing whitespace")
+    return value
+
+
+def _market_data_route_owner(source: object) -> str | None:
+    """Read an adapter's explicit native-route capability without duck-mocking it."""
+    return _market_data_capability(source, "market_data_route")
+
+
+def _market_data_calendar_id(source: object) -> str | None:
+    """Read a caller-owned source's explicit subscription calendar capability."""
+    return _market_data_capability(source, "market_data_calendar_id")
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketDataSubscriptionSnapshot:
+    """One-time resolution of source ownership and exact bar identity."""
+
+    route_owners: Mapping[str, str | None]
+    subscriptions: Mapping[str, MarketDataSubscription]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "route_owners", types.MappingProxyType(dict(self.route_owners)))
+        object.__setattr__(self, "subscriptions", types.MappingProxyType(dict(self.subscriptions)))
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketDataSourceCapabilities:
+    """Explicit capabilities read once from one concrete source instance."""
+
+    route_owner: str | None
+    calendar_id: str | None
+
+
+def _read_market_data_source_capabilities(
+    sources: Mapping[str, object],
+) -> dict[str, _MarketDataSourceCapabilities]:
+    """Snapshot each concrete source once, even when an instance serves many symbols."""
+    by_source_id: dict[int, _MarketDataSourceCapabilities] = {}
+    capabilities: dict[str, _MarketDataSourceCapabilities] = {}
+    for symbol, source in sources.items():
+        source_id = id(source)
+        resolved = by_source_id.get(source_id)
+        if resolved is None:
+            resolved = _MarketDataSourceCapabilities(
+                route_owner=_market_data_route_owner(source),
+                calendar_id=_market_data_calendar_id(source),
+            )
+            by_source_id[source_id] = resolved
+        capabilities[symbol] = resolved
+    return capabilities
+
+
+def _resolve_effective_calendars_from_capabilities(
+    instruments: Mapping[str, SymbolInfo],
+    source_capabilities: Mapping[str, _MarketDataSourceCapabilities],
+) -> dict[str, str | None]:
+    """Resolve source/config calendars from an already-read capability snapshot."""
+    calendars: dict[str, str | None] = {}
+    for symbol, instrument in instruments.items():
+        configured_calendar = instrument.calendar_id
+        capability = source_capabilities.get(symbol)
+        source_calendar = capability.calendar_id if capability is not None else None
+        if (
+            configured_calendar is not None
+            and source_calendar is not None
+            and configured_calendar != source_calendar
+        ):
+            raise ValueError(
+                f"{symbol!r} market-data source calendar_id={source_calendar!r} conflicts "
+                f"with configured calendar_id={configured_calendar!r}"
+            )
+        calendars[symbol] = configured_calendar or source_calendar
+    return calendars
+
+
+def _resolve_market_data_subscriptions(
+    timeframe: str,
+    session_mode: MarketDataSessionMode,
+    instruments: Mapping[str, SymbolInfo],
+    calendar_ids: Mapping[str, str | None],
+) -> dict[str, MarketDataSubscription]:
+    """Build exact subscriptions from the already-resolved source calendars."""
+    subscriptions: dict[str, MarketDataSubscription] = {}
+    for symbol, instrument in instruments.items():
+        calendar_id = calendar_ids.get(symbol)
+        if calendar_id is None:
+            raise ValueError(
+                f"market-data source for {symbol!r} must declare market_data_calendar_id "
+                "when the instrument route has no calendar_id"
+            )
+        subscriptions[symbol] = subscription_from_instrument(
+            instrument,
+            timeframe=timeframe,
+            session_mode=session_mode,
+            calendar_id=calendar_id,
+        )
+    return subscriptions
+
+
+def _resolve_market_data_subscription_snapshot(
+    timeframe: str,
+    session_mode: MarketDataSessionMode,
+    instruments: Mapping[str, SymbolInfo],
+    source_capabilities: Mapping[str, _MarketDataSourceCapabilities],
+    *,
+    default_route_owners: Mapping[str, str | None] | None = None,
+) -> _MarketDataSubscriptionSnapshot:
+    """Read source capabilities once and resolve one immutable runtime identity."""
+    defaults = default_route_owners or {}
+    route_owners = {
+        symbol: (
+            source_capabilities[symbol].route_owner
+            if symbol in source_capabilities
+            else defaults.get(symbol)
+        )
+        for symbol in instruments
+    }
+    effective_calendars = _resolve_effective_calendars_from_capabilities(
+        instruments,
+        source_capabilities,
+    )
+    _validate_market_data_calendar_preconditions(
+        timeframe,
+        instruments,
+        route_owners,
+        effective_calendars,
+    )
+    subscriptions = _resolve_market_data_subscriptions(
+        timeframe,
+        session_mode,
+        instruments,
+        effective_calendars,
+    )
+    return _MarketDataSubscriptionSnapshot(route_owners, subscriptions)
+
+
 def _validate_market_data_calendar_preconditions(
     timeframe: str,
     instruments: Mapping[str, SymbolInfo],
+    route_owners: Mapping[str, str | None],
+    calendar_ids: Mapping[str, str | None],
 ) -> None:
     """Fail before polling when a route cannot normalize its requested bars."""
     from librae.core.utils import to_ccxt
@@ -296,23 +467,23 @@ def _validate_market_data_calendar_preconditions(
         return
     missing = sorted(
         symbol
-        for symbol, instrument in instruments.items()
-        if instrument.data_adapter == "ibkr" and instrument.calendar_id is None
+        for symbol in instruments
+        if route_owners.get(symbol) == "ibkr" and calendar_ids.get(symbol) is None
     )
     if missing:
         raise ValueError(
             "daily IBKR market data requires calendar_id for every IBKR-routed "
             f"symbol; missing {missing}"
         )
-    for symbol, instrument in instruments.items():
-        if instrument.data_adapter != "ibkr":
+    for symbol in instruments:
+        if route_owners.get(symbol) != "ibkr":
             continue
+        calendar_id = calendar_ids[symbol]
         try:
-            validate_calendar_id(instrument.calendar_id)
+            validate_calendar_id(calendar_id)
         except ValueError as exc:
             raise ValueError(
-                f"daily IBKR market data has invalid calendar_id for {symbol!r}: "
-                f"{instrument.calendar_id!r}"
+                f"daily IBKR market data has invalid calendar_id for {symbol!r}: {calendar_id!r}"
             ) from exc
 
 
@@ -338,6 +509,8 @@ class LiveTrader:
             market-data adapter is used.
         state_store: Optional checkpoint store. Live mode requires a durable
             store so placement attempts and fills survive process restarts.
+        _market_data_snapshot: Internal deployment-factory handoff for an
+            already-resolved source capability and subscription snapshot.
         runtime_revision: Caller-owned opaque runtime identity. Live mode
             requires it so checkpoints cannot cross code or image revisions.
         notifier: Optional operational notifier implementing ``Notifier``.
@@ -380,6 +553,7 @@ class LiveTrader:
         on_run_registered: Callable[[str], None] | None = None,
         warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
+        _market_data_snapshot: _MarketDataSubscriptionSnapshot | None = None,
         runtime_revision: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -435,31 +609,6 @@ class LiveTrader:
             )
             for symbol in self._symbols
         }
-        _validate_market_data_calendar_preconditions(config.timeframe, self._instruments)
-        self._market_data_subscriptions = {
-            symbol: subscription_from_instrument(
-                instrument,
-                timeframe=self._timeframe,
-                session_mode=config.session_mode,
-            )
-            for symbol, instrument in self._instruments.items()
-        }
-        self._primary_subscriptions = tuple(
-            self._market_data_subscriptions[symbol] for symbol in self._symbols
-        )
-        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
-            missing_calendars = sorted(
-                symbol
-                for symbol, instrument in self._instruments.items()
-                if instrument.calendar_id is None
-            )
-            if missing_calendars:
-                raise ValueError(
-                    "intraday ADV requires calendar_id for every symbol; missing "
-                    f"{missing_calendars}"
-                )
-            for instrument in self._instruments.values():
-                validate_calendar_id(instrument.calendar_id)
         self._account_id = config.account_id
         self._currency = config.account.currency
 
@@ -476,11 +625,43 @@ class LiveTrader:
             sources = dict(adapter)
         else:
             sources = {symbol: adapter for symbol in self._symbols}
+        snapshot = _market_data_snapshot
+        if snapshot is None:
+            snapshot = _resolve_market_data_subscription_snapshot(
+                self._timeframe,
+                config.session_mode,
+                self._instruments,
+                _read_market_data_source_capabilities(sources),
+            )
+        expected_symbols = set(self._symbols)
+        if (
+            set(snapshot.route_owners) != expected_symbols
+            or set(snapshot.subscriptions) != expected_symbols
+        ):
+            raise ValueError("market-data snapshot symbols must exactly match config.symbols")
+        _validate_market_data_calendar_preconditions(
+            config.timeframe,
+            self._instruments,
+            snapshot.route_owners,
+            {
+                symbol: subscription.calendar_id
+                for symbol, subscription in snapshot.subscriptions.items()
+            },
+        )
+        self._market_data_subscriptions = dict(snapshot.subscriptions)
+        self._primary_subscriptions = tuple(
+            self._market_data_subscriptions[symbol] for symbol in self._symbols
+        )
+        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
+            for subscription in self._market_data_subscriptions.values():
+                validate_calendar_id(subscription.calendar_id)
         self._fetchers = {
             symbol: _bind_market_data_source(
                 sources[symbol],
                 self._instruments[symbol],
                 config.session_mode,
+                route_owner=snapshot.route_owners[symbol],
+                calendar_id=self._market_data_subscriptions[symbol].calendar_id,
             )
             for symbol in self._symbols
         }
@@ -537,7 +718,12 @@ class LiveTrader:
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
         self._market_data_fetch_failures: dict[str, int] = {}
-        self._cycle_fetch_failed = False
+        # Recent fetch health is intentionally process-local. Persisting a
+        # short operational window across downtime would mix unlike polling
+        # cadences and can raise a stale alert after an otherwise clean
+        # restart; it is diagnostic state, not execution state.
+        self._market_data_fetch_history: dict[str, deque[bool]] = {}
+        self._market_data_fetch_degraded: set[str] = set()
         self._last_cycle_ts: datetime | None = None
         self._last_feature_as_of: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
@@ -617,7 +803,7 @@ class LiveTrader:
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
-        if self._state_store is not None and not self._restored_state:
+        if not self._restored_state:
             # A restored run already notified on_run_registered inside
             # _restore_state, before it fires the state_recovered event —
             # callers like _TimescaleCallbacks cache run_id from this call
@@ -741,6 +927,14 @@ class LiveTrader:
     # unreachable), not a transient blip — worth alerting the operator.
     CONSECUTIVE_ERROR_THRESHOLD = 3
 
+    # A six-poll window catches a sustained two-out-of-three failure pattern
+    # without promoting a single transient error. Separate alert and recovery
+    # thresholds provide hysteresis so a feed near the boundary does not flap
+    # the operator diagnostic.
+    FETCH_HEALTH_WINDOW = 6
+    FETCH_HEALTH_ALERT_FAILURES = 4
+    FETCH_HEALTH_RECOVERY_FAILURES = 2
+
     # WHY: a completed bar's own timestamp is always ~1 interval behind wall
     # clock even when the feed is perfectly healthy (see _check_staleness) —
     # this is how many *additional* full intervals of no progress are
@@ -827,14 +1021,18 @@ class LiveTrader:
             deadline_missed,
         )
 
-    def _fetch_runtime_frames(self) -> dict[str, pd.DataFrame]:
-        """Fetch configured symbols with explicit bounded concurrency."""
+    def _fetch_runtime_frames(self) -> dict[str, _MarketDataFetchResult]:
+        """Fetch every required symbol and report its explicit cycle outcome."""
 
-        def fetch_one(
-            symbol: str,
-        ) -> tuple[pd.DataFrame | None, list[_OhlcvAuditRow], float, Exception | None]:
+        def fetch_one(symbol: str) -> _MarketDataFetchResult:
             started = perf_counter()
             audit_rows: list[_OhlcvAuditRow] = []
+            if symbol in self._replay_backlog_exhausted:
+                return _MarketDataFetchResult(
+                    outcome="terminal",
+                    frame=self._ohlcv_cache.get(symbol),
+                    elapsed_seconds=perf_counter() - started,
+                )
             try:
                 frame = self._fetch_with_cache_unchecked(
                     symbol,
@@ -842,8 +1040,22 @@ class LiveTrader:
                 )
             except Exception as exc:
                 frame = self._ohlcv_cache.get(symbol)
-                return frame, audit_rows, perf_counter() - started, exc
-            return frame, audit_rows, perf_counter() - started, None
+                return _MarketDataFetchResult(
+                    outcome="error",
+                    frame=frame,
+                    elapsed_seconds=perf_counter() - started,
+                    audit_rows=tuple(audit_rows),
+                    error=exc,
+                )
+            outcome: Literal["success", "terminal"] = (
+                "terminal" if symbol in self._replay_backlog_exhausted else "success"
+            )
+            return _MarketDataFetchResult(
+                outcome=outcome,
+                frame=frame,
+                elapsed_seconds=perf_counter() - started,
+                audit_rows=tuple(audit_rows),
+            )
 
         if self._market_data_workers == 1 or len(self._symbols) == 1:
             results = {symbol: fetch_one(symbol) for symbol in self._symbols}
@@ -853,20 +1065,16 @@ class LiveTrader:
                 futures = {symbol: pool.submit(fetch_one, symbol) for symbol in self._symbols}
                 results = {symbol: futures[symbol].result() for symbol in self._symbols}
 
-        frames: dict[str, pd.DataFrame] = {}
-        self._cycle_fetch_failed = False
-        for symbol, (frame, audit_rows, elapsed, error) in results.items():
-            self._cycle_fetch_seconds[symbol] = elapsed
-            if error is not None:
-                self._cycle_fetch_failed = True
-                self._record_market_data_fetch_failure(symbol, error)
-            else:
+        for symbol, result in results.items():
+            self._cycle_fetch_seconds[symbol] = result.elapsed_seconds
+            if result.outcome == "error":
+                assert result.error is not None
+                self._record_market_data_fetch_failure(symbol, result.error)
+            elif result.outcome == "success":
                 self._record_market_data_fetch_success(symbol)
-            if frame is not None:
-                frames[symbol] = frame
             if self._on_ohlcv is not None:
                 audit_by_version: dict[tuple[int, int], _OhlcvAuditRow] = {}
-                for event_ts, audit_bar in audit_rows:
+                for event_ts, audit_bar in result.audit_rows:
                     version = (
                         pd.Timestamp(event_ts).value,
                         pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
@@ -876,7 +1084,7 @@ class LiveTrader:
                     audit_by_version[version] for version in sorted(audit_by_version)
                 ):
                     self._on_ohlcv(symbol, self._timeframe, audit_bar, event_ts)
-        return frames
+        return results
 
     def _record_market_data_fetch_failure(self, symbol: str, error: Exception) -> None:
         failures = self._market_data_fetch_failures.get(symbol, 0) + 1
@@ -887,7 +1095,14 @@ class LiveTrader:
             failures,
             exc_info=(type(error), error, error.__traceback__),
         )
-        if failures != self.CONSECUTIVE_ERROR_THRESHOLD:
+        opens_incident = (
+            failures == self.CONSECUTIVE_ERROR_THRESHOLD
+            and symbol not in self._market_data_fetch_degraded
+        )
+        if failures == self.CONSECUTIVE_ERROR_THRESHOLD:
+            self._market_data_fetch_degraded.add(symbol)
+        if not opens_incident:
+            self._record_market_data_fetch_health(symbol, failed=True, error=error)
             return
         if self._on_runtime_event:
             self._on_runtime_event(
@@ -908,11 +1123,82 @@ class LiveTrader:
             title=f"[{self._executor.strategy_name}] Market Data Fetch Failed: {symbol}",
             message=f"{failures} consecutive failures: {error}",
         )
+        self._record_market_data_fetch_health(symbol, failed=True, error=error)
 
     def _record_market_data_fetch_success(self, symbol: str) -> None:
         failures = self._market_data_fetch_failures.pop(symbol, 0)
         if failures:
             logger.info("Market data fetch recovered for %s after %d failures", symbol, failures)
+        self._record_market_data_fetch_health(symbol, failed=False)
+
+    def _record_market_data_fetch_health(
+        self,
+        symbol: str,
+        *,
+        failed: bool,
+        error: Exception | None = None,
+    ) -> None:
+        """Maintain a bounded rolling failure diagnostic for one feed."""
+        history = self._market_data_fetch_history.setdefault(
+            symbol, deque(maxlen=self.FETCH_HEALTH_WINDOW)
+        )
+        history.append(failed)
+        if len(history) < self.FETCH_HEALTH_WINDOW:
+            return
+
+        failure_count = sum(history)
+        is_degraded = symbol in self._market_data_fetch_degraded
+        if not is_degraded and failure_count >= self.FETCH_HEALTH_ALERT_FAILURES:
+            self._market_data_fetch_degraded.add(symbol)
+            failure_rate = failure_count / self.FETCH_HEALTH_WINDOW
+            logger.warning(
+                "Market data fetch degraded for %s: failures=%d/%d",
+                symbol,
+                failure_count,
+                self.FETCH_HEALTH_WINDOW,
+            )
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=self._utc_now(),
+                        event_type="decision_skipped",
+                        symbol=symbol,
+                        detail={
+                            "reason": "market_data_fetch_degraded",
+                            "failed_polls": failure_count,
+                            "window_polls": self.FETCH_HEALTH_WINDOW,
+                            "failure_rate": failure_rate,
+                            "current_poll_failed": failed,
+                            "error_type": type(error).__name__ if error else None,
+                            "message": str(error) if error else None,
+                        },
+                    )
+                )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Market Data Fetch Degraded: {symbol}",
+                message=(
+                    f"{failure_count}/{self.FETCH_HEALTH_WINDOW} recent polls failed "
+                    f"({failure_rate:.0%}); failed polls remain cycle-atomic and "
+                    "skip strategy evaluation."
+                ),
+            )
+        elif is_degraded and not failed and failure_count <= self.FETCH_HEALTH_RECOVERY_FAILURES:
+            self._market_data_fetch_degraded.remove(symbol)
+            logger.info(
+                "Market data fetch health recovered for %s: failures=%d/%d",
+                symbol,
+                failure_count,
+                self.FETCH_HEALTH_WINDOW,
+            )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Market Data Fetch Recovered: {symbol}",
+                message=(
+                    f"Recent fetch failures fell to {failure_count}/"
+                    f"{self.FETCH_HEALTH_WINDOW}; degradation alert cleared."
+                ),
+            )
 
     def _reconcile_positions(self) -> None:
         """Adopt real broker positions into local state at startup.
@@ -1401,8 +1687,12 @@ class LiveTrader:
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
         self._maybe_reconcile_runtime()
-        fetched_frames = self._fetch_runtime_frames()
-        if self._on_heartbeat and not self._cycle_fetch_failed:
+        fetch_results = self._fetch_runtime_frames()
+        if any(result.outcome != "success" for result in fetch_results.values()):
+            if not self.warmup_ready:
+                self._report_incomplete_warmup()
+            return
+        if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
         if not self.warmup_ready:
             self._report_incomplete_warmup()
@@ -1416,7 +1706,8 @@ class LiveTrader:
             self._reported_warmup_reasons.clear()
 
         frames: dict[str, pd.DataFrame] = {}
-        for symbol, df in fetched_frames.items():
+        for symbol, result in fetch_results.items():
+            df = result.frame
             if df is None or df.empty:
                 continue
 
@@ -1553,6 +1844,14 @@ class LiveTrader:
             request_sizes = all_request_sizes
             try:
                 exhausted_fingerprint = self._warmup_exhausted_fingerprints.get(symbol)
+                if (
+                    exhausted_fingerprint is None
+                    and self._warmup_requested_periods.get(symbol) == all_request_sizes[-1]
+                ):
+                    # A prior largest-rung response added history but did not
+                    # close the gap. Re-probe that bound directly; exhaustion
+                    # is only established when this rung itself plateaus.
+                    request_sizes = [all_request_sizes[-1]]
                 if exhausted_fingerprint is not None:
                     probe_periods = self._warmup_requested_periods.get(symbol, base_request)
                     probe = self._fetch_history(symbol, probe_periods)
@@ -1597,14 +1896,12 @@ class LiveTrader:
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
-                    if self._history_fingerprint(merged) == before:
+                    if (
+                        requested_periods == all_request_sizes[-1]
+                        and self._history_fingerprint(merged) == before
+                    ):
                         self._warmup_exhausted_fingerprints[symbol] = before
                         break
-                if (
-                    self._warmup_gap(symbol, merged) is not None
-                    and symbol not in self._warmup_exhausted_fingerprints
-                ):
-                    self._warmup_exhausted_fingerprints[symbol] = self._history_fingerprint(merged)
             except Exception:
                 self._store_runtime_cache(symbol, merged)
                 raise
@@ -1813,7 +2110,17 @@ class LiveTrader:
                 self._reported_warmup_reasons.pop(symbol, None)
                 continue
             usable_periods = len(frame) if frame is not None else 0
-            if self._reported_warmup_reasons.get(symbol) == reason:
+            previous_reason = self._reported_warmup_reasons.get(symbol)
+            if previous_reason == reason:
+                continue
+            if (
+                previous_reason == "warmup_backfill_exhausted"
+                and not exhausted
+                and gap_reason is not None
+            ):
+                # A successful re-probe is progress, not a new outward edge.
+                # Keep the existing incident open until readiness or another
+                # terminal plateau rather than alternating alert reasons.
                 continue
             self._reported_warmup_reasons[symbol] = reason
             requested_periods = self._warmup_requested_periods.get(symbol, 0)
@@ -3181,9 +3488,7 @@ class LiveTrader:
         if self._interval_delta.days >= 1:
             label = pd.Timestamp(ts).date().isoformat()
         else:
-            calendar_id = self._instruments[symbol].calendar_id
-            if calendar_id is None:  # guarded during construction
-                raise RuntimeError(f"missing calendar_id for {symbol}")
+            calendar_id = self._market_data_subscriptions[symbol].calendar_id
             label = session_label(ts, calendar_id).isoformat()
         if self._adv_session_labels.get(symbol) != label:
             self._adv_session_labels[symbol] = label
@@ -3245,11 +3550,9 @@ class LiveTrader:
             self._last_prices[symbol] = close
             self._reset_adv_session(symbol, ts)
             if self._adv_lookback_sessions is not None:
-                calendar_id = self._instruments[symbol].calendar_id
+                calendar_id = self._market_data_subscriptions[symbol].calendar_id
                 labels = None
                 if self._interval_delta.days < 1:
-                    if calendar_id is None:  # guarded during construction
-                        raise RuntimeError(f"missing calendar_id for {symbol}")
                     labels = session_labels(
                         pd.DatetimeIndex(history.index),
                         calendar_id,
