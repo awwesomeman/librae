@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import logging
 from calendar import monthrange
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from math import isclose, isfinite
+from threading import Lock, RLock
 
 import pandas as pd
 
@@ -82,6 +84,8 @@ _BAR_SIZE_MAP = {
     "1M": "1 month",
 }
 _NATIVE_CALENDAR_TIMEFRAMES = frozenset({"1d", "1w", "1M"})
+_MARKET_RULE_CACHE_MAXSIZE = 128
+_MarketRuleLadder = tuple[tuple[float, float], ...]
 
 
 def _utc_today() -> date:
@@ -245,6 +249,11 @@ class IBKRAdapter:
 
     The adapter connects during ``__init__``. Call ``close()`` or use as a
     context manager to disconnect.
+
+    Order preparation and submission are a single-threaded adapter contract:
+    call them on the thread/event loop that owns ``ib_async``. The market-rule
+    single-flight lock only coalesces cache misses; it does not marshal SDK
+    calls between threads or event loops.
     """
 
     market_data_route = "ibkr"
@@ -263,6 +272,12 @@ class IBKRAdapter:
         self._contract_details_cache: dict[
             tuple[str, str, str | None, str, str | None], object
         ] = {}
+        self._market_rule_cache: OrderedDict[int, _MarketRuleLadder] = OrderedDict()
+        self._connection_state_lock = RLock()
+        self._market_rule_singleflight_lock = Lock()
+        self._connection_generation = 0
+        self._ib.connectedEvent += self._on_connection_boundary
+        self._ib.disconnectedEvent += self._on_connection_boundary
         self._ib.connect(
             creds.host,
             int(creds.port),
@@ -597,24 +612,158 @@ class IBKRAdapter:
                 "to enable order placement."
             )
 
-    @classmethod
-    def _normalize_limit_price(cls, signal: dict, details: object) -> float:
+    @staticmethod
+    def _routing_exchange(signal: dict) -> str:
+        if signal["security_type"] == "STK":
+            return "SMART"
+        exchange = str(signal.get("exchange") or "").strip().upper()
+        if not exchange:
+            raise ValueError(f"{signal['symbol']} has no IBKR order-routing exchange")
+        return exchange
+
+    @staticmethod
+    def _market_rule_id(details: object, routing_exchange: str, symbol: str) -> int | None:
         market_rule_ids = str(getattr(details, "marketRuleIds", "") or "").strip()
-        if market_rule_ids:
+        if not market_rule_ids:
+            return None
+        valid_exchanges = str(getattr(details, "validExchanges", "") or "").strip()
+        if not valid_exchanges:
+            raise ValueError(f"{symbol} has IBKR marketRuleIds without validExchanges")
+        exchanges = [item.strip().upper() for item in valid_exchanges.split(",")]
+        rule_ids = [item.strip() for item in market_rule_ids.split(",")]
+        if len(exchanges) != len(rule_ids) or any(not item for item in exchanges):
+            raise ValueError(f"{symbol} has malformed IBKR exchange/market-rule mapping")
+        matching = [
+            index for index, exchange in enumerate(exchanges) if exchange == routing_exchange
+        ]
+        if not matching:
             raise ValueError(
-                f"{signal['symbol']} requires an IBKR market-rule ladder; "
-                "ContractDetails.minTick alone is not authoritative"
+                f"{symbol} has no IBKR market rule for routing exchange {routing_exchange}"
             )
-        tick_size = cls._positive_float(getattr(details, "minTick", None))
+        if len(matching) != 1:
+            raise ValueError(
+                f"{symbol} has ambiguous IBKR market rules for routing exchange {routing_exchange}"
+            )
+        raw_rule_id = rule_ids[matching[0]]
+        if not raw_rule_id.isdigit() or int(raw_rule_id) <= 0:
+            raise ValueError(
+                f"{symbol} has invalid IBKR market rule for routing exchange {routing_exchange}"
+            )
+        return int(raw_rule_id)
+
+    @classmethod
+    def _parse_market_rule_ladder(cls, raw_ladder: object, rule_id: int) -> _MarketRuleLadder:
+        if raw_ladder is None:
+            raise ValueError(f"IBKR market rule {rule_id} request timed out")
+        try:
+            increments = list(raw_ladder)  # type: ignore[arg-type]
+        except TypeError as exc:
+            raise ValueError(f"IBKR market rule {rule_id} returned a malformed ladder") from exc
+        if not increments:
+            raise ValueError(f"IBKR market rule {rule_id} returned no price increments")
+
+        ladder: list[tuple[float, float]] = []
+        for item in increments:
+            low_edge = cls._optional_float(getattr(item, "lowEdge", None))
+            increment = cls._positive_float(getattr(item, "increment", None))
+            if low_edge is None or low_edge < 0 or increment is None:
+                raise ValueError(f"IBKR market rule {rule_id} returned a malformed ladder")
+            if ladder and low_edge <= ladder[-1][0]:
+                raise ValueError(f"IBKR market rule {rule_id} returned a malformed ladder")
+            ladder.append((low_edge, increment))
+        if ladder[0][0] != 0:
+            raise ValueError(f"IBKR market rule {rule_id} does not cover positive prices")
+        return tuple(ladder)
+
+    def _market_rule_ladder(
+        self,
+        rule_id: int,
+        *,
+        expected_generation: int,
+    ) -> _MarketRuleLadder:
+        with self._market_rule_singleflight_lock:
+            with self._connection_state_lock:
+                if self._connection_generation != expected_generation:
+                    raise ValueError("IBKR connection changed while resolving the market rule")
+                cached = self._market_rule_cache.get(rule_id)
+                if cached is not None:
+                    self._market_rule_cache.move_to_end(rule_id)
+                    return cached
+
+            ladder = self._parse_market_rule_ladder(self._ib.reqMarketRule(rule_id), rule_id)
+
+            with self._connection_state_lock:
+                if self._connection_generation != expected_generation:
+                    raise ValueError("IBKR market-rule response is stale after a connection change")
+                self._market_rule_cache[rule_id] = ladder
+                self._market_rule_cache.move_to_end(rule_id)
+                while len(self._market_rule_cache) > _MARKET_RULE_CACHE_MAXSIZE:
+                    self._market_rule_cache.popitem(last=False)
+                return ladder
+
+    @staticmethod
+    def _increment_at(price: float, ladder: _MarketRuleLadder) -> float:
+        for low_edge, increment in reversed(ladder):
+            if price >= low_edge:
+                return increment
+        raise ValueError("IBKR market-rule ladder does not cover the submitted price")
+
+    @classmethod
+    def _normalize_to_market_rule(
+        cls,
+        price: float,
+        side: str,
+        ladder: _MarketRuleLadder,
+    ) -> float:
+        normalized = price
+        for _ in range(len(ladder) + 2):
+            increment = cls._increment_at(normalized, ladder)
+            next_price = passive_price(normalized, increment, side)
+            if not isfinite(next_price) or next_price <= 0:
+                raise ValueError("IBKR market-rule normalization produced a non-positive price")
+            if next_price == normalized:
+                return normalized
+            normalized = next_price
+        raise ValueError("IBKR market-rule normalization did not reach a stable price band")
+
+    def _normalize_limit_price(
+        self,
+        signal: dict,
+        details: object,
+        *,
+        expected_generation: int,
+    ) -> float:
+        routing_exchange = self._routing_exchange(signal)
+        rule_id = self._market_rule_id(details, routing_exchange, signal["symbol"])
+        if rule_id is not None:
+            ladder = self._market_rule_ladder(
+                rule_id,
+                expected_generation=expected_generation,
+            )
+            normalized = self._normalize_to_market_rule(
+                float(signal["price"]), signal["side"], ladder
+            )
+            with self._connection_state_lock:
+                if self._connection_generation != expected_generation:
+                    raise ValueError("IBKR market-rule result is stale after a connection change")
+            return normalized
+
+        tick_size = self._positive_float(getattr(details, "minTick", None))
         if tick_size is None:
             raise ValueError(f"{signal['symbol']} has no positive IBKR minTick")
-        return passive_price(float(signal["price"]), tick_size, signal["side"])
+        normalized = passive_price(float(signal["price"]), tick_size, signal["side"])
+        with self._connection_state_lock:
+            if self._connection_generation != expected_generation:
+                raise ValueError("IBKR contract details are stale after a connection change")
+        return normalized
 
     def normalize_limit_price(self, signal: dict) -> float:
-        """Normalize only contracts whose details declare no price-band ladder."""
+        """Normalize a limit price using the routed contract's IBKR price grid."""
         validate_order_signal(signal)
         if signal.get("order_type") != "limit":
             raise ValueError("normalize_limit_price requires a limit order")
+        with self._connection_state_lock:
+            generation = self._connection_generation
         details = self._contract_details(
             signal["symbol"],
             security_type=signal["security_type"],
@@ -622,12 +771,19 @@ class IBKRAdapter:
             currency=signal["currency"],
             continuous_alias=signal.get("continuous_alias", False),
             contract_month=signal.get("contract_month"),
+            expected_generation=generation,
         )
-        return self._normalize_limit_price(signal, details)
+        return self._normalize_limit_price(
+            signal,
+            details,
+            expected_generation=generation,
+        )
 
     def prepare_order(self, signal: dict) -> dict:
         """Apply IBKR ContractDetails size and tick constraints."""
         validate_order_signal(signal)
+        with self._connection_state_lock:
+            generation = self._connection_generation
         details = self._contract_details(
             signal["symbol"],
             security_type=signal["security_type"],
@@ -635,6 +791,7 @@ class IBKRAdapter:
             currency=signal["currency"],
             continuous_alias=signal.get("continuous_alias", False),
             contract_month=signal.get("contract_month"),
+            expected_generation=generation,
         )
         step = (
             self._positive_float(getattr(details, "sizeIncrement", None))
@@ -657,7 +814,11 @@ class IBKRAdapter:
                     context=f"{signal['symbol']} limit price",
                 )
             else:
-                prepared["price"] = self._normalize_limit_price(signal, details)
+                prepared["price"] = self._normalize_limit_price(
+                    signal,
+                    details,
+                    expected_generation=generation,
+                )
         return prepared
 
     def place_order(self, signal: dict) -> dict:
@@ -910,7 +1071,13 @@ class IBKRAdapter:
 
     def close(self) -> None:
         """Disconnect from TWS/IB Gateway."""
+        with self._connection_state_lock:
+            generation = self._connection_generation
         self._ib.disconnect()
+        with self._connection_state_lock:
+            unchanged = self._connection_generation == generation
+        if unchanged:
+            self._on_connection_boundary()
         logger.info("IBKR disconnected")
 
     def __enter__(self):
@@ -923,6 +1090,14 @@ class IBKRAdapter:
     # Internal
     # ------------------------------------------------------------------
 
+    def _on_connection_boundary(self, *_: object) -> None:
+        """Invalidate connection-scoped contracts and market-rule ladders."""
+        with self._connection_state_lock:
+            self._connection_generation += 1
+            self._market_rule_cache.clear()
+            self._contract_cache.clear()
+            self._contract_details_cache.clear()
+
     def _resolve_contract(
         self,
         symbol: str,
@@ -932,6 +1107,7 @@ class IBKRAdapter:
         currency: str = "USD",
         continuous_alias: bool = False,
         contract_month: str | None = None,
+        expected_generation: int | None = None,
     ):
         """Resolve a ticker/futures-root string to a qualified IBKR contract.
         Both qualifyContracts (stocks) and reqContractDetails (futures) hit
@@ -970,17 +1146,20 @@ class IBKRAdapter:
             raise ValueError("continuous_alias and contract_month are valid only for IBKR futures")
 
         cache_key = (symbol, security_type, exchange, currency, contract_month)
-        if cache_key in self._contract_cache:
-            cached = self._contract_cache[cache_key]
-            if security_type != "FUT" or _future_contract_is_current(cached):
-                return cached
-            del self._contract_cache[cache_key]
-            detail_cache = getattr(self, "_contract_details_cache", None)
-            if detail_cache is not None:
-                detail_cache.pop(cache_key, None)
+        with self._connection_state_lock:
+            generation = self._connection_generation
+            if expected_generation is not None and generation != expected_generation:
+                raise ValueError("IBKR connection changed before resolving the contract")
+            cached = self._contract_cache.get(cache_key)
+            if cached is not None:
+                if security_type != "FUT" or _future_contract_is_current(cached):
+                    return cached
+                self._contract_cache.pop(cache_key, None)
+                self._contract_details_cache.pop(cache_key, None)
 
         ib_async = _require_ib_async()
 
+        selected_detail = None
         if security_type == "STK":
             contract = ib_async.Stock(symbol, "SMART", currency)
             qualified = self._ib.qualifyContracts(contract)
@@ -1032,13 +1211,15 @@ class IBKRAdapter:
                 )
             selected = candidates[0][1]
             resolved = selected.contract
-            detail_cache = getattr(self, "_contract_details_cache", None)
-            if detail_cache is None:
-                detail_cache = self._contract_details_cache = {}
-            detail_cache[cache_key] = selected
+            selected_detail = selected
 
-        self._contract_cache[cache_key] = resolved
-        return resolved
+        with self._connection_state_lock:
+            if self._connection_generation != generation:
+                raise ValueError("IBKR contract response is stale after a connection change")
+            self._contract_cache[cache_key] = resolved
+            if selected_detail is not None:
+                self._contract_details_cache[cache_key] = selected_detail
+            return resolved
 
     def _contract_details(
         self,
@@ -1049,11 +1230,13 @@ class IBKRAdapter:
         currency: str,
         continuous_alias: bool = False,
         contract_month: str | None = None,
+        expected_generation: int | None = None,
     ):
         cache_key = (symbol, security_type, exchange, currency, contract_month)
-        cache = getattr(self, "_contract_details_cache", None)
-        if cache is None:
-            cache = self._contract_details_cache = {}
+        with self._connection_state_lock:
+            generation = self._connection_generation
+            if expected_generation is not None and generation != expected_generation:
+                raise ValueError("IBKR connection changed before resolving contract details")
 
         contract = self._resolve_contract(
             symbol,
@@ -1062,9 +1245,14 @@ class IBKRAdapter:
             currency=currency,
             continuous_alias=continuous_alias,
             contract_month=contract_month,
+            expected_generation=generation,
         )
-        if cache_key in cache:
-            return cache[cache_key]
+        with self._connection_state_lock:
+            if self._connection_generation != generation:
+                raise ValueError("IBKR connection changed while resolving contract details")
+            cached = self._contract_details_cache.get(cache_key)
+            if cached is not None:
+                return cached
         details = list(self._ib.reqContractDetails(contract))
         if not details:
             raise ValueError(f"IBKR contract details unavailable for {symbol}")
@@ -1077,8 +1265,13 @@ class IBKRAdapter:
             ),
             details[0],
         )
-        cache[cache_key] = selected
-        return selected
+        with self._connection_state_lock:
+            if self._connection_generation != generation:
+                raise ValueError(
+                    "IBKR contract-details response is stale after a connection change"
+                )
+            self._contract_details_cache[cache_key] = selected
+            return selected
 
     @staticmethod
     def _positive_float(value: object) -> float | None:

@@ -54,11 +54,16 @@ class RunMetadata:
     mode: RunMode = "backtest"
     session_mode: MarketDataSessionMode = "extended"
     primary_subscriptions: tuple[MarketDataSubscription, ...] = ()
+    auxiliary_subscriptions: tuple[MarketDataSubscription, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", tuple(self.symbols))
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
         object.__setattr__(self, "primary_subscriptions", tuple(self.primary_subscriptions))
+        raw_auxiliary = tuple(self.auxiliary_subscriptions)
+        if any(not isinstance(item, MarketDataSubscription) for item in raw_auxiliary):
+            raise TypeError("auxiliary_subscriptions must contain MarketDataSubscription values")
+        object.__setattr__(self, "auxiliary_subscriptions", tuple(sorted(raw_auxiliary)))
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"invalid run mode: {self.mode!r}")
         if self.session_mode not in ("regular", "extended"):
@@ -76,6 +81,14 @@ class RunMetadata:
                 raise ValueError("primary subscription timeframe must match run timeframe")
             if any(item.session_mode != self.session_mode for item in subscriptions):
                 raise ValueError("primary subscription session_mode must match run session_mode")
+        auxiliary = self.auxiliary_subscriptions
+        if len(auxiliary) != len(set(auxiliary)):
+            raise ValueError("auxiliary_subscriptions must not contain duplicate identities")
+        if auxiliary and not subscriptions:
+            raise ValueError("auxiliary_subscriptions require exact primary_subscriptions")
+        overlap = set(subscriptions) & set(auxiliary)
+        if overlap:
+            raise ValueError("primary and auxiliary subscriptions must be distinct")
 
 
 @dataclass(frozen=True)
@@ -285,7 +298,10 @@ class BacktestOutput:
                 return [_convert(item) for item in obj]
             return obj
 
-        return _convert(asdict(self))
+        payload = _convert(asdict(self))
+        if not self.run_metadata.auxiliary_subscriptions:
+            payload["run_metadata"].pop("auxiliary_subscriptions", None)
+        return payload
 
     def validate(self) -> None:
         """Raise ValueError if required fields are empty/missing."""
