@@ -18,7 +18,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae.core.cost_model import CostModel
-from librae.core.executor import REASON_DRAWDOWN_BREACH, PositionEvent, execute_order_intents
+from librae.core.executor import (
+    REASON_DRAWDOWN_BREACH,
+    PositionEvent,
+    execute_order_intents,
+    validate_strategy_decision,
+)
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy, RunConfig
 from librae.core.strategy import (
     Context,
@@ -2234,6 +2239,347 @@ class TestLiveExecutionLifecycle:
         assert second["side"] == "sell"
         assert second["quantity"] == pytest.approx(250.0)
 
+    def test_delayed_target_waits_for_fresh_prices_before_next_leg(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = lambda signal: {
+            "id": f"order-{adapter.place_order.call_count}",
+            "status": "accepted",
+            "amount": signal["quantity"],
+            "filled": 0.0,
+        }
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["AAA", "BBB"]),
+        )
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
+
+        complete = runner._execute_live_decision(
+            PortfolioWeights(weights={"AAA": 0.5, "BBB": 0.5}),
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            t0,
+        )
+
+        assert complete is False
+        first = adapter.place_order.call_args_list[0].args[0]
+        assert (first["canonical_symbol"], first["side"], first["quantity"]) == (
+            "AAA",
+            "buy",
+            pytest.approx(500.0),
+        )
+        adapter.get_order.return_value = _broker_report(
+            order_id="order-1",
+            quantity=500.0,
+            average=100.0,
+            executed_at=t1,
+        )
+
+        runner._advance_live_orders()
+
+        assert runner._active_orders == []
+        assert runner._live_rebalance is not None
+        assert adapter.place_order.call_count == 1
+
+        runner._process_cycle(
+            {
+                "AAA": _make_ohlcv_at([t0, t1], price=200.0),
+                "BBB": _make_ohlcv_at([t0, t1], price=50.0),
+            },
+            t1,
+        )
+
+        second = adapter.place_order.call_args_list[1].args[0]
+        assert (second["canonical_symbol"], second["side"], second["quantity"]) == (
+            "AAA",
+            "sell",
+            pytest.approx(125.0),
+        )
+        assert runner._active_orders[0].request.submitted_at == t1
+
+    def test_live_target_uses_fresh_per_bar_volume_budget(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=f"order-{adapter.place_order.call_count}",
+            quantity=signal["quantity"],
+            average=100.0,
+        )
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=0.1,
+                    max_rebalance_delay_bars=2,
+                    warmup_periods=5,
+                ),
+            ),
+        )
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        complete = runner._execute_live_decision(
+            PortfolioWeights(weights={"BTCUSDT": 0.5}),
+            {"BTCUSDT": {"close": 100.0, "volume": 10.0}},
+            t0,
+        )
+
+        assert complete is False
+        assert adapter.place_order.call_args_list[0].args[0]["quantity"] == pytest.approx(1.0)
+        assert runner._live_rebalance is not None
+        assert runner._live_rebalance.delay_bars == 1
+
+        runner._continue_live_rebalance(
+            {"BTCUSDT": {"close": 100.0, "volume": 20.0}},
+            t1,
+        )
+
+        assert adapter.place_order.call_args_list[1].args[0]["quantity"] == pytest.approx(2.0)
+        assert runner._live_rebalance is not None
+        assert runner._live_rebalance.execution_bar_ts == t1
+        assert runner._live_rebalance.filled_bar_quantity_by_symbol == {"BTCUSDT": 2.0}
+
+    def test_unavailable_live_target_is_atomic_and_bounded(self):
+        adapter = _mock_order_adapter()
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    max_rebalance_delay_bars=1,
+                    warmup_periods=5,
+                ),
+            ),
+            on_runtime_event=runtime_events.append,
+        )
+        bars = {
+            "AAA": {
+                "close": 100.0,
+                "volume": 10_000.0,
+                "can_buy": True,
+                "can_sell": True,
+            },
+            "BBB": {
+                "close": 100.0,
+                "volume": 10_000.0,
+                "can_buy": False,
+                "can_sell": True,
+            },
+        }
+
+        complete = runner._execute_live_decision(
+            PortfolioWeights(weights={"AAA": 0.5, "BBB": 0.5}),
+            bars,
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        assert runner._halted is False
+        assert runner._live_rebalance is not None
+        adapter.place_order.assert_not_called()
+        assert runtime_events[-1].detail["reason"] == "rebalance_deferred"
+        assert runtime_events[-1].detail["symbols"] == ["BBB"]
+
+        runner._continue_live_rebalance(bars, TEST_CLOCK_NOW + timedelta(hours=1))
+
+        assert runner._halted is True
+        adapter.place_order.assert_not_called()
+
+    def test_live_target_missing_coherent_snapshot_remains_pending(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "aaa",
+            "status": "accepted",
+            "amount": 500.0,
+            "filled": 0.0,
+        }
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    max_rebalance_delay_bars=2,
+                    warmup_periods=5,
+                ),
+            ),
+        )
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
+        runner._execute_live_decision(
+            PortfolioWeights(weights={"AAA": 0.5, "BBB": 0.5}),
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            t0,
+        )
+        adapter.get_order.return_value = _broker_report(
+            order_id="aaa",
+            quantity=500.0,
+            average=100.0,
+        )
+        runner._advance_live_orders()
+
+        runner._continue_live_rebalance(
+            {"AAA": {"close": 110.0, "volume": 10_000.0}},
+            t0 + timedelta(hours=1),
+        )
+
+        assert runner._halted is False
+        assert runner._active_orders == []
+        assert runner._live_rebalance is not None
+        assert runner._live_rebalance.delay_bars == 1
+        assert adapter.place_order.call_count == 1
+
+    def test_live_target_replans_after_adv_session_reset(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = {
+            "id": "aaa",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                timeframe="D1",
+                symbols=["AAA"],
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    adv_lookback_sessions=1,
+                    max_adv_participation_rate=0.1,
+                    max_rebalance_delay_bars=2,
+                    warmup_periods=5,
+                ),
+            ),
+        )
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(days=1)
+        runner._last_prices = {"AAA": 100.0}
+        runner._adv_session_labels = {"AAA": t0.date().isoformat()}
+        runner._adv_filled_quantities = {"AAA": 1.0}
+
+        complete = runner._execute_live_decision(
+            PortfolioWeights(weights={"AAA": 0.5}),
+            {"AAA": {"close": 100.0, "volume": 10.0}},
+            t0,
+            lagged_adv_by_symbol={"AAA": 10.0},
+        )
+
+        assert complete is False
+        assert runner._live_rebalance is not None
+        assert runner._live_rebalance.delay_bars == 1
+        adapter.place_order.assert_not_called()
+
+        frame = pd.DataFrame(
+            {
+                "ts": pd.DatetimeIndex([t0, t1]),
+                "open": [100.0, 100.0],
+                "high": [101.0, 101.0],
+                "low": [99.0, 99.0],
+                "close": [100.0, 100.0],
+                "volume": [10.0, 20.0],
+            }
+        )
+        runner._process_cycle({"AAA": frame}, t1)
+
+        request = adapter.place_order.call_args.args[0]
+        assert request["quantity"] == pytest.approx(1.0)
+        assert runner._adv_session_labels == {"AAA": t1.date().isoformat()}
+        assert runner._adv_filled_quantities == {"AAA": 0.0}
+
+    def test_restored_live_target_waits_for_a_fresh_completed_bar(self):
+        store = MemoryLiveStateStore()
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = lambda signal: {
+            "id": f"order-{adapter.place_order.call_count}",
+            "status": "accepted",
+            "amount": signal["quantity"],
+            "filled": 0.0,
+        }
+        config = _test_cfg(
+            mode="live",
+            symbols=["AAA", "BBB"],
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                max_rebalance_delay_bars=2,
+                warmup_periods=5,
+            ),
+        )
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        first = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            state_store=store,
+            config=config,
+        )
+        first._last_prices = {"AAA": 100.0, "BBB": 100.0}
+        first._execute_live_decision(
+            PortfolioWeights(weights={"AAA": 0.5, "BBB": 0.5}),
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            t0,
+        )
+        adapter.get_order.return_value = _broker_report(
+            order_id="order-1",
+            quantity=500.0,
+            average=100.0,
+            executed_at=t1,
+        )
+        adapter.get_position.side_effect = lambda request: {
+            "symbol": request.venue_symbol,
+            "size": 500.0 if request.symbol == "AAA" else 0.0,
+            "avg_price": 100.0,
+        }
+        adapter.get_balance.return_value = {"total": 50_000.0}
+
+        restored = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            state_store=store,
+            config=config,
+        )
+        restored._initialize_run()
+
+        assert restored._halted is False
+        assert restored._active_orders == []
+        assert restored._live_rebalance is not None
+        assert adapter.place_order.call_count == 1
+
+        restored._process_cycle(
+            {
+                "AAA": _make_ohlcv_at([t0, t1]),
+                "BBB": _make_ohlcv_at([t0, t1]),
+            },
+            t1,
+        )
+
+        second = adapter.place_order.call_args_list[1].args[0]
+        assert (second["canonical_symbol"], second["side"], second["quantity"]) == (
+            "BBB",
+            "buy",
+            pytest.approx(500.0),
+        )
+        assert restored._active_orders[0].request.submitted_at == t1
+
     def test_live_group_leg_rejection_cancels_only_that_group(self):
         """No broker adapter offers a native combo order, so live submits each
         leg of a group serially. A rejected leg cancels that group's other
@@ -2554,6 +2900,131 @@ class TestLiveExecutionLifecycle:
         assert runner._halted is False
         assert set(runner._positions) == {"SOLO"}
         assert "no open position" in runtime_events[0].detail["message"]
+
+    def test_quantity_less_grouped_closes_match_validation_sim_and_live(self):
+        ts = datetime(2025, 1, 2, tzinfo=UTC)
+        bars = {symbol: {"close": 100.0, "volume": 10_000.0} for symbol in ("LONG", "SHORT")}
+        decision = [
+            OrderIntent(action="close", symbol="LONG", group_id="spread"),
+            OrderIntent(action="close", symbol="SHORT", group_id="spread"),
+        ]
+
+        def positions() -> dict[str, PositionState]:
+            return {
+                "LONG": PositionState(
+                    symbol="LONG",
+                    side="long",
+                    entry_price=100.0,
+                    quantity=2.0,
+                    entry_at=ts - timedelta(days=1),
+                    periods_held=1,
+                    entry_commission=0.0,
+                    entry_slippage=0.0,
+                    entry_tax=0.0,
+                    total_entry_cost=200.0,
+                    group_id="spread",
+                ),
+                "SHORT": PositionState(
+                    symbol="SHORT",
+                    side="short",
+                    entry_price=100.0,
+                    quantity=3.0,
+                    entry_at=ts - timedelta(days=1),
+                    periods_held=1,
+                    entry_commission=0.0,
+                    entry_slippage=0.0,
+                    entry_tax=0.0,
+                    total_entry_cost=300.0,
+                    group_id="spread",
+                ),
+            }
+
+        validate_strategy_decision(
+            decision,
+            {"LONG", "SHORT"},
+            primary_symbol="LONG",
+            bars=bars,
+            positions=positions(),
+        )
+        simulated_positions = positions()
+        simulated = execute_order_intents(
+            decision,
+            simulated_positions,
+            100_000.0,
+            ts,
+            get_price=lambda _symbol, _intent: 100.0,
+            get_cost_model=lambda _symbol: CostModel.zero(),
+            primary_symbol="LONG",
+            atomic_groups=True,
+        )
+
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=signal["canonical_symbol"],
+            quantity=signal["quantity"],
+            average=100.0,
+            executed_at=ts,
+        )
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["LONG", "SHORT"]),
+        )
+        runner._positions = positions()
+        runner._last_prices = {"LONG": 100.0, "SHORT": 100.0}
+
+        complete = runner._execute_live_decision(decision, bars, ts)
+
+        assert simulated_positions == {}
+        assert [event.fill_quantity for event in simulated.events] == [2.0, 3.0]
+        assert complete is True
+        assert runner._halted is False
+        assert runner._positions == {}
+        assert [call.args[0]["quantity"] for call in adapter.place_order.call_args_list] == [
+            2.0,
+            3.0,
+        ]
+
+    @pytest.mark.parametrize(
+        ("action", "blocked_field", "expected_side"),
+        [("long", "can_buy", "buy"), ("short", "can_sell", "sell")],
+    )
+    def test_unavailable_ungrouped_side_is_audited_and_skipped(
+        self,
+        action,
+        blocked_field,
+        expected_side,
+    ):
+        adapter = _mock_order_adapter()
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            on_runtime_event=runtime_events.append,
+        )
+        bar = {
+            "close": 100.0,
+            "volume": 10_000.0,
+            "can_buy": True,
+            "can_sell": True,
+        }
+        bar[blocked_field] = False
+
+        complete = runner._execute_live_decision(
+            [OrderIntent(action=action, symbol="BTCUSDT", quantity=1.0)],
+            {"BTCUSDT": bar},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        adapter.place_order.assert_not_called()
+        assert runtime_events[-1].event_type == "decision_skipped"
+        assert runtime_events[-1].symbol == "BTCUSDT"
+        assert runtime_events[-1].detail == {
+            "reason": "side_not_tradable",
+            "side": expected_side,
+        }
 
     def test_live_group_checkpoints_all_siblings_and_resumes_after_restart(self):
         store = MemoryLiveStateStore()

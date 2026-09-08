@@ -81,6 +81,22 @@ class ExecutionPriceUnavailableError(ExecutionUnavailableError):
         super().__init__(symbols, f"rebalance requires a valid execution price for {joined}")
 
 
+class ExecutionSideUnavailableError(ExecutionUnavailableError):
+    """A deterministic batch requires a market side unavailable on this bar."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        joined = ", ".join(sorted(symbols))
+        super().__init__(symbols, f"rebalance order side is not tradable for {joined}")
+
+
+class ExecutionLiquidityUnavailableError(ExecutionUnavailableError):
+    """A deterministic batch exhausted this completed bar's capacity."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        joined = ", ".join(sorted(symbols))
+        super().__init__(symbols, f"rebalance has no remaining liquidity for {joined}")
+
+
 class AmbiguousBarOrderingError(ExecutionUnavailableError):
     """This bar cannot order a triggered protection against a non-open fill."""
 
@@ -106,7 +122,7 @@ def _intent_order_side(
     return None
 
 
-def _order_side_is_tradable(
+def order_side_is_tradable(
     bar: Mapping[str, object],
     order_side: Literal["buy", "sell"],
 ) -> bool:
@@ -1028,7 +1044,7 @@ def check_stop_targets(
             continue
         price, reason = hit
         close_side: Literal["buy", "sell"] = "sell" if pos.side == "long" else "buy"
-        if not _order_side_is_tradable(bar, close_side):
+        if not order_side_is_tradable(bar, close_side):
             if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
                 pos.pending_market_exit_reason = reason
             runtime_events.append(
@@ -1155,7 +1171,7 @@ def liquidate_all(
             causes[sym] = "no_bar"
             continue
         close_side: Literal["buy", "sell"] = "sell" if pos.side == "long" else "buy"
-        if not _order_side_is_tradable(bar, close_side):
+        if not order_side_is_tradable(bar, close_side):
             logger.info(
                 "Forced exit for %s cannot fill because the order side is not tradable",
                 sym,
@@ -1257,7 +1273,7 @@ def resolve_fill_price(
     if order_side is None:
         logger.warning("Order rejected: cannot infer order side for %s", intent.action)
         return None
-    if not _order_side_is_tradable(bar, order_side):
+    if not order_side_is_tradable(bar, order_side):
         logger.info(
             "%s %s cannot fill because the order side is not tradable",
             order_side,

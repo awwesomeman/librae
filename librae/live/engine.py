@@ -25,7 +25,11 @@ import pandas as pd
 from librae.core import EPSILON
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
+    ExecutionLiquidityUnavailableError,
+    ExecutionPriceUnavailableError,
     ExecutionResult,
+    ExecutionSideUnavailableError,
+    ExecutionUnavailableError,
     RuntimeEvent,
     apply_execution_fill,
     calc_equity,
@@ -35,6 +39,7 @@ from librae.core.executor import (
     execute_pending_decision_and_stops,
     execute_portfolio_weights,
     merge_pending_decisions,
+    order_side_is_tradable,
     partition_pending_decision,
     queue_market_exit_all,
     validate_exposure_transition,
@@ -46,7 +51,7 @@ from librae.core.financing import (
     calculate_funding_cash_flows,
 )
 from librae.core.liquidity import calculate_lagged_adv
-from librae.core.market_data import CAN_BUY_COLUMN, CAN_SELL_COLUMN, validate_ohlcv_values
+from librae.core.market_data import validate_ohlcv_values
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -366,6 +371,7 @@ class LiveTrader:
         self._market_data_workers = config.runtime.market_data_workers
         self._clock = clock or (lambda: datetime.now(UTC))
         self._live_order_timeout_seconds = config.execution.live_order_timeout_seconds
+        self._max_rebalance_delay_bars = config.execution.max_rebalance_delay_bars
 
         # --- Build per-symbol cost models and instrument routes ---
         if isinstance(cost_model, Mapping):
@@ -1103,9 +1109,6 @@ class LiveTrader:
         self._reconcile_cash()
         if not self._executor.simulation:
             self._last_reconciliation_at = self._utc_now()
-            if self._live_rebalance is not None and not self._active_orders and not self._halted:
-                self._queue_next_live_rebalance_order()
-                self._advance_live_orders()
 
     def _release_lease(self) -> None:
         if self._lease_acquired:
@@ -1554,9 +1557,27 @@ class LiveTrader:
         }
         exposure_prices = dict(self._last_prices)
         exposure_prices.update(prices)
+        unavailable_side_symbols: set[str] = set()
 
-        def get_price(symbol: str, _action: OrderIntent) -> float | None:
-            return prices.get(symbol)
+        def get_price(symbol: str, action: OrderIntent) -> float | None:
+            price = prices.get(symbol)
+            if price is None:
+                return None
+            if action.action == "long":
+                order_side: Literal["buy", "sell"] | None = "buy"
+            elif action.action == "short":
+                order_side = "sell"
+            else:
+                position = staged_positions.get(symbol)
+                order_side = (
+                    None if position is None else "sell" if position.side == "long" else "buy"
+                )
+            if order_side is not None and not order_side_is_tradable(
+                bars.get(symbol, {}), order_side
+            ):
+                unavailable_side_symbols.add(symbol)
+                return None
+            return price
 
         def get_volume(symbol: str) -> float | None:
             volume = bars.get(symbol, {}).get("volume")
@@ -1654,23 +1675,39 @@ class LiveTrader:
             return prepared
 
         if isinstance(intent, PortfolioWeights):
-            result = execute_portfolio_weights(
-                intent,
-                staged_positions,
-                self._cash,
-                ts,
-                get_price=get_price,
-                get_cost_model=self._get_cost_model,
-                primary_symbol=primary_symbol,
-                max_position_notional=max_position_notional,
-                max_order_notional=max_order_notional,
-                max_bar_volume_participation_rate=volume_limit,
-                max_adv_participation_rate=adv_limit,
-                get_volume=get_volume,
-                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
-                used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
-                used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
+            try:
+                result = execute_portfolio_weights(
+                    intent,
+                    staged_positions,
+                    self._cash,
+                    ts,
+                    get_price=get_price,
+                    get_reference_price=lambda symbol: prices.get(symbol),
+                    get_cost_model=self._get_cost_model,
+                    primary_symbol=primary_symbol,
+                    max_position_notional=max_position_notional,
+                    max_order_notional=max_order_notional,
+                    max_bar_volume_participation_rate=volume_limit,
+                    max_adv_participation_rate=adv_limit,
+                    get_volume=get_volume,
+                    get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
+                    used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
+                    used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
+                )
+            except ExecutionPriceUnavailableError as exc:
+                if unavailable_side_symbols:
+                    raise ExecutionSideUnavailableError(sorted(unavailable_side_symbols)) from exc
+                raise
+            temporarily_blocked = sorted(
+                {
+                    event.symbol
+                    for event in result.runtime_events
+                    if event.symbol is not None
+                    and event.detail.get("reason") in ("volume_capped", "volume_unavailable")
+                }
             )
+            if not result.events and temporarily_blocked:
+                raise ExecutionLiquidityUnavailableError(temporarily_blocked)
             if self._on_runtime_event:
                 for runtime_event in result.runtime_events:
                     self._on_runtime_event(runtime_event)
@@ -1809,8 +1846,10 @@ class LiveTrader:
                         if not grouped:
                             continue
                         raise ValueError(f"{symbol} has no positive live reference price")
-                    if grouped and action.quantity is None:
-                        raise ValueError(f"{symbol} grouped intent requires an explicit quantity")
+                    if grouped and action.action != "close" and action.quantity is None:
+                        raise ValueError(
+                            f"{symbol} grouped entry intent requires an explicit quantity"
+                        )
 
                     if action.action == "long":
                         order_side = "buy"
@@ -1823,15 +1862,37 @@ class LiveTrader:
                                 continue
                             raise ValueError(f"{symbol} close intent has no open position")
                         order_side = "sell" if position.side == "long" else "buy"
-                    tradability_field = CAN_BUY_COLUMN if order_side == "buy" else CAN_SELL_COLUMN
-                    if grouped and not bool(bars.get(symbol, {}).get(tradability_field, True)):
-                        raise ValueError(
-                            f"{symbol} {order_side} side is not tradable on the decision bar"
-                        )
+                    if not order_side_is_tradable(bars.get(symbol, {}), order_side):
+                        if grouped:
+                            raise ValueError(
+                                f"{symbol} {order_side} side is not tradable on the decision bar"
+                            )
+                        if self._on_runtime_event:
+                            self._on_runtime_event(
+                                RuntimeEvent(
+                                    ts=ts,
+                                    event_type="decision_skipped",
+                                    symbol=symbol,
+                                    detail={
+                                        "reason": "side_not_tradable",
+                                        "side": order_side,
+                                    },
+                                )
+                            )
+                        continue
 
                     order_type = "limit" if action.limit_price is not None else "market"
                     limit_price = action.limit_price
-                    planning_action = replace(action, limit_price=None)
+                    expected_quantity = (
+                        unit_positions[symbol].quantity
+                        if grouped and action.action == "close" and action.quantity is None
+                        else action.quantity
+                    )
+                    planning_action = replace(
+                        action,
+                        quantity=expected_quantity,
+                        limit_price=None,
+                    )
                     positions_before_action = deepcopy(unit_positions)
                     cash_before_action = unit_cash
                     result = execute_order_intents(
@@ -1867,18 +1928,15 @@ class LiveTrader:
                     if not result.events:
                         continue
                     event = result.events[0]
-                    if grouped and (
-                        action.quantity is None
-                        or not isclose(
-                            event.fill_quantity,
-                            action.quantity,
-                            rel_tol=0.0,
-                            abs_tol=EPSILON,
-                        )
+                    if grouped and not isclose(
+                        event.fill_quantity,
+                        expected_quantity,
+                        rel_tol=0.0,
+                        abs_tol=EPSILON,
                     ):
                         raise ValueError(
                             f"{symbol} planned quantity {event.fill_quantity:.6f} does not "
-                            f"fully satisfy requested quantity {action.quantity:.6f}"
+                            f"fully satisfy requested quantity {expected_quantity:.6f}"
                         )
 
                     unit_cash += result.cash_delta
@@ -1970,10 +2028,11 @@ class LiveTrader:
                 decided_at=ts,
             )
             self._persist_state()
-            if not self._queue_next_live_rebalance_order():
-                return not self._halted
-            self._advance_live_orders()
-            return self._live_rebalance is None and not self._active_orders and not self._halted
+            return self._continue_live_rebalance(
+                bars,
+                ts,
+                lagged_adv_by_symbol=lagged_adv_by_symbol,
+            )
 
         try:
             requests = self._plan_live_orders(
@@ -1998,29 +2057,83 @@ class LiveTrader:
         self._advance_live_orders()
         return not self._active_orders and not self._halted
 
-    def _queue_next_live_rebalance_order(self) -> bool:
-        """Recalculate and queue one remaining target leg from confirmed state."""
+    def _queue_next_live_rebalance_order(
+        self,
+        bars: dict[str, dict[str, float]],
+        ts: datetime,
+        *,
+        lagged_adv_by_symbol: dict[str, float] | None = None,
+    ) -> bool:
+        """Recalculate one target leg from a coherent completed-bar snapshot."""
         batch = self._live_rebalance
         if batch is None:
             return False
         if self._active_orders:
             raise RuntimeError("cannot replan live targets while an order is active")
-        bars = {
-            symbol: {
-                "close": price,
-                "volume": batch.reference_volumes.get(symbol),
-            }
-            for symbol, price in batch.reference_prices.items()
+
+        if batch.execution_bar_ts != ts:
+            batch.filled_bar_quantity_by_symbol.clear()
+        batch.execution_bar_ts = ts
+        batch.reference_prices = {
+            symbol: float(bar["close"])
+            for symbol, bar in bars.items()
+            if bar.get("close") is not None and float(bar["close"]) > 0
+        }
+        batch.reference_volumes = {
+            symbol: (float(bar["volume"]) if bar.get("volume") is not None else None)
+            for symbol, bar in bars.items()
+        }
+        batch.lagged_adv_by_symbol = dict(lagged_adv_by_symbol or {})
+        required_symbols = set(self._positions) | {
+            symbol for symbol, weight in batch.targets.weights.items() if abs(weight) > EPSILON
         }
         try:
+            missing = sorted(required_symbols - set(batch.reference_prices))
+            if missing:
+                raise ExecutionPriceUnavailableError(missing)
             requests = self._plan_live_orders(
                 batch.targets,
                 bars,
-                batch.decided_at,
-                lagged_adv_by_symbol=batch.lagged_adv_by_symbol,
+                ts,
+                lagged_adv_by_symbol=lagged_adv_by_symbol,
                 used_bar_quantity_by_symbol=batch.filled_bar_quantity_by_symbol,
                 sequence_start=batch.next_sequence,
             )
+        except ExecutionUnavailableError as exc:
+            if batch.delay_bars >= self._max_rebalance_delay_bars:
+                self._halt_live(
+                    title="Live Rebalance Delay Exceeded",
+                    message=(
+                        "PortfolioWeights exceeded "
+                        f"max_rebalance_delay_bars={self._max_rebalance_delay_bars} "
+                        f"for {list(exc.symbols)} at {ts}: {exc}"
+                    ),
+                )
+                return False
+            batch.delay_bars += 1
+            logger.info(
+                "Deferring live PortfolioWeights at %s (%d/%d bars): %s",
+                ts,
+                batch.delay_bars,
+                self._max_rebalance_delay_bars,
+                exc,
+            )
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=ts,
+                        event_type="decision_skipped",
+                        detail={
+                            "reason": "rebalance_deferred",
+                            "symbols": list(exc.symbols),
+                            "delay_bars": batch.delay_bars,
+                            "max_rebalance_delay_bars": self._max_rebalance_delay_bars,
+                            "message": str(exc),
+                        },
+                    )
+                )
+            self._persist_state()
+            return False
         except ValueError as exc:
             self._halt_live(title="Live Rebalance Replan Rejected", message=str(exc))
             return False
@@ -2034,6 +2147,24 @@ class LiveTrader:
         self._active_orders.append(tracked)
         self._persist_state(tracked)
         return True
+
+    def _continue_live_rebalance(
+        self,
+        bars: dict[str, dict[str, float]],
+        ts: datetime,
+        *,
+        lagged_adv_by_symbol: dict[str, float] | None = None,
+    ) -> bool:
+        """Advance serial target legs using only one current market snapshot."""
+        while self._live_rebalance is not None and not self._active_orders and not self._halted:
+            if not self._queue_next_live_rebalance_order(
+                bars,
+                ts,
+                lagged_adv_by_symbol=lagged_adv_by_symbol,
+            ):
+                break
+            self._advance_live_orders()
+        return self._live_rebalance is None and not self._active_orders and not self._halted
 
     def _timed_order_call(
         self,
@@ -2164,12 +2295,6 @@ class LiveTrader:
                 return
             if report.status != "filled":
                 return
-            if (
-                not self._active_orders
-                and self._live_rebalance is not None
-                and self._queue_next_live_rebalance_order()
-            ):
-                continue
 
     def _live_order_timed_out(self, tracked: TrackedOrder) -> bool:
         """Return whether a placement-attempted order exceeded its local timeout."""
@@ -2466,14 +2591,32 @@ class LiveTrader:
                 if not pd.isna(lagged_adv):
                     lagged_adv_by_symbol[symbol] = float(lagged_adv)
 
+        if (
+            not self._executor.simulation
+            and self._live_rebalance is not None
+            and not self._active_orders
+            and not self._halted
+        ):
+            self._continue_live_rebalance(
+                raw_bars,
+                ts,
+                lagged_adv_by_symbol=lagged_adv_by_symbol,
+            )
+
         self._pending_decision = self._without_halted_account(self._pending_decision)
-        ready_decision, waiting_decision = partition_pending_decision(
-            self._pending_decision,
-            raw_bars,
-            self._positions,
-            primary_symbol=primary_symbol,
+        live_rebalance_blocks_decisions = not self._executor.simulation and (
+            self._live_rebalance is not None or bool(self._active_orders)
         )
-        self._pending_decision = waiting_decision
+        if live_rebalance_blocks_decisions:
+            ready_decision: StrategyDecision = []
+        else:
+            ready_decision, waiting_decision = partition_pending_decision(
+                self._pending_decision,
+                raw_bars,
+                self._positions,
+                primary_symbol=primary_symbol,
+            )
+            self._pending_decision = waiting_decision
         cycle_used_bar_quantity_by_symbol: dict[str, float] = {}
         if self._executor.simulation:
             exposure_prices = dict(self._last_prices)
@@ -2555,6 +2698,16 @@ class LiveTrader:
                 if symbol in raw_bars:
                     position.periods_held += 1
             self._persist_state()
+            return
+
+        if live_rebalance_blocks_decisions:
+            for symbol, position in self._positions.items():
+                if symbol in raw_bars:
+                    position.periods_held += 1
+            self._persist_state()
+            if self._on_ohlcv:
+                for symbol, bar in raw_bars.items():
+                    self._on_ohlcv(symbol, self._timeframe, bar, ts)
             return
 
         evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
