@@ -91,8 +91,11 @@ class TestLoadOhlcvSessionIdentity:
         load_ohlcv(run_id="run-1")
 
         sql = mock_read_sql.call_args.args[0]
-        assert "o.data_source = m.data_source" in sql
+        assert "jsonb_each_text(m.data_source_by_symbol)" in sql
+        assert "o.symbol = route.symbol" in sql
+        assert "o.data_source = route.data_source" in sql
         assert "o.session_mode = m.session_mode" in sql
+        assert "m.data_source = 'multi'" not in sql
 
 
 class TestRowToStrategyMetrics:

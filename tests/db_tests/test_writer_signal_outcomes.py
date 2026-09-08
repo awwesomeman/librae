@@ -42,6 +42,8 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         ["BTCUSDT"],
         "H1",
         "backtest",
+        data_source="run-default",
+        data_source_by_symbol={"BTCUSDT": "instrument-source"},
         session_mode="regular",
         params={"window": 20},
         execution_policy={
@@ -56,14 +58,15 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
     )
 
     values = cursor.execute.call_args.args[1]
-    assert values[5] == "regular"
-    assert json.loads(values[11]) == {"window": 20}
-    assert json.loads(values[12]) == {
+    assert json.loads(values[5]) == {"BTCUSDT": "instrument-source"}
+    assert values[6] == "regular"
+    assert json.loads(values[12]) == {"window": 20}
+    assert json.loads(values[13]) == {
         "default_fill_price": "open",
         "max_bar_volume_participation_rate": 0.1,
     }
-    assert json.loads(values[13]) == {"max_drawdown_rate": 0.2}
-    assert values[14:] == ("config-a", "revision-a", "cache-a")
+    assert json.loads(values[14]) == {"max_drawdown_rate": 0.2}
+    assert values[15:] == ("config-a", "revision-a", "cache-a")
 
 
 class TestBacktestCacheKeyClaim:
@@ -512,7 +515,18 @@ class TestPersistBacktest:
         counts = save_strategy_results(
             MagicMock(),
             df,
-            _test_cfg(symbols=["AAA", "BBB"]),
+            _test_cfg(
+                symbols=["AAA", "BBB"],
+                instrument_overrides={
+                    symbol: {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "data_adapter": "crypto",
+                    }
+                    for symbol in ("AAA", "BBB")
+                },
+                symbol_cost_overrides={symbol: {"multiplier": 1.0} for symbol in ("AAA", "BBB")},
+            ),
         )
 
         assert mock_write_ohlcv.call_count == 2
@@ -522,6 +536,31 @@ class TestPersistBacktest:
         }
         assert "BBB" in mock_write_bt.call_args.kwargs["signal_series_by_symbol"]
         assert counts["ohlcv"] == 20
+
+    @patch("librae.db.timescale_writer.write_ohlcv", return_value=3)
+    @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
+    def test_persists_per_instrument_data_source_identity(
+        self,
+        mock_write_bt,
+        mock_write_ohlcv,
+    ) -> None:
+        df, symbol = self._make_featured_df(n=3)
+        config = _test_cfg(
+            data_source="run-default",
+            instrument_overrides={
+                symbol: {
+                    "data_source": "ibkr",
+                    "data_adapter": "ibkr",
+                    "security_type": "STK",
+                }
+            },
+        )
+
+        save_strategy_results(MagicMock(), df, config)
+
+        assert mock_write_bt.call_args.kwargs["data_source_by_symbol"] == {symbol: "ibkr"}
+        assert mock_write_ohlcv.call_args.kwargs["data_source"] == "ibkr"
+        assert mock_write_ohlcv.call_args.kwargs["instrument_type"] == "spot"
 
 
 class TestSaveSignalResults:

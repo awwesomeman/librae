@@ -965,6 +965,8 @@ def test_database_schema_does_not_embed_migrations() -> None:
 def test_market_data_schema_keeps_session_datasets_distinct() -> None:
     schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
+    assert "data_source_by_symbol JSONB NOT NULL" in schema
+    assert "jsonb_typeof(data_source_by_symbol) = 'object'" in schema
     assert "(ts, symbol, timeframe, data_source, instrument_type, session_mode)" in schema
     assert "GROUP BY symbol, data_source, timeframe, instrument_type, session_mode" in schema
     assert "NULL::TEXT AS session_mode" in schema

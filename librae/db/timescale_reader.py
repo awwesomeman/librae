@@ -474,19 +474,22 @@ def load_ohlcv(
     elif run_id:
         sql = """
             WITH meta AS (
-                SELECT symbols, timeframe, data_source, session_mode, started_at, ended_at
+                SELECT timeframe, data_source_by_symbol, session_mode,
+                       started_at, ended_at
                 FROM backtest_runs WHERE run_id = %s
             )
             SELECT ts AS _time, o.symbol, open, high, low, close, volume
-            FROM ohlcv o, meta m
-            WHERE o.symbol IN (SELECT jsonb_array_elements_text(m.symbols))
-              AND o.timeframe = m.timeframe
-              AND (m.data_source IS NULL OR m.data_source = 'multi'
-                   OR o.data_source = m.data_source)
+            FROM meta m
+            JOIN LATERAL jsonb_each_text(m.data_source_by_symbol)
+              AS route(symbol, data_source) ON TRUE
+            JOIN ohlcv o
+              ON o.symbol = route.symbol
+             AND o.data_source = route.data_source
+            WHERE o.timeframe = m.timeframe
               AND o.session_mode = m.session_mode
               AND (m.started_at IS NULL OR ts >= m.started_at)
               AND (m.ended_at IS NULL OR ts <= m.ended_at)
-            ORDER BY ts
+            ORDER BY ts, o.symbol
         """
         params = [run_id]
     else:

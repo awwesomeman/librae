@@ -808,6 +808,30 @@ def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
     assert write_run.call_args.kwargs["config_hash"] == config.config_hash
 
 
+def test_register_run_persists_resolved_per_symbol_data_sources() -> None:
+    config = make_test_cfg(
+        data_source="run-default",
+        instrument_overrides={
+            "BTCUSDT": {
+                "data_source": "ibkr",
+                "data_adapter": "ibkr",
+                "security_type": "STK",
+            }
+        },
+    )
+    instruments = {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}
+    callbacks = _TimescaleCallbacks(config, instruments, None)
+
+    with (
+        patch("librae.db.timescale_writer.write_run_metadata", autospec=True) as write_run,
+        patch("librae.db.timescale_writer.write_strategy_performance", autospec=True),
+    ):
+        callbacks.register_run("run-1")
+
+    assert write_run.call_args.kwargs["data_source"] == "run-default"
+    assert write_run.call_args.kwargs["data_source_by_symbol"] == {"BTCUSDT": "ibkr"}
+
+
 def test_live_ohlcv_write_preserves_session_identity() -> None:
     config = make_test_cfg(mode="sim", session_mode="regular")
     callbacks = _TimescaleCallbacks(

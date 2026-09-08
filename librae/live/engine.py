@@ -296,6 +296,37 @@ def _bind_market_data_source(
     return base_fetcher
 
 
+def _validate_market_data_calendar_preconditions(
+    timeframe: str,
+    instruments: Mapping[str, SymbolInfo],
+) -> None:
+    """Fail before polling when a route cannot normalize its requested bars."""
+    from librae.core.utils import to_ccxt
+
+    if to_ccxt(timeframe) != "1d":
+        return
+    missing = sorted(
+        symbol
+        for symbol, instrument in instruments.items()
+        if instrument.data_adapter == "ibkr" and instrument.calendar_id is None
+    )
+    if missing:
+        raise ValueError(
+            "daily IBKR market data requires calendar_id for every IBKR-routed "
+            f"symbol; missing {missing}"
+        )
+    for symbol, instrument in instruments.items():
+        if instrument.data_adapter != "ibkr":
+            continue
+        try:
+            validate_calendar_id(instrument.calendar_id)
+        except ValueError as exc:
+            raise ValueError(
+                f"daily IBKR market data has invalid calendar_id for {symbol!r}: "
+                f"{instrument.calendar_id!r}"
+            ) from exc
+
+
 class LiveTrader:
     """Polling-based runner for sim/live modes.
 
@@ -403,6 +434,7 @@ class LiveTrader:
             )
             for symbol in self._symbols
         }
+        _validate_market_data_calendar_preconditions(config.timeframe, self._instruments)
         if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
             missing_calendars = sorted(
                 symbol
@@ -492,6 +524,8 @@ class LiveTrader:
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
+        self._market_data_fetch_failures: dict[str, int] = {}
+        self._cycle_fetch_failed = False
         self._last_cycle_ts: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
@@ -780,10 +814,16 @@ class LiveTrader:
     def _fetch_runtime_frames(self) -> dict[str, pd.DataFrame]:
         """Fetch configured symbols with explicit bounded concurrency."""
 
-        def fetch_one(symbol: str) -> tuple[pd.DataFrame | None, float]:
+        def fetch_one(
+            symbol: str,
+        ) -> tuple[pd.DataFrame | None, float, Exception | None]:
             started = perf_counter()
-            frame = self._fetch_with_cache(symbol)
-            return frame, perf_counter() - started
+            try:
+                frame = self._fetch_with_cache_unchecked(symbol)
+            except Exception as exc:
+                frame = self._ohlcv_cache.get(symbol)
+                return frame, perf_counter() - started, exc
+            return frame, perf_counter() - started, None
 
         if self._market_data_workers == 1 or len(self._symbols) == 1:
             results = {symbol: fetch_one(symbol) for symbol in self._symbols}
@@ -794,11 +834,53 @@ class LiveTrader:
                 results = {symbol: futures[symbol].result() for symbol in self._symbols}
 
         frames: dict[str, pd.DataFrame] = {}
-        for symbol, (frame, elapsed) in results.items():
+        self._cycle_fetch_failed = False
+        for symbol, (frame, elapsed, error) in results.items():
             self._cycle_fetch_seconds[symbol] = elapsed
+            if error is not None:
+                self._cycle_fetch_failed = True
+                self._record_market_data_fetch_failure(symbol, error)
+            else:
+                self._record_market_data_fetch_success(symbol)
             if frame is not None:
                 frames[symbol] = frame
         return frames
+
+    def _record_market_data_fetch_failure(self, symbol: str, error: Exception) -> None:
+        failures = self._market_data_fetch_failures.get(symbol, 0) + 1
+        self._market_data_fetch_failures[symbol] = failures
+        logger.error(
+            "Failed to fetch %s (%d consecutive)",
+            symbol,
+            failures,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        if failures != self.CONSECUTIVE_ERROR_THRESHOLD:
+            return
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._utc_now(),
+                    event_type="decision_skipped",
+                    symbol=symbol,
+                    detail={
+                        "reason": "market_data_fetch_failed",
+                        "consecutive_failures": failures,
+                        "error_type": type(error).__name__,
+                        "message": str(error),
+                    },
+                )
+            )
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Market Data Fetch Failed: {symbol}",
+            message=f"{failures} consecutive failures: {error}",
+        )
+
+    def _record_market_data_fetch_success(self, symbol: str) -> None:
+        failures = self._market_data_fetch_failures.pop(symbol, 0)
+        if failures:
+            logger.info("Market data fetch recovered for %s after %d failures", symbol, failures)
 
     def _reconcile_positions(self) -> None:
         """Adopt real broker positions into local state at startup.
@@ -1287,10 +1369,9 @@ class LiveTrader:
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
         self._maybe_reconcile_runtime()
-        if self._on_heartbeat:
-            self._on_heartbeat(self._run_id)
-
         fetched_frames = self._fetch_runtime_frames()
+        if self._on_heartbeat and not self._cycle_fetch_failed:
+            self._on_heartbeat(self._run_id)
         if not self.warmup_ready:
             self._report_incomplete_warmup()
             return
@@ -1395,16 +1476,24 @@ class LiveTrader:
     def _fetch_with_cache(self, symbol: str) -> pd.DataFrame | None:
         """Fetch OHLCV and keep a complete, deduplicated rolling cache."""
         try:
-            cached = self._ohlcv_cache.get(symbol)
-            if symbol in self._replay_backlog_exhausted:
-                return cached
-            if self._warmup_gap(symbol, cached) is not None:
-                merged = cached
-                base_request = self._warmup_periods + 1
-                all_request_sizes = [
-                    base_request * (2**attempt) for attempt in range(self.WARMUP_MAX_FETCH_ATTEMPTS)
-                ]
-                request_sizes = all_request_sizes
+            return self._fetch_with_cache_unchecked(symbol)
+        except Exception:
+            logger.exception("Failed to fetch %s", symbol)
+            return self._ohlcv_cache.get(symbol)
+
+    def _fetch_with_cache_unchecked(self, symbol: str) -> pd.DataFrame | None:
+        """Fetch and cache one symbol, propagating failures to the poll coordinator."""
+        cached = self._ohlcv_cache.get(symbol)
+        if symbol in self._replay_backlog_exhausted:
+            return cached
+        if self._warmup_gap(symbol, cached) is not None:
+            merged = cached
+            base_request = self._warmup_periods + 1
+            all_request_sizes = [
+                base_request * (2**attempt) for attempt in range(self.WARMUP_MAX_FETCH_ATTEMPTS)
+            ]
+            request_sizes = all_request_sizes
+            try:
                 exhausted_fingerprint = self._warmup_exhausted_fingerprints.get(symbol)
                 if exhausted_fingerprint is not None:
                     probe_periods = self._warmup_requested_periods.get(symbol, base_request)
@@ -1425,26 +1514,16 @@ class LiveTrader:
                             if requested > probe_periods
                         ]
 
-                fetch_failed = False
                 for requested_periods in request_sizes:
                     attempt = all_request_sizes.index(requested_periods) + 1
                     self._warmup_requested_periods[symbol] = requested_periods
                     self._warmup_fetch_attempts[symbol] = attempt
-                    try:
-                        before = self._history_fingerprint(merged)
-                        new_df = self._fetch_history(symbol, requested_periods)
-                        new_df = self._eligible_runtime_rows(symbol, new_df)
-                        if not new_df.empty:
-                            validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-                            merged = self._merge_runtime_rows(merged, new_df)
-                    except Exception:
-                        logger.exception(
-                            "Warmup fetch failed for %s after requesting %d periods",
-                            symbol,
-                            requested_periods,
-                        )
-                        fetch_failed = True
-                        break
+                    before = self._history_fingerprint(merged)
+                    new_df = self._fetch_history(symbol, requested_periods)
+                    new_df = self._eligible_runtime_rows(symbol, new_df)
+                    if not new_df.empty:
+                        validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
+                        merged = self._merge_runtime_rows(merged, new_df)
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
@@ -1452,53 +1531,60 @@ class LiveTrader:
                         self._warmup_exhausted_fingerprints[symbol] = before
                         break
                 if (
-                    not fetch_failed
-                    and self._warmup_gap(symbol, merged) is not None
+                    self._warmup_gap(symbol, merged) is not None
                     and symbol not in self._warmup_exhausted_fingerprints
                 ):
                     self._warmup_exhausted_fingerprints[symbol] = self._history_fingerprint(merged)
-            else:
-                self._warmup_exhausted_fingerprints.pop(symbol, None)
-                new_df = self._fetchers[symbol](
-                    symbol,
-                    self._timeframe,
-                    2,
-                    drop_incomplete=True,
-                )
-                new_df = self._eligible_runtime_rows(symbol, new_df)
-                if new_df.empty:
-                    return cached
-                validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-                merged = self._merge_runtime_rows(cached, new_df)
-
-            if merged is None or merged.empty:
-                return merged
-            watermark = self._last_bar_ts.get(symbol)
-            has_unprocessed_sim_rows = (
-                self._executor.simulation
-                and watermark is not None
-                and bool((pd.to_datetime(merged["ts"], utc=True) > watermark).any())
+            except Exception:
+                self._store_runtime_cache(symbol, merged)
+                raise
+        else:
+            self._warmup_exhausted_fingerprints.pop(symbol, None)
+            new_df = self._fetchers[symbol](
+                symbol,
+                self._timeframe,
+                2,
+                drop_incomplete=True,
             )
-            max_replay_rows = (self._warmup_periods + 1) * self.WARMUP_MAX_FETCH_MULTIPLIER
-            if has_unprocessed_sim_rows and len(merged) > max_replay_rows:
-                queued_rows = int((pd.to_datetime(merged["ts"], utc=True) > watermark).sum())
-                self._replay_backlog_exhausted[symbol] = (queued_rows, max_replay_rows)
-                logger.error(
-                    "Shadow replay backlog exceeded for %s: queued=%d max_history=%d; "
-                    "fetching and strategy evaluation are disabled until restart/resynchronization",
-                    symbol,
-                    queued_rows,
-                    max_replay_rows,
-                )
+            new_df = self._eligible_runtime_rows(symbol, new_df)
+            if new_df.empty:
                 return cached
-            if not has_unprocessed_sim_rows:
-                merged = merged.iloc[-self._warmup_periods :]
-            merged = merged.reset_index(drop=True)
-            self._ohlcv_cache[symbol] = merged
+            validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
+            merged = self._merge_runtime_rows(cached, new_df)
+
+        return self._store_runtime_cache(symbol, merged)
+
+    def _store_runtime_cache(
+        self,
+        symbol: str,
+        merged: pd.DataFrame | None,
+    ) -> pd.DataFrame | None:
+        """Persist one causal cache window, retaining pending simulation replay rows."""
+        if merged is None or merged.empty:
             return merged
-        except Exception:
-            logger.exception("Failed to fetch %s", symbol)
+        watermark = self._last_bar_ts.get(symbol)
+        has_unprocessed_sim_rows = (
+            self._executor.simulation
+            and watermark is not None
+            and bool((pd.to_datetime(merged["ts"], utc=True) > watermark).any())
+        )
+        max_replay_rows = (self._warmup_periods + 1) * self.WARMUP_MAX_FETCH_MULTIPLIER
+        if has_unprocessed_sim_rows and len(merged) > max_replay_rows:
+            queued_rows = int((pd.to_datetime(merged["ts"], utc=True) > watermark).sum())
+            self._replay_backlog_exhausted[symbol] = (queued_rows, max_replay_rows)
+            logger.error(
+                "Shadow replay backlog exceeded for %s: queued=%d max_history=%d; "
+                "fetching and strategy evaluation are disabled until restart/resynchronization",
+                symbol,
+                queued_rows,
+                max_replay_rows,
+            )
             return self._ohlcv_cache.get(symbol)
+        if not has_unprocessed_sim_rows:
+            merged = merged.iloc[-self._warmup_periods :]
+        merged = merged.reset_index(drop=True)
+        self._ohlcv_cache[symbol] = merged
+        return merged
 
     def _fetch_history(self, symbol: str, requested_periods: int) -> pd.DataFrame:
         """Fetch one completed history window through the configured warmup route."""

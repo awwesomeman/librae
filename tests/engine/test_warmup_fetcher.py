@@ -189,6 +189,31 @@ class TestWarmupFetcher:
         assert "BTCUSDT" not in trader._ohlcv_cache
         assert "runtime data OHLCV values must be finite" in caplog.text
 
+    def test_partial_warmup_is_retained_when_later_retry_fails(self):
+        from librae.live.engine import LiveTrader
+
+        partial = _bars([datetime(2025, 1, 1, hour, tzinfo=UTC) for hour in range(2)])
+        warmup_fetcher = MagicMock(side_effect=[partial, RuntimeError("source unavailable")])
+        trader = LiveTrader(
+            MagicMock(),
+            lambda frame: frame,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=5,
+                )
+            ),
+            adapter=MagicMock(),
+            warmup_fetcher=warmup_fetcher,
+        )
+
+        result = trader._fetch_with_cache("BTCUSDT")
+
+        assert result is not None
+        assert result["ts"].tolist() == partial["ts"].tolist()
+        assert warmup_fetcher.call_args_list[0].args[-1] == 6
+        assert warmup_fetcher.call_args_list[1].args[-1] == 12
+
     def test_regular_session_shortfall_across_weekend_and_holiday_is_backfilled(self):
         from librae.live.engine import LiveTrader
 
