@@ -469,6 +469,7 @@ class TestWarmupFetcher:
         latest_period = [2]
         requests: list[tuple[str, int]] = []
         runtime_events = []
+        heartbeat = MagicMock()
 
         def fetcher(symbol: str, _timeframe: str, limit: int, **_kwargs):
             requests.append((symbol, limit))
@@ -497,6 +498,7 @@ class TestWarmupFetcher:
             ),
             adapter=fetcher,
             on_runtime_event=runtime_events.append,
+            on_heartbeat=heartbeat,
             clock=lambda: datetime(2025, 1, 2, tzinfo=UTC),
         )
         trader._ohlcv_cache["AAA"] = history.iloc[:2].copy()
@@ -509,11 +511,15 @@ class TestWarmupFetcher:
 
         max_rows = (trader._warmup_periods + 1) * trader.WARMUP_MAX_FETCH_MULTIPLIER
         aaa_requests_before_terminal_poll = sum(symbol == "AAA" for symbol, _ in requests)
+        heartbeat.reset_mock()
+        trader._market_data_fetch_failures["AAA"] = 2
         trader._poll_cycle()
 
         assert len(trader._ohlcv_cache["AAA"]) <= max_rows
         assert "AAA" in trader._replay_backlog_exhausted
         assert sum(symbol == "AAA" for symbol, _ in requests) == aaa_requests_before_terminal_poll
+        heartbeat.assert_not_called()
+        assert trader._market_data_fetch_failures["AAA"] == 2
         backlog_events = [
             event
             for event in runtime_events
