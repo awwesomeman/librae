@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
-from threading import Lock, RLock
+from threading import Barrier, Event, Lock, RLock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -872,19 +872,31 @@ class TestPlaceOrder:
 
     def test_market_rule_cache_singleflight_avoids_duplicate_fake_requests(self):
         adapter = _make_adapter(trading_enabled=True)
-        adapter._ib.reqMarketRule.return_value = [
-            SimpleNamespace(lowEdge=0.0, increment=0.01),
-        ]
+        callers_ready = Barrier(4)
+        request_started = Event()
+        release_request = Event()
+
+        def blocking_fake_request(_rule_id):
+            request_started.set()
+            if not release_request.wait(timeout=5):
+                raise TimeoutError("test did not release fake market-rule request")
+            return [SimpleNamespace(lowEdge=0.0, increment=0.01)]
+
+        def fetch_ladder(_):
+            callers_ready.wait(timeout=5)
+            return adapter._market_rule_ladder(26, expected_generation=0)
+
+        adapter._ib.reqMarketRule.side_effect = blocking_fake_request
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            ladders = list(
-                pool.map(
-                    lambda _: adapter._market_rule_ladder(26, expected_generation=0),
-                    range(8),
-                )
-            )
+            futures = [pool.submit(fetch_ladder, index) for index in range(4)]
+            try:
+                assert request_started.wait(timeout=5)
+            finally:
+                release_request.set()
+            ladders = [future.result(timeout=5) for future in futures]
 
-        assert ladders == [((0.0, 0.01),)] * 8
+        assert ladders == [((0.0, 0.01),)] * 4
         adapter._ib.reqMarketRule.assert_called_once_with(26)
 
     def test_market_rule_cache_is_bounded(self):
@@ -1405,6 +1417,88 @@ class TestResolveContract:
 
         assert not adapter._contract_cache
         assert not adapter._contract_details_cache
+
+    @pytest.mark.parametrize("security_type", ["STK", "FUT"])
+    def test_stale_resolution_does_not_replace_new_generation_cache(self, security_type):
+        adapter = _make_adapter()
+        old_contract = SimpleNamespace(conId=1)
+        new_contract = SimpleNamespace(conId=2)
+        request_started = Event()
+        release_old_response = Event()
+        response_lock = Lock()
+        response_count = 0
+        mock_ib_async = MagicMock()
+
+        if security_type == "STK":
+            symbol = "MU"
+            exchange = None
+            contract_month = None
+            cache_key = (symbol, security_type, exchange, "USD", contract_month)
+            old_response = [old_contract]
+            new_response = [new_contract]
+            mock_ib_async.Stock.return_value = "unqualified_stock"
+            request_mock = adapter._ib.qualifyContracts
+        else:
+            symbol = "ES"
+            exchange = "CME"
+            contract_month = "209912"
+            cache_key = (symbol, security_type, exchange, "USD", contract_month)
+            old_contract.lastTradeDateOrContractMonth = "20991218"
+            new_contract.lastTradeDateOrContractMonth = "20991218"
+            old_response = [SimpleNamespace(contract=old_contract)]
+            new_response = [SimpleNamespace(contract=new_contract)]
+            mock_ib_async.Future.return_value = "unqualified_future"
+            request_mock = adapter._ib.reqContractDetails
+
+        def controlled_response(_contract):
+            nonlocal response_count
+            with response_lock:
+                response_count += 1
+                is_old_request = response_count == 1
+            if is_old_request:
+                request_started.set()
+                if not release_old_response.wait(timeout=5):
+                    raise TimeoutError("test did not release stale contract response")
+                return old_response
+            return new_response
+
+        request_mock.side_effect = controlled_response
+        request_kwargs = {
+            "security_type": security_type,
+            "exchange": exchange,
+            "contract_month": contract_month,
+        }
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)),
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            stale_future = pool.submit(
+                adapter._resolve_contract,
+                symbol,
+                expected_generation=0,
+                **request_kwargs,
+            )
+            assert request_started.wait(timeout=5)
+            adapter._on_connection_boundary()
+            try:
+                current = adapter._resolve_contract(
+                    symbol,
+                    expected_generation=1,
+                    **request_kwargs,
+                )
+            finally:
+                release_old_response.set()
+            with pytest.raises(ValueError, match="stale"):
+                stale_future.result(timeout=5)
+
+        assert current is new_contract
+        assert adapter._contract_cache[cache_key] is new_contract
+        if security_type == "FUT":
+            assert adapter._contract_details_cache[cache_key].contract is new_contract
+        else:
+            assert cache_key not in adapter._contract_details_cache
 
     def test_second_call_for_same_symbol_is_cached(self):
         """Regression test: qualifyContracts is a blocking IBKR round trip —
