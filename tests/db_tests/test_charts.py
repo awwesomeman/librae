@@ -49,17 +49,25 @@ def test_df_to_position_events_matches_reader_shape() -> None:
     assert markers[0]["shape"] == "arrow_up"
 
 
-def test_plot_trades_by_run_id_returns_none_when_run_has_no_chart_rows() -> None:
-    ohlcv = pd.DataFrame(columns=["_time", "symbol", "open", "high", "low", "close", "volume"])
-
+@pytest.mark.parametrize(
+    "ohlcv",
+    [
+        pd.DataFrame(),
+        pd.DataFrame(columns=["_time", "symbol", "open", "high", "low", "close", "volume"]),
+    ],
+)
+def test_plot_trades_by_run_id_returns_none_when_run_has_no_prices(
+    ohlcv: pd.DataFrame,
+) -> None:
     with (
         patch("librae.db.charts.load_ohlcv", return_value=ohlcv),
-        patch("librae.db.charts.load_position_events", return_value=pd.DataFrame()),
+        patch("librae.db.charts.load_position_events") as load_events,
         patch("librae.db.charts.plot_kbars") as render,
     ):
         result = plot_trades_by_run_id("empty-run", block=False)
 
     assert result is None
+    load_events.assert_not_called()
     render.assert_not_called()
 
 

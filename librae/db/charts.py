@@ -27,10 +27,11 @@ def plot_trades_by_run_id(
     block: bool = True,
 ) -> Chart | None:
     """Render one persisted run, or return ``None`` when it has no chart rows."""
-    ohlcv = load_ohlcv(run_id=run_id).set_index("_time")
-    position_events = df_to_position_events(load_position_events(run_id))
-    if ohlcv.empty and not position_events:
+    raw_ohlcv = load_ohlcv(run_id=run_id)
+    if raw_ohlcv.empty:
         return None
+    ohlcv = raw_ohlcv.set_index("_time")
+    position_events = df_to_position_events(load_position_events(run_id))
     resolved_symbol = symbol or (
         position_events[0].symbol if position_events else ohlcv["symbol"].iloc[0]
     )
