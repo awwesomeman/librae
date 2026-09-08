@@ -104,6 +104,9 @@ type HeartbeatCallback = Callable[[str], None]
 type FinancingCashFlowCallback = Callable[[FinancingCashFlow], None]
 type RuntimeEventCallback = Callable[[RuntimeEvent], None]
 type PerformanceCallback = Callable[[str, str], None]
+# The third argument is a requested history span, not a guaranteed row count.
+# LiveTrader may retry this caller-owned DB/API policy with a larger value when
+# closed sessions or source limits leave the usable completed history short.
 type WarmupFetcher = Callable[[str, str, int], pd.DataFrame]
 
 

@@ -182,11 +182,12 @@ class _HoldStrategy(Strategy):
 
 
 def _test_cfg(**overrides) -> RunConfig:
+    warmup_periods = overrides.pop("warmup_periods", 5)
     overrides.setdefault(
         "execution",
         ExecutionPolicy(
             max_bar_volume_participation_rate=None,
-            warmup_periods=5,
+            warmup_periods=warmup_periods,
         ),
     )
     from librae.config.symbols import load_symbol_registry
@@ -762,6 +763,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=CaptureClose(),
             fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
         )
 
         runner.run(max_iterations=1)
@@ -995,7 +997,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=BuyBbbOnce(),
             fetcher=fetcher,
-            config=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
+            config=_test_cfg(mode=mode, symbols=["AAA", "BBB"], warmup_periods=1),
             order_adapter=order_adapter,
         )
 
@@ -1031,7 +1033,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=fetcher,
-            config=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
         )
 
         runner._poll_cycle()
@@ -1040,7 +1042,7 @@ class TestLiveTrader:
         contexts = [call.args[0] for call in strategy.on_bar.call_args_list]
         assert [ctx.ts for ctx in contexts] == [t0, t1, t1]
         assert [set(ctx.bars) for ctx in contexts] == [
-            {"AAA", "BBB"},
+            {"BBB"},
             {"AAA"},
             {"AAA", "BBB"},
         ]
@@ -1085,7 +1087,10 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=SpreadPlusSolo(),
             fetcher=fetcher,
-            config=_test_cfg(symbols=["NEAR", "NEXT", "SOLO"]),
+            config=_test_cfg(
+                symbols=["NEAR", "NEXT", "SOLO"],
+                warmup_periods=1,
+            ),
         )
 
         runner._poll_cycle()  # t0: NEXT has no bar yet, spread withheld, SOLO decided
@@ -1131,7 +1136,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=fetcher,
-            config=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
         )
 
         for _ in range(3):
@@ -1154,7 +1159,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=lambda *_args, **_kwargs: duplicated,
-            config=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
         )
 
         runner._poll_cycle()
@@ -1192,7 +1197,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=fetcher,
-            config=_test_cfg(symbols=["AAA", "BBB"]),
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
         )
 
         for _ in range(3):
@@ -1216,7 +1221,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=strategy,
             fetcher=lambda *_args, **_kwargs: frame,
-            config=_test_cfg(mode=mode),
+            config=_test_cfg(mode=mode, warmup_periods=1),
             order_adapter=_mock_order_adapter() if mode == "live" else None,
         )
         runner._last_bar_ts["BTCUSDT"] = now - timedelta(hours=3)
@@ -1271,7 +1276,7 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=AllocationStrategy(),
             fetcher=fetcher,
-            config=_test_cfg(mode=mode, symbols=["AAA", "BBB"]),
+            config=_test_cfg(mode=mode, symbols=["AAA", "BBB"], warmup_periods=1),
             order_adapter=order_adapter,
         )
 
@@ -1572,7 +1577,11 @@ class TestLiveTrader:
         runner = self._make_runner(
             strategy=AllocateOnce(),
             fetcher=fetcher,
-            config=_test_cfg(mode="live", symbols=["AAA", "BBB"]),
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                warmup_periods=1,
+            ),
             order_adapter=adapter,
         )
 
@@ -2096,6 +2105,7 @@ class TestLiveTrader:
             strategy=strategy,
             fetcher=lambda *_args, **_kwargs: _make_ohlcv_at([t0, t1]),
             feature_fn=malformed_feature,
+            config=_test_cfg(warmup_periods=2),
         )
 
         with pytest.raises((TypeError, ValueError), match=message):
@@ -2140,13 +2150,14 @@ class TestLiveTrader:
             fetcher=lambda *_args, **_kwargs: next(responses),
             feature_fn=feature_fn,
             state_store=state_store,
+            config=_test_cfg(warmup_periods=1),
         )
         runner._on_position_event = lambda event, _sequence: (
             opened.append(event) if event.event_type == "open" else None
         )
 
         runner._poll_cycle()
-        with pytest.raises(ValueError, match="final timestamp"):
+        with pytest.raises(ValueError, match="must not be empty"):
             runner._poll_cycle()
 
         assert runner._last_bar_ts == {"BTCUSDT": t0}
@@ -3930,7 +3941,10 @@ class TestLiveExecutionLifecycle:
             adapter,
             config=_test_cfg(
                 mode="live",
-                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+                execution=ExecutionPolicy(
+                    live_order_timeout_seconds=30,
+                    warmup_periods=5,
+                ),
             ),
             clock=lambda: now[0],
         )
@@ -3978,7 +3992,10 @@ class TestLiveExecutionLifecycle:
             adapter,
             config=_test_cfg(
                 mode="live",
-                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+                execution=ExecutionPolicy(
+                    live_order_timeout_seconds=30,
+                    warmup_periods=5,
+                ),
             ),
             clock=lambda: now[0],
         )
@@ -4018,7 +4035,10 @@ class TestLiveExecutionLifecycle:
             adapter,
             config=_test_cfg(
                 mode="live",
-                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+                execution=ExecutionPolicy(
+                    live_order_timeout_seconds=30,
+                    warmup_periods=5,
+                ),
             ),
             clock=lambda: now[0],
         )
@@ -4057,7 +4077,10 @@ class TestLiveExecutionLifecycle:
             adapter,
             config=_test_cfg(
                 mode="live",
-                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+                execution=ExecutionPolicy(
+                    live_order_timeout_seconds=30,
+                    warmup_periods=5,
+                ),
             ),
             clock=lambda: now[0],
         )
@@ -4123,7 +4146,10 @@ class TestLiveExecutionLifecycle:
             adapter,
             config=_test_cfg(
                 mode="live",
-                execution=ExecutionPolicy(live_order_timeout_seconds=30),
+                execution=ExecutionPolicy(
+                    live_order_timeout_seconds=30,
+                    warmup_periods=5,
+                ),
             ),
             clock=lambda: now[0],
         )
@@ -4200,7 +4226,10 @@ class TestLiveExecutionLifecycle:
         adapter.place_order.return_value = accepted
         config = _test_cfg(
             mode="live",
-            execution=ExecutionPolicy(live_order_timeout_seconds=30),
+            execution=ExecutionPolicy(
+                live_order_timeout_seconds=30,
+                warmup_periods=5,
+            ),
         )
 
         first = self._make_trader(

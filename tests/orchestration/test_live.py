@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from librae.config.symbols import resolve_symbol
+from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import PortfolioWeights
 from librae.live.state import LiveRuntimeState, MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import (
@@ -164,7 +165,13 @@ def test_database_enabled_sim_checkpoints_portfolio_weights_decision() -> None:
         trader = build_live_trader(
             strategy,
             lambda history: history,
-            config=make_test_cfg(mode="sim"),
+            config=make_test_cfg(
+                mode="sim",
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=5,
+                ),
+            ),
             data_adapter_overrides={"BTCUSDT": adapter},
         )
 

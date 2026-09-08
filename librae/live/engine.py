@@ -520,6 +520,9 @@ class LiveTrader:
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
+        self._warmup_requested_periods: dict[str, int] = {}
+        self._warmup_fetch_attempts: dict[str, int] = {}
+        self._reported_warmup_states: dict[str, tuple[str, int]] = {}
         self._lease_acquired = False
         self._account_lease_acquired = False
         self._restored_state = False
@@ -698,6 +701,12 @@ class LiveTrader:
     # the operator's phone. Above this count, fills are summarized in a single
     # digest message instead of sent individually.
     SIGNAL_BATCH_THRESHOLD = 3
+
+    # A broker may translate ``limit`` into a wall-clock duration, so the
+    # first request can contain fewer usable observations across closed
+    # sessions. 1x/2x/4x covers the common calendar/session-density gap while
+    # keeping the startup request burst explicit and bounded.
+    WARMUP_MAX_FETCH_ATTEMPTS = 3
 
     def _utc_now(self) -> datetime:
         now = self._clock()
@@ -1231,6 +1240,14 @@ class LiveTrader:
         return self._last_cycle_diagnostics
 
     @property
+    def warmup_ready(self) -> bool:
+        """Whether every configured symbol has enough usable feature history."""
+        return all(
+            self._warmup_gap(symbol, self._ohlcv_cache.get(symbol)) is None
+            for symbol in self._symbols
+        )
+
+    @property
     def run_id(self) -> str:
         """Stable id used by callbacks and persisted runtime facts."""
         return self._run_id
@@ -1270,8 +1287,20 @@ class LiveTrader:
         if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
 
+        fetched_frames = self._fetch_runtime_frames()
+        if not self.warmup_ready:
+            self._report_incomplete_warmup()
+            return
+        if self._reported_warmup_states:
+            logger.info(
+                "Live warmup ready: required=%d usable=%s",
+                self._warmup_periods,
+                {symbol: len(self._ohlcv_cache[symbol]) for symbol in self._symbols},
+            )
+            self._reported_warmup_states.clear()
+
         frames: dict[str, pd.DataFrame] = {}
-        for symbol, df in self._fetch_runtime_frames().items():
+        for symbol, df in fetched_frames.items():
             if df is None or df.empty:
                 continue
 
@@ -1352,55 +1381,178 @@ class LiveTrader:
                 self._last_bar_ts[symbol] = cycle_ts
             self._last_cycle_ts = cycle_ts
             self._persist_state()
+        self._trim_runtime_caches()
 
     def _fetch_with_cache(self, symbol: str) -> pd.DataFrame | None:
-        """Fetch OHLCV and keep a sorted, deduplicated rolling cache."""
+        """Fetch OHLCV and keep a complete, deduplicated rolling cache."""
         try:
-            if symbol not in self._ohlcv_cache:
-                if self._warmup_fetcher:
-                    new_df = self._warmup_fetcher(symbol, self._timeframe, self._warmup_periods)
-                else:
-                    new_df = self._fetchers[symbol](
-                        symbol,
-                        self._timeframe,
-                        self._warmup_periods,
-                        drop_incomplete=True,
-                    )
-                cached = None
+            cached = self._ohlcv_cache.get(symbol)
+            if self._warmup_gap(symbol, cached) is not None:
+                merged = cached
+                for attempt in range(self.WARMUP_MAX_FETCH_ATTEMPTS):
+                    requested_periods = self._warmup_periods * (2**attempt)
+                    self._warmup_requested_periods[symbol] = requested_periods
+                    self._warmup_fetch_attempts[symbol] = attempt + 1
+                    try:
+                        if self._warmup_fetcher:
+                            new_df = self._warmup_fetcher(
+                                symbol,
+                                self._timeframe,
+                                requested_periods,
+                            )
+                        else:
+                            new_df = self._fetchers[symbol](
+                                symbol,
+                                self._timeframe,
+                                requested_periods,
+                                drop_incomplete=True,
+                            )
+                        new_df = self._eligible_runtime_rows(symbol, new_df)
+                        if not new_df.empty:
+                            validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
+                            merged = self._merge_runtime_rows(merged, new_df)
+                    except Exception:
+                        logger.exception(
+                            "Warmup fetch failed for %s after requesting %d periods",
+                            symbol,
+                            requested_periods,
+                        )
+                        break
+                    if self._warmup_gap(symbol, merged) is None:
+                        break
             else:
-                cached = self._ohlcv_cache[symbol]
                 new_df = self._fetchers[symbol](
                     symbol,
                     self._timeframe,
                     2,
                     drop_incomplete=True,
                 )
+                new_df = self._eligible_runtime_rows(symbol, new_df)
+                if new_df.empty:
+                    return cached
+                validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
+                merged = self._merge_runtime_rows(cached, new_df)
 
-            if not new_df.empty and "available_at" in new_df.columns:
-                availability = pd.to_datetime(new_df["available_at"], errors="raise")
-                if not isinstance(availability.dtype, pd.DatetimeTZDtype):
-                    raise ValueError(f"{symbol} available_at values must be timezone-aware")
-                if availability.isna().any():
-                    raise ValueError(f"{symbol} available_at values must not contain NaT")
-                availability = availability.dt.tz_convert("UTC")
-                eligible = availability <= pd.Timestamp(self._utc_now())
-                new_df = new_df.loc[eligible].copy()
-                new_df["available_at"] = availability.loc[eligible]
-
-            if new_df.empty:
-                return cached if cached is not None else new_df
-
-            merged = new_df if cached is None else pd.concat([cached, new_df], ignore_index=True)
-            merged = merged.drop_duplicates(subset="ts", keep="last").sort_values("ts")
-            if cached is not None:
+            if merged is None or merged.empty:
+                return merged
+            watermark = self._last_bar_ts.get(symbol)
+            has_unprocessed_sim_rows = (
+                self._executor.simulation
+                and watermark is not None
+                and bool((pd.to_datetime(merged["ts"], utc=True) > watermark).any())
+            )
+            if not has_unprocessed_sim_rows:
                 merged = merged.iloc[-self._warmup_periods :]
             merged = merged.reset_index(drop=True)
-            validate_ohlcv_values(merged, context=f"{symbol} runtime data")
             self._ohlcv_cache[symbol] = merged
             return merged
         except Exception:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
+
+    def _eligible_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
+        """Exclude rows whose source-declared availability has not arrived."""
+        if frame.empty or "available_at" not in frame.columns:
+            return frame
+        availability = pd.to_datetime(frame["available_at"], errors="raise")
+        if not isinstance(availability.dtype, pd.DatetimeTZDtype):
+            raise ValueError(f"{symbol} available_at values must be timezone-aware")
+        if availability.isna().any():
+            raise ValueError(f"{symbol} available_at values must not contain NaT")
+        availability = availability.dt.tz_convert("UTC")
+        eligible = availability <= pd.Timestamp(self._utc_now())
+        result = frame.loc[eligible].copy()
+        result["available_at"] = availability.loc[eligible]
+        return result
+
+    @staticmethod
+    def _merge_runtime_rows(
+        cached: pd.DataFrame | None,
+        fetched: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Merge one history response by timestamp without counting duplicates."""
+        merged = fetched if cached is None else pd.concat([cached, fetched], ignore_index=True)
+        return merged.drop_duplicates(subset="ts", keep="last").sort_values("ts")
+
+    def _report_incomplete_warmup(self) -> None:
+        """Publish an edge-triggered diagnostic after bounded backfill fails."""
+        changed: list[str] = []
+        for symbol in self._symbols:
+            frame = self._ohlcv_cache.get(symbol)
+            gap_reason = self._warmup_gap(symbol, frame)
+            if gap_reason is None:
+                continue
+            usable_periods = len(frame) if frame is not None else 0
+            reported_state = (gap_reason, usable_periods)
+            if self._reported_warmup_states.get(symbol) == reported_state:
+                continue
+            self._reported_warmup_states[symbol] = reported_state
+            requested_periods = self._warmup_requested_periods.get(symbol, 0)
+            attempts = self._warmup_fetch_attempts.get(symbol, 0)
+            changed.append(
+                f"{symbol}={usable_periods}/{self._warmup_periods} "
+                f"(requested up to {requested_periods})"
+            )
+            logger.warning(
+                "Live warmup incomplete for %s: usable=%d required=%d "
+                "requested=%d attempts=%d/%d; strategy evaluation remains disabled",
+                symbol,
+                usable_periods,
+                self._warmup_periods,
+                requested_periods,
+                attempts,
+                self.WARMUP_MAX_FETCH_ATTEMPTS,
+            )
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=self._utc_now(),
+                        event_type="decision_skipped",
+                        symbol=symbol,
+                        detail={
+                            "reason": gap_reason,
+                            "usable_periods": usable_periods,
+                            "required_periods": self._warmup_periods,
+                            "requested_periods": requested_periods,
+                            "attempts": attempts,
+                            "max_attempts": self.WARMUP_MAX_FETCH_ATTEMPTS,
+                        },
+                    )
+                )
+        if changed:
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Live Warmup Incomplete",
+                message=(
+                    ", ".join(changed) + "; strategy evaluation is disabled and backfill will retry"
+                ),
+            )
+
+    def _warmup_gap(self, symbol: str, frame: pd.DataFrame | None) -> str | None:
+        """Return why a symbol cannot safely evaluate its next runtime event."""
+        if frame is None or len(frame) < self._warmup_periods:
+            return "warmup_incomplete"
+        if not self._executor.simulation:
+            return None
+        watermark = self._last_bar_ts.get(symbol)
+        if watermark is None:
+            return None
+        timestamps = pd.to_datetime(frame["ts"], utc=True)
+        candidate_positions = timestamps > watermark
+        if not bool(candidate_positions.any()):
+            return None
+        first_position = int(candidate_positions.to_numpy().argmax())
+        if first_position < self._warmup_periods - 1:
+            return "warmup_replay_history_incomplete"
+        return None
+
+    def _trim_runtime_caches(self) -> None:
+        """Return temporary simulation replay windows to configured retention."""
+        for symbol, frame in self._ohlcv_cache.items():
+            if len(frame) > self._warmup_periods:
+                self._ohlcv_cache[symbol] = frame.iloc[-self._warmup_periods :].reset_index(
+                    drop=True
+                )
 
     def _publish_action_results(self, result: ExecutionResult) -> None:
         """Publish notifications and analytics after state is committed."""
@@ -2619,7 +2771,7 @@ class LiveTrader:
         previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
         for symbol, raw_df in raw_frames.items():
-            history = raw_df[raw_df["ts"] <= ts].set_index("ts")
+            history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
             history.index.name = "ts"
             if history.empty or pd.Timestamp(history.index[-1]).to_pydatetime() != ts:
                 continue

@@ -19,6 +19,7 @@ from librae.core.financing import (
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
+from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import PositionState
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
@@ -546,6 +547,10 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
     recorded = []
     config = make_test_cfg(
         symbols=["PERP"],
+        execution=ExecutionPolicy(
+            max_bar_volume_participation_rate=None,
+            warmup_periods=1,
+        ),
         instrument_overrides={
             "PERP": {
                 "instrument_type": "contract_perpetual",
