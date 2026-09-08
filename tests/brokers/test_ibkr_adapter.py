@@ -65,7 +65,7 @@ def _make_adapter(*, trading_enabled: bool = False):
     adapter._contract_details_cache = {}
     adapter._market_rule_cache = OrderedDict()
     adapter._connection_state_lock = RLock()
-    adapter._market_rule_request_lock = Lock()
+    adapter._market_rule_singleflight_lock = Lock()
     adapter._connection_generation = 0
     return adapter
 
@@ -870,7 +870,7 @@ class TestPlaceOrder:
                 }
             )
 
-    def test_market_rule_cache_is_shared_by_concurrent_requests(self):
+    def test_market_rule_cache_singleflight_avoids_duplicate_fake_requests(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._ib.reqMarketRule.return_value = [
             SimpleNamespace(lowEdge=0.0, increment=0.01),
@@ -1385,6 +1385,27 @@ class TestResolveContract:
         ):
             adapter._resolve_contract("NOTREAL")
 
+    def test_stock_qualification_crossing_connection_boundary_fails_closed(self):
+        adapter = _make_adapter()
+        qualified_contract = SimpleNamespace(conId=1)
+        mock_ib_async = MagicMock()
+        mock_ib_async.Stock.return_value = "unqualified_stock"
+
+        def reconnect_during_qualification(_contract):
+            adapter._on_connection_boundary()
+            return [qualified_contract]
+
+        adapter._ib.qualifyContracts.side_effect = reconnect_during_qualification
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="stale"),
+        ):
+            adapter._resolve_contract("MU", expected_generation=0)
+
+        assert not adapter._contract_cache
+        assert not adapter._contract_details_cache
+
     def test_second_call_for_same_symbol_is_cached(self):
         """Regression test: qualifyContracts is a blocking IBKR round trip —
         resolving the same symbol twice (e.g. a live poll loop hitting the
@@ -1459,6 +1480,34 @@ class TestResolveContractFutures:
             currency="USD",
             lastTradeDateOrContractMonth="202609",
         )
+
+    def test_futures_details_crossing_connection_boundary_fails_closed(self):
+        adapter = _make_adapter()
+        resolved_contract = MagicMock()
+        detail = self._detail("20260918", resolved_contract)
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        def reconnect_during_details(_contract):
+            adapter._on_connection_boundary()
+            return [detail]
+
+        adapter._ib.reqContractDetails.side_effect = reconnect_during_details
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="stale"),
+        ):
+            adapter._resolve_contract(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                contract_month="202609",
+                expected_generation=0,
+            )
+
+        assert not adapter._contract_cache
+        assert not adapter._contract_details_cache
 
     def test_exact_contract_month_does_not_fall_back_to_another_month(self):
         adapter = _make_adapter()

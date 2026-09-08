@@ -249,6 +249,11 @@ class IBKRAdapter:
 
     The adapter connects during ``__init__``. Call ``close()`` or use as a
     context manager to disconnect.
+
+    Order preparation and submission are a single-threaded adapter contract:
+    call them on the thread/event loop that owns ``ib_async``. The market-rule
+    single-flight lock only coalesces cache misses; it does not marshal SDK
+    calls between threads or event loops.
     """
 
     def __init__(
@@ -267,7 +272,7 @@ class IBKRAdapter:
         ] = {}
         self._market_rule_cache: OrderedDict[int, _MarketRuleLadder] = OrderedDict()
         self._connection_state_lock = RLock()
-        self._market_rule_request_lock = Lock()
+        self._market_rule_singleflight_lock = Lock()
         self._connection_generation = 0
         self._ib.connectedEvent += self._on_connection_boundary
         self._ib.disconnectedEvent += self._on_connection_boundary
@@ -674,7 +679,7 @@ class IBKRAdapter:
         *,
         expected_generation: int,
     ) -> _MarketRuleLadder:
-        with self._market_rule_request_lock:
+        with self._market_rule_singleflight_lock:
             with self._connection_state_lock:
                 if self._connection_generation != expected_generation:
                     raise ValueError("IBKR connection changed while resolving the market rule")
@@ -1100,6 +1105,7 @@ class IBKRAdapter:
         currency: str = "USD",
         continuous_alias: bool = False,
         contract_month: str | None = None,
+        expected_generation: int | None = None,
     ):
         """Resolve a ticker/futures-root string to a qualified IBKR contract.
         Both qualifyContracts (stocks) and reqContractDetails (futures) hit
@@ -1138,17 +1144,20 @@ class IBKRAdapter:
             raise ValueError("continuous_alias and contract_month are valid only for IBKR futures")
 
         cache_key = (symbol, security_type, exchange, currency, contract_month)
-        if cache_key in self._contract_cache:
-            cached = self._contract_cache[cache_key]
-            if security_type != "FUT" or _future_contract_is_current(cached):
-                return cached
-            del self._contract_cache[cache_key]
-            detail_cache = getattr(self, "_contract_details_cache", None)
-            if detail_cache is not None:
-                detail_cache.pop(cache_key, None)
+        with self._connection_state_lock:
+            generation = self._connection_generation
+            if expected_generation is not None and generation != expected_generation:
+                raise ValueError("IBKR connection changed before resolving the contract")
+            cached = self._contract_cache.get(cache_key)
+            if cached is not None:
+                if security_type != "FUT" or _future_contract_is_current(cached):
+                    return cached
+                self._contract_cache.pop(cache_key, None)
+                self._contract_details_cache.pop(cache_key, None)
 
         ib_async = _require_ib_async()
 
+        selected_detail = None
         if security_type == "STK":
             contract = ib_async.Stock(symbol, "SMART", currency)
             qualified = self._ib.qualifyContracts(contract)
@@ -1200,13 +1209,15 @@ class IBKRAdapter:
                 )
             selected = candidates[0][1]
             resolved = selected.contract
-            detail_cache = getattr(self, "_contract_details_cache", None)
-            if detail_cache is None:
-                detail_cache = self._contract_details_cache = {}
-            detail_cache[cache_key] = selected
+            selected_detail = selected
 
-        self._contract_cache[cache_key] = resolved
-        return resolved
+        with self._connection_state_lock:
+            if self._connection_generation != generation:
+                raise ValueError("IBKR contract response is stale after a connection change")
+            self._contract_cache[cache_key] = resolved
+            if selected_detail is not None:
+                self._contract_details_cache[cache_key] = selected_detail
+            return resolved
 
     def _contract_details(
         self,
@@ -1222,11 +1233,8 @@ class IBKRAdapter:
         cache_key = (symbol, security_type, exchange, currency, contract_month)
         with self._connection_state_lock:
             generation = self._connection_generation
-        if expected_generation is not None and generation != expected_generation:
-            raise ValueError("IBKR connection changed before resolving contract details")
-        cache = getattr(self, "_contract_details_cache", None)
-        if cache is None:
-            cache = self._contract_details_cache = {}
+            if expected_generation is not None and generation != expected_generation:
+                raise ValueError("IBKR connection changed before resolving contract details")
 
         contract = self._resolve_contract(
             symbol,
@@ -1235,14 +1243,14 @@ class IBKRAdapter:
             currency=currency,
             continuous_alias=continuous_alias,
             contract_month=contract_month,
+            expected_generation=generation,
         )
         with self._connection_state_lock:
             if self._connection_generation != generation:
-                self._contract_cache.pop(cache_key, None)
-                cache.pop(cache_key, None)
                 raise ValueError("IBKR connection changed while resolving contract details")
-            if cache_key in cache:
-                return cache[cache_key]
+            cached = self._contract_details_cache.get(cache_key)
+            if cached is not None:
+                return cached
         details = list(self._ib.reqContractDetails(contract))
         if not details:
             raise ValueError(f"IBKR contract details unavailable for {symbol}")
@@ -1257,12 +1265,10 @@ class IBKRAdapter:
         )
         with self._connection_state_lock:
             if self._connection_generation != generation:
-                self._contract_cache.pop(cache_key, None)
-                cache.pop(cache_key, None)
                 raise ValueError(
                     "IBKR contract-details response is stale after a connection change"
                 )
-            cache[cache_key] = selected
+            self._contract_details_cache[cache_key] = selected
             return selected
 
     @staticmethod
