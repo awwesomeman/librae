@@ -2829,6 +2829,133 @@ class TestLiveExecutionLifecycle:
 
         assert [request.quantity for request in requests] == [80.0, 20.0]
 
+    def test_live_planning_uses_execution_time_equity_after_other_holding_gaps(self):
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                risk=RiskPolicy(max_position_weight=0.5),
+            ),
+        )
+        runner._cash = 5_000.0
+        runner._prev_equity = 10_000.0
+        runner._positions["AAA"] = PositionState(
+            symbol="AAA",
+            side="long",
+            entry_price=100.0,
+            quantity=50.0,
+            entry_at=TEST_CLOCK_NOW,
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=5_000.0,
+        )
+
+        requests = runner._plan_live_orders(
+            [OrderIntent(action="long", symbol="BBB", quantity=100.0)],
+            {
+                "AAA": {"close": 20.0, "volume": 1_000.0},
+                "BBB": {"close": 100.0, "volume": 1_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert [request.quantity for request in requests] == [30.0]
+
+    def test_live_planning_applies_instrument_quantity_contract_before_adapter(self):
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            config=_test_cfg(
+                mode="live",
+                symbols=["COIN"],
+                instrument_overrides={
+                    "COIN": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "quantity_step": 0.1,
+                        "min_quantity": 0.2,
+                    }
+                },
+                symbol_cost_overrides={"COIN": {"multiplier": 1.0}},
+            ),
+        )
+
+        requests = runner._plan_live_orders(
+            [OrderIntent(action="long", symbol="COIN", quantity=1.29)],
+            {"COIN": {"close": 100.0, "volume": 1_000.0}},
+            TEST_CLOCK_NOW,
+        )
+
+        assert [request.quantity for request in requests] == [pytest.approx(1.2)]
+
+    def test_live_group_rejects_shared_normalization_that_changes_leg_ratios(self):
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            _mock_order_adapter(),
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                instrument_overrides={
+                    "AAA": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "quantity_step": 1.0,
+                    },
+                    "BBB": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "quantity_step": 2.0,
+                    },
+                },
+            ),
+            on_runtime_event=runtime_events.append,
+        )
+
+        requests = runner._plan_live_orders(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=2.7, group_id="spread"),
+                OrderIntent(action="short", symbol="BBB", quantity=5.0, group_id="spread"),
+            ],
+            {symbol: {"close": 100.0, "volume": 1_000.0} for symbol in ("AAA", "BBB")},
+            TEST_CLOCK_NOW,
+        )
+
+        assert requests == []
+        assert runtime_events[0].detail["reason"] == "group_preflight_rejected"
+        assert "changes relative leg ratios" in runtime_events[0].detail["message"]
+
+    def test_adapter_prepared_quantity_must_still_match_shared_increment(self):
+        adapter = _mock_order_adapter()
+        adapter.prepare_order.side_effect = lambda signal: {**signal, "quantity": 1.5}
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                symbols=["COIN"],
+                instrument_overrides={
+                    "COIN": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "quantity_step": 1.0,
+                        "min_quantity": 1.0,
+                    }
+                },
+            ),
+        )
+
+        with pytest.raises(ValueError, match="post-adapter risk validation"):
+            runner._plan_live_orders(
+                [OrderIntent(action="long", symbol="COIN", quantity=2.0)],
+                {"COIN": {"close": 100.0, "volume": 1_000.0}},
+                TEST_CLOCK_NOW,
+            )
+
     def test_live_order_batch_rejects_gross_exposure_before_submission(self):
         adapter = _mock_order_adapter()
         runner = self._make_trader(

@@ -1002,6 +1002,7 @@ def check_stop_targets(
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     eligible_symbols: set[str] | None = None,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> ExecutionResult:
     """Force-close any position whose stop-loss/take-profit is hit this bar.
 
@@ -1066,6 +1067,8 @@ def check_stop_targets(
         close_quantity = pos.quantity
         if max_volume_qty is not None:
             close_quantity = min(close_quantity, max_volume_qty)
+        if get_executable_quantity is not None and close_quantity > EPSILON:
+            close_quantity = get_executable_quantity(sym, close_quantity)
         if close_quantity <= EPSILON:
             if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
                 pos.pending_market_exit_reason = reason
@@ -1130,6 +1133,7 @@ def liquidate_all(
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> ExecutionResult:
     """Force-close every open position right now, at this bar's close price.
 
@@ -1180,6 +1184,8 @@ def liquidate_all(
         close_quantity = pos.quantity
         if max_volume_qty is not None:
             close_quantity = min(close_quantity, max_volume_qty)
+        if get_executable_quantity is not None and close_quantity > EPSILON:
+            close_quantity = get_executable_quantity(sym, close_quantity)
         if close_quantity <= EPSILON:
             continue
         trade, event, proceeds, fully_closed = build_close_event(
@@ -1518,6 +1524,7 @@ def simulate_fill(
     cost_model: CostModel,
     *,
     bar_volume: float | None = None,
+    normalize_quantity: Callable[[float], float] | None = None,
 ) -> Fill | None:
     """Build a Fill for a long/short intent. Returns None if rejected."""
     # Both guards below are unreachable via _try_fill's current callers —
@@ -1539,6 +1546,8 @@ def simulate_fill(
             intent.action,
             bar_volume=bar_volume,
         )
+    if normalize_quantity is not None and qty > 0:
+        qty = normalize_quantity(qty)
     if qty <= 0:
         return None
 
@@ -1596,6 +1605,7 @@ def _try_fill(
     existing_qty: float = 0.0,
     max_volume_qty: float | None = None,
     bar_volume: float | None = None,
+    normalize_quantity: Callable[[float], float] | None = None,
 ) -> tuple[Fill | None, float, str | None]:
     """Attempt a fill and validate cash sufficiency.
 
@@ -1603,19 +1613,45 @@ def _try_fill(
     """
     if _impact_volume_unavailable(cost_model, bar_volume):
         return None, 0.0, "volume_unavailable"
-    fill = simulate_fill(action, price, available_cash, cost_model, bar_volume=bar_volume)
+    fill = simulate_fill(
+        action,
+        price,
+        available_cash,
+        cost_model,
+        bar_volume=bar_volume,
+        normalize_quantity=normalize_quantity,
+    )
     if not fill or fill.quantity <= 0:
-        return None, 0.0, "insufficient_cash"
+        reason = "insufficient_cash" if action.quantity is None else "quantity_not_executable"
+        return None, 0.0, reason
     if max_notional is not None:
         fill = _cap_fill_to_notional(
             fill, existing_qty, cost_model, max_notional, bar_volume=bar_volume
         )
         if fill is None:
             return None, 0.0, "notional_capped"
+        if normalize_quantity is not None:
+            fill = _shrink_fill(
+                fill,
+                cost_model,
+                normalize_quantity(fill.quantity),
+                bar_volume,
+            )
+            if fill is None:
+                return None, 0.0, "notional_capped"
     if max_volume_qty is not None:
         fill = _cap_fill_to_volume(fill, cost_model, max_volume_qty, bar_volume=bar_volume)
         if fill is None:
             return None, 0.0, "volume_capped"
+        if normalize_quantity is not None:
+            fill = _shrink_fill(
+                fill,
+                cost_model,
+                normalize_quantity(fill.quantity),
+                bar_volume,
+            )
+            if fill is None:
+                return None, 0.0, "volume_capped"
     outlay = cost_model.estimate_entry_outlay(
         price,
         fill.quantity,
@@ -1625,6 +1661,67 @@ def _try_fill(
     if available_cash - outlay < -EPSILON:
         return None, 0.0, "insufficient_cash"
     return fill, outlay, None
+
+
+def normalize_order_intents(
+    intents: list[OrderIntent],
+    ts: datetime,
+    *,
+    primary_symbol: str,
+    get_executable_quantity: Callable[[str, float], float] | None,
+) -> tuple[list[OrderIntent], list[RuntimeEvent]]:
+    """Normalize explicit quantities before any execution constraint is applied."""
+    if get_executable_quantity is None:
+        return intents, []
+
+    normalized: list[OrderIntent] = []
+    runtime_events: list[RuntimeEvent] = []
+    group_scales: dict[str, list[float]] = {}
+    group_symbols: dict[str, list[str]] = {}
+    for intent in intents:
+        if intent.quantity is None:
+            normalized.append(intent)
+            continue
+        symbol = intent.symbol or primary_symbol
+        quantity = float(get_executable_quantity(symbol, intent.quantity))
+        if not isfinite(quantity) or quantity < 0 or quantity > intent.quantity + EPSILON:
+            raise ValueError(
+                f"executable quantity resolver returned invalid quantity for {symbol}: "
+                f"requested={intent.quantity:.12g}, normalized={quantity:.12g}"
+            )
+        if intent.group_id is not None:
+            if quantity <= EPSILON:
+                raise ValueError(
+                    f"group {intent.group_id!r} quantity for {symbol} rounds below its "
+                    "executable minimum"
+                )
+            group_scales.setdefault(intent.group_id, []).append(quantity / intent.quantity)
+            group_symbols.setdefault(intent.group_id, []).append(symbol)
+        if quantity <= EPSILON:
+            runtime_events.append(
+                _skipped(
+                    ts,
+                    "quantity_not_executable",
+                    symbol=symbol,
+                    requested_quantity=intent.quantity,
+                    executable_quantity=0.0,
+                )
+            )
+            continue
+        normalized.append(
+            intent
+            if np.isclose(quantity, intent.quantity, rtol=0.0, atol=EPSILON)
+            else replace(intent, quantity=quantity)
+        )
+
+    for group_id, scales in group_scales.items():
+        first = scales[0]
+        if any(not np.isclose(scale, first, rtol=EPSILON, atol=EPSILON) for scale in scales[1:]):
+            raise ValueError(
+                f"group {group_id!r} quantity normalization changes relative leg ratios "
+                f"for {group_symbols[group_id]}: " + ", ".join(f"{scale:.8f}" for scale in scales)
+            )
+    return normalized, runtime_events
 
 
 def _validate_entry_order_notional(
@@ -1662,6 +1759,7 @@ def execute_order_intents(
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     atomic_groups: bool = False,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> ExecutionResult:
     """Execute symbol-level intents: open, scale, partial/full close.
 
@@ -1685,9 +1783,15 @@ def execute_order_intents(
     liquidity usage for that group are discarded. Live planning deliberately
     leaves this disabled and performs broker-specific group handling itself.
     """
+    intents, normalization_events = normalize_order_intents(
+        intents,
+        ts,
+        primary_symbol=primary_symbol,
+        get_executable_quantity=get_executable_quantity,
+    )
     _validate_scale_in_group_identity(intents, positions, primary_symbol)
     if atomic_groups and any(intent.group_id is not None for intent in intents):
-        return _execute_order_intent_groups_atomically(
+        result = _execute_order_intent_groups_atomically(
             intents,
             positions,
             cash,
@@ -1703,11 +1807,14 @@ def execute_order_intents(
             get_lagged_adv=get_lagged_adv,
             used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+            get_executable_quantity=get_executable_quantity,
         )
+        result.runtime_events[:0] = normalization_events
+        return result
 
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
-    runtime_events: list[RuntimeEvent] = []
+    runtime_events: list[RuntimeEvent] = normalization_events
     cash_delta = 0.0
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
@@ -1770,6 +1877,11 @@ def execute_order_intents(
                     existing_qty=0.0,
                     max_volume_qty=max_volume_qty,
                     bar_volume=bar_volume,
+                    normalize_quantity=(
+                        (lambda quantity, symbol=sym: get_executable_quantity(symbol, quantity))
+                        if get_executable_quantity is not None
+                        else None
+                    ),
                 )
                 if fill:
                     _validate_entry_order_notional(
@@ -1844,6 +1956,11 @@ def execute_order_intents(
                     existing_qty=positions[sym].quantity,
                     max_volume_qty=max_volume_qty,
                     bar_volume=bar_volume,
+                    normalize_quantity=(
+                        (lambda quantity, symbol=sym: get_executable_quantity(symbol, quantity))
+                        if get_executable_quantity is not None
+                        else None
+                    ),
                 )
                 if fill:
                     _validate_entry_order_notional(
@@ -1927,9 +2044,13 @@ def execute_order_intents(
             requested_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
             if max_volume_qty is not None:
                 requested_qty = min(requested_qty, max_volume_qty)
+            if get_executable_quantity is not None and requested_qty > EPSILON:
+                requested_qty = get_executable_quantity(sym, requested_qty)
             if requested_qty <= EPSILON:
-                if max_volume_qty is not None:
-                    runtime_events.append(_skipped(ts, "volume_capped", symbol=sym))
+                reason = (
+                    "volume_capped" if max_volume_qty is not None else "quantity_not_executable"
+                )
+                runtime_events.append(_skipped(ts, reason, symbol=sym))
                 continue
 
             trade, event, proceeds, fully_closed = build_close_event(
@@ -2061,6 +2182,7 @@ def _execute_order_intent_groups_atomically(
     get_lagged_adv: Callable[[str], float | None] | None,
     used_bar_quantity_by_symbol: dict[str, float] | None,
     used_adv_quantity_by_symbol: dict[str, float] | None,
+    get_executable_quantity: Callable[[str, float], float] | None,
 ) -> ExecutionResult:
     """Execute grouped simulation intents against isolated staged state."""
     units: list[tuple[str | None, list[OrderIntent]]] = []
@@ -2091,6 +2213,7 @@ def _execute_order_intent_groups_atomically(
         "max_adv_participation_rate": max_adv_participation_rate,
         "get_volume": get_volume,
         "get_lagged_adv": get_lagged_adv,
+        "get_executable_quantity": get_executable_quantity,
     }
 
     # WHY: ungrouped units commit straight into the caller's book as the loop
@@ -2194,6 +2317,7 @@ def _scale_additions_to_cash(
     prices: dict[str, float],
     get_cost_model: Callable[[str], CostModel],
     get_volume: Callable[[str], float | None] | None = None,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> tuple[list[OrderIntent], list[RuntimeEvent]]:
     """Scale all rebalance additions by one factor when cash is insufficient.
 
@@ -2218,6 +2342,8 @@ def _scale_additions_to_cash(
         total = 0.0
         for action in actions:
             quantity = (action.quantity or 0.0) * scale
+            if get_executable_quantity is not None and quantity > EPSILON:
+                quantity = get_executable_quantity(action.symbol, quantity)
             if quantity <= EPSILON:
                 continue
             price = prices[action.symbol]
@@ -2253,16 +2379,15 @@ def _scale_additions_to_cash(
         return [], [event]
 
     logger.info("Rebalance additions scaled to %.6f of requested quantities", low)
-    return [
-        OrderIntent(
-            action=action.action,
-            symbol=action.symbol,
-            quantity=(action.quantity or 0.0) * low,
-            reason=action.reason,
-            limit_price=action.limit_price,
-        )
-        for action in actions
-    ], []
+    scaled: list[OrderIntent] = []
+    for action in actions:
+        quantity = (action.quantity or 0.0) * low
+        if get_executable_quantity is not None and quantity > EPSILON:
+            quantity = get_executable_quantity(action.symbol, quantity)
+        if quantity <= EPSILON:
+            continue
+        scaled.append(replace(action, quantity=quantity))
+    return scaled, []
 
 
 def _orders_for_target_notional(
@@ -2273,6 +2398,7 @@ def _orders_for_target_notional(
     price: float,
     *,
     get_cost_model: Callable[[str], CostModel],
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> list[RebalanceOrderState]:
     """Resolve one fixed target notional into quantities at a fresh price."""
     position = positions.get(symbol)
@@ -2280,6 +2406,13 @@ def _orders_for_target_notional(
         position.quantity * side_multiplier(position.side) if position is not None else 0.0
     )
     target_signed_quantity = target_signed_notional / (price * get_cost_model(symbol).multiplier)
+
+    def executable(quantity: float) -> float:
+        if quantity <= EPSILON:
+            return 0.0
+        if get_executable_quantity is None:
+            return quantity
+        return get_executable_quantity(symbol, quantity)
 
     reductions: list[OrderIntent] = []
     additions: list[OrderIntent] = []
@@ -2293,40 +2426,48 @@ def _orders_for_target_notional(
     if same_direction:
         quantity_delta = abs(target_signed_quantity) - abs(current_signed_quantity)
         if quantity_delta < -EPSILON:
+            quantity = executable(-quantity_delta)
+            if quantity > EPSILON:
+                reductions.append(
+                    OrderIntent(
+                        action="close",
+                        symbol=symbol,
+                        quantity=quantity,
+                        reason=reason,
+                    )
+                )
+        elif quantity_delta > EPSILON:
+            quantity = executable(quantity_delta)
+            if quantity > EPSILON:
+                additions.append(
+                    OrderIntent(
+                        action="long" if target_signed_quantity > 0 else "short",
+                        symbol=symbol,
+                        quantity=quantity,
+                        reason=reason,
+                    )
+                )
+    else:
+        close_quantity = executable(position.quantity if position is not None else 0.0)
+        if close_quantity > EPSILON:
             reductions.append(
                 OrderIntent(
                     action="close",
                     symbol=symbol,
-                    quantity=-quantity_delta,
+                    quantity=close_quantity,
                     reason=reason,
                 )
             )
-        elif quantity_delta > EPSILON:
+        open_quantity = executable(abs(target_signed_quantity))
+        if open_quantity > EPSILON:
             additions.append(
                 OrderIntent(
                     action="long" if target_signed_quantity > 0 else "short",
                     symbol=symbol,
-                    quantity=quantity_delta,
+                    quantity=open_quantity,
                     reason=reason,
                 )
             )
-    else:
-        reductions.append(
-            OrderIntent(
-                action="close",
-                symbol=symbol,
-                quantity=position.quantity if position is not None else None,
-                reason=reason,
-            )
-        )
-        additions.append(
-            OrderIntent(
-                action="long" if target_signed_quantity > 0 else "short",
-                symbol=symbol,
-                quantity=abs(target_signed_quantity),
-                reason=reason,
-            )
-        )
 
     return [
         RebalanceOrderState(
@@ -2348,6 +2489,7 @@ def _plan_portfolio_weights(
     get_reference_price: Callable[[str], float | None],
     get_cost_model: Callable[[str], CostModel],
     get_fresh_price: Callable[[str], float | None] | None = None,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> tuple[PortfolioRebalanceState, dict[str, float]]:
     """Freeze target notionals and resolve quantities only from fresh prices."""
     target_symbols = {symbol for symbol, weight in targets.weights.items() if abs(weight) > EPSILON}
@@ -2394,6 +2536,7 @@ def _plan_portfolio_weights(
                             positions,
                             position.entry_price,
                             get_cost_model=get_cost_model,
+                            get_executable_quantity=get_executable_quantity,
                         )
                     )
             else:
@@ -2415,6 +2558,7 @@ def _plan_portfolio_weights(
                 positions,
                 price,
                 get_cost_model=get_cost_model,
+                get_executable_quantity=get_executable_quantity,
             )
         )
     return (
@@ -2445,6 +2589,7 @@ def execute_portfolio_weights(
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> ExecutionResult:
     """Resolve and execute a portfolio rebalance as one deterministic batch."""
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
@@ -2471,6 +2616,7 @@ def execute_portfolio_weights(
         cash,
         get_reference_price=reference_price,
         get_cost_model=get_cost_model,
+        get_executable_quantity=get_executable_quantity,
     )
     if state.unresolved_legs:
         raise ExecutionPriceUnavailableError([leg.symbol for leg in state.unresolved_legs])
@@ -2525,6 +2671,7 @@ def execute_portfolio_weights(
         get_lagged_adv=get_lagged_adv,
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
+        get_executable_quantity=get_executable_quantity,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
     scaled_additions, cash_events = _scale_additions_to_cash(
@@ -2534,6 +2681,7 @@ def execute_portfolio_weights(
         prices=prices,
         get_cost_model=get_cost_model,
         get_volume=get_volume,
+        get_executable_quantity=get_executable_quantity,
     )
     addition_result = execute_order_intents(
         scaled_additions,
@@ -2551,6 +2699,7 @@ def execute_portfolio_weights(
         get_lagged_adv=get_lagged_adv,
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
+        get_executable_quantity=get_executable_quantity,
     )
     return ExecutionResult(
         trades=[*reduction_result.trades, *addition_result.trades],
@@ -2756,6 +2905,7 @@ def execute_portfolio_rebalance_slice(
     get_lagged_adv: Callable[[str], float | None] | None = None,
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> ExecutionResult:
     """Execute one bounded-liquidity slice and retain only true residuals."""
     if residual_policy == "discard":
@@ -2808,6 +2958,7 @@ def execute_portfolio_rebalance_slice(
                 positions,
                 float(raw_price),
                 get_cost_model=get_cost_model,
+                get_executable_quantity=get_executable_quantity,
             )
         )
 
@@ -2911,6 +3062,7 @@ def execute_portfolio_rebalance_slice(
         get_lagged_adv=get_lagged_adv,
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
+        get_executable_quantity=get_executable_quantity,
     )
     for event in reduction_result.events:
         key = ("reduction", event.symbol)
@@ -2936,6 +3088,11 @@ def execute_portfolio_rebalance_slice(
             existing_quantity = position.quantity if position is not None else 0.0
             unit_notional = price * get_cost_model(order.intent.symbol).multiplier
             available_quantity = max(max_position_notional / unit_notional - existing_quantity, 0.0)
+            if get_executable_quantity is not None and available_quantity > EPSILON:
+                available_quantity = get_executable_quantity(
+                    order.intent.symbol,
+                    available_quantity,
+                )
             if quantity > available_quantity + EPSILON:
                 if residual_policy == "fail":
                     raise ValueError(
@@ -2962,6 +3119,7 @@ def execute_portfolio_rebalance_slice(
         prices=addition_prices,
         get_cost_model=get_cost_model,
         get_volume=get_volume,
+        get_executable_quantity=get_executable_quantity,
     )
     has_future_reduction = any(
         remaining_by_key.get(("reduction", order.intent.symbol), 0.0) > EPSILON
@@ -3001,6 +3159,7 @@ def execute_portfolio_rebalance_slice(
         get_lagged_adv=get_lagged_adv,
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
+        get_executable_quantity=get_executable_quantity,
     )
     for event in addition_result.events:
         key = ("addition", event.symbol)
@@ -3341,6 +3500,7 @@ def execute_pending_decision_and_stops(
     exposure_prices: Mapping[str, float] | None = None,
     rebalance_state: PortfolioRebalanceState | None = None,
     rebalance_residual_policy: RebalanceResidualPolicy = "discard",
+    get_executable_quantity: Callable[[str, float], float] | None = None,
 ) -> tuple[float, ExecutionResult]:
     """Fill pending decisions, then check causally eligible protective exits.
 
@@ -3459,6 +3619,7 @@ def execute_pending_decision_and_stops(
             "max_adv_participation_rate": max_adv_participation_rate,
             "get_volume": get_execution_volume,
             "get_lagged_adv": get_lagged_adv,
+            "get_executable_quantity": get_executable_quantity,
         }
         if isinstance(pending_decision, PortfolioWeights) or rebalance_state is not None:
             if rebalance_residual_policy == "discard":
@@ -3486,6 +3647,7 @@ def execute_pending_decision_and_stops(
                         get_reference_price=get_valuation_price,
                         get_fresh_price=get_fresh_reference_price,
                         get_cost_model=get_cost_model,
+                        get_executable_quantity=get_executable_quantity,
                     )
                 fill_result = execute_portfolio_rebalance_slice(
                     state,
@@ -3561,6 +3723,7 @@ def execute_pending_decision_and_stops(
             used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             eligible_symbols=same_bar_protection_symbols,
+            get_executable_quantity=get_executable_quantity,
         )
         trades.extend(stop_result.trades)
         events.extend(stop_result.events)

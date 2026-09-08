@@ -25,6 +25,8 @@ from typing import Any, Self
 
 import pandas as pd
 
+from librae.core.utils import floor_to_step as floor_to_step
+
 # ---------------------------------------------------------------------------
 # get_position() shared shape
 # ---------------------------------------------------------------------------
@@ -105,14 +107,6 @@ def drop_incomplete_ohlcv(
     if close_at > datetime.now(UTC):
         return df.iloc[:-1]
     return df
-
-
-def floor_to_step(value: float, step: float) -> float:
-    """Round a positive quantity down to an exchange-supported step."""
-    if not isfinite(value) or value <= 0 or not isfinite(step) or step <= 0:
-        raise ValueError("value and step must be positive and finite")
-    units = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_FLOOR)
-    return float(units * Decimal(str(step)))
 
 
 def validate_order_signal(signal: Mapping[str, Any]) -> None:

@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from librae.core.run_config import RunConfig
 
-from librae.core.utils import validate_contract_month
+from librae.core.utils import floor_to_step, validate_contract_month
 
 type AdapterName = str
 type BrokerName = str
@@ -220,7 +220,9 @@ class SymbolInfo:
     _build_registry). tick_size is optional; None means "use
     market_config.py's market-level default" (an acceptable approximation
     — see this module's docstring for why tick_size and multiplier have
-    different risk profiles).
+    different risk profiles). quantity_step/min_quantity are optional shared
+    execution constraints; venue rules that must be discovered at order time
+    remain adapter-owned.
     """
 
     symbol: str
@@ -237,6 +239,8 @@ class SymbolInfo:
     security_type: str | None = None
     exchange: str | None = None
     calendar_id: str | None = None
+    quantity_step: float | None = None
+    min_quantity: float | None = None
 
     def __post_init__(self) -> None:
         validate_instrument_type(self.instrument_type, context=f"{self.symbol!r} instrument_type")
@@ -250,6 +254,15 @@ class SymbolInfo:
             raise ValueError(f"{self.symbol!r} currency must be non-empty")
         if self.calendar_id is not None and not self.calendar_id:
             raise ValueError(f"{self.symbol!r} calendar_id must be non-empty or None")
+        for field_name in ("quantity_step", "min_quantity"):
+            value = getattr(self, field_name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{self.symbol!r} {field_name} must be positive when supplied")
         if not isinstance(self.continuous_alias, bool):
             raise TypeError(f"{self.symbol!r} continuous_alias must be a bool")
         validate_contract_month(self.contract_month)
@@ -266,6 +279,24 @@ class SymbolInfo:
             raise ValueError(
                 f"{self.symbol!r} contract_month is valid only for monthly/quarterly contracts"
             )
+
+    def normalize_quantity(self, quantity: float) -> float:
+        """Round a requested quantity toward zero and enforce its minimum."""
+        if (
+            isinstance(quantity, bool)
+            or not isinstance(quantity, Real)
+            or not isfinite(quantity)
+            or quantity <= 0
+        ):
+            raise ValueError(f"{self.symbol!r} quantity must be positive and finite")
+        normalized = (
+            floor_to_step(float(quantity), self.quantity_step)
+            if self.quantity_step is not None
+            else float(quantity)
+        )
+        if self.min_quantity is not None and normalized < self.min_quantity:
+            return 0.0
+        return normalized
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
@@ -310,6 +341,12 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             ),
             exchange=str(data["exchange"]) if data.get("exchange") is not None else None,
             calendar_id=(str(data["calendar_id"]) if data.get("calendar_id") is not None else None),
+            quantity_step=(
+                float(data["quantity_step"]) if data.get("quantity_step") is not None else None
+            ),
+            min_quantity=(
+                float(data["min_quantity"]) if data.get("min_quantity") is not None else None
+            ),
         )
     return registry
 
@@ -354,6 +391,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,
             "multiplier": 200.0,  # TAIFEX large contract — required, no safe default for contract_* types
             "tick_size": 1.0,  # 1 index point; venue price limits remain contract-specific
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
         },
         "TXFR2": {
             "market": "tw_futures",
@@ -365,6 +404,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest) — see shioaji_adapter.py
             "multiplier": 200.0,  # same contract as TXFR1, just the next-nearest month
             "tick_size": 1.0,
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
         },
         "MXFR1": {
             "market": "tw_futures",
@@ -376,6 +417,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,
             "multiplier": 50.0,  # TAIFEX mini contract — contract spec: index x 50 TWD
             "tick_size": 1.0,
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
         },
         "MXFR2": {
             "market": "tw_futures",
@@ -387,6 +430,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
             "multiplier": 50.0,  # same contract as MXFR1, just the next-nearest month
             "tick_size": 1.0,
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
         },
         "TMFR1": {
             "market": "tw_futures",
@@ -398,6 +443,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,
             "multiplier": 10.0,  # TAIFEX micro contract — contract spec: index x 10 TWD
             "tick_size": 1.0,
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
         },
         "TMFR2": {
             "market": "tw_futures",
@@ -409,6 +456,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
             "multiplier": 10.0,  # same contract as TMFR1, just the next-nearest month
             "tick_size": 1.0,
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
         },
         "MU": {
             "market": "us_equity",
@@ -418,6 +467,8 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "currency": "USD",
             "security_type": "STK",
             "calendar_id": "XNYS",
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
             # multiplier/tick_size omitted — spot auto-defaults to
             # multiplier=1.0, tick_size falls back to market_config.py's
             # us_equity default (0.01).
@@ -621,6 +672,14 @@ def resolve_symbol(
     calendar_id = route.get("calendar_id") or (
         registered.calendar_id if registered else config.calendar_id
     )
+    quantity_step = route.get(
+        "quantity_step",
+        registered.quantity_step if registered else None,
+    )
+    min_quantity = route.get(
+        "min_quantity",
+        registered.min_quantity if registered else None,
+    )
     execution_broker = route.get("broker") or config.broker
     if (data_adapter == "ibkr" or execution_broker == "ibkr") and not security_type:
         raise ValueError(
@@ -658,4 +717,6 @@ def resolve_symbol(
         security_type=security_type,
         exchange=exchange,
         calendar_id=calendar_id,
+        quantity_step=float(quantity_step) if quantity_step is not None else None,
+        min_quantity=float(min_quantity) if min_quantity is not None else None,
     )

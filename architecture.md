@@ -501,6 +501,8 @@ strategy:
       venue_symbol: MU
       currency: USD
       security_type: STK
+      quantity_step: 1
+      min_quantity: 1
 ```
 
 An exact IBKR future keeps engine identity separate from venue resolution:
@@ -520,6 +522,8 @@ strategy:
       security_type: FUT
       exchange: CME
       contract_month: "202609"
+      quantity_step: 1
+      min_quantity: 1
   symbol_cost_overrides:
     ES_202609:
       multiplier: 50
@@ -529,6 +533,13 @@ For a rolling route, omit `contract_month` and set
 `continuous_alias: true`. For two expiries, configure two unique canonical
 symbols (for example `ES_202609` and `ES_202612`); no code infers expiry from
 those names.
+
+`quantity_step` and `min_quantity` are stable, cross-mode execution facts.
+The core rounds quantities down before cash, liquidity, and risk checks so a
+backtest cannot fill a size that live planning already knows is impossible.
+Adapters may impose a more specific current venue rule and their prepared
+quantity is validated again. Dynamic exchange precision and minimum-notional
+discovery stay adapter-owned rather than being frozen into `SymbolInfo`.
 
 For a live run, set one run-wide `broker` or compatible per-symbol
 `instrument_overrides.<symbol>.broker` values. Registered symbol metadata may
