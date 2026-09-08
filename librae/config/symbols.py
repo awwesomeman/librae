@@ -28,13 +28,16 @@ from the registry and must be selected by the caller.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from math import isfinite
 from numbers import Real
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from librae.core.run_config import RunConfig
+    from librae.core.strategy import OrderIntent
 
 from librae.core.utils import floor_to_step, validate_contract_month
 
@@ -70,6 +73,44 @@ ALLOWED_INSTRUMENT_TYPES = frozenset(
         "contract_quarterly",
     }
 )
+INSTRUMENT_OVERRIDE_FIELDS = frozenset(
+    {
+        "broker",
+        "calendar_id",
+        "continuous_alias",
+        "contract_month",
+        "currency",
+        "data_adapter",
+        "data_source",
+        "exchange",
+        "instrument_type",
+        "market",
+        "min_notional",
+        "min_quantity",
+        "price_increment",
+        "quantity_step",
+        "security_type",
+        "venue_symbol",
+    }
+)
+_INSTRUMENT_TEXT_FIELDS = frozenset(
+    {
+        "broker",
+        "calendar_id",
+        "currency",
+        "data_adapter",
+        "data_source",
+        "exchange",
+        "instrument_type",
+        "market",
+        "security_type",
+        "venue_symbol",
+    }
+)
+_INSTRUMENT_POSITIVE_FIELDS = frozenset(
+    {"min_notional", "min_quantity", "price_increment", "quantity_step"}
+)
+_PRICE_INCREMENT_TOLERANCE_RATE = Decimal("1e-9")
 
 
 def validate_instrument_type(instrument_type: str, *, context: str = "instrument_type") -> None:
@@ -78,6 +119,70 @@ def validate_instrument_type(instrument_type: str, *, context: str = "instrument
         raise ValueError(
             f"{context}={instrument_type!r} is not one of {sorted(ALLOWED_INSTRUMENT_TYPES)}"
         )
+
+
+def validate_instrument_overrides(
+    overrides: Mapping[str, object],
+    *,
+    symbols: tuple[str, ...],
+) -> None:
+    """Validate the closed per-symbol routing and execution schema."""
+    for symbol, raw_route in overrides.items():
+        if not isinstance(symbol, str):
+            raise TypeError("instrument_overrides keys must be symbol strings")
+        if symbol not in symbols:
+            raise ValueError(f"instrument_overrides contains unconfigured symbol {symbol!r}")
+        if not isinstance(raw_route, Mapping):
+            raise TypeError(f"instrument_overrides[{symbol!r}] must be a mapping")
+        route = dict(raw_route)
+        unknown = sorted(
+            repr(field_name)
+            for field_name in route
+            if not isinstance(field_name, str) or field_name not in INSTRUMENT_OVERRIDE_FIELDS
+        )
+        if unknown:
+            raise ValueError(f"instrument_overrides[{symbol!r}] contains unknown keys {unknown}")
+        for field_name in _INSTRUMENT_TEXT_FIELDS & set(route):
+            value = route[field_name]
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"instrument_overrides[{symbol!r}][{field_name!r}] must be a non-empty string"
+                )
+        for field_name in _INSTRUMENT_POSITIVE_FIELDS & set(route):
+            value = route[field_name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"instrument_overrides[{symbol!r}][{field_name!r}] must be finite and positive"
+                )
+        if "continuous_alias" in route and not isinstance(route["continuous_alias"], bool):
+            raise TypeError(f"instrument_overrides[{symbol!r}]['continuous_alias'] must be a bool")
+        if "contract_month" in route:
+            contract_month = route["contract_month"]
+            if contract_month is not None and not isinstance(contract_month, str):
+                raise TypeError(
+                    f"instrument_overrides[{symbol!r}]['contract_month'] must be a string or None"
+                )
+            try:
+                validate_contract_month(contract_month)
+            except ValueError as exc:
+                raise ValueError(
+                    f"instrument_overrides[{symbol!r}]['contract_month']: {exc}"
+                ) from exc
+        if route.get("continuous_alias") is True and route.get("contract_month") is not None:
+            raise ValueError(
+                f"instrument_overrides[{symbol!r}] cannot set both "
+                "continuous_alias=True and contract_month"
+            )
+        if "instrument_type" in route:
+            validate_instrument_type(
+                str(route["instrument_type"]),
+                context=f"instrument_overrides[{symbol!r}]['instrument_type']",
+            )
 
 
 @dataclass(frozen=True)
@@ -109,6 +214,8 @@ class AvailableSymbol:
     continuous_alias: bool = False
     multiplier: float | None = None
     tick_size: float | None = None
+    price_increment: float | None = None
+    min_notional: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.broker, str) or not self.broker:
@@ -149,7 +256,7 @@ class AvailableSymbol:
             raise TypeError("continuous_alias must be a bool")
         if self.continuous_alias and self.contract_month is not None:
             raise ValueError("continuous alias cannot also pin contract_month")
-        for field_name in ("multiplier", "tick_size"):
+        for field_name in ("multiplier", "tick_size", "price_increment", "min_notional"):
             value = getattr(self, field_name)
             if value is not None and (
                 isinstance(value, bool)
@@ -196,6 +303,10 @@ class AvailableSymbol:
             value = getattr(self, key)
             if value is not None:
                 route[key] = value
+        for key in ("price_increment", "min_notional"):
+            value = getattr(self, key)
+            if value is not None:
+                route[key] = value
         return route
 
     def cost_override(self) -> dict[str, float]:
@@ -220,9 +331,11 @@ class SymbolInfo:
     _build_registry). tick_size is optional; None means "use
     market_config.py's market-level default" (an acceptable approximation
     — see this module's docstring for why tick_size and multiplier have
-    different risk profiles). quantity_step/min_quantity are optional shared
-    execution constraints; venue rules that must be discovered at order time
-    remain adapter-owned.
+    different risk profiles). ``price_increment`` is separate, authoritative
+    order metadata and is never inferred from the cost model. Quantity step,
+    minimum quantity, and minimum notional are optional shared execution
+    constraints; venue rules that must be discovered at order time remain
+    adapter-owned.
     """
 
     symbol: str
@@ -241,20 +354,33 @@ class SymbolInfo:
     calendar_id: str | None = None
     quantity_step: float | None = None
     min_quantity: float | None = None
+    price_increment: float | None = None
+    min_notional: float | None = None
 
     def __post_init__(self) -> None:
         validate_instrument_type(self.instrument_type, context=f"{self.symbol!r} instrument_type")
         if not isinstance(self.data_adapter, str) or not self.data_adapter:
             raise ValueError(f"{self.symbol!r} data_adapter must be a non-empty string")
-        if self.multiplier <= 0:
-            raise ValueError(f"{self.symbol!r} multiplier must be positive")
+        if (
+            isinstance(self.multiplier, bool)
+            or not isinstance(self.multiplier, Real)
+            or not isfinite(self.multiplier)
+            or self.multiplier <= 0
+        ):
+            raise ValueError(f"{self.symbol!r} multiplier must be finite and positive")
         if not self.venue_symbol:
             raise ValueError(f"{self.symbol!r} venue_symbol must be non-empty")
         if not self.currency:
             raise ValueError(f"{self.symbol!r} currency must be non-empty")
         if self.calendar_id is not None and not self.calendar_id:
             raise ValueError(f"{self.symbol!r} calendar_id must be non-empty or None")
-        for field_name in ("quantity_step", "min_quantity"):
+        for field_name in (
+            "tick_size",
+            "quantity_step",
+            "min_quantity",
+            "price_increment",
+            "min_notional",
+        ):
             value = getattr(self, field_name)
             if value is not None and (
                 isinstance(value, bool)
@@ -297,6 +423,24 @@ class SymbolInfo:
         if self.min_quantity is not None and normalized < self.min_quantity:
             return 0.0
         return normalized
+
+    def validate_order_prices(self, intent: OrderIntent) -> None:
+        """Reject explicit order prices outside the authoritative grid."""
+        if self.price_increment is None:
+            return
+        increment = Decimal(str(self.price_increment))
+        tolerance = increment * _PRICE_INCREMENT_TOLERANCE_RATE
+        for field_name in ("limit_price", "stop_price", "take_profit_price"):
+            raw_price = getattr(intent, field_name)
+            if raw_price is None:
+                continue
+            price = Decimal(str(raw_price))
+            nearest = (price / increment).to_integral_value() * increment
+            if abs(price - nearest) > tolerance:
+                raise ValueError(
+                    f"{self.symbol!r} {field_name}={raw_price!r} is not aligned "
+                    f"to price_increment={self.price_increment!r}"
+                )
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
@@ -347,6 +491,12 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             min_quantity=(
                 float(data["min_quantity"]) if data.get("min_quantity") is not None else None
             ),
+            price_increment=(
+                float(data["price_increment"]) if data.get("price_increment") is not None else None
+            ),
+            min_notional=(
+                float(data["min_notional"]) if data.get("min_notional") is not None else None
+            ),
         )
     return registry
 
@@ -391,6 +541,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,
             "multiplier": 200.0,  # TAIFEX large contract — required, no safe default for contract_* types
             "tick_size": 1.0,  # 1 index point; venue price limits remain contract-specific
+            "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
         },
@@ -404,6 +555,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest) — see shioaji_adapter.py
             "multiplier": 200.0,  # same contract as TXFR1, just the next-nearest month
             "tick_size": 1.0,
+            "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
         },
@@ -417,6 +569,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,
             "multiplier": 50.0,  # TAIFEX mini contract — contract spec: index x 50 TWD
             "tick_size": 1.0,
+            "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
         },
@@ -430,6 +583,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
             "multiplier": 50.0,  # same contract as MXFR1, just the next-nearest month
             "tick_size": 1.0,
+            "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
         },
@@ -443,6 +597,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,
             "multiplier": 10.0,  # TAIFEX micro contract — contract spec: index x 10 TWD
             "tick_size": 1.0,
+            "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
         },
@@ -456,6 +611,7 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
             "multiplier": 10.0,  # same contract as TMFR1, just the next-nearest month
             "tick_size": 1.0,
+            "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
         },
@@ -680,6 +836,14 @@ def resolve_symbol(
         "min_quantity",
         registered.min_quantity if registered else None,
     )
+    price_increment = route.get(
+        "price_increment",
+        registered.price_increment if registered else None,
+    )
+    min_notional = route.get(
+        "min_notional",
+        registered.min_notional if registered else None,
+    )
     execution_broker = route.get("broker") or config.broker
     if (data_adapter == "ibkr" or execution_broker == "ibkr") and not security_type:
         raise ValueError(
@@ -719,4 +883,6 @@ def resolve_symbol(
         calendar_id=calendar_id,
         quantity_step=float(quantity_step) if quantity_step is not None else None,
         min_quantity=float(min_quantity) if min_quantity is not None else None,
+        price_increment=(float(price_increment) if price_increment is not None else None),
+        min_notional=float(min_notional) if min_notional is not None else None,
     )

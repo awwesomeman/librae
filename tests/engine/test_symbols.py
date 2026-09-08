@@ -14,6 +14,7 @@ from librae.config.symbols import (
     resolve_symbol,
 )
 from librae.core.run_config import AccountConfig, RunConfig
+from librae.core.strategy import OrderIntent
 
 
 @pytest.fixture
@@ -75,6 +76,8 @@ class TestAvailableSymbol:
             contract_rank=0,
             multiplier=2.0,
             tick_size=0.25,
+            price_increment=0.25,
+            min_notional=5.0,
         )
 
         assert symbol.market_data_kwargs() == {
@@ -94,6 +97,8 @@ class TestAvailableSymbol:
             "security_type": "FUT",
             "exchange": "CME",
             "contract_month": "202609",
+            "price_increment": 0.25,
+            "min_notional": 5.0,
         }
         assert symbol.cost_override() == {
             "multiplier": 2.0,
@@ -454,6 +459,84 @@ class TestResolveSymbol:
 
         assert info.calendar_id == "XNYS"
 
+    def test_instrument_override_rejects_unknown_key_with_symbol(self):
+        with pytest.raises(ValueError, match=r"AAPL.*price_incremnt"):
+            self._cfg(
+                instrument_overrides={
+                    "AAPL": {"price_incremnt": 0.01},
+                }
+            )
+
+    def test_instrument_override_rejects_non_string_field_name_cleanly(self):
+        with pytest.raises(ValueError, match=r"AAPL.*123"):
+            self._cfg(instrument_overrides={"AAPL": {123: "invalid"}})
+
+    def test_instrument_override_rejects_non_mapping_route(self):
+        with pytest.raises(TypeError, match=r"AAPL.*mapping"):
+            RunConfig(
+                strategy_name="x",
+                symbols=["AAPL"],
+                timeframe="1d",
+                market="us_equity",
+                data_source="ibkr",
+                account=AccountConfig(currency="USD", initial_cash=10_000.0),
+                mode="backtest",
+                instrument_overrides={"AAPL": []},
+            )
+
+    def test_instrument_override_rejects_unconfigured_symbol(self):
+        with pytest.raises(ValueError, match="unconfigured symbol 'GHOST'"):
+            self._cfg(instrument_overrides={"GHOST": {"calendar_id": "XNYS"}})
+
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("price_increment", 0.0),
+            ("price_increment", float("nan")),
+            ("min_notional", True),
+            ("quantity_step", "0.1"),
+        ],
+    )
+    def test_instrument_override_rejects_invalid_execution_values(
+        self,
+        field_name,
+        value,
+    ):
+        with pytest.raises(ValueError, match=field_name):
+            self._cfg(instrument_overrides={"AAPL": {field_name: value}})
+
+    def test_instrument_override_rejects_conflicting_contract_selection(self):
+        with pytest.raises(ValueError, match="cannot set both"):
+            self._cfg(
+                instrument_overrides={
+                    "AAPL": {
+                        "continuous_alias": True,
+                        "contract_month": "202609",
+                    }
+                }
+            )
+
+    def test_resolved_execution_constraints_stay_separate_from_cost_tick(self):
+        info = resolve_symbol(
+            self._cfg(
+                instrument_overrides={
+                    "AAPL": {
+                        "instrument_type": "spot",
+                        "currency": "USD",
+                        "security_type": "STK",
+                        "price_increment": 0.25,
+                        "min_notional": 100.0,
+                    }
+                },
+                symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+            ),
+            "AAPL",
+        )
+
+        assert info.tick_size is None
+        assert info.price_increment == 0.25
+        assert info.min_notional == 100.0
+
     def test_exact_ibkr_future_keeps_canonical_symbol_and_explicit_month(self):
         info = resolve_symbol(
             self._cfg(
@@ -538,3 +621,56 @@ class TestResolveSymbol:
                 ),
                 "BTCUSDT",
             )
+
+
+class TestExecutablePriceIncrement:
+    @staticmethod
+    def _instrument(price_increment: float | None, *, tick_size: float | None = None):
+        return SymbolInfo(
+            symbol="TEST",
+            market="test",
+            data_source="test",
+            instrument_type="spot",
+            multiplier=1.0,
+            data_adapter="test",
+            venue_symbol="TEST",
+            currency="USD",
+            tick_size=tick_size,
+            price_increment=price_increment,
+        )
+
+    @pytest.mark.parametrize(
+        ("increment", "price"),
+        [
+            (0.01, 100.13),
+            (0.25, 100.25),
+            (0.0001, 0.1234),
+            (0.1, 0.1 + 0.2),
+        ],
+    )
+    def test_accepts_equity_futures_crypto_and_float_boundaries(self, increment, price):
+        instrument = self._instrument(increment)
+
+        instrument.validate_order_prices(
+            OrderIntent(
+                action="long",
+                limit_price=price,
+                stop_price=price,
+                take_profit_price=price,
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "field_name",
+        ["limit_price", "stop_price", "take_profit_price"],
+    )
+    def test_rejects_half_tick(self, field_name):
+        instrument = self._instrument(0.25)
+
+        with pytest.raises(ValueError, match=rf"{field_name}.*price_increment"):
+            instrument.validate_order_prices(OrderIntent(action="long", **{field_name: 100.125}))
+
+    def test_cost_tick_is_not_an_authoritative_price_grid(self):
+        instrument = self._instrument(None, tick_size=0.25)
+
+        instrument.validate_order_prices(OrderIntent(action="long", limit_price=100.13))

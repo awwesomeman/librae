@@ -27,6 +27,7 @@ RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
 MarketDataSessionMode = Literal["regular", "extended"]
 RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
+SimulatedFillPrice = Literal["open"]
 DEFAULT_POLL_SECONDS = 60
 # A runtime is stale after three missed poll-cycle heartbeats. Consumers use
 # the persisted poll_seconds rather than inferring cadence from the bar timeframe.
@@ -64,16 +65,19 @@ class AccountConfig:
 class ExecutionPolicy:
     """Run-wide matching and pre-trade liquidity assumptions.
 
-    ``default_fill_price`` is used by backtest and simulation when a strategy
-    decision does not override ``fill_price``. Live market orders are filled
-    by the broker and do not use this bar field.
+    ``default_fill_price`` is used by backtest and simulation when an intent
+    has no explicit limit. The only built-in mode is ``open``: it uses the
+    next bar's first observed price, whose availability matches Librae's
+    bar-start execution timestamp. Close/high/low and custom feature columns
+    are deliberately unsupported until the engine has a separate
+    ``available_at`` contract. Live market orders are filled by the broker and
+    do not use this bar field.
 
     ``max_bar_volume_participation_rate`` caps the cumulative filled quantity for
     one symbol in one bar. ``None`` disables the cap. With a cap enabled,
     missing volume rejects the fill and insufficient volume produces a partial
-    fill. A simulated close fill uses that completed bar's volume. Open,
-    limit, other intrabar fills, and protective exits use the previous
-    completed bar's volume so later information cannot change an earlier fill.
+    fill. Open, limit, and protective fills use the previous completed bar's
+    volume so later information cannot change an earlier fill.
     Forced end-of-run exits fill at the completed final close and use its volume.
 
     ``adv_lookback_sessions`` and ``max_adv_participation_rate`` form one
@@ -104,7 +108,7 @@ class ExecutionPolicy:
     changes engine behavior and can invalidate ADV or strategy inputs.
     """
 
-    default_fill_price: str = "open"
+    default_fill_price: SimulatedFillPrice = "open"
     max_bar_volume_participation_rate: float | None = 0.1
     adv_lookback_sessions: int | None = None
     max_adv_participation_rate: float | None = None
@@ -114,8 +118,8 @@ class ExecutionPolicy:
     rebalance_residual_policy: RebalanceResidualPolicy = "discard"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.default_fill_price, str) or not self.default_fill_price:
-            raise ValueError("default_fill_price must be a non-empty bar field name")
+        if self.default_fill_price != "open":
+            raise ValueError("default_fill_price supports only causal next-bar 'open'")
         for field_name in (
             "max_bar_volume_participation_rate",
             "max_adv_participation_rate",
@@ -356,9 +360,9 @@ class RunConfig:
     # same tw_futures run).
     cost_overrides: dict[str, float | str] | None = None
     symbol_cost_overrides: dict[str, dict[str, float | str]] | None = None
-    # Broker/data routing metadata for one symbol. Cost fields remain in
-    # symbol_cost_overrides so accounting inputs and venue identifiers cannot be
-    # accidentally mixed into CostModel construction.
+    # Closed per-symbol routing and stable execution-constraint schema. Cost
+    # fields remain in symbol_cost_overrides so accounting inputs and venue
+    # identifiers cannot be accidentally mixed into CostModel construction.
     instrument_overrides: dict[str, dict[str, object]] | None = None
     # Run-wide trading-session calendar fallback, mirroring market/data_source:
     # resolve_symbol() uses it for any symbol without its own registry entry or
@@ -389,6 +393,15 @@ class RunConfig:
         object.__setattr__(self, "symbols", tuple(self.symbols))
         if not isinstance(self.account, AccountConfig):
             raise TypeError("account must be an AccountConfig")
+        if self.instrument_overrides is not None:
+            if type(self.instrument_overrides) not in (dict, FrozenDict):
+                raise TypeError("instrument_overrides must be a dictionary or None")
+            from librae.config.symbols import validate_instrument_overrides
+
+            validate_instrument_overrides(
+                self.instrument_overrides,
+                symbols=self.symbols,
+            )
         for field_name in (
             "params",
             "cost_overrides",

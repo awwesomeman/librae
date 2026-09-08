@@ -184,7 +184,7 @@ Grafana dashboards consume the same multiplier.
   `list_open_orders`, and `cancel_order`.
 - `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, compatible per-symbol `instrument_overrides[symbol]["broker"]` values, or an injected `order_adapter`; an unresolved or incompatible route fails before adapters are constructed. An explicitly selected broker may reuse the same adapter session as market data.
 - Cross-broker behavior is generalized only at an observed engine boundary. `LiveExecutor` builds one broker-neutral `PositionRequest` from the configured canonical/venue identity, currency, security type, exchange, `contract_month`/`continuous_alias`, and `CostModel.multiplier`; every adapter accepts that request and returns the same position shape. Contract lookup, broker-native symbol syntax, CCXT balance conventions, Shioaji direction enums, and IBKR `conId`/`avgCost` handling stay inside the concrete adapter. Add a shared field or helper only when more than one real adapter needs the same semantic; do not create broker hierarchies or speculative capability abstractions.
-- `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums/minimum tick. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero.
+- `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero. A prepared limit price may not differ from the strategy's validated limit. Fixed `price_increment` metadata is authoritative when present; price-band rules remain adapter/venue-owned rather than treating a cost-model tick or IBKR's minimum possible tick as a universal grid.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A non-flat position snapshot must provide finite side/quantity and a positive average price; missing fields never mean flat or zero. A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `librae/brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
@@ -539,12 +539,16 @@ For a rolling route, omit `contract_month` and set
 symbols (for example `ES_202609` and `ES_202612`); no code infers expiry from
 those names.
 
-`quantity_step` and `min_quantity` are stable, cross-mode execution facts.
-The core rounds quantities down before cash, liquidity, and risk checks so a
-backtest cannot fill a size that live planning already knows is impossible.
-Adapters may impose a more specific current venue rule and their prepared
-quantity is validated again. Dynamic exchange precision and minimum-notional
-discovery stay adapter-owned rather than being frozen into `SymbolInfo`.
+`quantity_step`, `min_quantity`, `min_notional`, and a fixed `price_increment`
+are stable, cross-mode execution facts. The core rounds quantities down before
+cash, liquidity, and risk checks, applies the entry minimum notional, and
+rejects explicit prices outside a configured fixed grid so a backtest cannot
+fill an order that live planning already knows is impossible. Cost-model
+`tick_size` remains an execution-cost approximation, never price-grid
+authority. Adapters may impose more specific current venue rules and their
+prepared request is validated again. Dynamic exchange precision,
+minimum-notional discovery, and price-band tick schedules stay adapter-owned
+rather than being frozen into `SymbolInfo`.
 
 For a live run, set one run-wide `broker` or compatible per-symbol
 `instrument_overrides.<symbol>.broker` values. Registered symbol metadata may

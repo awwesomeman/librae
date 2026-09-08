@@ -1511,15 +1511,14 @@ class LiveTrader:
         *,
         reference_price: float,
     ) -> OrderRequest:
-        """Apply venue normalization, then enforce the live limit-price collar.
+        """Apply venue validation, then enforce the live limit-price collar.
 
         The executor already rejects a prepared order that changes symbol,
-        drops a limit price, or enlarges the quantity. A limit price the
-        adapter rounds toward the aggressive side is deliberately not
-        rejected outright: a tick of rounding is normal venue behaviour, and
-        halting the account for it would cost more than it protects. The
-        opt-in ``max_limit_price_deviation_rate`` collar below is the bound
-        on how far a prepared limit may sit from the reference price.
+        drops or changes a validated limit price, or enlarges the quantity.
+        Adapter-owned variable tick rules therefore fail closed instead of
+        silently changing strategy intent. The opt-in
+        ``max_limit_price_deviation_rate`` collar below additionally bounds
+        the limit against the completed-bar reference price.
         """
         prepared = self._executor.prepare_order(
             request,
@@ -1664,6 +1663,9 @@ class LiveTrader:
                         symbol=prepared.symbol,
                         quantity=prepared.quantity,
                         reason=prepared.reason,
+                        limit_price=(
+                            prepared.limit_price if prepared.order_type == "limit" else None
+                        ),
                         group_id=prepared.group_id,
                     )
                 ],
@@ -1682,6 +1684,8 @@ class LiveTrader:
                 used_bar_quantity_by_symbol=prepared_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=prepared_adv_quantity_by_symbol,
                 get_executable_quantity=self._get_executable_quantity,
+                validate_intent_prices=self._validate_intent_prices,
+                get_min_notional=self._get_min_notional,
             )
             executable_quantity = sum(event.fill_quantity for event in validation_result.events)
             if abs(executable_quantity - prepared.quantity) > EPSILON:
@@ -1732,6 +1736,7 @@ class LiveTrader:
                     used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
                     get_executable_quantity=self._get_executable_quantity,
+                    get_min_notional=self._get_min_notional,
                 )
             except ExecutionPriceUnavailableError as exc:
                 if unavailable_side_symbols:
@@ -1939,7 +1944,6 @@ class LiveTrader:
                     planning_action = replace(
                         action,
                         quantity=expected_quantity,
-                        limit_price=None,
                     )
                     positions_before_action = deepcopy(unit_positions)
                     cash_before_action = unit_cash
@@ -1964,7 +1968,12 @@ class LiveTrader:
                         used_bar_quantity_by_symbol=unit_bar_quantities,
                         used_adv_quantity_by_symbol=unit_adv_quantities,
                         get_executable_quantity=self._get_executable_quantity,
+                        validate_intent_prices=self._validate_intent_prices,
+                        get_min_notional=self._get_min_notional,
                     )
+                    if not grouped and self._on_runtime_event:
+                        for runtime_event in result.runtime_events:
+                            self._on_runtime_event(runtime_event)
                     if grouped and len(result.events) != 1:
                         reasons = sorted(
                             {
@@ -2727,6 +2736,8 @@ class LiveTrader:
                     max_net_exposure=self._risk_policy.max_net_exposure,
                     exposure_prices=exposure_prices,
                     get_executable_quantity=self._get_executable_quantity,
+                    validate_intent_prices=self._validate_intent_prices,
+                    get_min_notional=self._get_min_notional,
                 )
             self._commit_simulated_results(
                 cash=staged_cash,
@@ -2938,6 +2949,14 @@ class LiveTrader:
     def _get_executable_quantity(self, symbol: str, quantity: float) -> float:
         """Apply the shared instrument quantity contract before broker preparation."""
         return self._instruments[symbol].normalize_quantity(quantity)
+
+    def _validate_intent_prices(self, symbol: str, intent: OrderIntent) -> None:
+        """Apply the shared authoritative price grid before broker preparation."""
+        self._instruments[symbol].validate_order_prices(intent)
+
+    def _get_min_notional(self, symbol: str) -> float | None:
+        """Return the shared entry-order minimum, when configured."""
+        return self._instruments[symbol].min_notional
 
     def _apply_financing_cash_flows(
         self,

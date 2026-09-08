@@ -86,7 +86,7 @@ class OrderSignal(TypedDict):
     reason: NotRequired[str]
     price: NotRequired[float]
     reference_price: NotRequired[float]
-    tick_size: NotRequired[float | None]
+    price_increment: NotRequired[float | None]
     security_type: NotRequired[str]
     exchange: NotRequired[str]
     currency: NotRequired[str]
@@ -475,7 +475,7 @@ class LiveExecutor:
         signal = request.to_signal()
         signal["reference_price"] = reference_price
         instrument = self._instruments.get(request.symbol)
-        signal["tick_size"] = instrument.tick_size if instrument else None
+        signal["price_increment"] = instrument.price_increment if instrument else None
         try:
             prepared = adapter.prepare_order(signal)
         except Exception as exc:
@@ -505,6 +505,23 @@ class LiveExecutor:
             limit_price is None or not isfinite(limit_price) or limit_price <= 0
         ):
             raise ValueError("prepared limit order requires a finite positive price")
+        if request.order_type == "limit":
+            assert request.limit_price is not None
+            assert limit_price is not None
+            tolerance = max(
+                EPSILON,
+                (
+                    instrument.price_increment
+                    if instrument is not None and instrument.price_increment is not None
+                    else 0.0
+                )
+                * EPSILON,
+            )
+            if abs(limit_price - request.limit_price) > tolerance:
+                raise ValueError(
+                    "order preparation cannot change a validated limit price: "
+                    f"requested {request.limit_price:.12g}, prepared {limit_price:.12g}"
+                )
         return replace(
             request,
             quantity=quantity,

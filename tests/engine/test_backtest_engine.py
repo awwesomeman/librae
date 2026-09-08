@@ -155,6 +155,48 @@ class TestBacktestBasics:
         open_event = next(event for event in result.position_events if event.event_type == "open")
         assert open_event.fill_quantity == pytest.approx(10.0)
 
+    def test_configured_price_grid_rejects_intent_before_backtest_fill(self) -> None:
+        class HalfTickLimitBuy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 0:
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol=ctx.symbol,
+                            quantity=1.0,
+                            limit_price=100.125,
+                        )
+                    ]
+                return []
+
+        backtest = Backtest(
+            _make_multiindex_df([100.0] * 5),
+            HalfTickLimitBuy(),
+            config=make_test_cfg(instrument_overrides={"BTCUSDT": {"price_increment": 0.25}}),
+        )
+
+        with pytest.raises(ValueError, match=r"limit_price.*price_increment"):
+            backtest.run()
+
+    def test_configured_minimum_notional_skips_backtest_entry(self) -> None:
+        class SmallBuy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        result = Backtest(
+            _make_multiindex_df([100.0] * 5),
+            SmallBuy(),
+            config=make_test_cfg(instrument_overrides={"BTCUSDT": {"min_notional": 150.0}}),
+        ).run()
+
+        assert result.position_events == []
+        assert any(
+            event.detail.get("reason") == "notional_below_minimum"
+            for event in result.runtime_events
+        )
+
     @pytest.mark.parametrize(
         "initial_balance",
         [0.0, -1.0, float("nan"), float("inf"), True, "100000"],

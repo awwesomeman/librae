@@ -79,9 +79,12 @@ For an `OrderIntent`, `limit_price` is a one-eligible-bar limit order. A
 buy fills when the bar's low reaches the limit and a sell fills when its high
 does; a gap through receives the opening price. An unreached limit expires
 after that bar and is logged. Simulated market orders use
-`ExecutionPolicy.default_fill_price`; a strategy never embeds a historical bar
-field in its decision. `PortfolioWeights` always uses that run-wide simulated
-market-fill policy; use per-symbol `OrderIntent`s for limits.
+`ExecutionPolicy.default_fill_price`, whose only supported value is `"open"`.
+This is the next eligible bar's open, available at Librae's bar-start event.
+Close/high/low and feature-column fills are rejected until the engine has an
+explicit value-availability timestamp contract. A strategy never embeds a
+historical bar field in its decision. `PortfolioWeights` uses the same
+next-open policy; use per-symbol `OrderIntent`s for limits.
 
 Historical data may additionally provide non-null boolean `can_buy` and
 `can_sell` columns as a required pair. The data adapter must normalize
@@ -107,9 +110,8 @@ cross-market backtest rule.
 
 OHLCV cannot determine whether an intrabar high or low happened first. A new
 position therefore receives same-bar stop/take-profit processing only when its
-entry is known at the bar open (the execution policy selects `"open"` or a
-limit gaps through at
-open). Protection for a resting limit or another non-open field begins on the
+entry is known at the bar open (a market order or a limit that gaps through at
+open). Protection for a resting limit begins on the
 next observed bar. This conservative rule prevents a target reached before the
 entry from being recorded as profit without introducing an invented intrabar
 path model.
@@ -647,15 +649,15 @@ concurrency. `LiveTrader.last_cycle_diagnostics` reports per-symbol fetch time,
 strategy time, broker-order time, total cycle time, and whether the cycle
 exceeded `RunConfig.runtime.poll_seconds`.
 
-- `default_fill_price`: backtest/sim fallback for decisions without an
-  explicit fill field. It is not used to manufacture live executions.
+- `default_fill_price`: backtest/sim fallback for market decisions. Only the
+  causal next-bar `"open"` is supported. It is not used to manufacture live
+  executions.
 - `max_bar_volume_participation_rate`: one cumulative per-symbol volume budget per
   simulated data event across entries, additions, reductions, ordinary
   closes, stops, modeled liquidation, drawdown exits, and terminal exits.
-  A fill explicitly modeled at `close` uses that completed bar's volume.
-  Next-open, limit, other non-close-field fills, and protective exits use the
-  previous completed bar's volume because the execution bar's final volume is
-  not known at their fill timestamp. Live planning uses the latest completed
+  Next-open, limit, and protective fills use the previous completed bar's
+  volume because the execution bar's final volume is not known at their fill
+  timestamp. Live planning uses the latest completed
   bar, so this keeps the simulation and live information sets aligned.
   "Previous" means that symbol's own last observed bar, not the previous
   timestamp, so a sparse cross-market panel stays correct — and across a gap

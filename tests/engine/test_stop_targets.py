@@ -268,7 +268,7 @@ class TestPendingFillStopOrdering:
             PortfolioWeights(weights={"TEST": 0.5}),
         ],
     )
-    def test_triggered_stop_rejects_overlapping_non_open_fill_before_mutation(
+    def test_unsafe_default_fill_is_rejected_before_mutation(
         self,
         decision,
     ):
@@ -283,7 +283,7 @@ class TestPendingFillStopOrdering:
             "volume": 100.0,
         }
 
-        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+        with pytest.raises(ValueError, match="only causal next-bar 'open'"):
             execute_pending_decision_and_stops(
                 datetime(2026, 1, 2, tzinfo=UTC),
                 positions,
@@ -329,76 +329,11 @@ class TestPendingFillStopOrdering:
             PortfolioWeights(weights={"OTHER": 1.0}),
             {"TEST": bar, "OTHER": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="close",
+            default_fill="open",
             primary_symbol="TEST",
         )
 
         assert "OTHER" in positions
-
-    def test_untradable_triggered_stop_still_rejects_ambiguous_fill(self):
-        position = _make_pos(side="long", stop=95.0)
-        positions = {"TEST": position}
-        bar = {
-            "open": 90.0,
-            "high": 90.0,
-            "low": 90.0,
-            "close": 90.0,
-            "volume": 100.0,
-            "can_buy": True,
-            "can_sell": False,
-        }
-
-        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
-            execute_pending_decision_and_stops(
-                datetime(2026, 1, 2, tzinfo=UTC),
-                positions,
-                1_000.0,
-                [OrderIntent(action="close", symbol="TEST")],
-                {"TEST": bar},
-                get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="close",
-                primary_symbol="TEST",
-            )
-
-        assert positions == {"TEST": position}
-        assert position.pending_market_exit_reason is None
-
-    def test_conflict_rejects_the_whole_batch_before_unrelated_fill(self):
-        position = _make_pos(side="long", stop=95.0)
-        positions = {"TEST": position}
-        bars = {
-            "OTHER": {
-                "open": 50.0,
-                "high": 51.0,
-                "low": 49.0,
-                "close": 50.0,
-                "volume": 100.0,
-            },
-            "TEST": {
-                "open": 100.0,
-                "high": 101.0,
-                "low": 90.0,
-                "close": 99.0,
-                "volume": 100.0,
-            },
-        }
-
-        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
-            execute_pending_decision_and_stops(
-                datetime(2026, 1, 2, tzinfo=UTC),
-                positions,
-                1_000.0,
-                [
-                    OrderIntent(action="long", symbol="OTHER", quantity=1.0),
-                    OrderIntent(action="close", symbol="TEST"),
-                ],
-                bars,
-                get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="close",
-                primary_symbol="TEST",
-            )
-
-        assert positions == {"TEST": position}
 
     def test_open_fill_keeps_defined_fill_before_stop_ordering(self):
         positions = {"TEST": _make_pos(side="long", stop=95.0)}
@@ -476,7 +411,6 @@ class TestPendingFillStopOrdering:
             cost_model=CostModel.zero(),
             data_source="test",
             execution=ExecutionPolicy(
-                default_fill_price="close",
                 max_bar_volume_participation_rate=None,
                 max_rebalance_delay_bars=2,
             ),
@@ -489,22 +423,6 @@ class TestPendingFillStopOrdering:
             ("A", timestamps[4]),
             ("B", timestamps[4]),
         ]
-
-    def test_ambiguous_bar_still_raises_without_a_deferral_budget(self):
-        positions = {"TEST": _make_pos(side="long", stop=95.0)}
-        bar = {"open": 100.0, "high": 101.0, "low": 90.0, "close": 99.0, "volume": 100.0}
-
-        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
-            execute_pending_decision_and_stops(
-                datetime(2026, 1, 2, tzinfo=UTC),
-                positions,
-                1_000.0,
-                PortfolioWeights(weights={"TEST": 0.5}),
-                {"TEST": bar},
-                get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="close",
-                primary_symbol="TEST",
-            )
 
 
 class TestLiquidation:

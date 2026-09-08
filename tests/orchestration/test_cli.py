@@ -312,7 +312,7 @@ class TestBuildRun:
                   symbol: MU
                   timeframe: 1d
                   execution:
-                    default_fill_price: close
+                    default_fill_price: open
                     max_bar_volume_participation_rate: null
                     max_rebalance_delay_bars: 2
                     rebalance_residual_policy: defer_symbols
@@ -322,7 +322,7 @@ class TestBuildRun:
             )
         )
         unlimited, _ = build_run("test_strat", str(tmp_path / "run.py"))
-        assert unlimited.execution.default_fill_price == "close"
+        assert unlimited.execution.default_fill_price == "open"
         assert unlimited.execution.max_bar_volume_participation_rate is None
         assert unlimited.execution.max_rebalance_delay_bars == 2
         assert unlimited.execution.rebalance_residual_policy == "defer_symbols"

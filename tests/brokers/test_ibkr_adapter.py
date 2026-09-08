@@ -157,6 +157,8 @@ def test_available_symbols_lists_mnq_front_and_next_exact_contracts():
     ]
     assert results[0].canonical_symbol == "MNQ_202609"
     assert results[0].contract_month == "202609"
+    assert results[0].tick_size == 0.25
+    assert results[0].price_increment is None
     mock_ib_async.Future.assert_called_once_with("MNQ", exchange="CME", currency="USD")
 
 
@@ -187,6 +189,8 @@ def test_available_symbols_resolves_nvda_spot():
     assert len(results) == 1
     assert results[0].canonical_symbol == "NVDA"
     assert results[0].venue_symbol == "NVDA"
+    assert results[0].tick_size == 0.01
+    assert results[0].price_increment is None
     mock_ib_async.Stock.assert_called_once_with("NVDA", "SMART", "USD")
 
 

@@ -345,7 +345,7 @@ class TestPlaceOrder:
         mock_sj.StockOrder = MagicMock(return_value="mock_order")
         return mock_sj
 
-    def test_prepare_order_rounds_lot_and_limit_price(self):
+    def test_prepare_order_rounds_lot_and_preserves_aligned_limit_price(self):
         adapter = _make_adapter(ca_activated=True)
         adapter._resolve_contract = MagicMock(
             return_value=_rolling_contract(limit_down=19_000, limit_up=21_000)
@@ -358,14 +358,54 @@ class TestPlaceOrder:
                 "quantity": 2.9,
                 "order_type": "limit",
                 "time_in_force": "day",
-                "price": 20_000.8,
-                "tick_size": 1.0,
+                "price": 20_000.0,
+                "price_increment": 1.0,
                 "continuous_alias": True,
             }
         )
 
         assert prepared["quantity"] == 2.0
         assert prepared["price"] == 20_000.0
+
+    def test_prepare_order_preserves_price_when_fixed_increment_is_unknown(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=_rolling_contract(limit_down=19_000, limit_up=21_000)
+        )
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "CUSTOM_FUTURE",
+                "side": "buy",
+                "quantity": 1.0,
+                "order_type": "limit",
+                "time_in_force": "day",
+                "price": 20_000.5,
+                "continuous_alias": True,
+            }
+        )
+
+        assert prepared["price"] == 20_000.5
+
+    def test_prepare_order_rejects_price_outside_known_fixed_grid(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=_rolling_contract(limit_down=19_000, limit_up=21_000)
+        )
+
+        with pytest.raises(ValueError, match="not aligned"):
+            adapter.prepare_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1.0,
+                    "order_type": "limit",
+                    "time_in_force": "day",
+                    "price": 20_000.5,
+                    "price_increment": 1.0,
+                    "continuous_alias": True,
+                }
+            )
 
     def test_prepare_limit_order_requires_contract_price_boundaries(self):
         adapter = _make_adapter(ca_activated=True)
@@ -380,7 +420,7 @@ class TestPlaceOrder:
                     "order_type": "limit",
                     "time_in_force": "day",
                     "price": 20_000.0,
-                    "tick_size": 1.0,
+                    "price_increment": 1.0,
                     "continuous_alias": True,
                 }
             )
