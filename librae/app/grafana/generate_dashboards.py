@@ -127,8 +127,9 @@ def _data_source_filter(meta_alias: str, ohlcv_alias: str) -> str:
     # data_source='multi' means the run mixes sources (e.g. spot+perp); treat it
     # like NULL (unrestricted) rather than a literal value ohlcv.data_source can match.
     return (
-        f"({meta_alias}.data_source IS NULL OR {meta_alias}.data_source = 'multi'"
+        f"(({meta_alias}.data_source IS NULL OR {meta_alias}.data_source = 'multi'"
         f" OR {ohlcv_alias}.data_source = {meta_alias}.data_source)"
+        f" AND {ohlcv_alias}.session_mode = {meta_alias}.session_mode)"
     )
 
 
@@ -459,7 +460,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _stat_target(
                 "WITH meta AS ("
-                " SELECT timeframe, data_source, mode, ended_at"
+                " SELECT timeframe, data_source, session_mode, mode, ended_at"
                 " FROM backtest_runs WHERE run_id='${run_id}'"
                 "),\n"
                 "positions AS (\n"
@@ -658,7 +659,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT timeframe, data_source, started_at, ended_at"
+                " SELECT timeframe, data_source, session_mode, started_at, ended_at"
                 " FROM backtest_runs WHERE run_id = '${run_id}')"
                 ' SELECT o.ts AS time, o.close AS "${symbol}"'
                 " FROM ohlcv o, meta m"
@@ -910,7 +911,8 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
+                " SELECT timeframe, data_source, session_mode"
+                " FROM backtest_runs WHERE run_id='${run_id}'"
                 "),\n"
                 "equity AS (\n"
                 "  SELECT equity FROM equity_curve\n"
@@ -1552,7 +1554,9 @@ def render_account_overview_dashboard() -> dict:
 # _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
 # so symbol/timeframe/data_source are resolved once instead of once per column.
 _SIG_WHERE = "s.run_id = '${run_id}' AND s.signal_type = '${signal_type}'"
-_META_INNER = " SELECT timeframe, data_source FROM backtest_runs WHERE run_id='${run_id}'"
+_META_INNER = (
+    " SELECT timeframe, data_source, session_mode FROM backtest_runs WHERE run_id='${run_id}'"
+)
 _OHLCV_WHERE = (
     "ohlcv.symbol = s.symbol"
     " AND ohlcv.timeframe = meta.timeframe"

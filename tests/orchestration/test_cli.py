@@ -444,6 +444,7 @@ class TestBuildRun:
                   market: us_equity
                   data_source: ibkr
                   broker: ibkr
+                  session_mode: regular
                   symbol_cost_overrides:
                     AAPL:
                       multiplier: 1.0
@@ -460,6 +461,7 @@ class TestBuildRun:
 
         assert cfg.symbol_cost_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
+        assert cfg.session_mode == "regular"
         assert cfg.instrument_overrides == {
             "AAPL": {
                 "data_adapter": "ibkr",

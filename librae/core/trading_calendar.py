@@ -185,6 +185,26 @@ def _session_segments(
     return ((open_at, close_at),)
 
 
+def session_bounds(value: date, calendar_id: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return the first open and final close for one trading-session date."""
+    if type(value) is not date:
+        raise TypeError("session date must be a date")
+    segments = _session_segments(calendar_id, value)
+    return segments[0][0], segments[-1][1]
+
+
+def next_session_open(value: date, calendar_id: str) -> pd.Timestamp:
+    """Return the first open of the trading session after ``value``."""
+    if type(value) is not date:
+        raise TypeError("session date must be a date")
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        return pd.Timestamp(value + timedelta(days=1), tz="UTC")
+    calendar = _exchange_calendar(calendar_id)
+    session = _calendar_session(calendar, value)
+    next_label = calendar.next_session(session).date()
+    return _session_segments(calendar_id, next_label)[0][0]
+
+
 def _segment_containing(
     segments: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
     timestamp: pd.Timestamp,

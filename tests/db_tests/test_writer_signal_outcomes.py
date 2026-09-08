@@ -42,6 +42,7 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         ["BTCUSDT"],
         "H1",
         "backtest",
+        session_mode="regular",
         params={"window": 20},
         execution_policy={
             "default_fill_price": "open",
@@ -55,13 +56,14 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
     )
 
     values = cursor.execute.call_args.args[1]
-    assert json.loads(values[10]) == {"window": 20}
-    assert json.loads(values[11]) == {
+    assert values[5] == "regular"
+    assert json.loads(values[11]) == {"window": 20}
+    assert json.loads(values[12]) == {
         "default_fill_price": "open",
         "max_bar_volume_participation_rate": 0.1,
     }
-    assert json.loads(values[12]) == {"max_drawdown_rate": 0.2}
-    assert values[13:] == ("config-a", "revision-a", "cache-a")
+    assert json.loads(values[13]) == {"max_drawdown_rate": 0.2}
+    assert values[14:] == ("config-a", "revision-a", "cache-a")
 
 
 class TestBacktestCacheKeyClaim:
@@ -288,6 +290,33 @@ def test_write_ohlcv_rejects_invalid_instrument_type() -> None:
 
     with pytest.raises(ValueError, match="instrument_type"):
         write_ohlcv(frame, "BTCUSDT", "H1", "test", instrument_type="daily")
+
+
+@patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+@patch("librae.db.timescale_writer.get_conn")
+def test_write_ohlcv_uses_session_mode_as_row_identity(mock_conn_ctx, mock_exec_values) -> None:
+    mock_cur = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value = mock_cur
+    mock_conn_ctx.return_value = mock_conn
+    frame = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [10.0],
+        },
+        index=pd.DatetimeIndex([datetime(2024, 6, 1, tzinfo=UTC)], name="ts"),
+    )
+
+    write_ohlcv(frame, "AAPL", "H1", "ibkr", session_mode="regular")
+
+    sql = mock_exec_values.call_args[0][1]
+    row = mock_exec_values.call_args[0][2][0]
+    assert "instrument_type, session_mode" in sql
+    assert row[5] == "regular"
 
 
 class TestWriteSignalEvent:

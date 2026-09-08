@@ -269,10 +269,12 @@ class _TimescaleCallbacks:
             mode=self._config.mode,
             started_at=datetime.now(tz=UTC),
             data_source=self._config.data_source,
+            session_mode=self._config.session_mode,
             poll_seconds=self._config.runtime.poll_seconds,
             params=self._config.params,
             execution_policy=asdict(self._config.execution),
             risk_policy=asdict(self._config.risk),
+            config_hash=self._config.config_hash,
         )
         # Seed a $0/0.0% baseline row up front — otherwise strategy_performance
         # has no row at all until the first close/reduce (on_performance is
@@ -402,6 +404,7 @@ class _TimescaleCallbacks:
             timeframe,
             data_source=instrument.data_source,
             instrument_type=instrument.instrument_type,
+            session_mode=self._config.session_mode,
         )
 
     def on_heartbeat(self, run_id: str) -> None:

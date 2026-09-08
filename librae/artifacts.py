@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from librae.backtest.schema import BacktestOutput
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 ArtifactKind = Literal["market_data", "backtest_output"]
 
 
@@ -110,6 +110,7 @@ def build_market_data_artifact(
     timeframe: str,
     data_source: str,
     instrument_type: str,
+    session_mode: str = "extended",
 ) -> TabularArtifact:
     """Build one enriched OHLCV table without selecting or writing a file format."""
     identity = {
@@ -117,9 +118,12 @@ def build_market_data_artifact(
         "timeframe": timeframe,
         "data_source": data_source,
         "instrument_type": instrument_type,
+        "session_mode": session_mode,
     }
     _validate_identity(identity)
     validate_instrument_type(instrument_type)
+    if session_mode not in ("regular", "extended"):
+        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     table = _normalized_market_data(frame, symbol=symbol)
 
     for name, expected in identity.items():

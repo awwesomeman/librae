@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 from librae.backtest.schema import RunMetadata, StrategyMetrics
-from librae.db.timescale_reader import get_run, row_to_strategy_metrics
+from librae.db.timescale_reader import get_run, load_ohlcv, row_to_strategy_metrics
 
 
 def _mock_conn(mock_cur: MagicMock) -> MagicMock:
@@ -34,6 +35,7 @@ class TestGetRun:
             ended_at,
             run_at,
             "backtest",
+            "regular",
         )
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
@@ -49,6 +51,7 @@ class TestGetRun:
             ended_at=ended_at,
             run_at=run_at,
             mode="backtest",
+            session_mode="regular",
         )
         sql = mock_cur.execute.call_args[0][0]
         assert "WHERE run_id = %s" in sql
@@ -60,6 +63,36 @@ class TestGetRun:
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         assert get_run("missing-run") is None
+
+
+class TestLoadOhlcvSessionIdentity:
+    @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_direct_read_filters_requested_session(self, mock_conn_ctx, mock_read_sql):
+        mock_conn_ctx.return_value = _mock_conn(MagicMock())
+
+        load_ohlcv(
+            symbol="AAPL",
+            timeframe="H1",
+            data_source="ibkr",
+            session_mode="regular",
+        )
+
+        sql = mock_read_sql.call_args.args[0]
+        params = mock_read_sql.call_args.kwargs["params"]
+        assert "session_mode = %s" in sql
+        assert params[-1] == "regular"
+
+    @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_run_read_uses_persisted_source_and_session(self, mock_conn_ctx, mock_read_sql):
+        mock_conn_ctx.return_value = _mock_conn(MagicMock())
+
+        load_ohlcv(run_id="run-1")
+
+        sql = mock_read_sql.call_args.args[0]
+        assert "o.data_source = m.data_source" in sql
+        assert "o.session_mode = m.session_mode" in sql
 
 
 class TestRowToStrategyMetrics:

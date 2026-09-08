@@ -23,7 +23,7 @@ from typing import Any
 
 from librae.core.executor import RuntimeEvent
 from librae.core.financing import FinancingKind
-from librae.core.run_config import RunMode
+from librae.core.run_config import MarketDataSessionMode, RunMode
 from librae.core.strategy import PositionEventType, PositionSide, TimeInForce
 
 # ---------------------------------------------------------------------------
@@ -50,11 +50,14 @@ class RunMetadata:
     ended_at: datetime
     run_at: datetime
     mode: RunMode = "backtest"
+    session_mode: MarketDataSessionMode = "extended"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", tuple(self.symbols))
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"invalid run mode: {self.mode!r}")
+        if self.session_mode not in ("regular", "extended"):
+            raise ValueError(f"invalid market-data session mode: {self.session_mode!r}")
 
 
 @dataclass(frozen=True)

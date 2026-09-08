@@ -85,6 +85,19 @@ def _make_bars_df():
     )
 
 
+def _make_daily_bars_df(*session_dates: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": list(session_dates),
+            "open": [100.0 + index for index in range(len(session_dates))],
+            "high": [102.0 + index for index in range(len(session_dates))],
+            "low": [99.0 + index for index in range(len(session_dates))],
+            "close": [101.0 + index for index in range(len(session_dates))],
+            "volume": [1_000 + index for index in range(len(session_dates))],
+        }
+    )
+
+
 def _mock_ib_async_module(bars_df):
     mock = MagicMock()
     mock.util.df.return_value = bars_df
@@ -212,7 +225,30 @@ class TestFetchOhlcv:
         assert df.empty
         assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
 
-    def test_use_rth_defaults_false_and_is_threaded_through(self):
+    def test_empty_daily_response_preserves_metadata_schema(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = []
+
+        with patch(
+            "librae.brokers.ibkr_adapter._require_ib_async",
+            return_value=_mock_ib_async_module(pd.DataFrame()),
+        ):
+            df = adapter.fetch_ohlcv("MU", "1d", calendar_id="XNYS")
+
+        assert df.empty
+        assert list(df.columns) == [
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "session_date",
+            "available_at",
+        ]
+
+    def test_session_mode_maps_to_ibkr_use_rth(self):
         adapter = _make_adapter()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")
         adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
@@ -224,8 +260,134 @@ class TestFetchOhlcv:
             adapter.fetch_ohlcv("MU", "1m")
             assert adapter._ib.reqHistoricalData.call_args.kwargs["useRTH"] is False
 
-            adapter.fetch_ohlcv("MU", "1m", use_rth=True)
+            adapter.fetch_ohlcv("MU", "1m", session_mode="regular")
             assert adapter._ib.reqHistoricalData.call_args.kwargs["useRTH"] is True
+
+    def test_legacy_use_rth_must_agree_with_session_mode(self):
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="request different IBKR sessions"):
+            adapter.fetch_ohlcv(
+                "MU",
+                "1m",
+                session_mode="regular",
+                use_rth=False,
+            )
+
+    def test_daily_stock_uses_session_date_and_regular_close_availability(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
+        module = _mock_ib_async_module(_make_daily_bars_df("20260309"))
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=module),
+            patch(
+                "librae.brokers.ibkr_adapter._utc_now",
+                return_value=datetime(2026, 3, 9, 19, 59, tzinfo=UTC),
+            ),
+        ):
+            unavailable = adapter.fetch_ohlcv(
+                "MU",
+                "1d",
+                calendar_id="XNYS",
+                session_mode="regular",
+            )
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=module),
+            patch(
+                "librae.brokers.ibkr_adapter._utc_now",
+                return_value=datetime(2026, 3, 9, 21, 0, tzinfo=UTC),
+            ),
+        ):
+            df = adapter.fetch_ohlcv(
+                "MU",
+                "1d",
+                calendar_id="XNYS",
+                session_mode="regular",
+            )
+
+        assert unavailable.empty
+        assert df.loc[0, "session_date"] == date(2026, 3, 9)
+        assert df.loc[0, "ts"] == pd.Timestamp("2026-03-09T13:30:00Z")
+        assert df.loc[0, "available_at"] == pd.Timestamp("2026-03-09T20:00:00Z")
+        request = adapter._ib.reqHistoricalData.call_args.kwargs
+        assert request["useRTH"] is True
+        assert request["formatDate"] == 1
+
+    def test_daily_extended_stock_waits_until_next_session_open(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
+        module = _mock_ib_async_module(_make_daily_bars_df("20260410"))
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=module),
+            patch(
+                "librae.brokers.ibkr_adapter._utc_now",
+                return_value=datetime(2026, 4, 10, 23, 0, tzinfo=UTC),
+            ),
+        ):
+            unavailable = adapter.fetch_ohlcv(
+                "MU",
+                "1d",
+                calendar_id="XNYS",
+                session_mode="extended",
+            )
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=module),
+            patch(
+                "librae.brokers.ibkr_adapter._utc_now",
+                return_value=datetime(2026, 4, 13, 14, 0, tzinfo=UTC),
+            ),
+        ):
+            available = adapter.fetch_ohlcv(
+                "MU",
+                "1d",
+                calendar_id="XNYS",
+                session_mode="extended",
+            )
+
+        assert unavailable.empty
+        assert available.loc[0, "available_at"] == pd.Timestamp("2026-04-13T13:30:00Z")
+
+    def test_daily_stock_requires_calendar(self):
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="require calendar_id"):
+            adapter.fetch_ohlcv("MU", "1d", security_type="STK")
+
+        adapter._ib.reqHistoricalData.assert_not_called()
+
+    @pytest.mark.parametrize("timeframe", ["1d", "1w", "1M"])
+    def test_native_calendar_future_is_rejected_before_settlement_can_leak(
+        self,
+        timeframe,
+    ):
+        adapter = _make_adapter()
+
+        with pytest.raises(NotImplementedError, match="settlement values"):
+            adapter.fetch_ohlcv(
+                "ES",
+                timeframe,
+                security_type="FUT",
+                exchange="CME",
+                continuous_alias=True,
+                calendar_id="CMES",
+            )
+
+        adapter._ib.reqHistoricalData.assert_not_called()
+
+    @pytest.mark.parametrize("timeframe", ["1w", "1M"])
+    def test_native_stock_weekly_and_monthly_bars_are_rejected(self, timeframe):
+        adapter = _make_adapter()
+
+        with pytest.raises(NotImplementedError, match="availability instant"):
+            adapter.fetch_ohlcv("MU", timeframe, security_type="STK")
+
+        adapter._ib.reqHistoricalData.assert_not_called()
 
     def test_limit_trims_tail(self):
         adapter = _make_adapter()
@@ -252,13 +414,39 @@ class TestFetchOhlcv:
             ),
             patch(
                 "librae.brokers.ibkr_adapter.drop_incomplete_ohlcv",
-                side_effect=lambda df, _timeframe: df.iloc[:-1],
+                side_effect=lambda df, _timeframe, **_kwargs: df.iloc[:-1],
             ) as drop_incomplete,
         ):
             df = adapter.fetch_ohlcv("MU", "1m", drop_incomplete=True)
 
         assert len(df) == 2
         drop_incomplete.assert_called_once()
+        assert drop_incomplete.call_args.kwargs == {"calendar_id": None}
+
+    def test_regular_intraday_completion_uses_exchange_calendar(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = ["mock_bar"]
+
+        with (
+            patch(
+                "librae.brokers.ibkr_adapter._require_ib_async",
+                return_value=_mock_ib_async_module(_make_bars_df()),
+            ),
+            patch(
+                "librae.brokers.ibkr_adapter.drop_incomplete_ohlcv",
+                side_effect=lambda df, _timeframe, **_kwargs: df,
+            ) as drop_incomplete,
+        ):
+            adapter.fetch_ohlcv(
+                "MU",
+                "1m",
+                calendar_id="XNYS",
+                session_mode="regular",
+                drop_incomplete=True,
+            )
+
+        assert drop_incomplete.call_args.kwargs == {"calendar_id": "XNYS"}
 
     def test_unsupported_timeframe_raises(self):
         adapter = _make_adapter()

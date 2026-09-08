@@ -82,7 +82,7 @@ from librae.core.financing import (
 )
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import validate_ohlcv_values
-from librae.core.run_config import ExecutionPolicy, RiskPolicy
+from librae.core.run_config import ExecutionPolicy, MarketDataSessionMode, RiskPolicy
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -475,6 +475,8 @@ class Backtest:
         strategy_name: Override strategy name (default: from config or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
         data_source: Data source identifier — direct-args style.
+        session_mode: Market-data session identity for direct-args data. With
+            ``config``, ``config.session_mode`` is the only source.
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
@@ -496,6 +498,7 @@ class Backtest:
         strategy_name: str | None = None,
         cost_model: CostModel | None = None,
         data_source: str = "",
+        session_mode: MarketDataSessionMode | None = None,
         record_position_snapshots: bool = False,
         execution: ExecutionPolicy | None = None,
         risk: RiskPolicy | None = None,
@@ -508,6 +511,17 @@ class Backtest:
             )
         if config is not None and risk is not None:
             raise ValueError("risk cannot override config.risk; use one configuration source")
+        if config is not None and session_mode is not None:
+            raise ValueError(
+                "session_mode cannot override config.session_mode; use one configuration source"
+            )
+        resolved_session_mode = config.session_mode if config is not None else session_mode
+        if resolved_session_mode is None:
+            resolved_session_mode = "extended"
+        if resolved_session_mode not in ("regular", "extended"):
+            raise ValueError(
+                f"session_mode must be 'regular' or 'extended', got {resolved_session_mode!r}"
+            )
         if (
             isinstance(initial_balance, bool)
             or not isinstance(initial_balance, Real)
@@ -523,6 +537,7 @@ class Backtest:
         self._data = data
         self._strategy = strategy
         self._config = config
+        self._session_mode: MarketDataSessionMode = resolved_session_mode
         self._run_id: str | None = None
         self._timeframe: str | None = None
         self._result: BacktestResult | None = None
@@ -1227,6 +1242,7 @@ class Backtest:
             started_at=started_at,
             ended_at=ended_at,
             run_at=datetime.now(tz=UTC),
+            session_mode=self._session_mode,
         )
 
         event_records = self._build_event_records(result, run_id)

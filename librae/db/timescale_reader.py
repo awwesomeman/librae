@@ -29,7 +29,7 @@ def get_run_by_backtest_cache_key(
     dsn: str | None = None,
 ) -> dict[str, Any] | None:
     """Find the canonical run for an explicit backtest cache identity."""
-    sql = """SELECT run_id, params, execution_policy, risk_policy
+    sql = """SELECT run_id, params, execution_policy, risk_policy, session_mode
              FROM backtest_runs
              WHERE backtest_cache_key = %s
              ORDER BY run_at DESC LIMIT 1"""
@@ -45,6 +45,7 @@ def get_run_by_backtest_cache_key(
         "params": json.loads(row[1]) if row[1] else None,
         "execution_policy": json.loads(row[2]) if row[2] else None,
         "risk_policy": json.loads(row[3]) if row[3] else None,
+        "session_mode": row[4],
     }
 
 
@@ -57,7 +58,7 @@ def get_run_by_config_hash(
     Returns run configuration metadata, or None if not found.
     Existing old runs (config_hash=NULL) are not affected.
     """
-    sql = """SELECT run_id, params, execution_policy, risk_policy
+    sql = """SELECT run_id, params, execution_policy, risk_policy, session_mode
              FROM backtest_runs
              WHERE config_hash = %s
              ORDER BY run_at DESC LIMIT 1"""
@@ -73,6 +74,7 @@ def get_run_by_config_hash(
         "params": json.loads(row[1]) if row[1] else None,
         "execution_policy": json.loads(row[2]) if row[2] else None,
         "risk_policy": json.loads(row[3]) if row[3] else None,
+        "session_mode": row[4],
     }
 
 
@@ -85,7 +87,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     cache reuse, see get_run_by_config_hash()/get_run_by_backtest_cache_key().
     """
     sql = """SELECT run_id, strategy_name, symbols, timeframe, data_source,
-                     started_at, ended_at, run_at, mode
+                     started_at, ended_at, run_at, mode, session_mode
              FROM backtest_runs
              WHERE run_id = %s"""
     with get_conn(dsn) as conn:
@@ -105,6 +107,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
         ended_at=row[6],
         run_at=row[7],
         mode=row[8],
+        session_mode=row[9],
     )
 
 
@@ -128,7 +131,7 @@ def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
     """List recent backtest runs."""
     sql = """
         SELECT run_id, strategy_name, symbols, timeframe,
-               mode, data_source, started_at, ended_at, run_at
+               mode, data_source, session_mode, started_at, ended_at, run_at
         FROM backtest_runs
         ORDER BY run_at DESC
         LIMIT %s
@@ -335,6 +338,8 @@ def get_ohlcv_coverage_ranges(
     data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
+    *,
+    session_mode: str = "extended",
 ) -> list[tuple[datetime, datetime]]:
     """Return this key's cached (range_started_at, range_ended_at) pairs, sorted.
 
@@ -342,14 +347,17 @@ def get_ohlcv_coverage_ranges(
     window with a gap between them) — see merge_ohlcv_coverage_ranges() for how
     they're kept merged/deduplicated on write.
     """
+    if session_mode not in ("regular", "extended"):
+        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     sql = """
         SELECT range_started_at, range_ended_at FROM ohlcv_coverage_ranges
-        WHERE symbol = %s AND timeframe = %s AND data_source = %s AND instrument_type = %s
+        WHERE symbol = %s AND timeframe = %s AND data_source = %s
+              AND instrument_type = %s AND session_mode = %s
         ORDER BY range_started_at
     """
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(sql, (symbol, timeframe, data_source, instrument_type))
+        cur.execute(sql, (symbol, timeframe, data_source, instrument_type, session_mode))
         rows = cur.fetchall()
         cur.close()
     return [(r[0], r[1]) for r in rows]
@@ -423,6 +431,7 @@ def load_ohlcv(
     timeframe: str | None = None,
     data_source: str | None = None,
     instrument_type: str | None = None,
+    session_mode: str = "extended",
     started_at: str | None = None,
     ended_at: str | None = None,
     dsn: str | None = None,
@@ -438,6 +447,8 @@ def load_ohlcv(
     pass it explicitly to avoid silently mixing rows of different contract
     types that happen to share a symbol/data_source.
     """
+    if session_mode not in ("regular", "extended"):
+        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     if symbol and timeframe:
         sql = """
             SELECT ts AS _time, symbol, open, high, low, close, volume
@@ -451,6 +462,8 @@ def load_ohlcv(
         if instrument_type:
             sql += " AND instrument_type = %s"
             params.append(instrument_type)
+        sql += " AND session_mode = %s"
+        params.append(session_mode)
         if started_at:
             sql += " AND ts >= %s"
             params.append(started_at)
@@ -461,13 +474,16 @@ def load_ohlcv(
     elif run_id:
         sql = """
             WITH meta AS (
-                SELECT symbols, timeframe, started_at, ended_at
+                SELECT symbols, timeframe, data_source, session_mode, started_at, ended_at
                 FROM backtest_runs WHERE run_id = %s
             )
             SELECT ts AS _time, o.symbol, open, high, low, close, volume
             FROM ohlcv o, meta m
             WHERE o.symbol IN (SELECT jsonb_array_elements_text(m.symbols))
               AND o.timeframe = m.timeframe
+              AND (m.data_source IS NULL OR m.data_source = 'multi'
+                   OR o.data_source = m.data_source)
+              AND o.session_mode = m.session_mode
               AND (m.started_at IS NULL OR ts >= m.started_at)
               AND (m.ended_at IS NULL OR ts <= m.ended_at)
             ORDER BY ts

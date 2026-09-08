@@ -679,6 +679,52 @@ class TestLiveTrader:
             )
         ]
 
+    def test_ibkr_adapter_receives_generic_session_and_calendar_contract(self):
+        calls: list[tuple[tuple, dict]] = []
+
+        class Adapter:
+            def fetch_ohlcv(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return _make_ohlcv_df()
+
+        config = _test_cfg(
+            symbols=["AAPL"],
+            market="us_equity",
+            data_source="ibkr",
+            session_mode="regular",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                    "calendar_id": "XNYS",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+        runner = self._make_runner(fetcher=Adapter(), config=config)
+
+        frame = runner._fetch_with_cache("AAPL")
+
+        assert frame is not None
+        assert calls[0][1]["session_mode"] == "regular"
+        assert calls[0][1]["calendar_id"] == "XNYS"
+        assert "use_rth" not in calls[0][1]
+
+    def test_non_ibkr_concrete_adapter_rejects_regular_session_request(self):
+        class Adapter:
+            def fetch_ohlcv(self, *_args, **_kwargs):
+                return _make_ohlcv_df()
+
+        with pytest.raises(ValueError, match="cannot honor session_mode='regular'"):
+            self._make_runner(
+                fetcher=Adapter(),
+                config=_test_cfg(session_mode="regular"),
+            )
+
     def test_invalid_market_data_adapter_fails_at_construction(self):
         with pytest.raises(TypeError, match=r"bar-data callable.*fetch_ohlcv"):
             self._make_runner(fetcher=object())
@@ -701,6 +747,27 @@ class TestLiveTrader:
         runner.run(max_iterations=1)
 
         assert observed == [0.75]
+
+    def test_market_data_is_not_featured_before_available_at(self):
+        frame = _make_ohlcv_df(n=2)
+        frame["close"] = [100.0, 999.0]
+        frame["available_at"] = pd.to_datetime(["2025-01-01T01:00:00Z", "2025-01-01T03:00:00Z"])
+        observed: list[float] = []
+
+        class CaptureClose(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                observed.append(float(ctx.bar["close"]))
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureClose(),
+            fetcher=lambda *_args, **_kwargs: frame,
+        )
+
+        runner.run(max_iterations=1)
+
+        assert observed == [100.0]
+        assert runner._ohlcv_cache["BTCUSDT"]["close"].tolist() == [100.0]
 
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):

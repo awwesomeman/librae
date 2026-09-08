@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from librae.config.symbols import resolve_symbol
 from librae.core.strategy import PortfolioWeights
 from librae.live.state import LiveRuntimeState, MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import (
@@ -786,7 +787,7 @@ def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
 
 
 def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
-    config = make_test_cfg(mode="sim", poll_seconds=17)
+    config = make_test_cfg(mode="sim", poll_seconds=17, session_mode="regular")
     callbacks = _TimescaleCallbacks(config, {}, None)
 
     with (
@@ -796,6 +797,27 @@ def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
         callbacks.register_run("run-1")
 
     assert write_run.call_args.kwargs["poll_seconds"] == 17
+    assert write_run.call_args.kwargs["session_mode"] == "regular"
+    assert write_run.call_args.kwargs["config_hash"] == config.config_hash
+
+
+def test_live_ohlcv_write_preserves_session_identity() -> None:
+    config = make_test_cfg(mode="sim", session_mode="regular")
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        None,
+    )
+
+    with patch("librae.db.timescale_writer.write_ohlcv", autospec=True) as write:
+        callbacks.on_ohlcv(
+            "BTCUSDT",
+            "H1",
+            {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0},
+            datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+    assert write.call_args.kwargs["session_mode"] == "regular"
 
 
 def test_timescale_callbacks_writes_runtime_event() -> None:

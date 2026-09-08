@@ -40,6 +40,8 @@ from librae.config.symbols import (
     AvailableSymbol,
     InstrumentKind,
 )
+from librae.core.run_config import MarketDataSessionMode
+from librae.core.trading_calendar import next_session_open, session_bounds, validate_calendar_id
 from librae.core.utils import floor_to_step, validate_contract_month
 from librae.live.executor import PositionRequest
 
@@ -73,11 +75,76 @@ _BAR_SIZE_MAP = {
     "1w": "1 week",
     "1M": "1 month",
 }
+_NATIVE_CALENDAR_TIMEFRAMES = frozenset({"1d", "1w", "1M"})
 
 
 def _utc_today() -> date:
     """Return the UTC date used for futures-expiry decisions."""
     return datetime.now(UTC).date()
+
+
+def _utc_now() -> datetime:
+    """Return the current UTC time used by daily-bar availability checks."""
+    return datetime.now(UTC)
+
+
+def _resolve_session_mode(
+    session_mode: MarketDataSessionMode | None,
+    use_rth: bool | None,
+) -> MarketDataSessionMode:
+    """Resolve the generic session contract and legacy IBKR spelling."""
+    if session_mode is not None and session_mode not in ("regular", "extended"):
+        raise ValueError(f"session_mode must be 'regular' or 'extended', got {session_mode!r}")
+    if use_rth is not None and not isinstance(use_rth, bool):
+        raise TypeError("use_rth must be a bool or None")
+    legacy_mode: MarketDataSessionMode | None = None
+    if use_rth is not None:
+        legacy_mode = "regular" if use_rth else "extended"
+    if session_mode is not None and legacy_mode is not None and session_mode != legacy_mode:
+        raise ValueError("session_mode and use_rth request different IBKR sessions")
+    return session_mode or legacy_mode or "extended"
+
+
+def _ibkr_session_date(value: object) -> date:
+    """Parse IBKR's date-only daily-bar label without treating it as UTC."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value).strip()
+    try:
+        parsed = pd.to_datetime(raw, format="%Y%m%d", errors="raise")
+    except (TypeError, ValueError):
+        try:
+            parsed = pd.to_datetime(raw, format="%Y-%m-%d", errors="raise")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid IBKR daily session date: {value!r}") from exc
+    return pd.Timestamp(parsed).date()
+
+
+def _normalize_daily_bars(
+    frame: pd.DataFrame,
+    *,
+    calendar_id: str,
+    session_mode: MarketDataSessionMode,
+) -> pd.DataFrame:
+    """Anchor IBKR date labels and attach a conservative usability bound."""
+    session_dates = frame["date"].map(_ibkr_session_date)
+    bounds = [session_bounds(label, calendar_id) for label in session_dates]
+    frame = frame.copy()
+    frame["session_date"] = session_dates
+    frame["ts"] = pd.DatetimeIndex([opened_at for opened_at, _ in bounds])
+    if session_mode == "regular":
+        available_at = [closed_at for _, closed_at in bounds]
+    else:
+        # The generic exchange calendar owns regular-session geometry, not
+        # vendor-specific pre/post-market hours. Waiting until the following
+        # session opens is conservative and prevents a partial extended-hours
+        # daily value from entering a feature early. This is an eligibility
+        # policy, not an assertion about IBKR's actual publication timestamp.
+        available_at = [next_session_open(label, calendar_id) for label in session_dates]
+    frame["available_at"] = pd.DatetimeIndex(available_at)
+    return frame
 
 
 def _contract_expiry_date(contract: object) -> date:
@@ -361,7 +428,9 @@ class IBKRAdapter:
         currency: str = "USD",
         continuous_alias: bool = False,
         contract_month: str | None = None,
-        use_rth: bool = False,
+        calendar_id: str | None = None,
+        session_mode: MarketDataSessionMode | None = None,
+        use_rth: bool | None = None,
         drop_incomplete: bool = False,
     ) -> pd.DataFrame:
         """Fetch OHLCV via IBKR's reqHistoricalData.
@@ -382,25 +451,44 @@ class IBKRAdapter:
                 non-expired contract.
             contract_month: For futures only, exact expiry month in ``YYYYMM``
                 form. Mutually exclusive with ``continuous_alias``.
-            use_rth: ``False`` (default, unchanged from prior behavior)
-                includes extended-hours prints. If a live run built on this
-                adapter fetches with a different ``use_rth`` than whatever
-                produced its backtest's historical data, the two see a
-                different bar shape for the same nominal timeframe (extra
-                pre/post-market bars, different daily OHLC) — this adapter
-                can't detect that mismatch itself since it doesn't know
-                where the backtest data came from; the caller is
-                responsible for passing the same value both places.
+            calendar_id: Exchange calendar used to anchor IBKR's date-only
+                daily labels. Required for ``1d`` requests.
+            session_mode: ``"extended"`` (default) requests every session
+                exposed by IBKR; ``"regular"`` requests RTH only.
+            use_rth: Adapter-specific compatibility spelling retained for direct
+                callers. It must agree with ``session_mode`` when both are set.
             drop_incomplete: Drop the current still-forming candle.
 
         Returns columns: ``[ts, open, high, low, close, volume]``
-        where ``ts`` is the UTC-aware bar-start datetime.
+        where ``ts`` is the UTC-aware bar-start datetime. Daily stock bars
+        additionally include ``session_date`` and ``available_at``. Native
+        weekly/monthly bars and calendar-sized futures bars are rejected:
+        build them from completed, normalized lower-frequency data instead.
 
         IBKR's own pacing/lookback limits per bar size (e.g. 1-sec bars only
         go back a few days) apply and aren't paginated around here; a
         window too long for the requested bar size raises from ib_async
         directly.
         """
+        bar_size = _to_bar_size(timeframe)
+        resolved_session_mode = _resolve_session_mode(session_mode, use_rth)
+        if security_type == "FUT" and timeframe in _NATIVE_CALENDAR_TIMEFRAMES:
+            raise NotImplementedError(
+                "IBKR native calendar-sized futures bars may use settlement values "
+                "published or revised later; fetch completed intraday bars and "
+                "resample them by calendar session"
+            )
+        if timeframe in {"1w", "1M"}:
+            raise NotImplementedError(
+                "IBKR native weekly/monthly bars use date labels without a safe "
+                "availability instant; fetch normalized daily or intraday bars and "
+                "aggregate them by calendar period"
+            )
+        if timeframe == "1d" and calendar_id is None:
+            raise ValueError("IBKR 1d bars require calendar_id for session-date normalization")
+        if timeframe == "1d":
+            validate_calendar_id(calendar_id)
+
         contract = self._resolve_contract(
             symbol,
             security_type=security_type,
@@ -409,9 +497,9 @@ class IBKRAdapter:
             continuous_alias=continuous_alias,
             contract_month=contract_month,
         )
-        bar_size = _to_bar_size(timeframe)
 
-        end_dt = _parse_dt(end) if end else datetime.now(UTC)
+        requested_at = _utc_now()
+        end_dt = _parse_dt(end) if end else requested_at
         if start:
             start_dt = _parse_dt(start)
             duration = f"{max(1, (end_dt - start_dt).days + 1)} D"
@@ -424,25 +512,64 @@ class IBKRAdapter:
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow="TRADES",
-            useRTH=use_rth,
-            formatDate=2,  # UTC datetimes, not exchange-local strings
+            useRTH=resolved_session_mode == "regular",
+            # IBKR ignores epoch mode for day bars and returns yyyyMMdd.
+            formatDate=1 if timeframe == "1d" else 2,
         )
 
         ib_async = _require_ib_async()
         df = ib_async.util.df(bars)
         if df is None or df.empty:
-            return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+            columns = ["ts", "open", "high", "low", "close", "volume"]
+            if timeframe == "1d":
+                columns.extend(["session_date", "available_at"])
+            return pd.DataFrame(columns=columns)
 
-        df = df.rename(columns={"date": "ts"})
-        df["ts"] = pd.to_datetime(df["ts"], utc=True)
-        df = df[["ts", "open", "high", "low", "close", "volume"]]
+        if timeframe == "1d":
+            if calendar_id is None:  # guarded before the request
+                raise RuntimeError("calendar_id unexpectedly missing for IBKR daily bars")
+            df = _normalize_daily_bars(
+                df,
+                calendar_id=calendar_id,
+                session_mode=resolved_session_mode,
+            )
+            df = df[
+                [
+                    "ts",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "session_date",
+                    "available_at",
+                ]
+            ]
+            df = df[df["available_at"] <= pd.Timestamp(requested_at)]
+        else:
+            df = df.rename(columns={"date": "ts"})
+            df["ts"] = pd.to_datetime(df["ts"], utc=True)
+            df = df[["ts", "open", "high", "low", "close", "volume"]]
 
         if start:
-            df = df[(df["ts"] >= start_dt) & (df["ts"] <= end_dt)]
+            if timeframe == "1d":
+                df = df[
+                    (df["session_date"] >= start_dt.date()) & (df["session_date"] <= end_dt.date())
+                ]
+            else:
+                df = df[(df["ts"] >= start_dt) & (df["ts"] <= end_dt)]
         elif len(df) > limit:
             df = df.tail(limit)
-        if drop_incomplete:
-            df = drop_incomplete_ohlcv(df, timeframe)
+        if drop_incomplete and timeframe != "1d":
+            # Extended bars may be outside the regular-session geometry held
+            # by exchange_calendars (for example XNYS pre/post-market). Fixed
+            # interval completion is safer than misclassifying them as invalid.
+            completion_calendar = calendar_id if resolved_session_mode == "regular" else None
+            df = drop_incomplete_ohlcv(
+                df,
+                timeframe,
+                calendar_id=completion_calendar,
+            )
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------

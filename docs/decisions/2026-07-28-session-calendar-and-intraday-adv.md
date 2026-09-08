@@ -9,6 +9,10 @@ Librae uses two separate time concepts:
 - Every OHLCV `ts` is a timezone-aware UTC bar-start instant.
 - `SymbolInfo.calendar_id` is the only source for mapping that instant to a
   trading-session label.
+- `RunConfig.session_mode` identifies whether the supplied or requested bars
+  include all available sessions (`extended`) or regular hours only
+  (`regular`). It is independent of the calendar and belongs to run, artifact,
+  stored OHLCV, and coverage-range identity.
 
 Standard exchange IDs are delegated to `exchange_calendars`. Librae adds
 `24/7`, `XTAIFEX`, and `XTAIFEX_1725` for UTC-day crypto and the two supported
@@ -55,6 +59,15 @@ bars, schedules, strategy callbacks, or missing market data. Cross-market
 baskets remain data-driven and sequential. The initial TAIFEX implementation
 uses XTAI trading dates for its holiday-session set, so product-specific
 exceptional closures must be filtered in upstream data.
+
+IBKR is an adapter-specific edge case: its daily timestamp is a session-date
+label, and futures daily closes can be revised to an official settlement.
+Stock labels are anchored through the configured calendar and kept unavailable
+until their supported completion bound. Native IBKR futures daily bars are not
+accepted; callers aggregate completed intraday observations instead. Native
+weekly and monthly bars are likewise rejected because their date labels do not
+identify a safe availability instant; callers aggregate normalized lower-
+frequency bars using calendar period boundaries.
 
 This is a breaking contract clarification for custom adapters and ETL:
 bar-end or naive timestamps must be normalized to UTC bar-start before entering

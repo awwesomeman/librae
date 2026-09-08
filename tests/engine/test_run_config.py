@@ -142,6 +142,19 @@ def test_config_hash_preserves_primary_symbol_order_and_mode() -> None:
     assert backtest.config_hash != simulation.config_hash
 
 
+def test_market_data_session_mode_is_validated_and_part_of_cache_identity() -> None:
+    extended = _config(session_mode="extended")
+    regular = _config(session_mode="regular")
+
+    assert extended.session_mode == "extended"
+    # Extended was the implicit pre-contract behavior; preserve its durable
+    # cache/checkpoint identity across upgrades.
+    assert extended.config_hash == "d084869e34febd7fd71bea8ecf6bf3a8"
+    assert extended.config_hash != regular.config_hash
+    with pytest.raises(ValueError, match="session_mode"):
+        _config(session_mode="overnight")
+
+
 def test_run_config_normalizes_and_validates_timeframe() -> None:
     canonical = _config(timeframe="H6")
     ccxt = _config(timeframe="6h")
