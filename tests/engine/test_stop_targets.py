@@ -13,6 +13,8 @@ from librae.core.executor import (
     REASON_LIQUIDATION,
     REASON_STOP_LOSS,
     REASON_TAKE_PROFIT,
+    PortfolioRebalanceState,
+    RebalanceOrderState,
     check_stop_targets,
     execute_pending_decision_and_stops,
     resolve_stop_exit,
@@ -302,6 +304,233 @@ class TestPendingFillStopOrdering:
         assert position.quantity == pytest.approx(1.0)
         assert position.pending_market_exit_reason is None
         assert adv_usage == {"TEST": 3.0}
+
+    @pytest.mark.parametrize(
+        "intent",
+        [
+            OrderIntent(action="close", symbol="TEST", limit_price=105.0),
+            OrderIntent(action="long", symbol="TEST", quantity=1.0, limit_price=98.0),
+        ],
+        ids=["close", "scale-in"],
+    )
+    def test_resting_limit_and_triggered_stop_reject_before_mutation(self, intent):
+        position = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": position}
+        adv_usage = {"TEST": 3.0}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [intent],
+                {"TEST": bar},
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                max_adv_participation_rate=0.1,
+                get_lagged_adv=lambda _symbol: 100.0,
+                used_adv_quantity_by_symbol=adv_usage,
+            )
+
+        assert positions == {"TEST": position}
+        assert position.quantity == pytest.approx(1.0)
+        assert position.pending_market_exit_reason is None
+        assert adv_usage == {"TEST": 3.0}
+
+    def test_resting_limit_conflict_rejects_group_before_other_leg_mutates(self):
+        position = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": position}
+        adv_usage = {"TEST": 3.0, "OTHER": 2.0}
+        bars = {
+            "TEST": {
+                "open": 100.0,
+                "high": 110.0,
+                "low": 90.0,
+                "close": 99.0,
+                "volume": 100.0,
+            },
+            "OTHER": {
+                "open": 50.0,
+                "high": 51.0,
+                "low": 49.0,
+                "close": 50.0,
+                "volume": 100.0,
+            },
+        }
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [
+                    OrderIntent(
+                        action="long",
+                        symbol="TEST",
+                        quantity=1.0,
+                        limit_price=98.0,
+                        group_id="spread",
+                    ),
+                    OrderIntent(
+                        action="short",
+                        symbol="OTHER",
+                        quantity=1.0,
+                        group_id="spread",
+                    ),
+                ],
+                bars,
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                max_adv_participation_rate=0.1,
+                get_lagged_adv=lambda _symbol: 100.0,
+                used_adv_quantity_by_symbol=adv_usage,
+            )
+
+        assert positions == {"TEST": position}
+        assert adv_usage == {"TEST": 3.0, "OTHER": 2.0}
+
+    def test_resting_limit_conflict_rejects_retained_rebalance_before_mutation(self):
+        position = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": position}
+        state = PortfolioRebalanceState(
+            target=PortfolioWeights(weights={"TEST": 0.0}),
+            orders=(
+                RebalanceOrderState(
+                    intent=OrderIntent(
+                        action="close",
+                        symbol="TEST",
+                        quantity=1.0,
+                        limit_price=105.0,
+                    ),
+                    phase="reduction",
+                    requested_quantity=1.0,
+                    remaining_quantity=1.0,
+                ),
+            ),
+        )
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [],
+                {
+                    "TEST": {
+                        "open": 100.0,
+                        "high": 110.0,
+                        "low": 90.0,
+                        "close": 99.0,
+                        "volume": 100.0,
+                    }
+                },
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                rebalance_state=state,
+                rebalance_residual_policy="defer_symbols",
+            )
+
+        assert positions == {"TEST": position}
+
+    @pytest.mark.parametrize(
+        "intent",
+        [
+            OrderIntent(action="close", symbol="TEST", limit_price=99.0),
+            OrderIntent(action="long", symbol="TEST", quantity=1.0, limit_price=101.0),
+        ],
+        ids=["close", "scale-in"],
+    )
+    def test_marketable_at_open_limit_keeps_defined_ordering(self, intent):
+        positions = {"TEST": _make_pos(side="long", stop=95.0)}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        _, result = execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            1_000.0,
+            [intent],
+            {"TEST": bar},
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+        )
+
+        assert result.events[0].price == pytest.approx(100.0)
+
+    @pytest.mark.parametrize(
+        "intent",
+        [
+            OrderIntent(action="close", symbol="TEST", limit_price=120.0),
+            OrderIntent(action="long", symbol="TEST", quantity=1.0, limit_price=85.0),
+        ],
+        ids=["close", "scale-in"],
+    )
+    def test_unreached_limit_does_not_block_triggered_stop(self, intent):
+        positions = {"TEST": _make_pos(side="long", stop=95.0)}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        _, result = execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            1_000.0,
+            [intent],
+            {"TEST": bar},
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+        )
+
+        assert positions == {}
+        assert [(event.reason, event.price) for event in result.events] == [
+            (REASON_STOP_LOSS, 95.0)
+        ]
+
+    def test_portfolio_weights_remains_ordered_at_open_before_triggered_stop(self):
+        positions = {"TEST": _make_pos(side="long", stop=95.0)}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        _, result = execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            1_000.0,
+            PortfolioWeights(weights={"TEST": 0.0}),
+            {"TEST": bar},
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+        )
+
+        assert positions == {}
+        assert len(result.events) == 1
+        assert result.events[0].price == pytest.approx(100.0)
 
     def test_carried_market_exit_is_not_ambiguous(self):
         """A volume-capped exit carried from an earlier bar fills at this bar's
