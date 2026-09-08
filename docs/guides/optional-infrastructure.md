@@ -416,16 +416,19 @@ been used as an intrusion entry point before.
 2. Run `deploy/build_push.sh` and copy its printed `TRADE_IMAGE_REF` into the
    `.env` that `cloud_deploy.sh` will sync.
 3. Before the first deploy to a new VM, create `.env.secrets` directly on the
-   VM with the Docker Compose infra secrets (`POSTGRES_PASSWORD`,
-   `POSTGRES_APP_PASSWORD`, `POSTGRES_GRAFANA_PASSWORD`,
-   `GF_SECURITY_ADMIN_PASSWORD`) and the DB connection strings
-   (`TIMESCALE_DSN`, `TRADE_TIMESCALE_DSN`) — `cloud_deploy.sh` never syncs
-   this file, and `trade.sh` (used in step 6) requires it:
+   VM and fill in every value the template asks for — `cloud_deploy.sh`
+   never syncs this file, and `trade.sh` (used in step 6) requires it:
 
    ```bash
    scp .env.secrets.example <user>@<host>:quant-deploy/.env.secrets
    ssh <user>@<host> "vi quant-deploy/.env.secrets"   # fill in real values
    ```
+
+   On the build machine, run `librae doctor` in the checkout first: it
+   catches a misspelled name, a secret that landed in the synced `.env`, or
+   a connection string on the wrong database role before anything leaves
+   the machine. `cloud_deploy.sh` independently refuses to sync a `.env`
+   that assigns a secret.
 
 4. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
    start TimescaleDB and Grafana. It does not start a strategy.

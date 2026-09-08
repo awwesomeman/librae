@@ -23,23 +23,26 @@ chain before that changes.
 
 ## Secrets handling and rotation
 
-Current model (see `.env.example`, `.env.secrets.example`, and
-`deploy/cloud_deploy.sh`'s header comment for the rationale):
+`librae/config/env.py` declares every variable, the file it belongs in, and
+whether it is a secret. `librae doctor` checks a machine against that
+declaration, and `cloud_deploy.sh` refuses to sync a `.env` that assigns a
+secret. By class:
 
-| Secret class | Lives in | Synced to VM by `cloud_deploy.sh`? | Notes |
+| Class | Lives in | Synced to VM by `cloud_deploy.sh`? | Notes |
 |---|---|---|---|
-| DB role passwords (`POSTGRES_*`) | `.env` | Yes | Non-trading; rotating them does not touch broker accounts. |
-| Telegram bot token/chat id | `.env` | Yes | Revoke via [@BotFather](https://t.me/BotFather) `/revoke`; update `.env` and restart the notifier process. |
-| Broker API keys (`BINANCE_*`, `SHIOAJI_*`, IBKR session) | one `.credentials/<account>.env` file per account | Never | Created by hand only on the machine that trades — see `.env.secrets.example`'s header comment. `trade.sh` passes only the explicitly selected file to Docker, never sourced as shell code. |
+| Non-secret settings (bind addresses, chat id, image refs) | `.env` | Yes | |
+| Shared infra secrets (DB passwords and connection strings, Grafana admin, Telegram bot token, Tailscale auth key) | `.env.secrets` | Never | Created by hand on each machine. The connection strings reference `${POSTGRES_APP_PASSWORD}`, so the app password exists once. Revoke a bot token via [@BotFather](https://t.me/BotFather) `/revoke`. |
+| Broker API keys (`BINANCE_*`, `SHIOAJI_*`, IBKR session) | one `.credentials/<account>.env` file per account | Never | Created by hand only on the machine that trades. `trade.sh` passes only the explicitly selected file to Docker, never sourced as shell code. |
 | Shioaji CA file | `.secrets/` | Never (bind-mounted read-only by `trade.sh`) | |
 
 Rotation procedure (any credential class):
 
 1. Generate the new credential at the provider (exchange API key page,
    Postgres `ALTER ROLE ... PASSWORD`, BotFather `/revoke` + new token).
-2. Update the value only on the machine(s) that hold it per the table above
-   — `.env` changes propagate via `cloud_deploy.sh`; `.credentials/*.env` and
-   `.secrets/` must be edited directly on the trading host over SSH.
+2. Update the value on every machine that holds it — secrets never
+   propagate. Edit `.env.secrets`, `.credentials/*.env`, or `.secrets/`
+   directly on each host over SSH; on the build machine, `librae doctor`
+   confirms the connection strings still agree with the new password.
 3. Restart the affected deployment (`deploy/trade.sh restart <deployment_id>`,
    or the `timescaledb`/`grafana` Compose services for DB passwords).
 4. Revoke the old credential at the provider once the new one is confirmed

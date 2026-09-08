@@ -223,12 +223,19 @@ The calling process chooses how to load them, for example:
 uv run --env-file .env python -m your_strategy.run --mode backtest
 ```
 
-When working from a clone:
+When working from a clone, configuration is split by who may see it.
+`.env` holds non-secret settings and is synced to every deployment host.
+`.env.secrets` holds everything sensitive — database passwords and connection
+strings, the Telegram bot token, broker keys — and is created by hand on each
+machine, never synced. Live trading additionally takes one
+`.credentials/<account>.env` file per account, which `trade.sh` hands to
+Docker with `--env-file` and never sources as shell code.
 
 POSIX shell:
 
 ```bash
 cp .env.example .env
+cp .env.secrets.example .env.secrets && chmod 600 .env.secrets
 mkdir -p .credentials
 cp .env.secrets.example .credentials/ibkr-main.env
 chmod 600 .credentials/ibkr-main.env
@@ -238,18 +245,26 @@ PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
+Copy-Item .env.secrets.example .env.secrets
 New-Item -ItemType Directory -Force .credentials
 Copy-Item .env.secrets.example .credentials/ibkr-main.env
 ```
 
-On Windows, apply the account-file ACL required by your organization and
-runtime instead of POSIX `chmod`.
+On Windows, apply the file ACL required by your organization and runtime
+instead of POSIX `chmod`.
 
-Keep real trading/signing secrets in account-specific files under
-`.credentials/`; the deployment scripts do not sync that directory.
-`trade.sh` passes one explicitly selected file to Docker with `--env-file`.
-Placeholder values are sufficient for the test suite because external broker
-and database calls are mocked.
+Fill in the values, then check the result:
+
+```bash
+librae doctor
+```
+
+It validates `.env` and `.env.secrets` against the variables librae declares
+(`librae/config/env.py`): a misspelled name, a secret placed in the synced
+`.env`, half of an API key pair, or a connection string that names the wrong
+database role. It prints names, never values, and ignores variables that
+belong to other tools sharing the files. Placeholder values are sufficient
+for the test suite because external broker and database calls are mocked.
 
 If you installed the package without cloning the repository, scaffold the
 minimal template with:
