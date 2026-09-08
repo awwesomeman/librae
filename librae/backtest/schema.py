@@ -84,6 +84,8 @@ class RunMetadata:
         auxiliary = self.auxiliary_subscriptions
         if len(auxiliary) != len(set(auxiliary)):
             raise ValueError("auxiliary_subscriptions must not contain duplicate identities")
+        if auxiliary and not subscriptions:
+            raise ValueError("auxiliary_subscriptions require exact primary_subscriptions")
         overlap = set(subscriptions) & set(auxiliary)
         if overlap:
             raise ValueError("primary and auxiliary subscriptions must be distinct")

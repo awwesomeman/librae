@@ -108,12 +108,13 @@ class MarketDataSubscription:
 class _MarketDataSource:
     """Run-owned immutable source used by lazy point-in-time views."""
 
-    __slots__ = ("_frames", "_index", "subscriptions")
+    __slots__ = ("_frames", "_index", "_monotonic", "subscriptions")
 
     def __init__(self, frames: Mapping[MarketDataSubscription, pd.DataFrame]) -> None:
         subscriptions = tuple(sorted(frames))
         self.subscriptions = subscriptions
         self._frames = tuple(_detach_object_features(frames[item]) for item in subscriptions)
+        self._monotonic = tuple(frame.index.is_monotonic_increasing for frame in self._frames)
         self._index = {subscription: index for index, subscription in enumerate(subscriptions)}
 
     def __deepcopy__(self, memo: dict[int, object]) -> _MarketDataSource:
@@ -136,10 +137,16 @@ class _MarketDataSource:
         visible_count: int,
         limit: int | None,
     ) -> pd.DataFrame:
-        frame = self._frames[self.index_of(subscription)]
-        visible = frame.iloc[:visible_count].sort_index(kind="stable")
-        if limit is not None:
-            visible = visible.tail(limit)
+        index = self.index_of(subscription)
+        frame = self._frames[index]
+        visible = frame.iloc[:visible_count]
+        if self._monotonic[index]:
+            if limit is not None:
+                visible = visible.tail(limit)
+        else:
+            visible = visible.sort_index(kind="stable")
+            if limit is not None:
+                visible = visible.tail(limit)
         return _detach_object_features(visible)
 
 

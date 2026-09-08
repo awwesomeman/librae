@@ -673,6 +673,94 @@ def test_direct_daily_identity_accepts_sparse_weekdays_across_dst() -> None:
     assert len(strategy.contexts) == 5
 
 
+@pytest.mark.parametrize("sample_size", [1, 4])
+@pytest.mark.parametrize(
+    ("timeframe", "timestamps"),
+    [
+        (
+            "D1",
+            [
+                "2026-03-06 14:30Z",
+                "2026-03-09 13:30Z",
+                "2026-03-10 13:30Z",
+                "2026-03-11 13:30Z",
+            ],
+        ),
+        (
+            "W1",
+            [
+                "2026-03-02 14:30Z",
+                "2026-03-09 13:30Z",
+                "2026-03-16 13:30Z",
+                "2026-03-23 13:30Z",
+            ],
+        ),
+        (
+            "MN1",
+            [
+                "2026-01-02 14:30Z",
+                "2026-02-02 14:30Z",
+                "2026-03-02 14:30Z",
+                "2026-04-01 13:30Z",
+            ],
+        ),
+    ],
+)
+def test_direct_calendar_identity_accepts_short_canonical_samples(
+    timeframe: str,
+    timestamps: list[str],
+    sample_size: int,
+) -> None:
+    primary_subscription = _subscription(
+        "MU",
+        timeframe,
+        calendar_id="XNYS",
+        session_mode="regular",
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+    strategy = _Capture()
+
+    backtest = _mixed_backtest(
+        _frame("MU", timestamps[:sample_size]),
+        strategy,
+        {auxiliary_subscription: _frame("AUX", ["2025-12-01"], multiindex=False)},
+        primary_subscriptions=(primary_subscription,),
+    )
+    backtest.run()
+
+    assert backtest.build_output().run_metadata.timeframe == timeframe
+    assert len(strategy.contexts) == sample_size
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "timestamp"),
+    [
+        ("D1", "2026-03-06 15:30Z"),
+        ("W1", "2026-03-03 14:30Z"),
+        ("MN1", "2026-03-03 14:30Z"),
+    ],
+)
+def test_direct_calendar_identity_rejects_short_noncanonical_samples(
+    timeframe: str,
+    timestamp: str,
+) -> None:
+    primary_subscription = _subscription(
+        "MU",
+        timeframe,
+        calendar_id="XNYS",
+        session_mode="regular",
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+
+    with pytest.raises(ValueError, match=rf"canonical timeframe={timeframe} period starts"):
+        _mixed_backtest(
+            _frame("MU", [timestamp]),
+            _Capture(),
+            {auxiliary_subscription: _frame("AUX", ["2025-12-01"], multiindex=False)},
+            primary_subscriptions=(primary_subscription,),
+        ).run()
+
+
 def test_direct_weekly_identity_rejects_daily_session_rows() -> None:
     timestamps = pd.DatetimeIndex(
         pd.to_datetime(
@@ -731,6 +819,53 @@ def test_market_data_view_materializes_history_only_on_demand(monkeypatch) -> No
     assert all(isinstance(ctx.market_data._visible_counts, tuple) for ctx in strategy.contexts)
     strategy.contexts[-1].market_data.history(auxiliary_subscription)
     assert calls == 1
+
+
+def test_market_data_view_limit_uses_monotonic_source_fast_path(monkeypatch) -> None:
+    monotonic_subscription = _subscription("A", "H1")
+    late_subscription = _subscription("B", "H1")
+    timestamps = pd.date_range("2026-01-03 00:00", periods=3, freq="h", tz="UTC")
+    monotonic = _frame("A", timestamps, multiindex=False)
+    non_monotonic = _frame("B", timestamps, multiindex=False).iloc[::-1]
+    source = market_data_module._MarketDataSource(
+        {
+            monotonic_subscription: monotonic,
+            late_subscription: non_monotonic,
+        }
+    )
+    view = market_data_module.MarketDataView(
+        as_of=pd.Timestamp("2026-01-04", tz="UTC").to_pydatetime(),
+        _source=source,
+        _visible_counts=(3, 3),
+    )
+    sort_calls = 0
+    detached_sizes: list[int] = []
+    original_sort = pd.DataFrame.sort_index
+    original_detach = market_data_module._detach_object_features
+
+    def counted_sort(frame, *args, **kwargs):
+        nonlocal sort_calls
+        sort_calls += 1
+        return original_sort(frame, *args, **kwargs)
+
+    def counted_detach(frame):
+        detached_sizes.append(len(frame))
+        return original_detach(frame)
+
+    monkeypatch.setattr(pd.DataFrame, "sort_index", counted_sort)
+    monkeypatch.setattr(market_data_module, "_detach_object_features", counted_detach)
+
+    monotonic_history = view.history(monotonic_subscription, limit=1)
+
+    assert sort_calls == 0
+    assert detached_sizes == [1]
+    assert monotonic_history.index.tolist() == [timestamps[-1]]
+
+    late_history = view.history(late_subscription, limit=1)
+
+    assert sort_calls == 1
+    assert detached_sizes == [1, 1]
+    assert late_history.index.tolist() == [timestamps[-1]]
 
 
 def test_config_mixed_backtest_reuses_resolved_primary_identity() -> None:

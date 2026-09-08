@@ -734,7 +734,7 @@ def _resolve_data_timeframe(
             continue
         if len(set(ordinals)) == len(ordinals):
             short_session_samples[symbol] = len(index)
-    if short_session_samples:
+    if short_session_samples and not authoritative_timeframe:
         raise ValueError(
             "cannot validate session cadence: at least five session bars are required "
             f"per symbol; got {short_session_samples}"
@@ -781,7 +781,7 @@ def _resolve_data_timeframe(
             raise ValueError(f"data symbols have inconsistent timeframes: {inferred_by_symbol}")
         data_timeframe = next(iter(inferred))
 
-    if _session_timeframe_unit(data_timeframe) is not None:
+    if _session_timeframe_unit(data_timeframe) is not None and not authoritative_timeframe:
         short_session_samples = {
             symbol: len(index)
             for symbol, index in indexes_by_symbol.items()
