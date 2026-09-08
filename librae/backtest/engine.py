@@ -272,12 +272,18 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
 
     month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     month_diffs = np.diff(month_ordinals)
-    if np.all(month_diffs > 0):
+    month_starts = pd.DatetimeIndex(
+        [period_start(timestamp, "MN1", calendar_id) for timestamp in sample]
+    )
+    if np.all(sample == month_starts) and np.all(month_diffs > 0):
         return f"MN{int(np.gcd.reduce(month_diffs))}"
 
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_diffs = np.diff(week_ordinals)
-    if np.all(week_diffs > 0):
+    week_starts = pd.DatetimeIndex(
+        [period_start(timestamp, "W1", calendar_id) for timestamp in sample]
+    )
+    if np.all(sample == week_starts) and np.all(week_diffs > 0):
         return f"W{int(np.gcd.reduce(week_diffs))}"
 
     session_diffs = np.diff(ordinals)
