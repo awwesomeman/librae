@@ -65,8 +65,12 @@ with sqlite3.connect(target) as connection:
 ```
 
 For enriched price/factor input, call `build_market_data_artifact()` with
-explicit `symbol`, `timeframe`, `data_source`, and `instrument_type`. It
-preserves extra feature columns and normalizes timestamps to UTC.
+explicit `symbol`, `timeframe`, `calendar_id`, `session_mode`, `data_source`,
+and `instrument_type`. It preserves extra feature columns and normalizes
+`ts`/`available_at` to UTC. Artifact schema v3 stores the complete immutable
+subscription identity and rejects values earlier than the provable bar close.
+`available_at` describes the current row version, so late corrections need not
+be monotonic with the bar-start sequence.
 `instrument_type` is validated against
 `librae.config.symbols.ALLOWED_INSTRUMENT_TYPES`, the same set the reference
 DB schema's `CHECK` constraint enforces, so no-DB callers get the same

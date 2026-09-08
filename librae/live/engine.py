@@ -53,7 +53,12 @@ from librae.core.financing import (
     calculate_funding_cash_flows,
 )
 from librae.core.liquidity import calculate_lagged_adv
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    normalize_bar_times,
+    subscription_from_instrument,
+    validate_ohlcv_values,
+)
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -121,6 +126,9 @@ class CycleDiagnostics:
     deadline_missed: bool
 
 
+type _OhlcvAuditRow = tuple[datetime, dict[str, object]]
+
+
 @dataclass(frozen=True)
 class _MarketDataFetchResult:
     """One required symbol's explicit outcome for the current poll."""
@@ -128,6 +136,7 @@ class _MarketDataFetchResult:
     outcome: Literal["success", "error", "terminal"]
     frame: pd.DataFrame | None
     elapsed_seconds: float
+    audit_rows: tuple[_OhlcvAuditRow, ...] = ()
     error: Exception | None = None
 
 
@@ -347,7 +356,8 @@ class LiveTrader:
         config: RunConfig — the sole configuration source.
         adapter: Callable bar fetcher, concrete adapter with ``fetch_ohlcv``,
             or per-symbol mapping. Required. Extra point-in-time columns reach
-            ``feature_fn``.
+            ``feature_fn`` except reserved ``available_at``, which remains on
+            the audit/persistence view only.
         order_adapter: Required broker gateway in live mode; unused in sim.
         cost_model: CostModel override. None resolves one model per symbol.
         callbacks: Optional analytics hooks. They have no default persistence
@@ -446,6 +456,14 @@ class LiveTrader:
             for symbol in self._symbols
         }
         _validate_market_data_calendar_preconditions(config.timeframe, self._instruments)
+        self._market_data_subscriptions = {
+            symbol: subscription_from_instrument(
+                instrument,
+                timeframe=self._timeframe,
+                session_mode=config.session_mode,
+            )
+            for symbol, instrument in self._instruments.items()
+        }
         if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
             missing_calendars = sorted(
                 symbol
@@ -572,7 +590,7 @@ class LiveTrader:
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
         self._warmup_requested_periods: dict[str, int] = {}
         self._warmup_fetch_attempts: dict[str, int] = {}
-        self._warmup_exhausted_fingerprints: dict[str, frozenset[int]] = {}
+        self._warmup_exhausted_fingerprints: dict[str, frozenset[tuple[int, int]]] = {}
         self._replay_backlog_exhausted: dict[str, tuple[int, int]] = {}
         self._reported_warmup_reasons: dict[str, str] = {}
         self._lease_acquired = False
@@ -840,6 +858,7 @@ class LiveTrader:
 
         def fetch_one(symbol: str) -> _MarketDataFetchResult:
             started = perf_counter()
+            audit_rows: list[_OhlcvAuditRow] = []
             if symbol in self._replay_backlog_exhausted:
                 return _MarketDataFetchResult(
                     outcome="terminal",
@@ -847,13 +866,17 @@ class LiveTrader:
                     elapsed_seconds=perf_counter() - started,
                 )
             try:
-                frame = self._fetch_with_cache_unchecked(symbol)
+                frame = self._fetch_with_cache_unchecked(
+                    symbol,
+                    audit_sink=audit_rows,
+                )
             except Exception as exc:
                 frame = self._ohlcv_cache.get(symbol)
                 return _MarketDataFetchResult(
                     outcome="error",
                     frame=frame,
                     elapsed_seconds=perf_counter() - started,
+                    audit_rows=tuple(audit_rows),
                     error=exc,
                 )
             outcome: Literal["success", "terminal"] = (
@@ -863,6 +886,7 @@ class LiveTrader:
                 outcome=outcome,
                 frame=frame,
                 elapsed_seconds=perf_counter() - started,
+                audit_rows=tuple(audit_rows),
             )
 
         if self._market_data_workers == 1 or len(self._symbols) == 1:
@@ -880,6 +904,18 @@ class LiveTrader:
                 self._record_market_data_fetch_failure(symbol, result.error)
             elif result.outcome == "success":
                 self._record_market_data_fetch_success(symbol)
+            if self._on_ohlcv is not None:
+                audit_by_version: dict[tuple[int, int], _OhlcvAuditRow] = {}
+                for event_ts, audit_bar in result.audit_rows:
+                    version = (
+                        pd.Timestamp(event_ts).value,
+                        pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
+                    )
+                    audit_by_version.setdefault(version, (event_ts, audit_bar))
+                for event_ts, audit_bar in (
+                    audit_by_version[version] for version in sorted(audit_by_version)
+                ):
+                    self._on_ohlcv(symbol, self._timeframe, audit_bar, event_ts)
         return results
 
     def _record_market_data_fetch_failure(self, symbol: str, error: Exception) -> None:
@@ -1600,9 +1636,23 @@ class LiveTrader:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
 
-    def _fetch_with_cache_unchecked(self, symbol: str) -> pd.DataFrame | None:
+    def _fetch_with_cache_unchecked(
+        self,
+        symbol: str,
+        *,
+        audit_sink: list[_OhlcvAuditRow] | None = None,
+    ) -> pd.DataFrame | None:
         """Fetch and cache one symbol, propagating failures to the poll coordinator."""
         cached = self._ohlcv_cache.get(symbol)
+        if cached is not None and not cached.empty:
+            # Restored and test-injected legacy caches may predate row-version
+            # metadata. Normalize them before comparing history fingerprints.
+            cached = self._normalize_runtime_rows(symbol, cached)
+        restart_audit_watermark = (
+            self._last_bar_ts.get(symbol)
+            if audit_sink is not None and (cached is None or cached.empty)
+            else None
+        )
         if symbol in self._replay_backlog_exhausted:
             return cached
         if self._warmup_gap(symbol, cached) is not None:
@@ -1628,7 +1678,13 @@ class LiveTrader:
                     probe = self._eligible_runtime_rows(symbol, probe)
                     if not probe.empty:
                         validate_ohlcv_values(probe, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(merged, probe)
+                        merged = self._merge_runtime_rows(
+                            symbol,
+                            merged,
+                            probe,
+                            audit_sink=audit_sink,
+                            restart_audit_watermark=restart_audit_watermark,
+                        )
                     if self._history_fingerprint(merged) == exhausted_fingerprint:
                         return cached
                     self._warmup_exhausted_fingerprints.pop(symbol, None)
@@ -1650,7 +1706,13 @@ class LiveTrader:
                     new_df = self._eligible_runtime_rows(symbol, new_df)
                     if not new_df.empty:
                         validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(merged, new_df)
+                        merged = self._merge_runtime_rows(
+                            symbol,
+                            merged,
+                            new_df,
+                            audit_sink=audit_sink,
+                            restart_audit_watermark=restart_audit_watermark,
+                        )
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
@@ -1675,7 +1737,13 @@ class LiveTrader:
             if new_df.empty:
                 return cached
             validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-            merged = self._merge_runtime_rows(cached, new_df)
+            merged = self._merge_runtime_rows(
+                symbol,
+                cached,
+                new_df,
+                audit_sink=audit_sink,
+                restart_audit_watermark=restart_audit_watermark,
+            )
 
         return self._store_runtime_cache(symbol, merged)
 
@@ -1723,36 +1791,126 @@ class LiveTrader:
         )
 
     @staticmethod
-    def _history_fingerprint(frame: pd.DataFrame | None) -> frozenset[int]:
-        """Identify observations without treating value revisions as new history."""
+    def _history_fingerprint(
+        frame: pd.DataFrame | None,
+    ) -> frozenset[tuple[int, int]]:
+        """Identify persisted row versions without treating them as extra history."""
         if frame is None or frame.empty:
             return frozenset()
         timestamps = pd.to_datetime(frame["ts"], utc=True)
-        return frozenset(pd.Timestamp(value).value for value in timestamps)
+        if AVAILABLE_AT_COLUMN in frame:
+            availability = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
+        else:
+            # Legacy/manual caches are normalized before storage. Keep their
+            # pre-normalization fingerprint deterministic without inventing a
+            # second observation identity.
+            availability = timestamps
+        return frozenset(
+            (pd.Timestamp(ts).value, pd.Timestamp(available_at).value)
+            for ts, available_at in zip(timestamps, availability, strict=True)
+        )
 
     def _eligible_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
-        """Exclude rows whose source-declared availability has not arrived."""
-        if frame.empty or "available_at" not in frame.columns:
+        """Normalize one exact subscription and expose only causally ready rows."""
+        if frame.empty:
             return frame
-        availability = pd.to_datetime(frame["available_at"], errors="raise")
-        if not isinstance(availability.dtype, pd.DatetimeTZDtype):
-            raise ValueError(f"{symbol} available_at values must be timezone-aware")
-        if availability.isna().any():
-            raise ValueError(f"{symbol} available_at values must not contain NaT")
-        availability = availability.dt.tz_convert("UTC")
-        eligible = availability <= pd.Timestamp(self._utc_now())
-        result = frame.loc[eligible].copy()
-        result["available_at"] = availability.loc[eligible]
-        return result
 
-    @staticmethod
+        normalized = self._normalize_runtime_rows(symbol, frame)
+        eligible = normalized[AVAILABLE_AT_COLUMN] <= pd.Timestamp(self._utc_now())
+        return normalized.loc[eligible].copy()
+
+    def _normalize_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
+        """Normalize one batch while retaining row-version audit metadata."""
+        if frame.empty:
+            return frame.copy()
+
+        if "ts" not in frame:
+            raise ValueError(f"{symbol} market data requires a ts column")
+        ordered = frame.copy()
+        try:
+            sort_timestamps = pd.DatetimeIndex(
+                [pd.Timestamp(value).tz_convert("UTC") for value in ordered["ts"]]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{symbol} bar timestamp must be valid and timezone-aware") from exc
+        if sort_timestamps.hasnans:
+            raise ValueError(f"{symbol} bar timestamps must not contain NaT")
+        ordered["_librae_ts_sort"] = sort_timestamps
+        ordered = ordered.sort_values("_librae_ts_sort", kind="stable").reset_index(drop=True)
+        if ordered["_librae_ts_sort"].duplicated().any():
+            raise ValueError(f"{symbol} runtime data requires unique bar timestamps")
+        ordered = ordered.drop(columns="_librae_ts_sort")
+        subscription = self._market_data_subscriptions[symbol]
+        timestamps, availability = normalize_bar_times(
+            ordered["ts"],
+            ordered.get(AVAILABLE_AT_COLUMN),
+            subscription,
+        )
+        ordered["ts"] = timestamps
+        ordered[AVAILABLE_AT_COLUMN] = availability
+        return ordered
+
     def _merge_runtime_rows(
+        self,
+        symbol: str,
         cached: pd.DataFrame | None,
         fetched: pd.DataFrame,
+        *,
+        audit_sink: list[_OhlcvAuditRow] | None = None,
+        restart_audit_watermark: datetime | None = None,
     ) -> pd.DataFrame:
-        """Merge one history response by timestamp without counting duplicates."""
-        merged = fetched if cached is None else pd.concat([cached, fetched], ignore_index=True)
-        return merged.drop_duplicates(subset="ts", keep="last").sort_values("ts")
+        """Merge causal row versions, then validate the whole cache cadence."""
+        fetched = self._normalize_runtime_rows(symbol, fetched)
+        accepted_audit_rows: list[_OhlcvAuditRow] = []
+        if audit_sink is not None and restart_audit_watermark is not None:
+            replay_rows = fetched.loc[fetched["ts"] <= pd.Timestamp(restart_audit_watermark)]
+            accepted_audit_rows.extend(
+                (
+                    pd.Timestamp(row["ts"]).to_pydatetime(),
+                    row.drop(labels="ts").to_dict(),
+                )
+                for _, row in replay_rows.iterrows()
+            )
+        if cached is None or cached.empty:
+            merged = fetched
+        else:
+            cached = self._normalize_runtime_rows(symbol, cached)
+            if audit_sink is not None and restart_audit_watermark is None:
+                watermark = self._last_bar_ts.get(symbol)
+                if watermark is not None:
+                    previous_availability = cached.set_index("ts")[AVAILABLE_AT_COLUMN]
+                    previous_versions = fetched["ts"].map(previous_availability)
+                    corrections = fetched.loc[
+                        previous_versions.notna()
+                        & (fetched[AVAILABLE_AT_COLUMN] > pd.DatetimeIndex(previous_versions))
+                        & (fetched["ts"] <= pd.Timestamp(watermark))
+                    ]
+                    accepted_audit_rows.extend(
+                        (
+                            pd.Timestamp(row["ts"]).to_pydatetime(),
+                            row.drop(labels="ts").to_dict(),
+                        )
+                        for _, row in corrections.iterrows()
+                    )
+            cached = cached.assign(_librae_source_priority=0)
+            fetched = fetched.assign(_librae_source_priority=1)
+            merged = pd.concat([cached, fetched], ignore_index=True)
+            merged = merged.sort_values(
+                ["ts", AVAILABLE_AT_COLUMN, "_librae_source_priority"],
+                ascending=[True, False, True],
+                kind="stable",
+            )
+            merged = merged.drop_duplicates(subset="ts", keep="first").drop(
+                columns="_librae_source_priority"
+            )
+        merged = merged.sort_values("ts", kind="stable").reset_index(drop=True)
+        # Each fetch can be valid alone while overlapping a cached multi-bar
+        # interval. Revalidate only after version selection has made the cache
+        # deterministic.
+        normalized = self._normalize_runtime_rows(symbol, merged)
+        if audit_sink is not None:
+            audit_sink.extend(accepted_audit_rows)
+        return normalized
 
     def _report_incomplete_warmup(self) -> None:
         """Publish an edge-triggered diagnostic after bounded backfill fails."""
@@ -3112,15 +3270,18 @@ class LiveTrader:
         primary_symbol = self._symbols[0]
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
+        audit_bars: dict[str, dict[str, object]] = {}
         previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
         for symbol, raw_df in raw_frames.items():
-            history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
-            history.index.name = "ts"
-            if history.empty or pd.Timestamp(history.index[-1]).to_pydatetime() != ts:
+            audit_history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
+            audit_history.index.name = "ts"
+            if audit_history.empty or pd.Timestamp(audit_history.index[-1]).to_pydatetime() != ts:
                 continue
+            history = audit_history.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
             histories[symbol] = history
             raw_bar = history.iloc[-1].to_dict()
+            audit_bars[symbol] = audit_history.iloc[-1].to_dict()
             close = float(raw_bar.get("close", float("nan")))
             if not isfinite(close) or close <= 0:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
@@ -3274,7 +3435,7 @@ class LiveTrader:
                     position.periods_held += 1
             self._persist_state()
             if self._on_ohlcv:
-                for symbol, bar in raw_bars.items():
+                for symbol, bar in audit_bars.items():
                     self._on_ohlcv(symbol, self._timeframe, bar, ts)
             return
 
@@ -3286,7 +3447,9 @@ class LiveTrader:
                     symbol=symbol,
                     event_ts=ts,
                 )
-                bar = featured.iloc[-1].to_dict()
+                bar = (
+                    featured.iloc[-1].drop(labels=[AVAILABLE_AT_COLUMN], errors="ignore").to_dict()
+                )
                 price = float(bar.get("close", float("nan")))
                 if not isfinite(price) or price <= 0:
                     raise ValueError(f"{symbol} feature output has invalid close at {ts}: {price}")
@@ -3391,7 +3554,7 @@ class LiveTrader:
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
-            for symbol, bar in raw_bars.items():
+            for symbol, bar in audit_bars.items():
                 self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:

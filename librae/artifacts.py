@@ -17,16 +17,20 @@ from librae.backtest.schema import (
     PositionSnapshotPoint,
     StrategyMetrics,
 )
-from librae.config.symbols import validate_instrument_type
 from librae.core.executor import RuntimeEvent
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    MarketDataSubscription,
+    normalize_bar_times,
+    validate_ohlcv_values,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from librae.backtest.schema import BacktestOutput
 
-ARTIFACT_SCHEMA_VERSION = 2
+ARTIFACT_SCHEMA_VERSION = 4
 ArtifactKind = Literal["market_data", "backtest_output"]
 
 
@@ -45,9 +49,14 @@ def _package_version() -> str:
         return "0.0.0.dev0+unknown"
 
 
-def _manifest(kind: ArtifactKind, **metadata: object) -> dict[str, Any]:
+def _manifest(
+    kind: ArtifactKind,
+    *,
+    schema_version: int = 3,
+    **metadata: object,
+) -> dict[str, Any]:
     return {
-        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "artifact_schema_version": schema_version,
         "artifact_kind": kind,
         "librae_version": _package_version(),
         "created_at": datetime.now(UTC).isoformat(),
@@ -55,7 +64,11 @@ def _manifest(kind: ArtifactKind, **metadata: object) -> dict[str, Any]:
     }
 
 
-def _normalized_market_data(frame: pd.DataFrame, *, symbol: str) -> pd.DataFrame:
+def _normalized_market_data(
+    frame: pd.DataFrame,
+    *,
+    subscription: MarketDataSubscription,
+) -> pd.DataFrame:
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("frame must be a pandas DataFrame")
     validate_ohlcv_values(frame, context="market-data artifact")
@@ -84,6 +97,7 @@ def _normalized_market_data(frame: pd.DataFrame, *, symbol: str) -> pd.DataFrame
         raise ValueError("market-data timestamps must not contain null values")
     table["ts"] = timestamps.tz_convert(UTC)
 
+    symbol = subscription.symbol
     if "symbol" in table.columns:
         observed = set(table["symbol"].dropna().astype(str))
         if observed != {symbol}:
@@ -92,15 +106,17 @@ def _normalized_market_data(frame: pd.DataFrame, *, symbol: str) -> pd.DataFrame
             )
     else:
         table.insert(0, "symbol", symbol)
+    if table["ts"].duplicated().any():
+        raise ValueError("market data must contain unique timestamps per subscription")
+    table = table.sort_values("ts", kind="stable").reset_index(drop=True)
+    timestamps, available_at = normalize_bar_times(
+        table["ts"],
+        table.get(AVAILABLE_AT_COLUMN),
+        subscription,
+    )
+    table["ts"] = timestamps
+    table[AVAILABLE_AT_COLUMN] = available_at
     return table
-
-
-def _validate_identity(identity: Mapping[str, str]) -> None:
-    invalid = [
-        name for name, value in identity.items() if not isinstance(value, str) or not value.strip()
-    ]
-    if invalid:
-        raise ValueError(f"market-data identity fields must be non-empty strings: {invalid}")
 
 
 def build_market_data_artifact(
@@ -108,23 +124,22 @@ def build_market_data_artifact(
     *,
     symbol: str,
     timeframe: str,
+    calendar_id: str,
     data_source: str,
     instrument_type: str,
     session_mode: str = "extended",
 ) -> TabularArtifact:
     """Build one enriched OHLCV table without selecting or writing a file format."""
-    identity = {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "data_source": data_source,
-        "instrument_type": instrument_type,
-        "session_mode": session_mode,
-    }
-    _validate_identity(identity)
-    validate_instrument_type(instrument_type)
-    if session_mode not in ("regular", "extended"):
-        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
-    table = _normalized_market_data(frame, symbol=symbol)
+    subscription = MarketDataSubscription(
+        symbol=symbol,
+        timeframe=timeframe,
+        calendar_id=calendar_id,
+        session_mode=session_mode,
+        data_source=data_source,
+        instrument_type=instrument_type,
+    )
+    identity = subscription.to_dict()
+    table = _normalized_market_data(frame, subscription=subscription)
 
     for name, expected in identity.items():
         if name in table.columns:
@@ -240,6 +255,9 @@ def build_backtest_artifact(
     return TabularArtifact(
         manifest=_manifest(
             "backtest_output",
+            schema_version=(
+                ARTIFACT_SCHEMA_VERSION if output.run_metadata.auxiliary_subscriptions else 3
+            ),
             config_hash=config_hash,
             run_metadata=output.to_dict()["run_metadata"],
         ),

@@ -333,9 +333,11 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy_name, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, primary_subscriptions, config_hash,
                        backtest_revision, backtest_cache_key)
-                  VALUES (%s, 'smoke', '["MU"]', 'D1', %s, %s, %s)
+                  VALUES (%s, 'smoke', '["MU"]', 'D1',
+                          '[{"symbol":"MU","timeframe":"D1","calendar_id":"XNYS","session_mode":"extended","data_source":"ibkr","instrument_type":"spot"}]',
+                          %s, %s, %s)
                   """,
                   (run_id, config_hash, revision, cache_key),
               )
@@ -345,9 +347,10 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy_name, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, primary_subscriptions, config_hash,
                        backtest_revision, backtest_cache_key)
                   VALUES ('cache-run-c', 'smoke', '["MU"]', 'D1',
+                          '[{"symbol":"MU","timeframe":"D1","calendar_id":"XNYS","session_mode":"extended","data_source":"ibkr","instrument_type":"spot"}]',
                           'config-b', 'revision-c', 'cache-a')
                   """
               )
@@ -357,6 +360,110 @@ jobs:
           else:
               raise AssertionError("duplicate backtest_cache_key was accepted")
           finally:
+              cursor.close()
+              connection.close()
+          PY
+
+      - name: Verify exact OHLCV subscription routing
+        run: |
+          set -a
+          source .env.example
+          source .env.secrets
+          set +a
+          docker run --rm --interactive \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python - <<'PY'
+          import os
+
+          import pandas as pd
+          import psycopg2
+
+          from librae.core.market_data import MarketDataSubscription
+          from librae.db.timescale_reader import load_ohlcv
+          from librae.db.timescale_writer import write_ohlcv
+
+          run_id = "identity-routing-smoke-193"
+          symbol = "IDENTITY_SMOKE_193"
+          connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
+          cursor = connection.cursor()
+          try:
+              cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              cursor.execute("DELETE FROM ohlcv WHERE symbol = %s", (symbol,))
+              cursor.execute(
+                  """
+                  INSERT INTO backtest_runs
+                      (run_id, strategy_name, symbols, timeframe,
+                       primary_subscriptions, started_at, ended_at)
+                  VALUES (%s, 'identity-routing-smoke', %s::jsonb, 'H1', %s::jsonb,
+                          '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')
+                  """,
+                  (
+                      run_id,
+                      f'["{symbol}"]',
+                      '[{"symbol":"IDENTITY_SMOKE_193","timeframe":"H1",'
+                      '"calendar_id":"24/7","session_mode":"extended",'
+                      '"data_source":"fixture","instrument_type":"spot"}]',
+                  ),
+              )
+              cursor.execute(
+                  """
+                  INSERT INTO ohlcv
+                      (ts, symbol, timeframe, calendar_id, session_mode,
+                       data_source, instrument_type, available_at,
+                       open, high, low, close, volume)
+                  VALUES
+                      ('2026-08-01T00:00:00Z', %s, 'H1', '24/7', 'extended',
+                       'fixture', 'spot', '2026-08-01T02:00:00Z', 100, 102, 99, 101, 10),
+                      ('2026-08-01T00:00:00Z', %s, 'H1', '24/7', 'extended',
+                       'fixture', 'contract_monthly', '2026-08-01T01:00:00Z',
+                       200, 202, 199, 201, 20)
+                  """,
+                  (symbol, symbol),
+              )
+              connection.commit()
+
+              loaded = load_ohlcv(run_id=run_id, as_of="2026-08-01T02:00:00Z")
+              assert loaded["instrument_type"].tolist() == ["spot"]
+              assert loaded["close"].tolist() == [101.0]
+
+              subscription = MarketDataSubscription(
+                  symbol=symbol,
+                  timeframe="H1",
+                  calendar_id="24/7",
+                  session_mode="extended",
+                  data_source="fixture",
+                  instrument_type="spot",
+              )
+
+              def version(close, available_at):
+                  return pd.DataFrame(
+                      {
+                          "open": [close],
+                          "high": [close + 1],
+                          "low": [close - 1],
+                          "close": [close],
+                          "volume": [10.0],
+                          "available_at": [pd.Timestamp(available_at)],
+                      },
+                      index=pd.DatetimeIndex(
+                          [pd.Timestamp("2026-08-01T00:00:00Z")],
+                          name="ts",
+                      ),
+                  )
+
+              assert write_ohlcv(version(91.0, "2026-08-01T01:00:00Z"), subscription) == 0
+              assert write_ohlcv(version(102.0, "2026-08-01T02:00:00Z"), subscription) == 0
+              assert write_ohlcv(version(103.0, "2026-08-01T03:00:00Z"), subscription) == 1
+              loaded = load_ohlcv(run_id=run_id, as_of="2026-08-01T03:00:00Z")
+              assert loaded["instrument_type"].tolist() == ["spot"]
+              assert loaded["close"].tolist() == [103.0]
+          finally:
+              connection.rollback()
+              cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              cursor.execute("DELETE FROM ohlcv WHERE symbol = %s", (symbol,))
+              connection.commit()
               cursor.close()
               connection.close()
           PY

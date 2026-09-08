@@ -13,6 +13,7 @@ from librae.backtest.schema import (
     RunMetadata,
     StrategyMetrics,
 )
+from librae.core.market_data import MarketDataSubscription
 
 NOW = datetime(2026, 3, 6, 12, 0, 0, tzinfo=UTC)
 START = datetime(2026, 3, 1, 0, 0, 0, tzinfo=UTC)
@@ -91,6 +92,20 @@ def test_run_metadata_defaults() -> None:
     assert meta.symbols == ("MXFR1",)
 
 
+def test_run_metadata_auxiliary_identity_requires_exact_primary_identity() -> None:
+    auxiliary = MarketDataSubscription(
+        symbol="MXFR1",
+        timeframe="D1",
+        calendar_id="XTAI",
+        session_mode="regular",
+        data_source="fixture",
+        instrument_type="contract_monthly",
+    )
+
+    with pytest.raises(ValueError, match="require exact primary_subscriptions"):
+        _make_run_metadata(auxiliary_subscriptions=(auxiliary,))
+
+
 def test_backtest_output_validate_passes() -> None:
     output = BacktestOutput(
         run_metadata=_make_run_metadata(),
@@ -115,6 +130,7 @@ def test_backtest_output_serializes_scalar_account() -> None:
 
     assert payload["account"]["account_id"] == "default"
     assert "accounts" not in payload
+    assert "auxiliary_subscriptions" not in payload["run_metadata"]
 
 
 def test_backtest_output_validate_empty_run_id_raises() -> None:
