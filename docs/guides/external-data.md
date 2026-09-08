@@ -151,7 +151,11 @@ not an automatic third-party ingestion service.
 
 The engine's default sim/live warm-up fetches directly through its injected
 adapter. If you want DB-first history with API gap filling, implement that
-policy in a callable and pass it as `warmup_fetcher`. Direct `LiveTrader`
+policy in a callable and pass it as `warmup_fetcher`. The fetcher's third
+argument is the requested history span, not a promised result size: the engine
+may retry it with a larger value when de-duplicated, completed, currently
+available observations do not meet `ExecutionPolicy.warmup_periods`. The
+callable must not return a still-forming bar as completed. Direct `LiveTrader`
 construction does not attach TimescaleDB. The repository orchestration factory
 does so when `database_enabled=True`; live always requires an explicitly
 injected durable `state_store`.

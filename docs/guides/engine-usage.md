@@ -510,9 +510,19 @@ Protective live orders require a broker-native implementation.
 Every exposure-increasing live fill is checked again against confirmed
 position, gross, and net limits. A breach halts dependent execution.
 
-Incremental cache retention is capped by the validated
-`ExecutionPolicy.warmup_periods` (default 720; an injected warmup
-fetcher may provide more initial history). This implementation favors
+The engine treats `ExecutionPolicy.warmup_periods` (default 720) as both the
+retained feature-history window and an all-symbol startup readiness condition.
+Initial responses are counted after timestamp de-duplication and source-declared
+`available_at` filtering. If fewer usable completed bars arrive, the engine
+retries the selected adapter or `warmup_fetcher` with bounded 1x/2x/4x history
+requests. It keeps strategy and feature evaluation disabled, leaves event
+watermarks unchanged, and emits an edge-triggered `warmup_incomplete` runtime
+diagnostic if the window is still short. Later polls retry recovery; after every
+symbol is ready, ordinary two-bar incremental polling resumes. A custom
+`warmup_fetcher` remains responsible for returning completed observations and
+for any DB-first/API gap-filling policy.
+
+This implementation favors
 daily/session correctness over high-frequency throughput; lower strategy
 frequency reduces load but does not remove clock/order-state synchronization
 requirements.
@@ -715,8 +725,11 @@ exceeded `RunConfig.runtime.poll_seconds`.
   `(timestamp, event type, symbol)` identity. Cash-scaled tails are final only
   after all possible reductions complete, and a protective exit cancels the
   same symbol's remaining target.
-- `warmup_periods`: positive live/sim feature-history retention count; it is
-  typed engine configuration, not a strategy `params` fallback.
+- `warmup_periods`: positive live/sim feature-history retention and all-symbol
+  startup readiness count. A request for N periods is not assumed to contain N
+  completed observations: bounded backfill expands the requested span, and the
+  strategy remains disabled if the usable de-duplicated count is still short.
+  It is typed engine configuration, not a strategy `params` fallback.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
   from the persisted wall-clock placement attempt. On expiry the engine first
   refreshes the broker report, requests cancellation only if the order remains
