@@ -6,10 +6,17 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    MarketDataSubscription,
+    normalize_bar_times,
+    validate_ohlcv_values,
+)
 
 _INDEX_NAMES = ["symbol", "datetime"]
-_CANONICAL_FIELDS = frozenset((*_INDEX_NAMES, "open", "high", "low", "close", "volume"))
+_CANONICAL_FIELDS = frozenset(
+    (*_INDEX_NAMES, "open", "high", "low", "close", "volume", AVAILABLE_AT_COLUMN)
+)
 
 
 def normalize_bars(
@@ -17,12 +24,15 @@ def normalize_bars(
     *,
     symbol: str | None = None,
     column_mapping: Mapping[str, str] | None = None,
+    subscription: MarketDataSubscription | None = None,
 ) -> pd.DataFrame:
     """Return sorted UTC bars indexed by ``(symbol, datetime)``.
 
     ``data`` may use the canonical MultiIndex, canonical columns, or a
     DatetimeIndex for one explicitly named ``symbol``. ``column_mapping`` maps
     source column names to canonical names. Extra feature columns are preserved.
+    Passing ``subscription`` enables the point-in-time contract and derives
+    ``available_at`` only when the subscription calendar can prove completion.
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data must be a pandas DataFrame")
@@ -77,5 +87,22 @@ def normalize_bars(
         raise ValueError("data must contain unique (symbol, datetime) pairs")
 
     normalized = frame.set_index(_INDEX_NAMES).sort_index()
+    if subscription is not None:
+        observed_symbols = set(normalized.index.get_level_values("symbol"))
+        if observed_symbols != {subscription.symbol}:
+            raise ValueError(
+                "subscription symbol must match normalized data; "
+                f"expected={subscription.symbol!r}, observed={sorted(observed_symbols)!r}"
+            )
+        normalized_ts, normalized_available = normalize_bar_times(
+            normalized.index.get_level_values("datetime"),
+            normalized.get(AVAILABLE_AT_COLUMN),
+            subscription,
+        )
+        normalized.index = pd.MultiIndex.from_arrays(
+            [normalized.index.get_level_values("symbol"), normalized_ts],
+            names=_INDEX_NAMES,
+        )
+        normalized[AVAILABLE_AT_COLUMN] = normalized_available
     validate_ohlcv_values(normalized)
     return normalized

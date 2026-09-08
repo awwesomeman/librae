@@ -81,6 +81,7 @@ from .core.metrics import (
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
 )
+from .core.market_data import MarketDataSubscription, MarketDataView
 from .core.run_config import (
     AccountConfig,
     ExecutionPolicy,
@@ -121,6 +122,8 @@ __all__ = [
     "describe_symbols",
     "margin_rate_from_absolute",
     "MarketConfig",
+    "MarketDataSubscription",
+    "MarketDataView",
     "get_market",
     "AvailableSymbol",
     "available_symbols",

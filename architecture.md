@@ -604,7 +604,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_position_event` | `on_position_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close |
 | `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions), not a fill |
-| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — `bar` is a dict of OHLCV fields |
+| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — best-effort audit projection; `bar` includes OHLCV and `available_at`; fetched history can repeat after restart, delivery failure is not guaranteed to retry, and sinks must be idempotent |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
@@ -736,7 +736,7 @@ flowchart TD
 
 ### Timestamp naming rules
 
-**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`, representing "when this row happened").
+**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`). For OHLCV it is the canonical UTC bar start; `available_at` records the earliest safe observation time of the currently persisted row version and is the causal as-of frontier.
 **Every other point-in-time metadata field uses the `_at` suffix**, consistently — even when it's a query range filter parameter (e.g. `load_ohlcv(started_at=..., ended_at=...)`), to avoid the same root word being called `ts` in one function signature and something else in another.
 
 | Field | Meaning | Where it appears |
@@ -747,6 +747,7 @@ flowchart TD
 | `entry_at` | when a position was entered | `position_events`, `Position`, `PositionState`, `TradeResult`, `PositionEvent`, `PositionEventRecord` |
 | `exit_at` | when a trade was exited | `TradeResult` |
 | `last_heartbeat_at` | last time the running process reported itself alive | `backtest_runs` |
+| `available_at` | earliest safe observation time of the current OHLCV row version; late corrections may be non-monotonic across `ts` | `ohlcv` and normalized market-data artifacts |
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
@@ -760,7 +761,7 @@ flowchart TD
 | `financing_cash_flows` | applied financing (perpetual funding or short borrow) rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, kind, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `runtime_events` | operational audit trail (restarts, skipped decisions) — not a fill; `event_type` is a small, deliberately closed set (`state_recovered`, `decision_skipped`), with the specific skip reason as a free string in `detail` | unique `(run_id, ts, event_type, COALESCE(symbol, ''))`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
-| `ohlcv` | shared market data (`get_ohlcv()` cache) | no FK | yes (`ts`) |
+| `ohlcv` | shared market data, keyed by the six-field immutable subscription identity and carrying `available_at` | no FK; unique `(ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type)` | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |
 | `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically | no FK (unique index: ts+symbol+factor_name+timeframe+data_source+instrument_type) | yes (`ts`) |
@@ -770,7 +771,10 @@ flowchart TD
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
 
-`backtest_runs.symbols` is a JSON array and is the run-universe SSOT; there is
+`backtest_runs.symbols` is a JSON array and is the run-universe SSOT;
+`primary_subscriptions` maps that ordered universe to exact raw-data identities.
+Legacy metadata that cannot supply every identity dimension is never widened
+into an OHLCV query. There is
 no separate primary-symbol column. Single-asset convenience remains
 `RunConfig.symbol` in memory. The table stores `params`, `execution_policy`,
 and `risk_policy` in separate JSONB columns so strategy logic, fill
@@ -823,9 +827,11 @@ replaces the prior canonical run for that cache key in the same transaction,
 so rollback restores the prior run if the replacement fails. A null key means
 cache reuse is disabled and does not serialize otherwise equal configurations.
 
-`write_ohlcv()` and `write_external_factor()` keep the earliest value on a
-primary-key conflict. Later source corrections do not silently rewrite stored
-point-in-time observations.
+`write_ohlcv()` accepts one complete `MarketDataSubscription` and validates
+`available_at` against the provable completion floor. On identity conflict,
+only a strictly later `available_at` replaces the stored OHLCV values and
+version time; equal or older versions are no-ops. `write_external_factor()`
+keeps the earliest value on a primary-key conflict.
 
 ## Maintenance rules
 

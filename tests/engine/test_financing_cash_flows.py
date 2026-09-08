@@ -555,6 +555,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
             "PERP": {
                 "instrument_type": "contract_perpetual",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             }
         },
     )

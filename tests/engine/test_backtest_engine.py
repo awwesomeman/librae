@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import exchange_calendars as xcals
 import librae
 import numpy as np
 import pandas as pd
 import pytest
-from librae import normalize_bars
+from librae import MarketDataSubscription, normalize_bars
 from librae.backtest.engine import Backtest
 from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
@@ -50,6 +51,33 @@ def _make_multiindex_df(
 
 def _zero_cost() -> CostModel:
     return CostModel.zero()
+
+
+def _xnys_session_opens(start: str, end: str) -> pd.DatetimeIndex:
+    schedule = xcals.get_calendar("XNYS").schedule.loc[start:end]
+    return pd.DatetimeIndex(schedule["open"])
+
+
+def _first_observation_per_period(
+    index: pd.DatetimeIndex,
+    frequency: str,
+) -> pd.DatetimeIndex:
+    periods = pd.PeriodIndex(index.tz_convert(None), freq=frequency)
+    return index[~periods.duplicated()]
+
+
+def _frame_at_timestamps(
+    symbol: str,
+    timestamps: pd.DatetimeIndex,
+    *,
+    price: float = 100.0,
+) -> pd.DataFrame:
+    frame = _make_multiindex_df([price] * len(timestamps), symbol=symbol)
+    frame.index = pd.MultiIndex.from_arrays(
+        [[symbol] * len(timestamps), timestamps],
+        names=["symbol", "datetime"],
+    )
+    return frame
 
 
 _XNYS_SESSION_CADENCE_TIMESTAMPS = {
@@ -655,6 +683,318 @@ class TestBacktestDataContract:
         assert backtest._data is normalized
         assert str(backtest._timeline[0].tz) == "UTC"
 
+    def test_config_resolves_exact_primary_subscription_identity(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5)
+        config = make_test_cfg(
+            mode="backtest",
+            data_source="run-default",
+            instrument_overrides={
+                "BTCUSDT": {
+                    "data_source": "instrument-source",
+                    "data_adapter": "crypto",
+                    "calendar_id": "24/7",
+                }
+            },
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest.primary_subscriptions == (
+            MarketDataSubscription(
+                symbol="BTCUSDT",
+                timeframe="H1",
+                calendar_id="24/7",
+                session_mode="extended",
+                data_source="instrument-source",
+                instrument_type="spot",
+            ),
+        )
+        assert backtest._data["available_at"].tolist() == list(
+            pd.date_range("2025-01-01 01:00", periods=5, freq="h", tz="UTC")
+        )
+
+    def test_config_rejects_competing_primary_subscription_identity(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5)
+        config = make_test_cfg(mode="backtest")
+        wrong = MarketDataSubscription(
+            symbol="BTCUSDT",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="different-source",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="do not match identities resolved from config"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                config=config,
+                cost_model=_zero_cost(),
+                primary_subscriptions=(wrong,),
+            )
+
+    def test_direct_backtest_accepts_and_validates_primary_subscription(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+            primary_subscriptions=(subscription,),
+        )
+        backtest.run()
+
+        assert backtest.primary_subscriptions == (subscription,)
+        assert backtest.build_output().run_metadata.primary_subscriptions == (subscription,)
+
+    def test_direct_primary_subscription_order_is_the_universe_ssot(self) -> None:
+        data = pd.concat(
+            [
+                _make_multiindex_df([200.0] * 5, symbol="BBB"),
+                _make_multiindex_df([100.0] * 5, symbol="AAA"),
+            ]
+        )
+        subscriptions = tuple(
+            MarketDataSubscription(
+                symbol=symbol,
+                timeframe="H1",
+                calendar_id="24/7",
+                session_mode="extended",
+                data_source="fixture",
+                instrument_type="spot",
+            )
+            for symbol in ("AAA", "BBB")
+        )
+        contexts: list[Context] = []
+
+        class CaptureUniverse(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        backtest = Backtest(
+            data,
+            CaptureUniverse(),
+            cost_model=_zero_cost(),
+            primary_subscriptions=subscriptions,
+        )
+
+        backtest.run()
+        output = backtest.build_output()
+
+        assert backtest.primary_subscriptions == subscriptions
+        assert output.run_metadata.symbols == ("AAA", "BBB")
+        assert output.run_metadata.primary_subscriptions == subscriptions
+        assert contexts
+        assert all(ctx.symbol == "AAA" for ctx in contexts)
+        assert all(ctx.symbols == ("AAA", "BBB") for ctx in contexts)
+        assert all(tuple(ctx.bars) == ("AAA", "BBB") for ctx in contexts)
+
+    def test_config_universe_orders_reversed_data_rows_and_subscriptions(self) -> None:
+        data = pd.concat(
+            [
+                _make_multiindex_df([200.0] * 5, symbol="BBB"),
+                _make_multiindex_df([100.0] * 5, symbol="AAA"),
+            ]
+        )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["AAA", "BBB"],
+            symbol_cost_overrides={
+                "AAA": {"multiplier": 1.0},
+                "BBB": {"multiplier": 1.0},
+            },
+            instrument_overrides={
+                "AAA": {
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                    "calendar_id": "24/7",
+                },
+                "BBB": {
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                    "calendar_id": "24/7",
+                },
+            },
+        )
+        contexts: list[Context] = []
+
+        class CaptureUniverse(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        backtest = Backtest(
+            data,
+            CaptureUniverse(),
+            config=config,
+            cost_model=_zero_cost(),
+        )
+
+        backtest.run()
+        output = backtest.build_output()
+
+        assert output.run_metadata.symbols == ("AAA", "BBB")
+        assert tuple(item.symbol for item in backtest.primary_subscriptions) == ("AAA", "BBB")
+        assert all(ctx.symbol == "AAA" for ctx in contexts)
+        assert all(ctx.symbols == ("AAA", "BBB") for ctx in contexts)
+        assert all(tuple(ctx.bars) == ("AAA", "BBB") for ctx in contexts)
+
+    def test_legacy_direct_universe_keeps_data_first_seen_order(self) -> None:
+        data = pd.concat(
+            [
+                _make_multiindex_df([200.0] * 5, symbol="BBB"),
+                _make_multiindex_df([100.0] * 5, symbol="AAA"),
+            ]
+        )
+        contexts: list[Context] = []
+
+        class CaptureUniverse(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        backtest = Backtest(data, CaptureUniverse(), cost_model=_zero_cost())
+
+        backtest.run()
+
+        assert backtest.primary_subscriptions == ()
+        assert contexts
+        assert all(ctx.symbol == "BBB" for ctx in contexts)
+        assert all(ctx.symbols == ("BBB", "AAA") for ctx in contexts)
+        assert all(tuple(ctx.bars) == ("BBB", "AAA") for ctx in contexts)
+
+    def test_direct_primary_subscriptions_type_check_precedes_field_access(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+
+        with pytest.raises(
+            TypeError,
+            match="primary_subscriptions must contain MarketDataSubscription values",
+        ):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(object(),),
+            )
+
+    def test_direct_primary_subscriptions_exact_cover_fails_at_construction(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        wrong = MarketDataSubscription(
+            symbol="OTHER",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="must exactly cover data symbols"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(wrong,),
+            )
+
+    def test_available_at_is_reserved_from_strategy_and_execution_bars(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        frame["available_at"] = frame.index.get_level_values("datetime") + pd.Timedelta(hours=1)
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+        context_bars: list[dict[str, object]] = []
+        execution_bars: list[dict[str, dict[str, float]]] = []
+
+        class BuyOnce(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                context_bars.append(dict(ctx.bar))
+                assert all("available_at" not in bar for bar in ctx.bars.values())
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        class CapturingBacktest(Backtest):
+            def _execute_steps(self, *args, **kwargs):
+                execution_bars.append(args[4])
+                return super()._execute_steps(*args, **kwargs)
+
+        result = CapturingBacktest(
+            frame,
+            BuyOnce(),
+            cost_model=_zero_cost(),
+            primary_subscriptions=(subscription,),
+        ).run()
+
+        assert result.position_events[0].event_type == "open"
+        assert context_bars
+        assert execution_bars
+        assert all("available_at" not in bar for bar in context_bars)
+        assert all(
+            "available_at" not in bar
+            for event_bars in execution_bars
+            for bar in event_bars.values()
+        )
+
+    def test_primary_subscription_rejects_early_availability(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        frame["available_at"] = frame.index.get_level_values("datetime")
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="earlier than bar completion"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(subscription,),
+            ).run()
+
+    def test_primary_subscription_rejects_naive_availability(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        frame["available_at"] = pd.date_range(
+            "2025-01-01 01:00",
+            periods=5,
+            freq="h",
+        )
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="available_at values must be timezone-aware"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(subscription,),
+            ).run()
+
     @pytest.mark.parametrize(
         "timestamps",
         [
@@ -712,6 +1052,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -762,6 +1103,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -868,6 +1210,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="W1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -896,6 +1239,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="MN1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -931,6 +1275,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=configured_timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -961,6 +1306,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -969,6 +1315,213 @@ class TestBacktestDataContract:
         backtest.run()
 
         assert backtest._timeframe == timeframe
+
+    @pytest.mark.parametrize("timeframe", ["D5", "W5"])
+    def test_long_sparse_session_cadence_stays_stable_across_calendar_boundaries(
+        self,
+        timeframe: str,
+    ) -> None:
+        opens = _xnys_session_opens("2024-01-02", "2027-12-31")
+        if timeframe == "D5":
+            timestamps = opens[2::5][:25]
+        else:
+            weekly = _first_observation_per_period(opens, "W-SUN")
+            timestamps = weekly[1::5][:15]
+        frame = _frame_at_timestamps("MU", timestamps)
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=timeframe,
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == timeframe
+
+    @pytest.mark.parametrize(
+        ("timeframe", "phase"),
+        [
+            *[("D10", phase) for phase in range(10)],
+            *[("D21", phase) for phase in range(21)],
+        ],
+    )
+    def test_long_sparse_daily_cadence_preserves_every_phase(
+        self,
+        timeframe: str,
+        phase: int,
+    ) -> None:
+        interval = int(timeframe[1:])
+        opens = _xnys_session_opens("2007-01-03", "2026-12-31")
+        frame = _frame_at_timestamps("MU", opens[phase::interval])
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=timeframe,
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == timeframe
+
+    def test_late_daily_to_weekly_cadence_shift_is_rejected(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-06-30")
+        daily = opens[:20]
+        weekly = _first_observation_per_period(opens[opens > daily[-1]], "W-SUN")[:5]
+        frame = _frame_at_timestamps("MU", daily.append(weekly))
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*W"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_late_daily_to_monthly_cadence_shift_is_rejected(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-09-30")
+        daily = opens[:20]
+        month_ordinals = pd.PeriodIndex(opens.tz_convert(None), freq="M")
+        first_later_month = month_ordinals > pd.Period(daily[-1].tz_convert(None), freq="M")
+        monthly = _first_observation_per_period(opens[first_later_month], "M")[:5]
+        frame = _frame_at_timestamps("MU", daily.append(monthly))
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*MN"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_late_weekly_to_monthly_cadence_shift_is_rejected(self) -> None:
+        opens = _xnys_session_opens("2025-01-06", "2027-12-31")
+        weekly = _first_observation_per_period(opens, "W-SUN")[:20]
+        month_ordinals = pd.PeriodIndex(opens.tz_convert(None), freq="M")
+        first_later_month = month_ordinals > pd.Period(weekly[-1].tz_convert(None), freq="M")
+        monthly = _first_observation_per_period(opens[first_later_month], "M")[:5]
+        frame = _frame_at_timestamps("MU", weekly.append(monthly))
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="W1",
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*MN"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_temporary_weekly_like_gap_then_daily_recovery_is_not_drift(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-09-30")
+        daily_prefix = opens[:20]
+        weekly_like = _first_observation_per_period(
+            opens[opens > daily_prefix[-1]],
+            "W-SUN",
+        )[:5]
+        daily_recovery = opens[opens > weekly_like[-1]][:10]
+        timestamps = daily_prefix.append(weekly_like).append(daily_recovery)
+        frame = _frame_at_timestamps("MU", timestamps)
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == "D1"
+
+    @pytest.mark.parametrize(
+        ("configured_timeframe", "actual_timeframe"),
+        [
+            ("D1", "D1"),
+            ("W1", "W1"),
+            ("MN1", "MN1"),
+            ("D1", "MN1"),
+        ],
+    )
+    def test_short_session_sample_fails_closed(
+        self,
+        configured_timeframe: str,
+        actual_timeframe: str,
+    ) -> None:
+        timestamps = pd.to_datetime(
+            _XNYS_SESSION_CADENCE_TIMESTAMPS[actual_timeframe][:4],
+            utc=True,
+        )
+        frame = _frame_at_timestamps("MU", timestamps)
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=configured_timeframe,
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"at least five session bars.*'MU': 4"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_multi_asset_late_cadence_shift_names_the_affected_symbol(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-06-30")
+        daily = opens[:25]
+        shifted_prefix = opens[:20]
+        shifted_suffix = _first_observation_per_period(
+            opens[opens > shifted_prefix[-1]],
+            "W-SUN",
+        )[:5]
+        aaa = _frame_at_timestamps("AAA", daily)
+        bbb = _frame_at_timestamps("BBB", shifted_prefix.append(shifted_suffix), price=200.0)
+        instrument = {
+            "data_adapter": "ibkr",
+            "instrument_type": "spot",
+            "currency": "USD",
+            "security_type": "STK",
+        }
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["AAA", "BBB"],
+            timeframe="D1",
+            market="us_equity",
+            session_mode="regular",
+            data_source="ibkr",
+            calendar_id="XNYS",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={"AAA": instrument, "BBB": instrument},
+            symbol_cost_overrides={
+                "AAA": {"multiplier": 1.0},
+                "BBB": {"multiplier": 1.0},
+            },
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'BBB'.*cadence changes.*W"):
+            Backtest(pd.concat([aaa, bbb]), HoldStrategy(), config=config).run()
 
     def test_configured_daily_rejects_coarser_symbol_in_multi_asset_data(self) -> None:
         daily = _make_multiindex_df([100.0] * 5, symbol="AAA")
@@ -998,6 +1551,7 @@ class TestBacktestDataContract:
             symbols=["AAA", "BBB"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             calendar_id="XNYS",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
@@ -1032,6 +1586,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="MN1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1105,6 +1660,7 @@ class TestBacktestDataContract:
             symbols=["AAA", "BBB"],
             timeframe=timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             calendar_id="XNYS",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
@@ -1634,6 +2190,7 @@ class TestMultiAsset:
                     "data_adapter": "crypto",
                     "instrument_type": "spot",
                     "currency": "USD",
+                    "calendar_id": "24/7",
                 },
             },
         )
@@ -1664,6 +2221,7 @@ class TestMultiAsset:
                     "instrument_type": "spot",
                     "currency": "USD",
                     "data_adapter": "crypto",
+                    "calendar_id": "24/7",
                 }
             },
         )

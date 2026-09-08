@@ -663,6 +663,7 @@ crypto-live = [
     { name = "ccxt" },
 ]
 db = [
+    { name = "exchange-calendars" },
     { name = "psycopg2-binary" },
 ]
 dev = [
@@ -699,6 +700,7 @@ viz = [
 requires-dist = [
     { name = "ccxt", marker = "extra == 'crypto-live'", specifier = ">=4.5.66,<5" },
     { name = "exchange-calendars", marker = "extra == 'calendars'", specifier = ">=4.5" },
+    { name = "exchange-calendars", marker = "extra == 'db'", specifier = ">=4.5" },
     { name = "exchange-calendars", marker = "extra == 'test'", specifier = ">=4.5" },
     { name = "exchange-calendars", marker = "extra == 'us-live'", specifier = ">=4.5" },
     { name = "httpx", marker = "extra == 'stocks-data'", specifier = ">=0.24" },

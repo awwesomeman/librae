@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from threading import Event
+from threading import Event, get_ident
 from time import perf_counter
 from unittest.mock import MagicMock, patch
 
@@ -127,7 +127,7 @@ def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     ts_end — used for staleness tests, where wall-clock-relative timing
     matters (unlike _make_ohlcv_df's fixed 2025-01-01 base, which reads
     as "very stale" relative to real now())."""
-    ts = pd.date_range(end=ts_end, periods=n, freq="h", tz=UTC)
+    ts = pd.date_range(end=pd.Timestamp(ts_end).floor("h"), periods=n, freq="h", tz=UTC)
     prices = np.arange(100.0, 100.0 + n, 1.0)
     return pd.DataFrame(
         {
@@ -141,7 +141,7 @@ def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     )
 
 
-TEST_CLOCK_NOW = datetime(2025, 1, 1, 2, tzinfo=UTC)
+TEST_CLOCK_NOW = datetime(2025, 1, 1, 10, tzinfo=UTC)
 
 
 def _make_ohlcv_at(timestamps: list[datetime], price: float = 100.0) -> pd.DataFrame:
@@ -203,6 +203,8 @@ def _test_cfg(**overrides) -> RunConfig:
             route = routes.setdefault(symbol, {})
             route.setdefault("instrument_type", "spot")
             route.setdefault("currency", "USDT")
+            if route.get("data_adapter") != "ibkr":
+                route.setdefault("calendar_id", "24/7")
     if "account" not in overrides:
         currencies = {
             routes.get(symbol, {}).get("currency") or registry[symbol].currency
@@ -583,6 +585,9 @@ class TestLiveTrader:
             **kwargs,
         )
         runner._sleep = lambda _seconds: None  # no real delays in unit tests
+        # Most fixtures use a fixed clock to exercise execution rather than
+        # staleness. Dedicated staleness tests restore the production bound.
+        runner.STALE_DATA_TOLERANCE_BARS = 100
         return runner
 
     @pytest.mark.parametrize(
@@ -650,9 +655,11 @@ class TestLiveTrader:
             ),
         )
 
-        frames = runner._fetch_runtime_frames()
+        results = runner._fetch_runtime_frames()
 
-        assert list(frames) == ["AAA", "BBB"]
+        assert list(results) == ["AAA", "BBB"]
+        assert all(result.outcome == "success" for result in results.values())
+        assert all(result.frame is not None for result in results.values())
         assert set(runner._cycle_fetch_seconds) == {"AAA", "BBB"}
 
     def test_concrete_market_data_adapter_uses_resolved_route(self):
@@ -682,11 +689,17 @@ class TestLiveTrader:
 
     def test_ibkr_adapter_receives_generic_session_and_calendar_contract(self):
         calls: list[tuple[tuple, dict]] = []
+        frame = _make_ohlcv_df()
+        frame["ts"] = pd.date_range(
+            "2025-01-02T14:30:00Z",
+            periods=5,
+            freq="h",
+        )
 
         class Adapter:
             def fetch_ohlcv(self, *args, **kwargs):
                 calls.append((args, kwargs))
-                return _make_ohlcv_df()
+                return frame
 
         config = _test_cfg(
             symbols=["AAPL"],
@@ -706,7 +719,11 @@ class TestLiveTrader:
             },
             symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
         )
-        runner = self._make_runner(fetcher=Adapter(), config=config)
+        runner = self._make_runner(
+            fetcher=Adapter(),
+            config=config,
+            clock=lambda: datetime(2025, 1, 3, tzinfo=UTC),
+        )
 
         frame = runner._fetch_with_cache("AAPL")
 
@@ -787,13 +804,189 @@ class TestLiveTrader:
             for event in runtime_events
             if event.detail.get("reason") == "market_data_fetch_failed"
         ]
-        assert len(failures) == 2
+        assert len(failures) == 1
         alerts = [
             call
             for call in runner._notify.call_args_list
             if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
         ]
-        assert len(alerts) == 2
+        assert len(alerts) == 1
+
+        state["fail"] = False
+        for _ in range(4):
+            runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == set()
+
+        state["fail"] = True
+        for _ in range(3):
+            runner._poll_cycle()
+
+        failures = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_failed"
+        ]
+        assert len(failures) == 2
+
+    def test_flapping_fetch_alerts_and_clears_rolling_diagnostic(self):
+        frame = _make_ohlcv_df()
+        outcomes = iter(
+            [
+                RuntimeError("feed unavailable"),
+                RuntimeError("feed unavailable"),
+                frame,
+                RuntimeError("feed unavailable"),
+                RuntimeError("feed unavailable"),
+                frame,
+                frame,
+                frame,
+            ]
+        )
+
+        def fetcher(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(warmup_periods=1),
+        )
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._poll_cycle()
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        degraded = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_degraded"
+        ]
+        assert len(degraded) == 1
+        assert degraded[0].detail["failed_polls"] == 4
+        assert degraded[0].detail["window_polls"] == 6
+        assert degraded[0].detail["failure_rate"] == pytest.approx(2 / 3)
+        assert degraded[0].detail["current_poll_failed"] is False
+        assert strategy.on_bar.call_count == 1
+
+        # Failed cycles never replay the cached strategy event. Two healthy
+        # polls move the bounded window below the recovery threshold without
+        # evaluating the same bar again.
+        runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        runner._poll_cycle()
+
+        assert runner._market_data_fetch_degraded == set()
+        assert strategy.on_bar.call_count == 1
+        health_titles = [
+            call.kwargs["title"]
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Market Data Fetch" in call.kwargs["title"]
+        ]
+        assert health_titles == [
+            "[test] Market Data Fetch Degraded: BTCUSDT",
+            "[test] Market Data Fetch Recovered: BTCUSDT",
+        ]
+
+    def test_consecutive_and_rolling_failures_share_one_incident(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("offline"))
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        reasons = [event.detail["reason"] for event in runtime_events]
+        assert reasons == ["market_data_fetch_failed"]
+        failure_alerts = [
+            call
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Fetch Failed" in call.kwargs["title"]
+        ]
+        assert len(failure_alerts) == 1
+
+        for _ in range(3):
+            runner._record_market_data_fetch_success("BTCUSDT")
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+
+        runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
+
+    def test_single_transient_fetch_failure_does_not_alert(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runner._notify = MagicMock()
+
+        runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("transient"))
+        for _ in range(5):
+            runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
+        runner._notify.assert_not_called()
+
+    def test_required_symbol_fetch_failure_skips_partial_universe_and_commit(self):
+        t0 = datetime(2025, 1, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        state = {"bbb_fails": True}
+        frames = {
+            "AAA": _make_ohlcv_at([t0, t1]),
+            "BBB": _make_ohlcv_at([t0, t1]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            if symbol == "BBB" and state["bbb_fails"]:
+                raise RuntimeError("BBB unavailable")
+            return frames[symbol]
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        order_adapter = _mock_order_adapter()
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                warmup_periods=1,
+            ),
+            order_adapter=order_adapter,
+        )
+        runner._ohlcv_cache = {symbol: _make_ohlcv_at([t0]) for symbol in ("AAA", "BBB")}
+        runner._last_bar_ts = {"AAA": t0, "BBB": t0}
+        runner._last_cycle_ts = t0
+        runner._last_reconciliation_at = TEST_CLOCK_NOW
+        runner._persist_state = MagicMock()
+        heartbeat = MagicMock()
+        runner._on_heartbeat = heartbeat
+
+        runner._poll_cycle()
+
+        heartbeat.assert_not_called()
+        strategy.on_bar.assert_not_called()
+        order_adapter.place_order.assert_not_called()
+        runner._persist_state.assert_not_called()
+        assert runner._last_bar_ts == {"AAA": t0, "BBB": t0}
+        assert runner._last_cycle_ts == t0
+        assert runner._ohlcv_cache["AAA"]["ts"].iloc[-1].to_pydatetime() == t1
+        assert runner._ohlcv_cache["BBB"]["ts"].iloc[-1].to_pydatetime() == t0
+        assert runner._market_data_fetch_failures == {"BBB": 1}
+
+        state["bbb_fails"] = False
+        runner._poll_cycle()
+
+        heartbeat.assert_called_once_with(runner.run_id)
+        strategy.on_bar.assert_called_once()
+        assert set(strategy.on_bar.call_args.args[0].bars) == {"AAA", "BBB"}
+        assert runner._market_data_fetch_failures == {}
 
     def test_factory_rejects_daily_ibkr_before_building_adapter(self):
         config = _test_cfg(
@@ -876,12 +1069,454 @@ class TestLiveTrader:
             strategy=CaptureClose(),
             fetcher=lambda *_args, **_kwargs: frame,
             config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
         )
 
         runner.run(max_iterations=1)
 
         assert observed == [100.0]
         assert runner._ohlcv_cache["BTCUSDT"]["close"].tolist() == [100.0]
+
+    def test_market_data_derives_completion_and_excludes_open_h1_bar(self):
+        frame = _make_ohlcv_df(n=2, start_hour=1)
+        frame["close"] = [100.0, 999.0]
+        observed: list[float] = []
+
+        class CaptureClose(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                observed.append(float(ctx.bar["close"]))
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureClose(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 2, 30, tzinfo=UTC),
+        )
+
+        runner.run(max_iterations=1)
+
+        assert observed == [100.0]
+        assert runner._ohlcv_cache["BTCUSDT"]["ts"].tolist() == [
+            pd.Timestamp("2025-01-01T01:00:00Z")
+        ]
+
+    def test_market_data_newest_first_is_stably_normalized_before_eligibility(self):
+        frame = _make_ohlcv_df(n=2).iloc[::-1]
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+
+        result = runner._eligible_runtime_rows("BTCUSDT", frame)
+
+        assert result["ts"].tolist() == [
+            pd.Timestamp("2025-01-01T00:00:00Z"),
+            pd.Timestamp("2025-01-01T01:00:00Z"),
+        ]
+
+    @pytest.mark.parametrize("mode", ["sim", "live"])
+    def test_availability_metadata_is_audit_only_across_runtime_views(self, mode):
+        from librae.core.executor import execute_pending_decision_and_stops
+
+        frame = _make_ohlcv_df(n=1)
+        expected_availability = pd.Timestamp("2025-01-01T01:00:00Z")
+        frame["available_at"] = [expected_availability]
+        feature_columns: list[set[str]] = []
+        contexts: list[Context] = []
+        audit_bars: list[dict[str, object]] = []
+
+        def feature(history: pd.DataFrame) -> pd.DataFrame:
+            feature_columns.append(set(history.columns))
+            return _simple_feature_fn(history)
+
+        class CaptureContext(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureContext(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            feature_fn=feature,
+            config=_test_cfg(mode=mode, warmup_periods=1),
+            order_adapter=_mock_order_adapter() if mode == "live" else None,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+        runner._on_ohlcv = lambda _symbol, _timeframe, bar, _ts: audit_bars.append(bar)
+        eligible = runner._eligible_runtime_rows("BTCUSDT", frame)
+
+        if mode == "sim":
+            with patch(
+                "librae.live.engine.execute_pending_decision_and_stops",
+                wraps=execute_pending_decision_and_stops,
+            ) as execute:
+                runner._process_cycle(
+                    {"BTCUSDT": eligible},
+                    datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            execution_bars = execute.call_args.args[4]
+        else:
+            runner._pending_decision = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+            with patch.object(runner, "_execute_live_decision", return_value=True) as execute:
+                runner._process_cycle(
+                    {"BTCUSDT": eligible},
+                    datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            execution_bars = execute.call_args.args[1]
+
+        assert feature_columns == [{"open", "high", "low", "close", "volume"}]
+        assert contexts
+        assert "available_at" not in contexts[0].bar
+        assert all("available_at" not in bar for bar in contexts[0].bars.values())
+        assert all("available_at" not in bar for bar in execution_bars.values())
+        assert audit_bars[0]["available_at"] == expected_availability
+
+    def test_extended_daily_provider_availability_reaches_ohlcv_audit_callback(self):
+        availability = pd.Timestamp("2026-03-10T13:30:00Z")
+        frame = _make_ohlcv_at([datetime(2026, 3, 9, 13, 30, tzinfo=UTC)])
+        frame["available_at"] = [availability]
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                warmup_periods=1,
+            ),
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                    "calendar_id": "XNYS",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=config,
+            clock=lambda: datetime(2026, 3, 11, tzinfo=UTC),
+        )
+        audit_bars: list[dict[str, object]] = []
+        runner._on_ohlcv = lambda _symbol, _timeframe, bar, _ts: audit_bars.append(bar)
+
+        eligible = runner._eligible_runtime_rows("AAPL", frame)
+        runner._process_cycle(
+            {"AAPL": eligible},
+            datetime(2026, 3, 9, 13, 30, tzinfo=UTC),
+        )
+
+        assert audit_bars[0]["available_at"] == availability
+
+    @pytest.mark.parametrize(
+        ("timeframe", "calendar_id", "cached_ts", "fetched_ts", "message"),
+        [
+            (
+                "D2",
+                "24/7",
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                "not aligned to timeframe=D2",
+            ),
+            (
+                "H1",
+                "XNYS",
+                "2026-03-09T22:15:00Z",
+                "2026-03-09T22:45:00Z",
+                "timestamps overlap timeframe=H1",
+            ),
+        ],
+    )
+    def test_cross_batch_overlapping_bars_fail_before_cache_store(
+        self,
+        timeframe: str,
+        calendar_id: str,
+        cached_ts: str,
+        fetched_ts: str,
+        message: str,
+    ):
+        symbol = "AAA"
+        runner = self._make_runner(
+            config=_test_cfg(
+                symbols=[symbol],
+                timeframe=timeframe,
+                instrument_overrides={
+                    symbol: {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "calendar_id": calendar_id,
+                    }
+                },
+                symbol_cost_overrides={symbol: {"multiplier": 1.0}},
+                warmup_periods=1,
+            )
+        )
+        cached = _make_ohlcv_at([pd.Timestamp(cached_ts).to_pydatetime()])
+        fetched = _make_ohlcv_at([pd.Timestamp(fetched_ts).to_pydatetime()])
+        duration = pd.Timedelta(days=2) if timeframe == "D2" else pd.Timedelta(hours=1)
+        cached["available_at"] = [pd.Timestamp(cached_ts) + duration]
+        fetched["available_at"] = [pd.Timestamp(fetched_ts) + duration]
+
+        with pytest.raises(ValueError, match=message):
+            runner._merge_runtime_rows(symbol, cached, fetched)
+
+        assert symbol not in runner._ohlcv_cache
+
+    def test_same_timestamp_runtime_versions_match_database_policy(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+
+        def version(close: float, available_at: str) -> pd.DataFrame:
+            frame = _make_ohlcv_at([timestamp], price=close)
+            frame["available_at"] = [pd.Timestamp(available_at)]
+            return frame
+
+        cached = version(200.0, "2025-01-01T02:00:00Z")
+        older = runner._merge_runtime_rows(
+            "BTCUSDT",
+            cached,
+            version(100.0, "2025-01-01T01:00:00Z"),
+        )
+        equal = runner._merge_runtime_rows(
+            "BTCUSDT",
+            older,
+            version(150.0, "2025-01-01T02:00:00Z"),
+        )
+        newer = runner._merge_runtime_rows(
+            "BTCUSDT",
+            equal,
+            version(300.0, "2025-01-01T03:00:00Z"),
+        )
+
+        assert older.loc[0, "close"] == 200.0
+        assert equal.loc[0, "close"] == 200.0
+        assert newer.loc[0, "close"] == 300.0
+        assert newer.loc[0, "available_at"] == pd.Timestamp("2025-01-01T03:00:00Z")
+
+    def test_poll_persists_only_newer_correction_without_replaying_observation(self):
+        from librae.core.executor import execute_pending_decision_and_stops
+
+        first_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        next_ts = datetime(2025, 1, 1, 1, tzinfo=UTC)
+
+        def version(ts: datetime, close: float, available_at: str) -> pd.DataFrame:
+            frame = _make_ohlcv_at([ts], price=close)
+            frame["available_at"] = [pd.Timestamp(available_at)]
+            return frame
+
+        responses = iter(
+            [
+                version(first_ts, 100.0, "2025-01-01T01:00:00Z"),
+                version(first_ts, 101.0, "2025-01-01T02:00:00Z"),
+                version(first_ts, 150.0, "2025-01-01T02:00:00Z"),
+                version(first_ts, 99.0, "2025-01-01T01:00:00Z"),
+                version(next_ts, 200.0, "2025-01-01T02:00:00Z"),
+            ]
+        )
+        feature_calls: list[pd.DataFrame] = []
+        contexts: list[Context] = []
+
+        def feature(history: pd.DataFrame) -> pd.DataFrame:
+            feature_calls.append(history.copy())
+            return _simple_feature_fn(history)
+
+        class CaptureStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureStrategy(),
+            fetcher=lambda *_args, **_kwargs: next(responses),
+            feature_fn=feature,
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        audit_events: list[tuple[str, str, datetime, dict[str, object], dict[str, str]]] = []
+
+        def capture_audit(
+            symbol: str,
+            timeframe: str,
+            bar: dict[str, object],
+            ts: datetime,
+        ) -> None:
+            audit_events.append(
+                (
+                    symbol,
+                    timeframe,
+                    ts,
+                    bar,
+                    runner._market_data_subscriptions[symbol].to_dict(),
+                )
+            )
+
+        runner._on_ohlcv = capture_audit
+        with patch(
+            "librae.live.engine.execute_pending_decision_and_stops",
+            wraps=execute_pending_decision_and_stops,
+        ) as execute:
+            for _ in range(5):
+                runner._poll_cycle()
+
+        assert len(feature_calls) == 2
+        assert len(contexts) == 2
+        assert execute.call_count == 2
+        assert runner._period_index == 2
+        assert runner._last_bar_ts["BTCUSDT"] == next_ts
+        assert [
+            (symbol, timeframe, ts, bar["close"], bar["available_at"])
+            for symbol, timeframe, ts, bar, _identity in audit_events
+        ] == [
+            ("BTCUSDT", "1h", first_ts, 100.0, pd.Timestamp("2025-01-01T01:00:00Z")),
+            ("BTCUSDT", "1h", first_ts, 101.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+            ("BTCUSDT", "1h", next_ts, 200.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+        ]
+        assert all(
+            identity
+            == {
+                "symbol": "BTCUSDT",
+                "timeframe": "H1",
+                "calendar_id": "24/7",
+                "session_mode": "extended",
+                "data_source": "binance_spot",
+                "instrument_type": "spot",
+            }
+            for *_event, identity in audit_events
+        )
+
+    def test_restart_replays_observed_history_only_to_audit_sink(self):
+        from librae.core.executor import execute_pending_decision_and_stops
+
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        history = _make_ohlcv_at([t0, t1])
+        history.loc[0, "close"] = 101.0
+        history["available_at"] = pd.to_datetime(["2025-01-01T01:30:00Z", "2025-01-01T02:00:00Z"])
+        state_store = MemoryLiveStateStore()
+        config = _test_cfg(warmup_periods=2)
+        original = self._make_runner(config=config, state_store=state_store)
+        original._last_bar_ts["BTCUSDT"] = t0
+        original._last_cycle_ts = t0
+        original._period_index = 1
+        original._persist_state()
+
+        feature_calls: list[pd.DataFrame] = []
+        contexts: list[Context] = []
+
+        def feature(frame: pd.DataFrame) -> pd.DataFrame:
+            feature_calls.append(frame.copy())
+            return _simple_feature_fn(frame)
+
+        class CaptureStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        restored = self._make_runner(
+            strategy=CaptureStrategy(),
+            fetcher=lambda *_args, **_kwargs: history.copy(),
+            feature_fn=feature,
+            config=config,
+            state_store=state_store,
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        audit_events: list[tuple[datetime, float, object]] = []
+        restored._on_ohlcv = lambda _symbol, _timeframe, bar, ts: audit_events.append(
+            (ts, float(bar["close"]), bar["available_at"])
+        )
+
+        with patch(
+            "librae.live.engine.execute_pending_decision_and_stops",
+            wraps=execute_pending_decision_and_stops,
+        ) as execute:
+            restored._poll_cycle()
+
+        assert audit_events == [
+            (t0, 101.0, pd.Timestamp("2025-01-01T01:30:00Z")),
+            (t1, 100.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+        ]
+        assert len(feature_calls) == 1
+        assert len(contexts) == 1
+        assert contexts[0].ts == t1
+        assert execute.call_count == 1
+        assert restored._period_index == 2
+        assert restored._last_bar_ts == {"BTCUSDT": t1}
+
+    def test_restart_audit_replay_sorts_suffix_windows_on_coordinator_thread(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        timestamps = [t0 + timedelta(hours=offset) for offset in range(4)]
+        histories = {
+            symbol: _make_ohlcv_at(timestamps, price=price).assign(
+                available_at=pd.DatetimeIndex(timestamps) + pd.Timedelta(hours=1)
+            )
+            for symbol, price in (("BBB", 200.0), ("AAA", 100.0))
+        }
+        requests: dict[str, list[int]] = {symbol: [] for symbol in histories}
+
+        def fetcher(symbol, _timeframe, limit, **_kwargs):
+            requests[symbol].append(limit)
+            history = histories[symbol]
+            return history.iloc[-2:].copy() if len(requests[symbol]) == 1 else history.copy()
+
+        runner = self._make_runner(
+            fetcher=fetcher,
+            config=_test_cfg(
+                symbols=["BBB", "AAA"],
+                market_data_workers=2,
+                warmup_periods=5,
+            ),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        runner._last_bar_ts = {symbol: timestamps[-1] for symbol in histories}
+        coordinator_thread = get_ident()
+        audit_versions: list[tuple[int, str, datetime, object]] = []
+        runner._on_ohlcv = lambda symbol, _timeframe, bar, ts: audit_versions.append(
+            (get_ident(), symbol, ts, bar["available_at"])
+        )
+
+        runner._fetch_runtime_frames()
+
+        assert requests == {"BBB": [6, 12, 24], "AAA": [6, 12, 24]}
+        assert audit_versions == [
+            (
+                coordinator_thread,
+                symbol,
+                timestamp,
+                pd.Timestamp(timestamp) + pd.Timedelta(hours=1),
+            )
+            for symbol in ("BBB", "AAA")
+            for timestamp in timestamps
+        ]
+
+    def test_restart_audit_delivery_failure_is_not_implicitly_retried(self):
+        timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+        history = _make_ohlcv_at([timestamp])
+        history["available_at"] = [timestamp + timedelta(hours=1)]
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: history.copy(),
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        runner._last_bar_ts["BTCUSDT"] = timestamp
+        failing_sink = MagicMock(side_effect=RuntimeError("sink unavailable"))
+        runner._on_ohlcv = failing_sink
+
+        with pytest.raises(RuntimeError, match="sink unavailable"):
+            runner._fetch_runtime_frames()
+
+        retry_sink = MagicMock()
+        runner._on_ohlcv = retry_sink
+        runner._fetch_runtime_frames()
+
+        failing_sink.assert_called_once()
+        retry_sink.assert_not_called()
 
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
@@ -1076,8 +1711,8 @@ class TestLiveTrader:
         frame["ts"] = frame["ts"].dt.tz_localize(None)
         runner = self._make_runner(fetcher=lambda *_args, **_kwargs: frame)
 
-        with pytest.raises(ValueError, match="timestamp must be timezone-aware"):
-            runner._poll_cycle()
+        with pytest.raises(ValueError, match=r"timestamp must be.*timezone-aware"):
+            runner._eligible_runtime_rows("BTCUSDT", frame)
 
     @pytest.mark.parametrize("mode", ["sim", "live"])
     def test_missing_symbol_action_waits_for_its_next_real_bar(self, mode):
@@ -1262,7 +1897,7 @@ class TestLiveTrader:
             {"AAA", "BBB"},
         ]
 
-    def test_duplicate_broker_bars_do_not_repeat_cycle(self):
+    def test_duplicate_broker_bars_fail_closed_before_strategy(self):
         ts = datetime(2025, 1, 1, tzinfo=UTC)
         duplicated = _make_ohlcv_at([ts, ts])
 
@@ -1274,11 +1909,10 @@ class TestLiveTrader:
             config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
         )
 
-        runner._poll_cycle()
-        runner._poll_cycle()
+        with pytest.raises(ValueError, match="unique bar timestamps"):
+            runner._eligible_runtime_rows("AAA", duplicated)
 
-        assert strategy.on_bar.call_count == 1
-        assert all(len(frame) == 1 for frame in runner._ohlcv_cache.values())
+        strategy.on_bar.assert_not_called()
 
     def test_out_of_order_bar_before_watermark_is_not_replayed(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -1325,7 +1959,7 @@ class TestLiveTrader:
 
     @pytest.mark.parametrize(("mode", "expected_events"), [("sim", 3), ("live", 1)])
     def test_only_sim_replays_all_uncommitted_bars(self, mode, expected_events):
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         timestamps = [now - timedelta(hours=2), now - timedelta(hours=1), now]
         frame = _make_ohlcv_at(timestamps)
         strategy = MagicMock(spec=Strategy)
@@ -1335,6 +1969,7 @@ class TestLiveTrader:
             fetcher=lambda *_args, **_kwargs: frame,
             config=_test_cfg(mode=mode, warmup_periods=1),
             order_adapter=_mock_order_adapter() if mode == "live" else None,
+            clock=lambda: now + timedelta(hours=1),
         )
         runner._last_bar_ts["BTCUSDT"] = now - timedelta(hours=3)
         runner._last_cycle_ts = now - timedelta(hours=3)
@@ -2061,6 +2696,7 @@ class TestLiveTrader:
             fetcher=lambda *a, **kw: _make_ohlcv_df_at(stale_ts),
             clock=lambda: datetime.now(UTC),
         )
+        runner.STALE_DATA_TOLERANCE_BARS = 2
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -2081,6 +2717,7 @@ class TestLiveTrader:
             order_adapter=order_adapter,
             clock=lambda: datetime.now(UTC),
         )
+        runner.STALE_DATA_TOLERANCE_BARS = 2
 
         runner._poll_cycle()
 
@@ -2111,6 +2748,7 @@ class TestLiveTrader:
         regression, and a fast unit test can't just wait out the clock to
         make an already-cached bar age past the threshold for real."""
         runner = self._make_runner(clock=lambda: datetime.now(UTC))
+        runner.STALE_DATA_TOLERANCE_BARS = 2
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -2483,7 +3121,7 @@ class TestLiveExecutionLifecycle:
         on_ready=None,
         on_runtime_event=None,
     ) -> LiveTrader:
-        return LiveTrader(
+        trader = LiveTrader(
             strategy,
             _simple_feature_fn,
             config=config or _test_cfg(mode="live"),
@@ -2501,6 +3139,8 @@ class TestLiveExecutionLifecycle:
             on_ready=on_ready,
             on_runtime_event=on_runtime_event,
         )
+        trader.STALE_DATA_TOLERANCE_BARS = 100
+        return trader
 
     def test_live_runtime_revision_is_required_before_checkpoint_or_broker_access(self):
         adapter = _mock_order_adapter()
@@ -4047,6 +4687,7 @@ class TestLiveExecutionLifecycle:
             runtime_revision="test-runtime",
             clock=lambda: TEST_CLOCK_NOW,
         )
+        runner.STALE_DATA_TOLERANCE_BARS = 100
 
         runner.run(max_iterations=2)
 
@@ -5299,6 +5940,7 @@ class TestShioajiLiveFactory:
                 runtime_revision="test-runtime",
             )
             trader._clock = lambda: TEST_CLOCK_NOW
+            trader.STALE_DATA_TOLERANCE_BARS = 100
             trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
 

@@ -99,7 +99,10 @@ type BarCallback = Callable[
     None,
 ]
 type PositionEventCallback = Callable[[PositionEvent, int], None]
-type OhlcvCallback = Callable[[str, str, dict[str, float], datetime], None]
+# Best-effort audit projection: fetched history may repeat after restart, while
+# a delivery failure is not guaranteed to retry. Sinks must be idempotent on
+# the exact subscription plus the row's (ts, available_at) version.
+type OhlcvCallback = Callable[[str, str, dict[str, object], datetime], None]
 type HeartbeatCallback = Callable[[str], None]
 type FinancingCashFlowCallback = Callable[[FinancingCashFlow], None]
 type RuntimeEventCallback = Callable[[RuntimeEvent], None]

@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from numbers import Real
 from typing import TYPE_CHECKING
@@ -81,7 +82,17 @@ from librae.core.financing import (
     calculate_funding_cash_flows,
 )
 from librae.core.liquidity import calculate_lagged_adv
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    MarketDataSubscription,
+    MarketDataView,
+    _detach_object_features,
+    _MarketDataSource,
+    normalize_bar_times,
+    subscription_from_instrument,
+    validate_bar_cadence,
+    validate_ohlcv_values,
+)
 from librae.core.run_config import ExecutionPolicy, MarketDataSessionMode, RiskPolicy
 from librae.core.strategy import (
     AccountSnapshot,
@@ -109,6 +120,172 @@ from librae.core.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _DecisionEnvelope:
+    """One strategy emission and the information frontier that caused it."""
+
+    decision: StrategyDecision
+    decision_at: pd.Timestamp | None
+
+
+def _enveloped_decision(envelopes: Sequence[_DecisionEnvelope]) -> StrategyDecision:
+    """Rebuild the executor's public decision shape without losing envelopes."""
+    decision: StrategyDecision = []
+    for envelope in envelopes:
+        decision = merge_pending_decisions(
+            decision,
+            envelope.decision,
+            primary_symbol="",
+        )
+    return decision
+
+
+def _merge_enveloped_decision(
+    envelopes: Sequence[_DecisionEnvelope],
+    new_decision: StrategyDecision,
+    *,
+    decision_at: pd.Timestamp | None,
+    primary_symbol: str,
+) -> list[_DecisionEnvelope]:
+    """Apply legacy pending-decision merge rules while preserving causal time."""
+    pending = _enveloped_decision(envelopes)
+    merge_pending_decisions(pending, new_decision, primary_symbol=primary_symbol)
+    if not isinstance(new_decision, PortfolioWeights):
+        pending_group_ids = {
+            intent.group_id
+            for envelope in envelopes
+            if not isinstance(envelope.decision, PortfolioWeights)
+            for intent in envelope.decision
+            if intent.group_id is not None
+        }
+        new_group_ids = {intent.group_id for intent in new_decision if intent.group_id is not None}
+        reused_group_ids = pending_group_ids & new_group_ids
+        if reused_group_ids:
+            raise ValueError(
+                "strategy reused pending group_id across decision emissions: "
+                f"{sorted(reused_group_ids)}"
+            )
+    if not new_decision:
+        return list(envelopes)
+    envelope = _DecisionEnvelope(
+        decision=list(new_decision)
+        if not isinstance(new_decision, PortfolioWeights)
+        else new_decision,
+        decision_at=decision_at,
+    )
+    if isinstance(pending, PortfolioWeights):
+        return [envelope]
+    return [*envelopes, envelope]
+
+
+def _partition_enveloped_decisions(
+    envelopes: Sequence[_DecisionEnvelope],
+    ts: pd.Timestamp,
+    bars: dict[str, dict[str, float]],
+    positions: dict[str, PositionState],
+    *,
+    primary_symbol: str,
+) -> tuple[StrategyDecision, list[_DecisionEnvelope], list[_DecisionEnvelope]]:
+    """Split causal/data-ready decisions without replacing their origin time."""
+    ready: list[_DecisionEnvelope] = []
+    waiting: list[_DecisionEnvelope] = []
+    for envelope in envelopes:
+        if envelope.decision_at is not None and ts <= envelope.decision_at:
+            waiting.append(envelope)
+            continue
+        executable, data_waiting = partition_pending_decision(
+            envelope.decision,
+            bars,
+            positions,
+            primary_symbol=primary_symbol,
+        )
+        if executable:
+            ready.append(_DecisionEnvelope(executable, envelope.decision_at))
+        if data_waiting:
+            waiting.append(_DecisionEnvelope(data_waiting, envelope.decision_at))
+    return _enveloped_decision(ready), waiting, ready
+
+
+class _MarketDataReplay:
+    """Run-local point-in-time visibility state for primary and auxiliary bars."""
+
+    def __init__(
+        self,
+        primary_data: pd.DataFrame,
+        primary_subscriptions: Sequence[MarketDataSubscription],
+        auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame],
+    ) -> None:
+        frames: dict[MarketDataSubscription, pd.DataFrame] = {}
+        primary_by_ts: dict[pd.Timestamp, list[tuple[MarketDataSubscription, pd.Timestamp]]] = {}
+
+        for subscription in primary_subscriptions:
+            frame = primary_data.xs(subscription.symbol, level="symbol").copy(deep=True)
+            frames[subscription] = frame
+            for ts, available_at in zip(frame.index, frame[AVAILABLE_AT_COLUMN], strict=True):
+                primary_by_ts.setdefault(pd.Timestamp(ts), []).append(
+                    (subscription, pd.Timestamp(available_at))
+                )
+
+        auxiliary_observations: list[
+            tuple[pd.Timestamp, pd.Timestamp, MarketDataSubscription, int]
+        ] = []
+        for subscription, frame in auxiliary_data.items():
+            # The normalized frame is already in canonical timestamp order;
+            # stable availability sorting therefore yields (available_at, ts).
+            replay_frame = frame.sort_values(AVAILABLE_AT_COLUMN, kind="stable").copy(deep=True)
+            frames[subscription] = replay_frame
+            for row_number, (ts, available_at) in enumerate(
+                zip(replay_frame.index, replay_frame[AVAILABLE_AT_COLUMN], strict=True)
+            ):
+                auxiliary_observations.append(
+                    (
+                        pd.Timestamp(available_at),
+                        pd.Timestamp(ts),
+                        subscription,
+                        row_number,
+                    )
+                )
+
+        self._source = _MarketDataSource(frames)
+        self._visible_counts = [0] * len(self._source.subscriptions)
+        self._primary_by_ts = primary_by_ts
+        self._auxiliary_observations = sorted(auxiliary_observations)
+        self._auxiliary_cursor = 0
+        self._frontier: pd.Timestamp | None = None
+
+    def advance_frontier(self, ts: pd.Timestamp) -> pd.Timestamp:
+        """Advance the cumulative availability watermark for one primary cohort."""
+        observations = self._primary_by_ts[ts]
+        raw_frontier = max(available_at for _, available_at in observations)
+        self._frontier = (
+            raw_frontier if self._frontier is None else max(self._frontier, raw_frontier)
+        )
+        while self._auxiliary_cursor < len(self._auxiliary_observations):
+            available_at, _, subscription, row_number = self._auxiliary_observations[
+                self._auxiliary_cursor
+            ]
+            if available_at > self._frontier:
+                break
+            index = self._source.index_of(subscription)
+            if row_number != self._visible_counts[index]:
+                raise RuntimeError("auxiliary replay lost stable prefix ordering")
+            self._visible_counts[index] += 1
+            self._auxiliary_cursor += 1
+        return self._frontier
+
+    def commit_primary(self, ts: pd.Timestamp) -> MarketDataView:
+        """Commit only the canonical primary cohort already processed by the run."""
+        if self._frontier is None:
+            raise RuntimeError("market-data frontier must advance before primary commit")
+        for subscription, _ in self._primary_by_ts[ts]:
+            self._visible_counts[self._source.index_of(subscription)] += 1
+        return MarketDataView(
+            as_of=self._frontier.to_pydatetime(),
+            _source=self._source,
+            _visible_counts=tuple(self._visible_counts),
+        )
 
 
 def _rebalance_symbols(state: PortfolioRebalanceState) -> tuple[str, ...]:
@@ -192,6 +369,7 @@ def _superseded_rebalance_events(
 
 
 _INDEX_NAMES = ["symbol", "datetime"]
+_MIN_SESSION_CADENCE_SAMPLES = 5
 
 
 def _validate_backtest_data(
@@ -256,34 +434,268 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+def _index_primary_subscriptions(
+    data: pd.DataFrame,
+    subscriptions: Sequence[MarketDataSubscription],
+) -> dict[str, MarketDataSubscription]:
+    """Type-check and index one exact subscription per data symbol."""
+    if any(not isinstance(item, MarketDataSubscription) for item in subscriptions):
+        raise TypeError("primary_subscriptions must contain MarketDataSubscription values")
+    subscription_by_symbol = {item.symbol: item for item in subscriptions}
+    if len(subscription_by_symbol) != len(subscriptions):
+        raise ValueError("primary_subscriptions must contain one identity per symbol")
+    data_symbols = tuple(data.index.get_level_values("symbol").unique())
+    if set(subscription_by_symbol) != set(data_symbols):
+        raise ValueError(
+            "primary_subscriptions must exactly cover data symbols; "
+            f"subscriptions={sorted(subscription_by_symbol)}, data={sorted(data_symbols)}"
+        )
+    timeframes = {item.timeframe for item in subscriptions}
+    if len(timeframes) != 1:
+        raise ValueError(
+            f"the current Backtest primary frame requires one timeframe; got {sorted(timeframes)}"
+        )
+    return subscription_by_symbol
+
+
+def _validate_primary_subscriptions(
+    data: pd.DataFrame,
+    subscriptions: Sequence[MarketDataSubscription],
+) -> pd.DataFrame:
+    """Validate one primary subscription per symbol and normalize availability."""
+    subscription_by_symbol = _index_primary_subscriptions(data, subscriptions)
+
+    normalized = data.copy()
+    normalized_available = pd.Series(
+        pd.NaT,
+        index=normalized.index,
+        dtype="datetime64[ns, UTC]",
+    )
+    raw_available = normalized.get(AVAILABLE_AT_COLUMN, None)
+    for symbol, subscription in subscription_by_symbol.items():
+        symbol_mask = normalized.index.get_level_values("symbol") == symbol
+        symbol_rows = normalized.loc[symbol_mask]
+        symbol_available = raw_available.loc[symbol_mask] if raw_available is not None else None
+        _, available_at = normalize_bar_times(
+            symbol_rows.index.get_level_values("datetime"),
+            (
+                symbol_available
+                if symbol_available is not None and symbol_available.notna().any()
+                else None
+            ),
+            subscription,
+        )
+        normalized_available.loc[symbol_mask] = pd.Series(
+            available_at,
+            index=symbol_rows.index,
+        )
+    normalized[AVAILABLE_AT_COLUMN] = normalized_available
+    return normalized
+
+
+def _sort_mixed_primary_data(
+    data: pd.DataFrame,
+    symbol_order: Sequence[str],
+) -> pd.DataFrame:
+    """Stably sort primary rows using the declared universe order when valid."""
+    if not isinstance(data.index, pd.MultiIndex) or data.index.nlevels != 2:
+        return data
+    observed_symbols = tuple(data.index.get_level_values(0).unique())
+    declared_symbols = tuple(symbol_order)
+    symbols = (
+        declared_symbols
+        if len(declared_symbols) == len(set(declared_symbols))
+        and set(declared_symbols) == set(observed_symbols)
+        else observed_symbols
+    )
+    return pd.concat(
+        [
+            data.xs(symbol, level=0, drop_level=False).sort_index(
+                level="datetime",
+                kind="stable",
+            )
+            for symbol in symbols
+        ]
+    )
+
+
+def _normalize_auxiliary_frame(
+    subscription: MarketDataSubscription,
+    data: pd.DataFrame,
+) -> pd.DataFrame:
+    """Normalize one identity-keyed, observation-only auxiliary frame."""
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("auxiliary_data values must be pandas DataFrames")
+
+    if isinstance(data.index, pd.MultiIndex):
+        if data.index.nlevels != 2 or list(data.index.names) != _INDEX_NAMES:
+            raise ValueError(
+                "auxiliary data MultiIndex levels must be exactly ('symbol', 'datetime')"
+            )
+        symbols = set(data.index.get_level_values("symbol"))
+        if symbols != {subscription.symbol}:
+            raise ValueError(
+                "auxiliary frame symbol must match its subscription; "
+                f"expected={subscription.symbol!r}, observed={sorted(symbols)!r}"
+            )
+        normalized = data.xs(subscription.symbol, level="symbol").copy(deep=True)
+    elif isinstance(data.index, pd.DatetimeIndex):
+        normalized = data.copy(deep=True)
+    else:
+        raise ValueError("auxiliary data requires a DatetimeIndex or MultiIndex (symbol, datetime)")
+
+    if not isinstance(normalized.index, pd.DatetimeIndex) or normalized.index.tz is None:
+        raise ValueError("auxiliary data timestamps must be timezone-aware")
+    normalized.index = normalized.index.tz_convert("UTC")
+    normalized.index.name = "datetime"
+    normalized = normalized.sort_index(kind="stable")
+    if not normalized.index.is_unique:
+        raise ValueError("auxiliary data must contain unique timestamps per subscription")
+    validate_ohlcv_values(normalized, context=f"auxiliary data for {subscription!r}")
+
+    raw_available = normalized.get(AVAILABLE_AT_COLUMN)
+    _, available_at = normalize_bar_times(
+        normalized.index,
+        raw_available if raw_available is not None and raw_available.notna().any() else None,
+        subscription,
+    )
+    normalized[AVAILABLE_AT_COLUMN] = available_at
+    return _detach_object_features(normalized)
+
+
+def _normalize_auxiliary_data(
+    data: Mapping[MarketDataSubscription, pd.DataFrame] | None,
+) -> dict[MarketDataSubscription, pd.DataFrame]:
+    if data is None:
+        return {}
+    if not isinstance(data, Mapping):
+        raise TypeError("auxiliary_data must be a mapping or None")
+    if any(not isinstance(subscription, MarketDataSubscription) for subscription in data):
+        raise TypeError("auxiliary_data keys must be MarketDataSubscription values")
+    normalized: dict[MarketDataSubscription, pd.DataFrame] = {}
+    for subscription in sorted(data):
+        normalized[subscription] = _normalize_auxiliary_frame(subscription, data[subscription])
+    return normalized
+
+
+def _terminal_canonical_cadence_start(
+    period_ordinals: np.ndarray,
+    canonical_starts: np.ndarray,
+) -> int | None:
+    """Return the start of a terminal run of consecutive canonical periods."""
+    minimum = _MIN_SESSION_CADENCE_SAMPLES
+    if len(period_ordinals) < minimum * 2 or not canonical_starts[-1]:
+        return None
+
+    start = len(period_ordinals) - 1
+    while (
+        start > 0
+        and canonical_starts[start - 1]
+        and period_ordinals[start] - period_ordinals[start - 1] == 1
+    ):
+        start -= 1
+    return start if len(period_ordinals) - start >= minimum else None
+
+
+def _canonical_period_start_flags(
+    index: pd.DatetimeIndex,
+    period_ordinals: np.ndarray,
+    timeframe: str,
+    calendar_id: str,
+) -> np.ndarray:
+    """Map one calendar-owned period start back to every observation."""
+    _, first_positions, inverse = np.unique(
+        period_ordinals,
+        return_index=True,
+        return_inverse=True,
+    )
+    canonical_by_period = pd.DatetimeIndex(
+        [period_start(index[position], timeframe, calendar_id) for position in first_positions]
+    )
+    return np.asarray(index == canonical_by_period.take(inverse), dtype=np.bool_)
+
+
+def _is_exact_daily_prefix(session_ordinal_values: np.ndarray, end: int) -> bool:
+    """Return whether the prefix proves one observation per trading session."""
+    return end >= _MIN_SESSION_CADENCE_SAMPLES and np.all(
+        np.diff(session_ordinal_values[:end]) == 1
+    )
+
+
+def _is_exact_weekly_prefix(
+    week_ordinals: np.ndarray,
+    week_start_flags: np.ndarray,
+    end: int,
+) -> bool:
+    """Return whether the prefix proves canonical consecutive weekly bars."""
+    return (
+        end >= _MIN_SESSION_CADENCE_SAMPLES
+        and np.all(week_start_flags[:end])
+        and np.all(np.diff(week_ordinals[:end]) == 1)
+    )
+
+
 def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
-    """Infer session bars by session cadence and fixed bars by elapsed time."""
-    sample = index[:20]
+    """Infer cadence from the complete per-symbol index."""
+    if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
+        return infer_timeframe(index)
     if calendar_id is None:
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
 
     try:
-        ordinals = np.asarray(session_ordinals(sample, calendar_id), dtype=np.int64)
-        labels = session_labels(sample, calendar_id)
+        ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
+        labels = session_labels(index, calendar_id)
     except ValueError:
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
     if len(set(ordinals)) != len(ordinals):
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
 
     month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     month_diffs = np.diff(month_ordinals)
-    month_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "MN1", calendar_id) for timestamp in sample]
+    month_start_flags = _canonical_period_start_flags(
+        index,
+        month_ordinals,
+        "MN1",
+        calendar_id,
     )
-    if np.all(sample == month_starts) and np.all(month_diffs > 0):
+    week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
+    week_start_flags = _canonical_period_start_flags(
+        index,
+        week_ordinals,
+        "W1",
+        calendar_id,
+    )
+
+    month_transition_start = _terminal_canonical_cadence_start(
+        month_ordinals,
+        month_start_flags,
+    )
+    # Timestamp-only input proves a unit change only when both sides have an
+    # exact cadence. Missing observations and non-canonical coarse labels need
+    # authoritative subscription metadata rather than another heuristic.
+    if month_transition_start is not None and (
+        _is_exact_daily_prefix(ordinals, month_transition_start)
+        or _is_exact_weekly_prefix(
+            week_ordinals,
+            week_start_flags,
+            month_transition_start,
+        )
+    ):
+        raise ValueError("session cadence changes to MN after earlier denser observations")
+    if np.all(month_start_flags) and np.all(month_diffs > 0):
         return f"MN{int(np.gcd.reduce(month_diffs))}"
 
-    week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_diffs = np.diff(week_ordinals)
-    week_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "W1", calendar_id) for timestamp in sample]
+    week_transition_start = _terminal_canonical_cadence_start(
+        week_ordinals,
+        week_start_flags,
     )
-    if np.all(sample == week_starts) and np.all(week_diffs > 0):
+    if week_transition_start is not None and _is_exact_daily_prefix(
+        ordinals,
+        week_transition_start,
+    ):
+        raise ValueError("session cadence changes to W after earlier denser observations")
+    if np.all(week_start_flags) and np.all(week_diffs > 0):
         return f"W{int(np.gcd.reduce(week_diffs))}"
 
     session_diffs = np.diff(ordinals)
@@ -299,55 +711,46 @@ def _session_timeframe_unit(timeframe: str) -> str | None:
     return None
 
 
-def _validate_session_timeframe(
-    symbol: str,
-    index: pd.DatetimeIndex,
-    timeframe: str,
-    calendar_id: str,
-) -> None:
-    """Validate calendar cadence and canonical period-start anchors."""
-    expected_starts = pd.DatetimeIndex(
-        [period_start(timestamp, timeframe, calendar_id) for timestamp in index]
-    )
-    if np.any(index != expected_starts):
-        raise ValueError(
-            f"data symbol {symbol!r} timestamps are not canonical "
-            f"timeframe={timeframe} period starts"
-        )
-
-    if timeframe.startswith("D"):
-        interval = int(timeframe[1:])
-        ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
-    elif timeframe.startswith("W"):
-        interval = int(timeframe[1:])
-        labels = session_labels(index, calendar_id)
-        ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
-    else:
-        interval = int(timeframe[2:])
-        labels = session_labels(index, calendar_id)
-        ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
-    diffs = np.diff(ordinals)
-    if np.any(diffs < interval) or np.any(diffs % interval != 0):
-        raise ValueError(
-            f"data symbol {symbol!r} timestamps are not aligned to timeframe={timeframe}"
-        )
-
-
 def _resolve_data_timeframe(
     data: pd.DataFrame,
     configured_timeframe: str | None,
     calendar_ids: dict[str, str | None],
+    *,
+    authoritative_timeframe: bool = False,
 ) -> str:
-    """Infer each symbol independently and require one coherent bar interval."""
+    """Validate one coherent bar interval, preferring declared exact identity."""
     indexes_by_symbol = {
         str(symbol): pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
         for symbol, symbol_data in data.groupby(level="symbol", sort=False)
     }
-    inferred_by_symbol = {
-        symbol: _infer_symbol_timeframe(index, calendar_ids.get(symbol))
-        for symbol, index in indexes_by_symbol.items()
-        if len(index) >= 5
-    }
+    short_session_samples: dict[str, int] = {}
+    for symbol, index in indexes_by_symbol.items():
+        calendar_id = calendar_ids.get(symbol)
+        if len(index) >= _MIN_SESSION_CADENCE_SAMPLES or calendar_id is None:
+            continue
+        try:
+            ordinals = session_ordinals(index, calendar_id)
+        except ValueError:
+            continue
+        if len(set(ordinals)) == len(ordinals):
+            short_session_samples[symbol] = len(index)
+    if short_session_samples and not authoritative_timeframe:
+        raise ValueError(
+            "cannot validate session cadence: at least five session bars are required "
+            f"per symbol; got {short_session_samples}"
+        )
+
+    inferred_by_symbol: dict[str, str] = {}
+    for symbol, index in indexes_by_symbol.items():
+        if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
+            continue
+        try:
+            inferred_by_symbol[symbol] = _infer_symbol_timeframe(
+                index,
+                calendar_ids.get(symbol),
+            )
+        except ValueError as exc:
+            raise ValueError(f"data symbol {symbol!r} {exc}") from exc
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
         expected_session_unit = _session_timeframe_unit(expected)
@@ -355,6 +758,7 @@ def _resolve_data_timeframe(
             symbol: timeframe
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
+            and not authoritative_timeframe
             and not (
                 expected_session_unit is not None
                 and _session_timeframe_unit(timeframe) == expected_session_unit
@@ -377,6 +781,18 @@ def _resolve_data_timeframe(
             raise ValueError(f"data symbols have inconsistent timeframes: {inferred_by_symbol}")
         data_timeframe = next(iter(inferred))
 
+    if _session_timeframe_unit(data_timeframe) is not None and not authoritative_timeframe:
+        short_session_samples = {
+            symbol: len(index)
+            for symbol, index in indexes_by_symbol.items()
+            if len(index) < _MIN_SESSION_CADENCE_SAMPLES
+        }
+        if short_session_samples:
+            raise ValueError(
+                "cannot validate session cadence: at least five session bars are required "
+                f"per symbol; got {short_session_samples}"
+            )
+
     if data_timeframe.startswith(("D", "W", "MN")):
         calendar_validated: set[str] = set()
         for symbol, index in indexes_by_symbol.items():
@@ -385,7 +801,12 @@ def _resolve_data_timeframe(
                 calendar_id = ALWAYS_OPEN_CALENDAR
             if calendar_id is None:
                 continue
-            _validate_session_timeframe(symbol, index, data_timeframe, calendar_id)
+            validate_bar_cadence(
+                index,
+                data_timeframe,
+                calendar_id,
+                context=f"data symbol {symbol!r}",
+            )
             calendar_validated.add(symbol)
     else:
         calendar_validated = set()
@@ -494,6 +915,12 @@ class Backtest:
         data_source: Data source identifier — direct-args style.
         session_mode: Market-data session identity for direct-args data. With
             ``config``, ``config.session_mode`` is the only source.
+        primary_subscriptions: Optional exact primary identities. In direct
+            construction their order is the authoritative universe order; with
+            ``config`` they must match ``config.symbols`` and resolved routes.
+        auxiliary_data: Optional observation-only frames keyed by their exact
+            market-data subscription. Auxiliary bars advance by ``available_at``
+            but never create execution/equity events.
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
@@ -516,12 +943,35 @@ class Backtest:
         cost_model: CostModel | None = None,
         data_source: str = "",
         session_mode: MarketDataSessionMode | None = None,
+        primary_subscriptions: Sequence[MarketDataSubscription] | None = None,
+        auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame] | None = None,
         record_position_snapshots: bool = False,
         execution: ExecutionPolicy | None = None,
         risk: RiskPolicy | None = None,
     ) -> None:
         data = _canonicalize_backtest_timestamps(data)
+        normalized_auxiliary_data = _normalize_auxiliary_data(auxiliary_data)
+        try:
+            supplied_subscriptions = (
+                () if primary_subscriptions is None else tuple(primary_subscriptions)
+            )
+        except TypeError as exc:
+            raise TypeError(
+                "primary_subscriptions must be a sequence of MarketDataSubscription values"
+            ) from exc
+        if normalized_auxiliary_data:
+            if supplied_subscriptions:
+                _index_primary_subscriptions(data, supplied_subscriptions)
+            declared_symbol_order = (
+                tuple(config.symbols)
+                if config is not None
+                else tuple(item.symbol for item in supplied_subscriptions)
+            )
+            data = _sort_mixed_primary_data(data, declared_symbol_order)
+            data = _detach_object_features(data)
         _validate_backtest_data(data, config.symbols if config is not None else None)
+        if supplied_subscriptions and not normalized_auxiliary_data:
+            _index_primary_subscriptions(data, supplied_subscriptions)
         if config is not None and execution is not None:
             raise ValueError(
                 "execution cannot override config.execution; use one configuration source"
@@ -532,7 +982,13 @@ class Backtest:
             raise ValueError(
                 "session_mode cannot override config.session_mode; use one configuration source"
             )
+        supplied_session_modes = {item.session_mode for item in supplied_subscriptions}
+        if len(supplied_session_modes) > 1:
+            raise ValueError("primary_subscriptions must use one session_mode")
+        supplied_session_mode = next(iter(supplied_session_modes), None)
         resolved_session_mode = config.session_mode if config is not None else session_mode
+        if resolved_session_mode is None:
+            resolved_session_mode = supplied_session_mode
         if resolved_session_mode is None:
             resolved_session_mode = "extended"
         if resolved_session_mode not in ("regular", "extended"):
@@ -551,7 +1007,6 @@ class Backtest:
         if not isinstance(currency, str) or not currency:
             raise ValueError("currency must be a non-empty string")
 
-        self._data = data
         self._strategy = strategy
         self._config = config
         self._session_mode: MarketDataSessionMode = resolved_session_mode
@@ -561,11 +1016,12 @@ class Backtest:
         self._metrics: StrategyMetrics | None = None
         self._record_position_snapshots = record_position_snapshots
 
-        self._symbols = (
-            list(config.symbols)
-            if config is not None
-            else data.index.get_level_values(0).unique().tolist()
-        )
+        if config is not None:
+            self._symbols = list(config.symbols)
+        elif supplied_subscriptions:
+            self._symbols = [item.symbol for item in supplied_subscriptions]
+        else:
+            self._symbols = data.index.get_level_values(0).unique().tolist()
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
         from librae.config.symbols import load_symbol_registry, resolve_symbol
 
@@ -588,8 +1044,57 @@ class Backtest:
             self._data_source = data_source
             resolved_name = None
             resolved_cm = cost_model if cost_model is not None else CostModel.zero()
+        if config is not None:
+            resolved_subscriptions = tuple(
+                subscription_from_instrument(
+                    self._instruments[symbol],
+                    timeframe=config.timeframe,
+                    session_mode=config.session_mode,
+                )
+                for symbol in self._symbols
+            )
+            if supplied_subscriptions and supplied_subscriptions != resolved_subscriptions:
+                raise ValueError(
+                    "primary_subscriptions do not match identities resolved from config"
+                )
+        else:
+            resolved_subscriptions = supplied_subscriptions
+            if resolved_subscriptions and supplied_session_mode != resolved_session_mode:
+                raise ValueError("session_mode does not match the supplied primary subscriptions")
+            if data_source and any(
+                item.data_source != data_source for item in resolved_subscriptions
+            ):
+                raise ValueError("data_source does not match the supplied primary subscriptions")
+            if resolved_subscriptions and not data_source:
+                resolved_sources = {item.data_source for item in resolved_subscriptions}
+                self._data_source = (
+                    next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
+                )
+        self._primary_subscriptions = resolved_subscriptions
+        if normalized_auxiliary_data and not resolved_subscriptions:
+            raise ValueError(
+                "direct Backtest auxiliary_data requires primary_subscriptions "
+                "covering every primary symbol"
+            )
+        primary_identity_set = set(resolved_subscriptions)
+        overlap = primary_identity_set & set(normalized_auxiliary_data)
+        if overlap:
+            raise ValueError(
+                "auxiliary_data identities must be distinct from primary subscriptions: "
+                f"{sorted(overlap)!r}"
+            )
+        self._auxiliary_data = normalized_auxiliary_data
+        self._auxiliary_subscriptions = tuple(sorted(normalized_auxiliary_data))
+        self._data = data
+        subscription_by_symbol = {item.symbol: item for item in resolved_subscriptions}
         self._calendar_ids = {
-            symbol: instrument.calendar_id if instrument is not None else None
+            symbol: (
+                subscription_by_symbol[symbol].calendar_id
+                if symbol in subscription_by_symbol
+                else instrument.calendar_id
+                if instrument is not None
+                else None
+            )
             for symbol, instrument in self._instruments.items()
         }
 
@@ -635,6 +1140,16 @@ class Backtest:
         return self._result
 
     @property
+    def primary_subscriptions(self) -> tuple[MarketDataSubscription, ...]:
+        """Return exact primary market-data identities, when declared."""
+        return self._primary_subscriptions
+
+    @property
+    def auxiliary_subscriptions(self) -> tuple[MarketDataSubscription, ...]:
+        """Return sorted observation-only market-data identities."""
+        return self._auxiliary_subscriptions
+
+    @property
     def run_id(self) -> str:
         """Access run_id. Raises RuntimeError if run() not called."""
         if self._run_id is None:
@@ -664,6 +1179,7 @@ class Backtest:
         used_adv_quantity_by_symbol: dict[str, float],
         exposure_prices: dict[str, float],
         rebalance_state: PortfolioRebalanceState | None = None,
+        stop_eligible_symbols: set[str] | None = None,
     ) -> tuple[float, ExecutionResult]:
         if halted:
             result = check_stop_targets(
@@ -676,6 +1192,7 @@ class Backtest:
                 get_volume=get_previous_volume,
                 get_lagged_adv=get_lagged_adv,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                eligible_symbols=stop_eligible_symbols,
                 get_executable_quantity=self._get_executable_quantity,
             )
             return cash + result.cash_delta, result
@@ -740,10 +1257,39 @@ class Backtest:
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
+        direct_mixed = self._config is None and bool(self._auxiliary_data)
+        configured_timeframe = (
+            self._config.timeframe
+            if self._config is not None
+            else self._primary_subscriptions[0].timeframe
+            if direct_mixed
+            else None
+        )
         self._timeframe = _resolve_data_timeframe(
             self._data,
-            self._config.timeframe if self._config is not None else None,
+            configured_timeframe,
             self._calendar_ids,
+            authoritative_timeframe=direct_mixed,
+        )
+        if self._primary_subscriptions and any(
+            item.timeframe != self._timeframe for item in self._primary_subscriptions
+        ):
+            raise ValueError(
+                "primary subscription timeframe does not match validated data timeframe"
+            )
+        if self._primary_subscriptions:
+            self._data = _validate_primary_subscriptions(
+                self._data,
+                self._primary_subscriptions,
+            )
+        market_data_replay = (
+            _MarketDataReplay(
+                self._data,
+                self._primary_subscriptions,
+                self._auxiliary_data,
+            )
+            if self._auxiliary_data
+            else None
         )
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
             missing_calendars = sorted(
@@ -773,7 +1319,7 @@ class Backtest:
         exposed_periods = 0
         primary_symbol = self._symbols[0]
         universe = set(self._symbols)
-        pending_decision: StrategyDecision = []
+        pending_envelopes: list[_DecisionEnvelope] = []
         pending_rebalance: PortfolioRebalanceState | None = None
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
@@ -790,8 +1336,12 @@ class Backtest:
         previous_volumes: dict[str, float] = {}
         rebalance_delay_bars = 0
         unavailable_rebalance_symbols: tuple[str, ...] = ()
+        drawdown_exit_origins: dict[str, pd.Timestamp] = {}
 
         for ts in self._timeline:
+            decision_at = (
+                market_data_replay.advance_frontier(ts) if market_data_replay is not None else None
+            )
             event_start_index = len(all_events)
             bars = all_bars[ts]
             lagged_adv = all_lagged_adv.get(ts, {})
@@ -822,12 +1372,16 @@ class Backtest:
                 if close is not None and np.isfinite(close) and close > 0:
                     last_prices[symbol] = float(close)
 
-            pending_decision = self._without_halted_account(pending_decision, halted)
-            decision_to_execute, pending_decision = partition_pending_decision(
-                pending_decision,
-                bars,
-                positions,
-                primary_symbol=primary_symbol,
+            if halted:
+                pending_envelopes = []
+            decision_to_execute, pending_envelopes, ready_envelopes = (
+                _partition_enveloped_decisions(
+                    pending_envelopes,
+                    ts,
+                    bars,
+                    positions,
+                    primary_symbol=primary_symbol,
+                )
             )
             if pending_rebalance is not None and decision_to_execute:
                 raise ValueError(
@@ -852,6 +1406,11 @@ class Backtest:
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     exposure_prices=exposure_prices,
                     rebalance_state=pending_rebalance,
+                    stop_eligible_symbols={
+                        symbol
+                        for symbol in positions
+                        if symbol not in drawdown_exit_origins or ts > drawdown_exit_origins[symbol]
+                    },
                 )
                 # WHY: only an executed target is the active one. Recording it
                 # before this call would let a deferred target show up in the
@@ -877,7 +1436,7 @@ class Backtest:
                     ) from exc
                 rebalance_delay_bars += 1
                 unavailable_rebalance_symbols = exc.symbols
-                pending_decision = decision_to_execute
+                pending_envelopes = [*ready_envelopes, *pending_envelopes]
                 logger.info(
                     "Deferring PortfolioWeights at %s (%d/%d bars): %s",
                     ts,
@@ -920,6 +1479,11 @@ class Backtest:
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             runtime_events.extend(step_result.runtime_events)
+            drawdown_exit_origins = {
+                symbol: origin
+                for symbol, origin in drawdown_exit_origins.items()
+                if symbol in positions
+            }
             _, event_financing_cash_flows = calculate_funding_cash_flows(
                 ts,
                 bars,
@@ -995,6 +1559,8 @@ class Backtest:
                     positions,
                     reason=REASON_DRAWDOWN_BREACH,
                 )
+                if decision_at is not None:
+                    drawdown_exit_origins.update({symbol: decision_at for symbol in positions})
                 halted = True
                 logger.warning(
                     "Backtest account %s halted at %s: drawdown %.2f%% breached "
@@ -1006,6 +1572,10 @@ class Backtest:
                     self._risk_policy.max_drawdown_rate * 100,
                 )
 
+            market_data_view = (
+                market_data_replay.commit_primary(ts) if market_data_replay is not None else None
+            )
+
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
                 if pending_rebalance is not None:
@@ -1014,7 +1584,7 @@ class Backtest:
                             ts, pending_rebalance, reason="rebalance_cancelled_by_halt"
                         )
                     )
-                pending_decision = []
+                pending_envelopes = []
                 pending_rebalance = None
             else:
                 ctx = Context(
@@ -1027,6 +1597,8 @@ class Backtest:
                     account_id=self._account_id,
                     account=account_snapshot,
                     period_index=decision_index,
+                    decision_at=(decision_at.to_pydatetime() if decision_at is not None else None),
+                    market_data=market_data_view,
                 )
                 new_decision = self._strategy.on_bar(ctx)
                 validate_strategy_decision(
@@ -1047,6 +1619,7 @@ class Backtest:
                             "cannot emit OrderIntents while a PortfolioWeights "
                             "rebalance is deferred"
                         )
+                pending_decision = _enveloped_decision(pending_envelopes)
                 if isinstance(pending_decision, PortfolioWeights) and isinstance(
                     new_decision, PortfolioWeights
                 ):
@@ -1057,9 +1630,10 @@ class Backtest:
                             detail={"reason": "rebalance_superseded"},
                         )
                     )
-                pending_decision = merge_pending_decisions(
-                    pending_decision,
+                pending_envelopes = _merge_enveloped_decision(
+                    pending_envelopes,
                     new_decision,
+                    decision_at=decision_at,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -1073,6 +1647,7 @@ class Backtest:
                 }
             )
 
+        pending_decision = _enveloped_decision(pending_envelopes)
         if (
             isinstance(pending_decision, PortfolioWeights) or pending_rebalance is not None
         ) and rebalance_delay_bars:
@@ -1273,6 +1848,8 @@ class Backtest:
             ended_at=ended_at,
             run_at=datetime.now(tz=UTC),
             session_mode=self._session_mode,
+            primary_subscriptions=self._primary_subscriptions,
+            auxiliary_subscriptions=self._auxiliary_subscriptions,
         )
 
         event_records = self._build_event_records(result, run_id)
@@ -1462,10 +2039,23 @@ class Backtest:
         ~490 rows/sec vs this ~869k rows/sec), same output.
         """
         result: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
-        raw = self._data.to_dict(orient="index")
+        # Row timing/identity facts are audit metadata, not numeric market
+        # fields. They must never leak into executor bars or ``Context``.
+        market_values = self._data.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
+        raw = market_values.to_dict(orient="index")
         for (sym, ts), row in raw.items():
             result.setdefault(ts, {})[sym] = row
-        return result
+        symbol_rank = {symbol: rank for rank, symbol in enumerate(self._symbols)}
+        ordered: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
+        for ts, bars in result.items():
+            try:
+                present_symbols = sorted(bars, key=symbol_rank.__getitem__)
+            except KeyError as exc:  # guarded by the constructor's exact-cover validation
+                raise ValueError(
+                    f"bar symbol {exc.args[0]!r} is outside the resolved backtest universe"
+                ) from exc
+            ordered[ts] = {symbol: bars[symbol] for symbol in present_symbols}
+        return ordered
 
     def _precompute_lagged_adv(self) -> dict[pd.Timestamp, dict[str, float]]:
         """Precompute point-in-time ADV from completed trading sessions."""
