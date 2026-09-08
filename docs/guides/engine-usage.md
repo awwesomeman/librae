@@ -743,11 +743,12 @@ exceeded `RunConfig.runtime.poll_seconds`.
   `(timestamp, event type, symbol)` identity. Cash-scaled tails are final only
   after all possible reductions complete, and a protective exit cancels the
   same symbol's remaining target.
-- `warmup_periods`: positive live/sim feature-history retention and all-symbol
-  startup readiness count. A request for N periods is not assumed to contain N
-  completed observations: bounded backfill expands the requested span, and the
-  strategy remains disabled if the usable de-duplicated count is still short.
-  It is typed engine configuration, not a strategy `params` fallback.
+- `warmup_periods`: positive batch feature-history retention across backtest
+  and live/sim, and the live/sim all-symbol startup readiness count. A request
+  for N periods is not assumed to contain N completed observations: bounded
+  backfill expands the requested span, and the strategy remains disabled if
+  the usable de-duplicated count is still short. It is typed engine
+  configuration, not a strategy `params` fallback.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
   from the persisted wall-clock placement attempt. On expiry the engine first
   refreshes the broker report, requests cancellation only if the order remains

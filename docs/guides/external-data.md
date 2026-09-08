@@ -106,8 +106,12 @@ def prepare_cross_asset(batch):
 
 The engine calls this once per committed primary cohort, including distinct
 events that share the same `as_of`. It validates the complete mapping before
-publishing any feature-derived bar or signal. Live auxiliary readiness and
-staleness policy are separate from this primary-cohort contract.
+publishing any feature-derived bar or signal. In both backtest and live/sim,
+`MarketDataView.history()` exposes at most `ExecutionPolicy.warmup_periods`
+rows per primary or auxiliary subscription; an explicit smaller `limit` is
+honored, while a larger value cannot exceed that configured window. Live
+auxiliary readiness and staleness policy are separate from this
+primary-cohort contract.
 
 ## `timeframe` and `poll_seconds`
 

@@ -969,6 +969,83 @@ class TestLiveTrader:
             ),
         ]
 
+    def test_batch_as_of_does_not_regress_after_runtime_cache_trim(self):
+        first_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        second_ts = first_ts + timedelta(hours=1)
+        first = _make_ohlcv_at([first_ts])
+        first["available_at"] = [pd.Timestamp("2025-01-01T10:00Z")]
+        second = _make_ohlcv_at([second_ts])
+        second["available_at"] = [pd.Timestamp("2025-01-01T03:00Z")]
+        responses = iter((first, second))
+        observed: list[tuple[datetime, datetime]] = []
+
+        def features(batch: FeatureBatch):
+            observed.append((batch.event_ts, batch.as_of))
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: next(responses),
+            config=_test_cfg(warmup_periods=1),
+            batch_feature_fn=features,
+            clock=lambda: datetime(2025, 1, 1, 11, tzinfo=UTC),
+        )
+
+        runner.run(max_iterations=2)
+
+        assert observed == [
+            (first_ts, datetime(2025, 1, 1, 10, tzinfo=UTC)),
+            (second_ts, datetime(2025, 1, 1, 10, tzinfo=UTC)),
+        ]
+        assert runner._last_feature_as_of == datetime(2025, 1, 1, 10, tzinfo=UTC)
+        assert tuple(runner._ohlcv_cache["BTCUSDT"]["ts"]) == (second_ts,)
+
+    def test_batch_as_of_frontier_survives_restart_after_cache_trim(self):
+        first_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        second_ts = first_ts + timedelta(hours=1)
+        first = _make_ohlcv_at([first_ts])
+        first["available_at"] = [pd.Timestamp("2025-01-01T10:00Z")]
+        second = _make_ohlcv_at([second_ts])
+        second["available_at"] = [pd.Timestamp("2025-01-01T03:00Z")]
+        store = MemoryLiveStateStore()
+        config = _test_cfg(warmup_periods=1)
+
+        def passthrough(batch: FeatureBatch):
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        first_runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: first,
+            config=config,
+            batch_feature_fn=passthrough,
+            state_store=store,
+            clock=lambda: datetime(2025, 1, 1, 11, tzinfo=UTC),
+        )
+        first_runner._poll_cycle()
+
+        observed: list[datetime] = []
+
+        def capture(batch: FeatureBatch):
+            observed.append(batch.as_of)
+            return passthrough(batch)
+
+        restarted = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: second,
+            config=config,
+            batch_feature_fn=capture,
+            state_store=store,
+            clock=lambda: datetime(2025, 1, 1, 11, tzinfo=UTC),
+        )
+        assert restarted._last_feature_as_of == datetime(2025, 1, 1, 10, tzinfo=UTC)
+
+        restarted._poll_cycle()
+
+        assert observed == [datetime(2025, 1, 1, 10, tzinfo=UTC)]
+        checkpoint = store.load(restarted._state_key)
+        assert checkpoint is not None
+        assert checkpoint.last_feature_as_of == datetime(2025, 1, 1, 10, tzinfo=UTC)
+        assert checkpoint.last_bar_ts == {"BTCUSDT": second_ts}
+
     def test_batch_features_keep_staggered_primary_cohorts_distinct(self):
         first = _make_ohlcv_at([datetime(2025, 1, 1, tzinfo=UTC)], price=100.0)
         second = _make_ohlcv_at([datetime(2025, 1, 1, 1, tzinfo=UTC)], price=110.0)
@@ -1040,8 +1117,125 @@ class TestLiveTrader:
 
         assert runner._last_bar_ts == {}
         assert runner._last_cycle_ts is None
+        assert runner._last_feature_as_of is None
         assert signals == []
         strategy.on_bar.assert_not_called()
+
+    def test_batch_strategy_failure_does_not_commit_feature_or_event_frontier(self):
+        event_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        frame = _make_ohlcv_at([event_ts])
+        frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+        store = MemoryLiveStateStore()
+
+        class FailingStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                raise RuntimeError("strategy failed")
+
+        def features(batch: FeatureBatch):
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        runner = self._make_runner(
+            strategy=FailingStrategy(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
+            batch_feature_fn=features,
+            state_store=store,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+
+        with pytest.raises(RuntimeError, match="strategy failed"):
+            runner._poll_cycle()
+
+        assert runner._last_feature_as_of is None
+        assert runner._last_bar_ts == {}
+        checkpoint = store.load(runner._state_key)
+        assert checkpoint is not None
+        assert checkpoint.last_feature_as_of is None
+        assert checkpoint.last_bar_ts == {}
+
+    def test_batch_live_order_failure_does_not_commit_feature_or_event_frontier(self):
+        event_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        frame = _make_ohlcv_at([event_ts])
+        frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+
+        class Buy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+
+        def features(batch: FeatureBatch):
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        store = MemoryLiveStateStore()
+        runner = self._make_runner(
+            strategy=Buy(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(mode="live", warmup_periods=1),
+            batch_feature_fn=features,
+            state_store=store,
+            order_adapter=_mock_order_adapter(),
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+
+        def reject_order(*_args, **_kwargs):
+            runner._halted = True
+            return False
+
+        runner._execute_live_decision = MagicMock(side_effect=reject_order)
+
+        runner._poll_cycle()
+
+        runner._execute_live_decision.assert_called_once()
+        assert runner._last_feature_as_of is None
+        assert runner._last_bar_ts == {}
+        checkpoint = store.load(runner._state_key)
+        assert checkpoint is not None
+        assert checkpoint.last_feature_as_of is None
+        assert checkpoint.last_bar_ts == {}
+
+    def test_batch_accepted_resting_order_commits_feature_and_event_frontier(self):
+        event_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        available_at = datetime(2025, 1, 1, 1, tzinfo=UTC)
+        frame = _make_ohlcv_at([event_ts])
+        frame["available_at"] = [pd.Timestamp(available_at)]
+
+        class Buy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+
+        def features(batch: FeatureBatch):
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        adapter = _mock_order_adapter()
+        accepted = {
+            "id": "resting-1",
+            "status": "accepted",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        adapter.place_order.return_value = accepted
+        store = MemoryLiveStateStore()
+        runner = self._make_runner(
+            strategy=Buy(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(mode="live", warmup_periods=1),
+            batch_feature_fn=features,
+            state_store=store,
+            order_adapter=adapter,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+
+        runner._poll_cycle()
+
+        assert len(runner._active_orders) == 1
+        assert runner._last_feature_as_of == available_at
+        assert runner._last_bar_ts == {"BTCUSDT": event_ts}
+        checkpoint = store.load(runner._state_key)
+        assert checkpoint is not None
+        assert checkpoint.last_feature_as_of == available_at
+        assert checkpoint.last_bar_ts == {"BTCUSDT": event_ts}
 
     def test_batch_retry_does_not_replay_a_confirmed_simulation_fill(self):
         frame = _make_ohlcv_df(n=1)

@@ -163,6 +163,7 @@ class MarketDataView:
     as_of: datetime
     _source: _MarketDataSource = field(repr=False)
     _visible_counts: tuple[int, ...] = field(repr=False)
+    _history_limit: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         timestamp = pd.Timestamp(self.as_of)
@@ -181,6 +182,12 @@ class MarketDataView:
                 or count > self._source.row_count(index)
             ):
                 raise ValueError("MarketDataView visibility counts are invalid")
+        if self._history_limit is not None and (
+            isinstance(self._history_limit, bool)
+            or not isinstance(self._history_limit, int)
+            or self._history_limit <= 0
+        ):
+            raise ValueError("MarketDataView history limit must be a positive integer or None")
         object.__setattr__(self, "as_of", timestamp.tz_convert("UTC").to_pydatetime())
         object.__setattr__(self, "_visible_counts", visible_counts)
 
@@ -201,7 +208,23 @@ class MarketDataView:
         ):
             raise ValueError("limit must be a positive integer or None")
         index = self._source.index_of(subscription)
-        return self._source.history(subscription, self._visible_counts[index], limit)
+        effective_limit = limit
+        if self._history_limit is not None:
+            effective_limit = (
+                self._history_limit
+                if effective_limit is None
+                else min(effective_limit, self._history_limit)
+            )
+        return self._source.history(subscription, self._visible_counts[index], effective_limit)
+
+    def _with_history_limit(self, limit: int) -> MarketDataView:
+        """Return the same frozen frontier with a bounded history window."""
+        return MarketDataView(
+            as_of=self.as_of,
+            _source=self._source,
+            _visible_counts=self._visible_counts,
+            _history_limit=limit,
+        )
 
     @classmethod
     def _from_causal_frames(
@@ -209,6 +232,7 @@ class MarketDataView:
         frames: Mapping[MarketDataSubscription, pd.DataFrame],
         *,
         as_of: datetime,
+        history_limit: int | None = None,
     ) -> MarketDataView:
         """Build an engine-owned view from histories already filtered to ``as_of``."""
         source = _MarketDataSource(frames)
@@ -218,6 +242,7 @@ class MarketDataView:
             _visible_counts=tuple(
                 source.row_count(index) for index in range(len(source.subscriptions))
             ),
+            _history_limit=history_limit,
         )
 
 

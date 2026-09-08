@@ -1136,6 +1136,7 @@ class Backtest:
         self._max_adv_participation_rate = resolved_execution.max_adv_participation_rate
         self._max_rebalance_delay_bars = resolved_execution.max_rebalance_delay_bars
         self._rebalance_residual_policy = resolved_execution.rebalance_residual_policy
+        self._batch_history_limit = resolved_execution.warmup_periods
         self._risk_policy = config.risk if config else risk or RiskPolicy()
 
         if strategy_name is not None:
@@ -1600,6 +1601,7 @@ class Backtest:
             if self._batch_feature_fn is not None:
                 if market_data_view is None or decision_at is None:
                     raise RuntimeError("batch features require a committed market-data frontier")
+                market_data_view = market_data_view._with_history_limit(self._batch_history_limit)
                 feature_batch = FeatureBatch(
                     event_ts=ts.to_pydatetime(),
                     as_of=decision_at.to_pydatetime(),

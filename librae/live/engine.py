@@ -539,6 +539,7 @@ class LiveTrader:
         self._market_data_fetch_failures: dict[str, int] = {}
         self._cycle_fetch_failed = False
         self._last_cycle_ts: datetime | None = None
+        self._last_feature_as_of: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
         self._stale_alerted: dict[str, bool] = {}
@@ -581,6 +582,7 @@ class LiveTrader:
                 self._restore_state(restored, on_run_registered)
 
         configured_warmup = config.execution.warmup_periods
+        self._feature_history_limit = configured_warmup
         adv_warmup = (config.execution.adv_lookback_sessions or 0) + 1
         self._warmup_periods = max(configured_warmup, adv_warmup)
 
@@ -646,6 +648,7 @@ class LiveTrader:
             positions=deepcopy(self._positions),
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
+            last_feature_as_of=self._last_feature_as_of,
             last_bar_ts=dict(self._last_bar_ts),
             last_financing_ts=dict(self._last_financing_ts),
             pending_decision=deepcopy(self._pending_decision),
@@ -684,6 +687,7 @@ class LiveTrader:
         self._positions = state.positions
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
+        self._last_feature_as_of = state.last_feature_as_of
         self._last_bar_ts = state.last_bar_ts
         self._last_financing_ts = state.last_financing_ts
         self._pending_decision = state.pending_decision
@@ -1493,14 +1497,23 @@ class LiveTrader:
                 sorted(event_frames),
             )
             if self._batch_feature_fn is None:
-                self._process_cycle(event_frames, cycle_ts)
+                committed_feature_as_of = self._process_cycle(event_frames, cycle_ts)
             else:
-                self._process_cycle(frames, cycle_ts, active_symbols=advanced_symbols)
+                committed_feature_as_of = self._process_cycle(
+                    frames,
+                    cycle_ts,
+                    active_symbols=advanced_symbols,
+                )
+                if committed_feature_as_of is None:
+                    continue
 
-            # Commit watermarks only after the event was processed successfully.
+            # Commit the event and feature frontiers together, only after the
+            # full feature/strategy/execution cycle succeeded.
             for symbol in advanced_symbols:
                 self._last_bar_ts[symbol] = cycle_ts
             self._last_cycle_ts = cycle_ts
+            if committed_feature_as_of is not None:
+                self._last_feature_as_of = committed_feature_as_of
             self._persist_state()
         self._trim_runtime_caches()
 
@@ -3112,18 +3125,20 @@ class LiveTrader:
             if cutoff is not None:
                 cutoffs[symbol] = cutoff
 
-        availability: list[pd.Timestamp] = []
-        for symbol, cutoff in cutoffs.items():
+        cohort_availability: list[pd.Timestamp] = []
+        for symbol in active_symbols:
             frame = normalized_frames[symbol]
-            committed = frame.loc[pd.to_datetime(frame["ts"], utc=True) <= pd.Timestamp(cutoff)]
-            if symbol in active_set and not bool(
-                (pd.to_datetime(committed["ts"], utc=True) == pd.Timestamp(ts)).any()
-            ):
+            current = frame.loc[pd.to_datetime(frame["ts"], utc=True) == pd.Timestamp(ts)]
+            if current.empty:
                 raise ValueError(f"{symbol} batch cohort is missing event timestamp {ts}")
-            availability.extend(pd.to_datetime(committed[AVAILABLE_AT_COLUMN], utc=True).tolist())
-        if not availability:
+            cohort_availability.extend(
+                pd.to_datetime(current[AVAILABLE_AT_COLUMN], utc=True).tolist()
+            )
+        if not cohort_availability:
             raise ValueError("batch feature cohort has no causal availability frontier")
-        as_of = max(availability)
+        as_of = max(cohort_availability)
+        if self._last_feature_as_of is not None:
+            as_of = max(as_of, pd.Timestamp(self._last_feature_as_of))
 
         histories = {}
         for symbol in self._symbols:
@@ -3136,7 +3151,7 @@ class LiveTrader:
                 available_at = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
                 causal = frame.loc[
                     (timestamps <= pd.Timestamp(cutoff)) & (available_at <= as_of)
-                ].iloc[-self._warmup_periods :]
+                ].iloc[-self._feature_history_limit :]
             history = causal.set_index("ts")
             history.index.name = "ts"
             histories[self._market_data_subscriptions[symbol]] = history
@@ -3144,6 +3159,7 @@ class LiveTrader:
         market_data = MarketDataView._from_causal_frames(
             histories,
             as_of=as_of.to_pydatetime(),
+            history_limit=self._feature_history_limit,
         )
         active_subscriptions = tuple(
             self._market_data_subscriptions[symbol]
@@ -3189,7 +3205,7 @@ class LiveTrader:
         ts: datetime,
         *,
         active_symbols: list[str] | tuple[str, ...] | None = None,
-    ) -> None:
+    ) -> datetime | None:
         """Execute and evaluate one data-driven market event.
 
         Simulation fills previous-cycle intent on this completed raw bar.
@@ -3349,7 +3365,7 @@ class LiveTrader:
             lagged_adv_by_symbol=lagged_adv_by_symbol,
         ):
             self._persist_state()
-            return
+            return None
 
         evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
         if self._batch_feature_fn is not None:
@@ -3393,7 +3409,7 @@ class LiveTrader:
                 if symbol in raw_bars:
                     position.periods_held += 1
             self._persist_state()
-            return
+            return feature_batch.as_of if feature_batch is not None else None
 
         if live_rebalance_blocks_decisions:
             for symbol, position in self._positions.items():
@@ -3403,7 +3419,7 @@ class LiveTrader:
             if self._on_ohlcv:
                 for symbol, bar in audit_bars.items():
                     self._on_ohlcv(symbol, self._timeframe, bar, ts)
-            return
+            return feature_batch.as_of if feature_batch is not None else None
 
         if feature_batch is None:
             if self._feature_fn is None:  # pragma: no cover - constructor invariant
@@ -3514,12 +3530,15 @@ class LiveTrader:
                 primary_symbol=primary_symbol,
             )
             if ready_decision:
-                self._execute_live_decision(
+                execution_complete = self._execute_live_decision(
                     ready_decision,
                     raw_bars,
                     ts,
                     lagged_adv_by_symbol=lagged_adv_by_symbol,
                 )
+                if not execution_complete and self._halted:
+                    self._persist_state()
+                    return None
 
         for symbol, position in self._positions.items():
             if symbol in raw_bars:
@@ -3530,6 +3549,7 @@ class LiveTrader:
         if self._on_ohlcv:
             for symbol, bar in audit_bars.items():
                 self._on_ohlcv(symbol, self._timeframe, bar, ts)
+        return feature_batch.as_of if feature_batch is not None else None
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:
         """Validate confirmed exposure after an exposure-increasing fill."""
