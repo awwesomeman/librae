@@ -10,6 +10,7 @@ from librae.core.trading_calendar import (
     bar_close,
     resample_session_ohlcv,
     session_label,
+    session_lookback_days,
 )
 
 
@@ -78,6 +79,14 @@ def test_unknown_calendar_fails_explicitly() -> None:
 def test_naive_timestamp_is_rejected() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         session_label(pd.Timestamp("2026-04-01 00:00"), "24/7")
+
+
+def test_session_lookback_days_includes_weekends_and_holidays() -> None:
+    assert session_lookback_days(pd.Timestamp("2025-01-04T00:00:00Z"), 5, "XNYS") == 8
+
+
+def test_session_lookback_days_for_always_open_market_matches_periods() -> None:
+    assert session_lookback_days(pd.Timestamp("2025-01-04T00:00:00Z"), 5, "24/7") == 5
 
 
 def test_resample_hourly_taifex_bars_anchor_to_each_session_open() -> None:

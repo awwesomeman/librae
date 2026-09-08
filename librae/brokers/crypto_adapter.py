@@ -24,6 +24,7 @@ from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
     InstrumentKind,
+    canonicalize_price_to_increment,
 )
 from librae.core.utils import validate_contract_month
 from librae.live.executor import PositionRequest
@@ -37,6 +38,23 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _decimal_places_tick(raw_precision: object) -> float | None:
+    """Convert CCXT DECIMAL_PLACES metadata into a cost-model tick."""
+    if isinstance(raw_precision, bool):
+        return None
+    try:
+        precision = float(raw_precision)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(precision) or not precision.is_integer():
+        return None
+    try:
+        tick_size = 10.0 ** -int(precision)
+    except OverflowError:
+        return None
+    return tick_size if isfinite(tick_size) and tick_size > 0 else None
 
 
 def _require_ccxt() -> object:
@@ -152,6 +170,7 @@ class CryptoAdapter:
         self._read_only = not bool(api_key)
         self._exchange_id = exchange_id
         self._tick_size_precision_mode = getattr(ccxt, "TICK_SIZE", None)
+        self._decimal_places_precision_mode = getattr(ccxt, "DECIMAL_PLACES", None)
 
     def info(self) -> AdapterInfo:
         """Return adapter metadata (consistent with ABC adapters)."""
@@ -243,13 +262,18 @@ class CryptoAdapter:
                 canonical_symbol = native_symbol
                 multiplier = market.get("contractSize")
             raw_price_precision = (market.get("precision") or {}).get("price")
-            price_increment = (
-                raw_price_precision
-                if getattr(self._exchange, "precisionMode", None)
-                == getattr(self, "_tick_size_precision_mode", None)
-                and self._tick_size_precision_mode is not None
-                else None
-            )
+            precision_mode = getattr(self._exchange, "precisionMode", None)
+            tick_size_mode = getattr(self, "_tick_size_precision_mode", None)
+            decimal_places_mode = getattr(self, "_decimal_places_precision_mode", None)
+            if precision_mode == tick_size_mode and tick_size_mode is not None:
+                price_increment = raw_price_precision
+                tick_size = raw_price_precision
+            elif precision_mode == decimal_places_mode and decimal_places_mode is not None:
+                price_increment = None
+                tick_size = _decimal_places_tick(raw_price_precision)
+            else:
+                price_increment = None
+                tick_size = None
             currency = str(market.get("settle") or quote)
             results.append(
                 AvailableSymbol(
@@ -266,7 +290,7 @@ class CryptoAdapter:
                     delivery_month=delivery_month,
                     contract_rank=contract_rank,
                     multiplier=float(multiplier) if multiplier is not None else None,
-                    tick_size=(float(price_increment) if price_increment is not None else None),
+                    tick_size=float(tick_size) if tick_size is not None else None,
                     price_increment=(
                         float(price_increment) if price_increment is not None else None
                     ),
@@ -504,6 +528,17 @@ class CryptoAdapter:
                 "Provide api_key/api_secret to enable trading."
             )
 
+    def normalize_limit_price(self, signal: dict) -> float:
+        """Return CCXT's native precision result for one limit signal."""
+        validate_order_signal(signal)
+        if signal.get("order_type") != "limit":
+            raise ValueError("normalize_limit_price requires a limit order")
+        self._exchange.load_markets()
+        price = float(self._exchange.price_to_precision(signal["symbol"], signal["price"]))
+        if not isfinite(price) or price <= 0:
+            raise ValueError(f"{signal['symbol']} price rounds to zero or a non-finite value")
+        return price
+
     def prepare_order(self, signal: dict) -> dict:
         """Apply CCXT precision/limit rules and reject spot short opens."""
         validate_order_signal(signal)
@@ -525,9 +560,27 @@ class CryptoAdapter:
 
         price = signal.get("price")
         if price is not None:
-            price = float(self._exchange.price_to_precision(symbol, price))
-            if price <= 0:
-                raise ValueError(f"{symbol} price rounds to zero")
+            requested_price = float(price)
+            native_price = self.normalize_limit_price(signal)
+            raw_increment = signal.get("price_increment")
+            if raw_increment is not None:
+                authoritative_price = canonicalize_price_to_increment(
+                    requested_price,
+                    raw_increment,
+                    context=f"{symbol} limit price",
+                )
+                native_price = canonicalize_price_to_increment(
+                    native_price,
+                    raw_increment,
+                    context=f"{symbol} CCXT-normalized limit price",
+                )
+                if native_price != authoritative_price:
+                    raise ValueError(
+                        f"{symbol} CCXT precision would change an authoritative limit price"
+                    )
+                price = authoritative_price
+            else:
+                price = native_price
             prepared["price"] = price
 
         is_spot = bool(market.get("spot") or market.get("type") == "spot")

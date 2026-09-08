@@ -672,7 +672,7 @@ class TestLiveTrader:
             (
                 ("BTC/USDT", "1h"),
                 {
-                    "limit": 5,
+                    "limit": 6,
                     "continuous_alias": False,
                     "contract_month": None,
                     "drop_incomplete": True,
@@ -1345,6 +1345,42 @@ class TestLiveTrader:
         if mode == "live":
             assert strategy.on_bar.call_args.args[0].ts == now
 
+    def test_live_event_contains_only_symbols_selected_at_that_timestamp(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        t2 = t1 + timedelta(hours=1)
+        frames = {
+            "AAA": _make_ohlcv_at([t0, t1, t2]),
+            "BBB": _make_ohlcv_at([t0, t1]),
+        }
+        contexts: list[Context] = []
+
+        class RejectHistoricalDecision(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                if ctx.ts == t1 and "AAA" in ctx.available_symbols:
+                    return [OrderIntent(action="long", symbol="AAA", quantity=1.0)]
+                return []
+
+        order_adapter = _mock_order_adapter()
+        runner = self._make_runner(
+            strategy=RejectHistoricalDecision(),
+            fetcher=lambda symbol, *_args, **_kwargs: frames[symbol],
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                warmup_periods=2,
+            ),
+            order_adapter=order_adapter,
+        )
+
+        runner._poll_cycle()
+
+        assert [ctx.ts for ctx in contexts] == [t1, t2]
+        assert [set(ctx.bars) for ctx in contexts] == [{"BBB"}, {"AAA"}]
+        assert runner._pending_decision == []
+        order_adapter.place_order.assert_not_called()
+
     def test_context_exposes_engine_equity(self):
         seen_equity: list[float] = []
 
@@ -1411,7 +1447,7 @@ class TestLiveTrader:
         runner = self._make_runner(fetcher=tracking_fetcher)
         runner.run(max_iterations=3)
 
-        assert calls[0]["limit"] == 5  # warmup_periods (full fetch)
+        assert calls[0]["limit"] == 6  # warmup plus one possibly forming bar
         for c in calls[1:]:
             assert c["limit"] == 2  # incremental
 

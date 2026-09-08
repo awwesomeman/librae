@@ -556,6 +556,8 @@ class LiveTrader:
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
         self._warmup_requested_periods: dict[str, int] = {}
         self._warmup_fetch_attempts: dict[str, int] = {}
+        self._warmup_exhausted_fingerprints: dict[str, frozenset[int]] = {}
+        self._replay_backlog_exhausted: dict[str, tuple[int, int]] = {}
         self._reported_warmup_reasons: dict[str, str] = {}
         self._lease_acquired = False
         self._account_lease_acquired = False
@@ -741,6 +743,7 @@ class LiveTrader:
     # sessions. 1x/2x/4x covers the common calendar/session-density gap while
     # keeping the startup request burst explicit and bounded.
     WARMUP_MAX_FETCH_ATTEMPTS = 3
+    WARMUP_MAX_FETCH_MULTIPLIER = 2 ** (WARMUP_MAX_FETCH_ATTEMPTS - 1)
 
     def _utc_now(self) -> datetime:
         now = self._clock()
@@ -1324,7 +1327,7 @@ class LiveTrader:
     @property
     def warmup_ready(self) -> bool:
         """Whether every configured symbol has enough usable feature history."""
-        return all(
+        return not self._replay_backlog_exhausted and all(
             self._warmup_gap(symbol, self._ohlcv_cache.get(symbol)) is None
             for symbol in self._symbols
         )
@@ -1401,7 +1404,7 @@ class LiveTrader:
         if not self._executor.simulation and (self._active_orders or self._halted):
             return
 
-        pending_timestamps: set[datetime] = set()
+        candidate_symbols_by_timestamp: dict[datetime, set[str]] = {}
         skipped_by_symbol: dict[str, int] = {}
         for symbol, frame in frames.items():
             watermark = self._last_bar_ts.get(symbol)
@@ -1415,7 +1418,8 @@ class LiveTrader:
                 timestamp = pd.Timestamp(raw_ts)
                 if timestamp.tzinfo is None:
                     raise ValueError(f"{symbol} completed bar timestamp must be timezone-aware")
-                pending_timestamps.add(timestamp.to_pydatetime().astimezone(UTC))
+                event_ts = timestamp.to_pydatetime().astimezone(UTC)
+                candidate_symbols_by_timestamp.setdefault(event_ts, set()).add(symbol)
 
         if skipped_by_symbol:
             summary = ", ".join(
@@ -1428,7 +1432,7 @@ class LiveTrader:
                 message=f"Skipped older uncommitted bars ({summary}); only latest bars are tradable.",
             )
 
-        for cycle_ts in sorted(pending_timestamps):
+        for cycle_ts in sorted(candidate_symbols_by_timestamp):
             if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
                 raise RuntimeError(
                     "out-of-order completed bar cannot be applied after a newer event: "
@@ -1437,10 +1441,15 @@ class LiveTrader:
 
             event_frames: dict[str, pd.DataFrame] = {}
             advanced_symbols: list[str] = []
-            for symbol, frame in frames.items():
-                normalized = pd.to_datetime(frame["ts"], utc=True)
-                if not bool((normalized == pd.Timestamp(cycle_ts)).any()):
-                    continue
+            event_symbols = set(candidate_symbols_by_timestamp[cycle_ts])
+            if self._executor.simulation:
+                event_symbols.update(
+                    symbol
+                    for symbol, frame in frames.items()
+                    if bool((pd.to_datetime(frame["ts"], utc=True) == pd.Timestamp(cycle_ts)).any())
+                )
+            for symbol in sorted(event_symbols):
+                frame = frames[symbol]
                 event_frames[symbol] = frame
                 if cycle_ts > self._last_bar_ts.get(
                     symbol,
@@ -1475,36 +1484,62 @@ class LiveTrader:
     def _fetch_with_cache_unchecked(self, symbol: str) -> pd.DataFrame | None:
         """Fetch and cache one symbol, propagating failures to the poll coordinator."""
         cached = self._ohlcv_cache.get(symbol)
+        if symbol in self._replay_backlog_exhausted:
+            return cached
         if self._warmup_gap(symbol, cached) is not None:
             merged = cached
+            base_request = self._warmup_periods + 1
+            all_request_sizes = [
+                base_request * (2**attempt) for attempt in range(self.WARMUP_MAX_FETCH_ATTEMPTS)
+            ]
+            request_sizes = all_request_sizes
             try:
-                for attempt in range(self.WARMUP_MAX_FETCH_ATTEMPTS):
-                    requested_periods = self._warmup_periods * (2**attempt)
-                    self._warmup_requested_periods[symbol] = requested_periods
-                    self._warmup_fetch_attempts[symbol] = attempt + 1
-                    if self._warmup_fetcher:
-                        new_df = self._warmup_fetcher(
-                            symbol,
-                            self._timeframe,
-                            requested_periods,
-                        )
+                exhausted_fingerprint = self._warmup_exhausted_fingerprints.get(symbol)
+                if exhausted_fingerprint is not None:
+                    probe_periods = self._warmup_requested_periods.get(symbol, base_request)
+                    probe = self._fetch_history(symbol, probe_periods)
+                    probe = self._eligible_runtime_rows(symbol, probe)
+                    if not probe.empty:
+                        validate_ohlcv_values(probe, context=f"{symbol} runtime data")
+                        merged = self._merge_runtime_rows(merged, probe)
+                    if self._history_fingerprint(merged) == exhausted_fingerprint:
+                        return cached
+                    self._warmup_exhausted_fingerprints.pop(symbol, None)
+                    if self._warmup_gap(symbol, merged) is None:
+                        request_sizes = []
                     else:
-                        new_df = self._fetchers[symbol](
-                            symbol,
-                            self._timeframe,
-                            requested_periods,
-                            drop_incomplete=True,
-                        )
+                        request_sizes = [
+                            requested
+                            for requested in all_request_sizes
+                            if requested > probe_periods
+                        ]
+
+                for requested_periods in request_sizes:
+                    attempt = all_request_sizes.index(requested_periods) + 1
+                    self._warmup_requested_periods[symbol] = requested_periods
+                    self._warmup_fetch_attempts[symbol] = attempt
+                    before = self._history_fingerprint(merged)
+                    new_df = self._fetch_history(symbol, requested_periods)
                     new_df = self._eligible_runtime_rows(symbol, new_df)
                     if not new_df.empty:
                         validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
                         merged = self._merge_runtime_rows(merged, new_df)
                     if self._warmup_gap(symbol, merged) is None:
+                        self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
+                    if self._history_fingerprint(merged) == before:
+                        self._warmup_exhausted_fingerprints[symbol] = before
+                        break
+                if (
+                    self._warmup_gap(symbol, merged) is not None
+                    and symbol not in self._warmup_exhausted_fingerprints
+                ):
+                    self._warmup_exhausted_fingerprints[symbol] = self._history_fingerprint(merged)
             except Exception:
                 self._store_runtime_cache(symbol, merged)
                 raise
         else:
+            self._warmup_exhausted_fingerprints.pop(symbol, None)
             new_df = self._fetchers[symbol](
                 symbol,
                 self._timeframe,
@@ -1533,11 +1568,42 @@ class LiveTrader:
             and watermark is not None
             and bool((pd.to_datetime(merged["ts"], utc=True) > watermark).any())
         )
+        max_replay_rows = (self._warmup_periods + 1) * self.WARMUP_MAX_FETCH_MULTIPLIER
+        if has_unprocessed_sim_rows and len(merged) > max_replay_rows:
+            queued_rows = int((pd.to_datetime(merged["ts"], utc=True) > watermark).sum())
+            self._replay_backlog_exhausted[symbol] = (queued_rows, max_replay_rows)
+            logger.error(
+                "Shadow replay backlog exceeded for %s: queued=%d max_history=%d; "
+                "fetching and strategy evaluation are disabled until restart/resynchronization",
+                symbol,
+                queued_rows,
+                max_replay_rows,
+            )
+            return self._ohlcv_cache.get(symbol)
         if not has_unprocessed_sim_rows:
             merged = merged.iloc[-self._warmup_periods :]
         merged = merged.reset_index(drop=True)
         self._ohlcv_cache[symbol] = merged
         return merged
+
+    def _fetch_history(self, symbol: str, requested_periods: int) -> pd.DataFrame:
+        """Fetch one completed history window through the configured warmup route."""
+        if self._warmup_fetcher:
+            return self._warmup_fetcher(symbol, self._timeframe, requested_periods)
+        return self._fetchers[symbol](
+            symbol,
+            self._timeframe,
+            requested_periods,
+            drop_incomplete=True,
+        )
+
+    @staticmethod
+    def _history_fingerprint(frame: pd.DataFrame | None) -> frozenset[int]:
+        """Identify observations without treating value revisions as new history."""
+        if frame is None or frame.empty:
+            return frozenset()
+        timestamps = pd.to_datetime(frame["ts"], utc=True)
+        return frozenset(pd.Timestamp(value).value for value in timestamps)
 
     def _eligible_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
         """Exclude rows whose source-declared availability has not arrived."""
@@ -1569,23 +1635,44 @@ class LiveTrader:
         for symbol in self._symbols:
             frame = self._ohlcv_cache.get(symbol)
             gap_reason = self._warmup_gap(symbol, frame)
-            if gap_reason is None:
+            backlog = self._replay_backlog_exhausted.get(symbol)
+            exhausted = symbol in self._warmup_exhausted_fingerprints
+            if backlog is not None:
+                reason = "warmup_replay_backlog_exhausted"
+            elif gap_reason is not None and exhausted:
+                reason = "warmup_backfill_exhausted"
+            else:
+                reason = gap_reason
+            if reason is None:
                 self._reported_warmup_reasons.pop(symbol, None)
                 continue
             usable_periods = len(frame) if frame is not None else 0
-            if self._reported_warmup_reasons.get(symbol) == gap_reason:
+            if self._reported_warmup_reasons.get(symbol) == reason:
                 continue
-            self._reported_warmup_reasons[symbol] = gap_reason
+            self._reported_warmup_reasons[symbol] = reason
             requested_periods = self._warmup_requested_periods.get(symbol, 0)
             attempts = self._warmup_fetch_attempts.get(symbol, 0)
-            changed.append(
-                f"{symbol}={usable_periods}/{self._warmup_periods} "
-                f"(requested up to {requested_periods})"
-            )
+            missing_periods = self._warmup_missing_periods(symbol, frame)
+            if backlog is not None:
+                summary = f"{symbol} replay queue exceeded its {backlog[1]}-period history bound"
+            elif gap_reason == "warmup_replay_history_incomplete":
+                summary = (
+                    f"{symbol} missing={missing_periods} periods before its next replay candidate "
+                    f"(cached total={usable_periods}, requested up to {requested_periods})"
+                )
+            else:
+                summary = (
+                    f"{symbol} missing={missing_periods} periods "
+                    f"(usable={usable_periods}/{self._warmup_periods}, "
+                    f"requested up to {requested_periods})"
+                )
+            changed.append(summary)
             logger.warning(
-                "Live warmup incomplete for %s: usable=%d required=%d "
-                "requested=%d attempts=%d/%d; strategy evaluation remains disabled",
+                "Live warmup unavailable for %s: reason=%s missing=%d usable_total=%d "
+                "required=%d requested=%d attempts=%d/%d; strategy evaluation remains disabled",
                 symbol,
+                reason,
+                missing_periods,
                 usable_periods,
                 self._warmup_periods,
                 requested_periods,
@@ -1599,12 +1686,23 @@ class LiveTrader:
                         event_type="decision_skipped",
                         symbol=symbol,
                         detail={
-                            "reason": gap_reason,
+                            "reason": reason,
+                            "gap_reason": gap_reason,
                             "usable_periods": usable_periods,
                             "required_periods": self._warmup_periods,
+                            "missing_periods": missing_periods,
                             "requested_periods": requested_periods,
                             "attempts": attempts,
                             "max_attempts": self.WARMUP_MAX_FETCH_ATTEMPTS,
+                            "terminal": exhausted or backlog is not None,
+                            **(
+                                {
+                                    "queued_replay_periods": backlog[0],
+                                    "max_history_periods": backlog[1],
+                                }
+                                if backlog is not None
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -1613,9 +1711,31 @@ class LiveTrader:
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Live Warmup Incomplete",
                 message=(
-                    ", ".join(changed) + "; strategy evaluation is disabled and backfill will retry"
+                    ", ".join(changed)
+                    + "; strategy evaluation is disabled; exhausted sources resume escalation "
+                    "only after new history, while replay overflow requires "
+                    "restart/resynchronization"
                 ),
             )
+
+    def _warmup_missing_periods(
+        self,
+        symbol: str,
+        frame: pd.DataFrame | None,
+    ) -> int:
+        """Return the actual feature-history shortfall at the next event."""
+        if frame is None or len(frame) < self._warmup_periods:
+            return self._warmup_periods - (len(frame) if frame is not None else 0)
+        if not self._executor.simulation:
+            return 0
+        watermark = self._last_bar_ts.get(symbol)
+        if watermark is None:
+            return 0
+        candidate_positions = pd.to_datetime(frame["ts"], utc=True) > watermark
+        if not bool(candidate_positions.any()):
+            return 0
+        first_position = int(candidate_positions.to_numpy().argmax())
+        return max(0, self._warmup_periods - first_position - 1)
 
     def _warmup_gap(self, symbol: str, frame: pd.DataFrame | None) -> str | None:
         """Return why a symbol cannot safely evaluate its next runtime event."""

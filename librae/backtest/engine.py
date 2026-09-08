@@ -272,16 +272,31 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
 
     month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     month_diffs = np.diff(month_ordinals)
-    if np.all(month_diffs > 0):
+    month_starts = pd.DatetimeIndex(
+        [period_start(timestamp, "MN1", calendar_id) for timestamp in sample]
+    )
+    if np.all(sample == month_starts) and np.all(month_diffs > 0):
         return f"MN{int(np.gcd.reduce(month_diffs))}"
 
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_diffs = np.diff(week_ordinals)
-    if np.all(week_diffs > 0):
+    week_starts = pd.DatetimeIndex(
+        [period_start(timestamp, "W1", calendar_id) for timestamp in sample]
+    )
+    if np.all(sample == week_starts) and np.all(week_diffs > 0):
         return f"W{int(np.gcd.reduce(week_diffs))}"
 
     session_diffs = np.diff(ordinals)
     return f"D{int(np.gcd.reduce(session_diffs))}"
+
+
+def _session_timeframe_unit(timeframe: str) -> str | None:
+    """Return the calendar cadence unit, keeping day, week, and month distinct."""
+    if timeframe.startswith("MN"):
+        return "MN"
+    if timeframe.startswith(("D", "W")):
+        return timeframe[0]
+    return None
 
 
 def _validate_session_timeframe(
@@ -335,13 +350,14 @@ def _resolve_data_timeframe(
     }
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
+        expected_session_unit = _session_timeframe_unit(expected)
         mismatches = {
             symbol: timeframe
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
             and not (
-                timeframe.startswith(("D", "W", "MN"))
-                and expected.startswith(("D", "W", "MN"))
+                expected_session_unit is not None
+                and _session_timeframe_unit(timeframe) == expected_session_unit
                 and calendar_ids.get(symbol) is not None
             )
         }

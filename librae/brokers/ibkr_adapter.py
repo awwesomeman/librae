@@ -39,9 +39,15 @@ from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
     InstrumentKind,
+    canonicalize_price_to_increment,
 )
 from librae.core.run_config import MarketDataSessionMode
-from librae.core.trading_calendar import next_session_open, session_bounds, validate_calendar_id
+from librae.core.trading_calendar import (
+    next_session_open,
+    session_bounds,
+    session_lookback_days,
+    validate_calendar_id,
+)
 from librae.core.utils import floor_to_step, validate_contract_month
 from librae.live.executor import PositionRequest
 
@@ -503,6 +509,12 @@ class IBKRAdapter:
         if start:
             start_dt = _parse_dt(start)
             duration = f"{max(1, (end_dt - start_dt).days + 1)} D"
+        elif timeframe == "1d":
+            if calendar_id is None:  # guarded before duration calculation
+                raise RuntimeError("calendar_id unexpectedly missing for IBKR daily bars")
+            # Include one possible current/forming session. The adapter later
+            # applies source availability and tails the requested row count.
+            duration = f"{session_lookback_days(end_dt, limit + 1, calendar_id)} D"
         else:
             duration = _default_duration_str(timeframe, limit)
 
@@ -583,6 +595,34 @@ class IBKRAdapter:
                 "to enable order placement."
             )
 
+    @classmethod
+    def _normalize_limit_price(cls, signal: dict, details: object) -> float:
+        market_rule_ids = str(getattr(details, "marketRuleIds", "") or "").strip()
+        if market_rule_ids:
+            raise ValueError(
+                f"{signal['symbol']} requires an IBKR market-rule ladder; "
+                "ContractDetails.minTick alone is not authoritative"
+            )
+        tick_size = cls._positive_float(getattr(details, "minTick", None))
+        if tick_size is None:
+            raise ValueError(f"{signal['symbol']} has no positive IBKR minTick")
+        return passive_price(float(signal["price"]), tick_size, signal["side"])
+
+    def normalize_limit_price(self, signal: dict) -> float:
+        """Normalize only contracts whose details declare no price-band ladder."""
+        validate_order_signal(signal)
+        if signal.get("order_type") != "limit":
+            raise ValueError("normalize_limit_price requires a limit order")
+        details = self._contract_details(
+            signal["symbol"],
+            security_type=signal["security_type"],
+            exchange=signal.get("exchange"),
+            currency=signal["currency"],
+            continuous_alias=signal.get("continuous_alias", False),
+            contract_month=signal.get("contract_month"),
+        )
+        return self._normalize_limit_price(signal, details)
+
     def prepare_order(self, signal: dict) -> dict:
         """Apply IBKR ContractDetails size and tick constraints."""
         validate_order_signal(signal)
@@ -607,14 +647,15 @@ class IBKRAdapter:
         prepared = dict(signal)
         prepared["quantity"] = quantity
         if signal.get("order_type") == "limit":
-            tick_size = self._positive_float(getattr(details, "minTick", None))
-            if tick_size is None:
-                raise ValueError(f"{signal['symbol']} has no positive IBKR minTick")
-            prepared["price"] = passive_price(
-                float(signal["price"]),
-                tick_size,
-                signal["side"],
-            )
+            raw_increment = signal.get("price_increment")
+            if raw_increment is not None:
+                prepared["price"] = canonicalize_price_to_increment(
+                    float(signal["price"]),
+                    raw_increment,
+                    context=f"{signal['symbol']} limit price",
+                )
+            else:
+                prepared["price"] = self._normalize_limit_price(signal, details)
         return prepared
 
     def place_order(self, signal: dict) -> dict:
