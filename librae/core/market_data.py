@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -26,25 +27,13 @@ SIDE_TRADABILITY_COLUMNS = (CAN_BUY_COLUMN, CAN_SELL_COLUMN)
 AVAILABLE_AT_COLUMN = "available_at"
 
 
-class _FrozenFrameMap(Mapping["MarketDataSubscription", pd.DataFrame]):
-    """Read-only mapping whose deep copies contain only detached frames."""
-
-    __slots__ = ("_data",)
-
-    def __init__(self, data: Mapping[MarketDataSubscription, pd.DataFrame]) -> None:
-        self._data = dict(data)
-
-    def __getitem__(self, key: MarketDataSubscription) -> pd.DataFrame:
-        return self._data[key].copy(deep=True)
-
-    def __iter__(self) -> Iterator[MarketDataSubscription]:
-        return iter(self._data)
-
-    def __len__(self) -> int:
-        return len(self._data)
-
-    def __deepcopy__(self, memo: dict[int, object]) -> dict[MarketDataSubscription, pd.DataFrame]:
-        return {subscription: frame.copy(deep=True) for subscription, frame in self._data.items()}
+def _detach_object_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Copy a frame and recursively detach mutable object-dtype feature cells."""
+    detached = frame.copy(deep=True)
+    for position, dtype in enumerate(detached.dtypes):
+        if pd.api.types.is_object_dtype(dtype):
+            detached.iloc[:, position] = detached.iloc[:, position].map(deepcopy)
+    return detached
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -116,42 +105,82 @@ class MarketDataSubscription:
         return cls(**value)
 
 
+class _MarketDataSource:
+    """Run-owned immutable source used by lazy point-in-time views."""
+
+    __slots__ = ("_frames", "_index", "subscriptions")
+
+    def __init__(self, frames: Mapping[MarketDataSubscription, pd.DataFrame]) -> None:
+        subscriptions = tuple(sorted(frames))
+        self.subscriptions = subscriptions
+        self._frames = tuple(_detach_object_features(frames[item]) for item in subscriptions)
+        self._index = {subscription: index for index, subscription in enumerate(subscriptions)}
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _MarketDataSource:
+        # The source is engine-owned and has no mutating API. Views carry only
+        # immutable prefix counts, so sharing it cannot advance an old view.
+        return self
+
+    def index_of(self, subscription: MarketDataSubscription) -> int:
+        try:
+            return self._index[subscription]
+        except KeyError as exc:
+            raise KeyError(f"unknown market-data subscription: {subscription!r}") from exc
+
+    def row_count(self, index: int) -> int:
+        return len(self._frames[index])
+
+    def history(
+        self,
+        subscription: MarketDataSubscription,
+        visible_count: int,
+        limit: int | None,
+    ) -> pd.DataFrame:
+        frame = self._frames[self.index_of(subscription)]
+        visible = frame.iloc[:visible_count].sort_index(kind="stable")
+        if limit is not None:
+            visible = visible.tail(limit)
+        return _detach_object_features(visible)
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataView:
     """Point-in-time, identity-keyed market history exposed to a strategy.
 
-    Views are snapshots: later engine progress cannot make rows appear in an
-    already emitted ``Context``.  ``history`` returns a deep copy so strategy
-    code cannot mutate engine-owned data or another callback's view.
-
-    The snapshot itself contains only visible rows; it never retains a
-    reference to the replay store or any future observation.
+    Views are lazy snapshots: immutable visibility counts freeze the as-of
+    frontier, while ``history`` materializes only selected rows and returns a
+    deep copy. Later engine progress and caller mutation therefore cannot
+    change an already emitted ``Context``.
     """
 
     as_of: datetime
-    _visible_data: Mapping[MarketDataSubscription, pd.DataFrame] = field(repr=False)
+    _source: _MarketDataSource = field(repr=False)
+    _visible_counts: tuple[int, ...] = field(repr=False)
 
     def __post_init__(self) -> None:
         timestamp = pd.Timestamp(self.as_of)
         if timestamp.tz is None:
             raise ValueError("MarketDataView.as_of must be timezone-aware")
-        visible_data = {
-            subscription: frame.copy(deep=True)
-            for subscription, frame in self._visible_data.items()
-        }
-        if any(
-            not isinstance(subscription, MarketDataSubscription) for subscription in visible_data
-        ):
-            raise TypeError("MarketDataView identities must be MarketDataSubscription values")
-        if any(not isinstance(frame, pd.DataFrame) for frame in visible_data.values()):
-            raise TypeError("MarketDataView histories must be pandas DataFrames")
+        if not isinstance(self._source, _MarketDataSource):
+            raise TypeError("MarketDataView source must be an engine market-data source")
+        visible_counts = tuple(self._visible_counts)
+        if len(visible_counts) != len(self._source.subscriptions):
+            raise ValueError("MarketDataView visibility must cover every subscription")
+        for index, count in enumerate(visible_counts):
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 0
+                or count > self._source.row_count(index)
+            ):
+                raise ValueError("MarketDataView visibility counts are invalid")
         object.__setattr__(self, "as_of", timestamp.tz_convert("UTC").to_pydatetime())
-        object.__setattr__(self, "_visible_data", _FrozenFrameMap(visible_data))
+        object.__setattr__(self, "_visible_counts", visible_counts)
 
     @property
     def subscriptions(self) -> tuple[MarketDataSubscription, ...]:
         """Return the exact identities available through this view."""
-        return tuple(sorted(self._visible_data))
+        return self._source.subscriptions
 
     def history(
         self,
@@ -160,17 +189,12 @@ class MarketDataView:
         limit: int | None = None,
     ) -> pd.DataFrame:
         """Return visible rows for one exact identity in canonical time order."""
-        if subscription not in self._visible_data:
-            raise KeyError(f"unknown market-data subscription: {subscription!r}")
         if limit is not None and (
             isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
         ):
             raise ValueError("limit must be a positive integer or None")
-
-        visible = self._visible_data[subscription]
-        if limit is not None:
-            visible = visible.tail(limit)
-        return visible.copy(deep=True)
+        index = self._source.index_of(subscription)
+        return self._source.history(subscription, self._visible_counts[index], limit)
 
 
 def subscription_from_instrument(

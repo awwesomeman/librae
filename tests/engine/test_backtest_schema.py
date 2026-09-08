@@ -115,6 +115,7 @@ def test_backtest_output_serializes_scalar_account() -> None:
 
     assert payload["account"]["account_id"] == "default"
     assert "accounts" not in payload
+    assert "auxiliary_subscriptions" not in payload["run_metadata"]
 
 
 def test_backtest_output_validate_empty_run_id_raises() -> None:

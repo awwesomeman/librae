@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae import Backtest, MarketDataSubscription, build_backtest_artifact
+from librae.core import market_data as market_data_module
 from librae.core.cost_model import CostModel
 from librae.core.executor import REASON_DRAWDOWN_BREACH, REASON_STOP_LOSS
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
@@ -42,7 +43,7 @@ def _frame(
     timestamps: list[str] | pd.DatetimeIndex,
     *,
     available_at: list[str] | pd.DatetimeIndex | None = None,
-    feature: list[float] | None = None,
+    feature: list[object] | None = None,
     multiindex: bool = True,
     volume: float = 100.0,
 ) -> pd.DataFrame:
@@ -181,11 +182,11 @@ def test_view_contains_no_future_rows_and_mutation_cannot_affect_later_context()
 
         def on_bar(self, ctx: Context) -> list[OrderIntent]:
             assert ctx.market_data is not None
-            private_snapshot = ctx.market_data._visible_data[auxiliary_subscription]
-            self.lengths.append(len(private_snapshot))
-            if not private_snapshot.empty:
-                self.values.append(float(private_snapshot.iloc[0]["feature"]))
-                private_snapshot.iloc[0, private_snapshot.columns.get_loc("feature")] = 999.0
+            returned = ctx.market_data.history(auxiliary_subscription)
+            self.lengths.append(len(returned))
+            if not returned.empty:
+                self.values.append(float(returned.iloc[0]["feature"]))
+                returned.iloc[0, returned.columns.get_loc("feature")] = 999.0
             return []
 
     strategy = MutatingStrategy()
@@ -198,6 +199,51 @@ def test_view_contains_no_future_rows_and_mutation_cannot_affect_later_context()
 
     assert strategy.lengths == [1, 1, 2, 2, 2]
     assert strategy.values == [1.0] * 5
+
+
+def test_object_feature_cells_are_detached_from_caller_and_history_results() -> None:
+    primary_subscription = _subscription("PRIMARY", "H1")
+    primary = _frame(
+        "PRIMARY",
+        pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC"),
+        feature=[{"score": value} for value in range(5)],
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+    auxiliary = _frame(
+        "AUX",
+        ["2026-01-01"],
+        feature=[{"score": 10}],
+        multiindex=False,
+    )
+
+    class MutateNestedValues(Strategy):
+        def __init__(self) -> None:
+            self.values: list[tuple[int, int]] = []
+
+        def on_bar(self, ctx: Context) -> list[OrderIntent]:
+            assert ctx.market_data is not None
+            primary_history = ctx.market_data.history(primary_subscription)
+            auxiliary_history = ctx.market_data.history(auxiliary_subscription)
+            primary_feature = primary_history.iloc[0]["feature"]
+            auxiliary_feature = auxiliary_history.iloc[0]["feature"]
+            self.values.append((primary_feature["score"], auxiliary_feature["score"]))
+            primary_feature["score"] = 999
+            auxiliary_feature["score"] = 999
+            return []
+
+    strategy = MutateNestedValues()
+    backtest = _mixed_backtest(
+        primary,
+        strategy,
+        {auxiliary_subscription: auxiliary},
+        primary_subscriptions=(primary_subscription,),
+    )
+    primary.iloc[0, primary.columns.get_loc("feature")]["score"] = 111
+    auxiliary.iloc[0, auxiliary.columns.get_loc("feature")]["score"] = 222
+
+    backtest.run()
+
+    assert strategy.values == [(0, 10)] * 5
 
 
 def test_auxiliary_rows_never_create_primary_runtime_events() -> None:
@@ -263,6 +309,41 @@ def test_independent_pending_intents_keep_their_emission_frontiers() -> None:
         ("A", pd.Timestamp("2026-01-03 02:00Z")),
         ("B", pd.Timestamp("2026-01-03 05:00Z")),
     ]
+
+
+def test_pending_group_id_cannot_be_reused_across_emissions() -> None:
+    timestamps = pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC")
+    late_available = pd.DatetimeIndex(
+        [
+            "2026-01-03 04:00Z",
+            "2026-01-03 02:00Z",
+            "2026-01-03 03:00Z",
+            "2026-01-03 04:00Z",
+            "2026-01-03 05:00Z",
+        ]
+    )
+    primary = pd.concat(
+        [
+            _frame("A", timestamps, available_at=late_available),
+            _frame("B", timestamps),
+        ]
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+
+    class ReusedGroup(Strategy):
+        def on_bar(self, ctx: Context) -> list[OrderIntent]:
+            if ctx.period_index == 0:
+                return [OrderIntent("long", symbol="A", quantity=1.0, group_id="spread")]
+            if ctx.period_index == 1:
+                return [OrderIntent("long", symbol="B", quantity=2_000.0, group_id="spread")]
+            return []
+
+    with pytest.raises(ValueError, match="reused pending group_id"):
+        _mixed_backtest(
+            primary,
+            ReusedGroup(),
+            {auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
+        ).run()
 
 
 @pytest.mark.parametrize("portfolio", [False, True])
@@ -468,6 +549,35 @@ def test_shuffled_inputs_and_mapping_order_have_identical_views() -> None:
     assert shuffled == canonical
 
 
+def test_reversed_multiasset_rows_use_declared_primary_subscription_order() -> None:
+    timestamps = pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC")
+    canonical_primary = pd.concat([_frame("A", timestamps), _frame("B", timestamps)])
+    primary_subscriptions = (_subscription("A", "H1"), _subscription("B", "H1"))
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+    auxiliary = {auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)}
+
+    canonical_strategy = _Capture()
+    reversed_strategy = _Capture()
+    canonical = _mixed_backtest(
+        canonical_primary,
+        canonical_strategy,
+        auxiliary,
+        primary_subscriptions=primary_subscriptions,
+    )
+    reversed_run = _mixed_backtest(
+        canonical_primary.iloc[::-1],
+        reversed_strategy,
+        auxiliary,
+        primary_subscriptions=primary_subscriptions,
+    )
+
+    assert reversed_run.run() == canonical.run()
+    assert reversed_run.build_output().run_metadata.symbols == ("A", "B")
+    assert [ctx.available_symbols for ctx in reversed_strategy.contexts] == [
+        ctx.available_symbols for ctx in canonical_strategy.contexts
+    ]
+
+
 def test_empty_auxiliary_mapping_preserves_legacy_context_and_result() -> None:
     primary = _frame(
         "PRIMARY",
@@ -511,18 +621,116 @@ def test_direct_mixed_backtest_requires_full_primary_identities() -> None:
         )
 
 
-def test_direct_mixed_backtest_requires_primary_identity_order() -> None:
+def test_direct_mixed_backtest_uses_primary_identity_order_as_ssot() -> None:
     timestamps = pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC")
     primary = pd.concat([_frame("A", timestamps), _frame("B", timestamps)])
     auxiliary_subscription = _subscription("AUX", "D1", source="daily")
 
-    with pytest.raises(ValueError, match="must follow and exactly cover"):
+    backtest = _mixed_backtest(
+        primary,
+        _Capture(),
+        {auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
+        primary_subscriptions=(_subscription("B", "H1"), _subscription("A", "H1")),
+    )
+
+    backtest.run()
+
+    assert backtest.build_output().run_metadata.symbols == ("B", "A")
+
+
+def test_direct_daily_identity_accepts_sparse_weekdays_across_dst() -> None:
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(
+            [
+                "2026-02-23 14:30Z",
+                "2026-03-02 14:30Z",
+                "2026-03-09 13:30Z",
+                "2026-03-16 13:30Z",
+                "2026-03-23 13:30Z",
+            ],
+            utc=True,
+        )
+    )
+    primary = _frame("MU", timestamps)
+    primary_subscription = _subscription(
+        "MU",
+        "D1",
+        calendar_id="XNYS",
+        session_mode="regular",
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+    strategy = _Capture()
+
+    backtest = _mixed_backtest(
+        primary,
+        strategy,
+        {auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
+        primary_subscriptions=(primary_subscription,),
+    )
+    backtest.run()
+
+    assert backtest.build_output().run_metadata.timeframe == "D1"
+    assert len(strategy.contexts) == 5
+
+
+def test_direct_weekly_identity_rejects_daily_session_rows() -> None:
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(
+            [
+                "2026-03-02 14:30Z",
+                "2026-03-03 14:30Z",
+                "2026-03-04 14:30Z",
+                "2026-03-05 14:30Z",
+                "2026-03-06 14:30Z",
+            ],
+            utc=True,
+        )
+    )
+    primary = _frame("MU", timestamps)
+    primary_subscription = _subscription(
+        "MU",
+        "W1",
+        calendar_id="XNYS",
+        session_mode="regular",
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+
+    with pytest.raises(ValueError, match="canonical timeframe=W1 period starts"):
         _mixed_backtest(
             primary,
             _Capture(),
             {auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
-            primary_subscriptions=(_subscription("B", "H1"), _subscription("A", "H1")),
-        )
+            primary_subscriptions=(primary_subscription,),
+        ).run()
+
+
+def test_market_data_view_materializes_history_only_on_demand(monkeypatch) -> None:
+    primary = _frame(
+        "PRIMARY",
+        pd.date_range("2026-01-03 00:00", periods=10, freq="h", tz="UTC"),
+    )
+    auxiliary_subscription = _subscription("AUX", "D1", source="daily")
+    strategy = _Capture()
+    calls = 0
+    original = market_data_module._MarketDataSource.history
+
+    def counted_history(self, subscription, visible_count, limit):
+        nonlocal calls
+        calls += 1
+        return original(self, subscription, visible_count, limit)
+
+    monkeypatch.setattr(market_data_module._MarketDataSource, "history", counted_history)
+    _mixed_backtest(
+        primary,
+        strategy,
+        {auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
+    ).run()
+
+    assert calls == 0
+    assert len({id(ctx.market_data._source) for ctx in strategy.contexts}) == 1
+    assert all(isinstance(ctx.market_data._visible_counts, tuple) for ctx in strategy.contexts)
+    strategy.contexts[-1].market_data.history(auxiliary_subscription)
+    assert calls == 1
 
 
 def test_config_mixed_backtest_reuses_resolved_primary_identity() -> None:

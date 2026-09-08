@@ -49,9 +49,14 @@ def _package_version() -> str:
         return "0.0.0.dev0+unknown"
 
 
-def _manifest(kind: ArtifactKind, **metadata: object) -> dict[str, Any]:
+def _manifest(
+    kind: ArtifactKind,
+    *,
+    schema_version: int = 3,
+    **metadata: object,
+) -> dict[str, Any]:
     return {
-        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "artifact_schema_version": schema_version,
         "artifact_kind": kind,
         "librae_version": _package_version(),
         "created_at": datetime.now(UTC).isoformat(),
@@ -250,6 +255,9 @@ def build_backtest_artifact(
     return TabularArtifact(
         manifest=_manifest(
             "backtest_output",
+            schema_version=(
+                ARTIFACT_SCHEMA_VERSION if output.run_metadata.auxiliary_subscriptions else 3
+            ),
             config_hash=config_hash,
             run_metadata=output.to_dict()["run_metadata"],
         ),

@@ -296,7 +296,10 @@ class BacktestOutput:
                 return [_convert(item) for item in obj]
             return obj
 
-        return _convert(asdict(self))
+        payload = _convert(asdict(self))
+        if not self.run_metadata.auxiliary_subscriptions:
+            payload["run_metadata"].pop("auxiliary_subscriptions", None)
+        return payload
 
     def validate(self) -> None:
         """Raise ValueError if required fields are empty/missing."""

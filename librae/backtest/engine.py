@@ -86,6 +86,8 @@ from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
     MarketDataSubscription,
     MarketDataView,
+    _detach_object_features,
+    _MarketDataSource,
     normalize_bar_times,
     subscription_from_instrument,
     validate_bar_cadence,
@@ -150,6 +152,21 @@ def _merge_enveloped_decision(
     """Apply legacy pending-decision merge rules while preserving causal time."""
     pending = _enveloped_decision(envelopes)
     merge_pending_decisions(pending, new_decision, primary_symbol=primary_symbol)
+    if not isinstance(new_decision, PortfolioWeights):
+        pending_group_ids = {
+            intent.group_id
+            for envelope in envelopes
+            if not isinstance(envelope.decision, PortfolioWeights)
+            for intent in envelope.decision
+            if intent.group_id is not None
+        }
+        new_group_ids = {intent.group_id for intent in new_decision if intent.group_id is not None}
+        reused_group_ids = pending_group_ids & new_group_ids
+        if reused_group_ids:
+            raise ValueError(
+                "strategy reused pending group_id across decision emissions: "
+                f"{sorted(reused_group_ids)}"
+            )
     if not new_decision:
         return list(envelopes)
     envelope = _DecisionEnvelope(
@@ -201,30 +218,26 @@ class _MarketDataReplay:
         auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame],
     ) -> None:
         frames: dict[MarketDataSubscription, pd.DataFrame] = {}
-        visible_rows: dict[MarketDataSubscription, list[int]] = {}
-        primary_by_ts: dict[
-            pd.Timestamp, list[tuple[MarketDataSubscription, int, pd.Timestamp]]
-        ] = {}
+        primary_by_ts: dict[pd.Timestamp, list[tuple[MarketDataSubscription, pd.Timestamp]]] = {}
 
         for subscription in primary_subscriptions:
             frame = primary_data.xs(subscription.symbol, level="symbol").copy(deep=True)
             frames[subscription] = frame
-            visible_rows[subscription] = []
-            for row_number, (ts, available_at) in enumerate(
-                zip(frame.index, frame[AVAILABLE_AT_COLUMN], strict=True)
-            ):
+            for ts, available_at in zip(frame.index, frame[AVAILABLE_AT_COLUMN], strict=True):
                 primary_by_ts.setdefault(pd.Timestamp(ts), []).append(
-                    (subscription, row_number, pd.Timestamp(available_at))
+                    (subscription, pd.Timestamp(available_at))
                 )
 
         auxiliary_observations: list[
             tuple[pd.Timestamp, pd.Timestamp, MarketDataSubscription, int]
         ] = []
         for subscription, frame in auxiliary_data.items():
-            frames[subscription] = frame
-            visible_rows[subscription] = []
+            # The normalized frame is already in canonical timestamp order;
+            # stable availability sorting therefore yields (available_at, ts).
+            replay_frame = frame.sort_values(AVAILABLE_AT_COLUMN, kind="stable").copy(deep=True)
+            frames[subscription] = replay_frame
             for row_number, (ts, available_at) in enumerate(
-                zip(frame.index, frame[AVAILABLE_AT_COLUMN], strict=True)
+                zip(replay_frame.index, replay_frame[AVAILABLE_AT_COLUMN], strict=True)
             ):
                 auxiliary_observations.append(
                     (
@@ -235,8 +248,8 @@ class _MarketDataReplay:
                     )
                 )
 
-        self._frames = frames
-        self._visible_rows = visible_rows
+        self._source = _MarketDataSource(frames)
+        self._visible_counts = [0] * len(self._source.subscriptions)
         self._primary_by_ts = primary_by_ts
         self._auxiliary_observations = sorted(auxiliary_observations)
         self._auxiliary_cursor = 0
@@ -245,7 +258,7 @@ class _MarketDataReplay:
     def advance_frontier(self, ts: pd.Timestamp) -> pd.Timestamp:
         """Advance the cumulative availability watermark for one primary cohort."""
         observations = self._primary_by_ts[ts]
-        raw_frontier = max(available_at for _, _, available_at in observations)
+        raw_frontier = max(available_at for _, available_at in observations)
         self._frontier = (
             raw_frontier if self._frontier is None else max(self._frontier, raw_frontier)
         )
@@ -255,7 +268,10 @@ class _MarketDataReplay:
             ]
             if available_at > self._frontier:
                 break
-            self._visible_rows[subscription].append(row_number)
+            index = self._source.index_of(subscription)
+            if row_number != self._visible_counts[index]:
+                raise RuntimeError("auxiliary replay lost stable prefix ordering")
+            self._visible_counts[index] += 1
             self._auxiliary_cursor += 1
         return self._frontier
 
@@ -263,14 +279,12 @@ class _MarketDataReplay:
         """Commit only the canonical primary cohort already processed by the run."""
         if self._frontier is None:
             raise RuntimeError("market-data frontier must advance before primary commit")
-        for subscription, row_number, _ in self._primary_by_ts[ts]:
-            self._visible_rows[subscription].append(row_number)
+        for subscription, _ in self._primary_by_ts[ts]:
+            self._visible_counts[self._source.index_of(subscription)] += 1
         return MarketDataView(
             as_of=self._frontier.to_pydatetime(),
-            _visible_data={
-                subscription: frame.iloc[self._visible_rows[subscription]].sort_index(kind="stable")
-                for subscription, frame in self._frames.items()
-            },
+            _source=self._source,
+            _visible_counts=tuple(self._visible_counts),
         )
 
 
@@ -479,11 +493,21 @@ def _validate_primary_subscriptions(
     return normalized
 
 
-def _sort_mixed_primary_data(data: pd.DataFrame) -> pd.DataFrame:
-    """Stably sort each primary symbol without changing its declared order."""
+def _sort_mixed_primary_data(
+    data: pd.DataFrame,
+    symbol_order: Sequence[str],
+) -> pd.DataFrame:
+    """Stably sort primary rows using the declared universe order when valid."""
     if not isinstance(data.index, pd.MultiIndex) or data.index.nlevels != 2:
         return data
-    symbols = data.index.get_level_values(0).unique()
+    observed_symbols = tuple(data.index.get_level_values(0).unique())
+    declared_symbols = tuple(symbol_order)
+    symbols = (
+        declared_symbols
+        if len(declared_symbols) == len(set(declared_symbols))
+        and set(declared_symbols) == set(observed_symbols)
+        else observed_symbols
+    )
     return pd.concat(
         [
             data.xs(symbol, level=0, drop_level=False).sort_index(
@@ -536,7 +560,7 @@ def _normalize_auxiliary_frame(
         subscription,
     )
     normalized[AVAILABLE_AT_COLUMN] = available_at
-    return normalized
+    return _detach_object_features(normalized)
 
 
 def _normalize_auxiliary_data(
@@ -691,8 +715,10 @@ def _resolve_data_timeframe(
     data: pd.DataFrame,
     configured_timeframe: str | None,
     calendar_ids: dict[str, str | None],
+    *,
+    authoritative_timeframe: bool = False,
 ) -> str:
-    """Infer each symbol independently and require one coherent bar interval."""
+    """Validate one coherent bar interval, preferring declared exact identity."""
     indexes_by_symbol = {
         str(symbol): pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
         for symbol, symbol_data in data.groupby(level="symbol", sort=False)
@@ -732,6 +758,7 @@ def _resolve_data_timeframe(
             symbol: timeframe
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
+            and not authoritative_timeframe
             and not (
                 expected_session_unit is not None
                 and _session_timeframe_unit(timeframe) == expected_session_unit
@@ -924,9 +951,27 @@ class Backtest:
     ) -> None:
         data = _canonicalize_backtest_timestamps(data)
         normalized_auxiliary_data = _normalize_auxiliary_data(auxiliary_data)
+        try:
+            supplied_subscriptions = (
+                () if primary_subscriptions is None else tuple(primary_subscriptions)
+            )
+        except TypeError as exc:
+            raise TypeError(
+                "primary_subscriptions must be a sequence of MarketDataSubscription values"
+            ) from exc
         if normalized_auxiliary_data:
-            data = _sort_mixed_primary_data(data)
+            if supplied_subscriptions:
+                _index_primary_subscriptions(data, supplied_subscriptions)
+            declared_symbol_order = (
+                tuple(config.symbols)
+                if config is not None
+                else tuple(item.symbol for item in supplied_subscriptions)
+            )
+            data = _sort_mixed_primary_data(data, declared_symbol_order)
+            data = _detach_object_features(data)
         _validate_backtest_data(data, config.symbols if config is not None else None)
+        if supplied_subscriptions and not normalized_auxiliary_data:
+            _index_primary_subscriptions(data, supplied_subscriptions)
         if config is not None and execution is not None:
             raise ValueError(
                 "execution cannot override config.execution; use one configuration source"
@@ -937,18 +982,6 @@ class Backtest:
             raise ValueError(
                 "session_mode cannot override config.session_mode; use one configuration source"
             )
-        try:
-            supplied_subscriptions = (
-                () if primary_subscriptions is None else tuple(primary_subscriptions)
-            )
-        except TypeError as exc:
-            raise TypeError(
-                "primary_subscriptions must be a sequence of MarketDataSubscription values"
-            ) from exc
-        if supplied_subscriptions:
-            # Validate every element before reading any identity field. Direct
-            # construction uses this declared order as its universe SSOT.
-            _index_primary_subscriptions(data, supplied_subscriptions)
         supplied_session_modes = {item.session_mode for item in supplied_subscriptions}
         if len(supplied_session_modes) > 1:
             raise ValueError("primary_subscriptions must use one session_mode")
@@ -1042,13 +1075,6 @@ class Backtest:
             raise ValueError(
                 "direct Backtest auxiliary_data requires primary_subscriptions "
                 "covering every primary symbol"
-            )
-        if normalized_auxiliary_data and tuple(
-            item.symbol for item in resolved_subscriptions
-        ) != tuple(self._symbols):
-            raise ValueError(
-                "mixed-frequency primary_subscriptions must follow and exactly cover "
-                f"primary symbols; expected={tuple(self._symbols)!r}"
             )
         primary_identity_set = set(resolved_subscriptions)
         overlap = primary_identity_set & set(normalized_auxiliary_data)
@@ -1231,10 +1257,19 @@ class Backtest:
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
+        direct_mixed = self._config is None and bool(self._auxiliary_data)
+        configured_timeframe = (
+            self._config.timeframe
+            if self._config is not None
+            else self._primary_subscriptions[0].timeframe
+            if direct_mixed
+            else None
+        )
         self._timeframe = _resolve_data_timeframe(
             self._data,
-            self._config.timeframe if self._config is not None else None,
+            configured_timeframe,
             self._calendar_ids,
+            authoritative_timeframe=direct_mixed,
         )
         if self._primary_subscriptions and any(
             item.timeframe != self._timeframe for item in self._primary_subscriptions
