@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import exchange_calendars as xcals
 import librae
 import numpy as np
 import pandas as pd
@@ -50,6 +51,33 @@ def _make_multiindex_df(
 
 def _zero_cost() -> CostModel:
     return CostModel.zero()
+
+
+def _xnys_session_opens(start: str, end: str) -> pd.DatetimeIndex:
+    schedule = xcals.get_calendar("XNYS").schedule.loc[start:end]
+    return pd.DatetimeIndex(schedule["open"])
+
+
+def _first_observation_per_period(
+    index: pd.DatetimeIndex,
+    frequency: str,
+) -> pd.DatetimeIndex:
+    periods = pd.PeriodIndex(index.tz_convert(None), freq=frequency)
+    return index[~periods.duplicated()]
+
+
+def _frame_at_timestamps(
+    symbol: str,
+    timestamps: pd.DatetimeIndex,
+    *,
+    price: float = 100.0,
+) -> pd.DataFrame:
+    frame = _make_multiindex_df([price] * len(timestamps), symbol=symbol)
+    frame.index = pd.MultiIndex.from_arrays(
+        [[symbol] * len(timestamps), timestamps],
+        names=["symbol", "datetime"],
+    )
+    return frame
 
 
 _XNYS_SESSION_CADENCE_TIMESTAMPS = {
@@ -969,6 +997,133 @@ class TestBacktestDataContract:
         backtest.run()
 
         assert backtest._timeframe == timeframe
+
+    @pytest.mark.parametrize("timeframe", ["D5", "W5"])
+    def test_long_sparse_session_cadence_stays_stable_across_calendar_boundaries(
+        self,
+        timeframe: str,
+    ) -> None:
+        opens = _xnys_session_opens("2024-01-02", "2027-12-31")
+        if timeframe == "D5":
+            timestamps = opens[2::5][:25]
+        else:
+            weekly = _first_observation_per_period(opens, "W-SUN")
+            timestamps = weekly[1::5][:15]
+        frame = _frame_at_timestamps("MU", timestamps)
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=timeframe,
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == timeframe
+
+    def test_late_daily_to_weekly_cadence_shift_is_rejected(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-06-30")
+        daily = opens[:20]
+        weekly = _first_observation_per_period(opens[opens > daily[-1]], "W-SUN")[:5]
+        frame = _frame_at_timestamps("MU", daily.append(weekly))
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*W"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_late_weekly_to_monthly_cadence_shift_is_rejected(self) -> None:
+        opens = _xnys_session_opens("2025-01-02", "2027-12-31")
+        weekly = _first_observation_per_period(opens, "W-SUN")[:20]
+        month_ordinals = pd.PeriodIndex(opens.tz_convert(None), freq="M")
+        first_later_month = month_ordinals > pd.Period(weekly[-1].tz_convert(None), freq="M")
+        monthly = _first_observation_per_period(opens[first_later_month], "M")[:5]
+        frame = _frame_at_timestamps("MU", weekly.append(monthly))
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="W1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*MN"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    @pytest.mark.parametrize(
+        ("configured_timeframe", "actual_timeframe"),
+        [
+            ("D1", "D1"),
+            ("W1", "W1"),
+            ("MN1", "MN1"),
+            ("D1", "MN1"),
+        ],
+    )
+    def test_short_session_sample_fails_closed(
+        self,
+        configured_timeframe: str,
+        actual_timeframe: str,
+    ) -> None:
+        timestamps = pd.to_datetime(
+            _XNYS_SESSION_CADENCE_TIMESTAMPS[actual_timeframe][:4],
+            utc=True,
+        )
+        frame = _frame_at_timestamps("MU", timestamps)
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=configured_timeframe,
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"at least five session bars.*'MU': 4"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_multi_asset_late_cadence_shift_names_the_affected_symbol(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-06-30")
+        daily = opens[:25]
+        shifted_prefix = opens[:20]
+        shifted_suffix = _first_observation_per_period(
+            opens[opens > shifted_prefix[-1]],
+            "W-SUN",
+        )[:5]
+        aaa = _frame_at_timestamps("AAA", daily)
+        bbb = _frame_at_timestamps("BBB", shifted_prefix.append(shifted_suffix), price=200.0)
+        instrument = {
+            "data_adapter": "ibkr",
+            "instrument_type": "spot",
+            "currency": "USD",
+            "security_type": "STK",
+        }
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["AAA", "BBB"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            calendar_id="XNYS",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={"AAA": instrument, "BBB": instrument},
+            symbol_cost_overrides={
+                "AAA": {"multiplier": 1.0},
+                "BBB": {"multiplier": 1.0},
+            },
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'BBB'.*cadence changes.*W"):
+            Backtest(pd.concat([aaa, bbb]), HoldStrategy(), config=config).run()
 
     def test_configured_daily_rejects_coarser_symbol_in_multi_asset_data(self) -> None:
         daily = _make_multiindex_df([100.0] * 5, symbol="AAA")

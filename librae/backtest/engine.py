@@ -192,6 +192,7 @@ def _superseded_rebalance_events(
 
 
 _INDEX_NAMES = ["symbol", "datetime"]
+_MIN_SESSION_CADENCE_SAMPLES = 5
 
 
 def _validate_backtest_data(
@@ -256,34 +257,62 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+def _has_late_coarse_cadence(
+    period_ordinals: np.ndarray,
+    canonical_starts: np.ndarray,
+) -> bool:
+    """Return whether a canonical coarse cadence follows denser observations."""
+    repeated_periods = np.diff(period_ordinals) == 0
+    denser_before = np.zeros(len(period_ordinals) + 1, dtype=np.bool_)
+    if len(repeated_periods) > 0:
+        denser_before[2:] = np.maximum.accumulate(repeated_periods)
+    final_start = len(period_ordinals) - _MIN_SESSION_CADENCE_SAMPLES + 1
+    for start in range(_MIN_SESSION_CADENCE_SAMPLES, final_start):
+        window = period_ordinals[start : start + _MIN_SESSION_CADENCE_SAMPLES]
+        if not np.all(canonical_starts[start : start + _MIN_SESSION_CADENCE_SAMPLES]):
+            continue
+        if np.any(np.diff(window) <= 0):
+            continue
+        if denser_before[start]:
+            return True
+    return False
+
+
 def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
-    """Infer session bars by session cadence and fixed bars by elapsed time."""
-    sample = index[:20]
+    """Infer cadence from the complete per-symbol index."""
+    if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
+        return infer_timeframe(index)
     if calendar_id is None:
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
 
     try:
-        ordinals = np.asarray(session_ordinals(sample, calendar_id), dtype=np.int64)
-        labels = session_labels(sample, calendar_id)
+        ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
+        labels = session_labels(index, calendar_id)
     except ValueError:
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
     if len(set(ordinals)) != len(ordinals):
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
 
     month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     month_diffs = np.diff(month_ordinals)
     month_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "MN1", calendar_id) for timestamp in sample]
+        [period_start(timestamp, "MN1", calendar_id) for timestamp in index]
     )
-    if np.all(sample == month_starts) and np.all(month_diffs > 0):
+    month_start_flags = np.asarray(index == month_starts, dtype=np.bool_)
+    if _has_late_coarse_cadence(month_ordinals, month_start_flags):
+        raise ValueError("session cadence changes to MN after earlier denser observations")
+    if np.all(month_start_flags) and np.all(month_diffs > 0):
         return f"MN{int(np.gcd.reduce(month_diffs))}"
 
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_diffs = np.diff(week_ordinals)
     week_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "W1", calendar_id) for timestamp in sample]
+        [period_start(timestamp, "W1", calendar_id) for timestamp in index]
     )
-    if np.all(sample == week_starts) and np.all(week_diffs > 0):
+    week_start_flags = np.asarray(index == week_starts, dtype=np.bool_)
+    if _has_late_coarse_cadence(week_ordinals, week_start_flags):
+        raise ValueError("session cadence changes to W after earlier denser observations")
+    if np.all(week_start_flags) and np.all(week_diffs > 0):
         return f"W{int(np.gcd.reduce(week_diffs))}"
 
     session_diffs = np.diff(ordinals)
@@ -343,11 +372,34 @@ def _resolve_data_timeframe(
         str(symbol): pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
         for symbol, symbol_data in data.groupby(level="symbol", sort=False)
     }
-    inferred_by_symbol = {
-        symbol: _infer_symbol_timeframe(index, calendar_ids.get(symbol))
-        for symbol, index in indexes_by_symbol.items()
-        if len(index) >= 5
-    }
+    short_session_samples: dict[str, int] = {}
+    for symbol, index in indexes_by_symbol.items():
+        calendar_id = calendar_ids.get(symbol)
+        if len(index) >= _MIN_SESSION_CADENCE_SAMPLES or calendar_id is None:
+            continue
+        try:
+            ordinals = session_ordinals(index, calendar_id)
+        except ValueError:
+            continue
+        if len(set(ordinals)) == len(ordinals):
+            short_session_samples[symbol] = len(index)
+    if short_session_samples:
+        raise ValueError(
+            "cannot validate session cadence: at least five session bars are required "
+            f"per symbol; got {short_session_samples}"
+        )
+
+    inferred_by_symbol: dict[str, str] = {}
+    for symbol, index in indexes_by_symbol.items():
+        if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
+            continue
+        try:
+            inferred_by_symbol[symbol] = _infer_symbol_timeframe(
+                index,
+                calendar_ids.get(symbol),
+            )
+        except ValueError as exc:
+            raise ValueError(f"data symbol {symbol!r} {exc}") from exc
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
         expected_session_unit = _session_timeframe_unit(expected)
@@ -376,6 +428,18 @@ def _resolve_data_timeframe(
         if len(inferred) != 1:
             raise ValueError(f"data symbols have inconsistent timeframes: {inferred_by_symbol}")
         data_timeframe = next(iter(inferred))
+
+    if _session_timeframe_unit(data_timeframe) is not None:
+        short_session_samples = {
+            symbol: len(index)
+            for symbol, index in indexes_by_symbol.items()
+            if len(index) < _MIN_SESSION_CADENCE_SAMPLES
+        }
+        if short_session_samples:
+            raise ValueError(
+                "cannot validate session cadence: at least five session bars are required "
+                f"per symbol; got {short_session_samples}"
+            )
 
     if data_timeframe.startswith(("D", "W", "MN")):
         calendar_validated: set[str] = set()
