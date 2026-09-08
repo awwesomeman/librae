@@ -284,6 +284,15 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
     return f"D{int(np.gcd.reduce(session_diffs))}"
 
 
+def _session_timeframe_unit(timeframe: str) -> str | None:
+    """Return the calendar cadence unit, keeping day, week, and month distinct."""
+    if timeframe.startswith("MN"):
+        return "MN"
+    if timeframe.startswith(("D", "W")):
+        return timeframe[0]
+    return None
+
+
 def _validate_session_timeframe(
     symbol: str,
     index: pd.DatetimeIndex,
@@ -335,13 +344,14 @@ def _resolve_data_timeframe(
     }
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
+        expected_session_unit = _session_timeframe_unit(expected)
         mismatches = {
             symbol: timeframe
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
             and not (
-                timeframe.startswith(("D", "W", "MN"))
-                and expected.startswith(("D", "W", "MN"))
+                expected_session_unit is not None
+                and _session_timeframe_unit(timeframe) == expected_session_unit
                 and calendar_ids.get(symbol) is not None
             )
         }
