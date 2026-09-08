@@ -12,6 +12,7 @@ from librae.app.grafana.generate_dashboards import (
     render_signal_monitor,
     render_unified_dashboard,
 )
+from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.core.utils import make_event_id
 
@@ -169,17 +170,40 @@ class TestRenderUnifiedDashboard:
         assert "notional / NULLIF(price * fill_quantity, 0)" in sql
         assert '"Weight"' in sql
 
-    def test_ohlcv_panels_join_the_exact_run_subscription(self):
-        dashboard = render_unified_dashboard()
-        panel = next(
-            item for item in dashboard["panels"] if item["title"] == "Price Trend — ${symbol}"
+    def test_every_ohlcv_panel_joins_the_exact_run_subscription(self):
+        subscription = MarketDataSubscription(
+            symbol="BTCUSDT",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="regular",
+            data_source="fixture",
+            instrument_type="spot",
         )
-        sql = panel["targets"][0]["rawSql"]
+        dashboards = (
+            render_unified_dashboard(),
+            render_account_overview_dashboard(),
+            render_signal_monitor(),
+        )
+        ohlcv_targets = [
+            (panel["title"], target["rawSql"])
+            for dashboard in dashboards
+            for panel in dashboard["panels"]
+            for target in panel.get("targets", [])
+            if "ohlcv" in target.get("rawSql", "").lower()
+        ]
 
-        assert "jsonb_to_recordset(m.primary_subscriptions)" in sql
-        assert "o.calendar_id = route.calendar_id" in sql
-        assert "o.instrument_type::text = route.instrument_type" in sql
-        assert "data_source = 'multi'" not in sql
+        assert ohlcv_targets
+        for title, sql in ohlcv_targets:
+            assert "primary_subscriptions" in sql, title
+            for field_name in subscription.to_dict():
+                assert f"route.{field_name}" in sql, (title, field_name)
+            assert "data_source = 'multi'" not in sql, title
+
+    def test_ohlcv_dashboards_explain_legacy_empty_subscription_metadata(self):
+        for dashboard in (render_unified_dashboard(), render_signal_monitor()):
+            description = dashboard["description"]
+            assert "primary_subscriptions=[]" in description
+            assert "recreate the run or explicitly migrate" in description
 
     def test_position_snapshot_reconstructs_state_as_of_time_range_end(self):
         """Every 'latest' lookup (position, mark, equity) must be bounded by

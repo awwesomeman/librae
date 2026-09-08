@@ -174,6 +174,12 @@ positions are reconstructed at each run's own equity timestamp rather than at
 "now", so a row never mixes moments. See
 [the dashboard-scope ADR](../decisions/2026-09-07-account-overview-is-a-separate-dashboard.md).
 
+OHLCV panels use the same exact six-field `primary_subscriptions` identity as
+the Python reader and never widen a query to make legacy data appear. A legacy
+run marked with `primary_subscriptions=[]` therefore has no price data in the
+strategy or signal dashboard; recreate the run or explicitly migrate its
+metadata from an auditable source.
+
 Dashboards query the TimescaleDB tables and remain empty until a strategy has
 written data. To inspect the panels before running a real strategy, load the
 bundled fake rows:
