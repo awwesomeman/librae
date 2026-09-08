@@ -655,9 +655,11 @@ class TestLiveTrader:
             ),
         )
 
-        frames = runner._fetch_runtime_frames()
+        results = runner._fetch_runtime_frames()
 
-        assert list(frames) == ["AAA", "BBB"]
+        assert list(results) == ["AAA", "BBB"]
+        assert all(result.outcome == "success" for result in results.values())
+        assert all(result.frame is not None for result in results.values())
         assert set(runner._cycle_fetch_seconds) == {"AAA", "BBB"}
 
     def test_concrete_market_data_adapter_uses_resolved_route(self):
@@ -914,13 +916,189 @@ class TestLiveTrader:
             for event in runtime_events
             if event.detail.get("reason") == "market_data_fetch_failed"
         ]
-        assert len(failures) == 2
+        assert len(failures) == 1
         alerts = [
             call
             for call in runner._notify.call_args_list
             if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
         ]
-        assert len(alerts) == 2
+        assert len(alerts) == 1
+
+        state["fail"] = False
+        for _ in range(4):
+            runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == set()
+
+        state["fail"] = True
+        for _ in range(3):
+            runner._poll_cycle()
+
+        failures = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_failed"
+        ]
+        assert len(failures) == 2
+
+    def test_flapping_fetch_alerts_and_clears_rolling_diagnostic(self):
+        frame = _make_ohlcv_df()
+        outcomes = iter(
+            [
+                RuntimeError("feed unavailable"),
+                RuntimeError("feed unavailable"),
+                frame,
+                RuntimeError("feed unavailable"),
+                RuntimeError("feed unavailable"),
+                frame,
+                frame,
+                frame,
+            ]
+        )
+
+        def fetcher(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(warmup_periods=1),
+        )
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._poll_cycle()
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        degraded = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_degraded"
+        ]
+        assert len(degraded) == 1
+        assert degraded[0].detail["failed_polls"] == 4
+        assert degraded[0].detail["window_polls"] == 6
+        assert degraded[0].detail["failure_rate"] == pytest.approx(2 / 3)
+        assert degraded[0].detail["current_poll_failed"] is False
+        assert strategy.on_bar.call_count == 1
+
+        # Failed cycles never replay the cached strategy event. Two healthy
+        # polls move the bounded window below the recovery threshold without
+        # evaluating the same bar again.
+        runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        runner._poll_cycle()
+
+        assert runner._market_data_fetch_degraded == set()
+        assert strategy.on_bar.call_count == 1
+        health_titles = [
+            call.kwargs["title"]
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Market Data Fetch" in call.kwargs["title"]
+        ]
+        assert health_titles == [
+            "[test] Market Data Fetch Degraded: BTCUSDT",
+            "[test] Market Data Fetch Recovered: BTCUSDT",
+        ]
+
+    def test_consecutive_and_rolling_failures_share_one_incident(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("offline"))
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        reasons = [event.detail["reason"] for event in runtime_events]
+        assert reasons == ["market_data_fetch_failed"]
+        failure_alerts = [
+            call
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Fetch Failed" in call.kwargs["title"]
+        ]
+        assert len(failure_alerts) == 1
+
+        for _ in range(3):
+            runner._record_market_data_fetch_success("BTCUSDT")
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+
+        runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
+
+    def test_single_transient_fetch_failure_does_not_alert(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runner._notify = MagicMock()
+
+        runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("transient"))
+        for _ in range(5):
+            runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
+        runner._notify.assert_not_called()
+
+    def test_required_symbol_fetch_failure_skips_partial_universe_and_commit(self):
+        t0 = datetime(2025, 1, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        state = {"bbb_fails": True}
+        frames = {
+            "AAA": _make_ohlcv_at([t0, t1]),
+            "BBB": _make_ohlcv_at([t0, t1]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            if symbol == "BBB" and state["bbb_fails"]:
+                raise RuntimeError("BBB unavailable")
+            return frames[symbol]
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        order_adapter = _mock_order_adapter()
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                warmup_periods=1,
+            ),
+            order_adapter=order_adapter,
+        )
+        runner._ohlcv_cache = {symbol: _make_ohlcv_at([t0]) for symbol in ("AAA", "BBB")}
+        runner._last_bar_ts = {"AAA": t0, "BBB": t0}
+        runner._last_cycle_ts = t0
+        runner._last_reconciliation_at = TEST_CLOCK_NOW
+        runner._persist_state = MagicMock()
+        heartbeat = MagicMock()
+        runner._on_heartbeat = heartbeat
+
+        runner._poll_cycle()
+
+        heartbeat.assert_not_called()
+        strategy.on_bar.assert_not_called()
+        order_adapter.place_order.assert_not_called()
+        runner._persist_state.assert_not_called()
+        assert runner._last_bar_ts == {"AAA": t0, "BBB": t0}
+        assert runner._last_cycle_ts == t0
+        assert runner._ohlcv_cache["AAA"]["ts"].iloc[-1].to_pydatetime() == t1
+        assert runner._ohlcv_cache["BBB"]["ts"].iloc[-1].to_pydatetime() == t0
+        assert runner._market_data_fetch_failures == {"BBB": 1}
+
+        state["bbb_fails"] = False
+        runner._poll_cycle()
+
+        heartbeat.assert_called_once_with(runner.run_id)
+        strategy.on_bar.assert_called_once()
+        assert set(strategy.on_bar.call_args.args[0].bars) == {"AAA", "BBB"}
+        assert runner._market_data_fetch_failures == {}
 
     def test_factory_rejects_daily_ibkr_before_building_adapter(self):
         config = _test_cfg(
