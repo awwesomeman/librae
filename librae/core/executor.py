@@ -2982,8 +2982,22 @@ def execute_portfolio_rebalance_slice(
             )
         state = retained_state
 
-    volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
-    adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
+    stage_minimum_preflight = residual_policy == "defer_all" and get_min_notional is not None
+    working_positions = deepcopy(positions) if stage_minimum_preflight else positions
+    volume_consumed = (
+        dict(used_bar_quantity_by_symbol or {})
+        if stage_minimum_preflight
+        else used_bar_quantity_by_symbol
+        if used_bar_quantity_by_symbol is not None
+        else {}
+    )
+    adv_consumed = (
+        dict(used_adv_quantity_by_symbol or {})
+        if stage_minimum_preflight
+        else used_adv_quantity_by_symbol
+        if used_adv_quantity_by_symbol is not None
+        else {}
+    )
     resolved_orders = list(state.orders)
     unresolved_legs: list[UnresolvedRebalanceLeg] = []
     for leg in state.unresolved_legs:
@@ -2996,7 +3010,7 @@ def execute_portfolio_rebalance_slice(
                 leg.symbol,
                 leg.target_signed_notional,
                 leg.reason,
-                positions,
+                working_positions,
                 float(raw_price),
                 get_cost_model=get_cost_model,
                 get_executable_quantity=get_executable_quantity,
@@ -3007,7 +3021,7 @@ def execute_portfolio_rebalance_slice(
     for order in resolved_orders:
         remaining_quantity = order.remaining_quantity
         if order.phase == "reduction":
-            position = positions.get(order.intent.symbol)
+            position = working_positions.get(order.intent.symbol)
             remaining_quantity = (
                 min(remaining_quantity, position.quantity) if position is not None else 0.0
             )
@@ -3037,8 +3051,12 @@ def execute_portfolio_rebalance_slice(
         if price is None or (max_volume_qty is not None and max_volume_qty <= EPSILON):
             blocked_symbols.add(symbol)
 
-    if residual_policy == "defer_all" and blocked_symbols:
-        blocked = sorted(blocked_symbols)
+    def defer_entire_batch(
+        symbols: set[str],
+        *,
+        constraint_events: list[RuntimeEvent] | None = None,
+    ) -> ExecutionResult:
+        blocked = sorted(symbols)
         runtime_events = [
             *cancellation_events,
             *_rebalance_quantity_events(
@@ -3054,6 +3072,7 @@ def execute_portfolio_rebalance_slice(
         runtime_events.extend(
             _unresolved_rebalance_event(ts, leg, blocked_symbols=blocked) for leg in unresolved_legs
         )
+        runtime_events.extend(constraint_events or [])
         return ExecutionResult(
             trades=[],
             events=[],
@@ -3065,6 +3084,9 @@ def execute_portfolio_rebalance_slice(
                 unresolved_legs=tuple(unresolved_legs),
             ),
         )
+
+    if residual_policy == "defer_all" and blocked_symbols:
+        return defer_entire_batch(blocked_symbols)
 
     remaining_by_key = {
         (order.phase, order.intent.symbol): order.remaining_quantity for order in pending_orders
@@ -3091,7 +3113,7 @@ def execute_portfolio_rebalance_slice(
 
     reduction_result = execute_order_intents(
         reduction_intents,
-        positions,
+        working_positions,
         cash,
         ts,
         get_price=lambda symbol, _action: reduction_prices.get(symbol),
@@ -3126,7 +3148,7 @@ def execute_portfolio_rebalance_slice(
         assert price is not None
         quantity = order.remaining_quantity
         if max_position_notional is not None:
-            position = positions.get(order.intent.symbol)
+            position = working_positions.get(order.intent.symbol)
             existing_quantity = position.quantity if position is not None else 0.0
             unit_notional = price * get_cost_model(order.intent.symbol).multiplier
             available_quantity = max(max_position_notional / unit_notional - existing_quantity, 0.0)
@@ -3167,7 +3189,7 @@ def execute_portfolio_rebalance_slice(
         remaining_by_key.get(("reduction", order.intent.symbol), 0.0) > EPSILON
         for order in pending_orders
         if order.phase == "reduction"
-    ) or any(leg.symbol in positions for leg in unresolved_legs)
+    ) or any(leg.symbol in working_positions for leg in unresolved_legs)
     cash_limit_cancellations: dict[tuple[RebalancePhase, str], tuple[float, float]] = {}
     if not has_future_reduction:
         scaled_quantity_by_symbol = {
@@ -3187,7 +3209,7 @@ def execute_portfolio_rebalance_slice(
             attempted_by_key[key] = final_quantity
     addition_result = execute_order_intents(
         scaled_additions,
-        positions,
+        working_positions,
         cash_after_reductions,
         ts,
         get_price=lambda symbol, _action: addition_prices.get(symbol),
@@ -3208,6 +3230,15 @@ def execute_portfolio_rebalance_slice(
         key = ("addition", event.symbol)
         filled_by_key[key] = filled_by_key.get(key, 0.0) + event.fill_quantity
         remaining_by_key[key] = max(remaining_by_key[key] - event.fill_quantity, 0.0)
+
+    minimum_events = [
+        event
+        for event in addition_result.runtime_events
+        if event.detail.get("reason") == "notional_below_minimum"
+    ]
+    if stage_minimum_preflight and minimum_events:
+        minimum_symbols = {event.symbol for event in minimum_events if event.symbol is not None}
+        return defer_entire_batch(minimum_symbols, constraint_events=minimum_events)
 
     updated_orders = tuple(
         replace(
@@ -3290,6 +3321,16 @@ def execute_portfolio_rebalance_slice(
         if updated_orders or unresolved_legs
         else None
     )
+    if stage_minimum_preflight:
+        positions.clear()
+        positions.update(working_positions)
+        if used_bar_quantity_by_symbol is not None:
+            used_bar_quantity_by_symbol.clear()
+            used_bar_quantity_by_symbol.update(volume_consumed)
+        if used_adv_quantity_by_symbol is not None:
+            used_adv_quantity_by_symbol.clear()
+            used_adv_quantity_by_symbol.update(adv_consumed)
+
     return ExecutionResult(
         trades=[*reduction_result.trades, *addition_result.trades],
         events=[*reduction_result.events, *addition_result.events],

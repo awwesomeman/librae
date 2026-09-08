@@ -242,9 +242,9 @@ class CryptoAdapter:
             else:
                 canonical_symbol = native_symbol
                 multiplier = market.get("contractSize")
-            tick_size = (market.get("precision") or {}).get("price")
+            raw_price_precision = (market.get("precision") or {}).get("price")
             price_increment = (
-                tick_size
+                raw_price_precision
                 if getattr(self._exchange, "precisionMode", None)
                 == getattr(self, "_tick_size_precision_mode", None)
                 and self._tick_size_precision_mode is not None
@@ -266,7 +266,7 @@ class CryptoAdapter:
                     delivery_month=delivery_month,
                     contract_rank=contract_rank,
                     multiplier=float(multiplier) if multiplier is not None else None,
-                    tick_size=float(tick_size) if tick_size is not None else None,
+                    tick_size=(float(price_increment) if price_increment is not None else None),
                     price_increment=(
                         float(price_increment) if price_increment is not None else None
                     ),

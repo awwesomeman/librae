@@ -116,6 +116,7 @@ def test_available_symbols_lists_spot_perpetual_and_ranked_delivery_futures(
     current = next(item for item in results if item.contract_rank == 0)
     assert current.contract_month == "202609"
     assert current.venue_symbol == "BTC/USDT:USDT-260925"
+    assert current.tick_size == 0.1
     assert current.price_increment == 0.1
 
 
@@ -189,6 +190,7 @@ def test_available_symbols_does_not_treat_decimal_places_as_price_increment(
 
     [symbol] = readonly_adapter.available_symbols()
 
+    assert symbol.tick_size is None
     assert symbol.price_increment is None
 
 

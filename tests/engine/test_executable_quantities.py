@@ -11,6 +11,7 @@ from librae.core.executor import (
     REASON_FORCE_CLOSE,
     check_stop_targets,
     execute_order_intents,
+    execute_pending_decision_and_stops,
     execute_portfolio_weights,
     liquidate_all,
 )
@@ -248,6 +249,81 @@ def test_portfolio_weight_entry_respects_minimum_notional() -> None:
 
     assert result.events == []
     assert result.runtime_events[0].detail["reason"] == "notional_below_minimum"
+
+
+def test_defer_all_preflights_minimum_notional_before_selling() -> None:
+    instruments = {
+        "A": _instrument("A", quantity_step=1.0),
+        "B": _instrument("B", quantity_step=1.0, min_notional=150.0),
+    }
+    positions = {
+        "A": PositionState(
+            symbol="A",
+            side="long",
+            entry_price=100.0,
+            quantity=10.0,
+            entry_at=TS,
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=1_000.0,
+        )
+    }
+    bars = {
+        symbol: {
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+            "volume": 100.0,
+        }
+        for symbol in instruments
+    }
+
+    updated_cash, result = execute_pending_decision_and_stops(
+        TS,
+        positions,
+        0.0,
+        PortfolioWeights({"B": 0.1}),
+        bars,
+        get_cost_model=lambda _symbol: CostModel.zero(),
+        default_fill="open",
+        primary_symbol="A",
+        rebalance_residual_policy="defer_all",
+        get_executable_quantity=_normalizer(instruments),
+        get_min_notional=lambda symbol: instruments[symbol].min_notional,
+    )
+
+    assert updated_cash == 0.0
+    assert positions["A"].quantity == 10.0
+    assert "B" not in positions
+    assert result.events == []
+    assert result.trades == []
+    assert result.pending_rebalance is not None
+    remaining_orders = {
+        (order.phase, order.intent.symbol, order.remaining_quantity)
+        for order in result.pending_rebalance.orders
+    }
+    assert remaining_orders == {
+        ("reduction", "A", 10.0),
+        ("addition", "B", 1.0),
+    }
+    residuals = [
+        event
+        for event in result.runtime_events
+        if event.detail.get("reason") == "rebalance_residual"
+    ]
+    assert [(event.symbol, event.detail["filled_quantity"]) for event in residuals] == [
+        ("A", 0.0),
+        ("B", 0.0),
+    ]
+    assert all(event.detail["blocked_symbols"] == ["B"] for event in residuals)
+    b_residual = next(event for event in residuals if event.symbol == "B")
+    assert any(
+        related.get("reason") == "notional_below_minimum"
+        for related in b_residual.detail["related_events"]
+    )
 
 
 def test_minimum_notional_never_blocks_an_exposure_reducing_close() -> None:

@@ -144,7 +144,8 @@ def test_available_symbols_lists_mnq_front_and_next_exact_contracts():
     ]
     assert results[0].canonical_symbol == "MNQ_202609"
     assert results[0].contract_month == "202609"
-    assert results[0].price_increment == 0.25
+    assert results[0].tick_size == 0.25
+    assert results[0].price_increment is None
     mock_ib_async.Future.assert_called_once_with("MNQ", exchange="CME", currency="USD")
 
 

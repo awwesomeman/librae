@@ -34,8 +34,6 @@ def test_schema_keys_the_master_on_the_fact_tables_triple() -> None:
     assert "PRIMARY KEY (symbol, data_source, instrument_type)" in sql
     assert "quantity_step    DOUBLE PRECISION" in sql
     assert "min_quantity     DOUBLE PRECISION" in sql
-    assert "price_increment  DOUBLE PRECISION" in sql
-    assert "min_notional     DOUBLE PRECISION" in sql
     # The domain must be declared before any table referencing it.
     assert sql.index("CREATE DOMAIN instrument_type_t") < sql.index(
         "CREATE TABLE IF NOT EXISTS symbols"
@@ -63,8 +61,6 @@ def test_write_symbols_upserts_on_the_natural_key(mock_get_conn, mock_exec_value
                 multiplier=200.0,
                 quantity_step=1.0,
                 min_quantity=1.0,
-                price_increment=0.25,
-                min_notional=100.0,
             ),
         ]
     )
@@ -75,7 +71,7 @@ def test_write_symbols_upserts_on_the_natural_key(mock_get_conn, mock_exec_value
     rows = mock_exec_values.call_args[0][2]
     assert rows[0][:4] == ("BTCUSDT", "binance", "spot", "crypto")
     assert rows[1][4] == 200.0
-    assert rows[1][-4:] == (1.0, 1.0, 0.25, 100.0)
+    assert rows[1][-2:] == (1.0, 1.0)
 
 
 @patch("librae.db.timescale_writer.get_conn")

@@ -767,8 +767,6 @@ def write_symbols(symbols: Iterable[SymbolInfo], dsn: str | None = None) -> int:
             info.calendar_id,
             info.quantity_step,
             info.min_quantity,
-            info.price_increment,
-            info.min_notional,
         )
         for info in symbols
     ]
@@ -783,7 +781,7 @@ def write_symbols(symbols: Iterable[SymbolInfo], dsn: str | None = None) -> int:
                    (symbol, data_source, instrument_type, market, multiplier,
                     data_adapter, venue_symbol, currency, continuous_alias,
                     contract_month, tick_size, security_type, exchange, calendar_id,
-                    quantity_step, min_quantity, price_increment, min_notional)
+                    quantity_step, min_quantity)
                VALUES %s
                ON CONFLICT (symbol, data_source, instrument_type) DO UPDATE SET
                  market=EXCLUDED.market,
@@ -799,8 +797,6 @@ def write_symbols(symbols: Iterable[SymbolInfo], dsn: str | None = None) -> int:
                  calendar_id=EXCLUDED.calendar_id,
                  quantity_step=EXCLUDED.quantity_step,
                  min_quantity=EXCLUDED.min_quantity,
-                 price_increment=EXCLUDED.price_increment,
-                 min_notional=EXCLUDED.min_notional,
                  updated_at=NOW()""",
             rows,
             page_size=500,
