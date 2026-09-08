@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 import pytest
+from librae import FeatureBatch
 from librae.core.cost_model import CostModel
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
@@ -568,9 +569,16 @@ class TestLiveTrader:
         kwargs.setdefault("clock", lambda: TEST_CLOCK_NOW)
         if test_config.mode == "live":
             kwargs.setdefault("runtime_revision", "test-runtime")
+        resolved_feature_fn = (
+            feature_fn
+            if feature_fn is not None
+            else None
+            if kwargs.get("batch_feature_fn") is not None
+            else _simple_feature_fn
+        )
         runner = LiveTrader(
             strategy or _HoldStrategy(),
-            feature_fn or _simple_feature_fn,
+            resolved_feature_fn,
             config=test_config,
             adapter=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
             cost_model=(
@@ -875,6 +883,222 @@ class TestLiveTrader:
         runner.run(max_iterations=1)
 
         assert observed == [0.75]
+
+    def test_batch_features_share_one_primary_snapshot_and_cohort_frontier(self):
+        timestamps = [datetime(2025, 1, 1, tzinfo=UTC)]
+        first = _make_ohlcv_at(timestamps, price=100.0)
+        second = _make_ohlcv_at(timestamps, price=110.0)
+        for frame in (first, second):
+            frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+        observed_batches: list[FeatureBatch] = []
+        contexts: list[Context] = []
+
+        def features(batch: FeatureBatch):
+            observed_batches.append(batch)
+            latest = {
+                subscription.symbol: float(
+                    batch.market_data.history(subscription)["close"].iloc[-1]
+                )
+                for subscription in batch.primary_subscriptions
+            }
+            spread = latest["AAA"] - latest["BBB"]
+            output = {}
+            for subscription in reversed(batch.active_primary_subscriptions):
+                frame = batch.market_data.history(subscription)
+                frame["spread"] = spread
+                output[subscription] = frame
+            return output
+
+        class Capture(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        runner = self._make_runner(
+            strategy=Capture(),
+            fetcher={
+                "AAA": lambda *_args, **_kwargs: first,
+                "BBB": lambda *_args, **_kwargs: second,
+            },
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
+            batch_feature_fn=features,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+
+        runner.run(max_iterations=1)
+
+        assert len(observed_batches) == 1
+        batch = observed_batches[0]
+        assert tuple(item.symbol for item in batch.primary_subscriptions) == ("AAA", "BBB")
+        assert batch.active_primary_subscriptions == batch.primary_subscriptions
+        assert batch.as_of == pd.Timestamp("2025-01-01T01:00Z")
+        assert len(contexts) == 1
+        assert contexts[0].decision_at == batch.as_of
+        assert contexts[0].bars["AAA"]["spread"] == -10.0
+        assert contexts[0].bars["BBB"]["spread"] == -10.0
+
+    def test_batch_features_do_not_deduplicate_distinct_cohorts_with_same_as_of(self):
+        frames = [_make_ohlcv_df(n=1, start_hour=hour) for hour in (0, 1)]
+        for frame in frames:
+            frame["available_at"] = [pd.Timestamp("2025-01-01T02:00Z")]
+        responses = iter(frames)
+        events: list[tuple[datetime, datetime]] = []
+
+        def features(batch: FeatureBatch):
+            events.append((batch.event_ts, batch.as_of))
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: next(responses),
+            config=_test_cfg(warmup_periods=1),
+            batch_feature_fn=features,
+            clock=lambda: datetime(2025, 1, 1, 3, tzinfo=UTC),
+        )
+
+        runner.run(max_iterations=2)
+
+        assert events == [
+            (
+                datetime(2025, 1, 1, 0, tzinfo=UTC),
+                datetime(2025, 1, 1, 2, tzinfo=UTC),
+            ),
+            (
+                datetime(2025, 1, 1, 1, tzinfo=UTC),
+                datetime(2025, 1, 1, 2, tzinfo=UTC),
+            ),
+        ]
+
+    def test_batch_features_keep_staggered_primary_cohorts_distinct(self):
+        first = _make_ohlcv_at([datetime(2025, 1, 1, tzinfo=UTC)], price=100.0)
+        second = _make_ohlcv_at([datetime(2025, 1, 1, 1, tzinfo=UTC)], price=110.0)
+        first["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+        second["available_at"] = [pd.Timestamp("2025-01-01T02:00Z")]
+        observations: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+
+        def features(batch: FeatureBatch):
+            observations.append(
+                (
+                    tuple(item.symbol for item in batch.active_primary_subscriptions),
+                    tuple(
+                        len(batch.market_data.history(item)) for item in batch.primary_subscriptions
+                    ),
+                )
+            )
+            return {
+                subscription: batch.market_data.history(subscription)
+                for subscription in batch.active_primary_subscriptions
+            }
+
+        runner = self._make_runner(
+            fetcher={
+                "AAA": lambda *_args, **_kwargs: first,
+                "BBB": lambda *_args, **_kwargs: second,
+            },
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
+            batch_feature_fn=features,
+            clock=lambda: datetime(2025, 1, 1, 3, tzinfo=UTC),
+        )
+
+        runner.run(max_iterations=1)
+
+        assert observations == [(("AAA",), (1, 0)), (("BBB",), (1, 1))]
+
+    def test_malformed_batch_output_keeps_watermark_and_callbacks_uncommitted(self):
+        timestamps = [datetime(2025, 1, 1, tzinfo=UTC)]
+        first = _make_ohlcv_at(timestamps, price=100.0)
+        second = _make_ohlcv_at(timestamps, price=110.0)
+        for frame in (first, second):
+            frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+        strategy = MagicMock(spec=Strategy)
+        signals: list[str] = []
+
+        def malformed(batch: FeatureBatch):
+            output = {}
+            for subscription in batch.active_primary_subscriptions:
+                featured = batch.market_data.history(subscription)
+                featured["entry_signal"] = 1.0
+                if subscription.symbol == "BBB":
+                    featured = featured.iloc[0:0]
+                output[subscription] = featured
+            return output
+
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher={
+                "AAA": lambda *_args, **_kwargs: first,
+                "BBB": lambda *_args, **_kwargs: second,
+            },
+            config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
+            batch_feature_fn=malformed,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+        runner._on_signal_outcome = lambda symbol, *_args, **_kwargs: signals.append(symbol)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            runner._poll_cycle()
+
+        assert runner._last_bar_ts == {}
+        assert runner._last_cycle_ts is None
+        assert signals == []
+        strategy.on_bar.assert_not_called()
+
+    def test_batch_retry_does_not_replay_a_confirmed_simulation_fill(self):
+        frame = _make_ohlcv_df(n=1)
+        frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+        attempts = 0
+        fills: list[float] = []
+
+        def flaky(batch: FeatureBatch):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary feature failure")
+            subscription = batch.active_primary_subscriptions[0]
+            return {subscription: batch.market_data.history(subscription)}
+
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
+            batch_feature_fn=flaky,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+        runner._pending_decision = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+        runner._on_position_event = lambda event, _sequence: fills.append(event.fill_quantity)
+
+        with pytest.raises(RuntimeError, match="temporary feature failure"):
+            runner._poll_cycle()
+
+        assert fills == [1.0]
+        assert runner._positions["BTCUSDT"].quantity == 1.0
+        assert runner._last_bar_ts == {}
+
+        runner._poll_cycle()
+
+        assert fills == [1.0]
+        assert runner._positions["BTCUSDT"].quantity == 1.0
+        assert runner._last_bar_ts == {
+            "BTCUSDT": datetime(2025, 1, 1, tzinfo=UTC),
+        }
+
+    def test_live_feature_callbacks_are_explicit_and_mutually_exclusive(self):
+        config = _test_cfg(warmup_periods=1)
+
+        with pytest.raises(ValueError, match="exactly one"):
+            LiveTrader(
+                _HoldStrategy(),
+                None,
+                config=config,
+                adapter=lambda *_args, **_kwargs: _make_ohlcv_df(n=1),
+            )
+        with pytest.raises(ValueError, match="exactly one"):
+            LiveTrader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                batch_feature_fn=lambda _batch: {},
+                adapter=lambda *_args, **_kwargs: _make_ohlcv_df(n=1),
+            )
 
     def test_market_data_is_not_featured_before_available_at(self):
         frame = _make_ohlcv_df(n=2)

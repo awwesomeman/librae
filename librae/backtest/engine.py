@@ -84,10 +84,13 @@ from librae.core.financing import (
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
+    BatchFeatureFn,
+    FeatureBatch,
     MarketDataSubscription,
     MarketDataView,
     _detach_object_features,
     _MarketDataSource,
+    evaluate_batch_features,
     normalize_bar_times,
     subscription_from_instrument,
     validate_bar_cadence,
@@ -286,6 +289,10 @@ class _MarketDataReplay:
             _source=self._source,
             _visible_counts=tuple(self._visible_counts),
         )
+
+    def active_primary_subscriptions(self, ts: pd.Timestamp) -> tuple[MarketDataSubscription, ...]:
+        """Return the primary cohort in its declared subscription order."""
+        return tuple(subscription for subscription, _ in self._primary_by_ts[ts])
 
 
 def _rebalance_symbols(state: PortfolioRebalanceState) -> tuple[str, ...]:
@@ -921,6 +928,9 @@ class Backtest:
         auxiliary_data: Optional observation-only frames keyed by their exact
             market-data subscription. Auxiliary bars advance by ``available_at``
             but never create execution/equity events.
+        batch_feature_fn: Optional explicit cross-asset callback evaluated
+            once for each committed primary cohort. Pre-featured input remains
+            the default when this is ``None``.
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
@@ -945,10 +955,13 @@ class Backtest:
         session_mode: MarketDataSessionMode | None = None,
         primary_subscriptions: Sequence[MarketDataSubscription] | None = None,
         auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame] | None = None,
+        batch_feature_fn: BatchFeatureFn | None = None,
         record_position_snapshots: bool = False,
         execution: ExecutionPolicy | None = None,
         risk: RiskPolicy | None = None,
     ) -> None:
+        if batch_feature_fn is not None and not callable(batch_feature_fn):
+            raise TypeError("batch_feature_fn must be callable or None")
         data = _canonicalize_backtest_timestamps(data)
         normalized_auxiliary_data = _normalize_auxiliary_data(auxiliary_data)
         try:
@@ -959,7 +972,12 @@ class Backtest:
             raise TypeError(
                 "primary_subscriptions must be a sequence of MarketDataSubscription values"
             ) from exc
-        if normalized_auxiliary_data:
+        if batch_feature_fn is not None and config is None and not supplied_subscriptions:
+            raise ValueError(
+                "direct Backtest batch_feature_fn requires primary_subscriptions "
+                "covering every primary symbol"
+            )
+        if normalized_auxiliary_data or batch_feature_fn is not None:
             if supplied_subscriptions:
                 _index_primary_subscriptions(data, supplied_subscriptions)
             declared_symbol_order = (
@@ -1008,6 +1026,7 @@ class Backtest:
             raise ValueError("currency must be a non-empty string")
 
         self._strategy = strategy
+        self._batch_feature_fn = batch_feature_fn
         self._config = config
         self._session_mode: MarketDataSessionMode = resolved_session_mode
         self._run_id: str | None = None
@@ -1257,7 +1276,9 @@ class Backtest:
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
-        direct_mixed = self._config is None and bool(self._auxiliary_data)
+        direct_mixed = self._config is None and bool(
+            self._auxiliary_data or self._batch_feature_fn is not None
+        )
         configured_timeframe = (
             self._config.timeframe
             if self._config is not None
@@ -1288,7 +1309,7 @@ class Backtest:
                 self._primary_subscriptions,
                 self._auxiliary_data,
             )
-            if self._auxiliary_data
+            if self._auxiliary_data or self._batch_feature_fn is not None
             else None
         )
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
@@ -1575,6 +1596,38 @@ class Backtest:
             market_data_view = (
                 market_data_replay.commit_primary(ts) if market_data_replay is not None else None
             )
+            strategy_bars = bars
+            if self._batch_feature_fn is not None:
+                if market_data_view is None or decision_at is None:
+                    raise RuntimeError("batch features require a committed market-data frontier")
+                feature_batch = FeatureBatch(
+                    event_ts=ts.to_pydatetime(),
+                    as_of=decision_at.to_pydatetime(),
+                    primary_subscriptions=self._primary_subscriptions,
+                    active_primary_subscriptions=(
+                        market_data_replay.active_primary_subscriptions(ts)
+                        if market_data_replay is not None
+                        else ()
+                    ),
+                    market_data=market_data_view,
+                )
+                featured = evaluate_batch_features(self._batch_feature_fn, feature_batch)
+                evaluated_bars: dict[str, dict[str, float]] = {}
+                for subscription in feature_batch.active_primary_subscriptions:
+                    bar = (
+                        featured[subscription]
+                        .iloc[-1]
+                        .drop(labels=[AVAILABLE_AT_COLUMN], errors="ignore")
+                        .to_dict()
+                    )
+                    price = float(bar.get("close", float("nan")))
+                    if not np.isfinite(price) or price <= 0:
+                        raise ValueError(
+                            f"{subscription.symbol} feature output has invalid close "
+                            f"at {ts}: {price}"
+                        )
+                    evaluated_bars[subscription.symbol] = bar
+                strategy_bars = evaluated_bars
 
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
@@ -1591,8 +1644,8 @@ class Backtest:
                     ts=ts,
                     symbol=primary_symbol,
                     symbols=self._symbols,
-                    bar=bars.get(primary_symbol, {}),
-                    bars=bars,
+                    bar=strategy_bars.get(primary_symbol, {}),
+                    bars=strategy_bars,
                     positions=position_view,
                     account_id=self._account_id,
                     account=account_snapshot,
@@ -1605,7 +1658,7 @@ class Backtest:
                     new_decision,
                     universe,
                     primary_symbol=primary_symbol,
-                    bars=bars,
+                    bars=strategy_bars,
                     positions=positions,
                 )
                 new_decision = self._without_halted_account(new_decision, halted)

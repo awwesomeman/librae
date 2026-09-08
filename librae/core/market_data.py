@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -202,6 +202,165 @@ class MarketDataView:
             raise ValueError("limit must be a positive integer or None")
         index = self._source.index_of(subscription)
         return self._source.history(subscription, self._visible_counts[index], limit)
+
+    @classmethod
+    def _from_causal_frames(
+        cls,
+        frames: Mapping[MarketDataSubscription, pd.DataFrame],
+        *,
+        as_of: datetime,
+    ) -> MarketDataView:
+        """Build an engine-owned view from histories already filtered to ``as_of``."""
+        source = _MarketDataSource(frames)
+        return cls(
+            as_of=as_of,
+            _source=source,
+            _visible_counts=tuple(
+                source.row_count(index) for index in range(len(source.subscriptions))
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureBatch:
+    """Immutable point-in-time input for one cross-asset feature evaluation."""
+
+    event_ts: datetime
+    as_of: datetime
+    primary_subscriptions: tuple[MarketDataSubscription, ...]
+    active_primary_subscriptions: tuple[MarketDataSubscription, ...]
+    market_data: MarketDataView
+
+    def __post_init__(self) -> None:
+        event_ts = pd.Timestamp(self.event_ts)
+        as_of = pd.Timestamp(self.as_of)
+        if event_ts.tz is None:
+            raise ValueError("FeatureBatch.event_ts must be timezone-aware")
+        if as_of.tz is None:
+            raise ValueError("FeatureBatch.as_of must be timezone-aware")
+        event_ts = event_ts.tz_convert("UTC")
+        as_of = as_of.tz_convert("UTC")
+        if as_of < event_ts:
+            raise ValueError("FeatureBatch.as_of must not be earlier than event_ts")
+
+        try:
+            primary = tuple(self.primary_subscriptions)
+        except TypeError as exc:
+            raise TypeError("FeatureBatch.primary_subscriptions must be a sequence") from exc
+        try:
+            active = tuple(self.active_primary_subscriptions)
+        except TypeError as exc:
+            raise TypeError("FeatureBatch.active_primary_subscriptions must be a sequence") from exc
+        if any(not isinstance(item, MarketDataSubscription) for item in primary):
+            raise TypeError(
+                "FeatureBatch.primary_subscriptions must contain MarketDataSubscription values"
+            )
+        if not primary:
+            raise ValueError("FeatureBatch.primary_subscriptions must not be empty")
+        if len(set(primary)) != len(primary):
+            raise ValueError("FeatureBatch.primary_subscriptions must not contain duplicates")
+        if any(not isinstance(item, MarketDataSubscription) for item in active):
+            raise TypeError(
+                "FeatureBatch.active_primary_subscriptions must contain "
+                "MarketDataSubscription values"
+            )
+        if not active:
+            raise ValueError("FeatureBatch.active_primary_subscriptions must not be empty")
+        if len(set(active)) != len(active):
+            raise ValueError(
+                "FeatureBatch.active_primary_subscriptions must not contain duplicates"
+            )
+        active_set = set(active)
+        if not active_set.issubset(primary):
+            raise ValueError("FeatureBatch active subscriptions must be primary subscriptions")
+        if active != tuple(item for item in primary if item in active_set):
+            raise ValueError("FeatureBatch active subscriptions must follow primary order")
+        if not isinstance(self.market_data, MarketDataView):
+            raise TypeError("FeatureBatch.market_data must be a MarketDataView")
+        if pd.Timestamp(self.market_data.as_of) != as_of:
+            raise ValueError("FeatureBatch.market_data must use the batch as_of frontier")
+        if not set(primary).issubset(self.market_data.subscriptions):
+            raise ValueError("FeatureBatch.market_data must contain every primary subscription")
+
+        object.__setattr__(self, "event_ts", event_ts.to_pydatetime())
+        object.__setattr__(self, "as_of", as_of.to_pydatetime())
+        object.__setattr__(self, "primary_subscriptions", primary)
+        object.__setattr__(self, "active_primary_subscriptions", active)
+
+
+type BatchFeatureOutput = Mapping[MarketDataSubscription, pd.DataFrame]
+type BatchFeatureFn = Callable[[FeatureBatch], BatchFeatureOutput]
+
+
+def validate_feature_frame(
+    output: object,
+    *,
+    label: str,
+    event_ts: datetime,
+    visible_index: pd.DatetimeIndex | None = None,
+) -> pd.DataFrame:
+    """Require one causal, current-event feature frame."""
+    if not isinstance(output, pd.DataFrame):
+        raise TypeError(f"{label} feature callback must return a pandas DataFrame")
+    if output.empty:
+        raise ValueError(f"{label} feature output must not be empty")
+    if not isinstance(output.index, pd.DatetimeIndex):
+        raise ValueError(f"{label} feature output must use a DatetimeIndex")
+
+    index = output.index
+    if index.tz is None:
+        raise ValueError(f"{label} feature output index must be timezone-aware")
+    if index.hasnans:
+        raise ValueError(f"{label} feature output index must not contain NaT")
+    if not index.is_unique:
+        raise ValueError(f"{label} feature output timestamps must be unique")
+    if not index.is_monotonic_increasing:
+        raise ValueError(f"{label} feature output timestamps must be strictly increasing")
+
+    event_timestamp = pd.Timestamp(event_ts)
+    if bool((index > event_timestamp).any()):
+        raise ValueError(f"{label} feature output contains a timestamp after event {event_ts}")
+    if index[-1] != event_timestamp:
+        raise ValueError(
+            f"{label} feature output final timestamp {index[-1]} does not match event {event_ts}"
+        )
+    if visible_index is not None and not bool(index.isin(visible_index).all()):
+        raise ValueError(f"{label} feature output contains a timestamp outside its causal history")
+    return output
+
+
+def evaluate_batch_features(
+    batch_feature_fn: BatchFeatureFn,
+    batch: FeatureBatch,
+) -> dict[MarketDataSubscription, pd.DataFrame]:
+    """Evaluate and atomically validate one subscription-keyed feature batch."""
+    output = batch_feature_fn(batch)
+    if not isinstance(output, Mapping):
+        raise TypeError("batch_feature_fn must return a mapping")
+    if any(not isinstance(item, MarketDataSubscription) for item in output):
+        raise TypeError("batch_feature_fn output keys must be MarketDataSubscription values")
+    expected = set(batch.active_primary_subscriptions)
+    actual = set(output)
+    if actual != expected or len(output) != len(expected):
+        missing = tuple(item for item in batch.active_primary_subscriptions if item not in actual)
+        extra = tuple(item for item in output if item not in expected)
+        raise ValueError(
+            "batch_feature_fn output must exactly cover active primary subscriptions; "
+            f"missing={missing!r}, extra={extra!r}"
+        )
+
+    validated: dict[MarketDataSubscription, pd.DataFrame] = {}
+    for subscription in batch.active_primary_subscriptions:
+        visible_index = batch.market_data.history(subscription).index
+        validated[subscription] = _detach_object_features(
+            validate_feature_frame(
+                output[subscription],
+                label=repr(subscription),
+                event_ts=batch.event_ts,
+                visible_index=visible_index,
+            )
+        )
+    return validated
 
 
 def subscription_from_instrument(

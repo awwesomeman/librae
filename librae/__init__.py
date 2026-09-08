@@ -81,7 +81,7 @@ from .core.metrics import (
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
 )
-from .core.market_data import MarketDataSubscription, MarketDataView
+from .core.market_data import BatchFeatureFn, FeatureBatch, MarketDataSubscription, MarketDataView
 from .core.run_config import (
     AccountConfig,
     ExecutionPolicy,
@@ -124,6 +124,8 @@ __all__ = [
     "MarketConfig",
     "MarketDataSubscription",
     "MarketDataView",
+    "FeatureBatch",
+    "BatchFeatureFn",
     "get_market",
     "AvailableSymbol",
     "available_symbols",

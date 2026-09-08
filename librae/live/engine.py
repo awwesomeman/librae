@@ -54,8 +54,13 @@ from librae.core.financing import (
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
+    BatchFeatureFn,
+    FeatureBatch,
+    MarketDataView,
+    evaluate_batch_features,
     normalize_bar_times,
     subscription_from_instrument,
+    validate_feature_frame,
     validate_ohlcv_values,
 )
 from librae.core.strategy import (
@@ -135,31 +140,7 @@ def _validate_feature_output(
     event_ts: datetime,
 ) -> pd.DataFrame:
     """Require one causal, current-event feature frame."""
-    if not isinstance(output, pd.DataFrame):
-        raise TypeError(f"{symbol} feature_fn must return a pandas DataFrame")
-    if output.empty:
-        raise ValueError(f"{symbol} feature output must not be empty")
-    if not isinstance(output.index, pd.DatetimeIndex):
-        raise ValueError(f"{symbol} feature output must use a DatetimeIndex")
-
-    index = output.index
-    if index.tz is None:
-        raise ValueError(f"{symbol} feature output index must be timezone-aware")
-    if index.hasnans:
-        raise ValueError(f"{symbol} feature output index must not contain NaT")
-    if not index.is_unique:
-        raise ValueError(f"{symbol} feature output timestamps must be unique")
-    if not index.is_monotonic_increasing:
-        raise ValueError(f"{symbol} feature output timestamps must be strictly increasing")
-
-    event_timestamp = pd.Timestamp(event_ts)
-    if bool((index > event_timestamp).any()):
-        raise ValueError(f"{symbol} feature output contains a timestamp after event {event_ts}")
-    if index[-1] != event_timestamp:
-        raise ValueError(
-            f"{symbol} feature output final timestamp {index[-1]} does not match event {event_ts}"
-        )
-    return output
+    return validate_feature_frame(output, label=symbol, event_ts=event_ts)
 
 
 def _bind_market_data_source(
@@ -340,7 +321,10 @@ class LiveTrader:
 
     Args:
         strategy: Strategy instance (same as backtest).
-        feature_fn: Callable(h1_base: DataFrame) -> DataFrame with entry_signal/exit_signal.
+        feature_fn: Legacy per-symbol callable with entry_signal/exit_signal.
+            Exactly one of ``feature_fn`` and ``batch_feature_fn`` is required.
+        batch_feature_fn: Explicit cross-asset callback evaluated once per
+            committed primary cohort.
         config: RunConfig — the sole configuration source.
         adapter: Callable bar fetcher, concrete adapter with ``fetch_ohlcv``,
             or per-symbol mapping. Required. Extra point-in-time columns reach
@@ -375,9 +359,10 @@ class LiveTrader:
     def __init__(
         self,
         strategy: Strategy,
-        feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
+        feature_fn: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
         *,
         config: RunConfig,
+        batch_feature_fn: BatchFeatureFn | None = None,
         adapter: object | Mapping[str, object] | None = None,
         order_adapter: object | Mapping[str, object] | None = None,
         cost_model: CostModel | Mapping[str, CostModel] | None = None,
@@ -402,8 +387,15 @@ class LiveTrader:
         from librae.core.cost_model import CostModel
         from librae.core.utils import generate_run_id, interval_to_timedelta, to_ccxt
 
+        if (feature_fn is None) == (batch_feature_fn is None):
+            raise ValueError("exactly one of feature_fn and batch_feature_fn is required")
+        if feature_fn is not None and not callable(feature_fn):
+            raise TypeError("feature_fn must be callable or None")
+        if batch_feature_fn is not None and not callable(batch_feature_fn):
+            raise TypeError("batch_feature_fn must be callable or None")
         self._strategy = strategy
         self._feature_fn = feature_fn
+        self._batch_feature_fn = batch_feature_fn
         self._config = config
         self._symbols = config.symbols
         self._timeframe = to_ccxt(config.timeframe)
@@ -452,6 +444,9 @@ class LiveTrader:
             )
             for symbol, instrument in self._instruments.items()
         }
+        self._primary_subscriptions = tuple(
+            self._market_data_subscriptions[symbol] for symbol in self._symbols
+        )
         if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
             missing_calendars = sorted(
                 symbol
@@ -1497,7 +1492,10 @@ class LiveTrader:
                 cycle_ts,
                 sorted(event_frames),
             )
-            self._process_cycle(event_frames, cycle_ts)
+            if self._batch_feature_fn is None:
+                self._process_cycle(event_frames, cycle_ts)
+            else:
+                self._process_cycle(frames, cycle_ts, active_symbols=advanced_symbols)
 
             # Commit watermarks only after the event was processed successfully.
             for symbol in advanced_symbols:
@@ -3092,6 +3090,74 @@ class LiveTrader:
         """Process one symbol through the portfolio-cycle path."""
         self._process_cycle({symbol: raw_df}, ts)
 
+    def _build_feature_batch(
+        self,
+        raw_frames: Mapping[str, pd.DataFrame],
+        active_symbols: tuple[str, ...],
+        ts: datetime,
+    ) -> FeatureBatch:
+        """Build one causal primary snapshot without using poll wall time as its frontier."""
+        normalized_frames: dict[str, pd.DataFrame] = {}
+        cutoffs: dict[str, datetime] = {}
+        active_set = set(active_symbols)
+        for symbol in self._symbols:
+            raw_frame = raw_frames.get(symbol)
+            if raw_frame is None:
+                raw_frame = self._ohlcv_cache.get(symbol)
+            if raw_frame is None:
+                raise ValueError(f"batch_feature_fn requires market-data history for {symbol}")
+            normalized = self._normalize_runtime_rows(symbol, raw_frame)
+            normalized_frames[symbol] = normalized
+            cutoff = ts if symbol in active_set else self._last_bar_ts.get(symbol)
+            if cutoff is not None:
+                cutoffs[symbol] = cutoff
+
+        availability: list[pd.Timestamp] = []
+        for symbol, cutoff in cutoffs.items():
+            frame = normalized_frames[symbol]
+            committed = frame.loc[pd.to_datetime(frame["ts"], utc=True) <= pd.Timestamp(cutoff)]
+            if symbol in active_set and not bool(
+                (pd.to_datetime(committed["ts"], utc=True) == pd.Timestamp(ts)).any()
+            ):
+                raise ValueError(f"{symbol} batch cohort is missing event timestamp {ts}")
+            availability.extend(pd.to_datetime(committed[AVAILABLE_AT_COLUMN], utc=True).tolist())
+        if not availability:
+            raise ValueError("batch feature cohort has no causal availability frontier")
+        as_of = max(availability)
+
+        histories = {}
+        for symbol in self._symbols:
+            frame = normalized_frames[symbol]
+            cutoff = cutoffs.get(symbol)
+            if cutoff is None:
+                causal = frame.iloc[0:0]
+            else:
+                timestamps = pd.to_datetime(frame["ts"], utc=True)
+                available_at = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
+                causal = frame.loc[
+                    (timestamps <= pd.Timestamp(cutoff)) & (available_at <= as_of)
+                ].iloc[-self._warmup_periods :]
+            history = causal.set_index("ts")
+            history.index.name = "ts"
+            histories[self._market_data_subscriptions[symbol]] = history
+
+        market_data = MarketDataView._from_causal_frames(
+            histories,
+            as_of=as_of.to_pydatetime(),
+        )
+        active_subscriptions = tuple(
+            self._market_data_subscriptions[symbol]
+            for symbol in self._symbols
+            if symbol in active_set
+        )
+        return FeatureBatch(
+            event_ts=ts,
+            as_of=as_of.to_pydatetime(),
+            primary_subscriptions=self._primary_subscriptions,
+            active_primary_subscriptions=active_subscriptions,
+            market_data=market_data,
+        )
+
     def _reset_adv_session(self, symbol: str, ts: datetime) -> None:
         """Reset one symbol's cumulative ADV usage when its session changes."""
         if self._adv_lookback_sessions is None:
@@ -3121,6 +3187,8 @@ class LiveTrader:
         self,
         raw_frames: dict[str, pd.DataFrame],
         ts: datetime,
+        *,
+        active_symbols: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         """Execute and evaluate one data-driven market event.
 
@@ -3130,12 +3198,18 @@ class LiveTrader:
         only broker-confirmed execution reports.
         """
         primary_symbol = self._symbols[0]
+        active_set = set(raw_frames) if active_symbols is None else set(active_symbols)
+        resolved_active_symbols = tuple(symbol for symbol in self._symbols if symbol in active_set)
+        if not resolved_active_symbols:
+            raise ValueError("market-data event requires at least one active primary symbol")
+        feature_batch: FeatureBatch | None = None
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
         audit_bars: dict[str, dict[str, object]] = {}
         previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
-        for symbol, raw_df in raw_frames.items():
+        for symbol in resolved_active_symbols:
+            raw_df = raw_frames[symbol]
             audit_history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
             audit_history.index.name = "ts"
             if audit_history.empty or pd.Timestamp(audit_history.index[-1]).to_pydatetime() != ts:
@@ -3277,6 +3351,36 @@ class LiveTrader:
             self._persist_state()
             return
 
+        evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
+        if self._batch_feature_fn is not None:
+            try:
+                feature_batch = self._build_feature_batch(raw_frames, resolved_active_symbols, ts)
+                featured_batch = evaluate_batch_features(self._batch_feature_fn, feature_batch)
+                for subscription in feature_batch.active_primary_subscriptions:
+                    featured = featured_batch[subscription]
+                    bar = (
+                        featured.iloc[-1]
+                        .drop(labels=[AVAILABLE_AT_COLUMN], errors="ignore")
+                        .to_dict()
+                    )
+                    price = float(bar.get("close", float("nan")))
+                    if not isfinite(price) or price <= 0:
+                        raise ValueError(
+                            f"{subscription.symbol} feature output has invalid close at {ts}: "
+                            f"{price}"
+                        )
+                    evaluated_bars[subscription.symbol] = (bar, price)
+            except Exception:
+                logger.exception(
+                    "Batch feature processing failed; cycle %s remains uncommitted",
+                    ts,
+                )
+                # Execution of an already-pending order is independent of
+                # feature computation. Persist that fill, but leave the market
+                # data watermark unchanged so the decision phase is retried.
+                self._persist_state()
+                raise
+
         # ── Step 1.5: equity/drawdown check — right after this bar's fills
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
@@ -3301,32 +3405,38 @@ class LiveTrader:
                     self._on_ohlcv(symbol, self._timeframe, bar, ts)
             return
 
-        evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
-        for symbol, history in histories.items():
-            try:
-                featured = _validate_feature_output(
-                    self._feature_fn(history),
-                    symbol=symbol,
-                    event_ts=ts,
-                )
-                bar = (
-                    featured.iloc[-1].drop(labels=[AVAILABLE_AT_COLUMN], errors="ignore").to_dict()
-                )
-                price = float(bar.get("close", float("nan")))
-                if not isfinite(price) or price <= 0:
-                    raise ValueError(f"{symbol} feature output has invalid close at {ts}: {price}")
-            except Exception:
-                logger.exception(
-                    "Feature processing failed for %s; cycle %s remains uncommitted",
-                    symbol,
-                    ts,
-                )
-                # Execution of an already-pending order is independent of
-                # feature computation. Persist that fill, but leave the market
-                # data watermark unchanged so the decision phase is retried.
-                self._persist_state()
-                raise
-            evaluated_bars[symbol] = (bar, price)
+        if feature_batch is None:
+            if self._feature_fn is None:  # pragma: no cover - constructor invariant
+                raise RuntimeError("missing feature callback")
+            for symbol, history in histories.items():
+                try:
+                    featured = _validate_feature_output(
+                        self._feature_fn(history),
+                        symbol=symbol,
+                        event_ts=ts,
+                    )
+                    bar = (
+                        featured.iloc[-1]
+                        .drop(labels=[AVAILABLE_AT_COLUMN], errors="ignore")
+                        .to_dict()
+                    )
+                    price = float(bar.get("close", float("nan")))
+                    if not isfinite(price) or price <= 0:
+                        raise ValueError(
+                            f"{symbol} feature output has invalid close at {ts}: {price}"
+                        )
+                except Exception:
+                    logger.exception(
+                        "Feature processing failed for %s; cycle %s remains uncommitted",
+                        symbol,
+                        ts,
+                    )
+                    # Execution of an already-pending order is independent of
+                    # feature computation. Persist that fill, but leave the market
+                    # data watermark unchanged so the decision phase is retried.
+                    self._persist_state()
+                    raise
+                evaluated_bars[symbol] = (bar, price)
 
         # Validate every symbol before publishing feature-derived facts or
         # invoking the strategy, so one malformed plugin result cannot leave a
@@ -3368,6 +3478,8 @@ class LiveTrader:
                 equity=equity,
             ),
             period_index=self._period_index,
+            decision_at=feature_batch.as_of if feature_batch is not None else None,
+            market_data=feature_batch.market_data if feature_batch is not None else None,
         )
         strategy_started = perf_counter()
         try:
