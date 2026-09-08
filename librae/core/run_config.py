@@ -103,12 +103,12 @@ class ExecutionPolicy:
     review. It is not a broker time-in-force instruction. ``None`` leaves order
     lifetime to the broker.
 
-    ``warmup_periods`` is both the retained live/sim feature-history window and
-    its startup readiness requirement. The polling engine does not evaluate a
-    strategy until every symbol has this many usable completed observations.
-    It is explicit and validated here because too short a window changes
-    engine behavior and can invalidate recursive features, ADV, or strategy
-    inputs.
+    ``warmup_periods`` is the retained batch feature-history window in both
+    backtest and live/sim, as well as the polling runtime's startup readiness
+    requirement. The polling engine does not evaluate a strategy until every
+    symbol has this many usable completed observations. It is explicit and
+    validated here because too short a window changes engine behavior and can
+    invalidate recursive features, ADV, or strategy inputs.
     """
 
     default_fill_price: SimulatedFillPrice = "open"

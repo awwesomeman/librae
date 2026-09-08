@@ -3690,7 +3690,9 @@ def execute_pending_decision_and_stops(
     max_adv_participation_rate: float | None = None,
     get_previous_volume: Callable[[str], float | None] | None = None,
     get_lagged_adv: Callable[[str], float | None] | None = None,
+    used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
+    eligible_stop_symbols: set[str] | None = None,
     max_gross_exposure: float | None = None,
     max_net_exposure: float | None = None,
     exposure_prices: Mapping[str, float] | None = None,
@@ -3721,8 +3723,11 @@ def execute_pending_decision_and_stops(
     runtime_events: list[RuntimeEvent] = []
     cash_delta_total = 0.0
     next_rebalance_state: PortfolioRebalanceState | None = None
-    used_bar_quantity_by_symbol: dict[str, float] = {}
+    if used_bar_quantity_by_symbol is None:
+        used_bar_quantity_by_symbol = {}
     same_bar_protection_symbols = set(positions)
+    if eligible_stop_symbols is not None:
+        same_bar_protection_symbols.intersection_update(eligible_stop_symbols)
 
     if pending_decision and rebalance_state is not None:
         raise ValueError("cannot execute a new decision while a portfolio residual is pending")

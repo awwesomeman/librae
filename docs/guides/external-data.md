@@ -106,6 +106,35 @@ warm-up rows, but it must not add observations later than the current event,
 and its final row must represent that event exactly. A violation prevents
 strategy evaluation and leaves the data watermark uncommitted for retry.
 
+Cross-asset features opt in explicitly with `batch_feature_fn`; do not pass a
+legacy `feature_fn` at the same time. The callback receives an immutable
+`FeatureBatch` with the event timestamp, causal `as_of` frontier, configured
+primary subscriptions, the active cohort, and an exact-identity
+`MarketDataView`. It returns one DataFrame for every active subscription:
+
+```python
+def prepare_cross_asset(batch):
+    latest = {
+        subscription: batch.market_data.history(subscription)["close"].iloc[-1]
+        for subscription in batch.primary_subscriptions
+    }
+    output = {}
+    for subscription in batch.active_primary_subscriptions:
+        frame = batch.market_data.history(subscription)
+        frame["relative_close"] = latest[subscription] / sum(latest.values())
+        output[subscription] = frame
+    return output
+```
+
+The engine calls this once per committed primary cohort, including distinct
+events that share the same `as_of`. It validates the complete mapping before
+publishing any feature-derived bar or signal. In both backtest and live/sim,
+`MarketDataView.history()` exposes at most `ExecutionPolicy.warmup_periods`
+rows per primary or auxiliary subscription; an explicit smaller `limit` is
+honored, while a larger value cannot exceed that configured window. Live
+auxiliary readiness and staleness policy are separate from this
+primary-cohort contract.
+
 ## `timeframe` and `poll_seconds`
 
 They intentionally remain separate:
@@ -181,6 +210,8 @@ complete as-of join. If a required factor is missing or stale, raise from
 data watermark uncommitted so the event can be retried. A previously queued
 simulated action may still execute on its already-promised next bar before
 feature calculation; factor failure must not rewrite that execution contract.
+The execution-phase frontier is checkpointed first, so retrying the same event
+does not replay a confirmed fill or reuse that bar's liquidity.
 
 For backtests, perform the same point-in-time join before constructing
 `Backtest`. The optional `external_factors` table is a persistence primitive,

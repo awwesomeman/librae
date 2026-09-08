@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
     from librae.core.executor import PositionEvent, RuntimeEvent
     from librae.core.financing import FinancingCashFlow
-    from librae.core.market_data import MarketDataSubscription
+    from librae.core.market_data import BatchFeatureFn, MarketDataSubscription
     from librae.core.run_config import RunConfig
     from librae.core.strategy import Strategy
     from librae.live.state import LiveStateStore
@@ -492,9 +492,10 @@ class _TimescaleCallbacks:
 
 def build_live_trader(
     strategy_name: Strategy,
-    feature_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    feature_fn: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
     *,
     config: RunConfig,
+    batch_feature_fn: BatchFeatureFn | None = None,
     database_enabled: bool = True,
     telegram_config: Mapping[str, object] | None = None,
     adapter_factories: Mapping[str, AdapterFactory] | None = None,
@@ -513,6 +514,8 @@ def build_live_trader(
     needs a bespoke data source ``instrument_overrides``' ``data_adapter``
     type can't express.
     """
+    if (feature_fn is None) == (batch_feature_fn is None):
+        raise ValueError("exactly one of feature_fn and batch_feature_fn is required")
     resolved_runtime_revision = normalize_runtime_revision(
         runtime_revision,
         required=config.mode == "live",
@@ -658,6 +661,7 @@ def build_live_trader(
         strategy_name,
         feature_fn,
         config=config,
+        batch_feature_fn=batch_feature_fn,
         adapter=data_adapters,
         order_adapter=order_adapters,
         cost_model=cost_models,
