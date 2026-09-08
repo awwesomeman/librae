@@ -695,6 +695,8 @@ class TestLiveTrader:
         )
 
         class Adapter:
+            market_data_route = "ibkr"
+
             def fetch_ohlcv(self, *args, **kwargs):
                 calls.append((args, kwargs))
                 return frame
@@ -749,8 +751,40 @@ class TestLiveTrader:
             symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
         )
 
+        adapter = MagicMock()
+        adapter.market_data_route = "ibkr"
+
         with pytest.raises(ValueError, match=r"daily IBKR.*calendar_id.*AAPL"):
-            self._make_runner(fetcher=MagicMock(), config=config)
+            self._make_runner(fetcher=adapter, config=config)
+
+    def test_daily_caller_owned_fetcher_supplies_calendar_outside_instrument_route(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+
+        runner = self._make_runner(fetcher=fetcher, config=config)
+
+        assert runner._fetchers["AAPL"] is fetcher
+        assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
 
     def test_repeated_fetch_failure_suppresses_heartbeat_and_alerts_once(self):
         state = {"fail": True}
@@ -841,6 +875,73 @@ class TestLiveTrader:
             )
 
         build_adapter.assert_not_called()
+
+    def test_factory_daily_override_supplies_calendar_outside_instrument_route(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+
+        with patch("librae.orchestration.live._build_adapter") as build_adapter:
+            runner = build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                database_enabled=False,
+                data_adapter_overrides={"AAPL": fetcher},
+            )
+
+        build_adapter.assert_not_called()
+        assert runner._fetchers["AAPL"] is fetcher
+
+    def test_daily_caller_owned_fetcher_without_any_calendar_identity_fails_closed(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        with pytest.raises(ValueError, match=r"must declare market_data_calendar_id"):
+            self._make_runner(fetcher=lambda *_args, **_kwargs: _make_ohlcv_df(), config=config)
+
+    def test_caller_owned_calendar_cannot_conflict_with_instrument_identity(self):
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+
+        with pytest.raises(ValueError, match=r"source calendar_id='XNYS'.*configured.*'24/7'"):
+            self._make_runner(fetcher=fetcher)
 
     def test_non_ibkr_concrete_adapter_rejects_regular_session_request(self):
         class Adapter:

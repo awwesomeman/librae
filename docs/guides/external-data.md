@@ -72,6 +72,18 @@ For sim/live, `LiveTrader(adapter=...)` accepts either:
 - a callable `(symbol, timeframe, limit, *, drop_incomplete=False) ->
   DataFrame`.
 
+An injected source owns its actual market-data route; Librae does not assume
+that `SymbolInfo.data_adapter` is still in use. A concrete source can declare
+`market_data_route = "ibkr"` (or another native route name) when it wants that
+adapter's argument binding and route-specific startup checks. A source used for
+an instrument without `calendar_id` must instead declare an exact
+`market_data_calendar_id` such as `"XNYS"`; this keeps the six-field
+subscription identity and daily completion boundary explicit without forcing
+the registry entry to own that calendar. A missing calendar in both places
+fails closed. These optional capability shapes are exported as
+`MarketDataRouteOwner` and `MarketDataCalendarProvider` from
+`librae.integrations`.
+
 The result must contain UTC-aware `ts` plus OHLCV. When a source exposes a
 publication time, map it to `available_at`; it must not precede the actual bar
 completion. Extra columns are preserved and passed to `feature_fn`, except

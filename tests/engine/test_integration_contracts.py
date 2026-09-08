@@ -8,6 +8,8 @@ from librae.integrations import (
     BrokerPosition,
     ExecutionReport,
     LiveStateStore,
+    MarketDataCalendarProvider,
+    MarketDataRouteOwner,
     Notifier,
     OrderAdapter,
     OrderRequest,
@@ -22,6 +24,8 @@ def test_public_integration_contracts_are_importable() -> None:
     assert BarDataFetcher is not None
     assert Notifier is not None
     assert LiveStateStore is not None
+    assert MarketDataCalendarProvider is not None
+    assert MarketDataRouteOwner is not None
     assert OrderRequest is not None
     assert PositionRequest is not None
     assert ExecutionReport is not None

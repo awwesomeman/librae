@@ -976,11 +976,7 @@ def test_timescale_callbacks_track_failures_per_callback() -> None:
 
 
 def test_timescale_callbacks_critical_write_alerts_on_first_failure() -> None:
-    """critical=True writes (register_run's write_run_metadata — fires once
-    per process, so it could never reach a consecutive-failure threshold at
-    all; trade/funding writes — per-event, irreplaceable financial records,
-    unlike a recoverable next-bar snapshot like equity_curve) must alert
-    immediately instead of waiting for _DB_FAILURE_ALERT_THRESHOLD."""
+    """Critical event writes alert immediately but remain best-effort."""
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
     callbacks = _TimescaleCallbacks(
@@ -995,48 +991,88 @@ def test_timescale_callbacks_critical_write_alerts_on_first_failure() -> None:
     assert callbacks._failures["failing_write"] == 1
 
 
-@pytest.mark.parametrize(
-    ("method", "callback_name", "call_kwargs"),
-    [
-        ("register_run", "write_run_metadata", {"run_id": "run-1"}),
-        ("on_financing_cash_flow", "write_financing_cash_flow", {}),
-    ],
-)
-def test_timescale_callbacks_mark_one_shot_writes_critical(
-    method: str, callback_name: str, call_kwargs: dict
+def test_run_metadata_failure_stops_startup_and_reports_distinct_alert(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Wiring check: register_run and on_financing_cash_flow must pass
-    critical=True through to _write, or the first-failure alert silently
-    stops firing for these irreplaceable writes."""
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(
+        config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, notifier
+    )
+
+    with (
+        patch(
+            "librae.db.timescale_writer.write_run_metadata",
+            autospec=True,
+            side_effect=RuntimeError("schema is stale"),
+        ),
+        patch("librae.db.timescale_writer.write_strategy_performance", autospec=True) as write_perf,
+        caplog.at_level("ERROR", logger="librae.orchestration.live"),
+        pytest.raises(RuntimeError, match=r"required run metadata.*trading did not start"),
+    ):
+        callbacks.register_run("run-1")
+
+    write_perf.assert_not_called()
+    notifier.send_alert.assert_called_once()
+    assert "DB Startup Failed" in notifier.send_alert.call_args.kwargs["title"]
+    assert "trading did not start" in notifier.send_alert.call_args.kwargs["message"]
+    assert "trading will not start" in caplog.text
+
+
+def test_reference_factory_does_not_return_when_run_metadata_parent_is_missing() -> None:
+    config = make_test_cfg(mode="sim")
+    adapter = MagicMock()
+
+    with (
+        patch("librae.orchestration.live._build_adapter", return_value=adapter),
+        patch("librae.orchestration.live._build_notifier", return_value=None),
+        patch(
+            "librae.db.timescale_writer.write_run_metadata",
+            autospec=True,
+            side_effect=RuntimeError("missing schema column"),
+        ),
+        patch("librae.db.timescale_writer.write_strategy_performance", autospec=True) as write_perf,
+        pytest.raises(RuntimeError, match=r"required run metadata.*trading did not start"),
+    ):
+        build_live_trader(
+            MagicMock(),
+            lambda frame: frame,
+            config=config,
+            state_store=MemoryLiveStateStore(),
+        )
+
+    write_perf.assert_not_called()
+    adapter.fetch_ohlcv.assert_not_called()
+
+
+def test_timescale_callbacks_mark_financing_writes_critical() -> None:
+    """Irreplaceable event writes must request immediate alerts."""
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
     callbacks._run_id = "run-1"
 
     with patch.object(callbacks, "_write") as write:
-        if method == "on_financing_cash_flow":
-            from librae.core.financing import FinancingCashFlow
+        from librae.core.financing import FinancingCashFlow
 
-            getattr(callbacks, method)(
-                FinancingCashFlow(
-                    ts=datetime.now(UTC),
-                    symbol="BTCUSDT",
-                    side="long",
-                    quantity=1.0,
-                    mark_price=100.0,
-                    multiplier=1.0,
-                    rate=0.0001,
-                    cash_flow=-0.01,
-                    group_id=None,
-                    entry_at=datetime.now(UTC),
-                )
+        callbacks.on_financing_cash_flow(
+            FinancingCashFlow(
+                ts=datetime.now(UTC),
+                symbol="BTCUSDT",
+                side="long",
+                quantity=1.0,
+                mark_price=100.0,
+                multiplier=1.0,
+                rate=0.0001,
+                cash_flow=-0.01,
+                group_id=None,
+                entry_at=datetime.now(UTC),
             )
-        else:
-            getattr(callbacks, method)(**call_kwargs)
-
-    # register_run also seeds a $0/0.0% strategy_performance baseline (a
-    # second, equally one-shot _write call) — match by name instead of
-    # asserting on the last call, so this doesn't depend on call order.
-    matching = [call for call in write.call_args_list if call.args[0].__name__ == callback_name]
+        )
+    matching = [
+        call
+        for call in write.call_args_list
+        if call.args[0].__name__ == "write_financing_cash_flow"
+    ]
     assert len(matching) == 1
     assert matching[0].kwargs["critical"] is True
 

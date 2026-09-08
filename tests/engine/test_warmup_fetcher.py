@@ -228,6 +228,8 @@ class TestWarmupFetcher:
         calls: list[dict[str, object]] = []
 
         class Adapter:
+            market_data_route = "ibkr"
+
             def fetch_ohlcv(self, *_args, **kwargs):
                 calls.append(kwargs)
                 if kwargs["limit"] == 6:

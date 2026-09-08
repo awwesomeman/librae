@@ -247,6 +247,8 @@ class IBKRAdapter:
     context manager to disconnect.
     """
 
+    market_data_route = "ibkr"
+
     def __init__(
         self,
         credentials: IBKRCredentials | None = None,
