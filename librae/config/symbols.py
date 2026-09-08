@@ -113,6 +113,34 @@ _INSTRUMENT_POSITIVE_FIELDS = frozenset(
 _PRICE_INCREMENT_TOLERANCE_RATE = Decimal("1e-9")
 
 
+def canonicalize_price_to_increment(
+    price: float,
+    price_increment: float,
+    *,
+    context: str = "price",
+) -> float:
+    """Return the nearest authoritative grid price within representation tolerance."""
+    if isinstance(price, bool) or not isinstance(price, Real) or not isfinite(price) or price <= 0:
+        raise ValueError(f"{context} must be finite and positive")
+    if (
+        isinstance(price_increment, bool)
+        or not isinstance(price_increment, Real)
+        or not isfinite(price_increment)
+        or price_increment <= 0
+    ):
+        raise ValueError("price_increment must be finite and positive")
+
+    decimal_price = Decimal(str(price))
+    increment = Decimal(str(price_increment))
+    nearest = (decimal_price / increment).to_integral_value() * increment
+    tolerance = increment * _PRICE_INCREMENT_TOLERANCE_RATE
+    if abs(decimal_price - nearest) > tolerance:
+        raise ValueError(
+            f"{context}={price!r} is not aligned to price_increment={price_increment!r}"
+        )
+    return float(nearest)
+
+
 def validate_instrument_type(instrument_type: str, *, context: str = "instrument_type") -> None:
     """Raise ValueError unless instrument_type is one of ALLOWED_INSTRUMENT_TYPES."""
     if instrument_type not in ALLOWED_INSTRUMENT_TYPES:
@@ -428,19 +456,15 @@ class SymbolInfo:
         """Reject explicit order prices outside the authoritative grid."""
         if self.price_increment is None:
             return
-        increment = Decimal(str(self.price_increment))
-        tolerance = increment * _PRICE_INCREMENT_TOLERANCE_RATE
         for field_name in ("limit_price", "stop_price", "take_profit_price"):
             raw_price = getattr(intent, field_name)
             if raw_price is None:
                 continue
-            price = Decimal(str(raw_price))
-            nearest = (price / increment).to_integral_value() * increment
-            if abs(price - nearest) > tolerance:
-                raise ValueError(
-                    f"{self.symbol!r} {field_name}={raw_price!r} is not aligned "
-                    f"to price_increment={self.price_increment!r}"
-                )
+            canonicalize_price_to_increment(
+                raw_price,
+                self.price_increment,
+                context=f"{self.symbol!r} {field_name}",
+            )
 
 
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
