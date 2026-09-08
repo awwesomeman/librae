@@ -84,6 +84,16 @@ fails closed. These optional capability shapes are exported as
 `MarketDataRouteOwner` and `MarketDataCalendarProvider` from
 `librae.integrations`.
 
+The reference deployment factory resolves these capabilities in two phases.
+Built-in native routes are known from configuration, so a missing daily
+calendar fails before their adapter is constructed. A caller-registered
+factory owns its product's actual route instead: Librae constructs that
+product, reads its route and calendar capabilities once, and validates the
+result before database registration or polling begins. The registered factory
+key selects construction only; it does not override the concrete source's
+declared route. The resulting subscription snapshot is then shared unchanged
+by persistence, runtime normalization, and adapter binding.
+
 The result must contain UTC-aware `ts` plus OHLCV. When a source exposes a
 publication time, map it to `available_at`; it must not precede the actual bar
 completion. Extra columns are preserved and passed to `feature_fn`, except

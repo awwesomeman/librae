@@ -19,7 +19,10 @@ from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
 from librae.live.engine import (
     LiveTrader,
+    _read_market_data_source_capabilities,
+    _resolve_effective_calendars_from_capabilities,
     _resolve_market_data_subscription_snapshot,
+    _validate_market_data_calendar_preconditions,
 )
 from librae.live.interfaces import Notifier
 from librae.live.state import normalize_runtime_revision
@@ -544,14 +547,26 @@ def build_live_trader(
     unknown_overrides = set(overrides) - set(instruments)
     if unknown_overrides:
         raise ValueError(f"data_adapter_overrides has unknown symbols: {sorted(unknown_overrides)}")
-    market_data_snapshot = _resolve_market_data_subscription_snapshot(
-        config.timeframe,
-        config.session_mode,
+    override_capabilities = _read_market_data_source_capabilities(overrides)
+    early_route_owners = {
+        symbol: (
+            override_capabilities[symbol].route_owner
+            if symbol in override_capabilities
+            else instrument.data_adapter
+            if instrument.data_adapter not in factories
+            else None
+        )
+        for symbol, instrument in instruments.items()
+    }
+    early_calendars = _resolve_effective_calendars_from_capabilities(
         instruments,
-        overrides,
-        default_route_owners={
-            symbol: instrument.data_adapter for symbol, instrument in instruments.items()
-        },
+        override_capabilities,
+    )
+    _validate_market_data_calendar_preconditions(
+        config.timeframe,
+        instruments,
+        early_route_owners,
+        early_calendars,
     )
 
     adapter_instances: dict[tuple[str, str, str], object] = {}
@@ -583,6 +598,25 @@ def build_live_trader(
             )
             adapter_instances[key] = instance
         data_adapters[symbol] = instance
+
+    registered_product_sources = {
+        symbol: data_adapters[symbol]
+        for symbol, instrument in instruments.items()
+        if symbol not in overrides and instrument.data_adapter in factories
+    }
+    source_capabilities = {
+        **override_capabilities,
+        **_read_market_data_source_capabilities(registered_product_sources),
+    }
+    market_data_snapshot = _resolve_market_data_subscription_snapshot(
+        config.timeframe,
+        config.session_mode,
+        instruments,
+        source_capabilities,
+        default_route_owners={
+            symbol: instrument.data_adapter for symbol, instrument in instruments.items()
+        },
+    )
 
     order_adapters: dict[str, object] | None = None
     if config.mode == "live":

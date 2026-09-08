@@ -350,16 +350,43 @@ class _MarketDataSubscriptionSnapshot:
         object.__setattr__(self, "subscriptions", types.MappingProxyType(dict(self.subscriptions)))
 
 
-def _resolve_effective_market_data_calendars(
-    instruments: Mapping[str, SymbolInfo],
+@dataclass(frozen=True, slots=True)
+class _MarketDataSourceCapabilities:
+    """Explicit capabilities read once from one concrete source instance."""
+
+    route_owner: str | None
+    calendar_id: str | None
+
+
+def _read_market_data_source_capabilities(
     sources: Mapping[str, object],
+) -> dict[str, _MarketDataSourceCapabilities]:
+    """Snapshot each concrete source once, even when an instance serves many symbols."""
+    by_source_id: dict[int, _MarketDataSourceCapabilities] = {}
+    capabilities: dict[str, _MarketDataSourceCapabilities] = {}
+    for symbol, source in sources.items():
+        source_id = id(source)
+        resolved = by_source_id.get(source_id)
+        if resolved is None:
+            resolved = _MarketDataSourceCapabilities(
+                route_owner=_market_data_route_owner(source),
+                calendar_id=_market_data_calendar_id(source),
+            )
+            by_source_id[source_id] = resolved
+        capabilities[symbol] = resolved
+    return capabilities
+
+
+def _resolve_effective_calendars_from_capabilities(
+    instruments: Mapping[str, SymbolInfo],
+    source_capabilities: Mapping[str, _MarketDataSourceCapabilities],
 ) -> dict[str, str | None]:
-    """Resolve one calendar per concrete source and reject identity conflicts."""
+    """Resolve source/config calendars from an already-read capability snapshot."""
     calendars: dict[str, str | None] = {}
     for symbol, instrument in instruments.items():
         configured_calendar = instrument.calendar_id
-        source = sources.get(symbol)
-        source_calendar = _market_data_calendar_id(source) if source is not None else None
+        capability = source_capabilities.get(symbol)
+        source_calendar = capability.calendar_id if capability is not None else None
         if (
             configured_calendar is not None
             and source_calendar is not None
@@ -401,7 +428,7 @@ def _resolve_market_data_subscription_snapshot(
     timeframe: str,
     session_mode: MarketDataSessionMode,
     instruments: Mapping[str, SymbolInfo],
-    sources: Mapping[str, object],
+    source_capabilities: Mapping[str, _MarketDataSourceCapabilities],
     *,
     default_route_owners: Mapping[str, str | None] | None = None,
 ) -> _MarketDataSubscriptionSnapshot:
@@ -409,11 +436,16 @@ def _resolve_market_data_subscription_snapshot(
     defaults = default_route_owners or {}
     route_owners = {
         symbol: (
-            _market_data_route_owner(sources[symbol]) if symbol in sources else defaults.get(symbol)
+            source_capabilities[symbol].route_owner
+            if symbol in source_capabilities
+            else defaults.get(symbol)
         )
         for symbol in instruments
     }
-    effective_calendars = _resolve_effective_market_data_calendars(instruments, sources)
+    effective_calendars = _resolve_effective_calendars_from_capabilities(
+        instruments,
+        source_capabilities,
+    )
     _validate_market_data_calendar_preconditions(
         timeframe,
         instruments,
@@ -602,12 +634,14 @@ class LiveTrader:
             sources = dict(adapter)
         else:
             sources = {symbol: adapter for symbol in self._symbols}
-        snapshot = _market_data_snapshot or _resolve_market_data_subscription_snapshot(
-            self._timeframe,
-            config.session_mode,
-            self._instruments,
-            sources,
-        )
+        snapshot = _market_data_snapshot
+        if snapshot is None:
+            snapshot = _resolve_market_data_subscription_snapshot(
+                self._timeframe,
+                config.session_mode,
+                self._instruments,
+                _read_market_data_source_capabilities(sources),
+            )
         expected_symbols = set(self._symbols)
         if (
             set(snapshot.route_owners) != expected_symbols

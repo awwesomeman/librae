@@ -1052,6 +1052,161 @@ class TestLiveTrader:
         assert runtime_subscription.calendar_id == "XNYS"
         assert adapter.fetch_kwargs[0]["calendar_id"] == "XNYS"
 
+    def test_registered_factory_product_owns_final_route_and_subscription_snapshot(self):
+        config = make_test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            calendar_id=None,
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "vendor_plugin",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        class RegisteredIBKRSource:
+            def __init__(self) -> None:
+                self.route_reads = 0
+                self.calendar_reads = 0
+                self.fetch_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            @property
+            def market_data_route(self) -> str:
+                self.route_reads += 1
+                return "ibkr" if self.route_reads == 1 else "caller-owned"
+
+            @property
+            def market_data_calendar_id(self) -> str:
+                self.calendar_reads += 1
+                return "XNYS" if self.calendar_reads == 1 else "XHKG"
+
+            def fetch_ohlcv(self, *args, **kwargs):
+                self.fetch_calls.append((args, kwargs))
+                return _make_ohlcv_df()
+
+        adapter = RegisteredIBKRSource()
+        factory = MagicMock(return_value=adapter)
+        callbacks = MagicMock()
+        with patch(
+            "librae.orchestration.live._TimescaleCallbacks", return_value=callbacks
+        ) as build:
+            runner = build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                adapter_factories={"vendor_plugin": factory},
+                state_store=MemoryLiveStateStore(),
+            )
+
+        persisted_subscription = build.call_args.args[3]["AAPL"]
+        runtime_subscription = runner._market_data_subscriptions["AAPL"]
+        runner._fetchers["AAPL"]("AAPL", "1d", 10, drop_incomplete=True)
+
+        factory.assert_called_once_with(trading=False)
+        assert adapter.route_reads == 1
+        assert adapter.calendar_reads == 1
+        assert persisted_subscription == runtime_subscription
+        assert runtime_subscription.calendar_id == "XNYS"
+        assert adapter.fetch_calls == [
+            (
+                ("AAPL", "1d"),
+                {
+                    "limit": 10,
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "continuous_alias": False,
+                    "contract_month": None,
+                    "calendar_id": "XNYS",
+                    "session_mode": "extended",
+                    "drop_incomplete": True,
+                },
+            )
+        ]
+
+    def test_registered_native_product_without_calendar_fails_before_db_or_polling(self):
+        config = make_test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            calendar_id=None,
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "vendor_plugin",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+        adapter = MagicMock(market_data_route="ibkr")
+        factory = MagicMock(return_value=adapter)
+
+        with (
+            patch("librae.orchestration.live._build_state_store") as build_state_store,
+            patch("librae.orchestration.live._TimescaleCallbacks") as build_callbacks,
+            pytest.raises(ValueError, match=r"daily IBKR.*calendar_id.*AAPL"),
+        ):
+            build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                adapter_factories={"vendor_plugin": factory},
+            )
+
+        factory.assert_called_once_with(trading=False)
+        build_state_store.assert_not_called()
+        build_callbacks.assert_not_called()
+        adapter.fetch_ohlcv.assert_not_called()
+
+    def test_registered_product_calendar_conflict_fails_before_db_or_polling(self):
+        config = _test_cfg(
+            symbols=["BTCUSDT"],
+            timeframe="D1",
+            data_source="vendor_feed",
+            instrument_overrides={
+                "BTCUSDT": {
+                    "data_adapter": "vendor_plugin",
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                }
+            },
+        )
+        adapter = MagicMock(
+            market_data_route="ibkr",
+            market_data_calendar_id="XNYS",
+        )
+        factory = MagicMock(return_value=adapter)
+
+        with (
+            patch("librae.orchestration.live._build_state_store") as build_state_store,
+            patch("librae.orchestration.live._TimescaleCallbacks") as build_callbacks,
+            pytest.raises(ValueError, match=r"source calendar_id='XNYS'.*configured.*'24/7'"),
+        ):
+            build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                adapter_factories={"vendor_plugin": factory},
+            )
+
+        factory.assert_called_once_with(trading=False)
+        build_state_store.assert_not_called()
+        build_callbacks.assert_not_called()
+        adapter.fetch_ohlcv.assert_not_called()
+
     def test_daily_caller_owned_fetcher_without_any_calendar_identity_fails_closed(self):
         config = _test_cfg(
             symbols=["AAPL"],
