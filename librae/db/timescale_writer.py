@@ -352,6 +352,12 @@ def save_backtest_output(
     """
     output.validate()
     meta = output.run_metadata
+    auxiliary_subscriptions = getattr(meta, "auxiliary_subscriptions", ())
+    if isinstance(auxiliary_subscriptions, tuple) and auxiliary_subscriptions:
+        raise ValueError(
+            "TimescaleDB run persistence does not yet store auxiliary_subscriptions; "
+            "use a backtest artifact or omit auxiliary_data"
+        )
     counts: dict[str, int] = {}
     revision = normalize_backtest_revision(backtest_revision)
     backtest_cache_key = build_backtest_cache_key(config_hash, revision)

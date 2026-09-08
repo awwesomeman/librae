@@ -216,6 +216,7 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
             "instrument_type": "spot",
         }
     ]
+    assert "auxiliary_subscriptions" not in artifact.manifest["run_metadata"]
     assert set(artifact.tables) == {
         "accounts",
         "equity_curve",
