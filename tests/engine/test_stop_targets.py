@@ -856,14 +856,97 @@ class TestPendingFillStopOrdering:
         assert len(result.events) == 1
         assert result.events[0].price == pytest.approx(100.0)
 
-    def test_carried_market_exit_is_not_ambiguous(self):
-        """A volume-capped exit carried from an earlier bar fills at this bar's
-        open, so it is unambiguously ahead of any close/high/low fill.
+    @pytest.mark.parametrize(
+        ("side", "action", "limit_price"),
+        [
+            ("long", "long", 98.0),
+            ("short", "short", 102.0),
+            ("long", "close", 102.0),
+            ("short", "close", 98.0),
+        ],
+        ids=["long-scale-in", "short-scale-in", "long-close", "short-close"],
+    )
+    def test_positive_resting_fill_conflicts_with_carried_market_exit_before_mutation(
+        self,
+        side,
+        action,
+        limit_price,
+    ):
+        position = _make_pos(side=side, stop=95.0 if side == "long" else 105.0)
+        position.pending_market_exit_reason = REASON_STOP_LOSS
+        positions = {"TEST": position}
+        adv_usage = {"TEST": 3.0}
+        intent = OrderIntent(
+            action=action,
+            symbol="TEST",
+            quantity=0.5,
+            limit_price=limit_price,
+        )
 
-        WHY: resolve_stop_exit returns non-None for such a residual before it
-        looks at any trigger level, so keying the guard on that return value
-        alone turns the engine's intended carry-forward into a fatal error.
-        """
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [intent],
+                {
+                    "TEST": {
+                        "open": 100.0,
+                        "high": 110.0,
+                        "low": 90.0,
+                        "close": 99.0,
+                        "volume": 100.0,
+                    }
+                },
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                max_bar_volume_participation_rate=0.1,
+                max_adv_participation_rate=0.1,
+                get_previous_volume=lambda _symbol: 10.0,
+                get_lagged_adv=lambda _symbol: 100.0,
+                used_adv_quantity_by_symbol=adv_usage,
+            )
+
+        assert positions == {"TEST": position}
+        assert positions["TEST"] is position
+        assert position.quantity == pytest.approx(1.0)
+        assert position.pending_market_exit_reason == REASON_STOP_LOSS
+        assert adv_usage == {"TEST": 3.0}
+
+    def test_zero_fill_resting_intent_allows_carried_market_exit(self):
+        position = _make_pos(side="long", stop=95.0)
+        position.pending_market_exit_reason = REASON_STOP_LOSS
+        positions = {"TEST": position}
+
+        cash, result = execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            0.0,
+            [OrderIntent(action="long", symbol="TEST", quantity=1.0, limit_price=98.0)],
+            {
+                "TEST": {
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 90.0,
+                    "close": 99.0,
+                    "volume": 100.0,
+                }
+            },
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+        )
+
+        assert cash == pytest.approx(100.0)
+        assert positions == {}
+        assert [(event.reason, event.price) for event in result.events] == [
+            (REASON_STOP_LOSS, 100.0)
+        ]
+        assert [event.detail["reason"] for event in result.runtime_events] == ["insufficient_cash"]
+
+    def test_carried_market_exit_does_not_conflict_with_open_only_rebalance(self):
+        """A carried exit and PortfolioWeights both remain open-timed."""
         position = _make_pos(side="long", stop=95.0)
         position.pending_market_exit_reason = REASON_STOP_LOSS
         positions = {"TEST": position}

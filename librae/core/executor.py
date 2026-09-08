@@ -3651,9 +3651,11 @@ def _validate_no_ambiguous_stop_conflicts(
         ):
             continue
         before = positions_before[item.symbol]
-        # WHY: a market exit carried from an earlier bar resumes at this bar's
-        # open, ahead of any close/high/low fill, so its ordering is defined.
+        # A carried market exit belongs at this bar's open, but the combined
+        # executor cannot apply it before an explicit resting fill. Refuse the
+        # positive resting fill instead of committing that reversed sequence.
         if before.pending_market_exit_reason is not None:
+            conflicts.add(item.symbol)
             continue
         cost_model = get_cost_model(item.symbol)
         bar = bars[item.symbol]
