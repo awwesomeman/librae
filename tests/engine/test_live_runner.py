@@ -824,9 +824,7 @@ class TestLiveTrader:
             ),
             order_adapter=order_adapter,
         )
-        runner._ohlcv_cache = {
-            symbol: _make_ohlcv_at([t0]) for symbol in ("AAA", "BBB")
-        }
+        runner._ohlcv_cache = {symbol: _make_ohlcv_at([t0]) for symbol in ("AAA", "BBB")}
         runner._last_bar_ts = {"AAA": t0, "BBB": t0}
         runner._last_cycle_ts = t0
         runner._last_reconciliation_at = TEST_CLOCK_NOW
