@@ -715,6 +715,53 @@ def test_live_executor_rejects_ccxt_change_to_authoritative_price(
         )
 
 
+def test_live_executor_accepts_equivalent_ccxt_fixed_increment_representation(
+    authed_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "limits": {},
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "1"
+    mock_ccxt_exchange.price_to_precision.return_value = "0.3"
+    instrument = SymbolInfo(
+        symbol="BTCUSDT",
+        market="crypto",
+        data_source="binance",
+        instrument_type="spot",
+        multiplier=1.0,
+        data_adapter="crypto",
+        venue_symbol="BTC/USDT",
+        currency="USDT",
+        price_increment=0.1,
+    )
+    executor = LiveExecutor(
+        CostModel.zero(),
+        simulation=False,
+        order_adapter=authed_adapter,
+        instruments={"BTCUSDT": instrument},
+    )
+
+    prepared = executor.prepare_order(
+        OrderRequest(
+            client_order_id="crypto-limit-float-boundary",
+            symbol="BTCUSDT",
+            venue_symbol="BTC/USDT",
+            side="buy",
+            quantity=1.0,
+            order_type="limit",
+            limit_price=0.1 + 0.2,
+            submitted_at=pd.Timestamp("2026-09-08T00:00:00Z").to_pydatetime(),
+        ),
+        reference_price=0.3,
+    )
+
+    assert prepared.limit_price == 0.3
+
+
 def test_prepare_order_rejects_raw_market_id_route(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.market.return_value = {
         "symbol": "BTC/USDT",

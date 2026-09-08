@@ -9,6 +9,7 @@ from librae.config.symbols import (
     SymbolInfo,
     _build_registry,
     available_symbols,
+    canonicalize_price_to_increment,
     get_symbol,
     load_symbol_registry,
     resolve_symbol,
@@ -659,6 +660,9 @@ class TestExecutablePriceIncrement:
                 take_profit_price=price,
             )
         )
+
+    def test_canonicalizes_float_representation_to_declared_grid(self):
+        assert canonicalize_price_to_increment(0.1 + 0.2, 0.1) == 0.3
 
     @pytest.mark.parametrize(
         "field_name",

@@ -39,6 +39,7 @@ from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
     InstrumentKind,
+    canonicalize_price_to_increment,
 )
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import next_session_open, session_bounds, validate_calendar_id
@@ -635,11 +636,15 @@ class IBKRAdapter:
         prepared = dict(signal)
         prepared["quantity"] = quantity
         if signal.get("order_type") == "limit":
-            prepared["price"] = (
-                float(signal["price"])
-                if signal.get("price_increment") is not None
-                else self._normalize_limit_price(signal, details)
-            )
+            raw_increment = signal.get("price_increment")
+            if raw_increment is not None:
+                prepared["price"] = canonicalize_price_to_increment(
+                    float(signal["price"]),
+                    raw_increment,
+                    context=f"{signal['symbol']} limit price",
+                )
+            else:
+                prepared["price"] = self._normalize_limit_price(signal, details)
         return prepared
 
     def place_order(self, signal: dict) -> dict:

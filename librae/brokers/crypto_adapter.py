@@ -24,6 +24,7 @@ from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
     InstrumentKind,
+    canonicalize_price_to_increment,
 )
 from librae.core.utils import validate_contract_month
 from librae.live.executor import PositionRequest
@@ -561,11 +562,25 @@ class CryptoAdapter:
         if price is not None:
             requested_price = float(price)
             native_price = self.normalize_limit_price(signal)
-            if signal.get("price_increment") is not None and native_price != requested_price:
-                raise ValueError(
-                    f"{symbol} CCXT precision would change an authoritative limit price"
+            raw_increment = signal.get("price_increment")
+            if raw_increment is not None:
+                authoritative_price = canonicalize_price_to_increment(
+                    requested_price,
+                    raw_increment,
+                    context=f"{symbol} limit price",
                 )
-            price = requested_price if signal.get("price_increment") is not None else native_price
+                native_price = canonicalize_price_to_increment(
+                    native_price,
+                    raw_increment,
+                    context=f"{symbol} CCXT-normalized limit price",
+                )
+                if native_price != authoritative_price:
+                    raise ValueError(
+                        f"{symbol} CCXT precision would change an authoritative limit price"
+                    )
+                price = authoritative_price
+            else:
+                price = native_price
             prepared["price"] = price
 
         is_spot = bool(market.get("spot") or market.get("type") == "spot")

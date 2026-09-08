@@ -16,6 +16,7 @@ from math import isfinite
 from numbers import Real
 from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
+from librae.config.symbols import canonicalize_price_to_increment
 from librae.core import EPSILON
 from librae.core.cost_model import CostModel
 from librae.core.strategy import PositionEventType, TimeInForce
@@ -485,6 +486,14 @@ class LiveExecutor:
         expected_limit_price = request.limit_price
         adapter_owns_price = False
         try:
+            if request.order_type == "limit" and signal["price_increment"] is not None:
+                assert request.limit_price is not None
+                expected_limit_price = canonicalize_price_to_increment(
+                    request.limit_price,
+                    signal["price_increment"],
+                    context=f"{request.symbol} limit price",
+                )
+                signal["price"] = expected_limit_price
             normalizer = getattr(type(adapter), "normalize_limit_price", None)
             if (
                 request.order_type == "limit"
@@ -531,13 +540,27 @@ class LiveExecutor:
             assert request.limit_price is not None
             assert limit_price is not None
             assert expected_limit_price is not None
-            if limit_price != expected_limit_price:
-                if instrument is not None and instrument.price_increment is not None:
-                    reason = "change an authoritative limit price"
-                elif adapter_owns_price:
+            if instrument is not None and instrument.price_increment is not None:
+                try:
+                    canonical_limit_price = canonicalize_price_to_increment(
+                        limit_price,
+                        instrument.price_increment,
+                        context=f"{request.symbol} prepared limit price",
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "order preparation cannot change an authoritative limit price"
+                    ) from exc
+                changed = canonical_limit_price != expected_limit_price
+                limit_price = canonical_limit_price
+                reason = "change an authoritative limit price"
+            else:
+                changed = limit_price != expected_limit_price
+                if adapter_owns_price:
                     reason = "change the declared adapter-normalized limit price"
                 else:
                     reason = "change a limit price without normalize_limit_price"
+            if changed:
                 raise ValueError(
                     f"order preparation cannot {reason}: expected "
                     f"{expected_limit_price:.12g}, prepared {limit_price:.12g}"

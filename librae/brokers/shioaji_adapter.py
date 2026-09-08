@@ -34,6 +34,7 @@ from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
     InstrumentKind,
+    canonicalize_price_to_increment,
 )
 from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
@@ -47,7 +48,6 @@ from .base import (
     CredentialConfig,
     drop_incomplete_ohlcv,
     find_position,
-    passive_price,
     validate_order_signal,
 )
 from .shioaji_time import shioaji_ts_ns_to_epoch
@@ -369,19 +369,11 @@ class ShioajiAdapter:
             price = float(signal["price"])
             raw_increment = signal.get("price_increment")
             if raw_increment is not None:
-                try:
-                    price_increment = float(raw_increment)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("price_increment must be finite and positive") from exc
-                if not isfinite(price_increment) or price_increment <= 0:
-                    raise ValueError("price_increment must be finite and positive")
-                normalized_price = passive_price(price, price_increment, signal["side"])
-                tolerance = max(1e-12, price_increment * 1e-9)
-                if abs(normalized_price - price) > tolerance:
-                    raise ValueError(
-                        f"{signal['symbol']} price is not aligned to "
-                        f"price_increment {price_increment}"
-                    )
+                price = canonicalize_price_to_increment(
+                    price,
+                    raw_increment,
+                    context=f"{signal['symbol']} limit price",
+                )
             raw_lower = getattr(contract, "limit_down", None)
             raw_upper = getattr(contract, "limit_up", None)
             if raw_lower is None or raw_upper is None:
