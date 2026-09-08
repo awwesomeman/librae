@@ -20,6 +20,10 @@ from numbers import Real
 from types import MappingProxyType
 from typing import Literal
 
+import pandas as pd
+
+from librae.core.market_data import MarketDataView
+
 PositionSide = Literal["long", "short"]
 OrderAction = Literal["long", "short", "close"]
 PositionEventType = Literal["open", "add", "reduce", "close"]
@@ -69,6 +73,10 @@ class Context:
             arrival events can share a timestamp, so this is not a
             business-day index, and a retried event repeats its index rather
             than advancing it.
+        decision_at: Point-in-time information frontier for this callback.
+            ``None`` preserves the legacy single-frame contract.
+        market_data: Immutable, exact-subscription as-of history. ``None``
+            preserves the legacy single-frame contract.
     """
 
     ts: datetime
@@ -80,6 +88,8 @@ class Context:
     account_id: str
     account: AccountSnapshot
     period_index: int
+    decision_at: datetime | None = None
+    market_data: MarketDataView | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", tuple(self.symbols))
@@ -100,6 +110,13 @@ class Context:
             raise ValueError("account_id must be a non-empty string")
         if not isinstance(self.account, AccountSnapshot):
             raise TypeError("account must be an AccountSnapshot")
+        if self.decision_at is not None:
+            decision_at = pd.Timestamp(self.decision_at)
+            if decision_at.tz is None:
+                raise ValueError("decision_at must be timezone-aware")
+            object.__setattr__(self, "decision_at", decision_at.tz_convert("UTC").to_pydatetime())
+        if self.market_data is not None and not isinstance(self.market_data, MarketDataView):
+            raise TypeError("market_data must be a MarketDataView or None")
 
     @property
     def available_symbols(self) -> tuple[str, ...]:

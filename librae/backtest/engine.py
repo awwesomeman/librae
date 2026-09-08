@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from numbers import Real
 from typing import TYPE_CHECKING
@@ -84,6 +85,7 @@ from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
     MarketDataSubscription,
+    MarketDataView,
     normalize_bar_times,
     subscription_from_instrument,
     validate_bar_cadence,
@@ -116,6 +118,160 @@ from librae.core.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _DecisionEnvelope:
+    """One strategy emission and the information frontier that caused it."""
+
+    decision: StrategyDecision
+    decision_at: pd.Timestamp | None
+
+
+def _enveloped_decision(envelopes: Sequence[_DecisionEnvelope]) -> StrategyDecision:
+    """Rebuild the executor's public decision shape without losing envelopes."""
+    decision: StrategyDecision = []
+    for envelope in envelopes:
+        decision = merge_pending_decisions(
+            decision,
+            envelope.decision,
+            primary_symbol="",
+        )
+    return decision
+
+
+def _merge_enveloped_decision(
+    envelopes: Sequence[_DecisionEnvelope],
+    new_decision: StrategyDecision,
+    *,
+    decision_at: pd.Timestamp | None,
+    primary_symbol: str,
+) -> list[_DecisionEnvelope]:
+    """Apply legacy pending-decision merge rules while preserving causal time."""
+    pending = _enveloped_decision(envelopes)
+    merge_pending_decisions(pending, new_decision, primary_symbol=primary_symbol)
+    if not new_decision:
+        return list(envelopes)
+    envelope = _DecisionEnvelope(
+        decision=list(new_decision)
+        if not isinstance(new_decision, PortfolioWeights)
+        else new_decision,
+        decision_at=decision_at,
+    )
+    if isinstance(pending, PortfolioWeights):
+        return [envelope]
+    return [*envelopes, envelope]
+
+
+def _partition_enveloped_decisions(
+    envelopes: Sequence[_DecisionEnvelope],
+    ts: pd.Timestamp,
+    bars: dict[str, dict[str, float]],
+    positions: dict[str, PositionState],
+    *,
+    primary_symbol: str,
+) -> tuple[StrategyDecision, list[_DecisionEnvelope], list[_DecisionEnvelope]]:
+    """Split causal/data-ready decisions without replacing their origin time."""
+    ready: list[_DecisionEnvelope] = []
+    waiting: list[_DecisionEnvelope] = []
+    for envelope in envelopes:
+        if envelope.decision_at is not None and ts <= envelope.decision_at:
+            waiting.append(envelope)
+            continue
+        executable, data_waiting = partition_pending_decision(
+            envelope.decision,
+            bars,
+            positions,
+            primary_symbol=primary_symbol,
+        )
+        if executable:
+            ready.append(_DecisionEnvelope(executable, envelope.decision_at))
+        if data_waiting:
+            waiting.append(_DecisionEnvelope(data_waiting, envelope.decision_at))
+    return _enveloped_decision(ready), waiting, ready
+
+
+class _MarketDataReplay:
+    """Run-local point-in-time visibility state for primary and auxiliary bars."""
+
+    def __init__(
+        self,
+        primary_data: pd.DataFrame,
+        primary_subscriptions: Sequence[MarketDataSubscription],
+        auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame],
+    ) -> None:
+        frames: dict[MarketDataSubscription, pd.DataFrame] = {}
+        visible_rows: dict[MarketDataSubscription, list[int]] = {}
+        primary_by_ts: dict[
+            pd.Timestamp, list[tuple[MarketDataSubscription, int, pd.Timestamp]]
+        ] = {}
+
+        for subscription in primary_subscriptions:
+            frame = primary_data.xs(subscription.symbol, level="symbol").copy(deep=True)
+            frames[subscription] = frame
+            visible_rows[subscription] = []
+            for row_number, (ts, available_at) in enumerate(
+                zip(frame.index, frame[AVAILABLE_AT_COLUMN], strict=True)
+            ):
+                primary_by_ts.setdefault(pd.Timestamp(ts), []).append(
+                    (subscription, row_number, pd.Timestamp(available_at))
+                )
+
+        auxiliary_observations: list[
+            tuple[pd.Timestamp, pd.Timestamp, MarketDataSubscription, int]
+        ] = []
+        for subscription, frame in auxiliary_data.items():
+            frames[subscription] = frame
+            visible_rows[subscription] = []
+            for row_number, (ts, available_at) in enumerate(
+                zip(frame.index, frame[AVAILABLE_AT_COLUMN], strict=True)
+            ):
+                auxiliary_observations.append(
+                    (
+                        pd.Timestamp(available_at),
+                        pd.Timestamp(ts),
+                        subscription,
+                        row_number,
+                    )
+                )
+
+        self._frames = frames
+        self._visible_rows = visible_rows
+        self._primary_by_ts = primary_by_ts
+        self._auxiliary_observations = sorted(auxiliary_observations)
+        self._auxiliary_cursor = 0
+        self._frontier: pd.Timestamp | None = None
+
+    def advance_frontier(self, ts: pd.Timestamp) -> pd.Timestamp:
+        """Advance the cumulative availability watermark for one primary cohort."""
+        observations = self._primary_by_ts[ts]
+        raw_frontier = max(available_at for _, _, available_at in observations)
+        self._frontier = (
+            raw_frontier if self._frontier is None else max(self._frontier, raw_frontier)
+        )
+        while self._auxiliary_cursor < len(self._auxiliary_observations):
+            available_at, _, subscription, row_number = self._auxiliary_observations[
+                self._auxiliary_cursor
+            ]
+            if available_at > self._frontier:
+                break
+            self._visible_rows[subscription].append(row_number)
+            self._auxiliary_cursor += 1
+        return self._frontier
+
+    def commit_primary(self, ts: pd.Timestamp) -> MarketDataView:
+        """Commit only the canonical primary cohort already processed by the run."""
+        if self._frontier is None:
+            raise RuntimeError("market-data frontier must advance before primary commit")
+        for subscription, row_number, _ in self._primary_by_ts[ts]:
+            self._visible_rows[subscription].append(row_number)
+        return MarketDataView(
+            as_of=self._frontier.to_pydatetime(),
+            _visible_data={
+                subscription: frame.iloc[self._visible_rows[subscription]].sort_index(kind="stable")
+                for subscription, frame in self._frames.items()
+            },
+        )
 
 
 def _rebalance_symbols(state: PortfolioRebalanceState) -> tuple[str, ...]:
@@ -320,6 +476,81 @@ def _validate_primary_subscriptions(
             index=symbol_rows.index,
         )
     normalized[AVAILABLE_AT_COLUMN] = normalized_available
+    return normalized
+
+
+def _sort_mixed_primary_data(data: pd.DataFrame) -> pd.DataFrame:
+    """Stably sort each primary symbol without changing its declared order."""
+    if not isinstance(data.index, pd.MultiIndex) or data.index.nlevels != 2:
+        return data
+    symbols = data.index.get_level_values(0).unique()
+    return pd.concat(
+        [
+            data.xs(symbol, level=0, drop_level=False).sort_index(
+                level="datetime",
+                kind="stable",
+            )
+            for symbol in symbols
+        ]
+    )
+
+
+def _normalize_auxiliary_frame(
+    subscription: MarketDataSubscription,
+    data: pd.DataFrame,
+) -> pd.DataFrame:
+    """Normalize one identity-keyed, observation-only auxiliary frame."""
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("auxiliary_data values must be pandas DataFrames")
+
+    if isinstance(data.index, pd.MultiIndex):
+        if data.index.nlevels != 2 or list(data.index.names) != _INDEX_NAMES:
+            raise ValueError(
+                "auxiliary data MultiIndex levels must be exactly ('symbol', 'datetime')"
+            )
+        symbols = set(data.index.get_level_values("symbol"))
+        if symbols != {subscription.symbol}:
+            raise ValueError(
+                "auxiliary frame symbol must match its subscription; "
+                f"expected={subscription.symbol!r}, observed={sorted(symbols)!r}"
+            )
+        normalized = data.xs(subscription.symbol, level="symbol").copy(deep=True)
+    elif isinstance(data.index, pd.DatetimeIndex):
+        normalized = data.copy(deep=True)
+    else:
+        raise ValueError("auxiliary data requires a DatetimeIndex or MultiIndex (symbol, datetime)")
+
+    if not isinstance(normalized.index, pd.DatetimeIndex) or normalized.index.tz is None:
+        raise ValueError("auxiliary data timestamps must be timezone-aware")
+    normalized.index = normalized.index.tz_convert("UTC")
+    normalized.index.name = "datetime"
+    normalized = normalized.sort_index(kind="stable")
+    if not normalized.index.is_unique:
+        raise ValueError("auxiliary data must contain unique timestamps per subscription")
+    validate_ohlcv_values(normalized, context=f"auxiliary data for {subscription!r}")
+
+    raw_available = normalized.get(AVAILABLE_AT_COLUMN)
+    _, available_at = normalize_bar_times(
+        normalized.index,
+        raw_available if raw_available is not None and raw_available.notna().any() else None,
+        subscription,
+    )
+    normalized[AVAILABLE_AT_COLUMN] = available_at
+    return normalized
+
+
+def _normalize_auxiliary_data(
+    data: Mapping[MarketDataSubscription, pd.DataFrame] | None,
+) -> dict[MarketDataSubscription, pd.DataFrame]:
+    if data is None:
+        return {}
+    if not isinstance(data, Mapping):
+        raise TypeError("auxiliary_data must be a mapping or None")
+    if any(not isinstance(subscription, MarketDataSubscription) for subscription in data):
+        raise TypeError("auxiliary_data keys must be MarketDataSubscription values")
+    normalized: dict[MarketDataSubscription, pd.DataFrame] = {}
+    for subscription in sorted(data):
+        normalized[subscription] = _normalize_auxiliary_frame(subscription, data[subscription])
     return normalized
 
 
@@ -660,6 +891,9 @@ class Backtest:
         primary_subscriptions: Optional exact primary identities. In direct
             construction their order is the authoritative universe order; with
             ``config`` they must match ``config.symbols`` and resolved routes.
+        auxiliary_data: Optional observation-only frames keyed by their exact
+            market-data subscription. Auxiliary bars advance by ``available_at``
+            but never create execution/equity events.
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
@@ -683,11 +917,15 @@ class Backtest:
         data_source: str = "",
         session_mode: MarketDataSessionMode | None = None,
         primary_subscriptions: Sequence[MarketDataSubscription] | None = None,
+        auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame] | None = None,
         record_position_snapshots: bool = False,
         execution: ExecutionPolicy | None = None,
         risk: RiskPolicy | None = None,
     ) -> None:
         data = _canonicalize_backtest_timestamps(data)
+        normalized_auxiliary_data = _normalize_auxiliary_data(auxiliary_data)
+        if normalized_auxiliary_data:
+            data = _sort_mixed_primary_data(data)
         _validate_backtest_data(data, config.symbols if config is not None else None)
         if config is not None and execution is not None:
             raise ValueError(
@@ -800,6 +1038,27 @@ class Backtest:
                     next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
                 )
         self._primary_subscriptions = resolved_subscriptions
+        if normalized_auxiliary_data and not resolved_subscriptions:
+            raise ValueError(
+                "direct Backtest auxiliary_data requires primary_subscriptions "
+                "covering every primary symbol"
+            )
+        if normalized_auxiliary_data and tuple(
+            item.symbol for item in resolved_subscriptions
+        ) != tuple(self._symbols):
+            raise ValueError(
+                "mixed-frequency primary_subscriptions must follow and exactly cover "
+                f"primary symbols; expected={tuple(self._symbols)!r}"
+            )
+        primary_identity_set = set(resolved_subscriptions)
+        overlap = primary_identity_set & set(normalized_auxiliary_data)
+        if overlap:
+            raise ValueError(
+                "auxiliary_data identities must be distinct from primary subscriptions: "
+                f"{sorted(overlap)!r}"
+            )
+        self._auxiliary_data = normalized_auxiliary_data
+        self._auxiliary_subscriptions = tuple(sorted(normalized_auxiliary_data))
         self._data = data
         subscription_by_symbol = {item.symbol: item for item in resolved_subscriptions}
         self._calendar_ids = {
@@ -860,6 +1119,11 @@ class Backtest:
         return self._primary_subscriptions
 
     @property
+    def auxiliary_subscriptions(self) -> tuple[MarketDataSubscription, ...]:
+        """Return sorted observation-only market-data identities."""
+        return self._auxiliary_subscriptions
+
+    @property
     def run_id(self) -> str:
         """Access run_id. Raises RuntimeError if run() not called."""
         if self._run_id is None:
@@ -889,6 +1153,7 @@ class Backtest:
         used_adv_quantity_by_symbol: dict[str, float],
         exposure_prices: dict[str, float],
         rebalance_state: PortfolioRebalanceState | None = None,
+        stop_eligible_symbols: set[str] | None = None,
     ) -> tuple[float, ExecutionResult]:
         if halted:
             result = check_stop_targets(
@@ -901,6 +1166,7 @@ class Backtest:
                 get_volume=get_previous_volume,
                 get_lagged_adv=get_lagged_adv,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                eligible_symbols=stop_eligible_symbols,
                 get_executable_quantity=self._get_executable_quantity,
             )
             return cash + result.cash_delta, result
@@ -981,6 +1247,15 @@ class Backtest:
                 self._data,
                 self._primary_subscriptions,
             )
+        market_data_replay = (
+            _MarketDataReplay(
+                self._data,
+                self._primary_subscriptions,
+                self._auxiliary_data,
+            )
+            if self._auxiliary_data
+            else None
+        )
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
             missing_calendars = sorted(
                 symbol for symbol, calendar_id in self._calendar_ids.items() if calendar_id is None
@@ -1009,7 +1284,7 @@ class Backtest:
         exposed_periods = 0
         primary_symbol = self._symbols[0]
         universe = set(self._symbols)
-        pending_decision: StrategyDecision = []
+        pending_envelopes: list[_DecisionEnvelope] = []
         pending_rebalance: PortfolioRebalanceState | None = None
         position_snapshots: list[PositionSnapshot] = []
         allocation_snapshots: list[AllocationSnapshot] = []
@@ -1026,8 +1301,12 @@ class Backtest:
         previous_volumes: dict[str, float] = {}
         rebalance_delay_bars = 0
         unavailable_rebalance_symbols: tuple[str, ...] = ()
+        drawdown_exit_origins: dict[str, pd.Timestamp] = {}
 
         for ts in self._timeline:
+            decision_at = (
+                market_data_replay.advance_frontier(ts) if market_data_replay is not None else None
+            )
             event_start_index = len(all_events)
             bars = all_bars[ts]
             lagged_adv = all_lagged_adv.get(ts, {})
@@ -1058,12 +1337,16 @@ class Backtest:
                 if close is not None and np.isfinite(close) and close > 0:
                     last_prices[symbol] = float(close)
 
-            pending_decision = self._without_halted_account(pending_decision, halted)
-            decision_to_execute, pending_decision = partition_pending_decision(
-                pending_decision,
-                bars,
-                positions,
-                primary_symbol=primary_symbol,
+            if halted:
+                pending_envelopes = []
+            decision_to_execute, pending_envelopes, ready_envelopes = (
+                _partition_enveloped_decisions(
+                    pending_envelopes,
+                    ts,
+                    bars,
+                    positions,
+                    primary_symbol=primary_symbol,
+                )
             )
             if pending_rebalance is not None and decision_to_execute:
                 raise ValueError(
@@ -1088,6 +1371,11 @@ class Backtest:
                     used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
                     exposure_prices=exposure_prices,
                     rebalance_state=pending_rebalance,
+                    stop_eligible_symbols={
+                        symbol
+                        for symbol in positions
+                        if symbol not in drawdown_exit_origins or ts > drawdown_exit_origins[symbol]
+                    },
                 )
                 # WHY: only an executed target is the active one. Recording it
                 # before this call would let a deferred target show up in the
@@ -1113,7 +1401,7 @@ class Backtest:
                     ) from exc
                 rebalance_delay_bars += 1
                 unavailable_rebalance_symbols = exc.symbols
-                pending_decision = decision_to_execute
+                pending_envelopes = [*ready_envelopes, *pending_envelopes]
                 logger.info(
                     "Deferring PortfolioWeights at %s (%d/%d bars): %s",
                     ts,
@@ -1156,6 +1444,11 @@ class Backtest:
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             runtime_events.extend(step_result.runtime_events)
+            drawdown_exit_origins = {
+                symbol: origin
+                for symbol, origin in drawdown_exit_origins.items()
+                if symbol in positions
+            }
             _, event_financing_cash_flows = calculate_funding_cash_flows(
                 ts,
                 bars,
@@ -1231,6 +1524,8 @@ class Backtest:
                     positions,
                     reason=REASON_DRAWDOWN_BREACH,
                 )
+                if decision_at is not None:
+                    drawdown_exit_origins.update({symbol: decision_at for symbol in positions})
                 halted = True
                 logger.warning(
                     "Backtest account %s halted at %s: drawdown %.2f%% breached "
@@ -1242,6 +1537,10 @@ class Backtest:
                     self._risk_policy.max_drawdown_rate * 100,
                 )
 
+            market_data_view = (
+                market_data_replay.commit_primary(ts) if market_data_replay is not None else None
+            )
+
             # ── Step 3: strategy decision (becomes eligible on a later bar) ──
             if halted:
                 if pending_rebalance is not None:
@@ -1250,7 +1549,7 @@ class Backtest:
                             ts, pending_rebalance, reason="rebalance_cancelled_by_halt"
                         )
                     )
-                pending_decision = []
+                pending_envelopes = []
                 pending_rebalance = None
             else:
                 ctx = Context(
@@ -1263,6 +1562,8 @@ class Backtest:
                     account_id=self._account_id,
                     account=account_snapshot,
                     period_index=decision_index,
+                    decision_at=(decision_at.to_pydatetime() if decision_at is not None else None),
+                    market_data=market_data_view,
                 )
                 new_decision = self._strategy.on_bar(ctx)
                 validate_strategy_decision(
@@ -1283,6 +1584,7 @@ class Backtest:
                             "cannot emit OrderIntents while a PortfolioWeights "
                             "rebalance is deferred"
                         )
+                pending_decision = _enveloped_decision(pending_envelopes)
                 if isinstance(pending_decision, PortfolioWeights) and isinstance(
                     new_decision, PortfolioWeights
                 ):
@@ -1293,9 +1595,10 @@ class Backtest:
                             detail={"reason": "rebalance_superseded"},
                         )
                     )
-                pending_decision = merge_pending_decisions(
-                    pending_decision,
+                pending_envelopes = _merge_enveloped_decision(
+                    pending_envelopes,
                     new_decision,
+                    decision_at=decision_at,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -1309,6 +1612,7 @@ class Backtest:
                 }
             )
 
+        pending_decision = _enveloped_decision(pending_envelopes)
         if (
             isinstance(pending_decision, PortfolioWeights) or pending_rebalance is not None
         ) and rebalance_delay_bars:
@@ -1510,6 +1814,7 @@ class Backtest:
             run_at=datetime.now(tz=UTC),
             session_mode=self._session_mode,
             primary_subscriptions=self._primary_subscriptions,
+            auxiliary_subscriptions=self._auxiliary_subscriptions,
         )
 
         event_records = self._build_event_records(result, run_id)

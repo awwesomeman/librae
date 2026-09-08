@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from librae.backtest.schema import BacktestOutput
 
-ARTIFACT_SCHEMA_VERSION = 3
+ARTIFACT_SCHEMA_VERSION = 4
 ArtifactKind = Literal["market_data", "backtest_output"]
 
 
