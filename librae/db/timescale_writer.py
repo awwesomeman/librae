@@ -69,6 +69,37 @@ _SIGNAL_INSERT_SQL = """INSERT INTO signal_events
            DO NOTHING"""
 
 
+def _normalize_data_source_by_symbol(
+    symbols: tuple[str, ...] | list[str],
+    data_source: str | None,
+    data_source_by_symbol: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Return the exact per-symbol sources that identify one run's raw bars."""
+    symbol_list = list(symbols)
+    if data_source_by_symbol is None:
+        if not data_source:
+            return {}
+        data_source_by_symbol = dict.fromkeys(symbol_list, data_source)
+
+    expected = set(symbol_list)
+    observed = set(data_source_by_symbol)
+    if observed != expected:
+        missing = sorted(expected - observed)
+        extra = sorted(observed - expected)
+        raise ValueError(
+            "data_source_by_symbol must cover exactly the run symbols; "
+            f"missing={missing}, extra={extra}"
+        )
+    invalid = sorted(
+        symbol
+        for symbol, source in data_source_by_symbol.items()
+        if not isinstance(source, str) or not source
+    )
+    if invalid:
+        raise ValueError(f"data_source_by_symbol values must be non-empty strings: {invalid}")
+    return {symbol: data_source_by_symbol[symbol] for symbol in symbol_list}
+
+
 def _extract_exit_signals(df: pd.DataFrame, symbol: str) -> pd.Series:
     """Extract exit_signal series if column exists, else empty Series."""
     if "exit_signal" not in df.columns:
@@ -105,6 +136,7 @@ def write_run_metadata(
     ended_at: datetime | None = None,
     run_at: datetime | None = None,
     data_source: str | None = None,
+    data_source_by_symbol: Mapping[str, str] | None = None,
     session_mode: str = "extended",
     poll_seconds: int | None = None,
     params: dict | None = None,
@@ -124,15 +156,23 @@ def write_run_metadata(
     timeframe = to_canonical(timeframe)
     if session_mode not in ("regular", "extended"):
         raise ValueError(f"invalid market-data session mode: {session_mode!r}")
+    resolved_data_sources = _normalize_data_source_by_symbol(
+        symbols,
+        data_source,
+        data_source_by_symbol,
+    )
     sql = """INSERT INTO backtest_runs
-               (run_id, strategy_name, symbols, timeframe, data_source, session_mode,
+               (run_id, strategy_name, symbols, timeframe, data_source,
+                data_source_by_symbol, session_mode,
                 started_at, ended_at, run_at, mode, poll_seconds,
                 params, execution_policy, risk_policy, config_hash,
                 backtest_revision, backtest_cache_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy_name=EXCLUDED.strategy_name, run_at=EXCLUDED.run_at,
-                 mode=EXCLUDED.mode, session_mode=EXCLUDED.session_mode,
+                 mode=EXCLUDED.mode,
+                 data_source_by_symbol=EXCLUDED.data_source_by_symbol,
+                 session_mode=EXCLUDED.session_mode,
                  poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
@@ -149,6 +189,7 @@ def write_run_metadata(
         json.dumps(symbols),
         timeframe,
         data_source,
+        json.dumps(resolved_data_sources),
         session_mode,
         _to_dt(started_at),
         _to_dt(ended_at),
@@ -228,6 +269,7 @@ def save_backtest_output(
     execution_policy: dict | None = None,
     risk_policy: dict | None = None,
     config_hash: str | None = None,
+    data_source_by_symbol: Mapping[str, str] | None = None,
     backtest_revision: str | None = None,
     replace_existing: bool = False,
     dsn: str | None = None,
@@ -242,6 +284,7 @@ def save_backtest_output(
         execution_policy: Resolved fill and liquidity assumptions to store.
         risk_policy: Resolved engine-level portfolio limits to store.
         config_hash: Deterministic engine-configuration hash.
+        data_source_by_symbol: Exact raw-data source used for each run symbol.
         backtest_revision: Optional caller-owned strategy_name-code and input-data
             revision. Cache reuse is disabled when omitted.
         replace_existing: Replace the canonical run for the derived cache key.
@@ -282,6 +325,7 @@ def save_backtest_output(
             ended_at=meta.ended_at,
             run_at=meta.run_at,
             data_source=meta.data_source,
+            data_source_by_symbol=data_source_by_symbol,
             session_mode=meta.session_mode,
             params=params,
             execution_policy=execution_policy,
@@ -1520,6 +1564,7 @@ def save_signal_results(
                     started_at=_to_dt(started_at),
                     ended_at=_to_dt(ended_at),
                     data_source=data_source,
+                    data_source_by_symbol={symbol: data_source},
                     session_mode=config.session_mode if config else "extended",
                     config_hash=config_hash,
                     backtest_revision=revision,
@@ -1586,7 +1631,12 @@ def save_strategy_results(
     strategy_performance, signal_events, ohlcv.
     """
     timeframe = config.timeframe
-    data_source = config.data_source
+    from librae.config.symbols import resolve_symbol
+
+    instruments = {symbol: resolve_symbol(config, symbol) for symbol in config.symbols}
+    data_source_by_symbol = {
+        symbol: instrument.data_source for symbol, instrument in instruments.items()
+    }
 
     signal_series_by_symbol: dict[str, pd.Series] = {}
     exit_signal_series_by_symbol: dict[str, pd.Series] = {}
@@ -1605,6 +1655,7 @@ def save_strategy_results(
         execution_policy=asdict(config.execution),
         risk_policy=asdict(config.risk),
         config_hash=config.config_hash,
+        data_source_by_symbol=data_source_by_symbol,
         backtest_revision=backtest_revision,
         replace_existing=replace_existing,
     )
@@ -1617,7 +1668,8 @@ def save_strategy_results(
             ohlcv_df,
             symbol,
             timeframe,
-            data_source=data_source,
+            data_source=instruments[symbol].data_source,
+            instrument_type=instruments[symbol].instrument_type,
             session_mode=config.session_mode,
         )
     counts["ohlcv"] = ohlcv_count

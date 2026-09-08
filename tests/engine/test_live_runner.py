@@ -715,6 +715,118 @@ class TestLiveTrader:
         assert calls[0][1]["calendar_id"] == "XNYS"
         assert "use_rth" not in calls[0][1]
 
+    def test_daily_ibkr_without_calendar_fails_at_construction(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        with pytest.raises(ValueError, match=r"daily IBKR.*calendar_id.*AAPL"):
+            self._make_runner(fetcher=MagicMock(), config=config)
+
+    def test_repeated_fetch_failure_suppresses_heartbeat_and_alerts_once(self):
+        state = {"fail": True}
+
+        def fetcher(*_args, **_kwargs):
+            if state["fail"]:
+                raise RuntimeError("feed unavailable")
+            return _make_ohlcv_df()
+
+        runner = self._make_runner(
+            fetcher=fetcher,
+            config=_test_cfg(warmup_periods=1),
+        )
+        heartbeat = MagicMock()
+        runtime_events = []
+        runner._on_heartbeat = heartbeat
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(4):
+            runner._poll_cycle()
+
+        heartbeat.assert_not_called()
+        failures = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0].detail["consecutive_failures"] == 3
+        alerts = [
+            call
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
+        ]
+        assert len(alerts) == 1
+
+        state["fail"] = False
+        runner._poll_cycle()
+
+        heartbeat.assert_called_once_with(runner.run_id)
+
+        state["fail"] = True
+        for _ in range(3):
+            runner._poll_cycle()
+
+        failures = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_failed"
+        ]
+        assert len(failures) == 2
+        alerts = [
+            call
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
+        ]
+        assert len(alerts) == 2
+
+    def test_factory_rejects_daily_ibkr_before_building_adapter(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        with (
+            patch("librae.orchestration.live._build_adapter") as build_adapter,
+            pytest.raises(ValueError, match=r"daily IBKR.*calendar_id.*AAPL"),
+        ):
+            build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                database_enabled=False,
+            )
+
+        build_adapter.assert_not_called()
+
     def test_non_ibkr_concrete_adapter_rejects_regular_session_request(self):
         class Adapter:
             def fetch_ohlcv(self, *_args, **_kwargs):

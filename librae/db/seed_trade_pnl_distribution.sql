@@ -17,10 +17,12 @@ DELETE FROM position_events WHERE run_id = 'seed_pnl_dist_run';
 DELETE FROM backtest_runs WHERE run_id = 'seed_pnl_dist_run';
 
 INSERT INTO backtest_runs
-    (run_id, strategy_name, symbols, timeframe, data_source, started_at, ended_at, run_at,
-     mode, poll_seconds, params, execution_policy, risk_policy, config_hash)
+    (run_id, strategy_name, symbols, timeframe, data_source, data_source_by_symbol,
+     started_at, ended_at, run_at, mode, poll_seconds, params, execution_policy,
+     risk_policy, config_hash)
 VALUES
     ('seed_pnl_dist_run', 'seed_test', '["BTCUSDT", "ETHUSDT", "SOLUSDT"]'::jsonb, 'H1', 'binance_spot',
+     '{"BTCUSDT":"binance_spot","ETHUSDT":"binance_spot","SOLUSDT":"binance_spot"}'::jsonb,
      NOW() - INTERVAL '200 hours', NOW(), NOW(),
      'backtest', NULL, '{}'::jsonb,
      '{"default_fill_price": "open", "max_bar_volume_participation_rate": 0.1, "warmup_periods": 720}'::jsonb,

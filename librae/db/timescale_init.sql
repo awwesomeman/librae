@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     symbols         JSONB NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT,
+    data_source_by_symbol JSONB NOT NULL DEFAULT '{}'::jsonb,
     session_mode    TEXT NOT NULL DEFAULT 'extended',
     started_at      TIMESTAMPTZ,
     ended_at        TIMESTAMPTZ,
@@ -67,6 +68,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     backtest_revision TEXT,
     backtest_cache_key VARCHAR(32),
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live')),
+    CONSTRAINT chk_run_data_sources_object
+        CHECK (jsonb_typeof(data_source_by_symbol) = 'object'),
     CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended'))
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash

@@ -17,7 +17,7 @@ from librae.config.symbols import resolve_symbol
 from librae.core.cost_model import CostModel
 from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
-from librae.live.engine import LiveTrader
+from librae.live.engine import LiveTrader, _validate_market_data_calendar_preconditions
 from librae.live.interfaces import Notifier
 from librae.live.state import normalize_runtime_revision
 
@@ -269,6 +269,9 @@ class _TimescaleCallbacks:
             mode=self._config.mode,
             started_at=datetime.now(tz=UTC),
             data_source=self._config.data_source,
+            data_source_by_symbol={
+                symbol: instrument.data_source for symbol, instrument in self._instruments.items()
+            },
             session_mode=self._config.session_mode,
             poll_seconds=self._config.runtime.poll_seconds,
             params=self._config.params,
@@ -488,6 +491,7 @@ def build_live_trader(
         )
         for symbol in config.symbols
     }
+    _validate_market_data_calendar_preconditions(config.timeframe, instruments)
     execution_routes = (
         _resolve_live_execution_routes(config, instruments, factories)
         if config.mode == "live"

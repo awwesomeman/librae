@@ -33,10 +33,12 @@ DELETE FROM ohlcv_coverage_ranges WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSD
 DELETE FROM backtest_runs WHERE run_id = 'seed_test_run';
 
 INSERT INTO backtest_runs
-    (run_id, strategy_name, symbols, timeframe, data_source, started_at, ended_at, run_at,
-     mode, poll_seconds, params, execution_policy, risk_policy, config_hash)
+    (run_id, strategy_name, symbols, timeframe, data_source, data_source_by_symbol,
+     started_at, ended_at, run_at, mode, poll_seconds, params, execution_policy,
+     risk_policy, config_hash)
 VALUES
     ('seed_test_run', 'seed_test', '["BTCUSDT", "ETHUSDT", "SOLUSDT"]'::jsonb, 'H1', 'binance_spot',
+     '{"BTCUSDT":"binance_spot","ETHUSDT":"binance_spot","SOLUSDT":"binance_spot"}'::jsonb,
      NOW() - INTERVAL '14 days', NOW(), NOW(),
      'backtest', NULL, '{}'::jsonb,
      '{"default_fill_price": "open", "max_bar_volume_participation_rate": 0.1, "warmup_periods": 720}'::jsonb,
@@ -64,7 +66,7 @@ FROM generate_series(0, 14 * 24 - 1) AS i,
      (VALUES ('BTCUSDT', 60000.0, 150.0),
              ('ETHUSDT', 3000.0, 500.0),
              ('SOLUSDT', 130.0, 900.0)) AS sym(symbol, base, base_vol)
-ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type) DO NOTHING;
+ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type, session_mode) DO NOTHING;
 
 INSERT INTO ohlcv_coverage_ranges (symbol, timeframe, data_source, range_started_at, range_ended_at)
 SELECT s, 'H1', 'binance_spot', NOW() - INTERVAL '14 days', NOW()
