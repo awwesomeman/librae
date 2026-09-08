@@ -192,6 +192,7 @@ def _superseded_rebalance_events(
 
 
 _INDEX_NAMES = ["symbol", "datetime"]
+_MIN_SESSION_CADENCE_SAMPLES = 5
 
 
 def _validate_backtest_data(
@@ -256,34 +257,124 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+def _terminal_canonical_cadence_start(
+    period_ordinals: np.ndarray,
+    canonical_starts: np.ndarray,
+) -> int | None:
+    """Return the start of a terminal run of consecutive canonical periods."""
+    minimum = _MIN_SESSION_CADENCE_SAMPLES
+    if len(period_ordinals) < minimum * 2 or not canonical_starts[-1]:
+        return None
+
+    start = len(period_ordinals) - 1
+    while (
+        start > 0
+        and canonical_starts[start - 1]
+        and period_ordinals[start] - period_ordinals[start - 1] == 1
+    ):
+        start -= 1
+    return start if len(period_ordinals) - start >= minimum else None
+
+
+def _canonical_period_start_flags(
+    index: pd.DatetimeIndex,
+    period_ordinals: np.ndarray,
+    timeframe: str,
+    calendar_id: str,
+) -> np.ndarray:
+    """Map one calendar-owned period start back to every observation."""
+    _, first_positions, inverse = np.unique(
+        period_ordinals,
+        return_index=True,
+        return_inverse=True,
+    )
+    canonical_by_period = pd.DatetimeIndex(
+        [period_start(index[position], timeframe, calendar_id) for position in first_positions]
+    )
+    return np.asarray(index == canonical_by_period.take(inverse), dtype=np.bool_)
+
+
+def _is_exact_daily_prefix(session_ordinal_values: np.ndarray, end: int) -> bool:
+    """Return whether the prefix proves one observation per trading session."""
+    return end >= _MIN_SESSION_CADENCE_SAMPLES and np.all(
+        np.diff(session_ordinal_values[:end]) == 1
+    )
+
+
+def _is_exact_weekly_prefix(
+    week_ordinals: np.ndarray,
+    week_start_flags: np.ndarray,
+    end: int,
+) -> bool:
+    """Return whether the prefix proves canonical consecutive weekly bars."""
+    return (
+        end >= _MIN_SESSION_CADENCE_SAMPLES
+        and np.all(week_start_flags[:end])
+        and np.all(np.diff(week_ordinals[:end]) == 1)
+    )
+
+
 def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
-    """Infer session bars by session cadence and fixed bars by elapsed time."""
-    sample = index[:20]
+    """Infer cadence from the complete per-symbol index."""
+    if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
+        return infer_timeframe(index)
     if calendar_id is None:
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
 
     try:
-        ordinals = np.asarray(session_ordinals(sample, calendar_id), dtype=np.int64)
-        labels = session_labels(sample, calendar_id)
+        ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
+        labels = session_labels(index, calendar_id)
     except ValueError:
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
     if len(set(ordinals)) != len(ordinals):
-        return infer_timeframe(sample)
+        return infer_timeframe(index)
 
     month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     month_diffs = np.diff(month_ordinals)
-    month_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "MN1", calendar_id) for timestamp in sample]
+    month_start_flags = _canonical_period_start_flags(
+        index,
+        month_ordinals,
+        "MN1",
+        calendar_id,
     )
-    if np.all(sample == month_starts) and np.all(month_diffs > 0):
+    week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
+    week_start_flags = _canonical_period_start_flags(
+        index,
+        week_ordinals,
+        "W1",
+        calendar_id,
+    )
+
+    month_transition_start = _terminal_canonical_cadence_start(
+        month_ordinals,
+        month_start_flags,
+    )
+    # Timestamp-only input proves a unit change only when both sides have an
+    # exact cadence. Missing observations and non-canonical coarse labels need
+    # authoritative subscription metadata rather than another heuristic.
+    if month_transition_start is not None and (
+        _is_exact_daily_prefix(ordinals, month_transition_start)
+        or _is_exact_weekly_prefix(
+            week_ordinals,
+            week_start_flags,
+            month_transition_start,
+        )
+    ):
+        raise ValueError("session cadence changes to MN after earlier denser observations")
+    if np.all(month_start_flags) and np.all(month_diffs > 0):
         return f"MN{int(np.gcd.reduce(month_diffs))}"
 
-    week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_diffs = np.diff(week_ordinals)
-    week_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "W1", calendar_id) for timestamp in sample]
+    week_transition_start = _terminal_canonical_cadence_start(
+        week_ordinals,
+        week_start_flags,
     )
-    if np.all(sample == week_starts) and np.all(week_diffs > 0):
+    if week_transition_start is not None and _is_exact_daily_prefix(
+        ordinals,
+        week_transition_start,
+    ):
+        raise ValueError("session cadence changes to W after earlier denser observations")
+    if np.all(week_start_flags) and np.all(week_diffs > 0):
         return f"W{int(np.gcd.reduce(week_diffs))}"
 
     session_diffs = np.diff(ordinals)
@@ -343,11 +434,34 @@ def _resolve_data_timeframe(
         str(symbol): pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
         for symbol, symbol_data in data.groupby(level="symbol", sort=False)
     }
-    inferred_by_symbol = {
-        symbol: _infer_symbol_timeframe(index, calendar_ids.get(symbol))
-        for symbol, index in indexes_by_symbol.items()
-        if len(index) >= 5
-    }
+    short_session_samples: dict[str, int] = {}
+    for symbol, index in indexes_by_symbol.items():
+        calendar_id = calendar_ids.get(symbol)
+        if len(index) >= _MIN_SESSION_CADENCE_SAMPLES or calendar_id is None:
+            continue
+        try:
+            ordinals = session_ordinals(index, calendar_id)
+        except ValueError:
+            continue
+        if len(set(ordinals)) == len(ordinals):
+            short_session_samples[symbol] = len(index)
+    if short_session_samples:
+        raise ValueError(
+            "cannot validate session cadence: at least five session bars are required "
+            f"per symbol; got {short_session_samples}"
+        )
+
+    inferred_by_symbol: dict[str, str] = {}
+    for symbol, index in indexes_by_symbol.items():
+        if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
+            continue
+        try:
+            inferred_by_symbol[symbol] = _infer_symbol_timeframe(
+                index,
+                calendar_ids.get(symbol),
+            )
+        except ValueError as exc:
+            raise ValueError(f"data symbol {symbol!r} {exc}") from exc
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
         expected_session_unit = _session_timeframe_unit(expected)
@@ -376,6 +490,18 @@ def _resolve_data_timeframe(
         if len(inferred) != 1:
             raise ValueError(f"data symbols have inconsistent timeframes: {inferred_by_symbol}")
         data_timeframe = next(iter(inferred))
+
+    if _session_timeframe_unit(data_timeframe) is not None:
+        short_session_samples = {
+            symbol: len(index)
+            for symbol, index in indexes_by_symbol.items()
+            if len(index) < _MIN_SESSION_CADENCE_SAMPLES
+        }
+        if short_session_samples:
+            raise ValueError(
+                "cannot validate session cadence: at least five session bars are required "
+                f"per symbol; got {short_session_samples}"
+            )
 
     if data_timeframe.startswith(("D", "W", "MN")):
         calendar_validated: set[str] = set()
