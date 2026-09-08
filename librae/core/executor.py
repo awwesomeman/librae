@@ -412,6 +412,15 @@ class PortfolioRebalanceState:
     unresolved_legs: tuple[UnresolvedRebalanceLeg, ...] = ()
 
 
+@dataclass(frozen=True)
+class _RestingFillCandidate:
+    """One reached non-open limit that may overlap position protection."""
+
+    symbol: str
+    fill_event_types: frozenset[PositionEventType]
+    check_pre_fill_protection: bool
+
+
 def _skipped(
     ts: datetime, reason: str, *, symbol: str | None = None, **context: object
 ) -> RuntimeEvent:
@@ -3535,17 +3544,90 @@ def merge_pending_decisions(
     return [*pending_intents, *new_intents]
 
 
-def _validate_no_ambiguous_stop_conflicts(
+def _resting_fill_candidates(
     pending_decision: StrategyDecision,
     positions: dict[str, PositionState],
     bars: dict[str, dict[str, float]],
     *,
-    get_cost_model: Callable[[str], CostModel],
     default_fill: str,
     primary_symbol: str,
     rebalance_state: PortfolioRebalanceState | None = None,
+) -> list[_RestingFillCandidate]:
+    """Return reached non-open limits that need transactional execution.
+
+    Price reachability only decides whether staging is needed. The canonical
+    executor still decides whether cash, quantity, and liquidity permit a
+    positive fill; the ambiguity guard consumes its resulting events instead
+    of duplicating those sizing rules.
+    """
+
+    def candidate(
+        intent: OrderIntent,
+        symbol: str,
+        *,
+        rebalance_phase: RebalancePhase | None = None,
+    ) -> _RestingFillCandidate | None:
+        position = positions.get(symbol)
+        if position is None or (
+            _intent_fill_timing(
+                intent,
+                bars.get(symbol, {}),
+                default_fill,
+                position_side=position.side,
+            )
+            != "intrabar"
+        ):
+            return None
+
+        if intent.action == "close":
+            fill_event_types: frozenset[PositionEventType] = frozenset(("close", "reduce"))
+            check_pre_fill_protection = True
+        elif rebalance_phase == "addition" and intent.action != position.side:
+            # A PortfolioWeights flip first closes the old side, then opens the
+            # other one. Its addition cannot overlap the old side's protection.
+            fill_event_types = frozenset(("open",))
+            check_pre_fill_protection = False
+        else:
+            # Same-side entries produce add events. An opposite-side explicit
+            # intent or a missing-quantity scale-in produces no such event, so
+            # it cannot become an ambiguity false positive.
+            fill_event_types = frozenset(("add",))
+            check_pre_fill_protection = True
+        return _RestingFillCandidate(
+            symbol=symbol,
+            fill_event_types=fill_event_types,
+            check_pre_fill_protection=check_pre_fill_protection,
+        )
+
+    candidates: list[_RestingFillCandidate] = []
+    if not isinstance(pending_decision, PortfolioWeights):
+        for intent in pending_decision:
+            symbol = intent.symbol or primary_symbol
+            if (item := candidate(intent, symbol)) is not None:
+                candidates.append(item)
+    if rebalance_state is not None:
+        for order in rebalance_state.orders:
+            if (
+                item := candidate(
+                    order.intent,
+                    order.intent.symbol,
+                    rebalance_phase=order.phase,
+                )
+            ) is not None:
+                candidates.append(item)
+    return candidates
+
+
+def _validate_no_ambiguous_stop_conflicts(
+    candidates: list[_RestingFillCandidate],
+    positions_before: dict[str, PositionState],
+    positions_after: dict[str, PositionState],
+    fill_events: list[PositionEvent],
+    bars: dict[str, dict[str, float]],
+    *,
+    get_cost_model: Callable[[str], CostModel],
 ) -> None:
-    """Refuse to guess the order of a non-open fill and a triggered protection.
+    """Refuse to guess the order of an actual non-open fill and protection.
 
     OHLCV bars cannot establish whether an intrabar stop/target occurred before
     or after a close/high/low fill. Detect it before execution so no cash,
@@ -3556,50 +3638,40 @@ def _validate_no_ambiguous_stop_conflicts(
     configured the caller sees the raise, which is the fail-closed default.
     """
 
-    def is_resting_fill(intent: OrderIntent, symbol: str) -> bool:
-        position = positions.get(symbol)
-        return (
-            position is not None
-            and _intent_fill_timing(
-                intent,
-                bars.get(symbol, {}),
-                default_fill,
-                position_side=position.side,
-            )
-            == "intrabar"
-        )
-
-    # PortfolioWeights produces market intents at the next open, so it has no
-    # unordered fill. Explicit intents and any retained rebalance legs are
-    # classified individually against this bar instead of inheriting the
-    # run-wide default.
-    decision_symbols: set[str] = set()
-    if not isinstance(pending_decision, PortfolioWeights):
-        for intent in pending_decision:
-            symbol = intent.symbol or primary_symbol
-            if is_resting_fill(intent, symbol):
-                decision_symbols.add(symbol)
-    if rebalance_state is not None:
-        decision_symbols |= {
-            order.intent.symbol
-            for order in rebalance_state.orders
-            if is_resting_fill(order.intent, order.intent.symbol)
-        }
-    if not decision_symbols:
+    if not candidates:
         return
 
-    conflicts = sorted(
-        symbol
-        for symbol in set(positions) & decision_symbols & set(bars)
-        # WHY: a market exit carried from an earlier bar resumes at this bar's
-        # open, ahead of any close/high/low fill, so its ordering is defined.
-        # resolve_stop_exit reports it before reading any trigger level, so
-        # only a level triggered by *this* bar is genuinely ambiguous.
-        if positions[symbol].pending_market_exit_reason is None
-        and resolve_stop_exit(positions[symbol], bars[symbol], get_cost_model(symbol)) is not None
-    )
+    filled_event_types = {
+        (event.symbol, event.event_type) for event in fill_events if event.fill_quantity > EPSILON
+    }
+    conflicts: set[str] = set()
+    for item in candidates:
+        if not any(
+            (item.symbol, event_type) in filled_event_types for event_type in item.fill_event_types
+        ):
+            continue
+        before = positions_before[item.symbol]
+        # A carried market exit belongs at this bar's open, but the combined
+        # executor cannot apply it before an explicit resting fill. Refuse the
+        # positive resting fill instead of committing that reversed sequence.
+        if before.pending_market_exit_reason is not None:
+            conflicts.add(item.symbol)
+            continue
+        cost_model = get_cost_model(item.symbol)
+        bar = bars[item.symbol]
+        before_triggered = item.check_pre_fill_protection and (
+            resolve_stop_exit(before, bar, cost_model) is not None
+        )
+        after = positions_after.get(item.symbol)
+        after_triggered = (
+            after is not None
+            and after.pending_market_exit_reason is None
+            and resolve_stop_exit(after, bar, cost_model) is not None
+        )
+        if before_triggered or after_triggered:
+            conflicts.add(item.symbol)
     if conflicts:
-        raise AmbiguousBarOrderingError(conflicts)
+        raise AmbiguousBarOrderingError(sorted(conflicts))
 
 
 def execute_pending_decision_and_stops(
@@ -3655,11 +3727,10 @@ def execute_pending_decision_and_stops(
     if pending_decision and rebalance_state is not None:
         raise ValueError("cannot execute a new decision while a portfolio residual is pending")
     if pending_decision or rebalance_state is not None:
-        _validate_no_ambiguous_stop_conflicts(
+        resting_candidates = _resting_fill_candidates(
             pending_decision,
             positions,
             bars,
-            get_cost_model=get_cost_model,
             default_fill=default_fill,
             primary_symbol=primary_symbol,
             rebalance_state=rebalance_state,
@@ -3671,7 +3742,8 @@ def execute_pending_decision_and_stops(
         retained_rebalance = (
             isinstance(pending_decision, PortfolioWeights) or rebalance_state is not None
         ) and rebalance_residual_policy != "discard"
-        stage_execution = enforce_portfolio_limits or retained_rebalance
+        required_staging = enforce_portfolio_limits or retained_rebalance
+        stage_execution = required_staging or bool(resting_candidates)
         if enforce_portfolio_limits and exposure_prices is None:
             raise ValueError("portfolio exposure limits require explicit exposure_prices")
         execution_positions = deepcopy(positions) if stage_execution else positions
@@ -3796,6 +3868,14 @@ def execute_pending_decision_and_stops(
                 atomic_groups=True,
                 validate_intent_prices=validate_intent_prices,
             )
+        _validate_no_ambiguous_stop_conflicts(
+            resting_candidates,
+            positions,
+            execution_positions,
+            fill_result.events,
+            bars,
+            get_cost_model=get_cost_model,
+        )
         if enforce_portfolio_limits:
             assert exposure_prices is not None
             validation_prices = dict(exposure_prices)
@@ -3810,7 +3890,7 @@ def execute_pending_decision_and_stops(
                 max_gross_exposure=max_gross_exposure,
                 max_net_exposure=max_net_exposure,
             )
-        if stage_execution:
+        if stage_execution and (required_staging or fill_result.events):
             positions.clear()
             positions.update(execution_positions)
             if used_adv_quantity_by_symbol is not None and execution_adv_quantities is not None:
