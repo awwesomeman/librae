@@ -364,6 +364,75 @@ jobs:
               connection.close()
           PY
 
+      - name: Verify exact OHLCV subscription routing
+        run: |
+          set -a
+          source .env.example
+          source .env.secrets
+          set +a
+          docker run --rm --interactive \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python - <<'PY'
+          import os
+
+          import psycopg2
+
+          from librae.db.timescale_reader import load_ohlcv
+
+          run_id = "identity-routing-smoke-193"
+          symbol = "IDENTITY_SMOKE_193"
+          connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
+          cursor = connection.cursor()
+          try:
+              cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              cursor.execute("DELETE FROM ohlcv WHERE symbol = %s", (symbol,))
+              cursor.execute(
+                  """
+                  INSERT INTO backtest_runs
+                      (run_id, strategy_name, symbols, timeframe,
+                       primary_subscriptions, started_at, ended_at)
+                  VALUES (%s, 'identity-routing-smoke', %s::jsonb, 'H1', %s::jsonb,
+                          '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')
+                  """,
+                  (
+                      run_id,
+                      f'["{symbol}"]',
+                      '[{"symbol":"IDENTITY_SMOKE_193","timeframe":"H1",'
+                      '"calendar_id":"24/7","session_mode":"extended",'
+                      '"data_source":"fixture","instrument_type":"spot"}]',
+                  ),
+              )
+              cursor.execute(
+                  """
+                  INSERT INTO ohlcv
+                      (ts, symbol, timeframe, calendar_id, session_mode,
+                       data_source, instrument_type, available_at,
+                       open, high, low, close, volume)
+                  VALUES
+                      ('2026-08-01T00:00:00Z', %s, 'H1', '24/7', 'extended',
+                       'fixture', 'spot', '2026-08-01T01:00:00Z', 100, 102, 99, 101, 10),
+                      ('2026-08-01T00:00:00Z', %s, 'H1', '24/7', 'extended',
+                       'fixture', 'contract_monthly', '2026-08-01T01:00:00Z',
+                       200, 202, 199, 201, 20)
+                  """,
+                  (symbol, symbol),
+              )
+              connection.commit()
+
+              loaded = load_ohlcv(run_id=run_id, as_of="2026-08-01T01:00:00Z")
+              assert loaded["instrument_type"].tolist() == ["spot"]
+              assert loaded["close"].tolist() == [101.0]
+          finally:
+              connection.rollback()
+              cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              cursor.execute("DELETE FROM ohlcv WHERE symbol = %s", (symbol,))
+              connection.commit()
+              cursor.close()
+              connection.close()
+          PY
+
       - name: Verify Linux host-gateway routing
         run: |
           python3 -m http.server 17497 --bind 0.0.0.0 >/tmp/fake-broker.log 2>&1 &

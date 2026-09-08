@@ -74,7 +74,10 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     CONSTRAINT chk_primary_subscriptions_array
         CHECK (
             jsonb_typeof(primary_subscriptions) = 'array'
-            AND jsonb_array_length(primary_subscriptions) = jsonb_array_length(symbols)
+            AND (
+                jsonb_array_length(primary_subscriptions) = 0
+                OR jsonb_array_length(primary_subscriptions) = jsonb_array_length(symbols)
+            )
         ),
     CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended'))
 );

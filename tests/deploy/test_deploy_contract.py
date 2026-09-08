@@ -976,6 +976,8 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
 
     assert "primary_subscriptions JSONB NOT NULL" in schema
     assert "jsonb_typeof(primary_subscriptions) = 'array'" in schema
+    assert "jsonb_array_length(primary_subscriptions) = 0" in schema
+    assert "jsonb_array_length(primary_subscriptions) = jsonb_array_length(symbols)" in schema
     assert "data_source_by_symbol JSONB NOT NULL" in schema
     assert "jsonb_typeof(data_source_by_symbol) = 'object'" in schema
     assert (
@@ -989,6 +991,13 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
     )
     assert "NULL::TEXT AS calendar_id" in schema
     assert "NULL::TEXT AS session_mode" in schema
+
+    seed = (ROOT / "librae/db/seed_fake_data.sql").read_text(encoding="utf-8")
+    assert "date_trunc('hour', NOW()) - INTERVAL '14 days'" in seed
+
+    workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
+    assert "Verify exact OHLCV subscription routing" in workflow
+    assert 'load_ohlcv(run_id=run_id, as_of="2026-08-01T01:00:00Z")' in workflow
 
 
 def test_backtest_cache_identity_is_separate_from_config_hash() -> None:

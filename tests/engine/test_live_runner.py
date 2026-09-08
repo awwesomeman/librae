@@ -127,7 +127,7 @@ def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     ts_end — used for staleness tests, where wall-clock-relative timing
     matters (unlike _make_ohlcv_df's fixed 2025-01-01 base, which reads
     as "very stale" relative to real now())."""
-    ts = pd.date_range(end=ts_end, periods=n, freq="h", tz=UTC)
+    ts = pd.date_range(end=pd.Timestamp(ts_end).floor("h"), periods=n, freq="h", tz=UTC)
     prices = np.arange(100.0, 100.0 + n, 1.0)
     return pd.DataFrame(
         {
@@ -141,7 +141,7 @@ def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     )
 
 
-TEST_CLOCK_NOW = datetime(2025, 1, 1, 2, tzinfo=UTC)
+TEST_CLOCK_NOW = datetime(2025, 1, 1, 10, tzinfo=UTC)
 
 
 def _make_ohlcv_at(timestamps: list[datetime], price: float = 100.0) -> pd.DataFrame:
@@ -203,6 +203,8 @@ def _test_cfg(**overrides) -> RunConfig:
             route = routes.setdefault(symbol, {})
             route.setdefault("instrument_type", "spot")
             route.setdefault("currency", "USDT")
+            if route.get("data_adapter") != "ibkr":
+                route.setdefault("calendar_id", "24/7")
     if "account" not in overrides:
         currencies = {
             routes.get(symbol, {}).get("currency") or registry[symbol].currency
@@ -583,6 +585,9 @@ class TestLiveTrader:
             **kwargs,
         )
         runner._sleep = lambda _seconds: None  # no real delays in unit tests
+        # Most fixtures use a fixed clock to exercise execution rather than
+        # staleness. Dedicated staleness tests restore the production bound.
+        runner.STALE_DATA_TOLERANCE_BARS = 100
         return runner
 
     @pytest.mark.parametrize(
@@ -682,11 +687,17 @@ class TestLiveTrader:
 
     def test_ibkr_adapter_receives_generic_session_and_calendar_contract(self):
         calls: list[tuple[tuple, dict]] = []
+        frame = _make_ohlcv_df()
+        frame["ts"] = pd.date_range(
+            "2025-01-02T14:30:00Z",
+            periods=5,
+            freq="h",
+        )
 
         class Adapter:
             def fetch_ohlcv(self, *args, **kwargs):
                 calls.append((args, kwargs))
-                return _make_ohlcv_df()
+                return frame
 
         config = _test_cfg(
             symbols=["AAPL"],
@@ -706,7 +717,11 @@ class TestLiveTrader:
             },
             symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
         )
-        runner = self._make_runner(fetcher=Adapter(), config=config)
+        runner = self._make_runner(
+            fetcher=Adapter(),
+            config=config,
+            clock=lambda: datetime(2025, 1, 3, tzinfo=UTC),
+        )
 
         frame = runner._fetch_with_cache("AAPL")
 
@@ -876,12 +891,52 @@ class TestLiveTrader:
             strategy=CaptureClose(),
             fetcher=lambda *_args, **_kwargs: frame,
             config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
         )
 
         runner.run(max_iterations=1)
 
         assert observed == [100.0]
         assert runner._ohlcv_cache["BTCUSDT"]["close"].tolist() == [100.0]
+
+    def test_market_data_derives_completion_and_excludes_open_h1_bar(self):
+        frame = _make_ohlcv_df(n=2, start_hour=1)
+        frame["close"] = [100.0, 999.0]
+        observed: list[float] = []
+
+        class CaptureClose(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                observed.append(float(ctx.bar["close"]))
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureClose(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 2, 30, tzinfo=UTC),
+        )
+
+        runner.run(max_iterations=1)
+
+        assert observed == [100.0]
+        assert runner._ohlcv_cache["BTCUSDT"]["ts"].tolist() == [
+            pd.Timestamp("2025-01-01T01:00:00Z")
+        ]
+
+    def test_market_data_newest_first_is_stably_normalized_before_eligibility(self):
+        frame = _make_ohlcv_df(n=2).iloc[::-1]
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+
+        result = runner._eligible_runtime_rows("BTCUSDT", frame)
+
+        assert result["ts"].tolist() == [
+            pd.Timestamp("2025-01-01T00:00:00Z"),
+            pd.Timestamp("2025-01-01T01:00:00Z"),
+        ]
 
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
@@ -1076,8 +1131,8 @@ class TestLiveTrader:
         frame["ts"] = frame["ts"].dt.tz_localize(None)
         runner = self._make_runner(fetcher=lambda *_args, **_kwargs: frame)
 
-        with pytest.raises(ValueError, match="timestamp must be timezone-aware"):
-            runner._poll_cycle()
+        with pytest.raises(ValueError, match=r"timestamp must be.*timezone-aware"):
+            runner._eligible_runtime_rows("BTCUSDT", frame)
 
     @pytest.mark.parametrize("mode", ["sim", "live"])
     def test_missing_symbol_action_waits_for_its_next_real_bar(self, mode):
@@ -1262,7 +1317,7 @@ class TestLiveTrader:
             {"AAA", "BBB"},
         ]
 
-    def test_duplicate_broker_bars_do_not_repeat_cycle(self):
+    def test_duplicate_broker_bars_fail_closed_before_strategy(self):
         ts = datetime(2025, 1, 1, tzinfo=UTC)
         duplicated = _make_ohlcv_at([ts, ts])
 
@@ -1274,11 +1329,10 @@ class TestLiveTrader:
             config=_test_cfg(symbols=["AAA", "BBB"], warmup_periods=1),
         )
 
-        runner._poll_cycle()
-        runner._poll_cycle()
+        with pytest.raises(ValueError, match="unique bar timestamps"):
+            runner._eligible_runtime_rows("AAA", duplicated)
 
-        assert strategy.on_bar.call_count == 1
-        assert all(len(frame) == 1 for frame in runner._ohlcv_cache.values())
+        strategy.on_bar.assert_not_called()
 
     def test_out_of_order_bar_before_watermark_is_not_replayed(self):
         t0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -1325,7 +1379,7 @@ class TestLiveTrader:
 
     @pytest.mark.parametrize(("mode", "expected_events"), [("sim", 3), ("live", 1)])
     def test_only_sim_replays_all_uncommitted_bars(self, mode, expected_events):
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         timestamps = [now - timedelta(hours=2), now - timedelta(hours=1), now]
         frame = _make_ohlcv_at(timestamps)
         strategy = MagicMock(spec=Strategy)
@@ -1335,6 +1389,7 @@ class TestLiveTrader:
             fetcher=lambda *_args, **_kwargs: frame,
             config=_test_cfg(mode=mode, warmup_periods=1),
             order_adapter=_mock_order_adapter() if mode == "live" else None,
+            clock=lambda: now + timedelta(hours=1),
         )
         runner._last_bar_ts["BTCUSDT"] = now - timedelta(hours=3)
         runner._last_cycle_ts = now - timedelta(hours=3)
@@ -2061,6 +2116,7 @@ class TestLiveTrader:
             fetcher=lambda *a, **kw: _make_ohlcv_df_at(stale_ts),
             clock=lambda: datetime.now(UTC),
         )
+        runner.STALE_DATA_TOLERANCE_BARS = 2
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -2081,6 +2137,7 @@ class TestLiveTrader:
             order_adapter=order_adapter,
             clock=lambda: datetime.now(UTC),
         )
+        runner.STALE_DATA_TOLERANCE_BARS = 2
 
         runner._poll_cycle()
 
@@ -2111,6 +2168,7 @@ class TestLiveTrader:
         regression, and a fast unit test can't just wait out the clock to
         make an already-cached bar age past the threshold for real."""
         runner = self._make_runner(clock=lambda: datetime.now(UTC))
+        runner.STALE_DATA_TOLERANCE_BARS = 2
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
 
@@ -2483,7 +2541,7 @@ class TestLiveExecutionLifecycle:
         on_ready=None,
         on_runtime_event=None,
     ) -> LiveTrader:
-        return LiveTrader(
+        trader = LiveTrader(
             strategy,
             _simple_feature_fn,
             config=config or _test_cfg(mode="live"),
@@ -2501,6 +2559,8 @@ class TestLiveExecutionLifecycle:
             on_ready=on_ready,
             on_runtime_event=on_runtime_event,
         )
+        trader.STALE_DATA_TOLERANCE_BARS = 100
+        return trader
 
     def test_live_runtime_revision_is_required_before_checkpoint_or_broker_access(self):
         adapter = _mock_order_adapter()
@@ -4047,6 +4107,7 @@ class TestLiveExecutionLifecycle:
             runtime_revision="test-runtime",
             clock=lambda: TEST_CLOCK_NOW,
         )
+        runner.STALE_DATA_TOLERANCE_BARS = 100
 
         runner.run(max_iterations=2)
 
@@ -5299,6 +5360,7 @@ class TestShioajiLiveFactory:
                 runtime_revision="test-runtime",
             )
             trader._clock = lambda: TEST_CLOCK_NOW
+            trader.STALE_DATA_TOLERANCE_BARS = 100
             trader._sleep = lambda _seconds: None  # no real delays in unit tests
             trader.run(max_iterations=2)
 

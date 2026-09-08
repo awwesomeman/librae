@@ -414,6 +414,7 @@ def test_data_adapters_are_not_shared_across_differing_instrument_types() -> Non
                 "data_source": "binance_spot",
                 "instrument_type": "contract_perpetual",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             }
         },
     )
@@ -518,6 +519,7 @@ def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
                 "data_adapter": "vendor_plugin",
                 "instrument_type": "contract_perpetual",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             }
             for symbol in ("BTC_PERP", "ETH_PERP")
         },
@@ -563,12 +565,14 @@ def test_live_execution_allows_independent_market_data_sources() -> None:
                 "data_source": "source_a",
                 "instrument_type": "spot",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             },
             "ETH": {
                 "data_adapter": "feed_b",
                 "data_source": "source_b",
                 "instrument_type": "spot",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             },
         },
     )
@@ -870,6 +874,37 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
     assert subscription.session_mode == "regular"
     assert subscription.calendar_id == "24/7"
     assert write.call_args.args[0]["available_at"].iloc[0] == datetime(2025, 1, 1, 1, tzinfo=UTC)
+
+
+def test_live_ohlcv_analytics_write_remains_best_effort() -> None:
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        None,
+    )
+
+    with patch(
+        "librae.db.timescale_writer.write_ohlcv",
+        autospec=True,
+        side_effect=RuntimeError("database unavailable"),
+    ) as write:
+        callbacks.on_ohlcv(
+            "BTCUSDT",
+            "H1",
+            {
+                "open": 99.0,
+                "high": 101.0,
+                "low": 98.0,
+                "close": 100.0,
+                "volume": 10.0,
+                "available_at": datetime(2025, 1, 1, 1, tzinfo=UTC),
+            },
+            datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+    write.assert_called_once()
+    assert callbacks._failures["write_ohlcv"] == 1
 
 
 def test_timescale_callbacks_writes_runtime_event() -> None:

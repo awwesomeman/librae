@@ -640,7 +640,9 @@ def write_ohlcv(
     columns: open, high, low, close, volume. ``subscription`` is the whole
     immutable row identity; partial scalar keys are deliberately unsupported.
     ``available_at`` is validated against the calendar/fixed completion floor
-    and derived only when that floor is provable.
+    and derived only when that floor is provable.  It versions the current
+    row: only a strictly later availability may replace stored OHLCV values;
+    equal or older versions are idempotent no-ops.
 
     Returns number of rows written.
     """
@@ -708,9 +710,10 @@ def write_ohlcv(
                    ts, symbol, timeframe, calendar_id, session_mode,
                    data_source, instrument_type)
                    DO UPDATE SET
-                 available_at=GREATEST(ohlcv.available_at, EXCLUDED.available_at),
+                 available_at=EXCLUDED.available_at,
                  open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
-                 close=EXCLUDED.close, volume=EXCLUDED.volume""",
+                 close=EXCLUDED.close, volume=EXCLUDED.volume
+               WHERE EXCLUDED.available_at > ohlcv.available_at""",
             rows,
             page_size=2000,
         )

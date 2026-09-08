@@ -757,6 +757,50 @@ class TestBacktestDataContract:
         assert backtest.primary_subscriptions == (subscription,)
         assert backtest.build_output().run_metadata.primary_subscriptions == (subscription,)
 
+    def test_available_at_is_reserved_from_strategy_and_execution_bars(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        frame["available_at"] = frame.index.get_level_values("datetime") + pd.Timedelta(hours=1)
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+        context_bars: list[dict[str, object]] = []
+        execution_bars: list[dict[str, dict[str, float]]] = []
+
+        class BuyOnce(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                context_bars.append(dict(ctx.bar))
+                assert all("available_at" not in bar for bar in ctx.bars.values())
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        class CapturingBacktest(Backtest):
+            def _execute_steps(self, *args, **kwargs):
+                execution_bars.append(args[4])
+                return super()._execute_steps(*args, **kwargs)
+
+        result = CapturingBacktest(
+            frame,
+            BuyOnce(),
+            cost_model=_zero_cost(),
+            primary_subscriptions=(subscription,),
+        ).run()
+
+        assert result.position_events[0].event_type == "open"
+        assert context_bars
+        assert execution_bars
+        assert all("available_at" not in bar for bar in context_bars)
+        assert all(
+            "available_at" not in bar
+            for event_bars in execution_bars
+            for bar in event_bars.values()
+        )
+
     def test_primary_subscription_rejects_early_availability(self) -> None:
         frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
         frame["available_at"] = frame.index.get_level_values("datetime")
@@ -770,6 +814,30 @@ class TestBacktestDataContract:
         )
 
         with pytest.raises(ValueError, match="earlier than bar completion"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(subscription,),
+            ).run()
+
+    def test_primary_subscription_rejects_naive_availability(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        frame["available_at"] = pd.date_range(
+            "2025-01-01 01:00",
+            periods=5,
+            freq="h",
+        )
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="available_at values must be timezone-aware"):
             Backtest(
                 frame,
                 HoldStrategy(),

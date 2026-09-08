@@ -463,11 +463,16 @@ rejected. The present event loop accepts one primary timeframe only; auxiliary
 frontier ordering is intentionally outside this foundation.
 
 Every normalized row has two UTC facts: `ts` is the canonical bar start and
-`available_at` is the earliest instant at which its final values are safe to
-observe. A provider publication later than the fixed/calendar completion floor
-is preserved. An earlier value is rejected. If Librae cannot establish the
-floor (for example, a calendar-sized extended-hours bar without a provider
-publication time), normalization fails closed rather than inventing one.
+`available_at` is the earliest instant at which that currently supplied row
+version is safe to observe. A late publication or correction can therefore
+make `available_at` non-monotonic across increasing `ts`. A provider time later
+than the fixed/calendar completion floor is preserved; an earlier value is
+rejected. If Librae cannot establish the floor (for example, a calendar-sized
+extended-hours bar without a provider publication time), normalization fails
+closed rather than inventing one. For extended intraday data, the floor is the
+source-declared `available_at`, or the nominal fixed duration from `ts` when it
+is absent; the regular-session calendar does not prove provider-specific
+after-hours bucket anchors.
 
 IBKR `1d` labels are exchange session dates, not UTC midnight instants. Stock
 daily bars therefore require `calendar_id`: the adapter preserves

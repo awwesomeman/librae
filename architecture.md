@@ -736,7 +736,7 @@ flowchart TD
 
 ### Timestamp naming rules
 
-**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`). For OHLCV it is the canonical UTC bar start; `available_at` records the earliest safe observation time and is the causal as-of frontier.
+**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`). For OHLCV it is the canonical UTC bar start; `available_at` records the earliest safe observation time of the currently persisted row version and is the causal as-of frontier.
 **Every other point-in-time metadata field uses the `_at` suffix**, consistently — even when it's a query range filter parameter (e.g. `load_ohlcv(started_at=..., ended_at=...)`), to avoid the same root word being called `ts` in one function signature and something else in another.
 
 | Field | Meaning | Where it appears |
@@ -747,7 +747,7 @@ flowchart TD
 | `entry_at` | when a position was entered | `position_events`, `Position`, `PositionState`, `TradeResult`, `PositionEvent`, `PositionEventRecord` |
 | `exit_at` | when a trade was exited | `TradeResult` |
 | `last_heartbeat_at` | last time the running process reported itself alive | `backtest_runs` |
-| `available_at` | earliest safe observation time of the final OHLCV values | `ohlcv` and normalized market-data artifacts |
+| `available_at` | earliest safe observation time of the current OHLCV row version; late corrections may be non-monotonic across `ts` | `ohlcv` and normalized market-data artifacts |
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
 
@@ -827,11 +827,11 @@ replaces the prior canonical run for that cache key in the same transaction,
 so rollback restores the prior run if the replacement fails. A null key means
 cache reuse is disabled and does not serialize otherwise equal configurations.
 
-`write_ohlcv()` accepts one complete `MarketDataSubscription`, validates
-`available_at` against the real completion floor, and may replace corrected
-OHLCV values for the same identity. Its stored availability can only move
-later, never earlier. `write_external_factor()` keeps the earliest value on a
-primary-key conflict.
+`write_ohlcv()` accepts one complete `MarketDataSubscription` and validates
+`available_at` against the provable completion floor. On identity conflict,
+only a strictly later `available_at` replaces the stored OHLCV values and
+version time; equal or older versions are no-ops. `write_external_factor()`
+keeps the earliest value on a primary-key conflict.
 
 ## Maintenance rules
 

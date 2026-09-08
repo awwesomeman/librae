@@ -162,6 +162,47 @@ def test_normalize_bars_maps_and_preserves_later_provider_availability() -> None
     ]
 
 
+def test_normalize_bars_allows_nonmonotonic_late_correction_availability() -> None:
+    data = _bars(pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC"))
+    data["available_at"] = [
+        "2026-01-03T00:00:00Z",
+        "2026-01-01T02:00:00Z",
+    ]
+
+    result = normalize_bars(data, symbol="AAA", subscription=_subscription())
+
+    assert result["available_at"].tolist() == [
+        pd.Timestamp("2026-01-03T00:00:00Z"),
+        pd.Timestamp("2026-01-01T02:00:00Z"),
+    ]
+
+
+def test_normalize_bars_accepts_mixed_offset_aware_availability() -> None:
+    data = _bars(pd.date_range("2026-03-08T05:00:00Z", periods=2, freq="h"))
+    data["available_at"] = [
+        "2026-03-08T01:00:00-05:00",
+        "2026-03-08T03:00:00-04:00",
+    ]
+
+    result = normalize_bars(data, symbol="AAA", subscription=_subscription())
+
+    assert result["available_at"].tolist() == [
+        pd.Timestamp("2026-03-08T06:00:00Z"),
+        pd.Timestamp("2026-03-08T07:00:00Z"),
+    ]
+
+
+def test_normalize_bars_rejects_one_naive_availability_in_aware_batch() -> None:
+    data = _bars(pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC"))
+    data["available_at"] = [
+        "2026-01-01T01:00:00Z",
+        "2026-01-01T02:00:00",
+    ]
+
+    with pytest.raises(ValueError, match="available_at values must be timezone-aware"):
+        normalize_bars(data, symbol="AAA", subscription=_subscription())
+
+
 def test_normalize_bars_derives_24x7_fixed_completion() -> None:
     data = _bars(pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC"))
 
@@ -171,6 +212,13 @@ def test_normalize_bars_derives_24x7_fixed_completion() -> None:
         pd.Timestamp("2026-01-01T01:00:00Z"),
         pd.Timestamp("2026-01-01T02:00:00Z"),
     ]
+
+
+def test_normalize_bars_rejects_overlapping_fixed_duration_bars() -> None:
+    data = _bars(pd.DatetimeIndex(pd.to_datetime(["2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z"])))
+
+    with pytest.raises(ValueError, match="timestamps overlap timeframe=H1"):
+        normalize_bars(data, symbol="AAA", subscription=_subscription())
 
 
 def test_normalize_bars_rejects_availability_before_completion() -> None:
@@ -198,6 +246,19 @@ def test_normalize_bars_uses_exchange_break_as_fixed_bar_completion() -> None:
         pd.Timestamp("2026-03-09T04:00:00Z"),
         pd.Timestamp("2026-03-09T06:00:00Z"),
     ]
+
+
+def test_extended_intraday_uses_fixed_floor_without_claiming_calendar_anchor() -> None:
+    data = _bars(pd.DatetimeIndex(pd.to_datetime(["2026-03-09T22:15:00Z", "2026-03-09T23:15:00Z"])))
+    data["available_at"] = pd.to_datetime(["2026-03-09T23:15:00Z", "2026-03-10T00:20:00Z"])
+
+    result = normalize_bars(
+        data,
+        symbol="AAA",
+        subscription=_subscription(calendar_id="XNYS", session_mode="extended"),
+    )
+
+    assert result["available_at"].tolist() == list(data["available_at"])
 
 
 @pytest.mark.parametrize(
@@ -254,6 +315,28 @@ def test_extended_calendar_bar_requires_provider_availability() -> None:
                 calendar_id="XNYS",
                 session_mode="extended",
             ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "timestamps"),
+    [
+        ("D2", ["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"]),
+        ("W2", ["2026-01-05T00:00:00Z", "2026-01-12T00:00:00Z"]),
+        ("MN2", ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]),
+    ],
+)
+def test_normalize_bars_rejects_overlapping_multi_period_bars(
+    timeframe: str,
+    timestamps: list[str],
+) -> None:
+    data = _bars(pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True)))
+
+    with pytest.raises(ValueError, match=f"not aligned to timeframe={timeframe}"):
+        normalize_bars(
+            data,
+            symbol="AAA",
+            subscription=_subscription(timeframe=timeframe),
         )
 
 

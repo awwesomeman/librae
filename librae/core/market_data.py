@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 
 from librae.core.run_config import MarketDataSessionMode
-from librae.core.trading_calendar import ALWAYS_OPEN_CALENDAR, period_close, period_start
+from librae.core.trading_calendar import (
+    ALWAYS_OPEN_CALENDAR,
+    period_close,
+    period_start,
+    session_labels,
+    session_ordinals,
+)
 from librae.core.utils import interval_to_timedelta, to_canonical
 
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
@@ -101,14 +107,24 @@ def subscription_from_instrument(
 
 def _utc_index(values: object, *, field_name: str) -> pd.DatetimeIndex:
     try:
-        timestamps = pd.DatetimeIndex(pd.to_datetime(values, errors="raise"))
+        raw_values = list(values)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} values must be valid timestamps") from exc
-    if timestamps.tz is None:
-        raise ValueError(f"{field_name} values must be timezone-aware")
-    if timestamps.hasnans:
-        raise ValueError(f"{field_name} values must not contain NaT")
-    return timestamps.tz_convert("UTC")
+
+    normalized: list[pd.Timestamp] = []
+    for value in raw_values:
+        try:
+            timestamp = pd.Timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} values must be valid timestamps") from exc
+        if pd.isna(timestamp):
+            raise ValueError(f"{field_name} values must not contain NaT")
+        if timestamp.tz is None:
+            raise ValueError(f"{field_name} values must be timezone-aware")
+        normalized.append(timestamp.tz_convert("UTC"))
+    if not normalized:
+        return pd.DatetimeIndex([], tz="UTC")
+    return pd.DatetimeIndex(normalized)
 
 
 def _completion_floor(
@@ -147,15 +163,74 @@ def _completion_floor(
     return floor
 
 
+def validate_bar_cadence(
+    timestamps: pd.DatetimeIndex,
+    timeframe: str,
+    calendar_id: str,
+    *,
+    context: str = "bar data",
+) -> None:
+    """Validate non-overlap plus calendar-sized per-series cadence.
+
+    Fixed intraday bars need not share a provider-independent global phase,
+    but two observations of one subscription cannot overlap. Calendar-sized
+    bars additionally use the first observation as that series' phase. Missing
+    whole bars are allowed; different symbols remain free to use other phases.
+    """
+    canonical = to_canonical(timeframe)
+    if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
+        interval = interval_to_timedelta(canonical)
+        diffs = pd.Series(timestamps).diff().dropna()
+        if bool((diffs < interval).any()):
+            raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
+        return
+    if not canonical.startswith(("D", "W", "MN")):
+        return
+
+    expected_starts = pd.DatetimeIndex(
+        [period_start(timestamp, canonical, calendar_id) for timestamp in timestamps]
+    )
+    if np.any(timestamps != expected_starts):
+        raise ValueError(
+            f"{context} timestamps are not the canonical timeframe={canonical} period starts"
+        )
+
+    if canonical.startswith("D"):
+        interval = int(canonical[1:])
+        ordinals = np.asarray(session_ordinals(timestamps, calendar_id), dtype=np.int64)
+    else:
+        labels = session_labels(timestamps, calendar_id)
+        if canonical.startswith("W"):
+            interval = int(canonical[1:])
+            ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
+        else:
+            interval = int(canonical[2:])
+            ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
+    diffs = np.diff(ordinals)
+    if np.any(diffs < interval) or np.any(diffs % interval != 0):
+        raise ValueError(f"{context} timestamps are not aligned to timeframe={canonical}")
+
+
 def normalize_bar_times(
     timestamps: object,
     available_at: object | None,
     subscription: MarketDataSubscription,
 ) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
-    """Normalize one subscription's row clocks and enforce causal availability."""
+    """Normalize row clocks and validate the currently supplied row versions.
+
+    ``available_at`` is version-local: a later correction to an older bar may
+    legitimately have a later availability than a newer bar.  It therefore
+    has no cross-row monotonicity requirement.
+    """
     normalized_ts = _utc_index(timestamps, field_name="bar timestamps")
     if not normalized_ts.is_monotonic_increasing:
         raise ValueError("bar timestamps must be increasing within a subscription")
+    validate_bar_cadence(
+        normalized_ts,
+        subscription.timeframe,
+        subscription.calendar_id,
+        context=f"{subscription.symbol!r} subscription",
+    )
     provided = available_at is not None
     normalized_available = (
         _utc_index(available_at, field_name=AVAILABLE_AT_COLUMN) if provided else None
@@ -181,8 +256,6 @@ def normalize_bar_times(
             f"available_at {normalized_available[first].isoformat()} is earlier than "
             f"bar completion {floors[first].isoformat()} for {subscription.symbol!r}"
         )
-    if not normalized_available.is_monotonic_increasing:
-        raise ValueError("available_at must not move backward within a subscription")
     return normalized_ts, normalized_available
 
 

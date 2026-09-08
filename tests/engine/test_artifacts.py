@@ -101,6 +101,28 @@ def test_market_data_artifact_preserves_features_and_adds_identity() -> None:
     assert str(table["ts"].dt.tz) == "UTC"
 
 
+def test_market_data_artifact_preserves_late_correction_version_time() -> None:
+    frame = _market_frame()
+    frame["available_at"] = [
+        "2026-08-02T00:00:00Z",
+        "2026-07-29T02:00:00Z",
+    ]
+
+    artifact = build_market_data_artifact(
+        frame,
+        symbol="BTCUSDT",
+        timeframe="H1",
+        calendar_id="24/7",
+        data_source="fixture",
+        instrument_type="spot",
+    )
+
+    assert artifact.tables["market_data"]["available_at"].tolist() == [
+        pd.Timestamp("2026-08-02T00:00:00Z"),
+        pd.Timestamp("2026-07-29T02:00:00Z"),
+    ]
+
+
 def test_market_data_artifact_distinguishes_regular_session_data() -> None:
     frame = _market_frame()
     frame.index = pd.DatetimeIndex(

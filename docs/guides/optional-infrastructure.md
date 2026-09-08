@@ -57,9 +57,11 @@ The subscription-identity schema adds `backtest_runs.primary_subscriptions`,
 columns must be backfilled from auditable source metadata before constraints
 and indexes are changed. Do not infer missing calendar or instrument type from
 the symbol string. Runs whose exact six-field identities cannot be recovered
-must remain legacy records: `load_ohlcv(run_id=...)` rejects them and requires
-recreation or an explicit operator-owned migration instead of reading a mixed
-dataset. Re-running `timescale_init.sql` is not that migration.
+must be marked explicitly with `primary_subscriptions=[]` as legacy records;
+`load_ohlcv(run_id=...)` rejects them and requires recreation or an explicit
+operator-owned migration instead of reading a mixed dataset. New writes still
+require a complete non-empty identity list. Re-running `timescale_init.sql` is
+not that migration.
 For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
 `POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
@@ -81,6 +83,10 @@ OHLCV read/write and coverage helpers accept a `MarketDataSubscription`
 instead of a collection of optional scalar filters. `load_ohlcv(as_of=...)`
 filters on `available_at`, so a DB-backed warmup cannot observe a bar merely
 because its start label is inside the requested range.
+OHLCV upserts treat `available_at` as a row-version clock: only a strictly
+later value replaces the stored OHLCV row. Equal versions are idempotent and
+older replays are ignored, so values and availability never come from
+different versions.
 
 Backtest database reuse is disabled unless the caller supplies
 `backtest_revision` through CLI/YAML orchestration and passes the same value to

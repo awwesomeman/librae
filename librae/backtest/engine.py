@@ -86,6 +86,7 @@ from librae.core.market_data import (
     MarketDataSubscription,
     normalize_bar_times,
     subscription_from_instrument,
+    validate_bar_cadence,
     validate_ohlcv_values,
 )
 from librae.core.run_config import ExecutionPolicy, MarketDataSessionMode, RiskPolicy
@@ -291,19 +292,16 @@ def _validate_primary_subscriptions(
         index=normalized.index,
         dtype="datetime64[ns, UTC]",
     )
-    if AVAILABLE_AT_COLUMN in normalized:
-        normalized_available = pd.to_datetime(
-            normalized[AVAILABLE_AT_COLUMN],
-            utc=True,
-        )
+    raw_available = normalized.get(AVAILABLE_AT_COLUMN, None)
     for symbol, subscription in subscription_by_symbol.items():
         symbol_mask = normalized.index.get_level_values("symbol") == symbol
         symbol_rows = normalized.loc[symbol_mask]
+        symbol_available = raw_available.loc[symbol_mask] if raw_available is not None else None
         _, available_at = normalize_bar_times(
             symbol_rows.index.get_level_values("datetime"),
             (
-                normalized_available.loc[symbol_mask]
-                if normalized_available.loc[symbol_mask].notna().any()
+                symbol_available
+                if symbol_available is not None and symbol_available.notna().any()
                 else None
             ),
             subscription,
@@ -449,40 +447,6 @@ def _session_timeframe_unit(timeframe: str) -> str | None:
     return None
 
 
-def _validate_session_timeframe(
-    symbol: str,
-    index: pd.DatetimeIndex,
-    timeframe: str,
-    calendar_id: str,
-) -> None:
-    """Validate calendar cadence and canonical period-start anchors."""
-    expected_starts = pd.DatetimeIndex(
-        [period_start(timestamp, timeframe, calendar_id) for timestamp in index]
-    )
-    if np.any(index != expected_starts):
-        raise ValueError(
-            f"data symbol {symbol!r} timestamps are not canonical "
-            f"timeframe={timeframe} period starts"
-        )
-
-    if timeframe.startswith("D"):
-        interval = int(timeframe[1:])
-        ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
-    elif timeframe.startswith("W"):
-        interval = int(timeframe[1:])
-        labels = session_labels(index, calendar_id)
-        ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
-    else:
-        interval = int(timeframe[2:])
-        labels = session_labels(index, calendar_id)
-        ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
-    diffs = np.diff(ordinals)
-    if np.any(diffs < interval) or np.any(diffs % interval != 0):
-        raise ValueError(
-            f"data symbol {symbol!r} timestamps are not aligned to timeframe={timeframe}"
-        )
-
-
 def _resolve_data_timeframe(
     data: pd.DataFrame,
     configured_timeframe: str | None,
@@ -570,7 +534,12 @@ def _resolve_data_timeframe(
                 calendar_id = ALWAYS_OPEN_CALENDAR
             if calendar_id is None:
                 continue
-            _validate_session_timeframe(symbol, index, data_timeframe, calendar_id)
+            validate_bar_cadence(
+                index,
+                data_timeframe,
+                calendar_id,
+                context=f"data symbol {symbol!r}",
+            )
             calendar_validated.add(symbol)
     else:
         calendar_validated = set()
@@ -1706,7 +1675,10 @@ class Backtest:
         ~490 rows/sec vs this ~869k rows/sec), same output.
         """
         result: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
-        raw = self._data.to_dict(orient="index")
+        # Row timing/identity facts are audit metadata, not numeric market
+        # fields. They must never leak into executor bars or ``Context``.
+        market_values = self._data.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
+        raw = market_values.to_dict(orient="index")
         for (sym, ts), row in raw.items():
             result.setdefault(ts, {})[sym] = row
         return result

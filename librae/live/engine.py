@@ -52,7 +52,12 @@ from librae.core.financing import (
     calculate_funding_cash_flows,
 )
 from librae.core.liquidity import calculate_lagged_adv
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    normalize_bar_times,
+    subscription_from_instrument,
+    validate_ohlcv_values,
+)
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -435,6 +440,14 @@ class LiveTrader:
             for symbol in self._symbols
         }
         _validate_market_data_calendar_preconditions(config.timeframe, self._instruments)
+        self._market_data_subscriptions = {
+            symbol: subscription_from_instrument(
+                instrument,
+                timeframe=self._timeframe,
+                session_mode=config.session_mode,
+            )
+            for symbol, instrument in self._instruments.items()
+        }
         if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
             missing_calendars = sorted(
                 symbol
@@ -1606,18 +1619,36 @@ class LiveTrader:
         return frozenset(pd.Timestamp(value).value for value in timestamps)
 
     def _eligible_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
-        """Exclude rows whose source-declared availability has not arrived."""
-        if frame.empty or "available_at" not in frame.columns:
+        """Normalize one exact subscription and expose only causally ready rows."""
+        if frame.empty:
             return frame
-        availability = pd.to_datetime(frame["available_at"], errors="raise")
-        if not isinstance(availability.dtype, pd.DatetimeTZDtype):
-            raise ValueError(f"{symbol} available_at values must be timezone-aware")
-        if availability.isna().any():
-            raise ValueError(f"{symbol} available_at values must not contain NaT")
-        availability = availability.dt.tz_convert("UTC")
+
+        if "ts" not in frame:
+            raise ValueError(f"{symbol} market data requires a ts column")
+        ordered = frame.copy()
+        try:
+            sort_timestamps = pd.DatetimeIndex(
+                [pd.Timestamp(value).tz_convert("UTC") for value in ordered["ts"]]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{symbol} bar timestamp must be valid and timezone-aware") from exc
+        if sort_timestamps.hasnans:
+            raise ValueError(f"{symbol} bar timestamps must not contain NaT")
+        ordered["_librae_ts_sort"] = sort_timestamps
+        ordered = ordered.sort_values("_librae_ts_sort", kind="stable").reset_index(drop=True)
+        if ordered["_librae_ts_sort"].duplicated().any():
+            raise ValueError(f"{symbol} runtime data requires unique bar timestamps")
+        ordered = ordered.drop(columns="_librae_ts_sort")
+        subscription = self._market_data_subscriptions[symbol]
+        timestamps, availability = normalize_bar_times(
+            ordered["ts"],
+            ordered.get(AVAILABLE_AT_COLUMN),
+            subscription,
+        )
         eligible = availability <= pd.Timestamp(self._utc_now())
-        result = frame.loc[eligible].copy()
-        result["available_at"] = availability.loc[eligible]
+        result = ordered.loc[eligible].copy()
+        result["ts"] = timestamps[eligible]
+        result[AVAILABLE_AT_COLUMN] = availability[eligible]
         return result
 
     @staticmethod

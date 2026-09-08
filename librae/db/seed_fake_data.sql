@@ -70,7 +70,10 @@ SELECT
     base * (1 + 0.08 * sin((i + 1) / 18.0) + (random() - 0.5) * 0.01) AS close,
     base_vol * (0.7 + random() * 0.6) AS volume
 FROM generate_series(0, 14 * 24 - 1) AS i,
-     LATERAL (SELECT NOW() - INTERVAL '14 days' + (i || ' hours')::interval AS ts) t,
+     LATERAL (
+         SELECT date_trunc('hour', NOW()) - INTERVAL '14 days'
+                + (i || ' hours')::interval AS ts
+     ) t,
      (VALUES ('BTCUSDT', 60000.0, 150.0),
              ('ETHUSDT', 3000.0, 500.0),
              ('SOLUSDT', 130.0, 900.0)) AS sym(symbol, base, base_vol)

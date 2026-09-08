@@ -218,11 +218,11 @@ class TestWarmupFetcher:
         from librae.live.engine import LiveTrader
 
         timestamps = [
-            datetime(2024, 12, 27, 21, tzinfo=UTC),
-            datetime(2024, 12, 30, 21, tzinfo=UTC),
-            datetime(2024, 12, 31, 21, tzinfo=UTC),
-            datetime(2025, 1, 2, 21, tzinfo=UTC),
-            datetime(2025, 1, 3, 21, tzinfo=UTC),
+            datetime(2024, 12, 27, 20, 30, tzinfo=UTC),
+            datetime(2024, 12, 30, 20, 30, tzinfo=UTC),
+            datetime(2024, 12, 31, 20, 30, tzinfo=UTC),
+            datetime(2025, 1, 2, 20, 30, tzinfo=UTC),
+            datetime(2025, 1, 3, 20, 30, tzinfo=UTC),
         ]
         full_history = _bars(timestamps)
         calls: list[dict[str, object]] = []
@@ -299,6 +299,7 @@ class TestWarmupFetcher:
                     "ETHUSDT": {
                         "instrument_type": "spot",
                         "currency": "USDT",
+                        "calendar_id": "24/7",
                     }
                 },
                 symbol_cost_overrides={"ETHUSDT": {"multiplier": 1.0}},
@@ -483,8 +484,16 @@ class TestWarmupFetcher:
             config=_test_cfg(
                 symbols=["AAA", "BBB"],
                 instrument_overrides={
-                    "AAA": {"instrument_type": "spot", "currency": "USDT"},
-                    "BBB": {"instrument_type": "spot", "currency": "USDT"},
+                    "AAA": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "calendar_id": "24/7",
+                    },
+                    "BBB": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "calendar_id": "24/7",
+                    },
                 },
                 symbol_cost_overrides={
                     "AAA": {"multiplier": 1.0},

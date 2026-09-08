@@ -130,6 +130,20 @@ def test_run_metadata_rejects_existing_different_immutable_identity() -> None:
         )
 
 
+def test_new_run_metadata_rejects_legacy_empty_subscription_sentinel() -> None:
+    with pytest.raises(ValueError, match="primary_subscriptions is required"):
+        write_run_metadata(
+            "new-run",
+            "strategy",
+            ["BTCUSDT"],
+            "H1",
+            "backtest",
+            data_source="test",
+            primary_subscriptions=(),
+            cur=MagicMock(),
+        )
+
+
 class TestBacktestCacheKeyClaim:
     def test_missing_cache_key_disables_deduplication(self) -> None:
         cursor = MagicMock()
@@ -389,7 +403,9 @@ def test_write_ohlcv_uses_complete_subscription_and_availability(
     sql = mock_exec_values.call_args[0][1]
     row = mock_exec_values.call_args[0][2][0]
     assert "calendar_id, session_mode" in sql
-    assert "available_at=GREATEST" in sql
+    assert "available_at=EXCLUDED.available_at" in sql
+    assert "WHERE EXCLUDED.available_at > ohlcv.available_at" in sql
+    assert "GREATEST" not in sql
     assert row[1:7] == tuple(subscription.to_dict().values())
     assert row[7] == datetime(2024, 6, 3, 15, tzinfo=UTC)
 
