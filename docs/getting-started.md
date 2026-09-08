@@ -284,7 +284,10 @@ Copy-Item .env.example .env
 ```
 
 `librae init` writes only `.env.example`. It does not create a strategy,
-Compose files, credentials, or deployment scripts.
+Compose files, credentials, or deployment scripts. Fill in `.env` and run
+`librae doctor` as above; with a single `.env` and no `.env.secrets` it
+treats that file as the whole configuration and skips the split-related
+checks.
 
 See [Optional infrastructure](guides/optional-infrastructure.md) before
 enabling a database, monitoring, or broker integration.

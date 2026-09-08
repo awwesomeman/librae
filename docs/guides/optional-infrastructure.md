@@ -424,11 +424,10 @@ been used as an intrusion entry point before.
    ssh <user>@<host> "vi quant-deploy/.env.secrets"   # fill in real values
    ```
 
-   On the build machine, run `librae doctor` in the checkout first: it
-   catches a misspelled name, a secret that landed in the synced `.env`, or
-   a connection string on the wrong database role before anything leaves
-   the machine. `cloud_deploy.sh` independently refuses to sync a `.env`
-   that assigns a secret.
+   On the build machine, run `librae doctor` in the checkout first
+   ([Getting started → Environment variables](../getting-started.md#environment-variables)).
+   `cloud_deploy.sh` independently refuses to sync a `.env` that assigns a
+   secret.
 
 4. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
    start TimescaleDB and Grafana. It does not start a strategy.

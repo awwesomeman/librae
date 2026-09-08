@@ -25,7 +25,8 @@ def main() -> None:
     subparsers.add_parser(
         "doctor",
         help="check ./.env and ./.env.secrets: misspelled names, secrets in the synced file, "
-        "half-configured key pairs, DSN role and password",
+        "half-configured key pairs, DSN role and password (with a single .env and no "
+        ".env.secrets, the file-placement checks are skipped)",
     )
 
     args = parser.parse_args()

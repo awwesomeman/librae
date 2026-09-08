@@ -23,17 +23,11 @@ chain before that changes.
 
 ## Secrets handling and rotation
 
-`librae/config/env.py` declares every variable, the file it belongs in, and
-whether it is a secret. `librae doctor` checks a machine against that
-declaration, and `cloud_deploy.sh` refuses to sync a `.env` that assigns a
-secret. By class:
-
-| Class | Lives in | Synced to VM by `cloud_deploy.sh`? | Notes |
-|---|---|---|---|
-| Non-secret settings (bind addresses, chat id, image refs) | `.env` | Yes | |
-| Shared infra secrets (DB passwords and connection strings, Grafana admin, Telegram bot token, Tailscale auth key) | `.env.secrets` | Never | Created by hand on each machine. The connection strings reference `${POSTGRES_APP_PASSWORD}`, so the app password exists once. Revoke a bot token via [@BotFather](https://t.me/BotFather) `/revoke`. |
-| Broker API keys (`BINANCE_*`, `SHIOAJI_*`, IBKR session) | one `.credentials/<account>.env` file per account | Never | Created by hand only on the machine that trades. `trade.sh` passes only the explicitly selected file to Docker, never sourced as shell code. |
-| Shioaji CA file | `.secrets/` | Never (bind-mounted read-only by `trade.sh`) | |
+Where each variable lives and which files sync is documented once in
+[Getting started → Environment variables](../getting-started.md#environment-variables);
+the per-variable authority is `librae/config/env.py`. Nothing under
+`.env.secrets`, `.credentials/`, or `.secrets/` ever propagates between
+machines.
 
 Rotation procedure (any credential class):
 

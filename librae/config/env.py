@@ -224,17 +224,29 @@ def doctor(project_root: Path) -> list[Finding]:
     """Validate a machine's .env / .env.secrets against the registry.
 
     Reports names only, never values. Errors are misconfigurations that would
-    fail late or leak; warnings are placements worth tidying.
+    fail late or leak; warnings are placements worth tidying. Typos, key
+    pairs and DSN consistency are always checked; the file-placement rules
+    apply only once .env.secrets exists (a `librae init` user keeps one .env),
+    and the quant_app role only in the Compose-managed layout that
+    POSTGRES_APP_PASSWORD identifies.
     """
     findings: list[Finding] = []
     env_path = project_root / Where.ENV.value
     secrets_path = project_root / Where.SECRETS.value
+    split_in_use = secrets_path.is_file()
     env = parse_env_file(env_path) if env_path.is_file() else {}
-    secrets = parse_env_file(secrets_path, context=env) if secrets_path.is_file() else {}
+    secrets = parse_env_file(secrets_path, context=env) if split_in_use else {}
     if not env_path.is_file():
         findings.append(Finding("warning", f"{Where.ENV.value} not found"))
-    if not secrets_path.is_file():
-        findings.append(Finding("warning", f"{Where.SECRETS.value} not found"))
+    if not split_in_use:
+        findings.append(
+            Finding(
+                "warning",
+                f"{Where.SECRETS.value} not found: treating {Where.ENV.value} as the whole "
+                "configuration (fine on one machine; create it before syncing with "
+                "deploy/cloud_deploy.sh, which refuses a .env that assigns a secret)",
+            )
+        )
 
     for where, values in ((Where.ENV, env), (Where.SECRETS, secrets)):
         for name in values:
@@ -251,7 +263,12 @@ def doctor(project_root: Path) -> list[Finding]:
                             f"{where.value}: unknown variable {name} (did you mean {hint[0]}?)",
                         )
                     )
-                elif where is Where.ENV and values[name] and SECRET_NAME_PATTERN.match(name):
+                elif (
+                    split_in_use
+                    and where is Where.ENV
+                    and values[name]
+                    and SECRET_NAME_PATTERN.match(name)
+                ):
                     findings.append(
                         Finding(
                             "error",
@@ -259,7 +276,7 @@ def doctor(project_root: Path) -> list[Finding]:
                             f"{Where.SECRETS.value} is the file that is never synced",
                         )
                     )
-            elif declared.secret and where is Where.ENV and values[name]:
+            elif split_in_use and declared.secret and where is Where.ENV and values[name]:
                 findings.append(
                     Finding(
                         "error",
@@ -267,7 +284,7 @@ def doctor(project_root: Path) -> list[Finding]:
                         f"{Where.SECRETS.value}, which is never synced",
                     )
                 )
-            elif declared.where is not where and values[name]:
+            elif split_in_use and declared.where is not where and values[name]:
                 findings.append(
                     Finding("warning", f"{where.value}: {name} belongs in {declared.where.value}")
                 )
@@ -279,8 +296,10 @@ def doctor(project_root: Path) -> list[Finding]:
                 Finding("error", f"{first} and {second} must be set together or both left empty")
             )
 
+    # quant_app and its password exist only in the Compose-managed layout;
+    # a pip user's own database may use any role, so skip when it is absent.
     app_password = merged.get(DSN_PASSWORD_NAME, "")
-    for name in DSN_NAMES:
+    for name in DSN_NAMES if app_password else ():
         dsn = merged.get(name)
         if not dsn:
             continue
@@ -293,7 +312,7 @@ def doctor(project_root: Path) -> list[Finding]:
                     f"role is {DSN_ROLE} (the admin role is for migrations only)",
                 )
             )
-        if app_password and parts.password != app_password:
+        if parts.password != app_password:
             findings.append(
                 Finding("error", f"{name} carries a password that differs from {DSN_PASSWORD_NAME}")
             )

@@ -18,18 +18,10 @@ publishes the port on every host interface.
 
 ### 2. Replace every placeholder password
 
-Replace `POSTGRES_PASSWORD`, `POSTGRES_APP_PASSWORD`,
-`POSTGRES_GRAFANA_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, and
-`TELEGRAM_BOT_TOKEN` in `.env.secrets` (never `.env` — that file gets scp'd
-to the VM, and `cloud_deploy.sh` refuses to sync one that assigns a secret).
-Use independent random values. `TIMESCALE_DSN`/`TRADE_TIMESCALE_DSN` need no
-edit: they reference `${POSTGRES_APP_PASSWORD}`, which the shell expands when
-any consumer sources the file.
-
-Then run `librae doctor` in the project root. It checks both files against
-the variables librae declares (`librae/config/env.py`): misspelled names, a
-secret assigned in the synced `.env`, half of a key pair, and a DSN that
-names the wrong role or a stale password. It prints names, never values.
+Replace every placeholder password and token in `.env.secrets` with an
+independent random value, then run `librae doctor`. Which file each variable
+belongs in, and what `doctor` checks, is documented once in
+[Getting started → Environment variables](docs/getting-started.md#environment-variables).
 
 On an existing deployment, changing `.env.secrets` does not rotate database
 roles. Rotate `quant` from a trusted admin session, then rerun
@@ -76,8 +68,7 @@ Do not expose Grafana (3000) or PostgreSQL (5432) to `0.0.0.0/0`.
 
 ## Trading credentials (a separate risk tier)
 
-Trading credentials stay in account-specific `.credentials/*.env` files,
-which deployment scripts never sync. `trade.sh` passes one selected file
-directly to Docker and never sources it as shell code. Disable withdrawal and
-transfer permissions, restrict keys by source IP, and use sandbox or paper
-endpoints for end-to-end tests.
+Trading credentials live in per-account `.credentials/*.env` files that
+deployment scripts never sync (layout: Getting started → Environment
+variables). Disable withdrawal and transfer permissions, restrict keys by
+source IP, and use sandbox or paper endpoints for end-to-end tests.

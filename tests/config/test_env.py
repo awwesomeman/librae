@@ -177,13 +177,13 @@ class TestDoctor:
         assert any("SHIOAJI_API_KEY and SHIOAJI_SECRET_KEY" in m for m in messages)
 
     def test_dsn_with_the_admin_role_is_an_error(self, tmp_path: Path):
-        secrets = "POSTGRES_PASSWORD=admin-pw\nTIMESCALE_DSN=postgresql://quant:admin-pw@h/quant\n"
+        secrets = "POSTGRES_APP_PASSWORD=app-pw\nTIMESCALE_DSN=postgresql://quant:app-pw@h/quant\n"
         project = _project(tmp_path, "", secrets)
 
         messages = [f.message for f in doctor(project) if f.level == "error"]
 
         assert any("TIMESCALE_DSN connects as quant" in m for m in messages)
-        assert not any("admin-pw" in m for m in messages)
+        assert not any("app-pw" in m for m in messages)
 
     def test_dsn_password_drift_is_an_error(self, tmp_path: Path):
         secrets = (
@@ -287,3 +287,31 @@ class TestDoctorUnknownNames:
         messages = [f.message for f in doctor(project) if f.level == "error"]
 
         assert any("did you mean BINANCE_API_KEY" in m for m in messages)
+
+
+class TestDoctorSingleFileLayout:
+    """A `librae init` user keeps one .env; split rules apply only once .env.secrets exists."""
+
+    def test_secrets_in_a_lone_env_are_not_placement_errors(self, tmp_path: Path):
+        (tmp_path / ".env").write_text(
+            "TIMESCALE_DSN=postgresql://me:pw@db/mine\nBINANCE_API_KEY=k\n"
+            "BINANCE_API_SECRET=s\nTELEGRAM_BOT_TOKEN=t\nIBKR_HOST=127.0.0.1\n"
+        )
+
+        findings = doctor(tmp_path)
+
+        assert [f.level for f in findings] == ["warning"]
+        assert ".env.secrets not found" in findings[0].message
+
+    def test_own_database_role_is_not_checked_without_the_compose_layout(self, tmp_path: Path):
+        (tmp_path / ".env").write_text("TIMESCALE_DSN=postgresql://me:pw@db/mine\n")
+
+        assert not [f for f in doctor(tmp_path) if f.level == "error"]
+
+    def test_typos_and_pairs_are_still_checked(self, tmp_path: Path):
+        (tmp_path / ".env").write_text("BINANCE_API_KEY=k\nTELEGRAM_BOT_TOKN=t\n")
+
+        messages = [f.message for f in doctor(tmp_path) if f.level == "error"]
+
+        assert any("did you mean TELEGRAM_BOT_TOKEN" in m for m in messages)
+        assert any("BINANCE_API_KEY and BINANCE_API_SECRET" in m for m in messages)
