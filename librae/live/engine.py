@@ -338,6 +338,18 @@ def _market_data_calendar_id(source: object) -> str | None:
     return _market_data_capability(source, "market_data_calendar_id")
 
 
+@dataclass(frozen=True, slots=True)
+class _MarketDataSubscriptionSnapshot:
+    """One-time resolution of source ownership and exact bar identity."""
+
+    route_owners: Mapping[str, str | None]
+    subscriptions: Mapping[str, MarketDataSubscription]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "route_owners", types.MappingProxyType(dict(self.route_owners)))
+        object.__setattr__(self, "subscriptions", types.MappingProxyType(dict(self.subscriptions)))
+
+
 def _resolve_effective_market_data_calendars(
     instruments: Mapping[str, SymbolInfo],
     sources: Mapping[str, object],
@@ -383,6 +395,38 @@ def _resolve_market_data_subscriptions(
             calendar_id=calendar_id,
         )
     return subscriptions
+
+
+def _resolve_market_data_subscription_snapshot(
+    timeframe: str,
+    session_mode: MarketDataSessionMode,
+    instruments: Mapping[str, SymbolInfo],
+    sources: Mapping[str, object],
+    *,
+    default_route_owners: Mapping[str, str | None] | None = None,
+) -> _MarketDataSubscriptionSnapshot:
+    """Read source capabilities once and resolve one immutable runtime identity."""
+    defaults = default_route_owners or {}
+    route_owners = {
+        symbol: (
+            _market_data_route_owner(sources[symbol]) if symbol in sources else defaults.get(symbol)
+        )
+        for symbol in instruments
+    }
+    effective_calendars = _resolve_effective_market_data_calendars(instruments, sources)
+    _validate_market_data_calendar_preconditions(
+        timeframe,
+        instruments,
+        route_owners,
+        effective_calendars,
+    )
+    subscriptions = _resolve_market_data_subscriptions(
+        timeframe,
+        session_mode,
+        instruments,
+        effective_calendars,
+    )
+    return _MarketDataSubscriptionSnapshot(route_owners, subscriptions)
 
 
 def _validate_market_data_calendar_preconditions(
@@ -437,6 +481,8 @@ class LiveTrader:
             market-data adapter is used.
         state_store: Optional checkpoint store. Live mode requires a durable
             store so placement attempts and fills survive process restarts.
+        _market_data_snapshot: Internal deployment-factory handoff for an
+            already-resolved source capability and subscription snapshot.
         runtime_revision: Caller-owned opaque runtime identity. Live mode
             requires it so checkpoints cannot cross code or image revisions.
         notifier: Optional operational notifier implementing ``Notifier``.
@@ -478,6 +524,7 @@ class LiveTrader:
         on_run_registered: Callable[[str], None] | None = None,
         warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
+        _market_data_snapshot: _MarketDataSubscriptionSnapshot | None = None,
         runtime_revision: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -555,31 +602,34 @@ class LiveTrader:
             sources = dict(adapter)
         else:
             sources = {symbol: adapter for symbol in self._symbols}
-        route_owners = {
-            symbol: _market_data_route_owner(sources[symbol]) for symbol in self._symbols
-        }
-        effective_calendars = _resolve_effective_market_data_calendars(
-            self._instruments,
-            sources,
-        )
-        _validate_market_data_calendar_preconditions(
-            config.timeframe,
-            self._instruments,
-            route_owners,
-            effective_calendars,
-        )
-        self._market_data_subscriptions = _resolve_market_data_subscriptions(
+        snapshot = _market_data_snapshot or _resolve_market_data_subscription_snapshot(
             self._timeframe,
             config.session_mode,
             self._instruments,
-            effective_calendars,
+            sources,
         )
+        expected_symbols = set(self._symbols)
+        if (
+            set(snapshot.route_owners) != expected_symbols
+            or set(snapshot.subscriptions) != expected_symbols
+        ):
+            raise ValueError("market-data snapshot symbols must exactly match config.symbols")
+        _validate_market_data_calendar_preconditions(
+            config.timeframe,
+            self._instruments,
+            snapshot.route_owners,
+            {
+                symbol: subscription.calendar_id
+                for symbol, subscription in snapshot.subscriptions.items()
+            },
+        )
+        self._market_data_subscriptions = dict(snapshot.subscriptions)
         self._fetchers = {
             symbol: _bind_market_data_source(
                 sources[symbol],
                 self._instruments[symbol],
                 config.session_mode,
-                route_owner=route_owners[symbol],
+                route_owner=snapshot.route_owners[symbol],
                 calendar_id=self._market_data_subscriptions[symbol].calendar_id,
             )
             for symbol in self._symbols

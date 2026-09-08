@@ -990,6 +990,68 @@ class TestLiveTrader:
         build_adapter.assert_not_called()
         assert runner._fetchers["AAPL"] is fetcher
 
+    def test_factory_reads_source_capabilities_once_for_one_subscription_snapshot(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        class ChangingCapabilityAdapter:
+            def __init__(self) -> None:
+                self.route_reads = 0
+                self.calendar_reads = 0
+                self.fetch_kwargs: list[dict[str, object]] = []
+
+            @property
+            def market_data_route(self) -> str:
+                self.route_reads += 1
+                return "ibkr" if self.route_reads == 1 else "caller-owned"
+
+            @property
+            def market_data_calendar_id(self) -> str:
+                self.calendar_reads += 1
+                return "XNYS" if self.calendar_reads == 1 else "XHKG"
+
+            def fetch_ohlcv(self, *_args, **kwargs):
+                self.fetch_kwargs.append(kwargs)
+                return _make_ohlcv_df()
+
+        adapter = ChangingCapabilityAdapter()
+        callbacks = MagicMock()
+        with patch(
+            "librae.orchestration.live._TimescaleCallbacks", return_value=callbacks
+        ) as build:
+            runner = build_live_trader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=config,
+                data_adapter_overrides={"AAPL": adapter},
+                state_store=MemoryLiveStateStore(),
+            )
+
+        persisted_subscription = build.call_args.args[3]["AAPL"]
+        runtime_subscription = runner._market_data_subscriptions["AAPL"]
+        runner._fetchers["AAPL"]("AAPL", "1d", 10)
+
+        assert adapter.route_reads == 1
+        assert adapter.calendar_reads == 1
+        assert persisted_subscription == runtime_subscription
+        assert runtime_subscription.calendar_id == "XNYS"
+        assert adapter.fetch_kwargs[0]["calendar_id"] == "XNYS"
+
     def test_daily_caller_owned_fetcher_without_any_calendar_identity_fails_closed(self):
         config = _test_cfg(
             symbols=["AAPL"],

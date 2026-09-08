@@ -19,10 +19,7 @@ from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
 from librae.live.engine import (
     LiveTrader,
-    _market_data_route_owner,
-    _resolve_effective_market_data_calendars,
-    _resolve_market_data_subscriptions,
-    _validate_market_data_calendar_preconditions,
+    _resolve_market_data_subscription_snapshot,
 )
 from librae.live.interfaces import Notifier
 from librae.live.state import normalize_runtime_revision
@@ -547,23 +544,14 @@ def build_live_trader(
     unknown_overrides = set(overrides) - set(instruments)
     if unknown_overrides:
         raise ValueError(f"data_adapter_overrides has unknown symbols: {sorted(unknown_overrides)}")
-    route_owners = {
-        symbol: (
-            _market_data_route_owner(overrides[symbol])
-            if symbol in overrides
-            else instrument.data_adapter
-        )
-        for symbol, instrument in instruments.items()
-    }
-    effective_calendars = _resolve_effective_market_data_calendars(
+    market_data_snapshot = _resolve_market_data_subscription_snapshot(
+        config.timeframe,
+        config.session_mode,
         instruments,
         overrides,
-    )
-    _validate_market_data_calendar_preconditions(
-        config.timeframe,
-        instruments,
-        route_owners,
-        effective_calendars,
+        default_route_owners={
+            symbol: instrument.data_adapter for symbol, instrument in instruments.items()
+        },
     )
 
     adapter_instances: dict[tuple[str, str, str], object] = {}
@@ -622,22 +610,12 @@ def build_live_trader(
     resolved_state_store = state_store
     if resolved_state_store is None and database_enabled:
         resolved_state_store = _build_state_store()
-    effective_calendars = _resolve_effective_market_data_calendars(
-        instruments,
-        data_adapters,
-    )
-    subscriptions = _resolve_market_data_subscriptions(
-        config.timeframe,
-        config.session_mode,
-        instruments,
-        effective_calendars,
-    )
     callbacks = (
         _TimescaleCallbacks(
             config,
             instruments,
             resolved_notifier,
-            subscriptions,
+            market_data_snapshot.subscriptions,
         )
         if database_enabled
         else None
@@ -667,5 +645,6 @@ def build_live_trader(
         # foreign key to a run-metadata table) — calling this only after
         # construction returns is too late, since __init__ already persisted.
         on_run_registered=callbacks.register_run if callbacks else None,
+        _market_data_snapshot=market_data_snapshot,
     )
     return trader
