@@ -252,6 +252,29 @@ class TestFetchOhlcv:
             "available_at",
         ]
 
+    def test_daily_duration_covers_requested_exchange_sessions(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value="mock_contract")
+        adapter._ib.reqHistoricalData.return_value = []
+
+        with (
+            patch(
+                "librae.brokers.ibkr_adapter._require_ib_async",
+                return_value=_mock_ib_async_module(pd.DataFrame()),
+            ),
+            patch(
+                "librae.brokers.ibkr_adapter._utc_now",
+                return_value=datetime(2025, 1, 6, 12, tzinfo=UTC),
+            ),
+        ):
+            adapter.fetch_ohlcv("MU", "1d", limit=5, calendar_id="XNYS")
+
+        request = adapter._ib.reqHistoricalData.call_args.kwargs
+        # Monday's session has not opened yet. The sixth label reserves that
+        # possible current/forming session, leaving five completed sessions;
+        # the calendar span reaches Friday 27 December without guessing 5/7.
+        assert request["durationStr"] == "10 D"
+
     def test_session_mode_maps_to_ibkr_use_rth(self):
         adapter = _make_adapter()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import date, time, timedelta
 from functools import cache
+from math import ceil
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -114,6 +115,29 @@ def validate_calendar_id(calendar_id: str) -> None:
     """Resolve a calendar identifier without requiring an in-session timestamp."""
     if calendar_id != ALWAYS_OPEN_CALENDAR:
         _exchange_calendar(calendar_id)
+
+
+def session_lookback_days(value: object, periods: int, calendar_id: str) -> int:
+    """Return calendar days covering the latest ``periods`` session labels.
+
+    A daily-data API commonly accepts a wall-clock duration rather than a row
+    count. This translates the requested session count through the exchange
+    calendar so weekends and holidays do not shorten the returned history.
+    """
+    if isinstance(periods, bool) or not isinstance(periods, int) or periods <= 0:
+        raise ValueError("periods must be a positive integer")
+    timestamp = _timestamp(value)
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        return periods
+
+    calendar = _exchange_calendar(calendar_id)
+    last_session = calendar.date_to_session(
+        pd.Timestamp(timestamp.date()),
+        direction="previous",
+    )
+    first_session = calendar.sessions_window(last_session, -periods)[0].date()
+    first_open = _session_segments(calendar_id, first_session)[0][0]
+    return max(1, ceil((timestamp - first_open).total_seconds() / 86_400))
 
 
 def session_labels(index: pd.DatetimeIndex, calendar_id: str) -> pd.Index:
