@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-from librae.brokers.crypto_adapter import CryptoAdapter, _require_ccxt
+from librae.brokers.crypto_adapter import CryptoAdapter, CryptoCredentials, _require_ccxt
 from librae.config.symbols import SymbolInfo
 from librae.core.cost_model import CostModel
 from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
@@ -1111,3 +1111,25 @@ def test_sandbox_patch_not_applied_to_non_binance_exchange():
     mock_exchange.urls = {"api": {"public": "https://testnet.example.com/api/v3"}}
     _build_adapter_via_init("okx", mock_exchange)
     assert mock_exchange.urls["api"]["public"] == "https://testnet.example.com/api/v3"
+
+
+class TestCredentialPairing:
+    """Half a key pair means a typo'd env var name, not a read-only run."""
+
+    def test_key_without_secret_raises(self):
+        with pytest.raises(ValueError, match="api_key and api_secret"):
+            CryptoCredentials(api_key="k")
+
+    def test_secret_without_key_raises(self):
+        with pytest.raises(ValueError, match="api_key and api_secret"):
+            CryptoCredentials(api_secret="s")
+
+    def test_both_empty_is_read_only_not_an_error(self):
+        assert CryptoCredentials().api_key == ""
+
+    def test_from_env_rejects_a_half_configured_prefix(self, monkeypatch):
+        monkeypatch.setenv("BINANCE_API_KEY", "k")
+        monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
+
+        with pytest.raises(ValueError, match="api_key and api_secret"):
+            CryptoCredentials.from_env("BINANCE")

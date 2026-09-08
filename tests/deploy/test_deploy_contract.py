@@ -761,14 +761,16 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert "TELEGRAM_BOT_TOKEN=" not in public_env
     assert "TELEGRAM_BOT_TOKEN=" in secrets_env
     assert "TELEGRAM_CHAT_ID=" in public_env
+    # The app password is referenced, never repeated: one edit rotates it
+    # everywhere instead of three that can silently drift apart.
     assert (
-        "TIMESCALE_DSN=postgresql://quant_app:REPLACE_WITH_POSTGRES_APP_PASSWORD"
-        "@localhost:5432/quant"
+        "TIMESCALE_DSN=postgresql://quant_app:${POSTGRES_APP_PASSWORD}@localhost:5432/quant"
     ) in secrets_env
     assert (
-        "TRADE_TIMESCALE_DSN=postgresql://quant_app:REPLACE_WITH_POSTGRES_APP_PASSWORD"
+        "TRADE_TIMESCALE_DSN=postgresql://quant_app:${POSTGRES_APP_PASSWORD}"
         "@quant_timescaledb:5432/quant"
     ) in secrets_env
+    assert "REPLACE_WITH_POSTGRES_APP_PASSWORD" not in secrets_env
     assert "\nIBKR_HOST=\n" in secrets_env
     assert "IBKR_HOST=127.0.0.1" not in secrets_env
     assert "host.docker.internal" in secrets_env
@@ -1035,3 +1037,96 @@ def test_timescaledb_has_enlarged_shm() -> None:
     # a misleading "No space left on device"; the compose file must raise it.
     compose = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text(encoding="utf-8"))
     assert compose["services"]["timescaledb"]["shm_size"] == "1g"
+
+
+def _cloud_deploy_project(tmp_path: Path, env_body: str) -> Path:
+    """A minimal project tree whose ssh/scp are stubs that fail if reached."""
+    project = tmp_path / "project"
+    script_dir = project / "deploy"
+    script_dir.mkdir(parents=True)
+    shutil.copy2(DEPLOY / "cloud_deploy.sh", script_dir / "cloud_deploy.sh")
+    (project / ".env").write_text(env_body, encoding="utf-8", newline="\n")
+    (project / ".env.secrets").write_text(
+        "\n".join(
+            (
+                "POSTGRES_PASSWORD=test",
+                "POSTGRES_APP_PASSWORD=test",
+                "POSTGRES_GRAFANA_PASSWORD=test",
+                "GF_SECURITY_ADMIN_PASSWORD=test",
+            )
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_bin = project / "fake-bin"
+    fake_bin.mkdir()
+    for tool in ("ssh", "scp", "rsync"):
+        stub = fake_bin / tool
+        stub.write_text("#!/usr/bin/env bash\nexit 17\n", encoding="utf-8", newline="\n")
+        stub.chmod(0o755)
+    return project
+
+
+def _run_cloud_deploy(project: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            _find_bash(),
+            "-c",
+            'PATH="$PWD/fake-bin:$PATH"; exec deploy/cloud_deploy.sh deployment-target',
+        ],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_cloud_deploy_refuses_to_sync_an_env_holding_secrets(tmp_path: Path) -> None:
+    # .env is scp'd wholesale, so a secret parked here reaches every host that
+    # syncs — the exact way a bot token once survived the .env/.env.secrets split.
+    project = _cloud_deploy_project(
+        tmp_path,
+        "\n".join(
+            (
+                "GF_BIND=127.0.0.1",
+                "TELEGRAM_CHAT_ID=12345",
+                "TELEGRAM_BOT_TOKEN=8000:AAsecretvalue",
+                "BINANCE_API_SECRET=another-secret",
+            )
+        ),
+    )
+
+    result = _run_cloud_deploy(project)
+
+    assert result.returncode == 1
+    assert "TELEGRAM_BOT_TOKEN" in result.stderr
+    assert "BINANCE_API_SECRET" in result.stderr
+    # Key names only — the check must not echo the value it is protecting.
+    assert "AAsecretvalue" not in result.stderr + result.stdout
+    assert "another-secret" not in result.stderr + result.stdout
+    # It aborts before the first transfer, not after.
+    assert "file transfer" not in result.stderr
+
+
+def test_cloud_deploy_preflight_allows_a_clean_env(tmp_path: Path) -> None:
+    # Non-secret keys pass, including a commented-out secret, an empty
+    # assignment, and an image digest whose value contains "sha256:".
+    project = _cloud_deploy_project(
+        tmp_path,
+        "\n".join(
+            (
+                "GF_BIND=127.0.0.1",
+                "TELEGRAM_CHAT_ID=12345",
+                "# TELEGRAM_BOT_TOKEN=not-set-here",
+                "TS_AUTHKEY=",
+                "TRADE_IMAGE_REF=ghcr.io/user/quant-trade@sha256:abc",
+            )
+        ),
+    )
+
+    result = _run_cloud_deploy(project)
+
+    # Reaches the transfer stage (where the stubbed ssh fails) instead of
+    # being stopped by the preflight.
+    assert "Cloud deployment failed during file transfer (exit 17)." in result.stderr
+    assert "Refusing to sync" not in result.stderr

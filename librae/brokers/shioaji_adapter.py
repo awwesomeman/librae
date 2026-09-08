@@ -83,6 +83,14 @@ class ShioajiCredentials(CredentialConfig):
     def __post_init__(self) -> None:
         if isinstance(self.sandbox, str):
             self.sandbox = self.sandbox.lower() == "true"
+        # Both or neither: half a pair is a typo'd env var name, and the
+        # adapter would otherwise treat it as an intentional read-only run.
+        # ca_path/ca_password stay optional — no CA is a supported data-only mode.
+        if bool(self.api_key) != bool(self.secret_key):
+            raise ValueError(
+                "api_key and secret_key must be set together or both left empty "
+                "(env: SHIOAJI_API_KEY / SHIOAJI_SECRET_KEY)"
+            )
 
 
 class ShioajiAdapter:

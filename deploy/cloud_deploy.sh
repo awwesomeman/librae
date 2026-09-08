@@ -71,6 +71,23 @@ set +a
 : "${POSTGRES_GRAFANA_PASSWORD:?Set POSTGRES_GRAFANA_PASSWORD in .env.secrets}"
 : "${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env.secrets}"
 
+# .env is scp'd wholesale below, so a credential parked here reaches every
+# host that ever syncs. The templates already document the split; this is the
+# only check that reads the file that actually travels. Key names only —
+# printing the value would put the secret in the terminal and CI log too.
+STAGE="credential preflight"
+leaked_keys="$(
+    sed -E 's/^[[:space:]]*export[[:space:]]+//' "${PROJECT_ROOT}/.env" \
+        | grep -E '^[A-Za-z_][A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|DSN|KEY)=.' \
+        | cut -d= -f1 || true
+)"
+if [[ -n "${leaked_keys}" ]]; then
+    echo "Refusing to sync ${PROJECT_ROOT}/.env — it assigns secrets that belong in .env.secrets:" >&2
+    echo "${leaked_keys}" | sed 's/^/  /' >&2
+    echo "Move them to .env.secrets (never synced), then re-run. See .env.example's header." >&2
+    exit 1
+fi
+
 STAGE="file transfer"
 echo "[1/6] Syncing deployment files to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
 ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/librae/db ${REMOTE_DIR}/librae/app/grafana"

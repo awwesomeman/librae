@@ -1061,3 +1061,26 @@ class TestInit:
 
         creds = ShioajiCredentials(api_key="k", secret_key="s", sandbox="true")
         assert creds.sandbox is True
+
+
+class TestShioajiCredentialPairing:
+    """Half a key pair means a typo'd env var name, not a read-only run."""
+
+    def test_key_without_secret_raises(self):
+        from librae.brokers.shioaji_adapter import ShioajiCredentials
+
+        with pytest.raises(ValueError, match="api_key and secret_key"):
+            ShioajiCredentials(api_key="k")
+
+    def test_both_empty_is_read_only_not_an_error(self):
+        from librae.brokers.shioaji_adapter import ShioajiCredentials
+
+        assert ShioajiCredentials().api_key == ""
+
+    def test_ca_stays_optional_for_a_data_only_login(self):
+        from librae.brokers.shioaji_adapter import ShioajiCredentials
+
+        creds = ShioajiCredentials(api_key="k", secret_key="s")
+
+        assert creds.ca_path == ""
+        assert creds.ca_password == ""

@@ -118,6 +118,13 @@ class CryptoCredentials(CredentialConfig):
     def __post_init__(self) -> None:
         if isinstance(self.sandbox, str):
             self.sandbox = self.sandbox.lower() == "true"
+        # Both or neither: half a pair is a typo'd env var name, and the
+        # adapter would otherwise treat it as an intentional read-only run.
+        if bool(self.api_key) != bool(self.api_secret):
+            raise ValueError(
+                "api_key and api_secret must be set together or both left empty "
+                "(env: {PREFIX}_API_KEY / {PREFIX}_API_SECRET)"
+            )
 
 
 class CryptoAdapter:

@@ -19,10 +19,12 @@ publishes the port on every host interface.
 ### 2. Replace every placeholder password
 
 Replace `POSTGRES_PASSWORD`, `POSTGRES_APP_PASSWORD`,
-`POSTGRES_GRAFANA_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, `TIMESCALE_DSN`,
-`TRADE_TIMESCALE_DSN`, and `TELEGRAM_BOT_TOKEN` in `.env.secrets` (never
-`.env` — that file gets scp'd to the VM). `TIMESCALE_DSN`/`TRADE_TIMESCALE_DSN`'s password must
-match `POSTGRES_APP_PASSWORD`. Use independent random values.
+`POSTGRES_GRAFANA_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, and
+`TELEGRAM_BOT_TOKEN` in `.env.secrets` (never `.env` — that file gets scp'd
+to the VM, and `cloud_deploy.sh` refuses to sync one that assigns a secret).
+Use independent random values. `TIMESCALE_DSN`/`TRADE_TIMESCALE_DSN` need no
+edit: they reference `${POSTGRES_APP_PASSWORD}`, which the shell expands when
+any consumer sources the file.
 
 On an existing deployment, changing `.env.secrets` does not rotate database
 roles. Rotate `quant` from a trusted admin session, then rerun
