@@ -99,8 +99,9 @@ class BrokerOrderReport(TypedDict, total=False):
     """Cumulative broker order facts accepted by ``LiveExecutor``.
 
     ``id``/``order_id`` and the snake/camel-case aliases reflect common SDK
-    response shapes. A filled quantity requires average price, commission, and
-    execution time; ``LiveExecutor`` validates those semantic requirements.
+    response shapes. Broker-provided identity fields must remain present so
+    ``LiveExecutor`` can validate them before canonicalizing the report. A
+    filled quantity requires average price, commission, and execution time.
     """
 
     id: str
@@ -301,7 +302,13 @@ class ExecutionReport:
 
 
 class OrderAdapter(Protocol):
-    """Required live order lifecycle and position-reconciliation gateway."""
+    """Required live order lifecycle and position-reconciliation gateway.
+
+    An adapter whose venue cannot carry Librae's full client order id may
+    additionally declare ``broker_client_order_id(client_order_id) -> str``.
+    ``LiveExecutor`` then expects that compact form in every broker report
+    instead of the canonical id.
+    """
 
     def prepare_order(self, signal: OrderSignal) -> OrderSignal: ...
 
@@ -517,7 +524,11 @@ class LiveExecutor:
         try:
             adapter = self.get_order_adapter(request.symbol)
             raw = adapter.place_order(request.to_signal())
-            report = self.normalize_report(request, raw)
+            report = self.normalize_report(
+                request,
+                raw,
+                broker_client_order_id=self.broker_client_order_id(adapter, request),
+            )
         except Exception:
             logger.exception(
                 "Order placement/report FAILED: %s %s qty=%.4f; local state unchanged",
@@ -545,13 +556,25 @@ class LiveExecutor:
             request.client_order_id,
             request.venue_symbol or request.symbol,
         )
-        return self.normalize_report(request, raw) if raw is not None else None
+        return (
+            self.normalize_report(
+                request,
+                raw,
+                broker_client_order_id=self.broker_client_order_id(adapter, request),
+            )
+            if raw is not None
+            else None
+        )
 
     def get_order(self, request: OrderRequest, order_id: str) -> ExecutionReport:
         """Fetch the latest cumulative state for one broker order."""
         adapter = self.get_order_adapter(request.symbol)
         raw = adapter.get_order(order_id, request.venue_symbol or request.symbol)
-        return self.normalize_report(request, raw)
+        return self.normalize_report(
+            request,
+            raw,
+            broker_client_order_id=self.broker_client_order_id(adapter, request),
+        )
 
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return raw open orders for startup orphan detection."""
@@ -567,18 +590,70 @@ class LiveExecutor:
         """Cancel and return the broker's latest cumulative order state."""
         adapter = self.get_order_adapter(request.symbol)
         raw = adapter.cancel_order(order_id, request.venue_symbol or request.symbol)
-        return self.normalize_report(request, raw)
+        return self.normalize_report(
+            request,
+            raw,
+            broker_client_order_id=self.broker_client_order_id(adapter, request),
+        )
+
+    @staticmethod
+    def broker_client_order_id(adapter: object, request: OrderRequest) -> str:
+        """Map a canonical client id only when an adapter declares a compact form.
+
+        The hook is looked up on the adapter's class so an auto-attribute test
+        double does not appear to declare one, then called through the
+        instance so a plain method, ``staticmethod``, or ``classmethod`` all
+        work.
+        """
+        if not callable(getattr(type(adapter), "broker_client_order_id", None)):
+            return request.client_order_id
+        encoded = str(adapter.broker_client_order_id(request.client_order_id))
+        if not encoded:
+            raise ValueError("broker client order id mapping must be non-empty")
+        return encoded
 
     @classmethod
-    def normalize_report(cls, request: OrderRequest, raw: object) -> ExecutionReport:
-        """Validate and normalize one cumulative broker report."""
+    def normalize_report(
+        cls,
+        request: OrderRequest,
+        raw: object,
+        *,
+        broker_client_order_id: str | None = None,
+    ) -> ExecutionReport:
+        """Validate raw broker identity, then normalize one cumulative report."""
         if not isinstance(raw, dict):
             raise ValueError("broker response must be a mapping")
 
         order_id = str(raw.get("id") or raw.get("order_id") or "")
         status = cls._normalize_status(raw.get("status"))
-        requested_quantity = float(
-            raw.get("amount") or raw.get("requested_quantity") or request.quantity
+        reported_symbol = raw.get("symbol")
+        expected_symbol = request.venue_symbol or request.symbol
+        if reported_symbol is not None and str(reported_symbol) != expected_symbol:
+            raise ValueError("broker report symbol does not match the tracked request")
+        reported_side = raw.get("side")
+        if reported_side is not None and str(reported_side).lower() != request.side:
+            raise ValueError("broker report side does not match the tracked request")
+        reported_client_ids = {
+            str(raw[key])
+            for key in ("clientOrderId", "client_order_id")
+            if raw.get(key) not in (None, "")
+        }
+        if len(reported_client_ids) > 1:
+            raise ValueError("broker report has conflicting client order ids")
+        expected_client_order_id = broker_client_order_id or request.client_order_id
+        if reported_client_ids and reported_client_ids != {expected_client_order_id}:
+            raise ValueError("broker report client order id does not match the tracked request")
+
+        reported_quantities = [
+            raw[key] for key in ("amount", "requested_quantity") if raw.get(key) is not None
+        ]
+        if (
+            len(reported_quantities) > 1
+            and abs(float(reported_quantities[0]) - float(reported_quantities[1])) > EPSILON
+        ):
+            raise ValueError("broker report has conflicting requested quantities")
+        requested_quantity = (
+            float(reported_quantities[0]) if reported_quantities else request.quantity
         )
         filled_quantity = float(raw.get("filled") or raw.get("filled_quantity") or 0.0)
         average_raw = raw.get("average")
@@ -610,6 +685,8 @@ class LiveExecutor:
             for value in (requested_quantity, filled_quantity, commission, slippage, tax)
         ):
             raise ValueError("broker report quantities and costs must be finite")
+        if abs(requested_quantity - request.quantity) > EPSILON:
+            raise ValueError("broker requested quantity does not match the tracked request")
 
         if filled_quantity > EPSILON:
             if average_price is None or not isfinite(average_price) or average_price <= 0:
@@ -633,7 +710,7 @@ class LiveExecutor:
 
         return ExecutionReport(
             order_id=order_id,
-            client_order_id=str(raw.get("clientOrderId") or request.client_order_id),
+            client_order_id=request.client_order_id,
             symbol=request.symbol,
             side=request.side,
             status=status,

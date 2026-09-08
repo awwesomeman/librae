@@ -452,18 +452,15 @@ class ShioajiAdapter:
             order_type=order_type,
         )
         if signal.get("client_order_id"):
-            order_kwargs["custom_field"] = self._client_tag(signal["client_order_id"])
+            order_kwargs["custom_field"] = self.broker_client_order_id(signal["client_order_id"])
         order = order_cls(**order_kwargs)
         trade = self._api.place_order(contract, order)
-        return {
-            "id": trade.status.id if trade.status else "",
-            "status": trade.status.status if trade.status else "unknown",
-        }
+        return self._trade_to_order(trade, symbol=signal["symbol"])
 
     def find_order(self, client_order_id: str, symbol: str) -> dict | None:
         """Find an order by its deterministic six-character custom field."""
         self._require_auth()
-        tag = self._client_tag(client_order_id)
+        tag = self.broker_client_order_id(client_order_id)
         matches = [
             trade
             for trade in self._trades(symbol)
@@ -471,7 +468,7 @@ class ShioajiAdapter:
         ]
         if len(matches) > 1:
             raise ValueError(f"duplicate Shioaji custom_field digest: {tag}")
-        return self._trade_to_order(matches[0]) if matches else None
+        return self._trade_to_order(matches[0], symbol=symbol) if matches else None
 
     def get_order(self, order_id: str, symbol: str) -> dict:
         """Refresh and return one cumulative Shioaji Trade state."""
@@ -480,14 +477,14 @@ class ShioajiAdapter:
             status_id = str(getattr(trade.status, "id", "") or "")
             order_obj_id = str(getattr(trade.order, "id", "") or "")
             if order_id in (status_id, order_obj_id):
-                return self._trade_to_order(trade)
+                return self._trade_to_order(trade, symbol=symbol)
         raise LookupError(f"Shioaji order not found: {order_id}")
 
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return non-final orders after refreshing the account state."""
         open_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
         return [
-            self._trade_to_order(trade)
+            self._trade_to_order(trade, symbol=symbol)
             for trade in self._trades(symbol)
             if str(
                 getattr(
@@ -508,7 +505,7 @@ class ShioajiAdapter:
             if order_id in (status_id, order_obj_id):
                 self._api.cancel_order(trade)
                 self._api.update_status(trade=trade)
-                return self._trade_to_order(trade)
+                return self._trade_to_order(trade, symbol=symbol)
         raise LookupError(f"Shioaji order not found: {order_id}")
 
     def _trades(self, symbol: str) -> list:
@@ -521,25 +518,27 @@ class ShioajiAdapter:
             if str(getattr(trade.contract, "code", "")) in contract_codes
         ]
 
-    @staticmethod
-    def _client_tag(client_order_id: str) -> str:
+    def broker_client_order_id(self, client_order_id: str) -> str:
+        """Map Librae's durable id to Shioaji's six-character custom field."""
         digest = hashlib.sha256(client_order_id.encode()).digest()
         return base64.b32encode(digest).decode("ascii")[:6]
 
     @staticmethod
-    def _trade_to_order(trade) -> dict:
+    def _trade_to_order(trade, *, symbol: str | None = None) -> dict:
         """Translate a Shioaji Trade into one cumulative execution report."""
         status = trade.status
         order = trade.order
         deals = list(getattr(status, "deals", None) or [])
         requested = getattr(status, "order_quantity", None)
-        if not isinstance(requested, Real):
+        if not isinstance(requested, Real) or requested <= 0:
+            # A Trade returned straight from place_order may not carry the
+            # venue-side order_quantity yet; the order we sent is the
+            # requested quantity and must match the tracked request exactly.
             requested = getattr(order, "quantity", 0)
         filled = getattr(status, "deal_quantity", 0)
         filled = float(filled) if isinstance(filled, Real) else 0.0
         result = {
             "id": str(getattr(status, "id", "") or getattr(order, "id", "") or ""),
-            "clientOrderId": str(getattr(order, "custom_field", "") or ""),
             "status": str(
                 getattr(
                     getattr(status, "status", "unknown"),
@@ -550,6 +549,17 @@ class ShioajiAdapter:
             "amount": float(requested),
             "filled": filled,
         }
+        client_order_id = getattr(order, "custom_field", None)
+        if isinstance(client_order_id, str) and client_order_id:
+            result["clientOrderId"] = client_order_id
+        if symbol is not None:
+            # The caller resolves and filters the concrete Shioaji contract for
+            # this venue symbol before mapping it back to the shared contract.
+            result["symbol"] = symbol
+        raw_side = getattr(order, "action", None)
+        side = getattr(raw_side, "value", raw_side)
+        if isinstance(side, str) and side.lower() in ("buy", "sell"):
+            result["side"] = side.lower()
         if filled and deals:
             result["average"] = (
                 sum(float(deal.price) * float(deal.quantity) for deal in deals) / filled

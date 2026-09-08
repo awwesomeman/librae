@@ -29,9 +29,21 @@ def validate_order_adapter(adapter: object) -> None:
 def normalize_broker_report(
     request: OrderRequest,
     report: Mapping[str, object],
+    *,
+    adapter: object | None = None,
 ) -> ExecutionReport:
-    """Apply the same cumulative-report validation used by live execution."""
-    return LiveExecutor.normalize_report(request, dict(report))
+    """Apply the same cumulative-report validation used by live execution.
+
+    Pass the ``adapter`` that produced ``report`` when it declares a compact
+    ``broker_client_order_id`` form so the client id check matches live.
+    """
+    return LiveExecutor.normalize_report(
+        request,
+        dict(report),
+        broker_client_order_id=(
+            LiveExecutor.broker_client_order_id(adapter, request) if adapter is not None else None
+        ),
+    )
 
 
 def validate_bar_data(frame: pd.DataFrame) -> None:

@@ -560,6 +560,26 @@ def test_prepare_order_applies_precision_and_limits(authed_adapter, mock_ccxt_ex
     assert prepared["price"] == 100.12
 
 
+def test_prepare_order_rejects_raw_market_id_route(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+    }
+
+    with pytest.raises(ValueError, match="CCXT unified symbol 'BTC/USDT'"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "quantity": 1.0,
+                "order_type": "market",
+                "time_in_force": "day",
+                "position_effect": "open",
+            }
+        )
+
+
 def test_prepare_order_rejects_spot_short_open(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.market.return_value = {
         "symbol": "BTC/USDT",
@@ -702,6 +722,11 @@ def test_place_order_without_client_order_id_omits_param(authed_adapter, mock_cc
 def test_place_order_backfills_missing_fee_from_trades(authed_adapter, mock_ccxt_exchange):
     # binanceusdm's create_order()/fetchOrder() never include fee, unlike
     # spot; commission is only available per-fill via fetch_my_trades().
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT:USDT",
+        "type": "swap",
+        "swap": True,
+    }
     mock_ccxt_exchange.create_order.return_value = {
         "id": "ord_1",
         "status": "closed",

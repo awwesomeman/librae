@@ -13,7 +13,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from librae.brokers.shioaji_adapter import _require_shioaji
-from librae.live.executor import PositionRequest
+from librae.core.cost_model import CostModel
+from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -430,7 +431,11 @@ class TestPlaceOrder:
             price_type="FUT_LMT",
             order_type="ROD",
         )
-        assert result == {"id": "order123", "status": "PendingSubmit"}
+        assert result["id"] == "order123"
+        assert result["status"] == "PendingSubmit"
+        assert result["symbol"] == "TXFR1"
+        assert result["amount"] == 1.0
+        assert result["filled"] == 0.0
 
     def test_stock_market_order_uses_stock_price_type(self):
         adapter = _make_adapter(ca_activated=True)
@@ -485,7 +490,7 @@ class TestPlaceOrder:
             )
 
         custom_field = mock_sj.FuturesOrder.call_args.kwargs["custom_field"]
-        assert custom_field == adapter._client_tag("strategy-TXFR1-open-20260101T000000")
+        assert custom_field == adapter.broker_client_order_id("strategy-TXFR1-open-20260101T000000")
         assert len(custom_field) == 6
 
     def test_futures_market_order_uses_ioc(self):
@@ -600,7 +605,7 @@ def test_trade_normalization_uses_cumulative_deals():
     from librae.brokers.shioaji_adapter import ShioajiAdapter
 
     trade = SimpleNamespace(
-        order=SimpleNamespace(id="ord-1", quantity=2, custom_field="ABC123"),
+        order=SimpleNamespace(id="ord-1", quantity=2, custom_field="ABC123", action="Buy"),
         status=SimpleNamespace(
             id="ord-1",
             status="PartFilled",
@@ -617,8 +622,11 @@ def test_trade_normalization_uses_cumulative_deals():
         ),
     )
 
-    result = ShioajiAdapter._trade_to_order(trade)
+    result = ShioajiAdapter._trade_to_order(trade, symbol="TXFR1")
 
+    assert result["symbol"] == "TXFR1"
+    assert result["side"] == "buy"
+    assert result["clientOrderId"] == "ABC123"
     assert result["status"] == "PartFilled"
     assert result["filled"] == 1.0
     assert result["average"] == 100.0
@@ -639,6 +647,78 @@ def test_trade_lookup_resolves_continuous_symbol_to_contract_code():
 
     assert result == [matching]
     adapter._api.update_status.assert_called_once_with()
+
+
+def test_trade_normalization_falls_back_to_sent_quantity_before_acknowledgement():
+    from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+    trade = SimpleNamespace(
+        order=SimpleNamespace(id="ord-1", quantity=2, custom_field="ABC123", action="Buy"),
+        status=SimpleNamespace(id="ord-1", status="PendingSubmit", order_quantity=0, deals=[]),
+    )
+
+    result = ShioajiAdapter._trade_to_order(trade, symbol="TXFR1")
+
+    assert result["amount"] == 2.0
+    assert result["filled"] == 0.0
+
+
+def test_find_order_rejects_ambiguous_compact_client_id():
+    adapter = _make_adapter(ca_activated=True)
+    client_order_id = "strategy-TXFR1-open-20260101T000000"
+    tag = adapter.broker_client_order_id(client_order_id)
+    adapter._trades = MagicMock(
+        return_value=[
+            SimpleNamespace(order=SimpleNamespace(custom_field=tag)),
+            SimpleNamespace(order=SimpleNamespace(custom_field=tag)),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="duplicate Shioaji custom_field digest"):
+        adapter.find_order(client_order_id, "TXFR1")
+
+
+def test_live_executor_verifies_compact_client_id_before_canonicalizing():
+    adapter = _make_adapter(ca_activated=True)
+    request = OrderRequest(
+        client_order_id="strategy-TXFR1-open-20260101T000000",
+        symbol="TXF",
+        venue_symbol="TXFR1",
+        side="buy",
+        quantity=2.0,
+        order_type="market",
+        submitted_at=datetime(2026, 1, 1, tzinfo=UTC),
+        security_type="FUT",
+        continuous_alias=True,
+    )
+    tag = adapter.broker_client_order_id(request.client_order_id)
+    adapter._trades = MagicMock(
+        return_value=[
+            SimpleNamespace(
+                order=SimpleNamespace(
+                    id="ord-1",
+                    quantity=2,
+                    custom_field=tag,
+                    action="Buy",
+                ),
+                status=SimpleNamespace(
+                    id="ord-1",
+                    status="Submitted",
+                    order_quantity=2,
+                    deal_quantity=0,
+                    deals=[],
+                ),
+            )
+        ]
+    )
+    executor = LiveExecutor(CostModel.zero(), simulation=False, order_adapter=adapter)
+
+    report = executor.find_order(request)
+
+    assert report is not None
+    assert report.client_order_id == request.client_order_id
+    assert report.symbol == request.symbol
+    assert report.side == request.side
 
 
 @pytest.mark.parametrize(
