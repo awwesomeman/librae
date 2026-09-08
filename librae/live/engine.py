@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import signal
 import types
+from collections import deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -553,6 +554,12 @@ class LiveTrader:
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
         self._market_data_fetch_failures: dict[str, int] = {}
+        # Recent fetch health is intentionally process-local. Persisting a
+        # short operational window across downtime would mix unlike polling
+        # cadences and can raise a stale alert after an otherwise clean
+        # restart; it is diagnostic state, not execution state.
+        self._market_data_fetch_history: dict[str, deque[bool]] = {}
+        self._market_data_fetch_degraded: set[str] = set()
         self._last_cycle_ts: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
@@ -752,6 +759,14 @@ class LiveTrader:
     # unreachable), not a transient blip — worth alerting the operator.
     CONSECUTIVE_ERROR_THRESHOLD = 3
 
+    # A six-poll window catches a sustained two-out-of-three failure pattern
+    # without promoting a single transient error. Separate alert and recovery
+    # thresholds provide hysteresis so a feed near the boundary does not flap
+    # the operator diagnostic.
+    FETCH_HEALTH_WINDOW = 6
+    FETCH_HEALTH_ALERT_FAILURES = 4
+    FETCH_HEALTH_RECOVERY_FAILURES = 2
+
     # WHY: a completed bar's own timestamp is always ~1 interval behind wall
     # clock even when the feed is perfectly healthy (see _check_staleness) —
     # this is how many *additional* full intervals of no progress are
@@ -912,7 +927,14 @@ class LiveTrader:
             failures,
             exc_info=(type(error), error, error.__traceback__),
         )
-        if failures != self.CONSECUTIVE_ERROR_THRESHOLD:
+        opens_incident = (
+            failures == self.CONSECUTIVE_ERROR_THRESHOLD
+            and symbol not in self._market_data_fetch_degraded
+        )
+        if failures == self.CONSECUTIVE_ERROR_THRESHOLD:
+            self._market_data_fetch_degraded.add(symbol)
+        if not opens_incident:
+            self._record_market_data_fetch_health(symbol, failed=True, error=error)
             return
         if self._on_runtime_event:
             self._on_runtime_event(
@@ -933,11 +955,82 @@ class LiveTrader:
             title=f"[{self._executor.strategy_name}] Market Data Fetch Failed: {symbol}",
             message=f"{failures} consecutive failures: {error}",
         )
+        self._record_market_data_fetch_health(symbol, failed=True, error=error)
 
     def _record_market_data_fetch_success(self, symbol: str) -> None:
         failures = self._market_data_fetch_failures.pop(symbol, 0)
         if failures:
             logger.info("Market data fetch recovered for %s after %d failures", symbol, failures)
+        self._record_market_data_fetch_health(symbol, failed=False)
+
+    def _record_market_data_fetch_health(
+        self,
+        symbol: str,
+        *,
+        failed: bool,
+        error: Exception | None = None,
+    ) -> None:
+        """Maintain a bounded rolling failure diagnostic for one feed."""
+        history = self._market_data_fetch_history.setdefault(
+            symbol, deque(maxlen=self.FETCH_HEALTH_WINDOW)
+        )
+        history.append(failed)
+        if len(history) < self.FETCH_HEALTH_WINDOW:
+            return
+
+        failure_count = sum(history)
+        is_degraded = symbol in self._market_data_fetch_degraded
+        if not is_degraded and failure_count >= self.FETCH_HEALTH_ALERT_FAILURES:
+            self._market_data_fetch_degraded.add(symbol)
+            failure_rate = failure_count / self.FETCH_HEALTH_WINDOW
+            logger.warning(
+                "Market data fetch degraded for %s: failures=%d/%d",
+                symbol,
+                failure_count,
+                self.FETCH_HEALTH_WINDOW,
+            )
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=self._utc_now(),
+                        event_type="decision_skipped",
+                        symbol=symbol,
+                        detail={
+                            "reason": "market_data_fetch_degraded",
+                            "failed_polls": failure_count,
+                            "window_polls": self.FETCH_HEALTH_WINDOW,
+                            "failure_rate": failure_rate,
+                            "current_poll_failed": failed,
+                            "error_type": type(error).__name__ if error else None,
+                            "message": str(error) if error else None,
+                        },
+                    )
+                )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Market Data Fetch Degraded: {symbol}",
+                message=(
+                    f"{failure_count}/{self.FETCH_HEALTH_WINDOW} recent polls failed "
+                    f"({failure_rate:.0%}); failed polls remain cycle-atomic and "
+                    "skip strategy evaluation."
+                ),
+            )
+        elif is_degraded and not failed and failure_count <= self.FETCH_HEALTH_RECOVERY_FAILURES:
+            self._market_data_fetch_degraded.remove(symbol)
+            logger.info(
+                "Market data fetch health recovered for %s: failures=%d/%d",
+                symbol,
+                failure_count,
+                self.FETCH_HEALTH_WINDOW,
+            )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Market Data Fetch Recovered: {symbol}",
+                message=(
+                    f"Recent fetch failures fell to {failure_count}/"
+                    f"{self.FETCH_HEALTH_WINDOW}; degradation alert cleared."
+                ),
+            )
 
     def _reconcile_positions(self) -> None:
         """Adopt real broker positions into local state at startup.
@@ -1571,6 +1664,14 @@ class LiveTrader:
             request_sizes = all_request_sizes
             try:
                 exhausted_fingerprint = self._warmup_exhausted_fingerprints.get(symbol)
+                if (
+                    exhausted_fingerprint is None
+                    and self._warmup_requested_periods.get(symbol) == all_request_sizes[-1]
+                ):
+                    # A prior largest-rung response added history but did not
+                    # close the gap. Re-probe that bound directly; exhaustion
+                    # is only established when this rung itself plateaus.
+                    request_sizes = [all_request_sizes[-1]]
                 if exhausted_fingerprint is not None:
                     probe_periods = self._warmup_requested_periods.get(symbol, base_request)
                     probe = self._fetch_history(symbol, probe_periods)
@@ -1615,14 +1716,12 @@ class LiveTrader:
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
-                    if self._history_fingerprint(merged) == before:
+                    if (
+                        requested_periods == all_request_sizes[-1]
+                        and self._history_fingerprint(merged) == before
+                    ):
                         self._warmup_exhausted_fingerprints[symbol] = before
                         break
-                if (
-                    self._warmup_gap(symbol, merged) is not None
-                    and symbol not in self._warmup_exhausted_fingerprints
-                ):
-                    self._warmup_exhausted_fingerprints[symbol] = self._history_fingerprint(merged)
             except Exception:
                 self._store_runtime_cache(symbol, merged)
                 raise
@@ -1831,7 +1930,17 @@ class LiveTrader:
                 self._reported_warmup_reasons.pop(symbol, None)
                 continue
             usable_periods = len(frame) if frame is not None else 0
-            if self._reported_warmup_reasons.get(symbol) == reason:
+            previous_reason = self._reported_warmup_reasons.get(symbol)
+            if previous_reason == reason:
+                continue
+            if (
+                previous_reason == "warmup_backfill_exhausted"
+                and not exhausted
+                and gap_reason is not None
+            ):
+                # A successful re-probe is progress, not a new outward edge.
+                # Keep the existing incident open until readiness or another
+                # terminal plateau rather than alternating alert reasons.
                 continue
             self._reported_warmup_reasons[symbol] = reason
             requested_periods = self._warmup_requested_periods.get(symbol, 0)
