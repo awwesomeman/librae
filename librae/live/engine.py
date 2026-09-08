@@ -891,7 +891,13 @@ class LiveTrader:
             failures,
             exc_info=(type(error), error, error.__traceback__),
         )
-        if failures != self.CONSECUTIVE_ERROR_THRESHOLD:
+        opens_incident = (
+            failures == self.CONSECUTIVE_ERROR_THRESHOLD
+            and symbol not in self._market_data_fetch_degraded
+        )
+        if failures == self.CONSECUTIVE_ERROR_THRESHOLD:
+            self._market_data_fetch_degraded.add(symbol)
+        if not opens_incident:
             self._record_market_data_fetch_health(symbol, failed=True, error=error)
             return
         if self._on_runtime_event:
@@ -938,7 +944,7 @@ class LiveTrader:
 
         failure_count = sum(history)
         is_degraded = symbol in self._market_data_fetch_degraded
-        if not is_degraded and failed and failure_count >= self.FETCH_HEALTH_ALERT_FAILURES:
+        if not is_degraded and failure_count >= self.FETCH_HEALTH_ALERT_FAILURES:
             self._market_data_fetch_degraded.add(symbol)
             failure_rate = failure_count / self.FETCH_HEALTH_WINDOW
             logger.warning(
@@ -958,6 +964,7 @@ class LiveTrader:
                             "failed_polls": failure_count,
                             "window_polls": self.FETCH_HEALTH_WINDOW,
                             "failure_rate": failure_rate,
+                            "current_poll_failed": failed,
                             "error_type": type(error).__name__ if error else None,
                             "message": str(error) if error else None,
                         },
@@ -968,10 +975,11 @@ class LiveTrader:
                 title=f"[{self._executor.strategy_name}] Market Data Fetch Degraded: {symbol}",
                 message=(
                     f"{failure_count}/{self.FETCH_HEALTH_WINDOW} recent polls failed "
-                    f"({failure_rate:.0%}); strategy evaluation remains fail closed."
+                    f"({failure_rate:.0%}); failed polls remain cycle-atomic and "
+                    "skip strategy evaluation."
                 ),
             )
-        elif is_degraded and failure_count <= self.FETCH_HEALTH_RECOVERY_FAILURES:
+        elif is_degraded and not failed and failure_count <= self.FETCH_HEALTH_RECOVERY_FAILURES:
             self._market_data_fetch_degraded.remove(symbol)
             logger.info(
                 "Market data fetch health recovered for %s: failures=%d/%d",

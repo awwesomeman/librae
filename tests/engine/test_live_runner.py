@@ -789,13 +789,29 @@ class TestLiveTrader:
             for event in runtime_events
             if event.detail.get("reason") == "market_data_fetch_failed"
         ]
-        assert len(failures) == 2
+        assert len(failures) == 1
         alerts = [
             call
             for call in runner._notify.call_args_list
             if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
         ]
-        assert len(alerts) == 2
+        assert len(alerts) == 1
+
+        state["fail"] = False
+        for _ in range(4):
+            runner._poll_cycle()
+        assert runner._market_data_fetch_degraded == set()
+
+        state["fail"] = True
+        for _ in range(3):
+            runner._poll_cycle()
+
+        failures = [
+            event
+            for event in runtime_events
+            if event.detail.get("reason") == "market_data_fetch_failed"
+        ]
+        assert len(failures) == 2
 
     def test_flapping_fetch_alerts_and_clears_rolling_diagnostic(self):
         frame = _make_ohlcv_df()
@@ -805,8 +821,6 @@ class TestLiveTrader:
                 RuntimeError("feed unavailable"),
                 frame,
                 RuntimeError("feed unavailable"),
-                RuntimeError("feed unavailable"),
-                frame,
                 RuntimeError("feed unavailable"),
                 frame,
                 frame,
@@ -831,7 +845,7 @@ class TestLiveTrader:
         runner._on_runtime_event = runtime_events.append
         runner._notify = MagicMock()
 
-        for _ in range(7):
+        for _ in range(6):
             runner._poll_cycle()
 
         assert runner._market_data_fetch_degraded == {"BTCUSDT"}
@@ -844,12 +858,12 @@ class TestLiveTrader:
         assert degraded[0].detail["failed_polls"] == 4
         assert degraded[0].detail["window_polls"] == 6
         assert degraded[0].detail["failure_rate"] == pytest.approx(2 / 3)
+        assert degraded[0].detail["current_poll_failed"] is False
         assert strategy.on_bar.call_count == 1
 
-        # Failed cycles never replay the cached strategy event. Three healthy
+        # Failed cycles never replay the cached strategy event. Two healthy
         # polls move the bounded window below the recovery threshold without
         # evaluating the same bar again.
-        runner._poll_cycle()
         runner._poll_cycle()
         assert runner._market_data_fetch_degraded == {"BTCUSDT"}
         runner._poll_cycle()
@@ -865,6 +879,33 @@ class TestLiveTrader:
             "[test] Market Data Fetch Degraded: BTCUSDT",
             "[test] Market Data Fetch Recovered: BTCUSDT",
         ]
+
+    def test_consecutive_and_rolling_failures_share_one_incident(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        runtime_events = []
+        runner._on_runtime_event = runtime_events.append
+        runner._notify = MagicMock()
+
+        for _ in range(6):
+            runner._record_market_data_fetch_failure("BTCUSDT", RuntimeError("offline"))
+
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+        reasons = [event.detail["reason"] for event in runtime_events]
+        assert reasons == ["market_data_fetch_failed"]
+        failure_alerts = [
+            call
+            for call in runner._notify.call_args_list
+            if call.args == ("send_alert",) and "Fetch Failed" in call.kwargs["title"]
+        ]
+        assert len(failure_alerts) == 1
+
+        for _ in range(3):
+            runner._record_market_data_fetch_success("BTCUSDT")
+        assert runner._market_data_fetch_degraded == {"BTCUSDT"}
+
+        runner._record_market_data_fetch_success("BTCUSDT")
+
+        assert runner._market_data_fetch_degraded == set()
 
     def test_single_transient_fetch_failure_does_not_alert(self):
         runner = self._make_runner(config=_test_cfg(warmup_periods=1))
