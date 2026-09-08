@@ -6,13 +6,16 @@ The optional SDK contract is covered separately without opening a socket.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
+from threading import Barrier, Event, Lock, RLock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-from librae.brokers.ibkr_adapter import _require_ib_async
+from librae.brokers.ibkr_adapter import IBKRAdapter, IBKRCredentials, _require_ib_async
 from librae.config.symbols import SymbolInfo
 from librae.core.cost_model import CostModel
 from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
@@ -55,13 +58,29 @@ def test_missing_ib_async_names_install_extra():
 
 def _make_adapter(*, trading_enabled: bool = False):
     """Build an IBKRAdapter with mocked internals (no real connect())."""
-    from librae.brokers.ibkr_adapter import IBKRAdapter
-
     adapter = IBKRAdapter.__new__(IBKRAdapter)
     adapter._ib = MagicMock()
     adapter._read_only = not trading_enabled
     adapter._contract_cache = {}
+    adapter._contract_details_cache = {}
+    adapter._market_rule_cache = OrderedDict()
+    adapter._connection_state_lock = RLock()
+    adapter._market_rule_singleflight_lock = Lock()
+    adapter._connection_generation = 0
     return adapter
+
+
+class _FakeEvent:
+    def __init__(self):
+        self._handlers = []
+
+    def __iadd__(self, handler):
+        self._handlers.append(handler)
+        return self
+
+    def emit(self):
+        for handler in tuple(self._handlers):
+            handler()
 
 
 def _make_bars_df():
@@ -104,6 +123,36 @@ def _mock_ib_async_module(bars_df):
     mock = MagicMock()
     mock.util.df.return_value = bars_df
     return mock
+
+
+def test_connection_events_invalidate_adapter_caches():
+    fake_ib = MagicMock()
+    fake_ib.connectedEvent = _FakeEvent()
+    fake_ib.disconnectedEvent = _FakeEvent()
+    fake_ib.connect.side_effect = lambda *args, **kwargs: fake_ib.connectedEvent.emit()
+    fake_ib.disconnect.side_effect = fake_ib.disconnectedEvent.emit
+    ib_async = SimpleNamespace(IB=MagicMock(return_value=fake_ib))
+
+    with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=ib_async):
+        adapter = IBKRAdapter(IBKRCredentials(), trading_enabled=True)
+
+    assert adapter._connection_generation == 1
+    adapter._contract_cache[("MU", "STK", None, "USD", None)] = object()
+    adapter._contract_details_cache[("MU", "STK", None, "USD", None)] = object()
+    adapter._market_rule_cache[26] = ((0.0, 0.01),)
+
+    fake_ib.connectedEvent.emit()
+
+    assert adapter._connection_generation == 2
+    assert not adapter._contract_cache
+    assert not adapter._contract_details_cache
+    assert not adapter._market_rule_cache
+
+    adapter._market_rule_cache[26] = ((0.0, 0.01),)
+    adapter.close()
+
+    assert adapter._connection_generation == 3
+    assert not adapter._market_rule_cache
 
 
 def test_available_symbols_lists_mnq_front_and_next_exact_contracts():
@@ -569,7 +618,7 @@ class TestPlaceOrder:
         assert prepared["quantity"] == 1.2
         assert prepared["price"] == 100.01
 
-    def test_live_executor_accepts_ibkr_owned_min_tick_normalization(self):
+    def test_live_executor_accepts_ibkr_owned_market_rule_normalization(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._contract_details = MagicMock(
             return_value=SimpleNamespace(
@@ -577,9 +626,13 @@ class TestPlaceOrder:
                 sizeIncrement=0.1,
                 suggestedSizeIncrement=0.1,
                 minTick=0.01,
-                marketRuleIds="",
+                validExchanges="SMART",
+                marketRuleIds="26",
             )
         )
+        adapter._ib.reqMarketRule.return_value = [
+            SimpleNamespace(lowEdge=0.0, increment=0.05),
+        ]
         instrument = SymbolInfo(
             symbol="MU",
             market="us_equity",
@@ -615,32 +668,298 @@ class TestPlaceOrder:
         )
 
         assert prepared.quantity == 1.2
-        assert prepared.limit_price == 100.01
+        assert prepared.limit_price == 100.05
+        adapter._ib.reqMarketRule.assert_called_once_with(26)
 
-    def test_prepare_order_fails_closed_when_market_rule_ladder_is_required(self):
+    def test_prepare_order_maps_smart_exchange_to_its_market_rule(self):
         adapter = _make_adapter(trading_enabled=True)
         adapter._contract_details = MagicMock(
             return_value=SimpleNamespace(
                 minSize=1.0,
                 sizeIncrement=1.0,
                 minTick=0.01,
+                validExchanges="NYSE,SMART",
+                marketRuleIds="25,26",
+            )
+        )
+        adapter._ib.reqMarketRule.return_value = [
+            SimpleNamespace(lowEdge=0.0, increment=0.01),
+        ]
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "MU",
+                "side": "buy",
+                "quantity": 1.0,
+                "order_type": "limit",
+                "time_in_force": "day",
+                "price": 100.019,
+                "security_type": "STK",
+                "currency": "USD",
+            }
+        )
+
+        assert prepared["price"] == 100.01
+        adapter._ib.reqMarketRule.assert_called_once_with(26)
+
+    @pytest.mark.parametrize(
+        ("side", "price", "expected"),
+        [("buy", 100.019, 100.01), ("sell", 100.011, 100.02)],
+    )
+    def test_constant_market_rule_rounds_passively(self, side, price, expected):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                validExchanges="SMART",
                 marketRuleIds="26",
             )
         )
+        adapter._ib.reqMarketRule.return_value = [
+            SimpleNamespace(lowEdge=0.0, increment=0.01),
+        ]
 
-        with pytest.raises(ValueError, match="market-rule ladder"):
-            adapter.prepare_order(
+        normalized = adapter.normalize_limit_price(
+            {
+                "symbol": "MU",
+                "side": side,
+                "quantity": 1.0,
+                "order_type": "limit",
+                "time_in_force": "day",
+                "price": price,
+                "security_type": "STK",
+                "currency": "USD",
+            }
+        )
+
+        assert normalized == expected
+
+    @pytest.mark.parametrize(
+        ("side", "price", "expected"),
+        [("buy", 1.031, 1.0), ("sell", 1.029, 1.05)],
+    )
+    def test_multiband_market_rule_stabilizes_across_boundary(self, side, price, expected):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                validExchanges="SMART",
+                marketRuleIds="26",
+            )
+        )
+        adapter._ib.reqMarketRule.return_value = [
+            SimpleNamespace(lowEdge=0.0, increment=0.01),
+            SimpleNamespace(lowEdge=1.03, increment=0.05),
+        ]
+
+        normalized = adapter.normalize_limit_price(
+            {
+                "symbol": "MU",
+                "side": side,
+                "quantity": 1.0,
+                "order_type": "limit",
+                "time_in_force": "day",
+                "price": price,
+                "security_type": "STK",
+                "currency": "USD",
+            }
+        )
+
+        assert normalized == expected
+
+    def test_future_uses_explicit_routing_exchange_market_rule(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                validExchanges="CME,NYMEX",
+                marketRuleIds="42,43",
+            )
+        )
+        adapter._ib.reqMarketRule.return_value = [
+            SimpleNamespace(lowEdge=0.0, increment=0.25),
+        ]
+
+        normalized = adapter.normalize_limit_price(
+            {
+                "symbol": "ES",
+                "side": "buy",
+                "quantity": 1.0,
+                "order_type": "limit",
+                "time_in_force": "day",
+                "price": 6000.24,
+                "security_type": "FUT",
+                "exchange": "CME",
+                "currency": "USD",
+                "contract_month": "202612",
+            }
+        )
+
+        assert normalized == 6000.0
+        adapter._ib.reqMarketRule.assert_called_once_with(42)
+
+    @pytest.mark.parametrize(
+        ("valid_exchanges", "market_rule_ids", "error"),
+        [
+            ("", "26", "without validExchanges"),
+            ("SMART,NYSE", "26", "malformed"),
+            ("NYSE", "26", "no IBKR market rule"),
+            ("SMART,SMART", "26,27", "ambiguous"),
+            ("SMART", "", "no positive IBKR minTick"),
+            ("SMART", "not-an-id", "invalid IBKR market rule"),
+        ],
+    )
+    def test_market_rule_mapping_fails_closed(self, valid_exchanges, market_rule_ids, error):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                validExchanges=valid_exchanges,
+                marketRuleIds=market_rule_ids,
+            )
+        )
+
+        with pytest.raises(ValueError, match=error):
+            adapter.normalize_limit_price(
                 {
                     "symbol": "MU",
                     "side": "buy",
                     "quantity": 1.0,
                     "order_type": "limit",
                     "time_in_force": "day",
-                    "price": 100.001,
+                    "price": 100.01,
                     "security_type": "STK",
                     "currency": "USD",
                 }
             )
+
+    @pytest.mark.parametrize(
+        ("ladder", "error"),
+        [
+            (None, "timed out"),
+            ([], "no price increments"),
+            ([SimpleNamespace(lowEdge=1.0, increment=0.01)], "does not cover"),
+            ([SimpleNamespace(lowEdge=0.0, increment=0.0)], "malformed"),
+            (
+                [
+                    SimpleNamespace(lowEdge=0.0, increment=0.01),
+                    SimpleNamespace(lowEdge=0.0, increment=0.05),
+                ],
+                "malformed",
+            ),
+            ([SimpleNamespace(lowEdge=float("nan"), increment=0.01)], "malformed"),
+        ],
+    )
+    def test_market_rule_ladder_fails_closed(self, ladder, error):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                validExchanges="SMART",
+                marketRuleIds="26",
+            )
+        )
+        adapter._ib.reqMarketRule.return_value = ladder
+
+        with pytest.raises(ValueError, match=error):
+            adapter.normalize_limit_price(
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "quantity": 1.0,
+                    "order_type": "limit",
+                    "time_in_force": "day",
+                    "price": 100.01,
+                    "security_type": "STK",
+                    "currency": "USD",
+                }
+            )
+
+    def test_market_rule_cache_singleflight_avoids_duplicate_fake_requests(self):
+        adapter = _make_adapter(trading_enabled=True)
+        callers_ready = Barrier(4)
+        request_started = Event()
+        release_request = Event()
+
+        def blocking_fake_request(_rule_id):
+            request_started.set()
+            if not release_request.wait(timeout=5):
+                raise TimeoutError("test did not release fake market-rule request")
+            return [SimpleNamespace(lowEdge=0.0, increment=0.01)]
+
+        def fetch_ladder(_):
+            callers_ready.wait(timeout=5)
+            return adapter._market_rule_ladder(26, expected_generation=0)
+
+        adapter._ib.reqMarketRule.side_effect = blocking_fake_request
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(fetch_ladder, index) for index in range(4)]
+            try:
+                assert request_started.wait(timeout=5)
+            finally:
+                release_request.set()
+            ladders = [future.result(timeout=5) for future in futures]
+
+        assert ladders == [((0.0, 0.01),)] * 4
+        adapter._ib.reqMarketRule.assert_called_once_with(26)
+
+    def test_market_rule_cache_is_bounded(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.reqMarketRule.return_value = [
+            SimpleNamespace(lowEdge=0.0, increment=0.01),
+        ]
+
+        with patch("librae.brokers.ibkr_adapter._MARKET_RULE_CACHE_MAXSIZE", 2):
+            for rule_id in (25, 26, 27):
+                adapter._market_rule_ladder(rule_id, expected_generation=0)
+
+        assert tuple(adapter._market_rule_cache) == (26, 27)
+
+    def test_connection_boundary_invalidates_market_rule_cache(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.reqMarketRule.side_effect = [
+            [SimpleNamespace(lowEdge=0.0, increment=0.01)],
+            [SimpleNamespace(lowEdge=0.0, increment=0.05)],
+        ]
+
+        first = adapter._market_rule_ladder(26, expected_generation=0)
+        adapter._on_connection_boundary()
+        second = adapter._market_rule_ladder(26, expected_generation=1)
+
+        assert first == ((0.0, 0.01),)
+        assert second == ((0.0, 0.05),)
+        assert adapter._ib.reqMarketRule.call_count == 2
+
+    def test_connection_change_during_request_rejects_stale_response(self):
+        adapter = _make_adapter(trading_enabled=True)
+
+        def disconnect_during_request(_rule_id):
+            adapter._on_connection_boundary()
+            return [SimpleNamespace(lowEdge=0.0, increment=0.01)]
+
+        adapter._ib.reqMarketRule.side_effect = disconnect_during_request
+
+        with pytest.raises(ValueError, match="stale"):
+            adapter._market_rule_ladder(26, expected_generation=0)
+
+    def test_connection_change_during_contract_details_rejects_stale_response(self):
+        adapter = _make_adapter(trading_enabled=True)
+        contract = SimpleNamespace(conId=1)
+        adapter._resolve_contract = MagicMock(return_value=contract)
+
+        def disconnect_during_request(_contract):
+            adapter._on_connection_boundary()
+            return [SimpleNamespace(contract=contract)]
+
+        adapter._ib.reqContractDetails.side_effect = disconnect_during_request
+
+        with pytest.raises(ValueError, match="stale"):
+            adapter._contract_details(
+                "MU",
+                security_type="STK",
+                exchange=None,
+                currency="USD",
+                expected_generation=0,
+            )
+
+        assert not adapter._contract_cache
+        assert not adapter._contract_details_cache
 
     def test_prepare_order_preserves_shared_authoritative_price(self):
         adapter = _make_adapter(trading_enabled=True)
@@ -668,6 +987,7 @@ class TestPlaceOrder:
         )
 
         assert prepared["price"] == 100.125
+        adapter._ib.reqMarketRule.assert_not_called()
 
     def test_market_order_uses_market_order_class(self):
         adapter = _make_adapter(trading_enabled=True)
@@ -1077,6 +1397,109 @@ class TestResolveContract:
         ):
             adapter._resolve_contract("NOTREAL")
 
+    def test_stock_qualification_crossing_connection_boundary_fails_closed(self):
+        adapter = _make_adapter()
+        qualified_contract = SimpleNamespace(conId=1)
+        mock_ib_async = MagicMock()
+        mock_ib_async.Stock.return_value = "unqualified_stock"
+
+        def reconnect_during_qualification(_contract):
+            adapter._on_connection_boundary()
+            return [qualified_contract]
+
+        adapter._ib.qualifyContracts.side_effect = reconnect_during_qualification
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="stale"),
+        ):
+            adapter._resolve_contract("MU", expected_generation=0)
+
+        assert not adapter._contract_cache
+        assert not adapter._contract_details_cache
+
+    @pytest.mark.parametrize("security_type", ["STK", "FUT"])
+    def test_stale_resolution_does_not_replace_new_generation_cache(self, security_type):
+        adapter = _make_adapter()
+        old_contract = SimpleNamespace(conId=1)
+        new_contract = SimpleNamespace(conId=2)
+        request_started = Event()
+        release_old_response = Event()
+        response_lock = Lock()
+        response_count = 0
+        mock_ib_async = MagicMock()
+
+        if security_type == "STK":
+            symbol = "MU"
+            exchange = None
+            contract_month = None
+            cache_key = (symbol, security_type, exchange, "USD", contract_month)
+            old_response = [old_contract]
+            new_response = [new_contract]
+            mock_ib_async.Stock.return_value = "unqualified_stock"
+            request_mock = adapter._ib.qualifyContracts
+        else:
+            symbol = "ES"
+            exchange = "CME"
+            contract_month = "209912"
+            cache_key = (symbol, security_type, exchange, "USD", contract_month)
+            old_contract.lastTradeDateOrContractMonth = "20991218"
+            new_contract.lastTradeDateOrContractMonth = "20991218"
+            old_response = [SimpleNamespace(contract=old_contract)]
+            new_response = [SimpleNamespace(contract=new_contract)]
+            mock_ib_async.Future.return_value = "unqualified_future"
+            request_mock = adapter._ib.reqContractDetails
+
+        def controlled_response(_contract):
+            nonlocal response_count
+            with response_lock:
+                response_count += 1
+                is_old_request = response_count == 1
+            if is_old_request:
+                request_started.set()
+                if not release_old_response.wait(timeout=5):
+                    raise TimeoutError("test did not release stale contract response")
+                return old_response
+            return new_response
+
+        request_mock.side_effect = controlled_response
+        request_kwargs = {
+            "security_type": security_type,
+            "exchange": exchange,
+            "contract_month": contract_month,
+        }
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            patch("librae.brokers.ibkr_adapter._utc_today", return_value=date(2026, 1, 1)),
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            stale_future = pool.submit(
+                adapter._resolve_contract,
+                symbol,
+                expected_generation=0,
+                **request_kwargs,
+            )
+            assert request_started.wait(timeout=5)
+            adapter._on_connection_boundary()
+            try:
+                current = adapter._resolve_contract(
+                    symbol,
+                    expected_generation=1,
+                    **request_kwargs,
+                )
+            finally:
+                release_old_response.set()
+            with pytest.raises(ValueError, match="stale"):
+                stale_future.result(timeout=5)
+
+        assert current is new_contract
+        assert adapter._contract_cache[cache_key] is new_contract
+        if security_type == "FUT":
+            assert adapter._contract_details_cache[cache_key].contract is new_contract
+        else:
+            assert cache_key not in adapter._contract_details_cache
+
     def test_second_call_for_same_symbol_is_cached(self):
         """Regression test: qualifyContracts is a blocking IBKR round trip —
         resolving the same symbol twice (e.g. a live poll loop hitting the
@@ -1151,6 +1574,34 @@ class TestResolveContractFutures:
             currency="USD",
             lastTradeDateOrContractMonth="202609",
         )
+
+    def test_futures_details_crossing_connection_boundary_fails_closed(self):
+        adapter = _make_adapter()
+        resolved_contract = MagicMock()
+        detail = self._detail("20260918", resolved_contract)
+        mock_ib_async = MagicMock()
+        mock_ib_async.Future.return_value = "unqualified_future"
+
+        def reconnect_during_details(_contract):
+            adapter._on_connection_boundary()
+            return [detail]
+
+        adapter._ib.reqContractDetails.side_effect = reconnect_during_details
+
+        with (
+            patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=mock_ib_async),
+            pytest.raises(ValueError, match="stale"),
+        ):
+            adapter._resolve_contract(
+                "ES",
+                security_type="FUT",
+                exchange="CME",
+                contract_month="202609",
+                expected_generation=0,
+            )
+
+        assert not adapter._contract_cache
+        assert not adapter._contract_details_cache
 
     def test_exact_contract_month_does_not_fall_back_to_another_month(self):
         adapter = _make_adapter()
