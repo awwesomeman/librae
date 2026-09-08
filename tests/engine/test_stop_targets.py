@@ -347,6 +347,7 @@ class TestPendingFillStopOrdering:
 
     def test_resting_limit_conflict_rejects_group_before_other_leg_mutates(self):
         position = _make_pos(side="long", stop=95.0)
+        position.group_id = "spread"
         positions = {"TEST": position}
         adv_usage = {"TEST": 3.0, "OTHER": 2.0}
         bars = {
@@ -396,6 +397,162 @@ class TestPendingFillStopOrdering:
             )
 
         assert positions == {"TEST": position}
+        assert adv_usage == {"TEST": 3.0, "OTHER": 2.0}
+
+    @pytest.mark.parametrize(
+        ("side", "limit_price", "protection"),
+        [
+            ("long", 98.0, {"stop_price": 95.0}),
+            ("long", 98.0, {"take_profit_price": 105.0}),
+            ("short", 102.0, {"stop_price": 105.0}),
+            ("short", 102.0, {"take_profit_price": 95.0}),
+        ],
+        ids=["long-stop", "long-target", "short-stop", "short-target"],
+    )
+    def test_resting_scale_in_new_protection_rejects_before_mutation(
+        self,
+        side,
+        limit_price,
+        protection,
+    ):
+        position = _make_pos(side=side)
+        positions = {"TEST": position}
+        adv_usage = {"TEST": 3.0}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [
+                    OrderIntent(
+                        action=side,
+                        symbol="TEST",
+                        quantity=1.0,
+                        limit_price=limit_price,
+                        **protection,
+                    )
+                ],
+                {"TEST": bar},
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                max_adv_participation_rate=0.1,
+                get_lagged_adv=lambda _symbol: 100.0,
+                used_adv_quantity_by_symbol=adv_usage,
+            )
+
+        assert positions == {"TEST": position}
+        assert positions["TEST"] is position
+        assert position.quantity == pytest.approx(1.0)
+        assert position.stop_price is None
+        assert position.take_profit_price is None
+        assert adv_usage == {"TEST": 3.0}
+
+    @pytest.mark.parametrize(
+        ("side", "limit_price"),
+        [("long", 98.0), ("short", 102.0)],
+    )
+    def test_resting_scale_in_and_liquidation_reject_before_mutation(
+        self,
+        side,
+        limit_price,
+    ):
+        position = _make_pos(side=side)
+        positions = {"TEST": position}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [
+                    OrderIntent(
+                        action=side,
+                        symbol="TEST",
+                        quantity=1.0,
+                        limit_price=limit_price,
+                    )
+                ],
+                {"TEST": bar},
+                get_cost_model=lambda _symbol: _leveraged_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+            )
+
+        assert positions == {"TEST": position}
+        assert positions["TEST"] is position
+        assert position.quantity == pytest.approx(1.0)
+
+    def test_grouped_resting_new_protection_conflict_rolls_back_all_legs(self):
+        position = _make_pos(side="long")
+        position.group_id = "spread"
+        positions = {"TEST": position}
+        adv_usage = {"TEST": 3.0, "OTHER": 2.0}
+        bars = {
+            "TEST": {
+                "open": 100.0,
+                "high": 110.0,
+                "low": 90.0,
+                "close": 99.0,
+                "volume": 100.0,
+            },
+            "OTHER": {
+                "open": 50.0,
+                "high": 51.0,
+                "low": 49.0,
+                "close": 50.0,
+                "volume": 100.0,
+            },
+        }
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [
+                    OrderIntent(
+                        action="long",
+                        symbol="TEST",
+                        quantity=1.0,
+                        limit_price=98.0,
+                        stop_price=95.0,
+                        group_id="spread",
+                    ),
+                    OrderIntent(
+                        action="short",
+                        symbol="OTHER",
+                        quantity=1.0,
+                        group_id="spread",
+                    ),
+                ],
+                bars,
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                max_adv_participation_rate=0.1,
+                get_lagged_adv=lambda _symbol: 100.0,
+                used_adv_quantity_by_symbol=adv_usage,
+            )
+
+        assert positions == {"TEST": position}
+        assert positions["TEST"] is position
+        assert position.stop_price is None
         assert adv_usage == {"TEST": 3.0, "OTHER": 2.0}
 
     def test_resting_limit_conflict_rejects_retained_rebalance_before_mutation(self):
@@ -506,6 +663,173 @@ class TestPendingFillStopOrdering:
         assert [(event.reason, event.price) for event in result.events] == [
             (REASON_STOP_LOSS, 95.0)
         ]
+
+    @pytest.mark.parametrize(
+        ("side", "intent", "skip_reason"),
+        [
+            (
+                "long",
+                OrderIntent(action="short", symbol="TEST", quantity=1.0, limit_price=105.0),
+                "opposite_side",
+            ),
+            (
+                "short",
+                OrderIntent(action="long", symbol="TEST", quantity=1.0, limit_price=95.0),
+                "opposite_side",
+            ),
+            (
+                "long",
+                OrderIntent(action="long", symbol="TEST", limit_price=98.0),
+                "missing_quantity",
+            ),
+            (
+                "short",
+                OrderIntent(action="short", symbol="TEST", limit_price=102.0),
+                "missing_quantity",
+            ),
+        ],
+        ids=["long-opposite", "short-opposite", "long-missing-qty", "short-missing-qty"],
+    )
+    def test_non_executable_resting_intent_does_not_mask_protection(
+        self,
+        side,
+        intent,
+        skip_reason,
+    ):
+        stop_price = 95.0 if side == "long" else 105.0
+        position = _make_pos(side=side, stop=stop_price)
+        positions = {"TEST": position}
+        bar = {
+            "open": 100.0,
+            "high": 110.0,
+            "low": 90.0,
+            "close": 99.0,
+            "volume": 100.0,
+        }
+
+        _, result = execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            1_000.0,
+            [intent],
+            {"TEST": bar},
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+        )
+
+        assert positions == {}
+        assert [(event.reason, event.price) for event in result.events] == [
+            (REASON_STOP_LOSS, stop_price)
+        ]
+        assert [event.detail["reason"] for event in result.runtime_events] == [skip_reason]
+
+    @pytest.mark.parametrize(
+        "constraint",
+        ["cash", "min-notional", "bar-volume", "adv", "normalizer"],
+    )
+    def test_zero_fill_constraint_does_not_create_ambiguity(self, constraint):
+        position = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": position}
+        adv_usage: dict[str, float] = {}
+        cash = 1_000.0
+        kwargs = {}
+        if constraint == "cash":
+            cash = 0.0
+        elif constraint == "min-notional":
+            kwargs["get_min_notional"] = lambda _symbol: 200.0
+        elif constraint == "bar-volume":
+            kwargs.update(
+                max_bar_volume_participation_rate=0.1,
+                get_previous_volume=lambda _symbol: 0.0,
+            )
+        elif constraint == "adv":
+            adv_usage["TEST"] = 1.0
+            kwargs.update(
+                max_adv_participation_rate=0.1,
+                get_lagged_adv=lambda _symbol: 10.0,
+            )
+        else:
+            kwargs["get_executable_quantity"] = lambda _symbol, _quantity: 0.0
+
+        _, result = execute_pending_decision_and_stops(
+            datetime(2026, 1, 2, tzinfo=UTC),
+            positions,
+            cash,
+            [OrderIntent(action="long", symbol="TEST", quantity=1.0, limit_price=98.0)],
+            {
+                "TEST": {
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 90.0,
+                    "close": 99.0,
+                    "volume": 100.0,
+                }
+            },
+            get_cost_model=lambda _symbol: _zero_cost(),
+            default_fill="open",
+            primary_symbol="TEST",
+            used_adv_quantity_by_symbol=adv_usage,
+            **kwargs,
+        )
+
+        assert all(event.event_type != "add" for event in result.events)
+        if constraint in ("cash", "min-notional"):
+            assert positions == {}
+            assert [(event.reason, event.price) for event in result.events] == [
+                (REASON_STOP_LOSS, 95.0)
+            ]
+        else:
+            assert positions == {"TEST": position}
+            assert positions["TEST"] is position
+            assert position.pending_market_exit_reason == REASON_STOP_LOSS
+        expected_adv = {"TEST": 1.0} if constraint in ("cash", "min-notional", "adv") else {}
+        assert adv_usage == expected_adv
+
+    @pytest.mark.parametrize("constraint", ["bar-volume", "adv"])
+    def test_positive_partial_fill_remains_ambiguous(self, constraint):
+        position = _make_pos(side="long", stop=95.0)
+        positions = {"TEST": position}
+        adv_usage: dict[str, float] = {}
+        kwargs = {}
+        if constraint == "bar-volume":
+            kwargs.update(
+                max_bar_volume_participation_rate=0.1,
+                get_previous_volume=lambda _symbol: 5.0,
+            )
+        else:
+            adv_usage["TEST"] = 0.75
+            kwargs.update(
+                max_adv_participation_rate=0.1,
+                get_lagged_adv=lambda _symbol: 10.0,
+            )
+
+        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
+            execute_pending_decision_and_stops(
+                datetime(2026, 1, 2, tzinfo=UTC),
+                positions,
+                1_000.0,
+                [OrderIntent(action="close", symbol="TEST", limit_price=105.0)],
+                {
+                    "TEST": {
+                        "open": 100.0,
+                        "high": 110.0,
+                        "low": 90.0,
+                        "close": 99.0,
+                        "volume": 100.0,
+                    }
+                },
+                get_cost_model=lambda _symbol: _zero_cost(),
+                default_fill="open",
+                primary_symbol="TEST",
+                used_adv_quantity_by_symbol=adv_usage,
+                **kwargs,
+            )
+
+        assert positions == {"TEST": position}
+        assert positions["TEST"] is position
+        assert position.quantity == pytest.approx(1.0)
+        assert adv_usage == ({"TEST": 0.75} if constraint == "adv" else {})
 
     def test_portfolio_weights_remains_ordered_at_open_before_triggered_stop(self):
         positions = {"TEST": _make_pos(side="long", stop=95.0)}
