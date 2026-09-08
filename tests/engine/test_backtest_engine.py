@@ -1024,6 +1024,35 @@ class TestBacktestDataContract:
 
         assert backtest._timeframe == timeframe
 
+    @pytest.mark.parametrize(
+        ("timeframe", "phase"),
+        [
+            *[("D10", phase) for phase in range(10)],
+            *[("D21", phase) for phase in range(21)],
+        ],
+    )
+    def test_long_sparse_daily_cadence_preserves_every_phase(
+        self,
+        timeframe: str,
+        phase: int,
+    ) -> None:
+        interval = int(timeframe[1:])
+        opens = _xnys_session_opens("2007-01-03", "2026-12-31")
+        frame = _frame_at_timestamps("MU", opens[phase::interval])
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=timeframe,
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == timeframe
+
     def test_late_daily_to_weekly_cadence_shift_is_rejected(self) -> None:
         opens = _xnys_session_opens("2026-01-02", "2026-06-30")
         daily = opens[:20]
@@ -1042,7 +1071,7 @@ class TestBacktestDataContract:
             Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
 
     def test_late_weekly_to_monthly_cadence_shift_is_rejected(self) -> None:
-        opens = _xnys_session_opens("2025-01-02", "2027-12-31")
+        opens = _xnys_session_opens("2025-01-06", "2027-12-31")
         weekly = _first_observation_per_period(opens, "W-SUN")[:20]
         month_ordinals = pd.PeriodIndex(opens.tz_convert(None), freq="M")
         first_later_month = month_ordinals > pd.Period(weekly[-1].tz_convert(None), freq="M")
@@ -1059,6 +1088,30 @@ class TestBacktestDataContract:
 
         with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*MN"):
             Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    def test_temporary_weekly_like_gap_then_daily_recovery_is_not_drift(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-09-30")
+        daily_prefix = opens[:20]
+        weekly_like = _first_observation_per_period(
+            opens[opens > daily_prefix[-1]],
+            "W-SUN",
+        )[:5]
+        daily_recovery = opens[opens > weekly_like[-1]][:10]
+        timestamps = daily_prefix.append(weekly_like).append(daily_recovery)
+        frame = _frame_at_timestamps("MU", timestamps)
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == "D1"
 
     @pytest.mark.parametrize(
         ("configured_timeframe", "actual_timeframe"),

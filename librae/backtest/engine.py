@@ -257,25 +257,43 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _has_late_coarse_cadence(
+def _terminal_canonical_cadence_start(
     period_ordinals: np.ndarray,
     canonical_starts: np.ndarray,
+) -> int | None:
+    """Return the start of a terminal run of consecutive canonical periods."""
+    minimum = _MIN_SESSION_CADENCE_SAMPLES
+    if len(period_ordinals) < minimum * 2 or not canonical_starts[-1]:
+        return None
+
+    start = len(period_ordinals) - 1
+    while (
+        start > 0
+        and canonical_starts[start - 1]
+        and period_ordinals[start] - period_ordinals[start - 1] == 1
+    ):
+        start -= 1
+    return start if len(period_ordinals) - start >= minimum else None
+
+
+def _is_exact_daily_prefix(session_ordinal_values: np.ndarray, end: int) -> bool:
+    """Return whether the prefix proves one observation per trading session."""
+    return end >= _MIN_SESSION_CADENCE_SAMPLES and np.all(
+        np.diff(session_ordinal_values[:end]) == 1
+    )
+
+
+def _is_exact_weekly_prefix(
+    week_ordinals: np.ndarray,
+    week_start_flags: np.ndarray,
+    end: int,
 ) -> bool:
-    """Return whether a canonical coarse cadence follows denser observations."""
-    repeated_periods = np.diff(period_ordinals) == 0
-    denser_before = np.zeros(len(period_ordinals) + 1, dtype=np.bool_)
-    if len(repeated_periods) > 0:
-        denser_before[2:] = np.maximum.accumulate(repeated_periods)
-    final_start = len(period_ordinals) - _MIN_SESSION_CADENCE_SAMPLES + 1
-    for start in range(_MIN_SESSION_CADENCE_SAMPLES, final_start):
-        window = period_ordinals[start : start + _MIN_SESSION_CADENCE_SAMPLES]
-        if not np.all(canonical_starts[start : start + _MIN_SESSION_CADENCE_SAMPLES]):
-            continue
-        if np.any(np.diff(window) <= 0):
-            continue
-        if denser_before[start]:
-            return True
-    return False
+    """Return whether the prefix proves canonical consecutive weekly bars."""
+    return (
+        end >= _MIN_SESSION_CADENCE_SAMPLES
+        and np.all(week_start_flags[:end])
+        and np.all(np.diff(week_ordinals[:end]) == 1)
+    )
 
 
 def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
@@ -299,18 +317,40 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
         [period_start(timestamp, "MN1", calendar_id) for timestamp in index]
     )
     month_start_flags = np.asarray(index == month_starts, dtype=np.bool_)
-    if _has_late_coarse_cadence(month_ordinals, month_start_flags):
-        raise ValueError("session cadence changes to MN after earlier denser observations")
-    if np.all(month_start_flags) and np.all(month_diffs > 0):
-        return f"MN{int(np.gcd.reduce(month_diffs))}"
-
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
-    week_diffs = np.diff(week_ordinals)
     week_starts = pd.DatetimeIndex(
         [period_start(timestamp, "W1", calendar_id) for timestamp in index]
     )
     week_start_flags = np.asarray(index == week_starts, dtype=np.bool_)
-    if _has_late_coarse_cadence(week_ordinals, week_start_flags):
+
+    month_transition_start = _terminal_canonical_cadence_start(
+        month_ordinals,
+        month_start_flags,
+    )
+    # Timestamp-only input proves a unit change only when both sides have an
+    # exact cadence. Missing observations and non-canonical coarse labels need
+    # authoritative subscription metadata rather than another heuristic.
+    if month_transition_start is not None and (
+        _is_exact_daily_prefix(ordinals, month_transition_start)
+        or _is_exact_weekly_prefix(
+            week_ordinals,
+            week_start_flags,
+            month_transition_start,
+        )
+    ):
+        raise ValueError("session cadence changes to MN after earlier denser observations")
+    if np.all(month_start_flags) and np.all(month_diffs > 0):
+        return f"MN{int(np.gcd.reduce(month_diffs))}"
+
+    week_diffs = np.diff(week_ordinals)
+    week_transition_start = _terminal_canonical_cadence_start(
+        week_ordinals,
+        week_start_flags,
+    )
+    if week_transition_start is not None and _is_exact_daily_prefix(
+        ordinals,
+        week_transition_start,
+    ):
         raise ValueError("session cadence changes to W after earlier denser observations")
     if np.all(week_start_flags) and np.all(week_diffs > 0):
         return f"W{int(np.gcd.reduce(week_diffs))}"
