@@ -1070,6 +1070,25 @@ class TestBacktestDataContract:
         with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*W"):
             Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
 
+    def test_late_daily_to_monthly_cadence_shift_is_rejected(self) -> None:
+        opens = _xnys_session_opens("2026-01-02", "2026-09-30")
+        daily = opens[:20]
+        month_ordinals = pd.PeriodIndex(opens.tz_convert(None), freq="M")
+        first_later_month = month_ordinals > pd.Period(daily[-1].tz_convert(None), freq="M")
+        monthly = _first_observation_per_period(opens[first_later_month], "M")[:5]
+        frame = _frame_at_timestamps("MU", daily.append(monthly))
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match=r"symbol 'MU'.*cadence changes.*MN"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
     def test_late_weekly_to_monthly_cadence_shift_is_rejected(self) -> None:
         opens = _xnys_session_opens("2025-01-06", "2027-12-31")
         weekly = _first_observation_per_period(opens, "W-SUN")[:20]

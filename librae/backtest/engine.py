@@ -276,6 +276,24 @@ def _terminal_canonical_cadence_start(
     return start if len(period_ordinals) - start >= minimum else None
 
 
+def _canonical_period_start_flags(
+    index: pd.DatetimeIndex,
+    period_ordinals: np.ndarray,
+    timeframe: str,
+    calendar_id: str,
+) -> np.ndarray:
+    """Map one calendar-owned period start back to every observation."""
+    _, first_positions, inverse = np.unique(
+        period_ordinals,
+        return_index=True,
+        return_inverse=True,
+    )
+    canonical_by_period = pd.DatetimeIndex(
+        [period_start(index[position], timeframe, calendar_id) for position in first_positions]
+    )
+    return np.asarray(index == canonical_by_period.take(inverse), dtype=np.bool_)
+
+
 def _is_exact_daily_prefix(session_ordinal_values: np.ndarray, end: int) -> bool:
     """Return whether the prefix proves one observation per trading session."""
     return end >= _MIN_SESSION_CADENCE_SAMPLES and np.all(
@@ -313,15 +331,19 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
 
     month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     month_diffs = np.diff(month_ordinals)
-    month_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "MN1", calendar_id) for timestamp in index]
+    month_start_flags = _canonical_period_start_flags(
+        index,
+        month_ordinals,
+        "MN1",
+        calendar_id,
     )
-    month_start_flags = np.asarray(index == month_starts, dtype=np.bool_)
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
-    week_starts = pd.DatetimeIndex(
-        [period_start(timestamp, "W1", calendar_id) for timestamp in index]
+    week_start_flags = _canonical_period_start_flags(
+        index,
+        week_ordinals,
+        "W1",
+        calendar_id,
     )
-    week_start_flags = np.asarray(index == week_starts, dtype=np.bool_)
 
     month_transition_start = _terminal_canonical_cadence_start(
         month_ordinals,
