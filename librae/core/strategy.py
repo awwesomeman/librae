@@ -65,8 +65,10 @@ class Context:
         positions: Open positions keyed by symbol.
         account_id: Stable identity of this run's account.
         account: Cash and mark-to-market equity for this run's account.
-        period_index: 0-based strategy-callback count. Live arrival events can
-            share a timestamp, so this is not a business-day index.
+        period_index: 0-based count of committed strategy callbacks. Live
+            arrival events can share a timestamp, so this is not a
+            business-day index, and a retried event repeats its index rather
+            than advancing it.
     """
 
     ts: datetime
@@ -301,8 +303,8 @@ class Strategy(ABC):
 
     Strategies only inspect Context and return a decision.
     Data preparation (ETL, signals) is done externally before the backtest.
-    Sim/live may retry the same Context after an exception, without rolling
-    back mutations to this instance. Runtime checkpoints do not serialize the
+    Sim/live may retry an event with an equivalent Context after an
+    exception, without rolling back mutations to this instance. Runtime checkpoints do not serialize the
     strategy object, so restart-relevant decision state must be reconstructible
     from Context and causal input history rather than mutable instance fields.
     """

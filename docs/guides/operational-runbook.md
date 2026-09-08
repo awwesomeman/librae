@@ -14,7 +14,7 @@ operational procedures layered on top of it, not a restatement of it.
 | | |
 |---|---|
 | Named operator | Jason Pan (repository owner) |
-| Escalation path | Single-operator deployment — there is no second responder. If the operator cannot act within the alert's implied urgency (see below), the fail-safe response is: `LiveTrader.halt(reason)` (or kill the process — live mode's durable state makes that safe, see [Restart recovery](#restart-recovery)), then contact the broker's support line directly for any order that halt could not resolve. |
+| Escalation path | Single-operator deployment — there is no second responder. If the operator cannot act within the alert's implied urgency (see below), the fail-safe response is: `LiveTrader.halt(reason)` (or kill the process — live mode's durable engine state makes that safe, see [Restart recovery](#restart-recovery); a restart rebuilds the strategy object from its defaults, so only engine-owned state returns), then contact the broker's support line directly for any order that halt could not resolve. |
 | Reachability | Telegram (bot configured under [Alert delivery](#alert-delivery)) is the paging channel. No on-call rotation exists; do not run live capital during a period the operator cannot monitor Telegram. |
 
 This is intentionally minimal because it is a single-person deployment. If a
