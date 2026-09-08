@@ -192,6 +192,8 @@ def test_live_rebalance_round_trip_and_memory_store_isolation():
             lagged_adv_by_symbol={"AAA": 10_000.0},
             decided_at=datetime(2025, 1, 1, tzinfo=UTC),
             next_sequence=1,
+            execution_bar_ts=datetime(2025, 1, 2, tzinfo=UTC),
+            delay_bars=1,
             filled_bar_quantity_by_symbol={"AAA": 5.0},
         ),
         equity_peak=1_000.0,

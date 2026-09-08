@@ -269,15 +269,31 @@ def test_risk_policy_is_validated_and_part_of_config_hash() -> None:
         _config(risk={"max_drawdown_rate": 0.2})
 
 
-@pytest.mark.parametrize("mode", ["sim", "live"])
 @pytest.mark.parametrize("residual_policy", ["discard", "defer_symbols"])
-def test_rebalance_delay_is_backtest_only(mode: str, residual_policy: str) -> None:
+def test_rebalance_delay_is_not_supported_by_sim(residual_policy: str) -> None:
     with pytest.raises(ValueError, match="only when mode='backtest'"):
         _config(
-            mode=mode,
+            mode="sim",
             execution=ExecutionPolicy(
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy=residual_policy,
+            ),
+        )
+
+
+def test_live_accepts_bounded_target_delay_but_not_backtest_slicing_policy() -> None:
+    config = _config(
+        mode="live",
+        execution=ExecutionPolicy(max_rebalance_delay_bars=1),
+    )
+
+    assert config.execution.max_rebalance_delay_bars == 1
+    with pytest.raises(ValueError, match="rebalance_residual_policy"):
+        _config(
+            mode="live",
+            execution=ExecutionPolicy(
+                max_rebalance_delay_bars=1,
+                rebalance_residual_policy="defer_symbols",
             ),
         )
 

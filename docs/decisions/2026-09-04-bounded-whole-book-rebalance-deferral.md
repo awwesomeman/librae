@@ -3,6 +3,10 @@
 Date: 2026-09-04
 Status: Accepted
 
+Live-mode exclusion is superseded by
+[`2026-09-08-live-rebalance-replans-from-fresh-facts.md`](2026-09-08-live-rebalance-replans-from-fresh-facts.md).
+The backtest decision remains unchanged.
+
 ## Context
 
 Cross-market portfolios need each asset's last close to value the whole account

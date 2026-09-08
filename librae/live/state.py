@@ -46,7 +46,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 22
+_STATE_SCHEMA_VERSION = 23
 
 
 def normalize_runtime_revision(
@@ -183,6 +183,8 @@ class LiveRebalance:
     lagged_adv_by_symbol: dict[str, float]
     decided_at: datetime
     next_sequence: int = 0
+    execution_bar_ts: datetime | None = None
+    delay_bars: int = 0
     filled_bar_quantity_by_symbol: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -193,6 +195,10 @@ class LiveRebalance:
             "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
             "decided_at": self.decided_at.isoformat(),
             "next_sequence": self.next_sequence,
+            "execution_bar_ts": (
+                self.execution_bar_ts.isoformat() if self.execution_bar_ts else None
+            ),
+            "delay_bars": self.delay_bars,
             "filled_bar_quantity_by_symbol": self.filled_bar_quantity_by_symbol,
         }
 
@@ -205,6 +211,9 @@ class LiveRebalance:
         next_sequence = int(raw["next_sequence"])
         if next_sequence < 0:
             raise ValueError("live rebalance next_sequence must be non-negative")
+        delay_bars = int(raw["delay_bars"])
+        if delay_bars < 0:
+            raise ValueError("live rebalance delay_bars must be non-negative")
         return cls(
             targets=targets,
             reference_prices={
@@ -219,6 +228,8 @@ class LiveRebalance:
             },
             decided_at=decided_at,
             next_sequence=next_sequence,
+            execution_bar_ts=_to_utc(raw["execution_bar_ts"]),
+            delay_bars=delay_bars,
             filled_bar_quantity_by_symbol={
                 str(symbol): float(quantity)
                 for symbol, quantity in raw["filled_bar_quantity_by_symbol"].items()

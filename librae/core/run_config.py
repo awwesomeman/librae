@@ -81,8 +81,10 @@ class ExecutionPolicy:
     a calendar_id for every configured symbol.
 
     ``max_rebalance_delay_bars`` bounds how many otherwise eligible backtest
-    events a ``PortfolioWeights`` decision may wait for every required order
-    side to become tradable. Zero preserves fail-fast next-bar execution.
+    or live events a ``PortfolioWeights`` decision may wait for every required
+    order side and coherent completed-bar snapshot. Zero preserves fail-fast
+    execution. In live mode, broker-resting time remains governed separately
+    by ``live_order_timeout_seconds``.
 
     ``rebalance_residual_policy`` opts portfolio targets into cross-bar
     execution slicing. ``discard`` preserves the one-shot compatibility
@@ -404,13 +406,15 @@ class RunConfig:
             raise ValueError("symbols must contain non-empty string identifiers")
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"mode must be 'backtest', 'sim', or 'live', got {self.mode!r}")
-        if self.mode != "backtest" and (
+        if self.mode == "sim" and (
             self.execution.max_rebalance_delay_bars
             or self.execution.rebalance_residual_policy != "discard"
         ):
             raise ValueError(
                 "deferred portfolio rebalancing is supported only when mode='backtest'"
             )
+        if self.mode == "live" and self.execution.rebalance_residual_policy != "discard":
+            raise ValueError("rebalance_residual_policy is supported only when mode='backtest'")
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
         for field_name in ("strategy_name", "timeframe", "market", "data_source"):

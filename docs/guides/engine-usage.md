@@ -218,10 +218,12 @@ portfolio equity at those same execution prices. The run's `ExecutionPolicy`
 selects the simulated fill field; allocation intent does not override execution
 semantics.
 If an execution bar has a required order side marked untradable,
-`max_rebalance_delay_bars` may defer the entire backtest rebalance until every
-required side is tradable on one event. No leg fills early. The zero default
-fails on the first unavailable execution event; a positive value is a strict
-upper bound, and reaching the end of the sample while deferred also raises.
+`max_rebalance_delay_bars` may defer the entire rebalance until every required
+side is tradable on one event. No leg fills early. The zero default fails on
+the first unavailable execution event; a positive value is a strict upper
+bound. Backtests also raise when the sample ends while deferred. Live targets
+persist the delay count and wait for a coherent new completed-bar snapshot;
+broker-resting time is bounded separately by `live_order_timeout_seconds`.
 By default, liquidity-constrained fills retain the historical one-bar behavior.
 Set `rebalance_residual_policy="defer_all"` or `"defer_symbols"` to retain
 unfilled portfolio quantities across bars. The former waits when any residual
@@ -402,6 +404,13 @@ Execution then deliberately diverges:
   is submitted immediately. A delayed symbol may create a second event with
   the same timestamp. Current prices may size requests but local execution
   facts come only from broker reports.
+
+Quantity feasibility does not diverge. `SymbolInfo.quantity_step` and
+`min_quantity`, when configured, round explicit and target-derived quantities
+toward zero before cash, volume, and risk checks in both modes. Grouped legs
+must preserve their relative scale after rounding. Live adapters remain the
+final authority for current venue-specific precision and minimums, and their
+prepared result is checked again before submission.
 
 OHLCV caches are sorted and deduplicated. Mode-specific backlog handling is
 defined under data staleness below. Both modes advance a durable per-symbol
@@ -635,25 +644,26 @@ exceeded `RunConfig.runtime.poll_seconds`.
   remains the local liquidity constraint. Sim/live
   `ExecutionPolicy.warmup_periods` must retain enough
   bars to cover N full sessions. The pair is disabled by default.
-- `max_rebalance_delay_bars`: non-negative, backtest-only bound for a
-  `PortfolioWeights` deferral. A value of N allows N additional execution
-  events after the normal T+1 eligibility point. At first eligibility, causal
-  marks freeze target notionals; a missing-market leg waits for its first fresh
-  execution price before resolving quantity. Resolved legs then retry explicit
-  per-symbol remaining quantities without weight drift. It raises on bound
-  exhaustion or sample end. This
-  does not infer holidays: omit a closed market's row instead of carrying its
-  OHLCV forward. A newer complete `PortfolioWeights` target supersedes the
-  older unfilled target without resetting the existing delay budget; the
-  superseded decision is recorded in `runtime_events`. It does not apply to
-  independent `OrderIntent`s or live broker submission. While a target is
-  deferred the strategy may return nothing or a newer `PortfolioWeights`;
-  returning `OrderIntent`s raises, because a per-symbol order cannot be
-  sequenced against a whole-book target that has not executed. A strategy
-  that mixes `PortfolioWeights` with per-symbol intents on other bars should
-  keep the default of `0`. A deferred target is not yet an active target:
-  allocation snapshots keep reporting the last *executed* target until the
-  deferred one fills.
+- `max_rebalance_delay_bars`: non-negative backtest/live bound for a
+  `PortfolioWeights` deferral. A value of N allows N unavailable completed-bar
+  events beyond normal eligibility. It raises on bound exhaustion; backtests
+  also raise at sample end. This does not infer holidays: omit a closed
+  market's row instead of carrying its OHLCV forward. In backtests, causal
+  marks freeze target notionals at first eligibility and resolved legs retry
+  explicit quantities without weight drift; a missing-market leg waits for its
+  first fresh execution price before quantity is resolved. A newer complete
+  target may supersede an older unfilled target without resetting the delay
+  budget, and the superseded target is recorded in `runtime_events`. While a
+  backtest target is deferred, the strategy may return nothing or a newer
+  `PortfolioWeights`; returning `OrderIntent`s raises. Allocation snapshots
+  continue to report the last executed target until the deferred target fills.
+  In live mode, each broker leg remains serial and non-atomic. After a resting
+  leg fills, the next leg waits for one coherent current snapshot and is
+  replanned from confirmed cash/positions, close, volume, lagged ADV, and
+  current session usage. The delay counter and latest attempted snapshot are
+  checkpointed for restart recovery, and strategy evaluation stays behind the
+  active target. Independent `OrderIntent`s do not use this target-level delay
+  policy.
 - `rebalance_residual_policy`: typed portfolio-target behavior. `"discard"`
   is the default and preserves the existing one-bar partial/drop path. `"fail"`
   stages the complete rebalance and raises without committing any position or

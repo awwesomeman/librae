@@ -39,7 +39,7 @@ from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
     resample_session_ohlcv,
 )
-from librae.core.utils import validate_contract_month
+from librae.core.utils import floor_to_step, validate_contract_month
 from librae.live.executor import PositionRequest
 
 from .base import (
@@ -47,7 +47,6 @@ from .base import (
     CredentialConfig,
     drop_incomplete_ohlcv,
     find_position,
-    floor_to_step,
     passive_price,
     validate_order_signal,
 )
