@@ -52,6 +52,59 @@ def _zero_cost() -> CostModel:
     return CostModel.zero()
 
 
+_XNYS_SESSION_CADENCE_TIMESTAMPS = {
+    "D1": (
+        "2026-03-05 14:30Z",
+        "2026-03-06 14:30Z",
+        "2026-03-09 13:30Z",
+        "2026-03-10 13:30Z",
+        "2026-03-11 13:30Z",
+    ),
+    "W1": (
+        "2026-02-23 14:30Z",
+        "2026-03-02 14:30Z",
+        "2026-03-09 13:30Z",
+        "2026-03-16 13:30Z",
+        "2026-03-23 13:30Z",
+    ),
+    "MN1": (
+        "2026-01-02 14:30Z",
+        "2026-02-02 14:30Z",
+        "2026-03-02 14:30Z",
+        "2026-04-01 13:30Z",
+        "2026-05-01 13:30Z",
+    ),
+    "D5": (
+        "2026-02-17 14:30Z",
+        "2026-02-24 14:30Z",
+        "2026-03-03 14:30Z",
+        "2026-03-10 13:30Z",
+        "2026-03-17 13:30Z",
+    ),
+    "D10": (
+        "2026-02-17 14:30Z",
+        "2026-03-03 14:30Z",
+        "2026-03-17 13:30Z",
+        "2026-03-31 13:30Z",
+        "2026-04-15 13:30Z",
+    ),
+    "D21": (
+        "2026-01-06 14:30Z",
+        "2026-02-05 14:30Z",
+        "2026-03-09 13:30Z",
+        "2026-04-08 13:30Z",
+        "2026-05-07 13:30Z",
+    ),
+    "W5": (
+        "2026-01-05 14:30Z",
+        "2026-02-09 14:30Z",
+        "2026-03-16 13:30Z",
+        "2026-04-20 13:30Z",
+        "2026-05-26 13:30Z",
+    ),
+}
+
+
 def _assert_terminal_equity_reconciles(
     backtest: Backtest,
     result: BacktestResult,
@@ -794,7 +847,7 @@ class TestBacktestDataContract:
 
         assert backtest._timeframe == "W1"
 
-    def test_xnys_weekly_timeframe_rejects_shifted_weekday_anchor(self) -> None:
+    def test_configured_xnys_weekly_timeframe_rejects_shifted_weekday_anchor(self) -> None:
         timestamps = pd.to_datetime(
             [
                 "2026-03-03 14:30Z",
@@ -810,9 +863,17 @@ class TestBacktestDataContract:
             [["MU"] * 5, timestamps],
             names=["symbol", "datetime"],
         )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="W1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
 
-        with pytest.raises(ValueError, match=r"canonical timeframe=W1 period starts"):
-            Backtest(frame, HoldStrategy(), cost_model=_zero_cost()).run()
+        with pytest.raises(ValueError, match=r"config\.timeframe=W1"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
 
     def test_configured_xnys_monthly_timeframe_uses_first_session(self) -> None:
         timestamps = pd.to_datetime(
@@ -844,7 +905,113 @@ class TestBacktestDataContract:
 
         assert backtest._timeframe == "MN1"
 
-    def test_xnys_monthly_timeframe_rejects_midmonth_anchor(self) -> None:
+    @pytest.mark.parametrize(
+        ("configured_timeframe", "actual_timeframe"),
+        [
+            (configured, actual)
+            for configured in ("D1", "W1", "MN1")
+            for actual in ("D1", "W1", "MN1")
+        ],
+    )
+    def test_configured_session_timeframe_discriminates_calendar_cadence(
+        self,
+        configured_timeframe: str,
+        actual_timeframe: str,
+    ) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="MU")
+        frame.index = pd.MultiIndex.from_arrays(
+            [
+                ["MU"] * 5,
+                pd.to_datetime(_XNYS_SESSION_CADENCE_TIMESTAMPS[actual_timeframe], utc=True),
+            ],
+            names=["symbol", "datetime"],
+        )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=configured_timeframe,
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+
+        if configured_timeframe == actual_timeframe:
+            backtest.run()
+            assert backtest._timeframe == configured_timeframe
+        else:
+            with pytest.raises(ValueError, match=r"config\.timeframe="):
+                backtest.run()
+
+    @pytest.mark.parametrize("timeframe", ["D5", "D10", "D21", "W5"])
+    def test_sparse_session_cadence_is_not_promoted_to_a_coarser_unit(
+        self,
+        timeframe: str,
+    ) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="MU")
+        frame.index = pd.MultiIndex.from_arrays(
+            [
+                ["MU"] * 5,
+                pd.to_datetime(_XNYS_SESSION_CADENCE_TIMESTAMPS[timeframe], utc=True),
+            ],
+            names=["symbol", "datetime"],
+        )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe=timeframe,
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == timeframe
+
+    def test_configured_daily_rejects_coarser_symbol_in_multi_asset_data(self) -> None:
+        daily = _make_multiindex_df([100.0] * 5, symbol="AAA")
+        daily.index = pd.MultiIndex.from_arrays(
+            [
+                ["AAA"] * 5,
+                pd.to_datetime(_XNYS_SESSION_CADENCE_TIMESTAMPS["D1"], utc=True),
+            ],
+            names=["symbol", "datetime"],
+        )
+        weekly = _make_multiindex_df([200.0] * 5, symbol="BBB")
+        weekly.index = pd.MultiIndex.from_arrays(
+            [
+                ["BBB"] * 5,
+                pd.to_datetime(_XNYS_SESSION_CADENCE_TIMESTAMPS["W1"], utc=True),
+            ],
+            names=["symbol", "datetime"],
+        )
+        instrument = {
+            "data_adapter": "ibkr",
+            "instrument_type": "spot",
+            "currency": "USD",
+            "security_type": "STK",
+        }
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["AAA", "BBB"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            calendar_id="XNYS",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={"AAA": instrument, "BBB": instrument},
+            symbol_cost_overrides={
+                "AAA": {"multiplier": 1.0},
+                "BBB": {"multiplier": 1.0},
+            },
+        )
+
+        with pytest.raises(ValueError, match=r"'BBB': 'W1'"):
+            Backtest(pd.concat([daily, weekly]), HoldStrategy(), config=config).run()
+
+    def test_configured_xnys_monthly_timeframe_rejects_midmonth_anchor(self) -> None:
         timestamps = pd.to_datetime(
             [
                 "2026-01-15 14:30Z",
@@ -860,9 +1027,17 @@ class TestBacktestDataContract:
             [["MU"] * 5, timestamps],
             names=["symbol", "datetime"],
         )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="MN1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
 
-        with pytest.raises(ValueError, match=r"canonical timeframe=MN1 period starts"):
-            Backtest(frame, HoldStrategy(), cost_model=_zero_cost()).run()
+        with pytest.raises(ValueError, match=r"config\.timeframe=MN1"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
 
     @pytest.mark.parametrize(
         ("timeframe", "aaa_timestamps", "bbb_timestamps"),
