@@ -164,11 +164,11 @@
     },
     {
       "title": "Status",
-      "description": "Online if last_heartbeat_at within 2x timeframe. Offline = process may have stopped.",
+      "description": "Online if the last heartbeat is within 3 polling cycles. Offline means the process may have stopped.",
       "type": "stat",
       "targets": [
         {
-          "rawSql": "SELECT CASE WHEN last_heartbeat_at IS NULL THEN -1 WHEN last_heartbeat_at > now() - CASE UPPER(timeframe) WHEN 'H1' THEN interval '2 hours' WHEN '1H' THEN interval '2 hours' WHEN 'M5' THEN interval '10 minutes' WHEN '5M' THEN interval '10 minutes' WHEN 'M15' THEN interval '30 minutes' WHEN '15M' THEN interval '30 minutes' WHEN 'H4' THEN interval '8 hours' WHEN '4H' THEN interval '8 hours' WHEN 'D1' THEN interval '2 days' WHEN '1D' THEN interval '2 days' ELSE interval '2 hours' END THEN 1 ELSE 0 END AS status FROM backtest_runs WHERE run_id = '${run_id}'",
+          "rawSql": "SELECT CASE WHEN last_heartbeat_at IS NULL OR poll_seconds IS NULL OR poll_seconds <= 0 THEN -1 WHEN last_heartbeat_at >= now() - make_interval(secs => poll_seconds * 3) THEN 1 ELSE 0 END AS status FROM backtest_runs WHERE run_id = '${run_id}'",
           "format": "table",
           "refId": "A",
           "datasource": {

@@ -12,6 +12,7 @@ from librae.app.grafana.generate_dashboards import (
     render_signal_monitor,
     render_unified_dashboard,
 )
+from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.core.utils import make_event_id
 
 from tests.signal_outcome_contract import (
@@ -200,6 +201,19 @@ class TestRenderUnifiedDashboard:
             sql = panel["targets"][0]["rawSql"]
             assert expected_order in sql, title
 
+    def test_runtime_status_uses_the_persisted_polling_contract(self):
+        dashboard = render_unified_dashboard()
+        panel = next(item for item in dashboard["panels"] if item["title"] == "Status")
+        sql = panel["targets"][0]["rawSql"]
+
+        assert f"make_interval(secs => poll_seconds * {HEARTBEAT_STALE_AFTER_POLLS})" in sql
+        assert "last_heartbeat_at >= now()" in sql
+        assert "timeframe" not in sql.lower()
+        # M1, existing standard timeframes, and custom durations all use the
+        # same persisted poll cadence; none gets a SQL special case.
+        assert all(f"'{timeframe}'" not in sql for timeframe in ("M1", "M5", "H1", "D1", "H8"))
+        assert f"{HEARTBEAT_STALE_AFTER_POLLS} polling cycles" in panel["description"]
+
     def test_portfolio_exposure_panel_reads_equity_curve(self):
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Portfolio Exposure")
@@ -319,6 +333,26 @@ class TestRenderAccountOverviewDashboard:
         sql = render_account_overview_dashboard()["panels"][0]["targets"][0]["rawSql"]
 
         assert "ORDER BY pe.symbol, pe.ts DESC, length(pe.event_id) DESC, pe.event_id DESC" in sql
+
+    def test_table_uses_the_same_runtime_status_contract(self):
+        strategy = render_unified_dashboard()
+        strategy_status = next(panel for panel in strategy["panels"] if panel["title"] == "Status")
+        account_table = render_account_overview_dashboard()["panels"][0]
+        account_sql = account_table["targets"][0]["rawSql"]
+
+        expected = (
+            "br.last_heartbeat_at >= now() - make_interval("
+            f"secs => br.poll_seconds * {HEARTBEAT_STALE_AFTER_POLLS})"
+        )
+        assert expected in account_sql
+        assert 'AS "Status"' in account_sql
+        status_override = next(
+            override
+            for override in account_table["fieldConfig"]["overrides"]
+            if override["matcher"]["options"] == "Status"
+        )
+        account_mappings = status_override["properties"][0]["value"]
+        assert account_mappings == strategy_status["fieldConfig"]["defaults"]["mappings"]
 
 
 class TestRenderSignalMonitor:

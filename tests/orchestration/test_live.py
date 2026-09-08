@@ -785,6 +785,19 @@ def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
     assert kwargs["metrics"].total_return == 0.0
 
 
+def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
+    config = make_test_cfg(mode="sim", poll_seconds=17)
+    callbacks = _TimescaleCallbacks(config, {}, None)
+
+    with (
+        patch("librae.db.timescale_writer.write_run_metadata", autospec=True) as write_run,
+        patch("librae.db.timescale_writer.write_strategy_performance", autospec=True),
+    ):
+        callbacks.register_run("run-1")
+
+    assert write_run.call_args.kwargs["poll_seconds"] == 17
+
+
 def test_timescale_callbacks_writes_runtime_event() -> None:
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(config, {}, None)

@@ -27,6 +27,9 @@ RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
 RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
 DEFAULT_POLL_SECONDS = 60
+# A runtime is stale after three missed poll-cycle heartbeats. Consumers use
+# the persisted poll_seconds rather than inferring cadence from the bar timeframe.
+HEARTBEAT_STALE_AFTER_POLLS = 3
 
 
 @dataclass(frozen=True, slots=True)

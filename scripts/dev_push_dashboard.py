@@ -77,6 +77,10 @@ def update_generate_dashboards(uid: str, ds_type: str) -> None:
 def deploy_dashboards(base_url: str, auth: tuple[str, str]) -> None:
     """Re-generate dashboard JSON and deploy to Grafana."""
     subprocess.run(
+        # WHY: by path, not -m. Running the submodule as a module executes
+        # librae/__init__.py first, which imports the engine and fails in the
+        # deploy venv. The generator stays free of package imports so this
+        # works wherever the repository files exist.
         [sys.executable, "librae/app/grafana/generate_dashboards.py"],
         check=True,
     )
