@@ -655,9 +655,11 @@ class TestLiveTrader:
             ),
         )
 
-        frames = runner._fetch_runtime_frames()
+        results = runner._fetch_runtime_frames()
 
-        assert list(frames) == ["AAA", "BBB"]
+        assert list(results) == ["AAA", "BBB"]
+        assert all(result.outcome == "success" for result in results.values())
+        assert all(result.frame is not None for result in results.values())
         assert set(runner._cycle_fetch_seconds) == {"AAA", "BBB"}
 
     def test_concrete_market_data_adapter_uses_resolved_route(self):
@@ -809,6 +811,61 @@ class TestLiveTrader:
             if call.args == ("send_alert",) and "Market Data Fetch Failed" in call.kwargs["title"]
         ]
         assert len(alerts) == 2
+
+    def test_required_symbol_fetch_failure_skips_partial_universe_and_commit(self):
+        t0 = datetime(2025, 1, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        state = {"bbb_fails": True}
+        frames = {
+            "AAA": _make_ohlcv_at([t0, t1]),
+            "BBB": _make_ohlcv_at([t0, t1]),
+        }
+
+        def fetcher(symbol, *_args, **_kwargs):
+            if symbol == "BBB" and state["bbb_fails"]:
+                raise RuntimeError("BBB unavailable")
+            return frames[symbol]
+
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        order_adapter = _mock_order_adapter()
+        runner = self._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA", "BBB"],
+                warmup_periods=1,
+            ),
+            order_adapter=order_adapter,
+        )
+        runner._ohlcv_cache = {symbol: _make_ohlcv_at([t0]) for symbol in ("AAA", "BBB")}
+        runner._last_bar_ts = {"AAA": t0, "BBB": t0}
+        runner._last_cycle_ts = t0
+        runner._last_reconciliation_at = TEST_CLOCK_NOW
+        runner._persist_state = MagicMock()
+        heartbeat = MagicMock()
+        runner._on_heartbeat = heartbeat
+
+        runner._poll_cycle()
+
+        heartbeat.assert_not_called()
+        strategy.on_bar.assert_not_called()
+        order_adapter.place_order.assert_not_called()
+        runner._persist_state.assert_not_called()
+        assert runner._last_bar_ts == {"AAA": t0, "BBB": t0}
+        assert runner._last_cycle_ts == t0
+        assert runner._ohlcv_cache["AAA"]["ts"].iloc[-1].to_pydatetime() == t1
+        assert runner._ohlcv_cache["BBB"]["ts"].iloc[-1].to_pydatetime() == t0
+        assert runner._market_data_fetch_failures == {"BBB": 1}
+
+        state["bbb_fails"] = False
+        runner._poll_cycle()
+
+        heartbeat.assert_called_once_with(runner.run_id)
+        strategy.on_bar.assert_called_once()
+        assert set(strategy.on_bar.call_args.args[0].bars) == {"AAA", "BBB"}
+        assert runner._market_data_fetch_failures == {}
 
     def test_factory_rejects_daily_ibkr_before_building_adapter(self):
         config = _test_cfg(

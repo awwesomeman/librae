@@ -128,6 +128,17 @@ class CycleDiagnostics:
 type _OhlcvAuditRow = tuple[datetime, dict[str, object]]
 
 
+@dataclass(frozen=True)
+class _MarketDataFetchResult:
+    """One required symbol's explicit outcome for the current poll."""
+
+    outcome: Literal["success", "error", "terminal"]
+    frame: pd.DataFrame | None
+    elapsed_seconds: float
+    audit_rows: tuple[_OhlcvAuditRow, ...] = ()
+    error: Exception | None = None
+
+
 def _validate_feature_output(
     output: object,
     *,
@@ -542,7 +553,6 @@ class LiveTrader:
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
         self._market_data_fetch_failures: dict[str, int] = {}
-        self._cycle_fetch_failed = False
         self._last_cycle_ts: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
@@ -828,14 +838,18 @@ class LiveTrader:
             deadline_missed,
         )
 
-    def _fetch_runtime_frames(self) -> dict[str, pd.DataFrame]:
-        """Fetch configured symbols with explicit bounded concurrency."""
+    def _fetch_runtime_frames(self) -> dict[str, _MarketDataFetchResult]:
+        """Fetch every required symbol and report its explicit cycle outcome."""
 
-        def fetch_one(
-            symbol: str,
-        ) -> tuple[pd.DataFrame | None, list[_OhlcvAuditRow], float, Exception | None]:
+        def fetch_one(symbol: str) -> _MarketDataFetchResult:
             started = perf_counter()
             audit_rows: list[_OhlcvAuditRow] = []
+            if symbol in self._replay_backlog_exhausted:
+                return _MarketDataFetchResult(
+                    outcome="terminal",
+                    frame=self._ohlcv_cache.get(symbol),
+                    elapsed_seconds=perf_counter() - started,
+                )
             try:
                 frame = self._fetch_with_cache_unchecked(
                     symbol,
@@ -843,8 +857,22 @@ class LiveTrader:
                 )
             except Exception as exc:
                 frame = self._ohlcv_cache.get(symbol)
-                return frame, audit_rows, perf_counter() - started, exc
-            return frame, audit_rows, perf_counter() - started, None
+                return _MarketDataFetchResult(
+                    outcome="error",
+                    frame=frame,
+                    elapsed_seconds=perf_counter() - started,
+                    audit_rows=tuple(audit_rows),
+                    error=exc,
+                )
+            outcome: Literal["success", "terminal"] = (
+                "terminal" if symbol in self._replay_backlog_exhausted else "success"
+            )
+            return _MarketDataFetchResult(
+                outcome=outcome,
+                frame=frame,
+                elapsed_seconds=perf_counter() - started,
+                audit_rows=tuple(audit_rows),
+            )
 
         if self._market_data_workers == 1 or len(self._symbols) == 1:
             results = {symbol: fetch_one(symbol) for symbol in self._symbols}
@@ -854,20 +882,16 @@ class LiveTrader:
                 futures = {symbol: pool.submit(fetch_one, symbol) for symbol in self._symbols}
                 results = {symbol: futures[symbol].result() for symbol in self._symbols}
 
-        frames: dict[str, pd.DataFrame] = {}
-        self._cycle_fetch_failed = False
-        for symbol, (frame, audit_rows, elapsed, error) in results.items():
-            self._cycle_fetch_seconds[symbol] = elapsed
-            if error is not None:
-                self._cycle_fetch_failed = True
-                self._record_market_data_fetch_failure(symbol, error)
-            else:
+        for symbol, result in results.items():
+            self._cycle_fetch_seconds[symbol] = result.elapsed_seconds
+            if result.outcome == "error":
+                assert result.error is not None
+                self._record_market_data_fetch_failure(symbol, result.error)
+            elif result.outcome == "success":
                 self._record_market_data_fetch_success(symbol)
-            if frame is not None:
-                frames[symbol] = frame
             if self._on_ohlcv is not None:
                 audit_by_version: dict[tuple[int, int], _OhlcvAuditRow] = {}
-                for event_ts, audit_bar in audit_rows:
+                for event_ts, audit_bar in result.audit_rows:
                     version = (
                         pd.Timestamp(event_ts).value,
                         pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
@@ -877,7 +901,7 @@ class LiveTrader:
                     audit_by_version[version] for version in sorted(audit_by_version)
                 ):
                     self._on_ohlcv(symbol, self._timeframe, audit_bar, event_ts)
-        return frames
+        return results
 
     def _record_market_data_fetch_failure(self, symbol: str, error: Exception) -> None:
         failures = self._market_data_fetch_failures.get(symbol, 0) + 1
@@ -1402,8 +1426,12 @@ class LiveTrader:
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
         self._maybe_reconcile_runtime()
-        fetched_frames = self._fetch_runtime_frames()
-        if self._on_heartbeat and not self._cycle_fetch_failed:
+        fetch_results = self._fetch_runtime_frames()
+        if any(result.outcome != "success" for result in fetch_results.values()):
+            if not self.warmup_ready:
+                self._report_incomplete_warmup()
+            return
+        if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
         if not self.warmup_ready:
             self._report_incomplete_warmup()
@@ -1417,7 +1445,8 @@ class LiveTrader:
             self._reported_warmup_reasons.clear()
 
         frames: dict[str, pd.DataFrame] = {}
-        for symbol, df in fetched_frames.items():
+        for symbol, result in fetch_results.items():
+            df = result.frame
             if df is None or df.empty:
                 continue
 
