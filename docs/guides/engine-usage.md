@@ -438,6 +438,41 @@ open) and `XTAIFEX_1725` (17:25 night open) are Librae extensions that label a
 Taiwan-futures night session with its following regular-session date.
 Shioaji's epoch correction remains adapter-specific and is not a calendar.
 
+`RunConfig.session_mode` is the separate market-data subscription identity.
+`extended` (the compatibility default) means all sessions exposed by the data
+source, including regular hours; `regular` excludes prints outside the venue's
+regular session. It is part of `config_hash`, so backtest caches cannot reuse a
+run built from the other bar set. The implicit/default `extended` value retains
+the legacy hash so an unchanged live run can recover its existing checkpoint.
+Market-data artifacts, database OHLCV rows, and coverage ranges also carry the
+mode as part of their identity; run metadata lets readers select the matching
+rows. Built-in IBKR wiring maps this generic value to IBKR's `useRTH` request
+flag. Other concrete adapters reject `regular` until they can honor it; an
+injected callable is caller-owned and must already return bars matching the
+configured mode.
+Direct `Backtest(...)` construction may declare the same identity with its
+`session_mode` keyword; when `config` is supplied, `config.session_mode` is the
+only accepted source.
+
+IBKR `1d` labels are exchange session dates, not UTC midnight instants. Stock
+daily bars therefore require `calendar_id`: the adapter preserves
+`session_date`, anchors `ts` at the calendar session open, and adds
+`available_at`. Regular-session bars become usable at session close. Because
+the generic calendar does not invent vendor-specific after-hours boundaries,
+extended-session stock bars use a deliberately conservative
+not-earlier-than-next-session-open usability boundary. This is not presented
+as IBKR's actual publication timestamp. It can delay the value by one session
+but the IBKR adapter and live ingestion cache cannot expose a partial
+after-hours daily bar. Caller-owned historical backtest inputs still need the
+general availability-frontier contract tracked separately from this adapter
+policy in GitHub issue #166. IBKR native futures daily bars fail closed: their
+settlement close may arrive hours later or be revised, so fetch completed
+intraday bars and resample by calendar session instead.
+The same settlement policy applies to native futures W/M bars. Native IBKR W/M
+bars for every instrument also fail closed because their date labels do not
+provide a safe availability instant; aggregate normalized daily or intraday
+bars with the calendar-aware period boundaries instead.
+
 Calendars own session labeling and resampling boundaries only. The engine
 still does not manufacture bars or infer suspensions, vendor outages,
 settlement days, or missing observations. The current TAIFEX implementation

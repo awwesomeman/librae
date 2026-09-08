@@ -103,6 +103,23 @@ def test_trade_image_installs_every_supported_runtime_extra() -> None:
     assert "\ndocs\n" in dockerignore
 
 
+def test_us_live_extra_installs_calendar_support() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    locked_project = next(package for package in lock["package"] if package["name"] == "librae")
+
+    assert any(
+        requirement.startswith("exchange-calendars")
+        for requirement in project["project"]["optional-dependencies"]["us-live"]
+    )
+    assert {
+        dependency["name"] for dependency in locked_project["optional-dependencies"]["us-live"]
+    } >= {
+        "exchange-calendars",
+        "ib-async",
+    }
+
+
 def test_trade_image_build_receives_explicit_source_identity() -> None:
     dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
     build_script = (DEPLOY / "build_push.sh").read_text(encoding="utf-8")
@@ -943,6 +960,14 @@ def test_database_schema_does_not_embed_migrations() -> None:
     assert r"\set ON_ERROR_STOP on" in schema
     assert "ALTER TABLE" not in schema
     assert "DROP INDEX" not in schema
+
+
+def test_market_data_schema_keeps_session_datasets_distinct() -> None:
+    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
+
+    assert "(ts, symbol, timeframe, data_source, instrument_type, session_mode)" in schema
+    assert "GROUP BY symbol, data_source, timeframe, instrument_type, session_mode" in schema
+    assert "NULL::TEXT AS session_mode" in schema
 
 
 def test_backtest_cache_identity_is_separate_from_config_hash() -> None:

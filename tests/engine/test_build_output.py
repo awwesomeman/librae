@@ -10,6 +10,8 @@ from librae.backtest.schema import BacktestOutput, StrategyMetrics
 from librae.core.cost_model import CostModel
 from librae.core.strategy import OrderIntent, Strategy
 
+from tests.conftest import make_test_cfg
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -105,6 +107,27 @@ class TestBuildOutputValid:
         bt.run()
         output = bt.build_output()
         assert output.run_metadata.strategy_name == "my_custom_name"
+
+    def test_run_metadata_preserves_market_data_session_mode(self) -> None:
+        df = _make_df()
+        config = make_test_cfg(mode="backtest", session_mode="regular")
+        bt = Backtest(df, HoldStrategy(), config=config)
+
+        bt.run()
+
+        assert bt.build_output().run_metadata.session_mode == "regular"
+
+        direct = Backtest(
+            df,
+            HoldStrategy(),
+            data_source="fixture",
+            session_mode="regular",
+        )
+        direct.run()
+        assert direct.build_output().run_metadata.session_mode == "regular"
+
+        with pytest.raises(ValueError, match=r"cannot override config\.session_mode"):
+            Backtest(df, HoldStrategy(), config=config, session_mode="extended")
 
     def test_has_close_events(self) -> None:
         df = _make_df()

@@ -25,6 +25,7 @@ from librae.core.utils import to_canonical
 
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
+MarketDataSessionMode = Literal["regular", "extended"]
 RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
 DEFAULT_POLL_SECONDS = 60
 # A runtime is stale after three missed poll-cycle heartbeats. Consumers use
@@ -367,6 +368,10 @@ class RunConfig:
     # per SymbolInfo and is only required where session-boundary awareness is
     # actually used (intraday ADV, session-aware resampling).
     calendar_id: str | None = None
+    # Run-wide market-data subscription identity. ``extended`` includes all
+    # sessions exposed by the source and preserves the historical adapter
+    # default; ``regular`` requests only the venue's regular session.
+    session_mode: MarketDataSessionMode = "extended"
 
     # === Non-result policies (excluded from config_hash) ===
     runtime: RuntimePolicy = field(default_factory=RuntimePolicy)
@@ -428,6 +433,10 @@ class RunConfig:
                 raise TypeError(f"{field_name} must be a string or None")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
+        if self.session_mode not in ("regular", "extended"):
+            raise ValueError(
+                f"session_mode must be 'regular' or 'extended', got {self.session_mode!r}"
+            )
         if self.calendar_id is not None and (
             not isinstance(self.calendar_id, str) or not self.calendar_id
         ):
@@ -483,7 +492,7 @@ class RunConfig:
         """Deterministic hash of all result-affecting config.
 
         Includes: strategy_name, symbols, timeframe, market, data_source, broker,
-        calendar_id, account, start, end, params, cost_overrides,
+        session_mode, calendar_id, account, start, end, params, cost_overrides,
         symbol_cost_overrides, instrument_overrides, execution, risk.
         Excludes: runtime behavior.
         """
@@ -498,6 +507,14 @@ class RunConfig:
                     "data_source": self.data_source,
                     "mode": self.mode,
                     "broker": self.broker,
+                    # ``extended`` was the implicit historical default. Omit
+                    # it to preserve compatible live checkpoint/cache keys
+                    # while making any non-default session a distinct input.
+                    **(
+                        {"session_mode": self.session_mode}
+                        if self.session_mode != "extended"
+                        else {}
+                    ),
                     "calendar_id": self.calendar_id,
                     "account": asdict(self.account),
                     "start": self.start,

@@ -105,6 +105,7 @@ def write_run_metadata(
     ended_at: datetime | None = None,
     run_at: datetime | None = None,
     data_source: str | None = None,
+    session_mode: str = "extended",
     poll_seconds: int | None = None,
     params: dict | None = None,
     execution_policy: dict | None = None,
@@ -121,15 +122,18 @@ def write_run_metadata(
     transaction).  Otherwise opens its own connection and commits.
     """
     timeframe = to_canonical(timeframe)
+    if session_mode not in ("regular", "extended"):
+        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     sql = """INSERT INTO backtest_runs
-               (run_id, strategy_name, symbols, timeframe, data_source,
+               (run_id, strategy_name, symbols, timeframe, data_source, session_mode,
                 started_at, ended_at, run_at, mode, poll_seconds,
                 params, execution_policy, risk_policy, config_hash,
                 backtest_revision, backtest_cache_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy_name=EXCLUDED.strategy_name, run_at=EXCLUDED.run_at,
-                 mode=EXCLUDED.mode, poll_seconds=EXCLUDED.poll_seconds,
+                 mode=EXCLUDED.mode, session_mode=EXCLUDED.session_mode,
+                 poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
                  risk_policy=EXCLUDED.risk_policy,
@@ -145,6 +149,7 @@ def write_run_metadata(
         json.dumps(symbols),
         timeframe,
         data_source,
+        session_mode,
         _to_dt(started_at),
         _to_dt(ended_at),
         _to_dt(run_at) or datetime.now(tz=UTC),
@@ -277,6 +282,7 @@ def save_backtest_output(
             ended_at=meta.ended_at,
             run_at=meta.run_at,
             data_source=meta.data_source,
+            session_mode=meta.session_mode,
             params=params,
             execution_policy=execution_policy,
             risk_policy=risk_policy,
@@ -528,6 +534,8 @@ def write_ohlcv(
     data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
+    *,
+    session_mode: str = "extended",
 ) -> int:
     """Write OHLCV DataFrame to TimescaleDB ohlcv table.
 
@@ -537,7 +545,10 @@ def write_ohlcv(
     the row's identity, not just metadata, so spot/perpetual/etc. sharing a
     symbol+data_source can't silently overwrite each other.
 
-    Upserts on (ts, symbol, timeframe, data_source, instrument_type):
+    ``session_mode`` is part of the row identity so regular- and extended-
+    session datasets cannot overwrite one another.
+
+    Upserts on (ts, symbol, timeframe, data_source, instrument_type, session_mode):
     a later write for the same bar replaces open/high/low/close/volume
     rather than being silently dropped. This matters for any workflow that
     writes the same bar more than once with different completeness — e.g.
@@ -552,6 +563,8 @@ def write_ohlcv(
         return 0
 
     validate_instrument_type(instrument_type)
+    if session_mode not in ("regular", "extended"):
+        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     timeframe = to_canonical(timeframe)
     required_columns = {"open", "high", "low", "close", "volume"}
     missing_columns = sorted(required_columns - set(df.columns))
@@ -580,6 +593,7 @@ def write_ohlcv(
             [timeframe] * len(df),
             [data_source] * len(df),
             [instrument_type] * len(df),
+            [session_mode] * len(df),
             df["open"].astype(float),
             df["high"].astype(float),
             df["low"].astype(float),
@@ -594,9 +608,11 @@ def write_ohlcv(
         psycopg2.extras.execute_values(
             cur,
             """INSERT INTO ohlcv (ts, symbol, timeframe, data_source, instrument_type,
-               open, high, low, close, volume)
+               session_mode, open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT (ts, symbol, timeframe, data_source, instrument_type) DO UPDATE SET
+               ON CONFLICT
+                   (ts, symbol, timeframe, data_source, instrument_type, session_mode)
+                   DO UPDATE SET
                  open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
                  close=EXCLUDED.close, volume=EXCLUDED.volume""",
             rows,
@@ -662,6 +678,8 @@ def merge_ohlcv_coverage_ranges(
     range_ended_at: datetime,
     instrument_type: str = "spot",
     dsn: str | None = None,
+    *,
+    session_mode: str = "extended",
 ) -> None:
     """Record [range_started_at, range_ended_at] as cached for this key.
 
@@ -669,14 +687,16 @@ def merge_ohlcv_coverage_ranges(
     count per key stays small instead of growing one row per fetch.
     """
     validate_instrument_type(instrument_type)
+    if session_mode not in ("regular", "extended"):
+        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         _merge_coverage_ranges(
             cur,
             "ohlcv_coverage_ranges",
-            ("symbol", "timeframe", "data_source", "instrument_type"),
-            (symbol, timeframe, data_source, instrument_type),
+            ("symbol", "timeframe", "data_source", "instrument_type", "session_mode"),
+            (symbol, timeframe, data_source, instrument_type, session_mode),
             range_started_at,
             range_ended_at,
         )
@@ -1500,6 +1520,7 @@ def save_signal_results(
                     started_at=_to_dt(started_at),
                     ended_at=_to_dt(ended_at),
                     data_source=data_source,
+                    session_mode=config.session_mode if config else "extended",
                     config_hash=config_hash,
                     backtest_revision=revision,
                     backtest_cache_key=backtest_cache_key,
@@ -1540,7 +1561,13 @@ def save_signal_results(
 
     ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
     ohlcv_df.index.name = "ts"
-    counts["ohlcv"] = write_ohlcv(ohlcv_df, symbol, timeframe, data_source=data_source)
+    counts["ohlcv"] = write_ohlcv(
+        ohlcv_df,
+        symbol,
+        timeframe,
+        data_source=data_source,
+        session_mode=config.session_mode if config else "extended",
+    )
     return counts
 
 
@@ -1591,6 +1618,7 @@ def save_strategy_results(
             symbol,
             timeframe,
             data_source=data_source,
+            session_mode=config.session_mode,
         )
     counts["ohlcv"] = ohlcv_count
     return counts

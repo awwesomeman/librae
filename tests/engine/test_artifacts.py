@@ -80,7 +80,23 @@ def test_market_data_artifact_preserves_features_and_adds_identity() -> None:
     assert table["factor_score"].tolist() == [0.2, 0.4]
     assert set(table["symbol"]) == {"BTCUSDT"}
     assert set(table["timeframe"]) == {"1h"}
+    assert set(table["session_mode"]) == {"extended"}
+    assert artifact.manifest["session_mode"] == "extended"
     assert str(table["ts"].dt.tz) == "UTC"
+
+
+def test_market_data_artifact_distinguishes_regular_session_data() -> None:
+    artifact = build_market_data_artifact(
+        _market_frame(),
+        symbol="AAPL",
+        timeframe="1h",
+        data_source="ibkr",
+        instrument_type="spot",
+        session_mode="regular",
+    )
+
+    assert artifact.manifest["session_mode"] == "regular"
+    assert set(artifact.tables["market_data"]["session_mode"]) == {"regular"}
 
 
 def test_market_data_artifact_rejects_naive_timestamps() -> None:

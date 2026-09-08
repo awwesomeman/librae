@@ -91,7 +91,7 @@ from .state import (
 if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
     from librae.core.cost_model import CostModel
-    from librae.core.run_config import RunConfig
+    from librae.core.run_config import MarketDataSessionMode, RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,7 @@ def _validate_feature_output(
 def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
+    session_mode: MarketDataSessionMode = "extended",
 ) -> BarDataFetcher:
     """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
@@ -177,7 +178,15 @@ def _bind_market_data_source(
             currency=instrument.currency,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
+            calendar_id=instrument.calendar_id,
+            session_mode=session_mode,
             drop_incomplete=drop_incomplete,
+        )
+    if session_mode != "extended":
+        raise ValueError(
+            f"data adapter {instrument.data_adapter!r} cannot honor "
+            f"session_mode={session_mode!r}; provide a session-filtered callable "
+            "or use session_mode='extended'"
         )
     if instrument.data_adapter == "shioaji":
         return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
@@ -424,7 +433,11 @@ class LiveTrader:
         else:
             sources = {symbol: adapter for symbol in self._symbols}
         self._fetchers = {
-            symbol: _bind_market_data_source(sources[symbol], self._instruments[symbol])
+            symbol: _bind_market_data_source(
+                sources[symbol],
+                self._instruments[symbol],
+                config.session_mode,
+            )
             for symbol in self._symbols
         }
 
@@ -1362,6 +1375,17 @@ class LiveTrader:
                     2,
                     drop_incomplete=True,
                 )
+
+            if not new_df.empty and "available_at" in new_df.columns:
+                availability = pd.to_datetime(new_df["available_at"], errors="raise")
+                if not isinstance(availability.dtype, pd.DatetimeTZDtype):
+                    raise ValueError(f"{symbol} available_at values must be timezone-aware")
+                if availability.isna().any():
+                    raise ValueError(f"{symbol} available_at values must not contain NaT")
+                availability = availability.dt.tz_convert("UTC")
+                eligible = availability <= pd.Timestamp(self._utc_now())
+                new_df = new_df.loc[eligible].copy()
+                new_df["available_at"] = availability.loc[eligible]
 
             if new_df.empty:
                 return cached if cached is not None else new_df

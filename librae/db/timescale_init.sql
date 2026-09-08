@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     symbols         JSONB NOT NULL,
     timeframe       TEXT NOT NULL,
     data_source     TEXT,
+    session_mode    TEXT NOT NULL DEFAULT 'extended',
     started_at      TIMESTAMPTZ,
     ended_at        TIMESTAMPTZ,
     run_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     config_hash     VARCHAR(32),
     backtest_revision TEXT,
     backtest_cache_key VARCHAR(32),
-    CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live'))
+    CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live')),
+    CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended'))
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
@@ -375,15 +377,19 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     -- names the same concept but is fixed per factor_name, not selectable.
     data_source     TEXT NOT NULL,
     instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
+    session_mode    TEXT NOT NULL DEFAULT 'extended',
     open            DOUBLE PRECISION,
     high            DOUBLE PRECISION,
     low             DOUBLE PRECISION,
     close           DOUBLE PRECISION,
-    volume          DOUBLE PRECISION
+    volume          DOUBLE PRECISION,
+    CONSTRAINT chk_ohlcv_session_mode CHECK (session_mode IN ('regular', 'extended'))
 );
 SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv(symbol, timeframe, data_source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique ON ohlcv (ts, symbol, timeframe, data_source, instrument_type);
+CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol
+    ON ohlcv(symbol, timeframe, data_source, instrument_type, session_mode, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique
+    ON ohlcv (ts, symbol, timeframe, data_source, instrument_type, session_mode);
 
 -- ============================================================
 -- signal_events — 訊號品質監控 (hypertable, 獨立)
@@ -420,11 +426,16 @@ CREATE TABLE IF NOT EXISTS ohlcv_coverage_ranges (
     timeframe       TEXT NOT NULL,
     data_source     TEXT NOT NULL,
     instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
+    session_mode    TEXT NOT NULL DEFAULT 'extended',
     range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL
+    range_ended_at       TIMESTAMPTZ NOT NULL,
+    CONSTRAINT chk_ohlcv_coverage_session_mode
+        CHECK (session_mode IN ('regular', 'extended'))
 );
 CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
-    ON ohlcv_coverage_ranges(symbol, timeframe, data_source, instrument_type, range_started_at);
+    ON ohlcv_coverage_ranges(
+        symbol, timeframe, data_source, instrument_type, session_mode, range_started_at
+    );
 
 -- ============================================================
 -- external_factors — 通用第三方因子資料 (hypertable)
@@ -515,12 +526,13 @@ SELECT
     data_source,
     timeframe,
     instrument_type,
+    session_mode,
     NULL::TEXT AS factor_name,
     count(*) AS rows,
     min(ts) AS start_ts,
     max(ts) AS end_ts
 FROM ohlcv
-GROUP BY symbol, data_source, timeframe, instrument_type
+GROUP BY symbol, data_source, timeframe, instrument_type, session_mode
 
 UNION ALL
 
@@ -530,6 +542,7 @@ SELECT
     ef.data_source,
     ef.timeframe,
     ef.instrument_type,
+    NULL::TEXT AS session_mode,
     ef.factor_name,
     count(*) AS rows,
     min(ef.ts) AS start_ts,

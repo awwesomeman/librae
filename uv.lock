@@ -688,6 +688,7 @@ tw-live = [
     { name = "shioaji" },
 ]
 us-live = [
+    { name = "exchange-calendars" },
     { name = "ib-async" },
 ]
 viz = [
@@ -699,6 +700,7 @@ requires-dist = [
     { name = "ccxt", marker = "extra == 'crypto-live'", specifier = ">=4.5.66,<5" },
     { name = "exchange-calendars", marker = "extra == 'calendars'", specifier = ">=4.5" },
     { name = "exchange-calendars", marker = "extra == 'test'", specifier = ">=4.5" },
+    { name = "exchange-calendars", marker = "extra == 'us-live'", specifier = ">=4.5" },
     { name = "httpx", marker = "extra == 'stocks-data'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'telegram'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.24" },

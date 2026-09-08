@@ -31,6 +31,7 @@ class TestGetOhlcvCoverage:
         assert result == [r1]
         sql = mock_cur.execute.call_args[0][0]
         assert "ohlcv_coverage_ranges" in sql
+        assert mock_cur.execute.call_args[0][1][-1] == "extended"
 
 
 class TestMergeOhlcvCoverage:
@@ -58,8 +59,34 @@ class TestMergeOhlcvCoverage:
         mock_exec_values.assert_called_once()
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 1
-        assert inserted_rows[0][4] == datetime(2024, 1, 1, tzinfo=UTC)
-        assert inserted_rows[0][5] == datetime(2024, 1, 3, tzinfo=UTC)
+        assert inserted_rows[0][4] == "extended"
+        assert inserted_rows[0][5] == datetime(2024, 1, 1, tzinfo=UTC)
+        assert inserted_rows[0][6] == datetime(2024, 1, 3, tzinfo=UTC)
+
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_regular_session_uses_separate_coverage_identity(
+        self,
+        mock_conn_ctx,
+        mock_exec_values,
+    ):
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = []
+        mock_conn_ctx.return_value = _mock_conn(mock_cur)
+
+        merge_ohlcv_coverage_ranges(
+            "AAPL",
+            "H1",
+            "ibkr",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 2, tzinfo=UTC),
+            session_mode="regular",
+        )
+
+        select_params = mock_cur.execute.call_args_list[0][0][1]
+        inserted_rows = mock_exec_values.call_args[0][2]
+        assert select_params[-1] == "regular"
+        assert inserted_rows[0][4] == "regular"
 
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
