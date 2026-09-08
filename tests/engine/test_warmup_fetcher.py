@@ -286,6 +286,69 @@ class TestWarmupFetcher:
             "max_attempts": 3,
         }
 
+        # One symbol becoming ready must re-arm its own edge even while the
+        # other symbol keeps the portfolio-level warmup gate closed.
+        alerts: list[tuple[str, dict[str, object]]] = []
+        trader._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        trader._ohlcv_cache["BTCUSDT"] = short.copy()
+        trader._report_incomplete_warmup()
+        trader._ohlcv_cache["BTCUSDT"] = full.copy()
+        trader._report_incomplete_warmup()
+        trader._ohlcv_cache["BTCUSDT"] = short.copy()
+        trader._report_incomplete_warmup()
+
+        btc_events = [event for event in runtime_events if event.symbol == "BTCUSDT"]
+        assert len(btc_events) == 2
+        assert len(alerts) == 2
+
+    def test_partial_warmup_progress_does_not_repeat_outward_alerts(self):
+        from librae.live.engine import LiveTrader
+
+        full = _bars([datetime(2025, 1, day, tzinfo=UTC) for day in range(1, 6)])
+        usable_periods = [2]
+        runtime_events = []
+        alerts: list[tuple[str, dict[str, object]]] = []
+        strategy = MagicMock()
+        strategy.on_bar.return_value = []
+
+        def fetcher(*_args, **_kwargs):
+            return full.iloc[-usable_periods[0] :].reset_index(drop=True)
+
+        trader = LiveTrader(
+            strategy,
+            lambda history: history,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=5,
+                )
+            ),
+            adapter=fetcher,
+            on_runtime_event=runtime_events.append,
+            clock=lambda: datetime(2025, 1, 5, 1, tzinfo=UTC),
+        )
+        trader._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+
+        for count in (2, 3, 4):
+            usable_periods[0] = count
+            trader._poll_cycle()
+
+        assert [event.detail["usable_periods"] for event in runtime_events] == [2]
+        assert len(alerts) == 1
+        strategy.on_bar.assert_not_called()
+
+        usable_periods[0] = 5
+        trader._poll_cycle()
+        assert trader.warmup_ready
+        strategy.on_bar.assert_called_once()
+
+        trader._ohlcv_cache["BTCUSDT"] = full.iloc[-2:].reset_index(drop=True)
+        usable_periods[0] = 2
+        trader._poll_cycle()
+
+        assert [event.detail["usable_periods"] for event in runtime_events] == [2, 2]
+        assert len(alerts) == 2
+
     def test_source_unavailable_rows_do_not_satisfy_warmup(self):
         from librae.live.engine import LiveTrader
 

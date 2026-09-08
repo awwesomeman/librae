@@ -522,7 +522,7 @@ class LiveTrader:
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
         self._warmup_requested_periods: dict[str, int] = {}
         self._warmup_fetch_attempts: dict[str, int] = {}
-        self._reported_warmup_states: dict[str, tuple[str, int]] = {}
+        self._reported_warmup_reasons: dict[str, str] = {}
         self._lease_acquired = False
         self._account_lease_acquired = False
         self._restored_state = False
@@ -1291,13 +1291,13 @@ class LiveTrader:
         if not self.warmup_ready:
             self._report_incomplete_warmup()
             return
-        if self._reported_warmup_states:
+        if self._reported_warmup_reasons:
             logger.info(
                 "Live warmup ready: required=%d usable=%s",
                 self._warmup_periods,
                 {symbol: len(self._ohlcv_cache[symbol]) for symbol in self._symbols},
             )
-            self._reported_warmup_states.clear()
+            self._reported_warmup_reasons.clear()
 
         frames: dict[str, pd.DataFrame] = {}
         for symbol, df in fetched_frames.items():
@@ -1481,12 +1481,12 @@ class LiveTrader:
             frame = self._ohlcv_cache.get(symbol)
             gap_reason = self._warmup_gap(symbol, frame)
             if gap_reason is None:
+                self._reported_warmup_reasons.pop(symbol, None)
                 continue
             usable_periods = len(frame) if frame is not None else 0
-            reported_state = (gap_reason, usable_periods)
-            if self._reported_warmup_states.get(symbol) == reported_state:
+            if self._reported_warmup_reasons.get(symbol) == gap_reason:
                 continue
-            self._reported_warmup_states[symbol] = reported_state
+            self._reported_warmup_reasons[symbol] = gap_reason
             requested_periods = self._warmup_requested_periods.get(symbol, 0)
             attempts = self._warmup_fetch_attempts.get(symbol, 0)
             changed.append(
