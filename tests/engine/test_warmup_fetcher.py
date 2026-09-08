@@ -547,7 +547,7 @@ class TestWarmupFetcher:
         assert len(result) == 1
         assert result.loc[0, "close"] == 101.0
         assert result.loc[0, "available_at"] == pd.Timestamp("2025-01-01T02:00:00Z")
-        assert requests == [3, 6]
+        assert requests == [3, 6, 12]
 
     def test_replay_diagnostic_reports_history_missing_before_first_candidate(self):
         from librae.live.engine import LiveTrader
