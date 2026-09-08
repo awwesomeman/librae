@@ -301,11 +301,20 @@ class Strategy(ABC):
 
     Strategies only inspect Context and return a decision.
     Data preparation (ETL, signals) is done externally before the backtest.
+    Sim/live may retry the same Context after an exception, without rolling
+    back mutations to this instance. Runtime checkpoints do not serialize the
+    strategy object, so restart-relevant decision state must be reconstructible
+    from Context and causal input history rather than mutable instance fields.
     """
 
     @abstractmethod
     def on_bar(self, ctx: Context) -> StrategyDecision:
-        """Return order intents (optionally grouped via group_id), weights, or ``[]``."""
+        """Return a retry-safe decision for this Context.
+
+        Equivalent same-event calls must not depend on an earlier failed
+        call's instance mutation. Return order intents (optionally grouped via
+        group_id), weights, or ``[]``.
+        """
         ...
 
 

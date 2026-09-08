@@ -687,6 +687,66 @@ class TestLiveTrader:
 
         strategy.on_bar.assert_called_once()
 
+    def test_same_event_retry_does_not_rollback_strategy_instance_mutation(self):
+        class MutatesBeforeFirstFailure(Strategy):
+            def __init__(self):
+                self.attempts = 0
+                self.contexts: list[tuple[datetime, int]] = []
+
+            def on_bar(self, ctx: Context):
+                self.attempts += 1
+                self.contexts.append((ctx.ts, ctx.period_index))
+                if self.attempts == 1:
+                    raise RuntimeError("retry me")
+                return []
+
+        strategy = MutatesBeforeFirstFailure()
+        runner = self._make_runner(strategy=strategy)
+
+        runner.run(max_iterations=2)
+
+        assert strategy.attempts == 2
+        assert strategy.contexts[0] == strategy.contexts[1]
+        assert strategy.contexts[0][1] == 0
+        assert runner._period_index == 1
+
+    def test_restart_restores_engine_index_but_not_strategy_instance_state(self):
+        store = MemoryLiveStateStore()
+        config = _test_cfg()
+
+        class StatefulCounter(Strategy):
+            def __init__(self):
+                self.count = 0
+                self.seen_periods: list[int] = []
+
+            def on_bar(self, ctx: Context):
+                self.count += 1
+                self.seen_periods.append(ctx.period_index)
+                return []
+
+        first_strategy = StatefulCounter()
+        first = self._make_runner(
+            strategy=first_strategy,
+            fetcher=lambda *args, **kwargs: _make_ohlcv_df(start_hour=0),
+            state_store=store,
+            config=config,
+        )
+        first.run(max_iterations=1)
+
+        restarted_strategy = StatefulCounter()
+        restarted = self._make_runner(
+            strategy=restarted_strategy,
+            fetcher=lambda *args, **kwargs: _make_ohlcv_df(start_hour=1),
+            state_store=store,
+            config=config,
+        )
+        restarted.run(max_iterations=1)
+
+        assert first_strategy.count == 1
+        assert restarted_strategy.count == 1
+        assert restarted_strategy.seen_periods == [1]
+        assert restarted._period_index == 2
+
     def test_new_bar_triggers_strategy(self):
         """When fetcher returns a new timestamp, strategy is called again."""
         call_count = 0

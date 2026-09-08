@@ -871,6 +871,15 @@ migration or removal.
 Pending strategy decisions use an explicit `order_intents` or
 `portfolio_weights` type tag so simulation checkpoints preserve the public
 decision variant exactly across JSON storage and restart.
+The strategy instance itself is deliberately outside this checkpoint. If
+`Strategy.on_bar` raises, the same data event can be retried in the same
+process with any instance mutation from the failed call still present. A
+process restart constructs a fresh strategy object while restoring the
+engine's `period_index` and execution state. Strategies promoted to sim/live
+must therefore make `on_bar` retry-safe for an equivalent `Context` and
+reconstruct restart-relevant decisions from `Context` plus causal input
+history; mutable instance counters, cooldowns, or online estimators are not a
+durable trading-state mechanism.
 `_STATE_SCHEMA_VERSION` is the single code-level version constant and must be
 bumped whenever the checkpoint or any persisted nested dataclass changes
 shape; it is not a business/domain version.
