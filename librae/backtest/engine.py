@@ -264,11 +264,11 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _validate_primary_subscriptions(
+def _index_primary_subscriptions(
     data: pd.DataFrame,
     subscriptions: Sequence[MarketDataSubscription],
-) -> pd.DataFrame:
-    """Validate one primary subscription per symbol and normalize availability."""
+) -> dict[str, MarketDataSubscription]:
+    """Type-check and index one exact subscription per data symbol."""
     if any(not isinstance(item, MarketDataSubscription) for item in subscriptions):
         raise TypeError("primary_subscriptions must contain MarketDataSubscription values")
     subscription_by_symbol = {item.symbol: item for item in subscriptions}
@@ -285,6 +285,15 @@ def _validate_primary_subscriptions(
         raise ValueError(
             f"the current Backtest primary frame requires one timeframe; got {sorted(timeframes)}"
         )
+    return subscription_by_symbol
+
+
+def _validate_primary_subscriptions(
+    data: pd.DataFrame,
+    subscriptions: Sequence[MarketDataSubscription],
+) -> pd.DataFrame:
+    """Validate one primary subscription per symbol and normalize availability."""
+    subscription_by_symbol = _index_primary_subscriptions(data, subscriptions)
 
     normalized = data.copy()
     normalized_available = pd.Series(
@@ -648,6 +657,9 @@ class Backtest:
         data_source: Data source identifier — direct-args style.
         session_mode: Market-data session identity for direct-args data. With
             ``config``, ``config.session_mode`` is the only source.
+        primary_subscriptions: Optional exact primary identities. In direct
+            construction their order is the authoritative universe order; with
+            ``config`` they must match ``config.symbols`` and resolved routes.
         record_position_snapshots: Record per-symbol end-of-event positions,
             realized weights, and target-versus-achieved allocations. Off by
             default to avoid O(events × configured symbols) memory growth.
@@ -687,7 +699,18 @@ class Backtest:
             raise ValueError(
                 "session_mode cannot override config.session_mode; use one configuration source"
             )
-        supplied_subscriptions = tuple(primary_subscriptions or ())
+        try:
+            supplied_subscriptions = (
+                () if primary_subscriptions is None else tuple(primary_subscriptions)
+            )
+        except TypeError as exc:
+            raise TypeError(
+                "primary_subscriptions must be a sequence of MarketDataSubscription values"
+            ) from exc
+        if supplied_subscriptions:
+            # Validate every element before reading any identity field. Direct
+            # construction uses this declared order as its universe SSOT.
+            _index_primary_subscriptions(data, supplied_subscriptions)
         supplied_session_modes = {item.session_mode for item in supplied_subscriptions}
         if len(supplied_session_modes) > 1:
             raise ValueError("primary_subscriptions must use one session_mode")
@@ -721,12 +744,14 @@ class Backtest:
         self._result: BacktestResult | None = None
         self._metrics: StrategyMetrics | None = None
         self._record_position_snapshots = record_position_snapshots
+        self._direct_subscription_universe = config is None and bool(supplied_subscriptions)
 
-        self._symbols = (
-            list(config.symbols)
-            if config is not None
-            else data.index.get_level_values(0).unique().tolist()
-        )
+        if config is not None:
+            self._symbols = list(config.symbols)
+        elif supplied_subscriptions:
+            self._symbols = [item.symbol for item in supplied_subscriptions]
+        else:
+            self._symbols = data.index.get_level_values(0).unique().tolist()
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
         from librae.config.symbols import load_symbol_registry, resolve_symbol
 
@@ -1681,7 +1706,12 @@ class Backtest:
         raw = market_values.to_dict(orient="index")
         for (sym, ts), row in raw.items():
             result.setdefault(ts, {})[sym] = row
-        return result
+        if not self._direct_subscription_universe:
+            return result
+        return {
+            ts: {symbol: bars[symbol] for symbol in self._symbols if symbol in bars}
+            for ts, bars in result.items()
+        }
 
     def _precompute_lagged_adv(self) -> dict[pd.Timestamp, dict[str, float]]:
         """Precompute point-in-time ADV from completed trading sessions."""

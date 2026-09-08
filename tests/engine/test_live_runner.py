@@ -1213,6 +1213,93 @@ class TestLiveTrader:
             for *_event, identity in audit_events
         )
 
+    def test_restart_replays_observed_history_only_to_audit_sink(self):
+        from librae.core.executor import execute_pending_decision_and_stops
+
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        t1 = t0 + timedelta(hours=1)
+        history = _make_ohlcv_at([t0, t1])
+        history.loc[0, "close"] = 101.0
+        history["available_at"] = pd.to_datetime(["2025-01-01T01:30:00Z", "2025-01-01T02:00:00Z"])
+        state_store = MemoryLiveStateStore()
+        config = _test_cfg(warmup_periods=2)
+        original = self._make_runner(config=config, state_store=state_store)
+        original._last_bar_ts["BTCUSDT"] = t0
+        original._last_cycle_ts = t0
+        original._period_index = 1
+        original._persist_state()
+
+        feature_calls: list[pd.DataFrame] = []
+        contexts: list[Context] = []
+
+        def feature(frame: pd.DataFrame) -> pd.DataFrame:
+            feature_calls.append(frame.copy())
+            return _simple_feature_fn(frame)
+
+        class CaptureStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        restored = self._make_runner(
+            strategy=CaptureStrategy(),
+            fetcher=lambda *_args, **_kwargs: history.copy(),
+            feature_fn=feature,
+            config=config,
+            state_store=state_store,
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        audit_events: list[tuple[datetime, float, object]] = []
+        restored._on_ohlcv = lambda _symbol, _timeframe, bar, ts: audit_events.append(
+            (ts, float(bar["close"]), bar["available_at"])
+        )
+
+        with patch(
+            "librae.live.engine.execute_pending_decision_and_stops",
+            wraps=execute_pending_decision_and_stops,
+        ) as execute:
+            restored._poll_cycle()
+
+        assert audit_events == [
+            (t0, 101.0, pd.Timestamp("2025-01-01T01:30:00Z")),
+            (t1, 100.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+        ]
+        assert len(feature_calls) == 1
+        assert len(contexts) == 1
+        assert contexts[0].ts == t1
+        assert execute.call_count == 1
+        assert restored._period_index == 2
+        assert restored._last_bar_ts == {"BTCUSDT": t1}
+
+    def test_restart_audit_replay_deduplicates_overlapping_warmup_fetches(self):
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        timestamps = [t0 + timedelta(hours=offset) for offset in range(3)]
+        history = _make_ohlcv_at(timestamps)
+        history["available_at"] = pd.DatetimeIndex(timestamps) + pd.Timedelta(hours=1)
+        requests: list[int] = []
+
+        def fetcher(_symbol, _timeframe, limit, **_kwargs):
+            requests.append(limit)
+            return history.iloc[: min(len(requests) + 1, len(history))].copy()
+
+        runner = self._make_runner(
+            fetcher=fetcher,
+            config=_test_cfg(warmup_periods=5),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        runner._last_bar_ts["BTCUSDT"] = timestamps[-1]
+        audit_versions: list[tuple[datetime, object]] = []
+        runner._on_ohlcv = lambda _symbol, _timeframe, bar, ts: audit_versions.append(
+            (ts, bar["available_at"])
+        )
+
+        runner._fetch_runtime_frames()
+
+        assert requests == [6, 12, 24]
+        assert audit_versions == [
+            (timestamp, pd.Timestamp(timestamp) + pd.Timedelta(hours=1)) for timestamp in timestamps
+        ]
+
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
             self._make_runner(config=_test_cfg(poll_seconds=3601))

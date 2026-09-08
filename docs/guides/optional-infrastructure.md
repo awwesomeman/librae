@@ -87,6 +87,12 @@ OHLCV upserts treat `available_at` as a row-version clock: only a strictly
 later value replaces the stored OHLCV row. Equal versions are idempotent and
 older replays are ignored, so values and availability never come from
 different versions.
+Live `on_ohlcv` is an at-least-once audit callback over the fetched-history
+window: after a restart, rows at or behind the durable event watermark are
+replayed without re-running strategy or execution. A custom sink must be
+idempotent on the exact subscription identity plus `(ts, available_at)`.
+The built-in Timescale sink satisfies this through the same strictly-newer
+row-version upsert policy.
 
 Backtest database reuse is disabled unless the caller supplies
 `backtest_revision` through CLI/YAML orchestration and passes the same value to

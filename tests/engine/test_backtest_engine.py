@@ -757,6 +757,82 @@ class TestBacktestDataContract:
         assert backtest.primary_subscriptions == (subscription,)
         assert backtest.build_output().run_metadata.primary_subscriptions == (subscription,)
 
+    def test_direct_primary_subscription_order_is_the_universe_ssot(self) -> None:
+        data = pd.concat(
+            [
+                _make_multiindex_df([200.0] * 5, symbol="BBB"),
+                _make_multiindex_df([100.0] * 5, symbol="AAA"),
+            ]
+        )
+        subscriptions = tuple(
+            MarketDataSubscription(
+                symbol=symbol,
+                timeframe="H1",
+                calendar_id="24/7",
+                session_mode="extended",
+                data_source="fixture",
+                instrument_type="spot",
+            )
+            for symbol in ("AAA", "BBB")
+        )
+        contexts: list[Context] = []
+
+        class CaptureUniverse(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        backtest = Backtest(
+            data,
+            CaptureUniverse(),
+            cost_model=_zero_cost(),
+            primary_subscriptions=subscriptions,
+        )
+
+        backtest.run()
+        output = backtest.build_output()
+
+        assert backtest.primary_subscriptions == subscriptions
+        assert output.run_metadata.symbols == ("AAA", "BBB")
+        assert output.run_metadata.primary_subscriptions == subscriptions
+        assert contexts
+        assert all(ctx.symbol == "AAA" for ctx in contexts)
+        assert all(ctx.symbols == ("AAA", "BBB") for ctx in contexts)
+        assert all(tuple(ctx.bars) == ("AAA", "BBB") for ctx in contexts)
+
+    def test_direct_primary_subscriptions_type_check_precedes_field_access(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+
+        with pytest.raises(
+            TypeError,
+            match="primary_subscriptions must contain MarketDataSubscription values",
+        ):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(object(),),
+            )
+
+    def test_direct_primary_subscriptions_exact_cover_fails_at_construction(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        wrong = MarketDataSubscription(
+            symbol="OTHER",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="must exactly cover data symbols"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(wrong,),
+            )
+
     def test_available_at_is_reserved_from_strategy_and_execution_bars(self) -> None:
         frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
         frame["available_at"] = frame.index.get_level_values("datetime") + pd.Timedelta(hours=1)
