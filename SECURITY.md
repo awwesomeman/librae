@@ -26,6 +26,11 @@ Use independent random values. `TIMESCALE_DSN`/`TRADE_TIMESCALE_DSN` need no
 edit: they reference `${POSTGRES_APP_PASSWORD}`, which the shell expands when
 any consumer sources the file.
 
+Then run `librae doctor` in the project root. It checks both files against
+the variables librae declares (`librae/config/env.py`): misspelled names, a
+secret assigned in the synced `.env`, half of a key pair, and a DSN that
+names the wrong role or a stale password. It prints names, never values.
+
 On an existing deployment, changing `.env.secrets` does not rotate database
 roles. Rotate `quant` from a trusted admin session, then rerun
 `timescale_init.sql` inside the database container for the two managed

@@ -14,12 +14,13 @@ second exchange means picking a new prefix (e.g. ``OKX_*``), not new code.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
 
 import pandas as pd
 
+from librae.config.env import CredentialConfig, Secret
 from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
@@ -31,7 +32,6 @@ from librae.live.executor import PositionRequest
 
 from .base import (
     AdapterInfo,
-    CredentialConfig,
     drop_incomplete_ohlcv,
     find_position,
     validate_order_signal,
@@ -110,12 +110,13 @@ def _patch_binance_sandbox_urls(exchange) -> None:
 class CryptoCredentials(CredentialConfig):
     """Credentials for a CCXT-backed exchange."""
 
-    api_key: str = ""
-    api_secret: str = ""
+    api_key: Secret = field(default_factory=Secret)
+    api_secret: Secret = field(default_factory=Secret)
     exchange_id: str = "binance"
     sandbox: bool = False
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if isinstance(self.sandbox, str):
             self.sandbox = self.sandbox.lower() == "true"
         # Both or neither: half a pair is a typo'd env var name, and the
@@ -155,8 +156,8 @@ class CryptoAdapter:
     ) -> None:
         if credentials is not None:
             exchange_id = credentials.exchange_id if credentials.exchange_id else exchange_id
-            api_key = credentials.api_key if credentials.api_key else api_key
-            api_secret = credentials.api_secret if credentials.api_secret else api_secret
+            api_key = credentials.api_key.reveal() if credentials.api_key else api_key
+            api_secret = credentials.api_secret.reveal() if credentials.api_secret else api_secret
             sandbox = credentials.sandbox or sandbox
 
         ccxt = _require_ccxt()

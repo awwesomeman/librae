@@ -23,13 +23,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from numbers import Real
 
 import pandas as pd
 
+from librae.config.env import CredentialConfig, Secret
 from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
@@ -45,7 +46,6 @@ from librae.live.executor import PositionRequest
 
 from .base import (
     AdapterInfo,
-    CredentialConfig,
     drop_incomplete_ohlcv,
     find_position,
     validate_order_signal,
@@ -73,14 +73,15 @@ def _require_shioaji():
 class ShioajiCredentials(CredentialConfig):
     """Credentials for Sinopac Shioaji API."""
 
-    api_key: str = ""
-    secret_key: str = ""
-    person_id: str = ""
+    api_key: Secret = field(default_factory=Secret)
+    secret_key: Secret = field(default_factory=Secret)
+    person_id: Secret = field(default_factory=Secret)
     ca_path: str = ""
-    ca_password: str = ""
+    ca_password: Secret = field(default_factory=Secret)
     sandbox: bool = False
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if isinstance(self.sandbox, str):
             self.sandbox = self.sandbox.lower() == "true"
         # Both or neither: half a pair is a typo'd env var name, and the
@@ -137,15 +138,15 @@ class ShioajiAdapter:
         # login() takes no person_id (removed upstream — it returns the
         # accounts tied to api_key instead); person_id is still needed by
         # activate_ca() below to pick which account's CA to activate.
-        self._api.login(api_key=creds.api_key, secret_key=creds.secret_key)
+        self._api.login(api_key=creds.api_key.reveal(), secret_key=creds.secret_key.reveal())
         logger.info("Shioaji login successful (simulation=%s)", simulation)
 
         self._read_only = True
         if creds.ca_path:
             self._api.activate_ca(
                 ca_path=creds.ca_path,
-                ca_passwd=creds.ca_password,
-                person_id=creds.person_id,
+                ca_passwd=creds.ca_password.reveal(),
+                person_id=creds.person_id.reveal(),
             )
             self._read_only = False
             logger.info("Shioaji CA activated — trading enabled")

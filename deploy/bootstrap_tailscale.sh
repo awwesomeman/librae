@@ -5,8 +5,9 @@
 # and deploy (what runs once you're connected) are different concerns.
 #
 # Usage: ./deploy/bootstrap_tailscale.sh <user>@<host>
-# TS_AUTHKEY can be set in .env to skip interactive auth; otherwise you'll
-# get a URL printed to approve the machine in the Tailscale admin console.
+# TS_AUTHKEY can be set in .env.secrets to skip interactive auth (it is an
+# auth key, so never in the synced .env); otherwise you'll get a URL printed
+# to approve the machine in the Tailscale admin console.
 set -euo pipefail
 
 TARGET="${1:?Usage: bootstrap_tailscale.sh <user>@<host>}"
@@ -14,12 +15,14 @@ TARGET="${1:?Usage: bootstrap_tailscale.sh <user>@<host>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "${PROJECT_ROOT}/.env"
-    set +a
-fi
+for env_file in .env .env.secrets; do
+    if [[ -f "${PROJECT_ROOT}/${env_file}" ]]; then
+        set -a
+        # shellcheck source=/dev/null
+        source "${PROJECT_ROOT}/${env_file}"
+        set +a
+    fi
+done
 
 echo "[1/2] Installing Tailscale on ${TARGET}..."
 ssh "${TARGET}" "curl -fsSL https://tailscale.com/install.sh | sh"
@@ -28,7 +31,7 @@ echo "[2/2] Bringing Tailscale up..."
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
     ssh "${TARGET}" "sudo tailscale up --authkey=${TS_AUTHKEY}"
 else
-    echo "No TS_AUTHKEY in .env — approve the machine via the URL below."
+    echo "No TS_AUTHKEY in .env.secrets — approve the machine via the URL below."
     ssh -t "${TARGET}" "sudo tailscale up"
 fi
 

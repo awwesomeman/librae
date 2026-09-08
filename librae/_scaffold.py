@@ -1,9 +1,9 @@
-"""``librae init`` — scaffold a starter .env.example for pip-installed usage.
+"""The ``librae`` command: ``init`` scaffolds an env template, ``doctor`` checks one.
 
-Cloning this repo already gets you .env.example/.env.secrets.example at the
-repo root. This command is for the other workflow: `pip install librae` with
-no clone, where there's no repo tree to copy a template from — so the
-template ships as package data instead (see librae/_scaffold/env.example).
+``init`` is for the `pip install librae` workflow with no clone, where there's
+no repo tree to copy a template from — so the template ships as package data
+(see librae/_scaffold/env.example). ``doctor`` validates the .env and
+.env.secrets in the current directory against librae.config.env's registry.
 """
 
 from __future__ import annotations
@@ -22,11 +22,29 @@ def main() -> None:
     init_parser.add_argument(
         "--force", action="store_true", help="overwrite .env.example if it already exists"
     )
+    subparsers.add_parser(
+        "doctor",
+        help="check ./.env and ./.env.secrets: misspelled names, secrets in the synced file, "
+        "half-configured key pairs, DSN role and password",
+    )
 
     args = parser.parse_args()
 
     if args.command == "init":
         _init(force=args.force)
+    elif args.command == "doctor":
+        raise SystemExit(_doctor())
+
+
+def _doctor() -> int:
+    from librae.config.env import doctor
+
+    findings = doctor(Path.cwd())
+    for finding in findings:
+        print(f"{finding.level}: {finding.message}")
+    errors = sum(finding.level == "error" for finding in findings)
+    print("ok" if not findings else f"{errors} error(s), {len(findings) - errors} warning(s)")
+    return 1 if errors else 0
 
 
 def _init(*, force: bool) -> None:

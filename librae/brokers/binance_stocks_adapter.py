@@ -13,15 +13,16 @@ bar-based live adapter contract.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import httpx
 
+from librae.config.env import CredentialConfig, Secret
 from librae.config.symbols import AssetClass, AvailableSymbol, InstrumentKind
 
-from .base import AdapterInfo, CredentialConfig
+from .base import AdapterInfo
 
 BINANCE_STOCKS_API_SCHEMA_VERSION = "1.0.0"
 _DEFAULT_BASE_URL = "https://api.binance.com"
@@ -33,8 +34,8 @@ _LATEST_QUOTE_PATH = "/sapi/v1/equity/market/quote"
 class BinanceStocksCredentials(CredentialConfig):
     """Credentials shared with the user's Binance account."""
 
-    api_key: str = ""
-    api_secret: str = ""
+    api_key: Secret = field(default_factory=Secret)
+    api_secret: Secret = field(default_factory=Secret)
 
 
 class BinanceStocksAdapter:
@@ -49,7 +50,7 @@ class BinanceStocksAdapter:
         client: httpx.Client | None = None,
     ) -> None:
         if credentials is not None and credentials.api_key:
-            api_key = credentials.api_key
+            api_key = credentials.api_key.reveal()
         if not api_key:
             raise ValueError(
                 "Binance Stocks market data requires BINANCE_API_KEY; "

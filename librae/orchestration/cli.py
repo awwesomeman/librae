@@ -33,6 +33,7 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
+from librae.config.env import RedactSecrets
 from librae.core.run_config import (
     DEFAULT_POLL_SECONDS,
     AccountConfig,
@@ -729,3 +730,8 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Filters only run on the handler that owns them, so attach to every
+    # root handler rather than the root logger.
+    redact = RedactSecrets()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(redact)

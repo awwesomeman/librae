@@ -78,7 +78,7 @@ set +a
 STAGE="credential preflight"
 leaked_keys="$(
     sed -E 's/^[[:space:]]*export[[:space:]]+//' "${PROJECT_ROOT}/.env" \
-        | grep -E '^[A-Za-z_][A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|DSN|KEY)=.' \
+        | grep -E '^[A-Za-z_][A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|DSN|KEY|PERSON_ID)=.' \
         | cut -d= -f1 || true
 )"
 if [[ -n "${leaked_keys}" ]]; then

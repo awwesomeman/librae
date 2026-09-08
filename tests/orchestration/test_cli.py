@@ -20,6 +20,7 @@ from librae.orchestration.cli import (
     reset_realtime_state,
     run_dispatch,
     run_realtime_generic,
+    setup_logging,
     with_dedup_check,
 )
 
@@ -814,3 +815,22 @@ class TestLogRunSummaryCodeRev:
             log_run_summary(_make_cfg(), RunOptions(database_enabled=False))
 
         get_rev.assert_called_once()
+
+
+class TestSetupLoggingRedactsSecrets:
+    def test_every_root_handler_carries_the_redaction_filter(self, monkeypatch):
+        import logging
+
+        from librae.config.env import RedactSecrets
+
+        root = logging.getLogger()
+        # basicConfig is a no-op once root has handlers; start from none and
+        # let monkeypatch restore pytest's own handlers and level afterwards.
+        monkeypatch.setattr(root, "handlers", [])
+        monkeypatch.setattr(root, "level", root.level)
+
+        setup_logging()
+
+        assert root.handlers
+        for handler in root.handlers:
+            assert any(isinstance(f, RedactSecrets) for f in handler.filters)

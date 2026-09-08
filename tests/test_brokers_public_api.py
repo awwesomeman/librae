@@ -15,10 +15,11 @@ def test_public_broker_api_exports_adapters_and_credentials():
             "-c",
             (
                 "from librae.brokers import ("
-                "BinanceStocksAdapter, BinanceStocksCredentials, CredentialConfig, "
+                "BinanceStocksAdapter, BinanceStocksCredentials, "
                 "CryptoAdapter, CryptoCredentials, IBKRAdapter, IBKRCredentials, "
                 "ShioajiAdapter, ShioajiCredentials"
                 "); "
+                "from librae.config.env import CredentialConfig; "
                 "assert all(issubclass(item, CredentialConfig) for item in ("
                 "BinanceStocksCredentials, CryptoCredentials, IBKRCredentials, "
                 "ShioajiCredentials"

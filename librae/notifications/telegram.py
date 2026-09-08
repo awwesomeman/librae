@@ -13,14 +13,13 @@ Usage:
 
 from __future__ import annotations
 
-import dataclasses
 import html
 import logging
-import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from librae.config.env import CredentialConfig, Secret
 from librae.notifications.config import NotificationConfig, TelegramConfig
 
 logger = logging.getLogger(__name__)
@@ -39,31 +38,11 @@ def _timestamp() -> str:
 
 
 @dataclass
-class TelegramCredentials:
-    """Telegram API secrets from environment variables.
+class TelegramCredentials(CredentialConfig):
+    """Env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID."""
 
-    Env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
-    """
-
-    bot_token: str = ""
+    bot_token: Secret = field(default_factory=Secret)
     chat_id: str = ""
-
-    @classmethod
-    def from_env(cls, prefix: str, **overrides: str) -> TelegramCredentials:
-        """Build from env vars ``{prefix}_{FIELD_UPPER}``; overrides win.
-
-        Self-contained on purpose (not librae/brokers/base.py's CredentialConfig)
-        — a notification adapter has no business depending on brokers.
-        """
-        kwargs: dict[str, str] = {}
-        for f in dataclasses.fields(cls):
-            if f.name in overrides:
-                kwargs[f.name] = overrides[f.name]
-            else:
-                env_val = os.environ.get(f"{prefix}_{f.name.upper()}")
-                if env_val is not None:
-                    kwargs[f.name] = env_val
-        return cls(**kwargs)
 
 
 class TelegramAdapter:
@@ -122,7 +101,7 @@ class TelegramAdapter:
             logger.debug("Telegram disabled, skipping message")
             return False
 
-        url = f"https://api.telegram.org/bot{self._token}/sendMessage"
+        url = f"https://api.telegram.org/bot{self._token.reveal()}/sendMessage"
         payload = {"chat_id": self._chat_id, "text": text, "parse_mode": parse_mode}
 
         for attempt in range(MAX_RETRIES):
@@ -139,7 +118,7 @@ class TelegramAdapter:
             except Exception as exc:
                 # No logger.exception: httpx exception messages embed the
                 # request URL, which carries the bot token in its path.
-                detail = str(exc).replace(self._token, "<bot-token>")
+                detail = str(exc).replace(self._token.reveal(), "<bot-token>")
                 logger.warning(
                     "Failed to send Telegram message (attempt %d/%d): %s: %s",
                     attempt + 1,

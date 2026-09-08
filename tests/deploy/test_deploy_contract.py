@@ -10,6 +10,7 @@ from typing import get_args, get_type_hints
 
 import pytest
 import yaml
+from librae.config.env import DECLARED, ENV_VARS, Where
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy"
@@ -1130,3 +1131,60 @@ def test_cloud_deploy_preflight_allows_a_clean_env(tmp_path: Path) -> None:
     # being stopped by the preflight.
     assert "Cloud deployment failed during file transfer (exit 17)." in result.stderr
     assert "Refusing to sync" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# librae.config.env is the one declaration; templates and guards must agree
+# ---------------------------------------------------------------------------
+
+
+def _assigned_names(path: Path) -> set[str]:
+    """KEY= lines, including commented-out ``# KEY=`` placeholders."""
+    text = path.read_text(encoding="utf-8")
+    return set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]*)=", text, flags=re.M))
+
+
+def test_env_templates_declare_exactly_the_registry() -> None:
+    assert _assigned_names(ROOT / ".env.example") == {
+        v.name for v in ENV_VARS if v.where is Where.ENV
+    }
+    assert _assigned_names(ROOT / ".env.secrets.example") == {
+        v.name for v in ENV_VARS if v.where is Where.SECRETS
+    }
+
+
+def test_pip_scaffold_template_is_a_declared_subset_without_deploy_settings() -> None:
+    names = _assigned_names(ROOT / "librae/_scaffold/env.example")
+
+    assert names <= set(DECLARED)
+    assert "GF_BIND" not in names
+    assert "TIMESCALE_DSN" in names
+
+
+def test_cloud_deploy_preflight_matches_every_declared_secret_and_nothing_else() -> None:
+    # The shell cannot import the registry, so it keys off name suffixes; this
+    # pins that heuristic to the declaration in both directions.
+    script = (DEPLOY / "cloud_deploy.sh").read_text(encoding="utf-8")
+    alternation = re.search(r"\*\(([A-Z_|]+)\)=\.'", script)
+    assert alternation, "cloud_deploy.sh credential preflight grep not found"
+    pattern = re.compile(rf"^[A-Za-z_][A-Za-z0-9_]*({alternation.group(1)})$")
+
+    for var in ENV_VARS:
+        assert bool(pattern.match(var.name)) is var.secret, var.name
+
+
+def test_bootstrap_tailscale_reads_its_auth_key_from_the_unsynced_file() -> None:
+    script = (DEPLOY / "bootstrap_tailscale.sh").read_text(encoding="utf-8")
+
+    assert "for env_file in .env .env.secrets; do" in script
+    assert "TS_AUTHKEY can be set in .env.secrets" in script
+
+
+def test_cloud_deploy_preflight_suffixes_are_the_registry_suffixes() -> None:
+    from librae.config.env import SECRET_NAME_SUFFIXES
+
+    script = (DEPLOY / "cloud_deploy.sh").read_text(encoding="utf-8")
+    alternation = re.search(r"\*\(([A-Z_|]+)\)=\.'", script)
+    assert alternation
+
+    assert alternation.group(1) == "|".join(SECRET_NAME_SUFFIXES)

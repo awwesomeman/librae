@@ -37,6 +37,7 @@ from threading import Lock, RLock
 
 import pandas as pd
 
+from librae.config.env import CredentialConfig
 from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
@@ -55,7 +56,6 @@ from librae.live.executor import PositionRequest
 
 from .base import (
     AdapterInfo,
-    CredentialConfig,
     drop_incomplete_ohlcv,
     find_position,
     passive_price,
