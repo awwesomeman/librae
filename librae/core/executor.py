@@ -3412,25 +3412,59 @@ def validate_strategy_decision(
         raise ValueError(f"strategy decision contains unknown symbols: {sorted(unknown)}")
 
 
+def _intent_fill_timing(
+    intent: OrderIntent,
+    bar: dict[str, float],
+    default_fill: str,
+    *,
+    position_side: PositionSide | None = None,
+) -> Literal["open", "intrabar"] | None:
+    """Classify a fill without inventing an intrabar path.
+
+    ``resolve_fill_price`` remains the source of truth for whether an intent
+    can fill on this bar. A reached limit that was not marketable at the open
+    has only an unordered intrabar timestamp at OHLCV resolution.
+    """
+    if (
+        resolve_fill_price(
+            bar,
+            intent,
+            default_fill,
+            position_side=position_side,
+        )
+        is None
+    ):
+        return None
+    if intent.limit_price is None:
+        return "open"
+
+    order_side = _intent_order_side(intent, position_side)
+    open_raw = bar.get("open")
+    if order_side is None or open_raw is None:
+        return None
+    open_price = float(open_raw)
+    if order_side == "buy":
+        return "open" if open_price <= intent.limit_price else "intrabar"
+    return "open" if open_price >= intent.limit_price else "intrabar"
+
+
 def _intent_executes_at_open(
     intent: OrderIntent,
     bar: dict[str, float],
     default_fill: str,
+    *,
+    position_side: PositionSide | None = None,
 ) -> bool:
-    """Return whether an entry is causally known to exist from bar open."""
-    if intent.limit_price is None:
-        return default_fill == "open"
-
-    open_raw = bar.get("open")
-    if open_raw is None:
-        return False
-    open_price = float(open_raw)
-    limit_price = intent.limit_price
-    if intent.action == "long":
-        return open_price <= limit_price
-    if intent.action == "short":
-        return open_price >= limit_price
-    return False
+    """Return whether an intent is causally known to fill at bar open."""
+    return (
+        _intent_fill_timing(
+            intent,
+            bar,
+            default_fill,
+            position_side=position_side,
+        )
+        == "open"
+    )
 
 
 def partition_pending_decision(
@@ -3521,30 +3555,36 @@ def _validate_no_ambiguous_stop_conflicts(
     being a question rather than being guessed. Where no deferral is
     configured the caller sees the raise, which is the fail-closed default.
     """
-    if default_fill == "open":
-        return
 
-    if isinstance(pending_decision, PortfolioWeights):
-        # A whole-book target prices every open position, so each one overlaps
-        # the batch whether or not the symbol appears in the target weights.
-        decision_symbols = set(positions)
-    else:
-        decision_symbols = {
-            intent.symbol or primary_symbol
-            for intent in pending_decision
-            if not _intent_executes_at_open(
+    def is_resting_fill(intent: OrderIntent, symbol: str) -> bool:
+        position = positions.get(symbol)
+        return (
+            position is not None
+            and _intent_fill_timing(
                 intent,
-                bars.get(intent.symbol or primary_symbol, {}),
+                bars.get(symbol, {}),
                 default_fill,
+                position_side=position.side,
             )
-        }
-    # WHY: a carried residual fills at this bar's price like any other
-    # decision, and it reaches here with no pending decision of its own. Those
-    # are the bars most likely to collide, because a residual persists across
-    # bars while a protection can trigger on any of them.
+            == "intrabar"
+        )
+
+    # PortfolioWeights produces market intents at the next open, so it has no
+    # unordered fill. Explicit intents and any retained rebalance legs are
+    # classified individually against this bar instead of inheriting the
+    # run-wide default.
+    decision_symbols: set[str] = set()
+    if not isinstance(pending_decision, PortfolioWeights):
+        for intent in pending_decision:
+            symbol = intent.symbol or primary_symbol
+            if is_resting_fill(intent, symbol):
+                decision_symbols.add(symbol)
     if rebalance_state is not None:
-        decision_symbols |= {order.intent.symbol for order in rebalance_state.orders}
-        decision_symbols |= {leg.symbol for leg in rebalance_state.unresolved_legs}
+        decision_symbols |= {
+            order.intent.symbol
+            for order in rebalance_state.orders
+            if is_resting_fill(order.intent, order.intent.symbol)
+        }
     if not decision_symbols:
         return
 
