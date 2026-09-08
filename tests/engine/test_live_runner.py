@@ -788,6 +788,43 @@ class TestLiveTrader:
         assert runner._fetchers["AAPL"] is fetcher
         assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
 
+    def test_intraday_adv_uses_source_supplied_effective_calendar(self):
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="H1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+            execution=ExecutionPolicy(
+                adv_lookback_sessions=1,
+                max_adv_participation_rate=0.1,
+                warmup_periods=2,
+            ),
+        )
+
+        def fetcher(*_args, **_kwargs):
+            return _make_ohlcv_df()
+
+        fetcher.market_data_calendar_id = "XNYS"
+        runner = self._make_runner(fetcher=fetcher, config=config)
+        current = datetime(2025, 1, 3, 14, 30, tzinfo=UTC)
+        frame = _make_ohlcv_at([datetime(2025, 1, 2, 14, 30, tzinfo=UTC), current])
+
+        runner._process_cycle({"AAPL": frame}, current)
+
+        assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
+        assert runner._adv_session_labels == {"AAPL": "2025-01-03"}
+
     def test_daily_native_route_uses_source_supplied_effective_calendar(self):
         calls: list[dict[str, object]] = []
 

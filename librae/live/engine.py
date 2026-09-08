@@ -617,19 +617,6 @@ class LiveTrader:
             )
             for symbol in self._symbols
         }
-        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
-            missing_calendars = sorted(
-                symbol
-                for symbol, instrument in self._instruments.items()
-                if instrument.calendar_id is None
-            )
-            if missing_calendars:
-                raise ValueError(
-                    "intraday ADV requires calendar_id for every symbol; missing "
-                    f"{missing_calendars}"
-                )
-            for instrument in self._instruments.values():
-                validate_calendar_id(instrument.calendar_id)
         self._account_id = config.account_id
         self._currency = config.account.currency
 
@@ -670,6 +657,9 @@ class LiveTrader:
             },
         )
         self._market_data_subscriptions = dict(snapshot.subscriptions)
+        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
+            for subscription in self._market_data_subscriptions.values():
+                validate_calendar_id(subscription.calendar_id)
         self._fetchers = {
             symbol: _bind_market_data_source(
                 sources[symbol],
@@ -3416,9 +3406,7 @@ class LiveTrader:
         if self._interval_delta.days >= 1:
             label = pd.Timestamp(ts).date().isoformat()
         else:
-            calendar_id = self._instruments[symbol].calendar_id
-            if calendar_id is None:  # guarded during construction
-                raise RuntimeError(f"missing calendar_id for {symbol}")
+            calendar_id = self._market_data_subscriptions[symbol].calendar_id
             label = session_label(ts, calendar_id).isoformat()
         if self._adv_session_labels.get(symbol) != label:
             self._adv_session_labels[symbol] = label
@@ -3472,11 +3460,9 @@ class LiveTrader:
             self._last_prices[symbol] = close
             self._reset_adv_session(symbol, ts)
             if self._adv_lookback_sessions is not None:
-                calendar_id = self._instruments[symbol].calendar_id
+                calendar_id = self._market_data_subscriptions[symbol].calendar_id
                 labels = None
                 if self._interval_delta.days < 1:
-                    if calendar_id is None:  # guarded during construction
-                        raise RuntimeError(f"missing calendar_id for {symbol}")
                     labels = session_labels(
                         pd.DatetimeIndex(history.index),
                         calendar_id,

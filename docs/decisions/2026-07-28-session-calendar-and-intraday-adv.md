@@ -7,8 +7,9 @@ Date: 2026-07-28
 Librae uses two separate time concepts:
 
 - Every OHLCV `ts` is a timezone-aware UTC bar-start instant.
-- `SymbolInfo.calendar_id` is the only source for mapping that instant to a
-  trading-session label.
+- The effective subscription `calendar_id` is the only source for mapping that
+  instant to a trading-session label. It is resolved once from
+  `SymbolInfo.calendar_id` or an explicit source capability before runtime.
 - `RunConfig.session_mode` identifies whether the supplied or requested bars
   include all available sessions (`extended`) or regular hours only
   (`regular`). It is independent of the calendar and belongs to run, artifact,
