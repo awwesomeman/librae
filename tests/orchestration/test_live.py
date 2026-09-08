@@ -1019,6 +1019,42 @@ def test_run_metadata_failure_stops_startup_and_reports_distinct_alert(
     assert "trading will not start" in caplog.text
 
 
+@pytest.mark.parametrize("notification_failure", ["enabled", "send"])
+def test_notification_failure_cannot_mask_run_metadata_failure(
+    notification_failure: str,
+) -> None:
+    class FailingNotifier:
+        @property
+        def enabled(self) -> bool:
+            if notification_failure == "enabled":
+                raise RuntimeError("enabled unavailable")
+            return True
+
+        def send_alert(self, **_kwargs: object) -> None:
+            raise RuntimeError("send unavailable")
+
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        FailingNotifier(),
+    )
+    database_error = RuntimeError("schema is stale")
+
+    with (
+        patch(
+            "librae.db.timescale_writer.write_run_metadata",
+            autospec=True,
+            side_effect=database_error,
+        ),
+        patch("librae.db.timescale_writer.write_strategy_performance", autospec=True),
+        pytest.raises(RuntimeError, match="required run metadata") as error,
+    ):
+        callbacks.register_run("run-1")
+
+    assert error.value.__cause__ is database_error
+
+
 def test_reference_factory_does_not_return_when_run_metadata_parent_is_missing() -> None:
     config = make_test_cfg(mode="sim")
     adapter = MagicMock()

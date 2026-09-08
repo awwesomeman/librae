@@ -32,7 +32,7 @@ from librae.core.strategy import (
     PositionState,
     Strategy,
 )
-from librae.live.engine import LiveTrader
+from librae.live.engine import LiveTrader, _market_data_calendar_id, _market_data_route_owner
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
 from librae.live.state import MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import build_live_trader
@@ -786,6 +786,84 @@ class TestLiveTrader:
         assert runner._fetchers["AAPL"] is fetcher
         assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
 
+    def test_daily_native_route_uses_source_supplied_effective_calendar(self):
+        calls: list[dict[str, object]] = []
+
+        class Adapter:
+            market_data_route = "ibkr"
+            market_data_calendar_id = "XNYS"
+
+            def fetch_ohlcv(self, *_args, **kwargs):
+                calls.append(kwargs)
+                return _make_ohlcv_df()
+
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+
+        runner = self._make_runner(fetcher=Adapter(), config=config)
+        runner._fetchers["AAPL"]("AAPL", "1d", 10)
+
+        assert runner._market_data_subscriptions["AAPL"].calendar_id == "XNYS"
+        assert calls[0]["calendar_id"] == "XNYS"
+
+    def test_market_data_capabilities_support_properties_and_slots(self):
+        class PropertySource:
+            @property
+            def market_data_route(self) -> str:
+                return "ibkr"
+
+            @property
+            def market_data_calendar_id(self) -> str:
+                return "XNYS"
+
+        class SlottedSource:
+            __slots__ = ("market_data_calendar_id", "market_data_route")
+
+            def __init__(self) -> None:
+                self.market_data_route = "ibkr"
+                self.market_data_calendar_id = "XNYS"
+
+        for source in (PropertySource(), SlottedSource()):
+            assert _market_data_route_owner(source) == "ibkr"
+            assert _market_data_calendar_id(source) == "XNYS"
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("market_data_route", " ibkr"),
+            ("market_data_route", "ibkr "),
+            ("market_data_calendar_id", " XNYS"),
+            ("market_data_calendar_id", "XNYS "),
+        ],
+    )
+    def test_market_data_capabilities_reject_surrounding_whitespace(self, name, value):
+        class Source:
+            pass
+
+        source = Source()
+        setattr(source, name, value)
+        reader = (
+            _market_data_route_owner if name == "market_data_route" else _market_data_calendar_id
+        )
+
+        with pytest.raises(ValueError, match="leading or trailing whitespace"):
+            reader(source)
+
     def test_repeated_fetch_failure_suppresses_heartbeat_and_alerts_once(self):
         state = {"fail": True}
 
@@ -942,6 +1020,27 @@ class TestLiveTrader:
 
         with pytest.raises(ValueError, match=r"source calendar_id='XNYS'.*configured.*'24/7'"):
             self._make_runner(fetcher=fetcher)
+
+    def test_fresh_run_registers_once_without_a_state_store(self):
+        on_run_registered = MagicMock()
+
+        runner = self._make_runner(
+            state_store=None,
+            on_run_registered=on_run_registered,
+        )
+
+        on_run_registered.assert_called_once_with(runner.run_id)
+
+    def test_registration_failure_without_a_state_store_propagates_once(self):
+        on_run_registered = MagicMock(side_effect=RuntimeError("registration failed"))
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            self._make_runner(
+                state_store=None,
+                on_run_registered=on_run_registered,
+            )
+
+        on_run_registered.assert_called_once()
 
     def test_non_ibkr_concrete_adapter_rejects_regular_session_request(self):
         class Adapter:

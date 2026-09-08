@@ -20,6 +20,7 @@ from librae.integrations import AdapterFactory
 from librae.live.engine import (
     LiveTrader,
     _market_data_route_owner,
+    _resolve_effective_market_data_calendars,
     _resolve_market_data_subscriptions,
     _validate_market_data_calendar_preconditions,
 )
@@ -254,9 +255,11 @@ class _TimescaleCallbacks:
 
     def _alert(self, *, title: str, message: str) -> None:
         notifier = self._notifier
-        if notifier is None or not bool(getattr(notifier, "enabled", False)):
+        if notifier is None:
             return
         try:
+            if not bool(getattr(notifier, "enabled", False)):
+                return
             notifier.send_alert(title=title, message=message)
         except Exception:
             logger.exception("DB failure notification failed")
@@ -552,10 +555,15 @@ def build_live_trader(
         )
         for symbol, instrument in instruments.items()
     }
+    effective_calendars = _resolve_effective_market_data_calendars(
+        instruments,
+        overrides,
+    )
     _validate_market_data_calendar_preconditions(
         config.timeframe,
         instruments,
         route_owners,
+        effective_calendars,
     )
 
     adapter_instances: dict[tuple[str, str, str], object] = {}
@@ -614,11 +622,15 @@ def build_live_trader(
     resolved_state_store = state_store
     if resolved_state_store is None and database_enabled:
         resolved_state_store = _build_state_store()
+    effective_calendars = _resolve_effective_market_data_calendars(
+        instruments,
+        data_adapters,
+    )
     subscriptions = _resolve_market_data_subscriptions(
         config.timeframe,
         config.session_mode,
         instruments,
-        data_adapters,
+        effective_calendars,
     )
     callbacks = (
         _TimescaleCallbacks(

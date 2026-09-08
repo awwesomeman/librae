@@ -170,8 +170,10 @@ def _bind_market_data_source(
     session_mode: MarketDataSessionMode = "extended",
     *,
     route_owner: str | None = None,
+    calendar_id: str | None = None,
 ) -> BarDataFetcher:
     """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
+    resolved_calendar_id = calendar_id if calendar_id is not None else instrument.calendar_id
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
     if not callable(fetch_ohlcv):
         if callable(source):
@@ -190,7 +192,7 @@ def _bind_market_data_source(
             currency=instrument.currency,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
-            calendar_id=instrument.calendar_id,
+            calendar_id=resolved_calendar_id,
             session_mode=session_mode,
             drop_incomplete=drop_incomplete,
         )
@@ -205,7 +207,7 @@ def _bind_market_data_source(
             instrument.venue_symbol,
             tf,
             limit=limit,
-            calendar_id=instrument.calendar_id,
+            calendar_id=resolved_calendar_id,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
             drop_incomplete=drop_incomplete,
@@ -308,37 +310,44 @@ def _bind_market_data_source(
     return base_fetcher
 
 
+_MISSING_MARKET_DATA_CAPABILITY = object()
+
+
+def _market_data_capability(source: object, name: str) -> str | None:
+    """Read one explicitly declared source capability without trusting ``__getattr__``."""
+    declaration = getattr_static(source, name, _MISSING_MARKET_DATA_CAPABILITY)
+    if declaration is _MISSING_MARKET_DATA_CAPABILITY:
+        return None
+    value = getattr(source, name)
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a non-empty string when supplied")
+    if not value.strip():
+        raise ValueError(f"{name} must be a non-empty string when supplied")
+    if value != value.strip():
+        raise ValueError(f"{name} must not contain leading or trailing whitespace")
+    return value
+
+
 def _market_data_route_owner(source: object) -> str | None:
     """Read an adapter's explicit native-route capability without duck-mocking it."""
-    route = getattr_static(source, "market_data_route", None)
-    if route is None:
-        return None
-    if not isinstance(route, str) or not route:
-        raise TypeError("market_data_route must be a non-empty string when supplied")
-    return route
+    return _market_data_capability(source, "market_data_route")
 
 
 def _market_data_calendar_id(source: object) -> str | None:
     """Read a caller-owned source's explicit subscription calendar capability."""
-    calendar_id = getattr_static(source, "market_data_calendar_id", None)
-    if calendar_id is None:
-        return None
-    if not isinstance(calendar_id, str) or not calendar_id:
-        raise TypeError("market_data_calendar_id must be a non-empty string when supplied")
-    return calendar_id
+    return _market_data_capability(source, "market_data_calendar_id")
 
 
-def _resolve_market_data_subscriptions(
-    timeframe: str,
-    session_mode: MarketDataSessionMode,
+def _resolve_effective_market_data_calendars(
     instruments: Mapping[str, SymbolInfo],
     sources: Mapping[str, object],
-) -> dict[str, MarketDataSubscription]:
-    """Bind exact subscription identities to the concrete market-data sources."""
-    subscriptions: dict[str, MarketDataSubscription] = {}
+) -> dict[str, str | None]:
+    """Resolve one calendar per concrete source and reject identity conflicts."""
+    calendars: dict[str, str | None] = {}
     for symbol, instrument in instruments.items():
         configured_calendar = instrument.calendar_id
-        source_calendar = _market_data_calendar_id(sources[symbol])
+        source = sources.get(symbol)
+        source_calendar = _market_data_calendar_id(source) if source is not None else None
         if (
             configured_calendar is not None
             and source_calendar is not None
@@ -348,7 +357,20 @@ def _resolve_market_data_subscriptions(
                 f"{symbol!r} market-data source calendar_id={source_calendar!r} conflicts "
                 f"with configured calendar_id={configured_calendar!r}"
             )
-        calendar_id = configured_calendar or source_calendar
+        calendars[symbol] = configured_calendar or source_calendar
+    return calendars
+
+
+def _resolve_market_data_subscriptions(
+    timeframe: str,
+    session_mode: MarketDataSessionMode,
+    instruments: Mapping[str, SymbolInfo],
+    calendar_ids: Mapping[str, str | None],
+) -> dict[str, MarketDataSubscription]:
+    """Build exact subscriptions from the already-resolved source calendars."""
+    subscriptions: dict[str, MarketDataSubscription] = {}
+    for symbol, instrument in instruments.items():
+        calendar_id = calendar_ids.get(symbol)
         if calendar_id is None:
             raise ValueError(
                 f"market-data source for {symbol!r} must declare market_data_calendar_id "
@@ -367,6 +389,7 @@ def _validate_market_data_calendar_preconditions(
     timeframe: str,
     instruments: Mapping[str, SymbolInfo],
     route_owners: Mapping[str, str | None],
+    calendar_ids: Mapping[str, str | None],
 ) -> None:
     """Fail before polling when a route cannot normalize its requested bars."""
     from librae.core.utils import to_ccxt
@@ -375,23 +398,23 @@ def _validate_market_data_calendar_preconditions(
         return
     missing = sorted(
         symbol
-        for symbol, instrument in instruments.items()
-        if route_owners.get(symbol) == "ibkr" and instrument.calendar_id is None
+        for symbol in instruments
+        if route_owners.get(symbol) == "ibkr" and calendar_ids.get(symbol) is None
     )
     if missing:
         raise ValueError(
             "daily IBKR market data requires calendar_id for every IBKR-routed "
             f"symbol; missing {missing}"
         )
-    for symbol, instrument in instruments.items():
+    for symbol in instruments:
         if route_owners.get(symbol) != "ibkr":
             continue
+        calendar_id = calendar_ids[symbol]
         try:
-            validate_calendar_id(instrument.calendar_id)
+            validate_calendar_id(calendar_id)
         except ValueError as exc:
             raise ValueError(
-                f"daily IBKR market data has invalid calendar_id for {symbol!r}: "
-                f"{instrument.calendar_id!r}"
+                f"daily IBKR market data has invalid calendar_id for {symbol!r}: {calendar_id!r}"
             ) from exc
 
 
@@ -535,16 +558,21 @@ class LiveTrader:
         route_owners = {
             symbol: _market_data_route_owner(sources[symbol]) for symbol in self._symbols
         }
+        effective_calendars = _resolve_effective_market_data_calendars(
+            self._instruments,
+            sources,
+        )
         _validate_market_data_calendar_preconditions(
             config.timeframe,
             self._instruments,
             route_owners,
+            effective_calendars,
         )
         self._market_data_subscriptions = _resolve_market_data_subscriptions(
             self._timeframe,
             config.session_mode,
             self._instruments,
-            sources,
+            effective_calendars,
         )
         self._fetchers = {
             symbol: _bind_market_data_source(
@@ -552,6 +580,7 @@ class LiveTrader:
                 self._instruments[symbol],
                 config.session_mode,
                 route_owner=route_owners[symbol],
+                calendar_id=self._market_data_subscriptions[symbol].calendar_id,
             )
             for symbol in self._symbols
         }
@@ -686,7 +715,7 @@ class LiveTrader:
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
-        if self._state_store is not None and not self._restored_state:
+        if not self._restored_state:
             # A restored run already notified on_run_registered inside
             # _restore_state, before it fires the state_recovered event —
             # callers like _TimescaleCallbacks cache run_id from this call
