@@ -221,6 +221,36 @@ def bar_close(value: object, target_seconds: int, calendar_id: str) -> pd.Timest
     return min(timestamp + pd.Timedelta(seconds=target_seconds), segment_close)
 
 
+def period_start(value: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
+    """Return the canonical start of the calendar period containing ``value``.
+
+    Multi-period bars deliberately use the start of their local day, week, or
+    month rather than a global phase.  Their cadence is a per-series invariant
+    and is validated separately by the consumer.
+    """
+    from librae.core.utils import interval_to_timedelta, to_canonical
+
+    canonical = to_canonical(timeframe)
+    if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
+        interval = interval_to_timedelta(canonical)
+        return _bucket_start(value, int(interval.total_seconds()), calendar_id)
+
+    timestamp = _timestamp(value)
+    label = session_label(timestamp, calendar_id)
+    if canonical.startswith("D"):
+        first_label = label
+    elif canonical.startswith("W"):
+        period = pd.Period(label, freq="W-SUN")
+        first_label = _first_session_on_or_after(period.start_time.date(), calendar_id)
+    elif canonical.startswith("MN"):
+        period = pd.Period(label, freq="M")
+        first_label = _first_session_on_or_after(period.start_time.date(), calendar_id)
+    else:  # pragma: no cover - to_canonical owns supported prefixes
+        raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
+
+    return _session_segments(calendar_id, first_label)[0][0]
+
+
 def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
     """Return the real close boundary for one session-aligned bar period."""
     from librae.core.utils import interval_to_timedelta, to_canonical
@@ -252,6 +282,14 @@ def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestam
         raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
 
     return _session_segments(calendar_id, final_label)[-1][1]
+
+
+def _first_session_on_or_after(boundary: date, calendar_id: str) -> date:
+    """Resolve the first trading-session label starting at a calendar boundary."""
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        return boundary
+    calendar = _exchange_calendar(calendar_id)
+    return calendar.date_to_session(pd.Timestamp(boundary), direction="next").date()
 
 
 def _last_session_on_or_before(boundary: date, calendar_id: str) -> date:

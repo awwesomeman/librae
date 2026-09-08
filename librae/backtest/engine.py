@@ -93,6 +93,8 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import (
+    ALWAYS_OPEN_CALENDAR,
+    period_start,
     session_labels,
     session_ordinals,
     validate_calendar_id,
@@ -255,17 +257,22 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
 
 def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
     """Infer session bars by session cadence and fixed bars by elapsed time."""
-    inferred = infer_timeframe(index[:20])
-    if calendar_id is None or not inferred.startswith(("D", "W")):
-        return inferred
+    sample = index[:20]
+    if calendar_id is None:
+        return infer_timeframe(sample)
 
     try:
-        ordinals = np.asarray(session_ordinals(index[:20], calendar_id), dtype=np.int64)
-        labels = session_labels(index[:20], calendar_id)
+        ordinals = np.asarray(session_ordinals(sample, calendar_id), dtype=np.int64)
+        labels = session_labels(sample, calendar_id)
     except ValueError:
-        return inferred
+        return infer_timeframe(sample)
     if len(set(ordinals)) != len(ordinals):
-        return inferred
+        return infer_timeframe(sample)
+
+    month_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
+    month_diffs = np.diff(month_ordinals)
+    if np.all(month_diffs > 0):
+        return f"MN{int(np.gcd.reduce(month_diffs))}"
 
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_diffs = np.diff(week_ordinals)
@@ -282,14 +289,27 @@ def _validate_session_timeframe(
     timeframe: str,
     calendar_id: str,
 ) -> None:
-    """Validate daily/weekly cadence in session space instead of UTC time."""
+    """Validate calendar cadence and canonical period-start anchors."""
+    expected_starts = pd.DatetimeIndex(
+        [period_start(timestamp, timeframe, calendar_id) for timestamp in index]
+    )
+    if np.any(index != expected_starts):
+        raise ValueError(
+            f"data symbol {symbol!r} timestamps are not canonical "
+            f"timeframe={timeframe} period starts"
+        )
+
     if timeframe.startswith("D"):
         interval = int(timeframe[1:])
         ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
-    else:
+    elif timeframe.startswith("W"):
         interval = int(timeframe[1:])
         labels = session_labels(index, calendar_id)
         ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
+    else:
+        interval = int(timeframe[2:])
+        labels = session_labels(index, calendar_id)
+        ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="M").asi8
     diffs = np.diff(ordinals)
     if np.any(diffs < interval) or np.any(diffs % interval != 0):
         raise ValueError(
@@ -319,8 +339,8 @@ def _resolve_data_timeframe(
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
             and not (
-                timeframe.startswith(("D", "W"))
-                and expected.startswith(("D", "W"))
+                timeframe.startswith(("D", "W", "MN"))
+                and expected.startswith(("D", "W", "MN"))
                 and calendar_ids.get(symbol) is not None
             )
         }
@@ -340,25 +360,13 @@ def _resolve_data_timeframe(
             raise ValueError(f"data symbols have inconsistent timeframes: {inferred_by_symbol}")
         data_timeframe = next(iter(inferred))
 
-    if data_timeframe.startswith("MN"):
-        month_interval = int(data_timeframe[2:])
-        for symbol, index in indexes_by_symbol.items():
-            if len(index) < 2:
-                continue
-            month_ordinals = index.tz_localize(None).to_period("M").asi8
-            month_diffs = np.diff(month_ordinals)
-            if np.any(month_diffs < month_interval) or np.any(month_diffs % month_interval != 0):
-                raise ValueError(
-                    f"data symbol {symbol!r} timestamps are not aligned to "
-                    f"timeframe={data_timeframe}"
-                )
-        return data_timeframe
-
-    if data_timeframe.startswith(("D", "W")):
+    if data_timeframe.startswith(("D", "W", "MN")):
         calendar_validated: set[str] = set()
         for symbol, index in indexes_by_symbol.items():
             calendar_id = calendar_ids.get(symbol)
-            if len(index) < 2 or calendar_id is None:
+            if data_timeframe.startswith("MN") and calendar_id is None:
+                calendar_id = ALWAYS_OPEN_CALENDAR
+            if calendar_id is None:
                 continue
             _validate_session_timeframe(symbol, index, data_timeframe, calendar_id)
             calendar_validated.add(symbol)
