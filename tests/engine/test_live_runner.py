@@ -1122,6 +1122,97 @@ class TestLiveTrader:
         assert newer.loc[0, "close"] == 300.0
         assert newer.loc[0, "available_at"] == pd.Timestamp("2025-01-01T03:00:00Z")
 
+    def test_poll_persists_only_newer_correction_without_replaying_observation(self):
+        from librae.core.executor import execute_pending_decision_and_stops
+
+        first_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        next_ts = datetime(2025, 1, 1, 1, tzinfo=UTC)
+
+        def version(ts: datetime, close: float, available_at: str) -> pd.DataFrame:
+            frame = _make_ohlcv_at([ts], price=close)
+            frame["available_at"] = [pd.Timestamp(available_at)]
+            return frame
+
+        responses = iter(
+            [
+                version(first_ts, 100.0, "2025-01-01T01:00:00Z"),
+                version(first_ts, 101.0, "2025-01-01T02:00:00Z"),
+                version(first_ts, 150.0, "2025-01-01T02:00:00Z"),
+                version(first_ts, 99.0, "2025-01-01T01:00:00Z"),
+                version(next_ts, 200.0, "2025-01-01T02:00:00Z"),
+            ]
+        )
+        feature_calls: list[pd.DataFrame] = []
+        contexts: list[Context] = []
+
+        def feature(history: pd.DataFrame) -> pd.DataFrame:
+            feature_calls.append(history.copy())
+            return _simple_feature_fn(history)
+
+        class CaptureStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureStrategy(),
+            fetcher=lambda *_args, **_kwargs: next(responses),
+            feature_fn=feature,
+            config=_test_cfg(warmup_periods=1),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        audit_events: list[tuple[str, str, datetime, dict[str, object], dict[str, str]]] = []
+
+        def capture_audit(
+            symbol: str,
+            timeframe: str,
+            bar: dict[str, object],
+            ts: datetime,
+        ) -> None:
+            audit_events.append(
+                (
+                    symbol,
+                    timeframe,
+                    ts,
+                    bar,
+                    runner._market_data_subscriptions[symbol].to_dict(),
+                )
+            )
+
+        runner._on_ohlcv = capture_audit
+        with patch(
+            "librae.live.engine.execute_pending_decision_and_stops",
+            wraps=execute_pending_decision_and_stops,
+        ) as execute:
+            for _ in range(5):
+                runner._poll_cycle()
+
+        assert len(feature_calls) == 2
+        assert len(contexts) == 2
+        assert execute.call_count == 2
+        assert runner._period_index == 2
+        assert runner._last_bar_ts["BTCUSDT"] == next_ts
+        assert [
+            (symbol, timeframe, ts, bar["close"], bar["available_at"])
+            for symbol, timeframe, ts, bar, _identity in audit_events
+        ] == [
+            ("BTCUSDT", "1h", first_ts, 100.0, pd.Timestamp("2025-01-01T01:00:00Z")),
+            ("BTCUSDT", "1h", first_ts, 101.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+            ("BTCUSDT", "1h", next_ts, 200.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+        ]
+        assert all(
+            identity
+            == {
+                "symbol": "BTCUSDT",
+                "timeframe": "H1",
+                "calendar_id": "24/7",
+                "session_mode": "extended",
+                "data_source": "binance_spot",
+                "instrument_type": "spot",
+            }
+            for *_event, identity in audit_events
+        )
+
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
             self._make_runner(config=_test_cfg(poll_seconds=3601))

@@ -125,6 +125,9 @@ class CycleDiagnostics:
     deadline_missed: bool
 
 
+type _OhlcvCorrection = tuple[datetime, dict[str, object]]
+
+
 def _validate_feature_output(
     output: object,
     *,
@@ -341,7 +344,8 @@ class LiveTrader:
         config: RunConfig — the sole configuration source.
         adapter: Callable bar fetcher, concrete adapter with ``fetch_ohlcv``,
             or per-symbol mapping. Required. Extra point-in-time columns reach
-            ``feature_fn``.
+            ``feature_fn`` except reserved ``available_at``, which remains on
+            the audit/persistence view only.
         order_adapter: Required broker gateway in live mode; unused in sim.
         cost_model: CostModel override. None resolves one model per symbol.
         callbacks: Optional analytics hooks. They have no default persistence
@@ -829,14 +833,18 @@ class LiveTrader:
 
         def fetch_one(
             symbol: str,
-        ) -> tuple[pd.DataFrame | None, float, Exception | None]:
+        ) -> tuple[pd.DataFrame | None, list[_OhlcvCorrection], float, Exception | None]:
             started = perf_counter()
+            corrections: list[_OhlcvCorrection] = []
             try:
-                frame = self._fetch_with_cache_unchecked(symbol)
+                frame = self._fetch_with_cache_unchecked(
+                    symbol,
+                    correction_sink=corrections,
+                )
             except Exception as exc:
                 frame = self._ohlcv_cache.get(symbol)
-                return frame, perf_counter() - started, exc
-            return frame, perf_counter() - started, None
+                return frame, corrections, perf_counter() - started, exc
+            return frame, corrections, perf_counter() - started, None
 
         if self._market_data_workers == 1 or len(self._symbols) == 1:
             results = {symbol: fetch_one(symbol) for symbol in self._symbols}
@@ -848,7 +856,7 @@ class LiveTrader:
 
         frames: dict[str, pd.DataFrame] = {}
         self._cycle_fetch_failed = False
-        for symbol, (frame, elapsed, error) in results.items():
+        for symbol, (frame, corrections, elapsed, error) in results.items():
             self._cycle_fetch_seconds[symbol] = elapsed
             if error is not None:
                 self._cycle_fetch_failed = True
@@ -857,6 +865,9 @@ class LiveTrader:
                 self._record_market_data_fetch_success(symbol)
             if frame is not None:
                 frames[symbol] = frame
+            if self._on_ohlcv is not None:
+                for event_ts, audit_bar in corrections:
+                    self._on_ohlcv(symbol, self._timeframe, audit_bar, event_ts)
         return frames
 
     def _record_market_data_fetch_failure(self, symbol: str, error: Exception) -> None:
@@ -1494,7 +1505,12 @@ class LiveTrader:
             logger.exception("Failed to fetch %s", symbol)
             return self._ohlcv_cache.get(symbol)
 
-    def _fetch_with_cache_unchecked(self, symbol: str) -> pd.DataFrame | None:
+    def _fetch_with_cache_unchecked(
+        self,
+        symbol: str,
+        *,
+        correction_sink: list[_OhlcvCorrection] | None = None,
+    ) -> pd.DataFrame | None:
         """Fetch and cache one symbol, propagating failures to the poll coordinator."""
         cached = self._ohlcv_cache.get(symbol)
         if cached is not None and not cached.empty:
@@ -1518,7 +1534,12 @@ class LiveTrader:
                     probe = self._eligible_runtime_rows(symbol, probe)
                     if not probe.empty:
                         validate_ohlcv_values(probe, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(symbol, merged, probe)
+                        merged = self._merge_runtime_rows(
+                            symbol,
+                            merged,
+                            probe,
+                            correction_sink=correction_sink,
+                        )
                     if self._history_fingerprint(merged) == exhausted_fingerprint:
                         return cached
                     self._warmup_exhausted_fingerprints.pop(symbol, None)
@@ -1540,7 +1561,12 @@ class LiveTrader:
                     new_df = self._eligible_runtime_rows(symbol, new_df)
                     if not new_df.empty:
                         validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(symbol, merged, new_df)
+                        merged = self._merge_runtime_rows(
+                            symbol,
+                            merged,
+                            new_df,
+                            correction_sink=correction_sink,
+                        )
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
@@ -1567,7 +1593,12 @@ class LiveTrader:
             if new_df.empty:
                 return cached
             validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-            merged = self._merge_runtime_rows(symbol, cached, new_df)
+            merged = self._merge_runtime_rows(
+                symbol,
+                cached,
+                new_df,
+                correction_sink=correction_sink,
+            )
 
         return self._store_runtime_cache(symbol, merged)
 
@@ -1679,13 +1710,33 @@ class LiveTrader:
         symbol: str,
         cached: pd.DataFrame | None,
         fetched: pd.DataFrame,
+        *,
+        correction_sink: list[_OhlcvCorrection] | None = None,
     ) -> pd.DataFrame:
         """Merge causal row versions, then validate the whole cache cadence."""
         fetched = self._normalize_runtime_rows(symbol, fetched)
+        accepted_corrections: list[_OhlcvCorrection] = []
         if cached is None or cached.empty:
             merged = fetched
         else:
             cached = self._normalize_runtime_rows(symbol, cached)
+            if correction_sink is not None:
+                watermark = self._last_bar_ts.get(symbol)
+                if watermark is not None:
+                    previous_availability = cached.set_index("ts")[AVAILABLE_AT_COLUMN]
+                    previous_versions = fetched["ts"].map(previous_availability)
+                    corrections = fetched.loc[
+                        previous_versions.notna()
+                        & (fetched[AVAILABLE_AT_COLUMN] > pd.DatetimeIndex(previous_versions))
+                        & (fetched["ts"] <= pd.Timestamp(watermark))
+                    ]
+                    accepted_corrections.extend(
+                        (
+                            pd.Timestamp(row["ts"]).to_pydatetime(),
+                            row.drop(labels="ts").to_dict(),
+                        )
+                        for _, row in corrections.iterrows()
+                    )
             cached = cached.assign(_librae_source_priority=0)
             fetched = fetched.assign(_librae_source_priority=1)
             merged = pd.concat([cached, fetched], ignore_index=True)
@@ -1701,7 +1752,10 @@ class LiveTrader:
         # Each fetch can be valid alone while overlapping a cached multi-bar
         # interval. Revalidate only after version selection has made the cache
         # deterministic.
-        return self._normalize_runtime_rows(symbol, merged)
+        normalized = self._normalize_runtime_rows(symbol, merged)
+        if correction_sink is not None:
+            correction_sink.extend(accepted_corrections)
+        return normalized
 
     def _report_incomplete_warmup(self) -> None:
         """Publish an edge-triggered diagnostic after bounded backfill fails."""

@@ -74,8 +74,9 @@ For sim/live, `LiveTrader(adapter=...)` accepts either:
 
 The result must contain UTC-aware `ts` plus OHLCV. When a source exposes a
 publication time, map it to `available_at`; it must not precede the actual bar
-completion. Extra columns are preserved
-and passed to `feature_fn`.
+completion. Extra columns are preserved and passed to `feature_fn`, except
+reserved `available_at`: the live engine retains it only on the audit and
+persistence view so publication metadata cannot become a strategy input.
 
 `feature_fn` must return a non-empty DataFrame with a timezone-aware,
 strictly increasing, unique `DatetimeIndex`. It may retain or drop older

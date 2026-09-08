@@ -871,8 +871,14 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
         )
 
     subscription = write.call_args.args[1]
-    assert subscription.session_mode == "regular"
-    assert subscription.calendar_id == "24/7"
+    assert subscription.to_dict() == {
+        "symbol": "BTCUSDT",
+        "timeframe": "H1",
+        "calendar_id": "24/7",
+        "session_mode": "regular",
+        "data_source": "binance_spot",
+        "instrument_type": "spot",
+    }
     assert write.call_args.args[0]["available_at"].iloc[0] == datetime(2025, 1, 1, 1, tzinfo=UTC)
 
 

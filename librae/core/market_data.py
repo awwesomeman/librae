@@ -47,6 +47,8 @@ class MarketDataSubscription:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
+            if value != value.strip():
+                raise ValueError(f"{field_name} must not contain leading or trailing whitespace")
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
         if self.session_mode not in ("regular", "extended"):
             raise ValueError(
