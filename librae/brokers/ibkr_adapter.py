@@ -42,7 +42,12 @@ from librae.config.symbols import (
     canonicalize_price_to_increment,
 )
 from librae.core.run_config import MarketDataSessionMode
-from librae.core.trading_calendar import next_session_open, session_bounds, validate_calendar_id
+from librae.core.trading_calendar import (
+    next_session_open,
+    session_bounds,
+    session_lookback_days,
+    validate_calendar_id,
+)
 from librae.core.utils import floor_to_step, validate_contract_month
 from librae.live.executor import PositionRequest
 
@@ -504,6 +509,12 @@ class IBKRAdapter:
         if start:
             start_dt = _parse_dt(start)
             duration = f"{max(1, (end_dt - start_dt).days + 1)} D"
+        elif timeframe == "1d":
+            if calendar_id is None:  # guarded before duration calculation
+                raise RuntimeError("calendar_id unexpectedly missing for IBKR daily bars")
+            # Include one possible current/forming session. The adapter later
+            # applies source availability and tails the requested row count.
+            duration = f"{session_lookback_days(end_dt, limit + 1, calendar_id)} D"
         else:
             duration = _default_duration_str(timeframe, limit)
 
