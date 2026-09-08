@@ -23,8 +23,10 @@ from typing import Any
 
 from librae.core.executor import RuntimeEvent
 from librae.core.financing import FinancingKind
+from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import MarketDataSessionMode, RunMode
 from librae.core.strategy import PositionEventType, PositionSide, TimeInForce
+from librae.core.utils import to_canonical
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -51,13 +53,29 @@ class RunMetadata:
     run_at: datetime
     mode: RunMode = "backtest"
     session_mode: MarketDataSessionMode = "extended"
+    primary_subscriptions: tuple[MarketDataSubscription, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", tuple(self.symbols))
+        object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
+        object.__setattr__(self, "primary_subscriptions", tuple(self.primary_subscriptions))
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"invalid run mode: {self.mode!r}")
         if self.session_mode not in ("regular", "extended"):
             raise ValueError(f"invalid market-data session mode: {self.session_mode!r}")
+        subscriptions = self.primary_subscriptions
+        if subscriptions:
+            if any(not isinstance(item, MarketDataSubscription) for item in subscriptions):
+                raise TypeError("primary_subscriptions must contain MarketDataSubscription values")
+            if len(subscriptions) != len(set(subscriptions)):
+                raise ValueError("primary_subscriptions must not contain duplicate identities")
+            subscription_symbols = tuple(item.symbol for item in subscriptions)
+            if subscription_symbols != self.symbols:
+                raise ValueError("primary_subscriptions must follow and exactly cover run symbols")
+            if any(item.timeframe != self.timeframe for item in subscriptions):
+                raise ValueError("primary subscription timeframe must match run timeframe")
+            if any(item.session_mode != self.session_mode for item in subscriptions):
+                raise ValueError("primary subscription session_mode must match run session_mode")
 
 
 @dataclass(frozen=True)

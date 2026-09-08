@@ -18,10 +18,33 @@ import pandas as pd
 
 from librae.backtest.schema import RunMetadata, StrategyMetrics
 from librae.config.symbols import validate_instrument_type
+from librae.core.market_data import MarketDataSubscription
 from librae.db import get_conn
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+def _parse_primary_subscriptions(value: object) -> tuple[MarketDataSubscription, ...]:
+    """Parse persisted exact identities without filling legacy omissions."""
+    decoded = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(decoded, list):
+        raise ValueError("primary_subscriptions must be a JSON array")
+    subscriptions = tuple(MarketDataSubscription.from_dict(item) for item in decoded)
+    if len(subscriptions) != len(set(subscriptions)):
+        raise ValueError("primary_subscriptions must not contain duplicates")
+    symbols = [item.symbol for item in subscriptions]
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("primary_subscriptions must contain one identity per symbol")
+    return subscriptions
+
+
+def _query_timestamp(value: object, *, field_name: str) -> datetime:
+    """Normalize one query frontier while rejecting ambiguous local time."""
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return timestamp.tz_convert("UTC").to_pydatetime()
 
 
 def get_run_by_backtest_cache_key(
@@ -87,7 +110,8 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     cache reuse, see get_run_by_config_hash()/get_run_by_backtest_cache_key().
     """
     sql = """SELECT run_id, strategy_name, symbols, timeframe, data_source,
-                     started_at, ended_at, run_at, mode, session_mode
+                     started_at, ended_at, run_at, mode, session_mode,
+                     primary_subscriptions
              FROM backtest_runs
              WHERE run_id = %s"""
     with get_conn(dsn) as conn:
@@ -108,6 +132,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
         run_at=row[7],
         mode=row[8],
         session_mode=row[9],
+        primary_subscriptions=_parse_primary_subscriptions(row[10]),
     )
 
 
@@ -333,13 +358,8 @@ def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
 
 
 def get_ohlcv_coverage_ranges(
-    symbol: str,
-    timeframe: str,
-    data_source: str,
-    instrument_type: str = "spot",
+    subscription: MarketDataSubscription,
     dsn: str | None = None,
-    *,
-    session_mode: str = "extended",
 ) -> list[tuple[datetime, datetime]]:
     """Return this key's cached (range_started_at, range_ended_at) pairs, sorted.
 
@@ -347,17 +367,27 @@ def get_ohlcv_coverage_ranges(
     window with a gap between them) — see merge_ohlcv_coverage_ranges() for how
     they're kept merged/deduplicated on write.
     """
-    if session_mode not in ("regular", "extended"):
-        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
+    if not isinstance(subscription, MarketDataSubscription):
+        raise TypeError("subscription must be a MarketDataSubscription")
     sql = """
         SELECT range_started_at, range_ended_at FROM ohlcv_coverage_ranges
-        WHERE symbol = %s AND timeframe = %s AND data_source = %s
-              AND instrument_type = %s AND session_mode = %s
+        WHERE symbol = %s AND timeframe = %s AND calendar_id = %s
+              AND session_mode = %s AND data_source = %s AND instrument_type = %s
         ORDER BY range_started_at
     """
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        cur.execute(sql, (symbol, timeframe, data_source, instrument_type, session_mode))
+        cur.execute(
+            sql,
+            (
+                subscription.symbol,
+                subscription.timeframe,
+                subscription.calendar_id,
+                subscription.session_mode,
+                subscription.data_source,
+                subscription.instrument_type,
+            ),
+        )
         rows = cur.fetchall()
         cur.close()
     return [(r[0], r[1]) for r in rows]
@@ -427,71 +457,92 @@ def load_external_factor(
 def load_ohlcv(
     run_id: str | None = None,
     *,
-    symbol: str | None = None,
-    timeframe: str | None = None,
-    data_source: str | None = None,
-    instrument_type: str | None = None,
-    session_mode: str = "extended",
-    started_at: str | None = None,
-    ended_at: str | None = None,
+    subscription: MarketDataSubscription | None = None,
+    started_at: str | datetime | None = None,
+    ended_at: str | datetime | None = None,
+    as_of: str | datetime | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
-    """Load OHLCV data by symbol+timeframe+range, or by run_id.
+    """Load OHLCV by one exact subscription or authoritative run metadata.
 
-    When *run_id* is given (without symbol/timeframe), the run's metadata
-    is used to derive symbol, timeframe, and date range.
-
-    instrument_type is an optional filter (None = don't filter, e.g. for
-    dashboards that haven't been updated to pass it) — internal callers
-    that write/read the same key (the OHLCV data-access layer) should always
-    pass it explicitly to avoid silently mixing rows of different contract
-    types that happen to share a symbol/data_source.
+    ``as_of`` filters by ``available_at`` and is the causal frontier for DB
+    warmup/as-of consumers. Legacy runs without complete subscriptions fail
+    closed instead of falling back to partial run-level metadata.
     """
-    if session_mode not in ("regular", "extended"):
-        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
-    if symbol and timeframe:
+    if run_id is not None and subscription is not None:
+        raise ValueError("pass either run_id or subscription, not both")
+    frontier = _query_timestamp(as_of, field_name="as_of") if as_of is not None else None
+    if subscription is not None:
+        if not isinstance(subscription, MarketDataSubscription):
+            raise TypeError("subscription must be a MarketDataSubscription")
         sql = """
-            SELECT ts AS _time, symbol, open, high, low, close, volume
+            SELECT ts AS _time, symbol, timeframe, calendar_id, session_mode,
+                   data_source, instrument_type, available_at,
+                   open, high, low, close, volume
             FROM ohlcv
-            WHERE symbol = %s AND timeframe = %s
+            WHERE symbol = %s AND timeframe = %s AND calendar_id = %s
+              AND session_mode = %s AND data_source = %s AND instrument_type = %s
         """
-        params: list = [symbol, timeframe]
-        if data_source:
-            sql += " AND data_source = %s"
-            params.append(data_source)
-        if instrument_type:
-            sql += " AND instrument_type = %s"
-            params.append(instrument_type)
-        sql += " AND session_mode = %s"
-        params.append(session_mode)
+        params: list[object] = list(subscription.to_dict().values())
         if started_at:
             sql += " AND ts >= %s"
-            params.append(started_at)
+            params.append(_query_timestamp(started_at, field_name="started_at"))
         if ended_at:
             sql += " AND ts <= %s"
-            params.append(ended_at)
+            params.append(_query_timestamp(ended_at, field_name="ended_at"))
+        if frontier is not None:
+            sql += " AND available_at <= %s"
+            params.append(frontier)
         sql += " ORDER BY ts"
     elif run_id:
-        sql = """
-            WITH meta AS (
-                SELECT timeframe, data_source_by_symbol, session_mode,
-                       started_at, ended_at
-                FROM backtest_runs WHERE run_id = %s
+        with get_conn(dsn) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT primary_subscriptions, started_at, ended_at
+                   FROM backtest_runs WHERE run_id = %s""",
+                (run_id,),
             )
-            SELECT ts AS _time, o.symbol, open, high, low, close, volume
-            FROM meta m
-            JOIN LATERAL jsonb_each_text(m.data_source_by_symbol)
-              AS route(symbol, data_source) ON TRUE
-            JOIN ohlcv o
+            metadata = cur.fetchone()
+            cur.close()
+        if metadata is None:
+            return pd.DataFrame()
+        subscriptions = _parse_primary_subscriptions(metadata[0])
+        if not subscriptions:
+            raise ValueError(
+                f"run {run_id!r} has no exact primary_subscriptions; "
+                "recreate or explicitly migrate the legacy run metadata"
+            )
+        placeholders = ",".join(["(%s,%s,%s,%s,%s,%s)"] * len(subscriptions))
+        sql = """
+            SELECT ts AS _time, o.symbol, o.timeframe, o.calendar_id, o.session_mode,
+                   o.data_source, o.instrument_type, o.available_at,
+                   open, high, low, close, volume
+            FROM ohlcv o
+            JOIN (VALUES {placeholders}) AS route(
+                symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
+            )
               ON o.symbol = route.symbol
+             AND o.timeframe = route.timeframe
+             AND o.calendar_id = route.calendar_id
+             AND o.session_mode = route.session_mode
              AND o.data_source = route.data_source
-            WHERE o.timeframe = m.timeframe
-              AND o.session_mode = m.session_mode
-              AND (m.started_at IS NULL OR ts >= m.started_at)
-              AND (m.ended_at IS NULL OR ts <= m.ended_at)
-            ORDER BY ts, o.symbol
+             AND o.instrument_type::text = route.instrument_type
         """
-        params = [run_id]
+        sql = sql.format(placeholders=placeholders)
+        params = [value for item in subscriptions for value in item.to_dict().values()]
+        predicates: list[str] = []
+        if metadata[1] is not None:
+            predicates.append("o.ts >= %s")
+            params.append(metadata[1])
+        if metadata[2] is not None:
+            predicates.append("o.ts <= %s")
+            params.append(metadata[2])
+        if frontier is not None:
+            predicates.append("o.available_at <= %s")
+            params.append(frontier)
+        if predicates:
+            sql += " WHERE " + " AND ".join(predicates)
+        sql += " ORDER BY ts, o.symbol"
     else:
         return pd.DataFrame()
 
@@ -499,4 +550,6 @@ def load_ohlcv(
         df = pd.read_sql(sql, conn, params=params)
     if not df.empty and "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], utc=True)
+        if "available_at" in df.columns:
+            df["available_at"] = pd.to_datetime(df["available_at"], utc=True)
     return df

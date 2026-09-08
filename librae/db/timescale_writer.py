@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -35,6 +35,13 @@ import pandas as pd
 from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
 from librae.backtest.schema import BacktestOutput
 from librae.config.symbols import SymbolInfo, validate_instrument_type
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    MarketDataSubscription,
+    normalize_bar_times,
+    subscription_from_instrument,
+    validate_ohlcv_values,
+)
 from librae.core.utils import to_canonical
 from librae.db import get_conn
 
@@ -100,6 +107,35 @@ def _normalize_data_source_by_symbol(
     return {symbol: data_source_by_symbol[symbol] for symbol in symbol_list}
 
 
+def _normalize_primary_subscriptions(
+    symbols: Sequence[str],
+    timeframe: str,
+    session_mode: str,
+    primary_subscriptions: Sequence[MarketDataSubscription],
+) -> tuple[MarketDataSubscription, ...]:
+    """Validate the authoritative run-to-raw-data identity mapping."""
+    subscriptions = tuple(primary_subscriptions)
+    if not subscriptions:
+        raise ValueError(
+            "primary_subscriptions is required; legacy run metadata cannot identify raw bars"
+        )
+    if any(not isinstance(item, MarketDataSubscription) for item in subscriptions):
+        raise TypeError("primary_subscriptions must contain MarketDataSubscription values")
+    expected_symbols = tuple(symbols)
+    observed_symbols = tuple(item.symbol for item in subscriptions)
+    if observed_symbols != expected_symbols:
+        raise ValueError(
+            "primary_subscriptions must follow and exactly cover run symbols; "
+            f"expected={expected_symbols}, observed={observed_symbols}"
+        )
+    canonical_timeframe = to_canonical(timeframe)
+    if any(item.timeframe != canonical_timeframe for item in subscriptions):
+        raise ValueError("primary subscription timeframe must match run timeframe")
+    if any(item.session_mode != session_mode for item in subscriptions):
+        raise ValueError("primary subscription session_mode must match run session_mode")
+    return subscriptions
+
+
 def _extract_exit_signals(df: pd.DataFrame, symbol: str) -> pd.Series:
     """Extract exit_signal series if column exists, else empty Series."""
     if "exit_signal" not in df.columns:
@@ -138,6 +174,7 @@ def write_run_metadata(
     data_source: str | None = None,
     data_source_by_symbol: Mapping[str, str] | None = None,
     session_mode: str = "extended",
+    primary_subscriptions: Sequence[MarketDataSubscription],
     poll_seconds: int | None = None,
     params: dict | None = None,
     execution_policy: dict | None = None,
@@ -156,30 +193,45 @@ def write_run_metadata(
     timeframe = to_canonical(timeframe)
     if session_mode not in ("regular", "extended"):
         raise ValueError(f"invalid market-data session mode: {session_mode!r}")
-    resolved_data_sources = _normalize_data_source_by_symbol(
+    subscriptions = _normalize_primary_subscriptions(
         symbols,
-        data_source,
-        data_source_by_symbol,
+        timeframe,
+        session_mode,
+        primary_subscriptions,
     )
+    resolved_data_sources = {item.symbol: item.data_source for item in subscriptions}
+    if data_source_by_symbol is not None:
+        supplied_data_sources = _normalize_data_source_by_symbol(
+            symbols,
+            data_source,
+            data_source_by_symbol,
+        )
+        if supplied_data_sources != resolved_data_sources:
+            raise ValueError("data_source_by_symbol must match authoritative primary_subscriptions")
     sql = """INSERT INTO backtest_runs
                (run_id, strategy_name, symbols, timeframe, data_source,
-                data_source_by_symbol, session_mode,
+                data_source_by_symbol, primary_subscriptions, session_mode,
                 started_at, ended_at, run_at, mode, poll_seconds,
                 params, execution_policy, risk_policy, config_hash,
                 backtest_revision, backtest_cache_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
-                 strategy_name=EXCLUDED.strategy_name, run_at=EXCLUDED.run_at,
+                 strategy_name=EXCLUDED.strategy_name,
+                 run_at=EXCLUDED.run_at,
                  mode=EXCLUDED.mode,
-                 data_source_by_symbol=EXCLUDED.data_source_by_symbol,
-                 session_mode=EXCLUDED.session_mode,
                  poll_seconds=EXCLUDED.poll_seconds,
                  params=EXCLUDED.params,
                  execution_policy=EXCLUDED.execution_policy,
                  risk_policy=EXCLUDED.risk_policy,
                  config_hash=EXCLUDED.config_hash,
                  backtest_revision=EXCLUDED.backtest_revision,
-                 backtest_cache_key=EXCLUDED.backtest_cache_key"""
+                 backtest_cache_key=EXCLUDED.backtest_cache_key
+               WHERE backtest_runs.symbols = EXCLUDED.symbols
+                 AND backtest_runs.timeframe = EXCLUDED.timeframe
+                 AND backtest_runs.data_source IS NOT DISTINCT FROM EXCLUDED.data_source
+                 AND backtest_runs.data_source_by_symbol = EXCLUDED.data_source_by_symbol
+                 AND backtest_runs.primary_subscriptions = EXCLUDED.primary_subscriptions
+                 AND backtest_runs.session_mode = EXCLUDED.session_mode"""
     params_val = json.dumps(params) if params is not None else None
     execution_policy_val = json.dumps(execution_policy) if execution_policy is not None else None
     risk_policy_val = json.dumps(risk_policy) if risk_policy is not None else None
@@ -190,6 +242,7 @@ def write_run_metadata(
         timeframe,
         data_source,
         json.dumps(resolved_data_sources),
+        json.dumps([item.to_dict() for item in subscriptions]),
         session_mode,
         _to_dt(started_at),
         _to_dt(ended_at),
@@ -205,10 +258,14 @@ def write_run_metadata(
     )
     if cur is not None:
         cur.execute(sql, values)
+        if cur.rowcount == 0:
+            raise ValueError(f"run_id={run_id!r} already has a different immutable identity")
     else:
         with get_conn(dsn) as conn:
             c = conn.cursor()
             c.execute(sql, values)
+            if c.rowcount == 0:
+                raise ValueError(f"run_id={run_id!r} already has a different immutable identity")
             c.close()
 
 
@@ -327,6 +384,7 @@ def save_backtest_output(
             data_source=meta.data_source,
             data_source_by_symbol=data_source_by_symbol,
             session_mode=meta.session_mode,
+            primary_subscriptions=meta.primary_subscriptions,
             params=params,
             execution_policy=execution_policy,
             risk_policy=risk_policy,
@@ -573,71 +631,63 @@ def save_backtest_output(
 
 def write_ohlcv(
     df: pd.DataFrame,
-    symbol: str,
-    timeframe: str,
-    data_source: str,
-    instrument_type: str = "spot",
+    subscription: MarketDataSubscription,
     dsn: str | None = None,
-    *,
-    session_mode: str = "extended",
 ) -> int:
     """Write OHLCV DataFrame to TimescaleDB ohlcv table.
 
     Expects df with DatetimeIndex (or 'ts'/'timestamp' column) and
-    columns: open, high, low, close, volume. instrument_type is the
-    contract's expiry structure (see librae/config/symbols.py) — part of
-    the row's identity, not just metadata, so spot/perpetual/etc. sharing a
-    symbol+data_source can't silently overwrite each other.
+    columns: open, high, low, close, volume. ``subscription`` is the whole
+    immutable row identity; partial scalar keys are deliberately unsupported.
+    ``available_at`` is validated against the calendar/fixed completion floor
+    and derived only when that floor is provable.  It versions the current
+    row: only a strictly later availability may replace stored OHLCV values;
+    equal or older versions are idempotent no-ops.
 
-    ``session_mode`` is part of the row identity so regular- and extended-
-    session datasets cannot overwrite one another.
-
-    Upserts on (ts, symbol, timeframe, data_source, instrument_type, session_mode):
-    a later write for the same bar replaces open/high/low/close/volume
-    rather than being silently dropped. This matters for any workflow that
-    writes the same bar more than once with different completeness — e.g.
-    a narrow validation backfill followed by the full-range run: if the
-    narrow run's raw fetch didn't cover a whole session, its aggregated
-    bar is incomplete, and the later full run's correct recomputation must
-    win, not lose to whichever write happened first.
-
-    Returns number of rows written.
+    Returns the number of inserted or strictly newer row versions accepted.
     """
+    if not isinstance(subscription, MarketDataSubscription):
+        raise TypeError("subscription must be a MarketDataSubscription")
     if df is None or df.empty:
         return 0
 
-    validate_instrument_type(instrument_type)
-    if session_mode not in ("regular", "extended"):
-        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
-    timeframe = to_canonical(timeframe)
-    required_columns = {"open", "high", "low", "close", "volume"}
-    missing_columns = sorted(required_columns - set(df.columns))
-    if missing_columns:
-        raise ValueError("OHLCV write missing required columns: " + ", ".join(missing_columns))
+    validate_ohlcv_values(df, context="OHLCV write")
+    identity = subscription.to_dict()
+    for name, expected in identity.items():
+        if name not in df:
+            continue
+        observed = set(df[name].dropna().astype(str))
+        if df[name].isna().any() or observed != {expected}:
+            raise ValueError(
+                f"OHLCV {name} column must contain only {expected!r}, got {sorted(observed)!r}"
+            )
 
     # Normalise index -> ts column (reset_index returns a new DataFrame)
     if "ts" not in df.columns and "timestamp" not in df.columns:
-        df = df.reset_index()
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise ValueError("OHLCV write requires a ts column or DatetimeIndex")
+        index_name = df.index.name or "index"
+        df = df.reset_index().rename(columns={index_name: "ts"})
     ts_col = "ts" if "ts" in df.columns else "timestamp"
-
-    # Ensure tz-aware UTC — reject naive timestamps early
-    ts_series = pd.to_datetime(df[ts_col])
-    if ts_series.dt.tz is None:
-        raise ValueError(
-            "OHLCV timestamps are timezone-naive — "
-            "fetcher must provide tz-aware datetimes "
-            "(e.g. pd.to_datetime(..., utc=True))"
-        )
-    ts_utc = ts_series.dt.tz_convert("UTC")
+    df = df.sort_values(ts_col, kind="stable").reset_index(drop=True)
+    timestamps, available_at = normalize_bar_times(
+        df[ts_col],
+        df.get(AVAILABLE_AT_COLUMN),
+        subscription,
+    )
+    if timestamps.duplicated().any():
+        raise ValueError("OHLCV write requires unique timestamps per subscription")
 
     rows = list(
         zip(
-            ts_utc.apply(_to_dt),
-            [symbol] * len(df),
-            [timeframe] * len(df),
-            [data_source] * len(df),
-            [instrument_type] * len(df),
-            [session_mode] * len(df),
+            timestamps.to_pydatetime(),
+            [subscription.symbol] * len(df),
+            [subscription.timeframe] * len(df),
+            [subscription.calendar_id] * len(df),
+            [subscription.session_mode] * len(df),
+            [subscription.data_source] * len(df),
+            [subscription.instrument_type] * len(df),
+            available_at.to_pydatetime(),
             df["open"].astype(float),
             df["high"].astype(float),
             df["low"].astype(float),
@@ -649,22 +699,29 @@ def write_ohlcv(
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        psycopg2.extras.execute_values(
+        accepted = psycopg2.extras.execute_values(
             cur,
-            """INSERT INTO ohlcv (ts, symbol, timeframe, data_source, instrument_type,
-               session_mode, open, high, low, close, volume)
+            """INSERT INTO ohlcv (
+                   ts, symbol, timeframe, calendar_id, session_mode,
+                   data_source, instrument_type, available_at,
+                   open, high, low, close, volume)
                VALUES %s
-               ON CONFLICT
-                   (ts, symbol, timeframe, data_source, instrument_type, session_mode)
+               ON CONFLICT (
+                   ts, symbol, timeframe, calendar_id, session_mode,
+                   data_source, instrument_type)
                    DO UPDATE SET
+                 available_at=EXCLUDED.available_at,
                  open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
-                 close=EXCLUDED.close, volume=EXCLUDED.volume""",
+                 close=EXCLUDED.close, volume=EXCLUDED.volume
+               WHERE EXCLUDED.available_at > ohlcv.available_at
+               RETURNING 1""",
             rows,
             page_size=2000,
+            fetch=True,
         )
         cur.close()
 
-    return len(rows)
+    return len(accepted)
 
 
 def _merge_coverage_ranges(
@@ -715,32 +772,40 @@ def _merge_coverage_ranges(
 
 
 def merge_ohlcv_coverage_ranges(
-    symbol: str,
-    timeframe: str,
-    data_source: str,
+    subscription: MarketDataSubscription,
     range_started_at: datetime,
     range_ended_at: datetime,
-    instrument_type: str = "spot",
     dsn: str | None = None,
-    *,
-    session_mode: str = "extended",
 ) -> None:
     """Record [range_started_at, range_ended_at] as cached for this key.
 
     Merges with any existing rows it now overlaps or touches, so the row
     count per key stays small instead of growing one row per fetch.
     """
-    validate_instrument_type(instrument_type)
-    if session_mode not in ("regular", "extended"):
-        raise ValueError(f"invalid market-data session mode: {session_mode!r}")
+    if not isinstance(subscription, MarketDataSubscription):
+        raise TypeError("subscription must be a MarketDataSubscription")
     range_started_at, range_ended_at = _to_dt(range_started_at), _to_dt(range_ended_at)
     with get_conn(dsn) as conn:
         cur = conn.cursor()
         _merge_coverage_ranges(
             cur,
             "ohlcv_coverage_ranges",
-            ("symbol", "timeframe", "data_source", "instrument_type", "session_mode"),
-            (symbol, timeframe, data_source, instrument_type, session_mode),
+            (
+                "symbol",
+                "timeframe",
+                "calendar_id",
+                "session_mode",
+                "data_source",
+                "instrument_type",
+            ),
+            (
+                subscription.symbol,
+                subscription.timeframe,
+                subscription.calendar_id,
+                subscription.session_mode,
+                subscription.data_source,
+                subscription.instrument_type,
+            ),
             range_started_at,
             range_ended_at,
         )
@@ -1512,6 +1577,7 @@ def save_signal_results(
     mode: str = "backtest",
     signal_column: str = "entry_signal",
     config: RunConfig | None = None,
+    primary_subscription: MarketDataSubscription | None = None,
     replace_existing: bool = False,
     backtest_revision: str | None = None,
 ) -> dict:
@@ -1523,6 +1589,30 @@ def save_signal_results(
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     exit_signal_series = _extract_exit_signals(df, symbol)
     tf = to_canonical(timeframe)
+    if config is not None:
+        from librae.config.symbols import resolve_symbol
+
+        resolved_subscription = subscription_from_instrument(
+            resolve_symbol(config, symbol),
+            timeframe=tf,
+            session_mode=config.session_mode,
+        )
+        if primary_subscription is not None and primary_subscription != resolved_subscription:
+            raise ValueError(
+                "primary_subscription does not match the identity resolved from config"
+            )
+    else:
+        if primary_subscription is None:
+            raise ValueError("primary_subscription is required when config is not provided")
+        resolved_subscription = primary_subscription
+    if (
+        resolved_subscription.symbol != symbol
+        or resolved_subscription.timeframe != tf
+        or resolved_subscription.data_source != data_source
+    ):
+        raise ValueError(
+            "primary_subscription must match symbol, timeframe, and data_source arguments"
+        )
     counts: dict[str, int] = {}
     revision = normalize_backtest_revision(backtest_revision)
     config_hash = config.config_hash if config else None
@@ -1565,7 +1655,8 @@ def save_signal_results(
                     ended_at=_to_dt(ended_at),
                     data_source=data_source,
                     data_source_by_symbol={symbol: data_source},
-                    session_mode=config.session_mode if config else "extended",
+                    session_mode=resolved_subscription.session_mode,
+                    primary_subscriptions=(resolved_subscription,),
                     config_hash=config_hash,
                     backtest_revision=revision,
                     backtest_cache_key=backtest_cache_key,
@@ -1604,15 +1695,12 @@ def save_signal_results(
             counts["signal_events"] = sig_count
             cur.close()
 
-    ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
+    ohlcv_columns = ["open", "high", "low", "close", "volume"]
+    if AVAILABLE_AT_COLUMN in symbol_df:
+        ohlcv_columns.append(AVAILABLE_AT_COLUMN)
+    ohlcv_df = symbol_df[ohlcv_columns]
     ohlcv_df.index.name = "ts"
-    counts["ohlcv"] = write_ohlcv(
-        ohlcv_df,
-        symbol,
-        timeframe,
-        data_source=data_source,
-        session_mode=config.session_mode if config else "extended",
-    )
+    counts["ohlcv"] = write_ohlcv(ohlcv_df, resolved_subscription)
     return counts
 
 
@@ -1630,10 +1718,21 @@ def save_strategy_results(
     Writes: backtest_runs, equity_curve, position_events, financing_cash_flows,
     strategy_performance, signal_events, ohlcv.
     """
-    timeframe = config.timeframe
     from librae.config.symbols import resolve_symbol
 
     instruments = {symbol: resolve_symbol(config, symbol) for symbol in config.symbols}
+    subscriptions = tuple(
+        subscription_from_instrument(
+            instruments[symbol],
+            timeframe=config.timeframe,
+            session_mode=config.session_mode,
+        )
+        for symbol in config.symbols
+    )
+    if output.run_metadata.primary_subscriptions != subscriptions:
+        raise ValueError(
+            "output primary_subscriptions do not match identities resolved from config"
+        )
     data_source_by_symbol = {
         symbol: instrument.data_source for symbol, instrument in instruments.items()
     }
@@ -1661,16 +1760,13 @@ def save_strategy_results(
     )
 
     ohlcv_count = 0
+    subscription_by_symbol = {item.symbol: item for item in subscriptions}
     for symbol, symbol_df in symbol_frames.items():
-        ohlcv_df = symbol_df[["open", "high", "low", "close", "volume"]]
+        ohlcv_columns = ["open", "high", "low", "close", "volume"]
+        if AVAILABLE_AT_COLUMN in symbol_df:
+            ohlcv_columns.append(AVAILABLE_AT_COLUMN)
+        ohlcv_df = symbol_df[ohlcv_columns]
         ohlcv_df.index.name = "ts"
-        ohlcv_count += write_ohlcv(
-            ohlcv_df,
-            symbol,
-            timeframe,
-            data_source=instruments[symbol].data_source,
-            instrument_type=instruments[symbol].instrument_type,
-            session_mode=config.session_mode,
-        )
+        ohlcv_count += write_ohlcv(ohlcv_df, subscription_by_symbol[symbol])
     counts["ohlcv"] = ohlcv_count
     return counts

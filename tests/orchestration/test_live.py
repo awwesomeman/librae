@@ -414,6 +414,7 @@ def test_data_adapters_are_not_shared_across_differing_instrument_types() -> Non
                 "data_source": "binance_spot",
                 "instrument_type": "contract_perpetual",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             }
         },
     )
@@ -518,6 +519,7 @@ def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
                 "data_adapter": "vendor_plugin",
                 "instrument_type": "contract_perpetual",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             }
             for symbol in ("BTC_PERP", "ETH_PERP")
         },
@@ -563,12 +565,14 @@ def test_live_execution_allows_independent_market_data_sources() -> None:
                 "data_source": "source_a",
                 "instrument_type": "spot",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             },
             "ETH": {
                 "data_adapter": "feed_b",
                 "data_source": "source_b",
                 "instrument_type": "spot",
                 "currency": "USDT",
+                "calendar_id": "24/7",
             },
         },
     )
@@ -725,7 +729,7 @@ def test_timescale_callbacks_writes_trade_event() -> None:
     autospec enforces this; a plain MagicMock would hide a mismatch since
     _write() swallows the resulting TypeError as a logged DB failure."""
     config = make_test_cfg(mode="sim")
-    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
     callbacks._run_id = "run-1"
     ts = datetime.now(UTC)
 
@@ -777,7 +781,11 @@ def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
     next to an already-live Unrealized P&L. register_run() must seed a
     $0/0.0% baseline instead."""
     config = make_test_cfg(mode="sim", initial_balance=50_000.0)
-    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        None,
+    )
 
     with (
         patch("librae.db.timescale_writer.write_run_metadata", autospec=True),
@@ -795,7 +803,11 @@ def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
 
 def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
     config = make_test_cfg(mode="sim", poll_seconds=17, session_mode="regular")
-    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        None,
+    )
 
     with (
         patch("librae.db.timescale_writer.write_run_metadata", autospec=True) as write_run,
@@ -805,6 +817,9 @@ def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
 
     assert write_run.call_args.kwargs["poll_seconds"] == 17
     assert write_run.call_args.kwargs["session_mode"] == "regular"
+    subscription = write_run.call_args.kwargs["primary_subscriptions"][0]
+    assert subscription.symbol == "BTCUSDT"
+    assert subscription.calendar_id == "24/7"
     assert write_run.call_args.kwargs["config_hash"] == config.config_hash
 
 
@@ -844,16 +859,63 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
         callbacks.on_ohlcv(
             "BTCUSDT",
             "H1",
-            {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0},
+            {
+                "open": 99.0,
+                "high": 101.0,
+                "low": 98.0,
+                "close": 100.0,
+                "volume": 10.0,
+                "available_at": datetime(2025, 1, 1, 1, tzinfo=UTC),
+            },
             datetime(2025, 1, 1, tzinfo=UTC),
         )
 
-    assert write.call_args.kwargs["session_mode"] == "regular"
+    subscription = write.call_args.args[1]
+    assert subscription.to_dict() == {
+        "symbol": "BTCUSDT",
+        "timeframe": "H1",
+        "calendar_id": "24/7",
+        "session_mode": "regular",
+        "data_source": "binance_spot",
+        "instrument_type": "spot",
+    }
+    assert write.call_args.args[0]["available_at"].iloc[0] == datetime(2025, 1, 1, 1, tzinfo=UTC)
+
+
+def test_live_ohlcv_analytics_write_remains_best_effort() -> None:
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        None,
+    )
+
+    with patch(
+        "librae.db.timescale_writer.write_ohlcv",
+        autospec=True,
+        side_effect=RuntimeError("database unavailable"),
+    ) as write:
+        callbacks.on_ohlcv(
+            "BTCUSDT",
+            "H1",
+            {
+                "open": 99.0,
+                "high": 101.0,
+                "low": 98.0,
+                "close": 100.0,
+                "volume": 10.0,
+                "available_at": datetime(2025, 1, 1, 1, tzinfo=UTC),
+            },
+            datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+    write.assert_called_once()
+    assert callbacks._failures["write_ohlcv"] == 1
 
 
 def test_timescale_callbacks_writes_runtime_event() -> None:
     config = make_test_cfg(mode="sim")
-    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
     callbacks._run_id = "run-1"
     ts = datetime.now(UTC)
 
@@ -874,7 +936,9 @@ def test_timescale_callbacks_writes_runtime_event() -> None:
 def test_timescale_callbacks_alert_after_repeated_write_failures() -> None:
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
-    callbacks = _TimescaleCallbacks(config, {}, notifier)
+    callbacks = _TimescaleCallbacks(
+        config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, notifier
+    )
     failing_write = MagicMock(side_effect=RuntimeError("db down"))
     failing_write.__name__ = "failing_write"
 
@@ -891,7 +955,9 @@ def test_timescale_callbacks_track_failures_per_callback() -> None:
     trade_event writes failing every time) — each is tracked independently."""
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
-    callbacks = _TimescaleCallbacks(config, {}, notifier)
+    callbacks = _TimescaleCallbacks(
+        config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, notifier
+    )
 
     failing_write = MagicMock(side_effect=RuntimeError("db down"))
     failing_write.__name__ = "failing_write"
@@ -917,7 +983,9 @@ def test_timescale_callbacks_critical_write_alerts_on_first_failure() -> None:
     immediately instead of waiting for _DB_FAILURE_ALERT_THRESHOLD."""
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
-    callbacks = _TimescaleCallbacks(config, {}, notifier)
+    callbacks = _TimescaleCallbacks(
+        config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, notifier
+    )
     failing_write = MagicMock(side_effect=RuntimeError("db down"))
     failing_write.__name__ = "failing_write"
 
@@ -941,7 +1009,7 @@ def test_timescale_callbacks_mark_one_shot_writes_critical(
     critical=True through to _write, or the first-failure alert silently
     stops firing for these irreplaceable writes."""
     config = make_test_cfg(mode="sim")
-    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
     callbacks._run_id = "run-1"
 
     with patch.object(callbacks, "_write") as write:
@@ -975,7 +1043,7 @@ def test_timescale_callbacks_mark_one_shot_writes_critical(
 
 def test_timescale_callbacks_on_position_event_marks_write_trade_event_critical() -> None:
     config = make_test_cfg(mode="sim")
-    callbacks = _TimescaleCallbacks(config, {}, None)
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
     callbacks._run_id = "run-1"
 
     from librae.core.executor import PositionEvent

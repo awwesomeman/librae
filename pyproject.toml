@@ -41,6 +41,7 @@ cli = [
 ]
 db = [
   "psycopg2-binary>=2.9",  # librae/db/ — optional TimescaleDB read/write integration
+  "exchange-calendars>=4.5",  # validates persisted non-24/7 subscription identities
 ]
 parquet = [
   "pyarrow>=15",  # optional caller-selected DataFrame serialization backend

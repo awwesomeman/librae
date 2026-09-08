@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from librae.core.market_data import MarketDataSubscription
 from librae.db.timescale_reader import get_ohlcv_coverage_ranges
 from librae.db.timescale_writer import merge_ohlcv_coverage_ranges
 
@@ -18,6 +19,17 @@ def _mock_conn(mock_cur: MagicMock) -> MagicMock:
     return mock_conn
 
 
+def _subscription(*, session_mode: str = "extended") -> MarketDataSubscription:
+    return MarketDataSubscription(
+        symbol="BTCUSDT",
+        timeframe="H1",
+        calendar_id="24/7",
+        session_mode=session_mode,
+        data_source="binance_spot",
+        instrument_type="spot",
+    )
+
+
 class TestGetOhlcvCoverage:
     @patch("librae.db.timescale_reader.get_conn")
     def test_returns_sorted_ranges(self, mock_conn_ctx):
@@ -26,12 +38,12 @@ class TestGetOhlcvCoverage:
         mock_cur.fetchall.return_value = [r1]
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
-        result = get_ohlcv_coverage_ranges("BTCUSDT", "H1", "binance_spot")
+        result = get_ohlcv_coverage_ranges(_subscription())
 
         assert result == [r1]
         sql = mock_cur.execute.call_args[0][0]
         assert "ohlcv_coverage_ranges" in sql
-        assert mock_cur.execute.call_args[0][1][-1] == "extended"
+        assert mock_cur.execute.call_args[0][1] == tuple(_subscription().to_dict().values())
 
 
 class TestMergeOhlcvCoverage:
@@ -45,9 +57,7 @@ class TestMergeOhlcvCoverage:
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         merge_ohlcv_coverage_ranges(
-            "BTCUSDT",
-            "H1",
-            "binance_spot",
+            _subscription(),
             datetime(2024, 1, 2, tzinfo=UTC),
             datetime(2024, 1, 3, tzinfo=UTC),
         )
@@ -59,9 +69,9 @@ class TestMergeOhlcvCoverage:
         mock_exec_values.assert_called_once()
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 1
-        assert inserted_rows[0][4] == "extended"
-        assert inserted_rows[0][5] == datetime(2024, 1, 1, tzinfo=UTC)
-        assert inserted_rows[0][6] == datetime(2024, 1, 3, tzinfo=UTC)
+        assert inserted_rows[0][:6] == tuple(_subscription().to_dict().values())
+        assert inserted_rows[0][6] == datetime(2024, 1, 1, tzinfo=UTC)
+        assert inserted_rows[0][7] == datetime(2024, 1, 3, tzinfo=UTC)
 
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
@@ -74,19 +84,24 @@ class TestMergeOhlcvCoverage:
         mock_cur.fetchall.return_value = []
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
+        subscription = MarketDataSubscription(
+            symbol="AAPL",
+            timeframe="H1",
+            calendar_id="XNYS",
+            session_mode="regular",
+            data_source="ibkr",
+            instrument_type="spot",
+        )
         merge_ohlcv_coverage_ranges(
-            "AAPL",
-            "H1",
-            "ibkr",
+            subscription,
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 2, tzinfo=UTC),
-            session_mode="regular",
         )
 
         select_params = mock_cur.execute.call_args_list[0][0][1]
         inserted_rows = mock_exec_values.call_args[0][2]
-        assert select_params[-1] == "regular"
-        assert inserted_rows[0][4] == "regular"
+        assert select_params == tuple(subscription.to_dict().values())
+        assert inserted_rows[0][:6] == tuple(subscription.to_dict().values())
 
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
@@ -98,9 +113,7 @@ class TestMergeOhlcvCoverage:
         mock_conn_ctx.return_value = _mock_conn(mock_cur)
 
         merge_ohlcv_coverage_ranges(
-            "BTCUSDT",
-            "H1",
-            "binance_spot",
+            _subscription(),
             datetime(2024, 1, 10, tzinfo=UTC),
             datetime(2024, 1, 11, tzinfo=UTC),
         )
@@ -108,13 +121,10 @@ class TestMergeOhlcvCoverage:
         inserted_rows = mock_exec_values.call_args[0][2]
         assert len(inserted_rows) == 2
 
-    def test_rejects_invalid_instrument_type(self):
-        with pytest.raises(ValueError, match="instrument_type"):
+    def test_rejects_partial_scalar_identity(self):
+        with pytest.raises(TypeError, match="MarketDataSubscription"):
             merge_ohlcv_coverage_ranges(
-                "BTCUSDT",
-                "H1",
-                "binance_spot",
+                "BTCUSDT",  # type: ignore[arg-type]
                 datetime(2024, 1, 2, tzinfo=UTC),
                 datetime(2024, 1, 3, tzinfo=UTC),
-                instrument_type="daily",
             )
