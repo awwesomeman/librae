@@ -744,7 +744,6 @@ class Backtest:
         self._result: BacktestResult | None = None
         self._metrics: StrategyMetrics | None = None
         self._record_position_snapshots = record_position_snapshots
-        self._direct_subscription_universe = config is None and bool(supplied_subscriptions)
 
         if config is not None:
             self._symbols = list(config.symbols)
@@ -1706,12 +1705,17 @@ class Backtest:
         raw = market_values.to_dict(orient="index")
         for (sym, ts), row in raw.items():
             result.setdefault(ts, {})[sym] = row
-        if not self._direct_subscription_universe:
-            return result
-        return {
-            ts: {symbol: bars[symbol] for symbol in self._symbols if symbol in bars}
-            for ts, bars in result.items()
-        }
+        symbol_rank = {symbol: rank for rank, symbol in enumerate(self._symbols)}
+        ordered: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
+        for ts, bars in result.items():
+            try:
+                present_symbols = sorted(bars, key=symbol_rank.__getitem__)
+            except KeyError as exc:  # guarded by the constructor's exact-cover validation
+                raise ValueError(
+                    f"bar symbol {exc.args[0]!r} is outside the resolved backtest universe"
+                ) from exc
+            ordered[ts] = {symbol: bars[symbol] for symbol in present_symbols}
+        return ordered
 
     def _precompute_lagged_adv(self) -> dict[pd.Timestamp, dict[str, float]]:
         """Precompute point-in-time ADV from completed trading sessions."""

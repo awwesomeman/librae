@@ -800,6 +800,80 @@ class TestBacktestDataContract:
         assert all(ctx.symbols == ("AAA", "BBB") for ctx in contexts)
         assert all(tuple(ctx.bars) == ("AAA", "BBB") for ctx in contexts)
 
+    def test_config_universe_orders_reversed_data_rows_and_subscriptions(self) -> None:
+        data = pd.concat(
+            [
+                _make_multiindex_df([200.0] * 5, symbol="BBB"),
+                _make_multiindex_df([100.0] * 5, symbol="AAA"),
+            ]
+        )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["AAA", "BBB"],
+            symbol_cost_overrides={
+                "AAA": {"multiplier": 1.0},
+                "BBB": {"multiplier": 1.0},
+            },
+            instrument_overrides={
+                "AAA": {
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                    "calendar_id": "24/7",
+                },
+                "BBB": {
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                    "calendar_id": "24/7",
+                },
+            },
+        )
+        contexts: list[Context] = []
+
+        class CaptureUniverse(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        backtest = Backtest(
+            data,
+            CaptureUniverse(),
+            config=config,
+            cost_model=_zero_cost(),
+        )
+
+        backtest.run()
+        output = backtest.build_output()
+
+        assert output.run_metadata.symbols == ("AAA", "BBB")
+        assert tuple(item.symbol for item in backtest.primary_subscriptions) == ("AAA", "BBB")
+        assert all(ctx.symbol == "AAA" for ctx in contexts)
+        assert all(ctx.symbols == ("AAA", "BBB") for ctx in contexts)
+        assert all(tuple(ctx.bars) == ("AAA", "BBB") for ctx in contexts)
+
+    def test_legacy_direct_universe_keeps_data_first_seen_order(self) -> None:
+        data = pd.concat(
+            [
+                _make_multiindex_df([200.0] * 5, symbol="BBB"),
+                _make_multiindex_df([100.0] * 5, symbol="AAA"),
+            ]
+        )
+        contexts: list[Context] = []
+
+        class CaptureUniverse(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        backtest = Backtest(data, CaptureUniverse(), cost_model=_zero_cost())
+
+        backtest.run()
+
+        assert backtest.primary_subscriptions == ()
+        assert contexts
+        assert all(ctx.symbol == "BBB" for ctx in contexts)
+        assert all(ctx.symbols == ("BBB", "AAA") for ctx in contexts)
+        assert all(tuple(ctx.bars) == ("BBB", "AAA") for ctx in contexts)
+
     def test_direct_primary_subscriptions_type_check_precedes_field_access(self) -> None:
         frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
 
