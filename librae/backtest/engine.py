@@ -86,6 +86,7 @@ from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
+    OrderIntent,
     PortfolioWeights,
     Position,
     PositionState,
@@ -587,6 +588,8 @@ class Backtest:
             rebalance_state=rebalance_state,
             rebalance_residual_policy=self._rebalance_residual_policy,
             get_executable_quantity=self._get_executable_quantity,
+            validate_intent_prices=self._validate_intent_prices,
+            get_min_notional=self._get_min_notional,
         )
 
     # --- Private helpers ---
@@ -599,6 +602,17 @@ class Backtest:
         """Apply configured instrument size rules; unknown direct symbols stay continuous."""
         instrument = self._instruments.get(symbol)
         return instrument.normalize_quantity(quantity) if instrument is not None else quantity
+
+    def _validate_intent_prices(self, symbol: str, intent: OrderIntent) -> None:
+        """Apply authoritative instrument price grids before matching."""
+        instrument = self._instruments.get(symbol)
+        if instrument is not None:
+            instrument.validate_order_prices(intent)
+
+    def _get_min_notional(self, symbol: str) -> float | None:
+        """Return the shared entry-order minimum, when configured."""
+        instrument = self._instruments.get(symbol)
+        return instrument.min_notional if instrument is not None else None
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""

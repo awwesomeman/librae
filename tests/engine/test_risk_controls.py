@@ -935,15 +935,7 @@ class TestMaxVolumeParticipation:
         assert filled_quantity(20.0) == pytest.approx(50.0)
         assert filled_quantity(2_000.0) == pytest.approx(50.0)
 
-    @pytest.mark.parametrize(
-        ("default_fill", "limit_price"),
-        [("open", None), ("high", None), ("close", 100.0)],
-    )
-    def test_non_close_fills_use_previous_completed_volume(
-        self,
-        default_fill: str,
-        limit_price: float | None,
-    ) -> None:
+    def test_next_open_fills_use_previous_completed_volume(self) -> None:
         positions: dict[str, PositionState] = {}
 
         _, result = execute_pending_decision_and_stops(
@@ -955,7 +947,6 @@ class TestMaxVolumeParticipation:
                     action="long",
                     symbol="TEST",
                     quantity=100.0,
-                    limit_price=limit_price,
                 )
             ],
             {
@@ -968,7 +959,7 @@ class TestMaxVolumeParticipation:
                 }
             },
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill=default_fill,
+            default_fill="open",
             primary_symbol="TEST",
             max_bar_volume_participation_rate=0.5,
             get_previous_volume=lambda _symbol: 20.0,
@@ -1039,26 +1030,12 @@ class TestMaxVolumeParticipation:
         assert positions == {}
         assert [event.detail["reason"] for event in result.runtime_events] == ["volume_unavailable"]
 
-    def test_close_fill_uses_execution_bar_volume(self):
-        bars = [
-            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 20.0},
-            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-            {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100.0},
-        ]
-        result = Backtest(
-            _make_multiindex_df(bars),
-            OpenOnceStrategy(),
-            initial_balance=10_000.0,
-            cost_model=_zero_cost(),
-            execution=ExecutionPolicy(
+    def test_noncausal_close_fill_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="causal next-bar"):
+            ExecutionPolicy(
                 default_fill_price="close",
                 max_bar_volume_participation_rate=0.5,
-            ),
-        ).run()
-
-        assert result.trades[0].quantity == pytest.approx(10.0)
+            )
 
 
 class TestDynamicSlippage:

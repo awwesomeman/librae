@@ -151,6 +151,7 @@ class CryptoAdapter:
 
         self._read_only = not bool(api_key)
         self._exchange_id = exchange_id
+        self._tick_size_precision_mode = getattr(ccxt, "TICK_SIZE", None)
 
     def info(self) -> AdapterInfo:
         """Return adapter metadata (consistent with ABC adapters)."""
@@ -242,6 +243,13 @@ class CryptoAdapter:
                 canonical_symbol = native_symbol
                 multiplier = market.get("contractSize")
             tick_size = (market.get("precision") or {}).get("price")
+            price_increment = (
+                tick_size
+                if getattr(self._exchange, "precisionMode", None)
+                == getattr(self, "_tick_size_precision_mode", None)
+                and self._tick_size_precision_mode is not None
+                else None
+            )
             currency = str(market.get("settle") or quote)
             results.append(
                 AvailableSymbol(
@@ -259,6 +267,9 @@ class CryptoAdapter:
                     contract_rank=contract_rank,
                     multiplier=float(multiplier) if multiplier is not None else None,
                     tick_size=float(tick_size) if tick_size is not None else None,
+                    price_increment=(
+                        float(price_increment) if price_increment is not None else None
+                    ),
                 )
             )
         return tuple(

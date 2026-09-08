@@ -25,6 +25,8 @@ def _instrument(
     *,
     quantity_step: float,
     min_quantity: float | None = None,
+    price_increment: float | None = None,
+    min_notional: float | None = None,
 ) -> SymbolInfo:
     return SymbolInfo(
         symbol=symbol,
@@ -37,6 +39,8 @@ def _instrument(
         currency="USD",
         quantity_step=quantity_step,
         min_quantity=min_quantity,
+        price_increment=price_increment,
+        min_notional=min_notional,
     )
 
 
@@ -67,6 +71,10 @@ def _execute(
             (lambda _symbol: max_volume_quantity) if max_volume_quantity is not None else None
         ),
         get_executable_quantity=_normalizer(instruments),
+        validate_intent_prices=lambda symbol, intent: instruments[symbol].validate_order_prices(
+            intent
+        ),
+        get_min_notional=lambda symbol: instruments[symbol].min_notional,
     )
 
 
@@ -160,6 +168,187 @@ def test_quantity_below_minimum_is_audited_as_skipped() -> None:
         "requested_quantity": 0.049,
         "executable_quantity": 0.0,
     }
+
+
+@pytest.mark.parametrize(("quantity", "fills"), [(0.99, False), (1.0, True)])
+def test_minimum_notional_is_enforced_after_quantity_normalization(
+    quantity: float,
+    fills: bool,
+) -> None:
+    instruments = {
+        "COIN": _instrument(
+            "COIN",
+            quantity_step=0.01,
+            min_notional=100.0,
+        )
+    }
+
+    result = _execute(
+        [OrderIntent(action="long", symbol="COIN", quantity=quantity)],
+        instruments,
+    )
+
+    assert bool(result.events) is fills
+    if not fills:
+        assert result.runtime_events[0].detail["reason"] == "notional_below_minimum"
+
+
+def test_cost_model_slippage_cannot_satisfy_minimum_notional() -> None:
+    instrument = _instrument("COIN", quantity_step=0.01, min_notional=100.0)
+
+    result = execute_order_intents(
+        [OrderIntent(action="long", symbol="COIN", quantity=1.0)],
+        {},
+        100_000.0,
+        TS,
+        get_price=lambda _symbol, _intent: 90.0,
+        get_cost_model=lambda _symbol: CostModel(
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=2.0,
+            tick_size=10.0,
+            tax_rate=0.0,
+        ),
+        primary_symbol="COIN",
+        get_min_notional=lambda _symbol: instrument.min_notional,
+    )
+
+    assert result.events == []
+    assert result.runtime_events[0].detail["reason"] == "notional_below_minimum"
+
+
+def test_sizing_cap_cannot_leave_an_entry_below_minimum_notional() -> None:
+    instruments = {"COIN": _instrument("COIN", quantity_step=0.01, min_notional=100.0)}
+
+    result = _execute(
+        [OrderIntent(action="long", symbol="COIN", quantity=2.0)],
+        instruments,
+        max_position_notional=99.0,
+    )
+
+    assert result.events == []
+    assert result.runtime_events[0].detail["reason"] == "notional_below_minimum"
+
+
+def test_portfolio_weight_entry_respects_minimum_notional() -> None:
+    instruments = {"COIN": _instrument("COIN", quantity_step=0.01, min_notional=150.0)}
+
+    result = execute_portfolio_weights(
+        PortfolioWeights({"COIN": 0.1}),
+        {},
+        1_000.0,
+        TS,
+        get_price=lambda _symbol, _intent: 100.0,
+        get_cost_model=lambda _symbol: CostModel.zero(),
+        primary_symbol="COIN",
+        get_executable_quantity=_normalizer(instruments),
+        get_min_notional=lambda symbol: instruments[symbol].min_notional,
+    )
+
+    assert result.events == []
+    assert result.runtime_events[0].detail["reason"] == "notional_below_minimum"
+
+
+def test_minimum_notional_never_blocks_an_exposure_reducing_close() -> None:
+    positions = {
+        "COIN": PositionState(
+            symbol="COIN",
+            side="long",
+            entry_price=100.0,
+            quantity=0.5,
+            entry_at=TS,
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=50.0,
+        )
+    }
+
+    result = execute_order_intents(
+        [OrderIntent(action="close", symbol="COIN")],
+        positions,
+        1_000.0,
+        TS,
+        get_price=lambda _symbol, _intent: 90.0,
+        get_cost_model=lambda _symbol: CostModel.zero(),
+        primary_symbol="COIN",
+        get_min_notional=lambda _symbol: 100.0,
+    )
+
+    assert positions == {}
+    assert result.events[0].event_type == "close"
+
+
+def test_minimum_notional_rejects_an_entire_atomic_group() -> None:
+    instruments = {
+        "A": _instrument("A", quantity_step=1.0, min_notional=50.0),
+        "B": _instrument("B", quantity_step=1.0, min_notional=150.0),
+    }
+    positions: dict[str, PositionState] = {}
+
+    result = execute_order_intents(
+        [
+            OrderIntent(action="long", symbol="A", quantity=1.0, group_id="spread"),
+            OrderIntent(action="short", symbol="B", quantity=1.0, group_id="spread"),
+        ],
+        positions,
+        100_000.0,
+        TS,
+        get_price=lambda _symbol, _intent: 100.0,
+        get_cost_model=lambda _symbol: CostModel.zero(),
+        primary_symbol="A",
+        atomic_groups=True,
+        get_executable_quantity=_normalizer(instruments),
+        get_min_notional=lambda symbol: instruments[symbol].min_notional,
+    )
+
+    assert positions == {}
+    assert result.events == []
+    assert result.runtime_events[0].detail["reason"] == "group_unfillable"
+    assert result.runtime_events[0].detail["failed_reasons"] == ["notional_below_minimum"]
+
+
+def test_invalid_price_grid_rejects_group_before_any_position_mutation() -> None:
+    instruments = {
+        "A": _instrument("A", quantity_step=1.0, price_increment=0.25),
+        "B": _instrument("B", quantity_step=1.0, price_increment=0.25),
+    }
+    positions: dict[str, PositionState] = {}
+
+    with pytest.raises(ValueError, match=r"limit_price.*price_increment"):
+        execute_order_intents(
+            [
+                OrderIntent(
+                    action="long",
+                    symbol="A",
+                    quantity=1.0,
+                    limit_price=100.25,
+                    group_id="spread",
+                ),
+                OrderIntent(
+                    action="short",
+                    symbol="B",
+                    quantity=1.0,
+                    limit_price=100.125,
+                    group_id="spread",
+                ),
+            ],
+            positions,
+            100_000.0,
+            TS,
+            get_price=lambda _symbol, intent: intent.limit_price,
+            get_cost_model=lambda _symbol: CostModel.zero(),
+            primary_symbol="A",
+            atomic_groups=True,
+            get_executable_quantity=_normalizer(instruments),
+            validate_intent_prices=lambda symbol, intent: instruments[symbol].validate_order_prices(
+                intent
+            ),
+        )
+
+    assert positions == {}
 
 
 def test_group_rejects_quantity_normalization_that_changes_leg_ratios() -> None:

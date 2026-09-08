@@ -345,7 +345,7 @@ class ShioajiAdapter:
             )
 
     def prepare_order(self, signal: dict) -> dict:
-        """Round quantity/limit price to Shioaji contract rules."""
+        """Normalize quantity and validate known fixed-price constraints."""
         validate_order_signal(signal)
         contract = self._resolve_contract(signal["symbol"])
         self._validate_contract_selection(
@@ -366,10 +366,22 @@ class ShioajiAdapter:
         prepared["quantity"] = quantity
 
         if signal.get("order_type") == "limit":
-            tick_size = float(signal.get("tick_size") or 0.0)
-            if tick_size <= 0:
-                raise ValueError("Shioaji limit orders require a positive tick_size")
-            price = passive_price(float(signal["price"]), tick_size, signal["side"])
+            price = float(signal["price"])
+            raw_increment = signal.get("price_increment")
+            if raw_increment is not None:
+                try:
+                    price_increment = float(raw_increment)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("price_increment must be finite and positive") from exc
+                if not isfinite(price_increment) or price_increment <= 0:
+                    raise ValueError("price_increment must be finite and positive")
+                normalized_price = passive_price(price, price_increment, signal["side"])
+                tolerance = max(1e-12, price_increment * 1e-9)
+                if abs(normalized_price - price) > tolerance:
+                    raise ValueError(
+                        f"{signal['symbol']} price is not aligned to "
+                        f"price_increment {price_increment}"
+                    )
             raw_lower = getattr(contract, "limit_down", None)
             raw_upper = getattr(contract, "limit_up", None)
             if raw_lower is None or raw_upper is None:
@@ -382,6 +394,9 @@ class ShioajiAdapter:
                 raise ValueError(f"{signal['symbol']} price is below limit_down {lower}")
             if price > upper:
                 raise ValueError(f"{signal['symbol']} price exceeds limit_up {upper}")
+            # A missing fixed increment is intentional for price-band markets.
+            # Preserve the requested price and let Shioaji/the venue perform
+            # its authoritative variable-tick validation.
             prepared["price"] = price
         return prepared
 

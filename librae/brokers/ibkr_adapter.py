@@ -340,6 +340,7 @@ class IBKRAdapter:
                         float(raw_multiplier) if raw_multiplier not in (None, "") else None
                     ),
                     tick_size=self._positive_float(getattr(detail, "minTick", None)),
+                    price_increment=self._positive_float(getattr(detail, "minTick", None)),
                 )
             )
         return tuple(results)

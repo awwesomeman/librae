@@ -116,6 +116,7 @@ def test_available_symbols_lists_spot_perpetual_and_ranked_delivery_futures(
     current = next(item for item in results if item.contract_rank == 0)
     assert current.contract_month == "202609"
     assert current.venue_symbol == "BTC/USDT:USDT-260925"
+    assert current.price_increment == 0.1
 
 
 def test_available_symbols_filters_binance_tradfi_perpetual_pool(
@@ -167,6 +168,30 @@ def test_available_symbols_filters_binance_tradfi_perpetual_pool(
     assert results[0].canonical_symbol == "MUUSDT_PERP"
 
 
+def test_available_symbols_does_not_treat_decimal_places_as_price_increment(
+    readonly_adapter,
+    mock_ccxt_exchange,
+):
+    mock_ccxt_exchange.precisionMode = 2
+    mock_ccxt_exchange.load_markets.return_value = {
+        "spot": {
+            "id": "BTCUSDT",
+            "symbol": "BTC/USDT",
+            "base": "BTC",
+            "quote": "USDT",
+            "type": "spot",
+            "spot": True,
+            "active": True,
+            "precision": {"price": 2},
+            "info": {},
+        }
+    }
+
+    [symbol] = readonly_adapter.available_symbols()
+
+    assert symbol.price_increment is None
+
+
 @pytest.fixture
 def mock_ccxt_exchange():
     """Return a mock CCXT exchange instance."""
@@ -194,9 +219,11 @@ def readonly_adapter(mock_ccxt_exchange):
         mock_ccxt.return_value = MagicMock(**{"binance": mock_exchange_cls})
         # Manually construct to bypass __init__ ccxt lookup
         adapter = CryptoAdapter.__new__(CryptoAdapter)
-        adapter._exchange = mock_ccxt_exchange
-        adapter._read_only = True
-        adapter._exchange_id = "binance"
+    adapter._exchange = mock_ccxt_exchange
+    adapter._read_only = True
+    adapter._exchange_id = "binance"
+    adapter._tick_size_precision_mode = 4
+    mock_ccxt_exchange.precisionMode = 4
     return adapter
 
 

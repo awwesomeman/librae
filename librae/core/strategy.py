@@ -130,8 +130,8 @@ class OrderIntent:
             eligible bar reaches the limit; sells fill when it reaches the
             limit. Gap-through simulation fills at the next bar open. In live,
             the same value submits a broker limit order. ``None`` means the
-            execution policy's simulated market fill field in backtest/sim and
-            a broker market order in live.
+            execution policy's next-eligible-bar open in backtest/sim and a
+            broker market order in live.
         stop_price: Absolute price that force-closes the position (stop-market
             order — fills at the worse of stop_price/bar-open on gap-through).
             Only applied on open/scale of a "long"/"short" action; the engine
@@ -150,8 +150,10 @@ class OrderIntent:
             on them: a leg that cannot fill as written — no executable price, a
             close for a symbol holding nothing, or a close larger than the
             position — raises before anything is staged, while a shortfall the
-            venue decides (cash, bar volume, ADV) rolls the staged mutation
-            back and reports a group_unfillable runtime event. An entry leg
+            venue decides (cash, minimum notional, bar volume, ADV) rolls the
+            staged mutation back and reports a group_unfillable runtime event.
+            Explicit limit/protective prices outside a configured fixed grid
+            fail before staging. An entry leg
             requires an explicit quantity; a close leg may omit one to mean the
             whole position, which is the only way to exit a leg whose size
             changed underneath the strategy. A position carries the group that
@@ -227,8 +229,8 @@ class PortfolioWeights:
     live ``fill_price`` is therefore unsupported.
 
     Target weights need not sum to one; any remainder stays in cash. Simulated
-    execution uses ``RunConfig.execution.default_fill_price``. Live target
-    rebalances submit market orders after the completed-bar decision.
+    execution uses the next eligible bar's open. Live target rebalances submit
+    market orders after the completed-bar decision.
     """
 
     weights: Mapping[str, float]

@@ -237,16 +237,19 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         )
     )
     assert intraday_adv.execution.adv_lookback_sessions == 20
-    with pytest.raises(ValueError, match="bar field"):
+    with pytest.raises(ValueError, match="causal next-bar"):
         ExecutionPolicy(default_fill_price="")
+    for unsupported in ("close", "high", "low", "feature_price"):
+        with pytest.raises(ValueError, match="causal next-bar"):
+            ExecutionPolicy(default_fill_price=unsupported)
     with pytest.raises(TypeError, match="ExecutionPolicy"):
         _config(execution={"max_bar_volume_participation_rate": 0.1})
 
 
 def test_execution_policy_preserves_existing_positional_argument_order() -> None:
-    policy = ExecutionPolicy("close", 0.2, 10, 0.03, 4, 90, 1_440)
+    policy = ExecutionPolicy("open", 0.2, 10, 0.03, 4, 90, 1_440)
 
-    assert policy.default_fill_price == "close"
+    assert policy.default_fill_price == "open"
     assert policy.max_bar_volume_participation_rate == 0.2
     assert policy.adv_lookback_sessions == 10
     assert policy.max_adv_participation_rate == 0.03

@@ -177,10 +177,14 @@ configuration — copy an existing entry for the same broker/asset class as a
 working example. An unregistered symbol needs `instrument_overrides` in
 `config.yaml`, resolved from three separate sources:
 
-1. **The field schema** — `symbol`/`venue_symbol`/`currency`/`multiplier`/
-   `security_type`/`exchange`/`continuous_alias`/`contract_month` plus the
-   optional common execution rules `quantity_step`/`min_quantity`. Instrument
-   metadata is defined by `SymbolInfo`; the broker request boundary is
+1. **The field schema** — routing and identity fields such as
+   `venue_symbol`/`currency`/`security_type`/`exchange`/`continuous_alias`/
+   `contract_month`, plus the optional common execution rules
+   `quantity_step`/`min_quantity`/`price_increment`/`min_notional`. Unknown
+   keys and invalid values are rejected when `RunConfig` is built. Accounting
+   fields such as `multiplier` and cost-model `tick_size` belong in
+   `symbol_cost_overrides`. Instrument metadata is defined by `SymbolInfo`; the
+   broker request boundary is
    `PositionRequest`/`OrderRequest` in
    [`librae/live/executor.py`](../librae/live/executor.py), and both are walked
    through with worked IBKR stock and futures examples in the "Per-symbol
@@ -199,10 +203,15 @@ A registered symbol can still override select routing fields per run via
 `data_source` — set `strategy.broker` or
 `instrument_overrides.<symbol>.broker` explicitly.
 
-Set `quantity_step` and `min_quantity` to the stable constraint shared by
-research and live execution. The engine rounds down before cash, liquidity,
-and risk checks. Broker-discovered precision and changing minimum-notional
-rules remain adapter checks; do not copy a transient venue value into the
+Set `quantity_step`, `min_quantity`, and `min_notional` only when they are stable
+constraints shared by research and live execution. The engine rounds quantity
+down before cash, liquidity, and risk checks, then applies the minimum notional
+to exposure-increasing orders; exits are never blocked by an entry minimum.
+Set `price_increment` from authoritative venue metadata when strategies submit
+explicit limit or protective prices. It is deliberately separate from the
+cost-model `tick_size`, which is only a slippage approximation and never an
+executable-price authority. Broker-discovered precision and changing venue
+rules remain final adapter checks; do not copy a transient value into the
 built-in registry.
 
 ## Environment variables

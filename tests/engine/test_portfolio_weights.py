@@ -720,43 +720,6 @@ class TestBacktestRebalance:
         assert b_cancellation.detail["cancelled_quantity"] == pytest.approx(5.0)
         assert b_cancellation.detail["remaining_quantity"] == 0.0
 
-    def test_residual_slice_is_covered_by_the_ambiguous_ordering_guard(self) -> None:
-        """A carried residual fills at this bar's price like any other
-        decision, so it faces the same unresolvable ordering against a
-        protection triggered on the same bar. The guard keys on the pending
-        decision, which a residual slice leaves empty, so it has to be told
-        about the residual explicitly or those bars -- the ones most likely to
-        collide, since a residual persists across bars -- would slip through.
-        """
-        frame = _multi_asset_frame(opens={"A": [100.0] * 6}, closes={"A": [100.0] * 6})
-        timestamps = frame.index.get_level_values("datetime").unique()
-        frame["volume"] = 1.0
-        # The stop triggers on the bar where the residual would slice again.
-        frame.loc[("A", timestamps[3]), "low"] = 80.0
-
-        class SlowTargetWithStop(Strategy):
-            def on_bar(self, ctx: Context) -> StrategyDecision:
-                if ctx.period_index == 0:
-                    return [OrderIntent(action="long", symbol="A", quantity=1.0, stop_price=95.0)]
-                if ctx.period_index == 1:
-                    return PortfolioWeights(weights={"A": 0.5})
-                return []
-
-        with pytest.raises(ValueError, match="ambiguous same-bar ordering"):
-            Backtest(
-                frame,
-                SlowTargetWithStop(),
-                initial_balance=1_000.0,
-                cost_model=CostModel.zero(),
-                data_source="test",
-                execution=ExecutionPolicy(
-                    default_fill_price="close",
-                    max_bar_volume_participation_rate=1.0,
-                    max_rebalance_delay_bars=4,
-                    rebalance_residual_policy="defer_symbols",
-                ),
-            ).run()
-
     def test_triggered_stop_cancels_addition_residual_and_owns_later_capacity(self) -> None:
         frame = _multi_asset_frame(opens={"A": [100.0] * 6})
         timestamps = frame.index.get_level_values("datetime").unique()

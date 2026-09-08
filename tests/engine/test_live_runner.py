@@ -2896,6 +2896,40 @@ class TestLiveExecutionLifecycle:
         assert runtime_events[0].detail["reason"] == "group_preflight_rejected"
         assert runtime_events[0].detail["group_id"] == "bad"
 
+    def test_live_group_shared_minimum_notional_submits_no_sibling(self):
+        adapter = _mock_order_adapter()
+        runtime_events = []
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                symbols=["A", "B"],
+                instrument_overrides={"B": {"min_notional": 150.0}},
+            ),
+            on_runtime_event=runtime_events.append,
+        )
+        runner._last_prices = {"A": 100.0, "B": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0, group_id="pair"),
+                OrderIntent(action="short", symbol="B", quantity=1.0, group_id="pair"),
+            ],
+            {
+                "A": {"close": 100.0, "volume": 10_000.0},
+                "B": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert runner._positions == {}
+        adapter.place_order.assert_not_called()
+        assert runtime_events[0].detail["reason"] == "group_preflight_rejected"
+        assert "notional_below_minimum" in runtime_events[0].detail["message"]
+
     def test_live_group_rejects_asymmetric_adapter_quantity_rounding(self):
         adapter = _mock_order_adapter()
         adapter.prepare_order.side_effect = lambda signal: {
@@ -4477,6 +4511,89 @@ class TestLiveExecutionLifecycle:
         assert signal["price"] == 99.5
         assert runner._positions == {}
 
+    def test_invalid_price_grid_halts_before_adapter_preparation(self):
+        adapter = _mock_order_adapter()
+
+        class HalfTickLimitBuy(Strategy):
+            def on_bar(self, ctx):
+                return [
+                    OrderIntent(
+                        action="long",
+                        symbol=ctx.symbol,
+                        quantity=1.0,
+                        limit_price=99.625,
+                    )
+                ]
+
+        runner = self._make_trader(
+            HalfTickLimitBuy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                instrument_overrides={"BTCUSDT": {"price_increment": 0.25}},
+            ),
+        )
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is True
+        adapter.prepare_order.assert_not_called()
+        adapter.place_order.assert_not_called()
+
+    def test_minimum_notional_is_skipped_before_adapter_preparation(self):
+        adapter = _mock_order_adapter()
+        runtime_events = []
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                instrument_overrides={"BTCUSDT": {"min_notional": 200.0}},
+            ),
+            on_runtime_event=runtime_events.append,
+        )
+
+        runner.run(max_iterations=1)
+
+        assert runner._halted is False
+        assert any(
+            event.detail.get("reason") == "notional_below_minimum" for event in runtime_events
+        )
+        adapter.prepare_order.assert_not_called()
+        adapter.place_order.assert_not_called()
+
+    def test_simulation_uses_the_same_minimum_notional_contract(self):
+        adapter = _mock_order_adapter()
+        runtime_events = []
+        runner = self._make_trader(
+            _AlwaysBuyStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="sim",
+                instrument_overrides={"BTCUSDT": {"min_notional": 200.0}},
+            ),
+            on_runtime_event=runtime_events.append,
+        )
+        first_frame = _make_ohlcv_df(start_hour=0)
+        second_frame = _make_ohlcv_df(start_hour=1)
+
+        runner._process_bar(
+            "BTCUSDT",
+            first_frame,
+            first_frame["ts"].iloc[-1].to_pydatetime(),
+        )
+        runner._process_bar(
+            "BTCUSDT",
+            second_frame,
+            second_frame["ts"].iloc[-1].to_pydatetime(),
+        )
+
+        assert runner._positions == {}
+        assert any(
+            event.detail.get("reason") == "notional_below_minimum" for event in runtime_events
+        )
+        adapter.prepare_order.assert_not_called()
+
     def test_limit_price_collar_halts_before_submission(self):
         adapter = _mock_order_adapter()
 
@@ -4580,7 +4697,7 @@ class TestLiveExecutionLifecycle:
         adapter.place_order.assert_called_once()
         assert adapter.place_order.call_args[0][0]["quantity"] == pytest.approx(0.9)
 
-    def test_prepared_limit_price_cannot_bypass_order_notional_limit(self):
+    def test_prepared_limit_price_change_halts_before_submission(self):
         adapter = _mock_order_adapter()
         adapter.prepare_order.side_effect = lambda signal: {
             **signal,
@@ -4599,7 +4716,7 @@ class TestLiveExecutionLifecycle:
                 ]
 
         runner = self._make_trader(LimitBuy(), adapter)
-        runner._risk_policy = RiskPolicy(max_order_notional=150.0)
+        runner._risk_policy = RiskPolicy()
 
         runner.run(max_iterations=1)
 
@@ -4670,7 +4787,7 @@ class TestLiveExecutionLifecycle:
                         action="long",
                         symbol=ctx.symbol,
                         quantity=1.9,
-                        limit_price=99.57,
+                        limit_price=99.5,
                     )
                 ]
 

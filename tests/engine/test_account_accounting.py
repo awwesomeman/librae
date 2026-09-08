@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from librae import AccountConfig, RunConfig
-from librae.config.symbols import resolve_symbol
 
 
 def _config(**overrides: object) -> RunConfig:
@@ -58,21 +57,19 @@ def test_single_account_has_direct_accessors() -> None:
 
 
 def test_symbol_cannot_route_to_another_account() -> None:
-    config = _config(
-        instrument_overrides={
-            "AAA": {
-                "account_id": "secondary",
-                "currency": "USD",
-                "instrument_type": "spot",
-                "data_adapter": "crypto",
-            },
-            "BBB": {
-                "currency": "USD",
-                "instrument_type": "spot",
-                "data_adapter": "crypto",
-            },
-        }
-    )
-
-    with pytest.raises(ValueError, match="account_id is not supported"):
-        resolve_symbol(config, "AAA")
+    with pytest.raises(ValueError, match="account_id"):
+        _config(
+            instrument_overrides={
+                "AAA": {
+                    "account_id": "secondary",
+                    "currency": "USD",
+                    "instrument_type": "spot",
+                    "data_adapter": "crypto",
+                },
+                "BBB": {
+                    "currency": "USD",
+                    "instrument_type": "spot",
+                    "data_adapter": "crypto",
+                },
+            }
+        )

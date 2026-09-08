@@ -1257,12 +1257,13 @@ def resolve_fill_price(
     *,
     position_side: PositionSide | None = None,
 ) -> float | None:
-    """Resolve a limit price or the engine's simulated market fill field.
+    """Resolve a limit price or the causal next-bar open market fill.
 
     Args:
         bar: Next bar's OHLCV dict (the bar where the fill happens).
         intent: The order intent whose fill-price specification to use.
-        default_fill: Engine-level default field name (e.g. "open").
+        default_fill: Engine-level built-in mode. Only ``"open"`` is causal
+            under Librae's bar-start timestamp contract.
         position_side: Required to infer the order direction for a close.
 
     Returns:
@@ -1274,6 +1275,8 @@ def resolve_fill_price(
     A gap through the limit receives the opening price, otherwise the limit.
     The intent is good for this eligible bar only.
     """
+    if default_fill != "open":
+        raise ValueError("default_fill supports only causal next-bar 'open'")
     fill_spec: float | str = intent.limit_price if intent.limit_price is not None else default_fill
     order_side = _intent_order_side(intent, position_side)
     if order_side is None:
@@ -1622,6 +1625,7 @@ def _try_fill(
     max_volume_qty: float | None = None,
     bar_volume: float | None = None,
     normalize_quantity: Callable[[float], float] | None = None,
+    min_notional: float | None = None,
 ) -> tuple[Fill | None, float, str | None]:
     """Attempt a fill and validate cash sufficiency.
 
@@ -1668,6 +1672,13 @@ def _try_fill(
             )
             if fill is None:
                 return None, 0.0, "volume_capped"
+    if min_notional is not None:
+        # Venue minimums apply to the executable order price, not to a
+        # research-only slippage adjustment produced by the cost model.
+        notional = price * fill.quantity * cost_model.multiplier
+        tolerance = max(EPSILON, min_notional * EPSILON)
+        if notional < min_notional - tolerance:
+            return None, 0.0, "notional_below_minimum"
     outlay = cost_model.estimate_entry_outlay(
         price,
         fill.quantity,
@@ -1776,6 +1787,8 @@ def execute_order_intents(
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     atomic_groups: bool = False,
     get_executable_quantity: Callable[[str, float], float] | None = None,
+    validate_intent_prices: Callable[[str, OrderIntent], None] | None = None,
+    get_min_notional: Callable[[str], float | None] | None = None,
 ) -> ExecutionResult:
     """Execute symbol-level intents: open, scale, partial/full close.
 
@@ -1799,6 +1812,9 @@ def execute_order_intents(
     liquidity usage for that group are discarded. Live planning deliberately
     leaves this disabled and performs broker-specific group handling itself.
     """
+    if validate_intent_prices is not None:
+        for intent in intents:
+            validate_intent_prices(intent.symbol or primary_symbol, intent)
     intents, normalization_events = normalize_order_intents(
         intents,
         ts,
@@ -1824,6 +1840,7 @@ def execute_order_intents(
             used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
             used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
             get_executable_quantity=get_executable_quantity,
+            get_min_notional=get_min_notional,
         )
         result.runtime_events[:0] = normalization_events
         return result
@@ -1898,6 +1915,7 @@ def execute_order_intents(
                         if get_executable_quantity is not None
                         else None
                     ),
+                    min_notional=get_min_notional(sym) if get_min_notional else None,
                 )
                 if fill:
                     _validate_entry_order_notional(
@@ -1977,6 +1995,7 @@ def execute_order_intents(
                         if get_executable_quantity is not None
                         else None
                     ),
+                    min_notional=get_min_notional(sym) if get_min_notional else None,
                 )
                 if fill:
                     _validate_entry_order_notional(
@@ -2199,6 +2218,7 @@ def _execute_order_intent_groups_atomically(
     used_bar_quantity_by_symbol: dict[str, float] | None,
     used_adv_quantity_by_symbol: dict[str, float] | None,
     get_executable_quantity: Callable[[str, float], float] | None,
+    get_min_notional: Callable[[str], float | None] | None,
 ) -> ExecutionResult:
     """Execute grouped simulation intents against isolated staged state."""
     units: list[tuple[str | None, list[OrderIntent]]] = []
@@ -2230,6 +2250,7 @@ def _execute_order_intent_groups_atomically(
         "get_volume": get_volume,
         "get_lagged_adv": get_lagged_adv,
         "get_executable_quantity": get_executable_quantity,
+        "get_min_notional": get_min_notional,
     }
 
     # WHY: ungrouped units commit straight into the caller's book as the loop
@@ -2606,6 +2627,7 @@ def execute_portfolio_weights(
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     get_executable_quantity: Callable[[str, float], float] | None = None,
+    get_min_notional: Callable[[str], float | None] | None = None,
 ) -> ExecutionResult:
     """Resolve and execute a portfolio rebalance as one deterministic batch."""
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
@@ -2688,6 +2710,7 @@ def execute_portfolio_weights(
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
         get_executable_quantity=get_executable_quantity,
+        get_min_notional=get_min_notional,
     )
     cash_after_reductions = cash + reduction_result.cash_delta
     scaled_additions, cash_events = _scale_additions_to_cash(
@@ -2716,6 +2739,7 @@ def execute_portfolio_weights(
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
         get_executable_quantity=get_executable_quantity,
+        get_min_notional=get_min_notional,
     )
     return ExecutionResult(
         trades=[*reduction_result.trades, *addition_result.trades],
@@ -2922,6 +2946,7 @@ def execute_portfolio_rebalance_slice(
     used_bar_quantity_by_symbol: dict[str, float] | None = None,
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     get_executable_quantity: Callable[[str, float], float] | None = None,
+    get_min_notional: Callable[[str], float | None] | None = None,
 ) -> ExecutionResult:
     """Execute one bounded-liquidity slice and retain only true residuals."""
     if residual_policy == "discard":
@@ -3079,6 +3104,7 @@ def execute_portfolio_rebalance_slice(
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
         get_executable_quantity=get_executable_quantity,
+        get_min_notional=get_min_notional,
     )
     for event in reduction_result.events:
         key = ("reduction", event.symbol)
@@ -3176,6 +3202,7 @@ def execute_portfolio_rebalance_slice(
         used_bar_quantity_by_symbol=volume_consumed,
         used_adv_quantity_by_symbol=adv_consumed,
         get_executable_quantity=get_executable_quantity,
+        get_min_notional=get_min_notional,
     )
     for event in addition_result.events:
         key = ("addition", event.symbol)
@@ -3517,21 +3544,25 @@ def execute_pending_decision_and_stops(
     rebalance_state: PortfolioRebalanceState | None = None,
     rebalance_residual_policy: RebalanceResidualPolicy = "discard",
     get_executable_quantity: Callable[[str, float], float] | None = None,
+    validate_intent_prices: Callable[[str, OrderIntent], None] | None = None,
+    get_min_notional: Callable[[str], float | None] | None = None,
 ) -> tuple[float, ExecutionResult]:
     """Fill pending decisions, then check causally eligible protective exits.
 
     Positions already open before this bar and entries known to fill at the
     bar open may trigger protection on this bar. Protection on a new resting
-    limit or non-open field fill starts on the next bar because OHLCV cannot
+    limit fill starts on the next bar because OHLCV cannot
     establish whether the bar's stop/target occurred before or after entry.
     Backtest and real-time simulation share this conservative convention.
-    Live broker execution intentionally does not call it. A fill at the bar
-    close may use that completed bar's volume. Open, limit, and other
-    non-close fills use ``get_previous_volume`` so their liquidity cap and
-    impact never depend on information completed after the fill timestamp.
+    Live broker execution intentionally does not call it. Open and limit fills
+    use ``get_previous_volume`` so their liquidity cap and impact never depend
+    on information completed after the fill timestamp.
 
     Returns (updated cash, combined ExecutionResult for both steps).
     """
+    if default_fill != "open":
+        raise ValueError("default_fill supports only causal next-bar 'open'")
+
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
@@ -3542,7 +3573,6 @@ def execute_pending_decision_and_stops(
 
     if pending_decision and rebalance_state is not None:
         raise ValueError("cannot execute a new decision while a portfolio residual is pending")
-
     if pending_decision or rebalance_state is not None:
         _validate_no_ambiguous_stop_conflicts(
             pending_decision,
@@ -3572,15 +3602,11 @@ def execute_pending_decision_and_stops(
         )
 
         if isinstance(pending_decision, PortfolioWeights):
-            if default_fill == "open":
-                same_bar_protection_symbols.update(pending_decision.weights)
+            same_bar_protection_symbols.update(pending_decision.weights)
         elif rebalance_state is not None:
-            if default_fill == "open":
-                same_bar_protection_symbols.update(
-                    order.intent.symbol
-                    for order in rebalance_state.orders
-                    if order.phase == "addition"
-                )
+            same_bar_protection_symbols.update(
+                order.intent.symbol for order in rebalance_state.orders if order.phase == "addition"
+            )
         else:
             for intent in pending_decision:
                 symbol = intent.symbol or primary_symbol
@@ -3602,7 +3628,7 @@ def execute_pending_decision_and_stops(
             )
 
         def get_fresh_reference_price(sym: str) -> float | None:
-            raw_price = bars.get(sym, {}).get(default_fill)
+            raw_price = bars.get(sym, {}).get("open")
             if raw_price is None or not isfinite(raw_price) or raw_price <= 0:
                 return None
             return float(raw_price)
@@ -3610,19 +3636,7 @@ def execute_pending_decision_and_stops(
         def get_valuation_price(sym: str) -> float | None:
             return get_fresh_reference_price(sym) or (exposure_prices or {}).get(sym)
 
-        intents_by_symbol = (
-            {intent.symbol or primary_symbol: intent for intent in pending_decision}
-            if isinstance(pending_decision, list)
-            else {}
-        )
-
         def get_execution_volume(sym: str) -> float | None:
-            intent = intents_by_symbol.get(sym)
-            executes_at_close = default_fill == "close" and (
-                intent is None or intent.limit_price is None
-            )
-            if executes_at_close:
-                return bars.get(sym, {}).get("volume")
             return get_previous_volume(sym) if get_previous_volume else None
 
         common_kwargs = {
@@ -3636,6 +3650,7 @@ def execute_pending_decision_and_stops(
             "get_volume": get_execution_volume,
             "get_lagged_adv": get_lagged_adv,
             "get_executable_quantity": get_executable_quantity,
+            "get_min_notional": get_min_notional,
         }
         if isinstance(pending_decision, PortfolioWeights) or rebalance_state is not None:
             if rebalance_residual_policy == "discard":
@@ -3698,6 +3713,7 @@ def execute_pending_decision_and_stops(
                 used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=adv_quantities,
                 atomic_groups=True,
+                validate_intent_prices=validate_intent_prices,
             )
         if enforce_portfolio_limits:
             assert exposure_prices is not None
