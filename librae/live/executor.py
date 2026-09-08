@@ -308,6 +308,12 @@ class OrderAdapter(Protocol):
     additionally declare ``broker_client_order_id(client_order_id) -> str``.
     ``LiveExecutor`` then expects that compact form in every broker report
     instead of the canonical id.
+
+    An adapter that owns a venue price grid not expressible as one fixed
+    ``SymbolInfo.price_increment`` may additionally declare
+    ``normalize_limit_price(signal) -> float``. ``LiveExecutor`` obtains that
+    exact expected value before preparation and rejects any different result;
+    an undeclared adapter price change remains invalid.
     """
 
     def prepare_order(self, signal: OrderSignal) -> OrderSignal: ...
@@ -476,7 +482,23 @@ class LiveExecutor:
         signal["reference_price"] = reference_price
         instrument = self._instruments.get(request.symbol)
         signal["price_increment"] = instrument.price_increment if instrument else None
+        expected_limit_price = request.limit_price
+        adapter_owns_price = False
         try:
+            normalizer = getattr(type(adapter), "normalize_limit_price", None)
+            if (
+                request.order_type == "limit"
+                and signal["price_increment"] is None
+                and callable(normalizer)
+            ):
+                normalized_raw = adapter.normalize_limit_price(signal)
+                expected_limit_price = float(normalized_raw)
+                if not isfinite(expected_limit_price) or expected_limit_price <= 0:
+                    raise ValueError(
+                        "adapter normalize_limit_price must return a finite positive price"
+                    )
+                signal["price"] = expected_limit_price
+                adapter_owns_price = True
             prepared = adapter.prepare_order(signal)
         except Exception as exc:
             raise ValueError(f"{request.symbol} order preparation failed: {exc}") from exc
@@ -508,19 +530,17 @@ class LiveExecutor:
         if request.order_type == "limit":
             assert request.limit_price is not None
             assert limit_price is not None
-            tolerance = max(
-                EPSILON,
-                (
-                    instrument.price_increment
-                    if instrument is not None and instrument.price_increment is not None
-                    else 0.0
-                )
-                * EPSILON,
-            )
-            if abs(limit_price - request.limit_price) > tolerance:
+            assert expected_limit_price is not None
+            if limit_price != expected_limit_price:
+                if instrument is not None and instrument.price_increment is not None:
+                    reason = "change an authoritative limit price"
+                elif adapter_owns_price:
+                    reason = "change the declared adapter-normalized limit price"
+                else:
+                    reason = "change a limit price without normalize_limit_price"
                 raise ValueError(
-                    "order preparation cannot change a validated limit price: "
-                    f"requested {request.limit_price:.12g}, prepared {limit_price:.12g}"
+                    f"order preparation cannot {reason}: expected "
+                    f"{expected_limit_price:.12g}, prepared {limit_price:.12g}"
                 )
         return replace(
             request,

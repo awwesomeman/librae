@@ -583,6 +583,34 @@ class IBKRAdapter:
                 "to enable order placement."
             )
 
+    @classmethod
+    def _normalize_limit_price(cls, signal: dict, details: object) -> float:
+        market_rule_ids = str(getattr(details, "marketRuleIds", "") or "").strip()
+        if market_rule_ids:
+            raise ValueError(
+                f"{signal['symbol']} requires an IBKR market-rule ladder; "
+                "ContractDetails.minTick alone is not authoritative"
+            )
+        tick_size = cls._positive_float(getattr(details, "minTick", None))
+        if tick_size is None:
+            raise ValueError(f"{signal['symbol']} has no positive IBKR minTick")
+        return passive_price(float(signal["price"]), tick_size, signal["side"])
+
+    def normalize_limit_price(self, signal: dict) -> float:
+        """Normalize only contracts whose details declare no price-band ladder."""
+        validate_order_signal(signal)
+        if signal.get("order_type") != "limit":
+            raise ValueError("normalize_limit_price requires a limit order")
+        details = self._contract_details(
+            signal["symbol"],
+            security_type=signal["security_type"],
+            exchange=signal.get("exchange"),
+            currency=signal["currency"],
+            continuous_alias=signal.get("continuous_alias", False),
+            contract_month=signal.get("contract_month"),
+        )
+        return self._normalize_limit_price(signal, details)
+
     def prepare_order(self, signal: dict) -> dict:
         """Apply IBKR ContractDetails size and tick constraints."""
         validate_order_signal(signal)
@@ -607,13 +635,10 @@ class IBKRAdapter:
         prepared = dict(signal)
         prepared["quantity"] = quantity
         if signal.get("order_type") == "limit":
-            tick_size = self._positive_float(getattr(details, "minTick", None))
-            if tick_size is None:
-                raise ValueError(f"{signal['symbol']} has no positive IBKR minTick")
-            prepared["price"] = passive_price(
-                float(signal["price"]),
-                tick_size,
-                signal["side"],
+            prepared["price"] = (
+                float(signal["price"])
+                if signal.get("price_increment") is not None
+                else self._normalize_limit_price(signal, details)
             )
         return prepared
 

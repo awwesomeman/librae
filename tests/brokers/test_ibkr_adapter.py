@@ -13,7 +13,9 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from librae.brokers.ibkr_adapter import _require_ib_async
-from librae.live.executor import PositionRequest
+from librae.config.symbols import SymbolInfo
+from librae.core.cost_model import CostModel
+from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -543,6 +545,106 @@ class TestPlaceOrder:
 
         assert prepared["quantity"] == 1.2
         assert prepared["price"] == 100.01
+
+    def test_live_executor_accepts_ibkr_owned_min_tick_normalization(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                minSize=0.1,
+                sizeIncrement=0.1,
+                suggestedSizeIncrement=0.1,
+                minTick=0.01,
+                marketRuleIds="",
+            )
+        )
+        instrument = SymbolInfo(
+            symbol="MU",
+            market="us_equity",
+            data_source="ibkr",
+            instrument_type="spot",
+            multiplier=1.0,
+            data_adapter="ibkr",
+            venue_symbol="MU",
+            currency="USD",
+            security_type="STK",
+        )
+        executor = LiveExecutor(
+            CostModel.zero(),
+            simulation=False,
+            order_adapter=adapter,
+            instruments={"MU": instrument},
+        )
+
+        prepared = executor.prepare_order(
+            OrderRequest(
+                client_order_id="ibkr-limit-1",
+                symbol="MU",
+                venue_symbol="MU",
+                side="sell",
+                quantity=1.29,
+                order_type="limit",
+                limit_price=100.001,
+                submitted_at=datetime(2026, 9, 8, tzinfo=UTC),
+                security_type="STK",
+                currency="USD",
+            ),
+            reference_price=100.0,
+        )
+
+        assert prepared.quantity == 1.2
+        assert prepared.limit_price == 100.01
+
+    def test_prepare_order_fails_closed_when_market_rule_ladder_is_required(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                minSize=1.0,
+                sizeIncrement=1.0,
+                minTick=0.01,
+                marketRuleIds="26",
+            )
+        )
+
+        with pytest.raises(ValueError, match="market-rule ladder"):
+            adapter.prepare_order(
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "quantity": 1.0,
+                    "order_type": "limit",
+                    "time_in_force": "day",
+                    "price": 100.001,
+                    "security_type": "STK",
+                    "currency": "USD",
+                }
+            )
+
+    def test_prepare_order_preserves_shared_authoritative_price(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(
+                minSize=1.0,
+                sizeIncrement=1.0,
+                minTick=0.01,
+                marketRuleIds="26",
+            )
+        )
+
+        prepared = adapter.prepare_order(
+            {
+                "symbol": "MU",
+                "side": "buy",
+                "quantity": 1.0,
+                "order_type": "limit",
+                "time_in_force": "day",
+                "price": 100.125,
+                "price_increment": 0.125,
+                "security_type": "STK",
+                "currency": "USD",
+            }
+        )
+
+        assert prepared["price"] == 100.125
 
     def test_market_order_uses_market_order_class(self):
         adapter = _make_adapter(trading_enabled=True)
