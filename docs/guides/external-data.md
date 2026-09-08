@@ -210,6 +210,8 @@ complete as-of join. If a required factor is missing or stale, raise from
 data watermark uncommitted so the event can be retried. A previously queued
 simulated action may still execute on its already-promised next bar before
 feature calculation; factor failure must not rewrite that execution contract.
+The execution-phase frontier is checkpointed first, so retrying the same event
+does not replay a confirmed fill or reuse that bar's liquidity.
 
 For backtests, perform the same point-in-time join before constructing
 `Backtest`. The optional `external_factors` table is a persistence primitive,

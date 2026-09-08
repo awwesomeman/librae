@@ -251,6 +251,8 @@ class LiveRuntimeState:
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
     last_cycle_ts: datetime | None = None
+    last_execution_bar_ts: dict[str, datetime] = field(default_factory=dict)
+    execution_bar_filled_quantities: dict[str, float] = field(default_factory=dict)
     last_feature_as_of: datetime | None = None
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     last_financing_ts: dict[str, datetime] = field(default_factory=dict)
@@ -300,6 +302,11 @@ class LiveRuntimeState:
             "positions": positions,
             "last_prices": self.last_prices,
             "last_cycle_ts": self.last_cycle_ts.isoformat() if self.last_cycle_ts else None,
+            "last_execution_bar_ts": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.last_execution_bar_ts.items()
+            },
+            "execution_bar_filled_quantities": self.execution_bar_filled_quantities,
             "last_feature_as_of": (
                 self.last_feature_as_of.isoformat() if self.last_feature_as_of else None
             ),
@@ -349,6 +356,14 @@ class LiveRuntimeState:
             positions=positions,
             last_prices={str(symbol): float(price) for symbol, price in raw["last_prices"].items()},
             last_cycle_ts=_to_utc(raw["last_cycle_ts"]),
+            last_execution_bar_ts=_timestamps_from_dict(
+                raw["last_execution_bar_ts"],
+                field="last_execution_bar_ts",
+            ),
+            execution_bar_filled_quantities={
+                str(symbol): float(quantity)
+                for symbol, quantity in raw["execution_bar_filled_quantities"].items()
+            },
             last_feature_as_of=_to_utc(raw["last_feature_as_of"]),
             last_bar_ts=_timestamps_from_dict(raw["last_bar_ts"], field="last_bar_ts"),
             last_financing_ts=_timestamps_from_dict(

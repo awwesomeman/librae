@@ -110,6 +110,8 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         positions={"BTC/USDT": _position()},
         last_prices={"BTC/USDT": 101.0},
         last_cycle_ts=datetime(2025, 1, 2, tzinfo=UTC),
+        last_execution_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
+        execution_bar_filled_quantities={"BTC/USDT": 0.5},
         last_feature_as_of=datetime(2025, 1, 2, 0, 5, tzinfo=UTC),
         last_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
         last_financing_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},

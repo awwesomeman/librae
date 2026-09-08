@@ -725,6 +725,8 @@ class LiveTrader:
         self._market_data_fetch_history: dict[str, deque[bool]] = {}
         self._market_data_fetch_degraded: set[str] = set()
         self._last_cycle_ts: datetime | None = None
+        self._last_execution_bar_ts: dict[str, datetime] = {}
+        self._execution_bar_filled_quantities: dict[str, float] = {}
         self._last_feature_as_of: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
@@ -834,6 +836,8 @@ class LiveTrader:
             positions=deepcopy(self._positions),
             last_prices=dict(self._last_prices),
             last_cycle_ts=self._last_cycle_ts,
+            last_execution_bar_ts=dict(self._last_execution_bar_ts),
+            execution_bar_filled_quantities=dict(self._execution_bar_filled_quantities),
             last_feature_as_of=self._last_feature_as_of,
             last_bar_ts=dict(self._last_bar_ts),
             last_financing_ts=dict(self._last_financing_ts),
@@ -873,6 +877,8 @@ class LiveTrader:
         self._positions = state.positions
         self._last_prices = state.last_prices
         self._last_cycle_ts = state.last_cycle_ts
+        self._last_execution_bar_ts = state.last_execution_bar_ts
+        self._execution_bar_filled_quantities = state.execution_bar_filled_quantities
         self._last_feature_as_of = state.last_feature_as_of
         self._last_bar_ts = state.last_bar_ts
         self._last_financing_ts = state.last_financing_ts
@@ -3523,6 +3529,22 @@ class LiveTrader:
         resolved_active_symbols = tuple(symbol for symbol in self._symbols if symbol in active_set)
         if not resolved_active_symbols:
             raise ValueError("market-data event requires at least one active primary symbol")
+        execution_symbols: set[str] = set()
+        for symbol in resolved_active_symbols:
+            execution_watermark = self._last_execution_bar_ts.get(symbol)
+            if execution_watermark is not None and ts < execution_watermark:
+                raise RuntimeError(
+                    "out-of-order execution phase cannot be applied after a newer event: "
+                    f"{symbol} {ts} < {execution_watermark}"
+                )
+            if execution_watermark != ts:
+                execution_symbols.add(symbol)
+        execution_already_committed = not execution_symbols
+        cycle_used_bar_quantity_by_symbol = {
+            symbol: self._execution_bar_filled_quantities.get(symbol, 0.0)
+            for symbol in resolved_active_symbols
+            if self._last_execution_bar_ts.get(symbol) == ts
+        }
         feature_batch: FeatureBatch | None = None
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
@@ -3566,7 +3588,8 @@ class LiveTrader:
                     lagged_adv_by_symbol[symbol] = float(lagged_adv)
 
         if (
-            not self._executor.simulation
+            not execution_already_committed
+            and not self._executor.simulation
             and self._live_rebalance is not None
             and not self._active_orders
             and not self._halted
@@ -3577,22 +3600,21 @@ class LiveTrader:
                 lagged_adv_by_symbol=lagged_adv_by_symbol,
             )
 
-        self._pending_decision = self._without_halted_account(self._pending_decision)
         live_rebalance_blocks_decisions = not self._executor.simulation and (
             self._live_rebalance is not None or bool(self._active_orders)
         )
-        if live_rebalance_blocks_decisions:
-            ready_decision: StrategyDecision = []
-        else:
-            ready_decision, waiting_decision = partition_pending_decision(
-                self._pending_decision,
-                raw_bars,
-                self._positions,
-                primary_symbol=primary_symbol,
-            )
-            self._pending_decision = waiting_decision
-        cycle_used_bar_quantity_by_symbol: dict[str, float] = {}
-        if self._executor.simulation:
+        ready_decision: StrategyDecision = []
+        if not execution_already_committed:
+            self._pending_decision = self._without_halted_account(self._pending_decision)
+            if not live_rebalance_blocks_decisions:
+                ready_decision, waiting_decision = partition_pending_decision(
+                    self._pending_decision,
+                    raw_bars,
+                    self._positions,
+                    primary_symbol=primary_symbol,
+                )
+                self._pending_decision = waiting_decision
+        if not execution_already_committed and self._executor.simulation:
             exposure_prices = dict(self._last_prices)
             exposure_prices.update(
                 {
@@ -3613,6 +3635,7 @@ class LiveTrader:
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                    eligible_symbols=execution_symbols,
                     get_executable_quantity=self._get_executable_quantity,
                 )
                 staged_cash = self._cash + step_result.cash_delta
@@ -3643,7 +3666,9 @@ class LiveTrader:
                     max_adv_participation_rate=self._max_adv_participation_rate,
                     get_previous_volume=lambda symbol: previous_volumes.get(symbol),
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
+                    used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                    eligible_stop_symbols=execution_symbols,
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                     exposure_prices=exposure_prices,
@@ -3657,10 +3682,6 @@ class LiveTrader:
                 result=step_result,
             )
             self._apply_financing_cash_flows(ts, raw_bars)
-            for event in step_result.events:
-                cycle_used_bar_quantity_by_symbol[event.symbol] = (
-                    cycle_used_bar_quantity_by_symbol.get(event.symbol, 0.0) + event.fill_quantity
-                )
         elif ready_decision and not self._execute_live_decision(
             ready_decision,
             raw_bars,
@@ -3669,6 +3690,13 @@ class LiveTrader:
         ):
             self._persist_state()
             return None
+        if not execution_already_committed:
+            for symbol in resolved_active_symbols:
+                self._last_execution_bar_ts[symbol] = ts
+                self._execution_bar_filled_quantities[symbol] = (
+                    cycle_used_bar_quantity_by_symbol.get(symbol, 0.0)
+                )
+            self._persist_state()
 
         evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
         if self._batch_feature_fn is not None:

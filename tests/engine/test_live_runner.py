@@ -1869,11 +1869,21 @@ class TestLiveTrader:
         assert checkpoint.last_feature_as_of == available_at
         assert checkpoint.last_bar_ts == {"BTCUSDT": event_ts}
 
-    def test_batch_retry_does_not_replay_a_confirmed_simulation_fill(self):
-        frame = _make_ohlcv_df(n=1)
-        frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
+    def test_batch_retry_does_not_replay_a_confirmed_partial_stop_fill(self):
+        frame = _make_ohlcv_df(n=2)
+        frame.loc[0, "volume"] = 10.0
+        frame.loc[1, ["open", "high", "low", "close"]] = [100.0, 101.0, 90.0, 100.0]
+        frame["available_at"] = pd.to_datetime(frame["ts"], utc=True) + timedelta(hours=1)
+        event_ts = pd.Timestamp(frame["ts"].iloc[-1]).to_pydatetime()
         attempts = 0
         fills: list[float] = []
+        store = MemoryLiveStateStore()
+        config = _test_cfg(
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=0.1,
+                warmup_periods=2,
+            )
+        )
 
         def flaky(batch: FeatureBatch):
             nonlocal attempts
@@ -1885,27 +1895,51 @@ class TestLiveTrader:
 
         runner = self._make_runner(
             fetcher=lambda *_args, **_kwargs: frame,
-            config=_test_cfg(warmup_periods=1),
+            config=config,
             batch_feature_fn=flaky,
-            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+            state_store=store,
+            clock=lambda: datetime(2025, 1, 1, 3, tzinfo=UTC),
         )
-        runner._pending_decision = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+        runner._positions["BTCUSDT"] = PositionState(
+            symbol="BTCUSDT",
+            side="long",
+            entry_price=100.0,
+            quantity=5.0,
+            entry_at=datetime(2025, 1, 1, tzinfo=UTC),
+            periods_held=0,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=500.0,
+            stop_price=95.0,
+        )
         runner._on_position_event = lambda event, _sequence: fills.append(event.fill_quantity)
 
         with pytest.raises(RuntimeError, match="temporary feature failure"):
             runner._poll_cycle()
 
         assert fills == [1.0]
-        assert runner._positions["BTCUSDT"].quantity == 1.0
+        assert runner._positions["BTCUSDT"].quantity == 4.0
+        assert runner._last_execution_bar_ts == {"BTCUSDT": event_ts}
+        assert runner._execution_bar_filled_quantities == {"BTCUSDT": 1.0}
         assert runner._last_bar_ts == {}
 
-        runner._poll_cycle()
+        restarted = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=config,
+            batch_feature_fn=flaky,
+            state_store=store,
+            clock=lambda: datetime(2025, 1, 1, 3, tzinfo=UTC),
+        )
+        restarted._on_position_event = lambda event, _sequence: fills.append(event.fill_quantity)
+        assert restarted._last_execution_bar_ts == {"BTCUSDT": event_ts}
+        assert restarted._execution_bar_filled_quantities == {"BTCUSDT": 1.0}
+
+        restarted._poll_cycle()
 
         assert fills == [1.0]
-        assert runner._positions["BTCUSDT"].quantity == 1.0
-        assert runner._last_bar_ts == {
-            "BTCUSDT": datetime(2025, 1, 1, tzinfo=UTC),
-        }
+        assert restarted._positions["BTCUSDT"].quantity == 4.0
+        assert restarted._last_bar_ts == {"BTCUSDT": event_ts}
 
     def test_live_feature_callbacks_are_explicit_and_mutually_exclusive(self):
         config = _test_cfg(warmup_periods=1)
