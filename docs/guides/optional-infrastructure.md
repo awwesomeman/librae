@@ -51,6 +51,17 @@ docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_in
 
 When a revision changes the schema, recreate disposable development data or
 perform an explicit operator-owned migration before running the new revision.
+The subscription-identity schema adds `backtest_runs.primary_subscriptions`,
+`ohlcv.calendar_id`, `ohlcv.available_at`, and the calendar dimension on
+`ohlcv_coverage_ranges`; it also replaces the OHLCV unique/index keys. Those
+columns must be backfilled from auditable source metadata before constraints
+and indexes are changed. Do not infer missing calendar or instrument type from
+the symbol string. Runs whose exact six-field identities cannot be recovered
+must be marked explicitly with `primary_subscriptions=[]` as legacy records;
+`load_ohlcv(run_id=...)` rejects them and requires recreation or an explicit
+operator-owned migration instead of reading a mixed dataset. New writes still
+require a complete non-empty identity list. Re-running `timescale_init.sql` is
+not that migration.
 For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
 `POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
@@ -68,6 +79,21 @@ ad hoc SQL. The repository runner skips database writes when
 `timescale_writer`'s `instrument_type` params are validated in Python
 against `librae.config.symbols.ALLOWED_INSTRUMENT_TYPES` before any SQL
 runs — fails fast instead of relying on the `CHECK` constraint at `INSERT`.
+OHLCV read/write and coverage helpers accept a `MarketDataSubscription`
+instead of a collection of optional scalar filters. `load_ohlcv(as_of=...)`
+filters on `available_at`, so a DB-backed warmup cannot observe a bar merely
+because its start label is inside the requested range.
+OHLCV upserts treat `available_at` as a row-version clock: only a strictly
+later value replaces the stored OHLCV row. Equal versions are idempotent and
+older replays are ignored, so values and availability never come from
+different versions.
+Live `on_ohlcv` is a best-effort audit callback over the fetched-history
+window. After a restart, rows at or behind the durable event watermark can be
+replayed without re-running strategy or execution, so a custom sink must be
+idempotent on the exact subscription identity plus `(ts, available_at)`.
+Delivery failures are not guaranteed to retry; the callback is not a durable
+outbox or acknowledgement protocol. The built-in Timescale sink tolerates
+duplicate delivery through the same strictly-newer row-version upsert policy.
 
 Backtest database reuse is disabled unless the caller supplies
 `backtest_revision` through CLI/YAML orchestration and passes the same value to
@@ -147,6 +173,12 @@ reporting-currency conversion stay caller-owned, per `architecture.md`. Open
 positions are reconstructed at each run's own equity timestamp rather than at
 "now", so a row never mixes moments. See
 [the dashboard-scope ADR](../decisions/2026-09-07-account-overview-is-a-separate-dashboard.md).
+
+OHLCV panels use the same exact six-field `primary_subscriptions` identity as
+the Python reader and never widen a query to make legacy data appear. A legacy
+run marked with `primary_subscriptions=[]` therefore has no price data in the
+strategy or signal dashboard; recreate the run or explicitly migrate its
+metadata from an auditable source.
 
 Dashboards query the TimescaleDB tables and remain empty until a strategy has
 written data. To inspect the panels before running a real strategy, load the

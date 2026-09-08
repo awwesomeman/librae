@@ -12,7 +12,16 @@ For common backtest layouts, normalize explicitly before constructing the
 engine:
 
 ```python
-from librae import Backtest, normalize_bars
+from librae import Backtest, MarketDataSubscription, normalize_bars
+
+subscription = MarketDataSubscription(
+    symbol="BTCUSDT",
+    timeframe="H1",
+    calendar_id="24/7",
+    session_mode="extended",
+    data_source="vendor-name",
+    instrument_type="spot",
+)
 
 bars = normalize_bars(
     vendor_frame,
@@ -25,8 +34,13 @@ bars = normalize_bars(
         "Close": "close",
         "Volume": "volume",
     },
+    subscription=subscription,
 )
-backtest = Backtest(data=bars, strategy=strategy, config=config)
+backtest = Backtest(
+    data=bars,
+    strategy=strategy,
+    primary_subscriptions=(subscription,),
+)
 ```
 
 For a single-symbol DataFrame with a timezone-aware `DatetimeIndex`, pass
@@ -58,8 +72,11 @@ For sim/live, `LiveTrader(adapter=...)` accepts either:
 - a callable `(symbol, timeframe, limit, *, drop_incomplete=False) ->
   DataFrame`.
 
-The result must contain UTC-aware `ts` plus OHLCV. Extra columns are preserved
-and passed to `feature_fn`.
+The result must contain UTC-aware `ts` plus OHLCV. When a source exposes a
+publication time, map it to `available_at`; it must not precede the actual bar
+completion. Extra columns are preserved and passed to `feature_fn`, except
+reserved `available_at`: the live engine retains it only on the audit and
+persistence view so publication metadata cannot become a strategy input.
 
 `feature_fn` must return a non-empty DataFrame with a timezone-aware,
 strictly increasing, unique `DatetimeIndex`. It may retain or drop older
