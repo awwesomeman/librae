@@ -375,6 +375,7 @@ def test_write_ohlcv_rejects_partial_scalar_identity() -> None:
 def test_write_ohlcv_uses_complete_subscription_and_availability(
     mock_conn_ctx, mock_exec_values
 ) -> None:
+    mock_exec_values.return_value = []
     mock_cur = MagicMock()
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -398,14 +399,17 @@ def test_write_ohlcv_uses_complete_subscription_and_availability(
         data_source="ibkr",
     )
 
-    write_ohlcv(frame, subscription)
+    accepted = write_ohlcv(frame, subscription)
 
     sql = mock_exec_values.call_args[0][1]
     row = mock_exec_values.call_args[0][2][0]
     assert "calendar_id, session_mode" in sql
     assert "available_at=EXCLUDED.available_at" in sql
     assert "WHERE EXCLUDED.available_at > ohlcv.available_at" in sql
+    assert "RETURNING 1" in sql
     assert "GREATEST" not in sql
+    assert mock_exec_values.call_args.kwargs["fetch"] is True
+    assert accepted == 0
     assert row[1:7] == tuple(subscription.to_dict().values())
     assert row[7] == datetime(2024, 6, 3, 15, tzinfo=UTC)
 

@@ -644,7 +644,7 @@ def write_ohlcv(
     row: only a strictly later availability may replace stored OHLCV values;
     equal or older versions are idempotent no-ops.
 
-    Returns number of rows written.
+    Returns the number of inserted or strictly newer row versions accepted.
     """
     if not isinstance(subscription, MarketDataSubscription):
         raise TypeError("subscription must be a MarketDataSubscription")
@@ -699,7 +699,7 @@ def write_ohlcv(
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        psycopg2.extras.execute_values(
+        accepted = psycopg2.extras.execute_values(
             cur,
             """INSERT INTO ohlcv (
                    ts, symbol, timeframe, calendar_id, session_mode,
@@ -713,13 +713,15 @@ def write_ohlcv(
                  available_at=EXCLUDED.available_at,
                  open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
                  close=EXCLUDED.close, volume=EXCLUDED.volume
-               WHERE EXCLUDED.available_at > ohlcv.available_at""",
+               WHERE EXCLUDED.available_at > ohlcv.available_at
+               RETURNING 1""",
             rows,
             page_size=2000,
+            fetch=True,
         )
         cur.close()
 
-    return len(rows)
+    return len(accepted)
 
 
 def _merge_coverage_ranges(

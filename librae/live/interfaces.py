@@ -99,7 +99,7 @@ type BarCallback = Callable[
     None,
 ]
 type PositionEventCallback = Callable[[PositionEvent, int], None]
-type OhlcvCallback = Callable[[str, str, dict[str, float], datetime], None]
+type OhlcvCallback = Callable[[str, str, dict[str, object], datetime], None]
 type HeartbeatCallback = Callable[[str], None]
 type FinancingCashFlowCallback = Callable[[FinancingCashFlow], None]
 type RuntimeEventCallback = Callable[[RuntimeEvent], None]

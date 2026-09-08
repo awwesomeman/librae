@@ -131,6 +131,46 @@ def test_subscription_is_canonical_hashable_and_identity_complete() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "symbol",
+        "timeframe",
+        "calendar_id",
+        "session_mode",
+        "data_source",
+        "instrument_type",
+    ),
+)
+def test_subscription_rejects_whitespace_only_identity_fields(field_name: str) -> None:
+    values = {
+        "symbol": "AAA",
+        "timeframe": "H1",
+        "calendar_id": "24/7",
+        "session_mode": "extended",
+        "data_source": "fixture",
+        "instrument_type": "spot",
+    }
+    values[field_name] = " \t "
+
+    with pytest.raises(ValueError, match=field_name):
+        MarketDataSubscription(**values)
+
+
+def test_subscription_does_not_silently_rewrite_identity_text() -> None:
+    subscription = MarketDataSubscription(
+        symbol=" AAA ",
+        timeframe="H1",
+        calendar_id="24/7",
+        session_mode="extended",
+        data_source=" fixture ",
+        instrument_type="spot",
+    )
+
+    assert subscription.symbol == " AAA "
+    assert subscription.data_source == " fixture "
+
+
 def test_subscription_rejects_missing_calendar_and_unknown_instrument_type() -> None:
     with pytest.raises(ValueError, match="calendar_id"):
         _subscription(calendar_id="")

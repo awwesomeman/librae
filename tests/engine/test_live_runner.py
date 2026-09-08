@@ -938,6 +938,190 @@ class TestLiveTrader:
             pd.Timestamp("2025-01-01T01:00:00Z"),
         ]
 
+    @pytest.mark.parametrize("mode", ["sim", "live"])
+    def test_availability_metadata_is_audit_only_across_runtime_views(self, mode):
+        from librae.core.executor import execute_pending_decision_and_stops
+
+        frame = _make_ohlcv_df(n=1)
+        expected_availability = pd.Timestamp("2025-01-01T01:00:00Z")
+        frame["available_at"] = [expected_availability]
+        feature_columns: list[set[str]] = []
+        contexts: list[Context] = []
+        audit_bars: list[dict[str, object]] = []
+
+        def feature(history: pd.DataFrame) -> pd.DataFrame:
+            feature_columns.append(set(history.columns))
+            return _simple_feature_fn(history)
+
+        class CaptureContext(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                contexts.append(ctx)
+                return []
+
+        runner = self._make_runner(
+            strategy=CaptureContext(),
+            fetcher=lambda *_args, **_kwargs: frame,
+            feature_fn=feature,
+            config=_test_cfg(mode=mode, warmup_periods=1),
+            order_adapter=_mock_order_adapter() if mode == "live" else None,
+            clock=lambda: datetime(2025, 1, 1, 2, tzinfo=UTC),
+        )
+        runner._on_ohlcv = lambda _symbol, _timeframe, bar, _ts: audit_bars.append(bar)
+        eligible = runner._eligible_runtime_rows("BTCUSDT", frame)
+
+        if mode == "sim":
+            with patch(
+                "librae.live.engine.execute_pending_decision_and_stops",
+                wraps=execute_pending_decision_and_stops,
+            ) as execute:
+                runner._process_cycle(
+                    {"BTCUSDT": eligible},
+                    datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            execution_bars = execute.call_args.args[4]
+        else:
+            runner._pending_decision = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+            with patch.object(runner, "_execute_live_decision", return_value=True) as execute:
+                runner._process_cycle(
+                    {"BTCUSDT": eligible},
+                    datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            execution_bars = execute.call_args.args[1]
+
+        assert feature_columns == [{"open", "high", "low", "close", "volume"}]
+        assert contexts
+        assert "available_at" not in contexts[0].bar
+        assert all("available_at" not in bar for bar in contexts[0].bars.values())
+        assert all("available_at" not in bar for bar in execution_bars.values())
+        assert audit_bars[0]["available_at"] == expected_availability
+
+    def test_extended_daily_provider_availability_reaches_ohlcv_audit_callback(self):
+        availability = pd.Timestamp("2026-03-10T13:30:00Z")
+        frame = _make_ohlcv_at([datetime(2026, 3, 9, 13, 30, tzinfo=UTC)])
+        frame["available_at"] = [availability]
+        config = _test_cfg(
+            symbols=["AAPL"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                warmup_periods=1,
+            ),
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "AAPL": {
+                    "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "currency": "USD",
+                    "security_type": "STK",
+                    "exchange": "SMART",
+                    "calendar_id": "XNYS",
+                }
+            },
+            symbol_cost_overrides={"AAPL": {"multiplier": 1.0}},
+        )
+        runner = self._make_runner(
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=config,
+            clock=lambda: datetime(2026, 3, 11, tzinfo=UTC),
+        )
+        audit_bars: list[dict[str, object]] = []
+        runner._on_ohlcv = lambda _symbol, _timeframe, bar, _ts: audit_bars.append(bar)
+
+        eligible = runner._eligible_runtime_rows("AAPL", frame)
+        runner._process_cycle(
+            {"AAPL": eligible},
+            datetime(2026, 3, 9, 13, 30, tzinfo=UTC),
+        )
+
+        assert audit_bars[0]["available_at"] == availability
+
+    @pytest.mark.parametrize(
+        ("timeframe", "calendar_id", "cached_ts", "fetched_ts", "message"),
+        [
+            (
+                "D2",
+                "24/7",
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                "not aligned to timeframe=D2",
+            ),
+            (
+                "H1",
+                "XNYS",
+                "2026-03-09T22:15:00Z",
+                "2026-03-09T22:45:00Z",
+                "timestamps overlap timeframe=H1",
+            ),
+        ],
+    )
+    def test_cross_batch_overlapping_bars_fail_before_cache_store(
+        self,
+        timeframe: str,
+        calendar_id: str,
+        cached_ts: str,
+        fetched_ts: str,
+        message: str,
+    ):
+        symbol = "AAA"
+        runner = self._make_runner(
+            config=_test_cfg(
+                symbols=[symbol],
+                timeframe=timeframe,
+                instrument_overrides={
+                    symbol: {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "calendar_id": calendar_id,
+                    }
+                },
+                symbol_cost_overrides={symbol: {"multiplier": 1.0}},
+                warmup_periods=1,
+            )
+        )
+        cached = _make_ohlcv_at([pd.Timestamp(cached_ts).to_pydatetime()])
+        fetched = _make_ohlcv_at([pd.Timestamp(fetched_ts).to_pydatetime()])
+        duration = pd.Timedelta(days=2) if timeframe == "D2" else pd.Timedelta(hours=1)
+        cached["available_at"] = [pd.Timestamp(cached_ts) + duration]
+        fetched["available_at"] = [pd.Timestamp(fetched_ts) + duration]
+
+        with pytest.raises(ValueError, match=message):
+            runner._merge_runtime_rows(symbol, cached, fetched)
+
+        assert symbol not in runner._ohlcv_cache
+
+    def test_same_timestamp_runtime_versions_match_database_policy(self):
+        runner = self._make_runner(config=_test_cfg(warmup_periods=1))
+        timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+
+        def version(close: float, available_at: str) -> pd.DataFrame:
+            frame = _make_ohlcv_at([timestamp], price=close)
+            frame["available_at"] = [pd.Timestamp(available_at)]
+            return frame
+
+        cached = version(200.0, "2025-01-01T02:00:00Z")
+        older = runner._merge_runtime_rows(
+            "BTCUSDT",
+            cached,
+            version(100.0, "2025-01-01T01:00:00Z"),
+        )
+        equal = runner._merge_runtime_rows(
+            "BTCUSDT",
+            older,
+            version(150.0, "2025-01-01T02:00:00Z"),
+        )
+        newer = runner._merge_runtime_rows(
+            "BTCUSDT",
+            equal,
+            version(300.0, "2025-01-01T03:00:00Z"),
+        )
+
+        assert older.loc[0, "close"] == 200.0
+        assert equal.loc[0, "close"] == 200.0
+        assert newer.loc[0, "close"] == 300.0
+        assert newer.loc[0, "available_at"] == pd.Timestamp("2025-01-01T03:00:00Z")
+
     def test_poll_slower_than_timeframe_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
             self._make_runner(config=_test_cfg(poll_seconds=3601))

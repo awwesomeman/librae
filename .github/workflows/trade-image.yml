@@ -377,9 +377,12 @@ jobs:
             python - <<'PY'
           import os
 
+          import pandas as pd
           import psycopg2
 
+          from librae.core.market_data import MarketDataSubscription
           from librae.db.timescale_reader import load_ohlcv
+          from librae.db.timescale_writer import write_ohlcv
 
           run_id = "identity-routing-smoke-193"
           symbol = "IDENTITY_SMOKE_193"
@@ -412,7 +415,7 @@ jobs:
                        open, high, low, close, volume)
                   VALUES
                       ('2026-08-01T00:00:00Z', %s, 'H1', '24/7', 'extended',
-                       'fixture', 'spot', '2026-08-01T01:00:00Z', 100, 102, 99, 101, 10),
+                       'fixture', 'spot', '2026-08-01T02:00:00Z', 100, 102, 99, 101, 10),
                       ('2026-08-01T00:00:00Z', %s, 'H1', '24/7', 'extended',
                        'fixture', 'contract_monthly', '2026-08-01T01:00:00Z',
                        200, 202, 199, 201, 20)
@@ -421,9 +424,41 @@ jobs:
               )
               connection.commit()
 
-              loaded = load_ohlcv(run_id=run_id, as_of="2026-08-01T01:00:00Z")
+              loaded = load_ohlcv(run_id=run_id, as_of="2026-08-01T02:00:00Z")
               assert loaded["instrument_type"].tolist() == ["spot"]
               assert loaded["close"].tolist() == [101.0]
+
+              subscription = MarketDataSubscription(
+                  symbol=symbol,
+                  timeframe="H1",
+                  calendar_id="24/7",
+                  session_mode="extended",
+                  data_source="fixture",
+                  instrument_type="spot",
+              )
+
+              def version(close, available_at):
+                  return pd.DataFrame(
+                      {
+                          "open": [close],
+                          "high": [close + 1],
+                          "low": [close - 1],
+                          "close": [close],
+                          "volume": [10.0],
+                          "available_at": [pd.Timestamp(available_at)],
+                      },
+                      index=pd.DatetimeIndex(
+                          [pd.Timestamp("2026-08-01T00:00:00Z")],
+                          name="ts",
+                      ),
+                  )
+
+              assert write_ohlcv(version(91.0, "2026-08-01T01:00:00Z"), subscription) == 0
+              assert write_ohlcv(version(102.0, "2026-08-01T02:00:00Z"), subscription) == 0
+              assert write_ohlcv(version(103.0, "2026-08-01T03:00:00Z"), subscription) == 1
+              loaded = load_ohlcv(run_id=run_id, as_of="2026-08-01T03:00:00Z")
+              assert loaded["instrument_type"].tolist() == ["spot"]
+              assert loaded["close"].tolist() == [103.0]
           finally:
               connection.rollback()
               cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))

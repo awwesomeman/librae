@@ -36,9 +36,16 @@ class MarketDataSubscription:
     instrument_type: str
 
     def __post_init__(self) -> None:
-        for field_name in ("symbol", "calendar_id", "data_source", "instrument_type"):
+        for field_name in (
+            "symbol",
+            "timeframe",
+            "calendar_id",
+            "session_mode",
+            "data_source",
+            "instrument_type",
+        ):
             value = getattr(self, field_name)
-            if not isinstance(value, str) or not value:
+            if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
         if self.session_mode not in ("regular", "extended"):

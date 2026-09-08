@@ -997,7 +997,8 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
 
     workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
     assert "Verify exact OHLCV subscription routing" in workflow
-    assert 'load_ohlcv(run_id=run_id, as_of="2026-08-01T01:00:00Z")' in workflow
+    assert 'load_ohlcv(run_id=run_id, as_of="2026-08-01T03:00:00Z")' in workflow
+    assert 'write_ohlcv(version(91.0, "2026-08-01T01:00:00Z"), subscription) == 0' in workflow
 
 
 def test_backtest_cache_identity_is_separate_from_config_hash() -> None:

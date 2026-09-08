@@ -569,7 +569,7 @@ class LiveTrader:
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
         self._warmup_requested_periods: dict[str, int] = {}
         self._warmup_fetch_attempts: dict[str, int] = {}
-        self._warmup_exhausted_fingerprints: dict[str, frozenset[int]] = {}
+        self._warmup_exhausted_fingerprints: dict[str, frozenset[tuple[int, int]]] = {}
         self._replay_backlog_exhausted: dict[str, tuple[int, int]] = {}
         self._reported_warmup_reasons: dict[str, str] = {}
         self._lease_acquired = False
@@ -1497,6 +1497,10 @@ class LiveTrader:
     def _fetch_with_cache_unchecked(self, symbol: str) -> pd.DataFrame | None:
         """Fetch and cache one symbol, propagating failures to the poll coordinator."""
         cached = self._ohlcv_cache.get(symbol)
+        if cached is not None and not cached.empty:
+            # Restored and test-injected legacy caches may predate row-version
+            # metadata. Normalize them before comparing history fingerprints.
+            cached = self._normalize_runtime_rows(symbol, cached)
         if symbol in self._replay_backlog_exhausted:
             return cached
         if self._warmup_gap(symbol, cached) is not None:
@@ -1514,7 +1518,7 @@ class LiveTrader:
                     probe = self._eligible_runtime_rows(symbol, probe)
                     if not probe.empty:
                         validate_ohlcv_values(probe, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(merged, probe)
+                        merged = self._merge_runtime_rows(symbol, merged, probe)
                     if self._history_fingerprint(merged) == exhausted_fingerprint:
                         return cached
                     self._warmup_exhausted_fingerprints.pop(symbol, None)
@@ -1536,7 +1540,7 @@ class LiveTrader:
                     new_df = self._eligible_runtime_rows(symbol, new_df)
                     if not new_df.empty:
                         validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(merged, new_df)
+                        merged = self._merge_runtime_rows(symbol, merged, new_df)
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
@@ -1563,7 +1567,7 @@ class LiveTrader:
             if new_df.empty:
                 return cached
             validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-            merged = self._merge_runtime_rows(cached, new_df)
+            merged = self._merge_runtime_rows(symbol, cached, new_df)
 
         return self._store_runtime_cache(symbol, merged)
 
@@ -1611,17 +1615,38 @@ class LiveTrader:
         )
 
     @staticmethod
-    def _history_fingerprint(frame: pd.DataFrame | None) -> frozenset[int]:
-        """Identify observations without treating value revisions as new history."""
+    def _history_fingerprint(
+        frame: pd.DataFrame | None,
+    ) -> frozenset[tuple[int, int]]:
+        """Identify persisted row versions without treating them as extra history."""
         if frame is None or frame.empty:
             return frozenset()
         timestamps = pd.to_datetime(frame["ts"], utc=True)
-        return frozenset(pd.Timestamp(value).value for value in timestamps)
+        if AVAILABLE_AT_COLUMN in frame:
+            availability = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
+        else:
+            # Legacy/manual caches are normalized before storage. Keep their
+            # pre-normalization fingerprint deterministic without inventing a
+            # second observation identity.
+            availability = timestamps
+        return frozenset(
+            (pd.Timestamp(ts).value, pd.Timestamp(available_at).value)
+            for ts, available_at in zip(timestamps, availability, strict=True)
+        )
 
     def _eligible_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
         """Normalize one exact subscription and expose only causally ready rows."""
         if frame.empty:
             return frame
+
+        normalized = self._normalize_runtime_rows(symbol, frame)
+        eligible = normalized[AVAILABLE_AT_COLUMN] <= pd.Timestamp(self._utc_now())
+        return normalized.loc[eligible].copy()
+
+    def _normalize_runtime_rows(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
+        """Normalize one batch while retaining row-version audit metadata."""
+        if frame.empty:
+            return frame.copy()
 
         if "ts" not in frame:
             raise ValueError(f"{symbol} market data requires a ts column")
@@ -1645,20 +1670,38 @@ class LiveTrader:
             ordered.get(AVAILABLE_AT_COLUMN),
             subscription,
         )
-        eligible = availability <= pd.Timestamp(self._utc_now())
-        result = ordered.loc[eligible].copy()
-        result["ts"] = timestamps[eligible]
-        result[AVAILABLE_AT_COLUMN] = availability[eligible]
-        return result
+        ordered["ts"] = timestamps
+        ordered[AVAILABLE_AT_COLUMN] = availability
+        return ordered
 
-    @staticmethod
     def _merge_runtime_rows(
+        self,
+        symbol: str,
         cached: pd.DataFrame | None,
         fetched: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Merge one history response by timestamp without counting duplicates."""
-        merged = fetched if cached is None else pd.concat([cached, fetched], ignore_index=True)
-        return merged.drop_duplicates(subset="ts", keep="last").sort_values("ts")
+        """Merge causal row versions, then validate the whole cache cadence."""
+        fetched = self._normalize_runtime_rows(symbol, fetched)
+        if cached is None or cached.empty:
+            merged = fetched
+        else:
+            cached = self._normalize_runtime_rows(symbol, cached)
+            cached = cached.assign(_librae_source_priority=0)
+            fetched = fetched.assign(_librae_source_priority=1)
+            merged = pd.concat([cached, fetched], ignore_index=True)
+            merged = merged.sort_values(
+                ["ts", AVAILABLE_AT_COLUMN, "_librae_source_priority"],
+                ascending=[True, False, True],
+                kind="stable",
+            )
+            merged = merged.drop_duplicates(subset="ts", keep="first").drop(
+                columns="_librae_source_priority"
+            )
+        merged = merged.sort_values("ts", kind="stable").reset_index(drop=True)
+        # Each fetch can be valid alone while overlapping a cached multi-bar
+        # interval. Revalidate only after version selection has made the cache
+        # deterministic.
+        return self._normalize_runtime_rows(symbol, merged)
 
     def _report_incomplete_warmup(self) -> None:
         """Publish an edge-triggered diagnostic after bounded backfill fails."""
@@ -3008,15 +3051,18 @@ class LiveTrader:
         primary_symbol = self._symbols[0]
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
+        audit_bars: dict[str, dict[str, object]] = {}
         previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
         for symbol, raw_df in raw_frames.items():
-            history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
-            history.index.name = "ts"
-            if history.empty or pd.Timestamp(history.index[-1]).to_pydatetime() != ts:
+            audit_history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
+            audit_history.index.name = "ts"
+            if audit_history.empty or pd.Timestamp(audit_history.index[-1]).to_pydatetime() != ts:
                 continue
+            history = audit_history.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
             histories[symbol] = history
             raw_bar = history.iloc[-1].to_dict()
+            audit_bars[symbol] = audit_history.iloc[-1].to_dict()
             close = float(raw_bar.get("close", float("nan")))
             if not isfinite(close) or close <= 0:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
@@ -3170,7 +3216,7 @@ class LiveTrader:
                     position.periods_held += 1
             self._persist_state()
             if self._on_ohlcv:
-                for symbol, bar in raw_bars.items():
+                for symbol, bar in audit_bars.items():
                     self._on_ohlcv(symbol, self._timeframe, bar, ts)
             return
 
@@ -3182,7 +3228,9 @@ class LiveTrader:
                     symbol=symbol,
                     event_ts=ts,
                 )
-                bar = featured.iloc[-1].to_dict()
+                bar = (
+                    featured.iloc[-1].drop(labels=[AVAILABLE_AT_COLUMN], errors="ignore").to_dict()
+                )
                 price = float(bar.get("close", float("nan")))
                 if not isfinite(price) or price <= 0:
                     raise ValueError(f"{symbol} feature output has invalid close at {ts}: {price}")
@@ -3287,7 +3335,7 @@ class LiveTrader:
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)
         if self._on_ohlcv:
-            for symbol, bar in raw_bars.items():
+            for symbol, bar in audit_bars.items():
                 self._on_ohlcv(symbol, self._timeframe, bar, ts)
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:

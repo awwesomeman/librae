@@ -391,6 +391,45 @@ class TestWarmupFetcher:
         assert len(trader._ohlcv_cache["BTCUSDT"]) == 3
         assert "BTCUSDT" in trader._warmup_exhausted_fingerprints
 
+    def test_exhausted_probe_commits_strictly_newer_row_version(self):
+        from librae.live.engine import LiveTrader
+
+        timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+        original = _bars([timestamp], closes=[100.0])
+        original["available_at"] = pd.to_datetime(["2025-01-01T01:00:00Z"])
+        correction = _bars([timestamp], closes=[101.0])
+        correction["available_at"] = pd.to_datetime(["2025-01-01T02:00:00Z"])
+        requests: list[int] = []
+
+        def fetcher(_symbol: str, _timeframe: str, limit: int, **_kwargs):
+            requests.append(limit)
+            return correction.copy()
+
+        trader = LiveTrader(
+            MagicMock(),
+            lambda frame: frame,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=2,
+                )
+            ),
+            adapter=fetcher,
+            clock=lambda: datetime(2025, 1, 1, 3, tzinfo=UTC),
+        )
+        cached = trader._eligible_runtime_rows("BTCUSDT", original)
+        trader._ohlcv_cache["BTCUSDT"] = cached
+        trader._warmup_exhausted_fingerprints["BTCUSDT"] = trader._history_fingerprint(cached)
+        trader._warmup_requested_periods["BTCUSDT"] = 3
+
+        result = trader._fetch_with_cache("BTCUSDT")
+
+        assert result is not None
+        assert len(result) == 1
+        assert result.loc[0, "close"] == 101.0
+        assert result.loc[0, "available_at"] == pd.Timestamp("2025-01-01T02:00:00Z")
+        assert requests == [3, 6]
+
     def test_replay_diagnostic_reports_history_missing_before_first_candidate(self):
         from librae.live.engine import LiveTrader
 

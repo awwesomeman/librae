@@ -392,7 +392,7 @@ class _TimescaleCallbacks:
         self,
         symbol: str,
         timeframe: str,
-        bar: dict[str, float],
+        bar: dict[str, object],
         ts: datetime,
     ) -> None:
         from librae.core.market_data import AVAILABLE_AT_COLUMN, subscription_from_instrument
