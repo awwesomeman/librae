@@ -58,12 +58,12 @@ def test_sim_engine_does_not_build_optional_infrastructure():
     assert trader._on_bar is None
 
 
-def _mock_order_adapter() -> MagicMock:
+def _mock_order_adapter(mock_class: type[MagicMock] = MagicMock) -> MagicMock:
     """order_adapter mock with realistic flat get_position()/get_balance() —
     a bare MagicMock's auto-generated return values are truthy/float-coercible
     by default, which _reconcile_positions()/_reconcile_cash() would misread
     as real broker state (an open position, a MagicMock "total") at startup."""
-    adapter = MagicMock()
+    adapter = mock_class()
     adapter.get_position.return_value = {
         "symbol": "",
         "size": 0,
@@ -414,7 +414,9 @@ class TestLiveExecutor:
             ("amount", 0.5, "requested quantity"),
         ],
     )
-    def test_order_routes_reject_mismatched_broker_identity(self, route, field, value, message):
+    def test_order_routes_reject_mismatched_broker_identity(
+        self, route, field, value, message, caplog
+    ):
         adapter = MagicMock()
         raw = {
             "id": "broker-1",
@@ -438,7 +440,9 @@ class TestLiveExecutor:
 
         if route == "placement":
             adapter.place_order.return_value = raw
-            assert ex.submit_order(request) is None
+            with caplog.at_level(logging.ERROR, logger="librae.live.executor"):
+                assert ex.submit_order(request) is None
+            assert message in caplog.text
         elif route == "polling":
             adapter.get_order.return_value = raw
             with pytest.raises(ValueError, match=message):
@@ -3710,6 +3714,30 @@ class TestLiveExecutionLifecycle:
 
         assert runner._halted is True
         strategy.on_bar.assert_not_called()
+
+    def test_orphan_check_recognizes_compact_broker_client_ids(self):
+        class CompactIdAdapter(MagicMock):
+            def broker_client_order_id(self, client_order_id: str) -> str:
+                return client_order_id[:6]
+
+        adapter = _mock_order_adapter(CompactIdAdapter)
+        request = OrderRequest(
+            client_order_id="client-1-long-canonical-id",
+            symbol="BTCUSDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=TEST_CLOCK_NOW,
+        )
+        adapter.list_open_orders.return_value = [
+            {"id": "", "clientOrderId": adapter.broker_client_order_id(request.client_order_id)}
+        ]
+        runner = self._make_trader(MagicMock(spec=Strategy), adapter)
+        runner._active_orders = [TrackedOrder(request=request, placement_attempted=True)]
+
+        runner._reconcile_open_orders()
+
+        assert runner._halted is False
 
     def test_exit_uses_broker_price_fees_and_timestamp(self):
         first_fill_at = datetime(2025, 1, 1, tzinfo=UTC)

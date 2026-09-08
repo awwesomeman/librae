@@ -302,7 +302,13 @@ class ExecutionReport:
 
 
 class OrderAdapter(Protocol):
-    """Required live order lifecycle and position-reconciliation gateway."""
+    """Required live order lifecycle and position-reconciliation gateway.
+
+    An adapter whose venue cannot carry Librae's full client order id may
+    additionally declare ``broker_client_order_id(client_order_id) -> str``.
+    ``LiveExecutor`` then expects that compact form in every broker report
+    instead of the canonical id.
+    """
 
     def prepare_order(self, signal: OrderSignal) -> OrderSignal: ...
 
@@ -521,7 +527,7 @@ class LiveExecutor:
             report = self.normalize_report(
                 request,
                 raw,
-                broker_client_order_id=self._broker_client_order_id(adapter, request),
+                broker_client_order_id=self.broker_client_order_id(adapter, request),
             )
         except Exception:
             logger.exception(
@@ -554,7 +560,7 @@ class LiveExecutor:
             self.normalize_report(
                 request,
                 raw,
-                broker_client_order_id=self._broker_client_order_id(adapter, request),
+                broker_client_order_id=self.broker_client_order_id(adapter, request),
             )
             if raw is not None
             else None
@@ -567,7 +573,7 @@ class LiveExecutor:
         return self.normalize_report(
             request,
             raw,
-            broker_client_order_id=self._broker_client_order_id(adapter, request),
+            broker_client_order_id=self.broker_client_order_id(adapter, request),
         )
 
     def list_open_orders(self, symbol: str) -> list[dict]:
@@ -587,16 +593,21 @@ class LiveExecutor:
         return self.normalize_report(
             request,
             raw,
-            broker_client_order_id=self._broker_client_order_id(adapter, request),
+            broker_client_order_id=self.broker_client_order_id(adapter, request),
         )
 
     @staticmethod
-    def _broker_client_order_id(adapter: object, request: OrderRequest) -> str:
-        """Map a canonical client id only when an adapter declares a compact form."""
-        encoder = getattr(type(adapter), "broker_client_order_id", None)
-        if not callable(encoder):
+    def broker_client_order_id(adapter: object, request: OrderRequest) -> str:
+        """Map a canonical client id only when an adapter declares a compact form.
+
+        The hook is looked up on the adapter's class so an auto-attribute test
+        double does not appear to declare one, then called through the
+        instance so a plain method, ``staticmethod``, or ``classmethod`` all
+        work.
+        """
+        if not callable(getattr(type(adapter), "broker_client_order_id", None)):
             return request.client_order_id
-        encoded = str(encoder(adapter, request.client_order_id))
+        encoded = str(adapter.broker_client_order_id(request.client_order_id))
         if not encoded:
             raise ValueError("broker client order id mapping must be non-empty")
         return encoded

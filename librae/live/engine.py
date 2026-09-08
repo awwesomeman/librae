@@ -874,7 +874,13 @@ class LiveTrader:
         if self._executor.simulation:
             return
         known_ids = {order.order_id for order in self._active_orders if order.order_id}
-        known_clients = {order.request.client_order_id for order in self._active_orders}
+        known_clients: set[str] = set()
+        for order in self._active_orders:
+            known_clients.add(order.request.client_order_id)
+            adapter = self._executor.get_order_adapter(order.request.symbol)
+            if adapter is not None:
+                # Raw open orders carry the venue's form of the client id.
+                known_clients.add(self._executor.broker_client_order_id(adapter, order.request))
         orphans: list[str] = []
         for symbol in self._symbols:
             for raw in self._executor.list_open_orders(symbol):

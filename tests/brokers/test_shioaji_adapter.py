@@ -649,6 +649,20 @@ def test_trade_lookup_resolves_continuous_symbol_to_contract_code():
     adapter._api.update_status.assert_called_once_with()
 
 
+def test_trade_normalization_falls_back_to_sent_quantity_before_acknowledgement():
+    from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+    trade = SimpleNamespace(
+        order=SimpleNamespace(id="ord-1", quantity=2, custom_field="ABC123", action="Buy"),
+        status=SimpleNamespace(id="ord-1", status="PendingSubmit", order_quantity=0, deals=[]),
+    )
+
+    result = ShioajiAdapter._trade_to_order(trade, symbol="TXFR1")
+
+    assert result["amount"] == 2.0
+    assert result["filled"] == 0.0
+
+
 def test_find_order_rejects_ambiguous_compact_client_id():
     adapter = _make_adapter(ca_activated=True)
     client_order_id = "strategy-TXFR1-open-20260101T000000"

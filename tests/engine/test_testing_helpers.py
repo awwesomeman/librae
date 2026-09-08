@@ -58,6 +58,21 @@ def test_normalize_broker_report_uses_live_contract() -> None:
     assert report.status == "filled"
 
 
+def test_normalize_broker_report_applies_adapter_client_id_mapping() -> None:
+    class CompactIdAdapter:
+        @staticmethod
+        def broker_client_order_id(client_order_id: str) -> str:
+            return client_order_id[:3]
+
+    raw = {"id": "order-1", "clientOrderId": "cli", "status": "submitted", "amount": 1.0}
+
+    with pytest.raises(ValueError, match="client order id"):
+        normalize_broker_report(_request(), raw)
+    report = normalize_broker_report(_request(), raw, adapter=CompactIdAdapter())
+
+    assert report.client_order_id == "client-1"
+
+
 def test_normalize_broker_report_rejects_invented_fill_facts() -> None:
     with pytest.raises(ValueError, match="commission"):
         normalize_broker_report(

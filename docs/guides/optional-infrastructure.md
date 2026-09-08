@@ -241,6 +241,9 @@ validate_bar_data(sample_bars)
 normalized = normalize_broker_report(sample_request, sample_broker_report)
 ```
 
+Pass `adapter=` to `normalize_broker_report` when the adapter declares a compact
+`broker_client_order_id` form, so the client id check matches live execution.
+
 Paper trading uses `mode=live` with a broker's paper endpoint. `mode=sim` is a
 local shadow simulation and does not exercise acknowledgements, partial fills,
 rejections, or broker fees.

@@ -770,6 +770,14 @@ class CryptoAdapter:
                 "CryptoAdapter does not order continuous aliases; "
                 "configure an exact CCXT delivery symbol"
             )
+        unified_symbol = market.get("symbol")
+        if isinstance(unified_symbol, str) and unified_symbol and unified_symbol != symbol:
+            # ccxt resolves a raw market id too, but every order it returns
+            # names the unified symbol, which LiveExecutor compares against
+            # the configured venue_symbol.
+            raise ValueError(
+                f"{symbol} must be configured as the CCXT unified symbol {unified_symbol!r}"
+            )
 
         is_delivery_future = bool(market.get("future") or market.get("type") == "future")
         if contract_month is None:

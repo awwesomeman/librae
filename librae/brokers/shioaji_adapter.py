@@ -530,7 +530,10 @@ class ShioajiAdapter:
         order = trade.order
         deals = list(getattr(status, "deals", None) or [])
         requested = getattr(status, "order_quantity", None)
-        if not isinstance(requested, Real):
+        if not isinstance(requested, Real) or requested <= 0:
+            # A Trade returned straight from place_order may not carry the
+            # venue-side order_quantity yet; the order we sent is the
+            # requested quantity and must match the tracked request exactly.
             requested = getattr(order, "quantity", 0)
         filled = getattr(status, "deal_quantity", 0)
         filled = float(filled) if isinstance(filled, Real) else 0.0
