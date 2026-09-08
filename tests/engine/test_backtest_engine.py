@@ -6,10 +6,11 @@ import librae
 import numpy as np
 import pandas as pd
 import pytest
+from librae import normalize_bars
 from librae.backtest.engine import Backtest
 from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
-from librae.core.run_config import ExecutionPolicy, RiskPolicy
+from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 
 from tests.conftest import make_test_cfg
@@ -296,6 +297,35 @@ class TestBacktestBasics:
         with pytest.raises(ValueError, match=r"calendar_id.*UNREGISTERED"):
             backtest.run()
 
+    def test_intraday_adv_uses_run_calendar_for_unregistered_symbol(self) -> None:
+        policy = ExecutionPolicy(
+            adv_lookback_sessions=2,
+            max_adv_participation_rate=0.1,
+        )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["UNREGISTERED"],
+            calendar_id="24/7",
+            instrument_overrides={
+                "UNREGISTERED": {
+                    "data_adapter": "crypto",
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                }
+            },
+            symbol_cost_overrides={"UNREGISTERED": {"multiplier": 1.0}},
+            execution=policy,
+        )
+        backtest = Backtest(
+            _make_multiindex_df([100.0] * 5, symbol="UNREGISTERED"),
+            HoldStrategy(),
+            config=config,
+        )
+
+        backtest.run()
+
+        assert backtest._calendar_ids == {"UNREGISTERED": "24/7"}
+
     def test_force_close_at_end(self) -> None:
         prices = [100.0, 100.0, 100.0, 110.0, 120.0]
         df = _make_multiindex_df(prices)
@@ -490,6 +520,141 @@ class TestBacktestDataContract:
         backtest.run()
 
         assert backtest._timeframe == "MN1"
+
+    def test_direct_input_is_canonicalized_to_utc_without_mutating_caller(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5)
+        local_timestamps = frame.index.get_level_values("datetime").tz_convert("Asia/Taipei")
+        frame.index = pd.MultiIndex.from_arrays(
+            [frame.index.get_level_values("symbol"), local_timestamps],
+            names=["symbol", "datetime"],
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest.run()
+
+        assert str(backtest._data.index.get_level_values("datetime").tz) == "UTC"
+        assert str(frame.index.get_level_values("datetime").tz) == "Asia/Taipei"
+
+    def test_normalized_input_keeps_the_same_canonical_utc_boundary(self) -> None:
+        timestamps = pd.date_range(
+            "2026-01-01",
+            periods=5,
+            freq="h",
+            tz="Asia/Taipei",
+        )
+        frame = pd.DataFrame(
+            {
+                "open": [100.0] * 5,
+                "high": [101.0] * 5,
+                "low": [99.0] * 5,
+                "close": [100.0] * 5,
+                "volume": [100.0] * 5,
+            },
+            index=timestamps,
+        )
+
+        normalized = normalize_bars(frame, symbol="BTCUSDT")
+        backtest = Backtest(normalized, HoldStrategy(), cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._data is normalized
+        assert str(backtest._timeline[0].tz) == "UTC"
+
+    @pytest.mark.parametrize(
+        "timestamps",
+        [
+            [
+                "2026-03-05 14:30Z",
+                "2026-03-06 14:30Z",
+                "2026-03-09 13:30Z",
+                "2026-03-10 13:30Z",
+                "2026-03-11 13:30Z",
+            ],
+            [
+                "2026-10-29 13:30Z",
+                "2026-10-30 13:30Z",
+                "2026-11-02 14:30Z",
+                "2026-11-03 14:30Z",
+                "2026-11-04 14:30Z",
+            ],
+        ],
+    )
+    def test_xnys_daily_timeframe_accepts_dst_transitions(
+        self,
+        timestamps: list[str],
+    ) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="MU")
+        frame.index = pd.MultiIndex.from_arrays(
+            [["MU"] * 5, pd.to_datetime(timestamps, utc=True)],
+            names=["symbol", "datetime"],
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == "D1"
+
+    def test_xnys_daily_timeframe_rejects_off_session_timestamp(self) -> None:
+        timestamps = pd.to_datetime(
+            [
+                "2026-03-05 14:30Z",
+                "2026-03-06 14:30Z",
+                "2026-03-07 14:30Z",
+                "2026-03-09 13:30Z",
+                "2026-03-10 13:30Z",
+            ],
+            utc=True,
+        )
+        frame = _make_multiindex_df([100.0] * 5, symbol="MU")
+        frame.index = pd.MultiIndex.from_arrays(
+            [["MU"] * 5, timestamps],
+            names=["symbol", "datetime"],
+        )
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["MU"],
+            timeframe="D1",
+            market="us_equity",
+            data_source="ibkr",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        )
+
+        with pytest.raises(ValueError, match="outside the XNYS trading session"):
+            Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost()).run()
+
+    @pytest.mark.parametrize(
+        "timestamps",
+        [
+            [
+                "2026-02-23 14:30Z",
+                "2026-03-02 14:30Z",
+                "2026-03-09 13:30Z",
+                "2026-03-16 13:30Z",
+                "2026-03-23 13:30Z",
+            ],
+            [
+                "2026-10-19 13:30Z",
+                "2026-10-26 13:30Z",
+                "2026-11-02 14:30Z",
+                "2026-11-09 14:30Z",
+                "2026-11-16 14:30Z",
+            ],
+        ],
+    )
+    def test_xnys_weekly_timeframe_accepts_dst_transitions(
+        self,
+        timestamps: list[str],
+    ) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="MU")
+        frame.index = pd.MultiIndex.from_arrays(
+            [["MU"] * 5, pd.to_datetime(timestamps, utc=True)],
+            names=["symbol", "datetime"],
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest._timeframe == "W1"
 
 
 class TestSignalDrivenStrategy:

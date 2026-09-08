@@ -126,6 +126,20 @@ def session_labels(index: pd.DatetimeIndex, calendar_id: str) -> pd.Index:
     )
 
 
+def session_ordinals(index: pd.DatetimeIndex, calendar_id: str) -> tuple[int, ...]:
+    """Return monotonically comparable trading-session positions for bars."""
+    labels = session_labels(index, calendar_id)
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        epoch = date(1970, 1, 1)
+        return tuple((label - epoch).days for label in labels)
+
+    calendar = _exchange_calendar(calendar_id)
+    positions = calendar.sessions.get_indexer(pd.DatetimeIndex(labels))
+    if (positions < 0).any():  # pragma: no cover - session_label already validates
+        raise ValueError(f"bar timestamps include an unknown {calendar_id} session")
+    return tuple(int(position) for position in positions)
+
+
 def _local_timestamp(day: date, clock: time, timezone: str) -> pd.Timestamp:
     return pd.Timestamp.combine(day, clock).tz_localize(timezone).tz_convert("UTC")
 
@@ -205,6 +219,47 @@ def bar_close(value: object, target_seconds: int, calendar_id: str) -> pd.Timest
         return segments[-1][1]
     _, segment_close = _segment_containing(segments, timestamp, calendar_id)
     return min(timestamp + pd.Timedelta(seconds=target_seconds), segment_close)
+
+
+def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
+    """Return the real close boundary for one session-aligned bar period."""
+    from librae.core.utils import interval_to_timedelta, to_canonical
+
+    canonical = to_canonical(timeframe)
+    if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
+        interval = interval_to_timedelta(canonical)
+        return bar_close(value, int(interval.total_seconds()), calendar_id)
+
+    timestamp = _timestamp(value)
+    label = session_label(timestamp, calendar_id)
+    if canonical.startswith("D"):
+        count = int(canonical[1:])
+        if calendar_id == ALWAYS_OPEN_CALENDAR:
+            final_label = label + timedelta(days=count - 1)
+        else:
+            calendar = _exchange_calendar(calendar_id)
+            session = _calendar_session(calendar, label)
+            final_label = calendar.session_offset(session, count - 1).date()
+    elif canonical.startswith("W"):
+        count = int(canonical[1:])
+        period = pd.Period(label, freq="W-SUN") + count - 1
+        final_label = _last_session_on_or_before(period.end_time.date(), calendar_id)
+    elif canonical.startswith("MN"):
+        count = int(canonical[2:])
+        period = pd.Period(label, freq="M") + count - 1
+        final_label = _last_session_on_or_before(period.end_time.date(), calendar_id)
+    else:  # pragma: no cover - to_canonical owns supported prefixes
+        raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
+
+    return _session_segments(calendar_id, final_label)[-1][1]
+
+
+def _last_session_on_or_before(boundary: date, calendar_id: str) -> date:
+    """Resolve the final trading-session label ending at a calendar boundary."""
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        return boundary
+    calendar = _exchange_calendar(calendar_id)
+    return calendar.date_to_session(pd.Timestamp(boundary), direction="previous").date()
 
 
 _MAX_TOLERATED_OUTLIERS = 5

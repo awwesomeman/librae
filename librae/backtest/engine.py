@@ -92,7 +92,11 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
-from librae.core.trading_calendar import session_labels, validate_calendar_id
+from librae.core.trading_calendar import (
+    session_labels,
+    session_ordinals,
+    validate_calendar_id,
+)
 from librae.core.utils import (
     generate_run_id,
     infer_timeframe,
@@ -231,14 +235,80 @@ def _validate_backtest_data(
     validate_ohlcv_values(data)
 
 
-def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None) -> str:
+def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
+    """Return canonical-index data without changing the caller-owned frame."""
+    if not isinstance(data.index, pd.MultiIndex) or data.index.nlevels != 2:
+        return data
+    timestamps = data.index.get_level_values(-1)
+    if not isinstance(timestamps, pd.DatetimeIndex) or timestamps.tz is None:
+        return data
+    utc_timestamps = timestamps.tz_convert("UTC")
+    if str(timestamps.tz) == "UTC":
+        return data
+    normalized = data.copy()
+    normalized.index = pd.MultiIndex.from_arrays(
+        [data.index.get_level_values(0), utc_timestamps],
+        names=data.index.names,
+    )
+    return normalized
+
+
+def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
+    """Infer session bars by session cadence and fixed bars by elapsed time."""
+    inferred = infer_timeframe(index[:20])
+    if calendar_id is None or not inferred.startswith(("D", "W")):
+        return inferred
+
+    try:
+        ordinals = np.asarray(session_ordinals(index[:20], calendar_id), dtype=np.int64)
+        labels = session_labels(index[:20], calendar_id)
+    except ValueError:
+        return inferred
+    if len(set(ordinals)) != len(ordinals):
+        return inferred
+
+    week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
+    week_diffs = np.diff(week_ordinals)
+    if np.all(week_diffs > 0):
+        return f"W{int(np.gcd.reduce(week_diffs))}"
+
+    session_diffs = np.diff(ordinals)
+    return f"D{int(np.gcd.reduce(session_diffs))}"
+
+
+def _validate_session_timeframe(
+    symbol: str,
+    index: pd.DatetimeIndex,
+    timeframe: str,
+    calendar_id: str,
+) -> None:
+    """Validate daily/weekly cadence in session space instead of UTC time."""
+    if timeframe.startswith("D"):
+        interval = int(timeframe[1:])
+        ordinals = np.asarray(session_ordinals(index, calendar_id), dtype=np.int64)
+    else:
+        interval = int(timeframe[1:])
+        labels = session_labels(index, calendar_id)
+        ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
+    diffs = np.diff(ordinals)
+    if np.any(diffs < interval) or np.any(diffs % interval != 0):
+        raise ValueError(
+            f"data symbol {symbol!r} timestamps are not aligned to timeframe={timeframe}"
+        )
+
+
+def _resolve_data_timeframe(
+    data: pd.DataFrame,
+    configured_timeframe: str | None,
+    calendar_ids: dict[str, str | None],
+) -> str:
     """Infer each symbol independently and require one coherent bar interval."""
     indexes_by_symbol = {
         str(symbol): pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
         for symbol, symbol_data in data.groupby(level="symbol", sort=False)
     }
     inferred_by_symbol = {
-        symbol: infer_timeframe(index[:20])
+        symbol: _infer_symbol_timeframe(index, calendar_ids.get(symbol))
         for symbol, index in indexes_by_symbol.items()
         if len(index) >= 5
     }
@@ -248,6 +318,11 @@ def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None
             symbol: timeframe
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
+            and not (
+                timeframe.startswith(("D", "W"))
+                and expected.startswith(("D", "W"))
+                and calendar_ids.get(symbol) is not None
+            )
         }
         if mismatches:
             raise ValueError(
@@ -279,9 +354,20 @@ def _resolve_data_timeframe(data: pd.DataFrame, configured_timeframe: str | None
                 )
         return data_timeframe
 
+    if data_timeframe.startswith(("D", "W")):
+        calendar_validated: set[str] = set()
+        for symbol, index in indexes_by_symbol.items():
+            calendar_id = calendar_ids.get(symbol)
+            if len(index) < 2 or calendar_id is None:
+                continue
+            _validate_session_timeframe(symbol, index, data_timeframe, calendar_id)
+            calendar_validated.add(symbol)
+    else:
+        calendar_validated = set()
+
     base_interval = interval_to_timedelta(data_timeframe)
     for symbol, index in indexes_by_symbol.items():
-        if len(index) < 2:
+        if len(index) < 2 or symbol in calendar_validated:
             continue
         diffs = pd.Series(index).diff().dropna()
         if any(diff < base_interval or diff % base_interval != pd.Timedelta(0) for diff in diffs):
@@ -406,6 +492,7 @@ class Backtest:
         execution: ExecutionPolicy | None = None,
         risk: RiskPolicy | None = None,
     ) -> None:
+        data = _canonicalize_backtest_timestamps(data)
         _validate_backtest_data(data, config.symbols if config is not None else None)
         if config is not None and execution is not None:
             raise ValueError(
@@ -443,12 +530,6 @@ class Backtest:
         from librae.config.symbols import load_symbol_registry, resolve_symbol
 
         registry = load_symbol_registry()
-        instrument_overrides = config.instrument_overrides if config is not None else {}
-        self._calendar_ids = {
-            symbol: (instrument_overrides or {}).get(symbol, {}).get("calendar_id")
-            or (registry[symbol].calendar_id if symbol in registry else None)
-            for symbol in self._symbols
-        }
 
         # Resolve from config or explicit args
         if config is not None:
@@ -467,6 +548,10 @@ class Backtest:
             self._data_source = data_source
             resolved_name = None
             resolved_cm = cost_model if cost_model is not None else CostModel.zero()
+        self._calendar_ids = {
+            symbol: instrument.calendar_id if instrument is not None else None
+            for symbol, instrument in self._instruments.items()
+        }
 
         self._cost_models: dict[str, CostModel] = {"__default__": resolved_cm}
         if config is not None and cost_model is None:
@@ -605,6 +690,7 @@ class Backtest:
         self._timeframe = _resolve_data_timeframe(
             self._data,
             self._config.timeframe if self._config is not None else None,
+            self._calendar_ids,
         )
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
             missing_calendars = sorted(
