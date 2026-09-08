@@ -17,7 +17,13 @@ from librae.config.symbols import resolve_symbol
 from librae.core.cost_model import CostModel
 from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
-from librae.live.engine import LiveTrader, _validate_market_data_calendar_preconditions
+from librae.live.engine import (
+    LiveTrader,
+    _read_market_data_source_capabilities,
+    _resolve_effective_calendars_from_capabilities,
+    _resolve_market_data_subscription_snapshot,
+    _validate_market_data_calendar_preconditions,
+)
 from librae.live.interfaces import Notifier
 from librae.live.state import normalize_runtime_revision
 
@@ -25,6 +31,7 @@ if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
     from librae.core.executor import PositionEvent, RuntimeEvent
     from librae.core.financing import FinancingCashFlow
+    from librae.core.market_data import MarketDataSubscription
     from librae.core.run_config import RunConfig
     from librae.core.strategy import Strategy
     from librae.live.state import LiveStateStore
@@ -195,17 +202,19 @@ def _build_state_store() -> object:
 
 
 class _TimescaleCallbacks:
-    """Best-effort analytics sink; runtime checkpoints remain fail-fast."""
+    """Reference DB sink; run identity is required, analytics are best-effort."""
 
     def __init__(
         self,
         config: RunConfig,
         instruments: dict[str, SymbolInfo],
         notifier: Notifier | None,
+        subscriptions: Mapping[str, MarketDataSubscription] | None = None,
     ) -> None:
         self._config = config
         self._instruments = instruments
         self._notifier = notifier
+        self._subscriptions = dict(subscriptions or {})
         self._run_id = ""
         self._failures: dict[str, int] = {}
 
@@ -219,11 +228,10 @@ class _TimescaleCallbacks:
         """Run one best-effort DB write.
 
         ``critical=True`` alerts on the first failure instead of after
-        ``_DB_FAILURE_ALERT_THRESHOLD`` consecutive ones — for writes that
-        are one-shot (register_run fires once per process, so it would
-        never reach a consecutive-failure threshold at all) or per-event
-        and irreplaceable (a fill, a funding payment), unlike a recoverable
-        next-bar snapshot such as equity_curve.
+        ``_DB_FAILURE_ALERT_THRESHOLD`` consecutive ones — for per-event,
+        irreplaceable writes such as a fill or funding payment, unlike a
+        recoverable next-bar snapshot such as equity_curve. Run registration
+        uses a separate fail-closed path because it is a foreign-key parent.
         """
         name = callback.__name__
         try:
@@ -247,12 +255,39 @@ class _TimescaleCallbacks:
 
     def _alert(self, *, title: str, message: str) -> None:
         notifier = self._notifier
-        if notifier is None or not bool(getattr(notifier, "enabled", False)):
+        if notifier is None:
             return
         try:
+            if not bool(getattr(notifier, "enabled", False)):
+                return
             notifier.send_alert(title=title, message=message)
         except Exception:
             logger.exception("DB failure notification failed")
+
+    def _write_required_run_metadata(
+        self,
+        callback: Callable[..., object],
+        **kwargs: object,
+    ) -> None:
+        """Persist the foreign-key parent or stop construction before polling."""
+        try:
+            callback(**kwargs)
+        except Exception as exc:
+            logger.exception(
+                "DB run registration failed for run_id=%s; trading will not start",
+                self._run_id,
+            )
+            self._alert(
+                title=f"[{self._config.strategy_name}] DB Startup Failed",
+                message=(
+                    f"Run metadata persistence failed for {self._run_id}; trading did not "
+                    "start. Verify database availability and schema revision."
+                ),
+            )
+            raise RuntimeError(
+                f"required run metadata persistence failed for {self._run_id}; "
+                "trading did not start"
+            ) from exc
 
     def register_run(self, run_id: str) -> None:
         from librae.backtest.schema import StrategyMetrics
@@ -261,16 +296,16 @@ class _TimescaleCallbacks:
 
         self._run_id = run_id
         subscriptions = tuple(
-            subscription_from_instrument(
+            self._subscriptions.get(symbol)
+            or subscription_from_instrument(
                 self._instruments[symbol],
                 timeframe=self._config.timeframe,
                 session_mode=self._config.session_mode,
             )
             for symbol in self._config.symbols
         )
-        self._write(
+        self._write_required_run_metadata(
             write_run_metadata,
-            critical=True,
             run_id=run_id,
             strategy_name=self._config.strategy_name,
             symbols=self._config.symbols,
@@ -410,7 +445,7 @@ class _TimescaleCallbacks:
             row[AVAILABLE_AT_COLUMN] = bar[AVAILABLE_AT_COLUMN]
         frame = pd.DataFrame([row]).set_index("ts")
         instrument = self._instruments[symbol]
-        subscription = subscription_from_instrument(
+        subscription = self._subscriptions.get(symbol) or subscription_from_instrument(
             instrument,
             timeframe=timeframe,
             session_mode=self._config.session_mode,
@@ -502,7 +537,6 @@ def build_live_trader(
         )
         for symbol in config.symbols
     }
-    _validate_market_data_calendar_preconditions(config.timeframe, instruments)
     execution_routes = (
         _resolve_live_execution_routes(config, instruments, factories)
         if config.mode == "live"
@@ -513,6 +547,27 @@ def build_live_trader(
     unknown_overrides = set(overrides) - set(instruments)
     if unknown_overrides:
         raise ValueError(f"data_adapter_overrides has unknown symbols: {sorted(unknown_overrides)}")
+    override_capabilities = _read_market_data_source_capabilities(overrides)
+    early_route_owners = {
+        symbol: (
+            override_capabilities[symbol].route_owner
+            if symbol in override_capabilities
+            else instrument.data_adapter
+            if instrument.data_adapter not in factories
+            else None
+        )
+        for symbol, instrument in instruments.items()
+    }
+    early_calendars = _resolve_effective_calendars_from_capabilities(
+        instruments,
+        override_capabilities,
+    )
+    _validate_market_data_calendar_preconditions(
+        config.timeframe,
+        instruments,
+        early_route_owners,
+        early_calendars,
+    )
 
     adapter_instances: dict[tuple[str, str, str], object] = {}
     data_adapters: dict[str, object] = {}
@@ -544,6 +599,25 @@ def build_live_trader(
             adapter_instances[key] = instance
         data_adapters[symbol] = instance
 
+    registered_product_sources = {
+        symbol: data_adapters[symbol]
+        for symbol, instrument in instruments.items()
+        if symbol not in overrides and instrument.data_adapter in factories
+    }
+    source_capabilities = {
+        **override_capabilities,
+        **_read_market_data_source_capabilities(registered_product_sources),
+    }
+    market_data_snapshot = _resolve_market_data_subscription_snapshot(
+        config.timeframe,
+        config.session_mode,
+        instruments,
+        source_capabilities,
+        default_route_owners={
+            symbol: instrument.data_adapter for symbol, instrument in instruments.items()
+        },
+    )
+
     order_adapters: dict[str, object] | None = None
     if config.mode == "live":
         route_instances: dict[_ExecutionRoute, object] = {}
@@ -571,7 +645,14 @@ def build_live_trader(
     if resolved_state_store is None and database_enabled:
         resolved_state_store = _build_state_store()
     callbacks = (
-        _TimescaleCallbacks(config, instruments, resolved_notifier) if database_enabled else None
+        _TimescaleCallbacks(
+            config,
+            instruments,
+            resolved_notifier,
+            market_data_snapshot.subscriptions,
+        )
+        if database_enabled
+        else None
     )
     trader = LiveTrader(
         strategy_name,
@@ -598,5 +679,6 @@ def build_live_trader(
         # foreign key to a run-metadata table) — calling this only after
         # construction returns is too late, since __init__ already persisted.
         on_run_registered=callbacks.register_run if callbacks else None,
+        _market_data_snapshot=market_data_snapshot,
     )
     return trader

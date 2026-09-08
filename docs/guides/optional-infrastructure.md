@@ -61,7 +61,15 @@ must be marked explicitly with `primary_subscriptions=[]` as legacy records;
 `load_ohlcv(run_id=...)` rejects them and requires recreation or an explicit
 operator-owned migration instead of reading a mixed dataset. New writes still
 require a complete non-empty identity list. Re-running `timescale_init.sql` is
-not that migration.
+not that migration. Its create-if-not-exists statements also do not add columns
+or replace constraints on an existing table. The reference live factory
+therefore treats `backtest_runs` registration as a startup precondition: if the
+foreign-key parent cannot be written, construction fails before polling or
+order execution and emits a distinct `DB Startup Failed` alert when a notifier
+is configured. That alert means persistence startup failed, not that a run
+started without a dashboard row. Other analytics callbacks remain best-effort
+after successful registration.
+
 For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
 `POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to

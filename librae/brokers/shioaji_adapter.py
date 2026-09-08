@@ -107,6 +107,8 @@ class ShioajiAdapter:
     Call ``close()`` or use as context manager to log out.
     """
 
+    market_data_route = "shioaji"
+
     def __init__(
         self,
         credentials: ShioajiCredentials | None = None,

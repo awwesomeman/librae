@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from inspect import getattr_static
 from math import isclose, isfinite
 from threading import Event
 from time import perf_counter
@@ -55,6 +56,7 @@ from librae.core.financing import (
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
+    MarketDataSubscription,
     normalize_bar_times,
     subscription_from_instrument,
     validate_ohlcv_values,
@@ -178,8 +180,12 @@ def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
     session_mode: MarketDataSessionMode = "extended",
+    *,
+    route_owner: str | None = None,
+    calendar_id: str | None = None,
 ) -> BarDataFetcher:
     """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
+    resolved_calendar_id = calendar_id if calendar_id is not None else instrument.calendar_id
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
     if not callable(fetch_ohlcv):
         if callable(source):
@@ -188,7 +194,7 @@ def _bind_market_data_source(
             "adapter must be a bar-data callable or expose a callable fetch_ohlcv method"
         )
 
-    if instrument.data_adapter == "ibkr":
+    if route_owner == "ibkr":
         return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
             instrument.venue_symbol,
             tf,
@@ -198,22 +204,22 @@ def _bind_market_data_source(
             currency=instrument.currency,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
-            calendar_id=instrument.calendar_id,
+            calendar_id=resolved_calendar_id,
             session_mode=session_mode,
             drop_incomplete=drop_incomplete,
         )
     if session_mode != "extended":
         raise ValueError(
-            f"data adapter {instrument.data_adapter!r} cannot honor "
+            f"data adapter route {route_owner or 'caller-owned'!r} cannot honor "
             f"session_mode={session_mode!r}; provide a session-filtered callable "
             "or use session_mode='extended'"
         )
-    if instrument.data_adapter == "shioaji":
+    if route_owner == "shioaji":
         return lambda _symbol, tf, limit, *, drop_incomplete=False: fetch_ohlcv(
             instrument.venue_symbol,
             tf,
             limit=limit,
-            calendar_id=instrument.calendar_id,
+            calendar_id=resolved_calendar_id,
             continuous_alias=instrument.continuous_alias,
             contract_month=instrument.contract_month,
             drop_incomplete=drop_incomplete,
@@ -316,9 +322,162 @@ def _bind_market_data_source(
     return base_fetcher
 
 
+_MISSING_MARKET_DATA_CAPABILITY = object()
+
+
+def _market_data_capability(source: object, name: str) -> str | None:
+    """Read one explicitly declared source capability without trusting ``__getattr__``."""
+    declaration = getattr_static(source, name, _MISSING_MARKET_DATA_CAPABILITY)
+    if declaration is _MISSING_MARKET_DATA_CAPABILITY:
+        return None
+    value = getattr(source, name)
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a non-empty string when supplied")
+    if not value.strip():
+        raise ValueError(f"{name} must be a non-empty string when supplied")
+    if value != value.strip():
+        raise ValueError(f"{name} must not contain leading or trailing whitespace")
+    return value
+
+
+def _market_data_route_owner(source: object) -> str | None:
+    """Read an adapter's explicit native-route capability without duck-mocking it."""
+    return _market_data_capability(source, "market_data_route")
+
+
+def _market_data_calendar_id(source: object) -> str | None:
+    """Read a caller-owned source's explicit subscription calendar capability."""
+    return _market_data_capability(source, "market_data_calendar_id")
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketDataSubscriptionSnapshot:
+    """One-time resolution of source ownership and exact bar identity."""
+
+    route_owners: Mapping[str, str | None]
+    subscriptions: Mapping[str, MarketDataSubscription]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "route_owners", types.MappingProxyType(dict(self.route_owners)))
+        object.__setattr__(self, "subscriptions", types.MappingProxyType(dict(self.subscriptions)))
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketDataSourceCapabilities:
+    """Explicit capabilities read once from one concrete source instance."""
+
+    route_owner: str | None
+    calendar_id: str | None
+
+
+def _read_market_data_source_capabilities(
+    sources: Mapping[str, object],
+) -> dict[str, _MarketDataSourceCapabilities]:
+    """Snapshot each concrete source once, even when an instance serves many symbols."""
+    by_source_id: dict[int, _MarketDataSourceCapabilities] = {}
+    capabilities: dict[str, _MarketDataSourceCapabilities] = {}
+    for symbol, source in sources.items():
+        source_id = id(source)
+        resolved = by_source_id.get(source_id)
+        if resolved is None:
+            resolved = _MarketDataSourceCapabilities(
+                route_owner=_market_data_route_owner(source),
+                calendar_id=_market_data_calendar_id(source),
+            )
+            by_source_id[source_id] = resolved
+        capabilities[symbol] = resolved
+    return capabilities
+
+
+def _resolve_effective_calendars_from_capabilities(
+    instruments: Mapping[str, SymbolInfo],
+    source_capabilities: Mapping[str, _MarketDataSourceCapabilities],
+) -> dict[str, str | None]:
+    """Resolve source/config calendars from an already-read capability snapshot."""
+    calendars: dict[str, str | None] = {}
+    for symbol, instrument in instruments.items():
+        configured_calendar = instrument.calendar_id
+        capability = source_capabilities.get(symbol)
+        source_calendar = capability.calendar_id if capability is not None else None
+        if (
+            configured_calendar is not None
+            and source_calendar is not None
+            and configured_calendar != source_calendar
+        ):
+            raise ValueError(
+                f"{symbol!r} market-data source calendar_id={source_calendar!r} conflicts "
+                f"with configured calendar_id={configured_calendar!r}"
+            )
+        calendars[symbol] = configured_calendar or source_calendar
+    return calendars
+
+
+def _resolve_market_data_subscriptions(
+    timeframe: str,
+    session_mode: MarketDataSessionMode,
+    instruments: Mapping[str, SymbolInfo],
+    calendar_ids: Mapping[str, str | None],
+) -> dict[str, MarketDataSubscription]:
+    """Build exact subscriptions from the already-resolved source calendars."""
+    subscriptions: dict[str, MarketDataSubscription] = {}
+    for symbol, instrument in instruments.items():
+        calendar_id = calendar_ids.get(symbol)
+        if calendar_id is None:
+            raise ValueError(
+                f"market-data source for {symbol!r} must declare market_data_calendar_id "
+                "when the instrument route has no calendar_id"
+            )
+        subscriptions[symbol] = subscription_from_instrument(
+            instrument,
+            timeframe=timeframe,
+            session_mode=session_mode,
+            calendar_id=calendar_id,
+        )
+    return subscriptions
+
+
+def _resolve_market_data_subscription_snapshot(
+    timeframe: str,
+    session_mode: MarketDataSessionMode,
+    instruments: Mapping[str, SymbolInfo],
+    source_capabilities: Mapping[str, _MarketDataSourceCapabilities],
+    *,
+    default_route_owners: Mapping[str, str | None] | None = None,
+) -> _MarketDataSubscriptionSnapshot:
+    """Read source capabilities once and resolve one immutable runtime identity."""
+    defaults = default_route_owners or {}
+    route_owners = {
+        symbol: (
+            source_capabilities[symbol].route_owner
+            if symbol in source_capabilities
+            else defaults.get(symbol)
+        )
+        for symbol in instruments
+    }
+    effective_calendars = _resolve_effective_calendars_from_capabilities(
+        instruments,
+        source_capabilities,
+    )
+    _validate_market_data_calendar_preconditions(
+        timeframe,
+        instruments,
+        route_owners,
+        effective_calendars,
+    )
+    subscriptions = _resolve_market_data_subscriptions(
+        timeframe,
+        session_mode,
+        instruments,
+        effective_calendars,
+    )
+    return _MarketDataSubscriptionSnapshot(route_owners, subscriptions)
+
+
 def _validate_market_data_calendar_preconditions(
     timeframe: str,
     instruments: Mapping[str, SymbolInfo],
+    route_owners: Mapping[str, str | None],
+    calendar_ids: Mapping[str, str | None],
 ) -> None:
     """Fail before polling when a route cannot normalize its requested bars."""
     from librae.core.utils import to_ccxt
@@ -327,23 +486,23 @@ def _validate_market_data_calendar_preconditions(
         return
     missing = sorted(
         symbol
-        for symbol, instrument in instruments.items()
-        if instrument.data_adapter == "ibkr" and instrument.calendar_id is None
+        for symbol in instruments
+        if route_owners.get(symbol) == "ibkr" and calendar_ids.get(symbol) is None
     )
     if missing:
         raise ValueError(
             "daily IBKR market data requires calendar_id for every IBKR-routed "
             f"symbol; missing {missing}"
         )
-    for symbol, instrument in instruments.items():
-        if instrument.data_adapter != "ibkr":
+    for symbol in instruments:
+        if route_owners.get(symbol) != "ibkr":
             continue
+        calendar_id = calendar_ids[symbol]
         try:
-            validate_calendar_id(instrument.calendar_id)
+            validate_calendar_id(calendar_id)
         except ValueError as exc:
             raise ValueError(
-                f"daily IBKR market data has invalid calendar_id for {symbol!r}: "
-                f"{instrument.calendar_id!r}"
+                f"daily IBKR market data has invalid calendar_id for {symbol!r}: {calendar_id!r}"
             ) from exc
 
 
@@ -366,6 +525,8 @@ class LiveTrader:
             market-data adapter is used.
         state_store: Optional checkpoint store. Live mode requires a durable
             store so placement attempts and fills survive process restarts.
+        _market_data_snapshot: Internal deployment-factory handoff for an
+            already-resolved source capability and subscription snapshot.
         runtime_revision: Caller-owned opaque runtime identity. Live mode
             requires it so checkpoints cannot cross code or image revisions.
         notifier: Optional operational notifier implementing ``Notifier``.
@@ -407,6 +568,7 @@ class LiveTrader:
         on_run_registered: Callable[[str], None] | None = None,
         warmup_fetcher: WarmupFetcher | None = None,
         state_store: LiveStateStore | None = None,
+        _market_data_snapshot: _MarketDataSubscriptionSnapshot | None = None,
         runtime_revision: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -455,28 +617,6 @@ class LiveTrader:
             )
             for symbol in self._symbols
         }
-        _validate_market_data_calendar_preconditions(config.timeframe, self._instruments)
-        self._market_data_subscriptions = {
-            symbol: subscription_from_instrument(
-                instrument,
-                timeframe=self._timeframe,
-                session_mode=config.session_mode,
-            )
-            for symbol, instrument in self._instruments.items()
-        }
-        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
-            missing_calendars = sorted(
-                symbol
-                for symbol, instrument in self._instruments.items()
-                if instrument.calendar_id is None
-            )
-            if missing_calendars:
-                raise ValueError(
-                    "intraday ADV requires calendar_id for every symbol; missing "
-                    f"{missing_calendars}"
-                )
-            for instrument in self._instruments.values():
-                validate_calendar_id(instrument.calendar_id)
         self._account_id = config.account_id
         self._currency = config.account.currency
 
@@ -493,11 +633,40 @@ class LiveTrader:
             sources = dict(adapter)
         else:
             sources = {symbol: adapter for symbol in self._symbols}
+        snapshot = _market_data_snapshot
+        if snapshot is None:
+            snapshot = _resolve_market_data_subscription_snapshot(
+                self._timeframe,
+                config.session_mode,
+                self._instruments,
+                _read_market_data_source_capabilities(sources),
+            )
+        expected_symbols = set(self._symbols)
+        if (
+            set(snapshot.route_owners) != expected_symbols
+            or set(snapshot.subscriptions) != expected_symbols
+        ):
+            raise ValueError("market-data snapshot symbols must exactly match config.symbols")
+        _validate_market_data_calendar_preconditions(
+            config.timeframe,
+            self._instruments,
+            snapshot.route_owners,
+            {
+                symbol: subscription.calendar_id
+                for symbol, subscription in snapshot.subscriptions.items()
+            },
+        )
+        self._market_data_subscriptions = dict(snapshot.subscriptions)
+        if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
+            for subscription in self._market_data_subscriptions.values():
+                validate_calendar_id(subscription.calendar_id)
         self._fetchers = {
             symbol: _bind_market_data_source(
                 sources[symbol],
                 self._instruments[symbol],
                 config.session_mode,
+                route_owner=snapshot.route_owners[symbol],
+                calendar_id=self._market_data_subscriptions[symbol].calendar_id,
             )
             for symbol in self._symbols
         }
@@ -637,7 +806,7 @@ class LiveTrader:
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
-        if self._state_store is not None and not self._restored_state:
+        if not self._restored_state:
             # A restored run already notified on_run_registered inside
             # _restore_state, before it fires the state_recovered event —
             # callers like _TimescaleCallbacks cache run_id from this call
@@ -3237,9 +3406,7 @@ class LiveTrader:
         if self._interval_delta.days >= 1:
             label = pd.Timestamp(ts).date().isoformat()
         else:
-            calendar_id = self._instruments[symbol].calendar_id
-            if calendar_id is None:  # guarded during construction
-                raise RuntimeError(f"missing calendar_id for {symbol}")
+            calendar_id = self._market_data_subscriptions[symbol].calendar_id
             label = session_label(ts, calendar_id).isoformat()
         if self._adv_session_labels.get(symbol) != label:
             self._adv_session_labels[symbol] = label
@@ -3293,11 +3460,9 @@ class LiveTrader:
             self._last_prices[symbol] = close
             self._reset_adv_session(symbol, ts)
             if self._adv_lookback_sessions is not None:
-                calendar_id = self._instruments[symbol].calendar_id
+                calendar_id = self._market_data_subscriptions[symbol].calendar_id
                 labels = None
                 if self._interval_delta.days < 1:
-                    if calendar_id is None:  # guarded during construction
-                        raise RuntimeError(f"missing calendar_id for {symbol}")
                     labels = session_labels(
                         pd.DatetimeIndex(history.index),
                         calendar_id,
