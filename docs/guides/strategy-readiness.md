@@ -93,6 +93,9 @@ account and therefore follows the broker-confirmed execution path.
       unknown broker positions.
 - [ ] Durable state, single-process lease, broker-order reconciliation,
       restart recovery, and placement-ambiguity handling are exercised.
+- [ ] `Strategy.on_bar` is retry-safe for an equivalent `Context`; any
+      restart-relevant decision state is reconstructed from causal inputs,
+      not mutable strategy-instance fields (which are not checkpointed).
 - [ ] Stale-data, cycle-deadline, database, notification, and broker failures
       have alerts and an operator response.
 - [ ] The kill switch, account halt/reset, and unresolved-order procedure are

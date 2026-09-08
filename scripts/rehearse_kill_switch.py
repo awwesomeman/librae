@@ -50,7 +50,9 @@ class _RestingLimitOnceStrategy(Strategy):
     A market order would likely already be filled by the time halt() runs
     (nothing left to cancel), so this rests on the book instead. Tracks
     "already ordered" itself rather than via ctx.positions, since
-    --seed-reviewed-state can restore a pre-existing dust position.
+    --seed-reviewed-state can restore a pre-existing dust position. That flag
+    scopes one rehearsal process: a restart deliberately starts a fresh
+    rehearsal, and a same-event retry must still be able to place the order.
     """
 
     def __init__(self, quantity: float) -> None:
@@ -60,15 +62,16 @@ class _RestingLimitOnceStrategy(Strategy):
     def on_bar(self, ctx: Context) -> list[OrderIntent]:
         if self._ordered:
             return []
-        self._ordered = True
         # 0.6x clears Binance's PERCENT_PRICE_BY_SIDE floor (0.5x) with
         # margin, while staying far enough from market to never fill here.
         limit_price = ctx.bar["close"] * 0.6
-        return [
-            OrderIntent(
-                action="long", symbol=ctx.symbol, quantity=self._quantity, limit_price=limit_price
-            )
-        ]
+        intent = OrderIntent(
+            action="long", symbol=ctx.symbol, quantity=self._quantity, limit_price=limit_price
+        )
+        # Mutated only once the decision exists. Setting it earlier would let
+        # a retried event return [] and rehearse against no resting order.
+        self._ordered = True
+        return [intent]
 
 
 def _feature_fn(h1_base):
