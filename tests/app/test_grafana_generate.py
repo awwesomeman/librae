@@ -169,6 +169,18 @@ class TestRenderUnifiedDashboard:
         assert "notional / NULLIF(price * fill_quantity, 0)" in sql
         assert '"Weight"' in sql
 
+    def test_ohlcv_panels_join_the_exact_run_subscription(self):
+        dashboard = render_unified_dashboard()
+        panel = next(
+            item for item in dashboard["panels"] if item["title"] == "Price Trend — ${symbol}"
+        )
+        sql = panel["targets"][0]["rawSql"]
+
+        assert "jsonb_to_recordset(m.primary_subscriptions)" in sql
+        assert "o.calendar_id = route.calendar_id" in sql
+        assert "o.instrument_type::text = route.instrument_type" in sql
+        assert "data_source = 'multi'" not in sql
+
     def test_position_snapshot_reconstructs_state_as_of_time_range_end(self):
         """Every 'latest' lookup (position, mark, equity) must be bounded by
         $__timeTo(), not just $__timeFilter(ts) on ts's own row — otherwise

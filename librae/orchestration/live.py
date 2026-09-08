@@ -256,9 +256,18 @@ class _TimescaleCallbacks:
 
     def register_run(self, run_id: str) -> None:
         from librae.backtest.schema import StrategyMetrics
+        from librae.core.market_data import subscription_from_instrument
         from librae.db.timescale_writer import write_run_metadata, write_strategy_performance
 
         self._run_id = run_id
+        subscriptions = tuple(
+            subscription_from_instrument(
+                self._instruments[symbol],
+                timeframe=self._config.timeframe,
+                session_mode=self._config.session_mode,
+            )
+            for symbol in self._config.symbols
+        )
         self._write(
             write_run_metadata,
             critical=True,
@@ -273,6 +282,7 @@ class _TimescaleCallbacks:
                 symbol: instrument.data_source for symbol, instrument in self._instruments.items()
             },
             session_mode=self._config.session_mode,
+            primary_subscriptions=subscriptions,
             poll_seconds=self._config.runtime.poll_seconds,
             params=self._config.params,
             execution_policy=asdict(self._config.execution),
@@ -385,29 +395,30 @@ class _TimescaleCallbacks:
         bar: dict[str, float],
         ts: datetime,
     ) -> None:
+        from librae.core.market_data import AVAILABLE_AT_COLUMN, subscription_from_instrument
         from librae.db.timescale_writer import write_ohlcv
 
-        frame = pd.DataFrame(
-            [
-                {
-                    "ts": ts,
-                    "open": bar["open"],
-                    "high": bar["high"],
-                    "low": bar["low"],
-                    "close": bar["close"],
-                    "volume": bar["volume"],
-                }
-            ]
-        ).set_index("ts")
+        row = {
+            "ts": ts,
+            "open": bar["open"],
+            "high": bar["high"],
+            "low": bar["low"],
+            "close": bar["close"],
+            "volume": bar["volume"],
+        }
+        if AVAILABLE_AT_COLUMN in bar:
+            row[AVAILABLE_AT_COLUMN] = bar[AVAILABLE_AT_COLUMN]
+        frame = pd.DataFrame([row]).set_index("ts")
         instrument = self._instruments[symbol]
+        subscription = subscription_from_instrument(
+            instrument,
+            timeframe=timeframe,
+            session_mode=self._config.session_mode,
+        )
         self._write(
             write_ohlcv,
             frame,
-            symbol,
-            timeframe,
-            data_source=instrument.data_source,
-            instrument_type=instrument.instrument_type,
-            session_mode=self._config.session_mode,
+            subscription,
         )
 
     def on_heartbeat(self, run_id: str) -> None:

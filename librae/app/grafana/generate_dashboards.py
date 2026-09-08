@@ -123,13 +123,19 @@ def _account_metric_sql(column: str) -> str:
     )
 
 
-def _data_source_filter(meta_alias: str, ohlcv_alias: str) -> str:
-    # data_source='multi' means the run mixes sources (e.g. spot+perp); treat it
-    # like NULL (unrestricted) rather than a literal value ohlcv.data_source can match.
+def _subscription_filter(meta_alias: str, ohlcv_alias: str) -> str:
+    """Match a raw bar to one exact run-owned subscription identity."""
     return (
-        f"(({meta_alias}.data_source IS NULL OR {meta_alias}.data_source = 'multi'"
-        f" OR {ohlcv_alias}.data_source = {meta_alias}.data_source)"
-        f" AND {ohlcv_alias}.session_mode = {meta_alias}.session_mode)"
+        "EXISTS (SELECT 1 FROM jsonb_to_recordset("
+        f"{meta_alias}.primary_subscriptions) AS route("
+        "symbol text, timeframe text, calendar_id text, session_mode text, "
+        "data_source text, instrument_type text)"
+        f" WHERE {ohlcv_alias}.symbol = route.symbol"
+        f" AND {ohlcv_alias}.timeframe = route.timeframe"
+        f" AND {ohlcv_alias}.calendar_id = route.calendar_id"
+        f" AND {ohlcv_alias}.session_mode = route.session_mode"
+        f" AND {ohlcv_alias}.data_source = route.data_source"
+        f" AND {ohlcv_alias}.instrument_type::text = route.instrument_type)"
     )
 
 
@@ -460,7 +466,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _stat_target(
                 "WITH meta AS ("
-                " SELECT timeframe, data_source, session_mode, mode, ended_at"
+                " SELECT primary_subscriptions, mode, ended_at"
                 " FROM backtest_runs WHERE run_id='${run_id}'"
                 "),\n"
                 "positions AS (\n"
@@ -473,8 +479,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "marks AS (\n"
                 "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
                 "  FROM ohlcv o, meta m\n"
-                "  WHERE o.timeframe = m.timeframe\n"
-                f"    AND {_data_source_filter('m', 'o')}\n"
+                f"  WHERE {_subscription_filter('m', 'o')}\n"
                 "    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
                 "  ORDER BY o.symbol, o.ts DESC\n"
                 "),\n"
@@ -652,20 +657,19 @@ BASE_PANELS_DEF: list[dict] = [
         "_x": 0,
         "_dy": 0,
         "title": "Price Trend — ${symbol}",
-        "description": "Close price for the selected symbol, matched by timeframe and data source.",
+        "description": "Close price for the selected symbol's exact run subscription.",
         "type": "timeseries",
         "h": 10,
         "w": 12,
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT timeframe, data_source, session_mode, started_at, ended_at"
+                " SELECT primary_subscriptions, started_at, ended_at"
                 " FROM backtest_runs WHERE run_id = '${run_id}')"
                 ' SELECT o.ts AS time, o.close AS "${symbol}"'
                 " FROM ohlcv o, meta m"
                 " WHERE o.symbol = '${symbol}'"
-                " AND o.timeframe = m.timeframe"
-                f" AND {_data_source_filter('m', 'o')}"
+                f" AND {_subscription_filter('m', 'o')}"
                 " AND (m.started_at IS NULL OR o.ts >= m.started_at)"
                 " AND (m.ended_at IS NULL OR o.ts <= m.ended_at)"
                 " AND $__timeFilter(o.ts)"
@@ -911,7 +915,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _target(
                 "WITH meta AS ("
-                " SELECT timeframe, data_source, session_mode"
+                " SELECT primary_subscriptions"
                 " FROM backtest_runs WHERE run_id='${run_id}'"
                 "),\n"
                 "equity AS (\n"
@@ -933,8 +937,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "marks AS (\n"
                 "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n"
                 "  FROM ohlcv o, meta m\n"
-                "  WHERE o.timeframe = m.timeframe\n"
-                f"    AND {_data_source_filter('m', 'o')}\n"
+                f"  WHERE {_subscription_filter('m', 'o')}\n"
                 "    AND o.ts <= $__timeTo()\n"
                 "  ORDER BY o.symbol, o.ts DESC\n"
                 "),\n"
@@ -1550,18 +1553,12 @@ def render_account_overview_dashboard() -> dict:
 
 # WHY: common SQL fragments for signal_events LATERAL JOIN to ohlcv.
 # These are reused across multiple panels to compute forward return, MFE, MAE.
-# All filtering uses run_id — symbol/timeframe/source derived from backtest_runs.
+# All filtering uses run_id — exact primary subscriptions come from backtest_runs.
 # _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
-# so symbol/timeframe/data_source are resolved once instead of once per column.
+# so the run-owned subscription mapping is resolved once instead of once per column.
 _SIG_WHERE = "s.run_id = '${run_id}' AND s.signal_type = '${signal_type}'"
-_META_INNER = (
-    " SELECT timeframe, data_source, session_mode FROM backtest_runs WHERE run_id='${run_id}'"
-)
-_OHLCV_WHERE = (
-    "ohlcv.symbol = s.symbol"
-    " AND ohlcv.timeframe = meta.timeframe"
-    f" AND {_data_source_filter('meta', 'ohlcv')}"
-)
+_META_INNER = " SELECT primary_subscriptions FROM backtest_runs WHERE run_id='${run_id}'"
+_OHLCV_WHERE = f"ohlcv.symbol = s.symbol AND {_subscription_filter('meta', 'ohlcv')}"
 _ENTRY_BAR = (
     f"SELECT $fill_price_field AS entry_price FROM ohlcv, meta"
     f" WHERE {_OHLCV_WHERE} AND ts > s.ts"

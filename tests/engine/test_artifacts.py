@@ -87,6 +87,7 @@ def test_market_data_artifact_preserves_features_and_adds_identity() -> None:
     )
 
     table = artifact.tables["market_data"]
+    assert artifact.manifest["artifact_schema_version"] == 3
     assert artifact.manifest["artifact_kind"] == "market_data"
     assert table["factor_score"].tolist() == [0.2, 0.4]
     assert set(table["symbol"]) == {"BTCUSDT"}
@@ -180,6 +181,7 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
     artifact = build_backtest_artifact(_backtest_output(), config_hash="config-123")
 
     assert artifact.manifest["artifact_kind"] == "backtest_output"
+    assert artifact.manifest["artifact_schema_version"] == 3
     assert artifact.manifest["config_hash"] == "config-123"
     assert artifact.manifest["run_metadata"]["run_id"] == "demo-20260729t1200-abcdef"
     assert artifact.manifest["run_metadata"]["primary_subscriptions"] == [

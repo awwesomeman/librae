@@ -440,21 +440,34 @@ open) and `XTAIFEX_1725` (17:25 night open) are Librae extensions that label a
 Taiwan-futures night session with its following regular-session date.
 Shioaji's epoch correction remains adapter-specific and is not a calendar.
 
-`RunConfig.session_mode` is the separate market-data subscription identity.
+`MarketDataSubscription` is the immutable raw-data identity: `symbol`,
+canonical `timeframe`, resolved `calendar_id`, `session_mode`, `data_source`,
+and `instrument_type`. Primary/auxiliary role is intentionally not part of
+that identity. `RunConfig.session_mode` supplies its session dimension.
 `extended` (the compatibility default) means all sessions exposed by the data
 source, including regular hours; `regular` excludes prints outside the venue's
 regular session. It is part of `config_hash`, so backtest caches cannot reuse a
 run built from the other bar set. The implicit/default `extended` value retains
 the legacy hash so an unchanged live run can recover its existing checkpoint.
-Market-data artifacts, database OHLCV rows, and coverage ranges also carry the
-mode as part of their identity; run metadata lets readers select the matching
-rows. Built-in IBKR wiring maps this generic value to IBKR's `useRTH` request
+Market-data artifacts, database OHLCV rows, and coverage ranges carry all six
+dimensions; run metadata stores the exact primary identities so readers never
+fall back to a broad run-level source/type match. Built-in IBKR wiring maps
+the generic session value to IBKR's `useRTH` request
 flag. Other concrete adapters reject `regular` until they can honor it; an
 injected callable is caller-owned and must already return bars matching the
 configured mode.
 Direct `Backtest(...)` construction may declare the same identity with its
-`session_mode` keyword; when `config` is supplied, `config.session_mode` is the
-only accepted source.
+`primary_subscriptions` keyword. When `config` is supplied, the resolved
+instrument routes are authoritative and a competing supplied identity is
+rejected. The present event loop accepts one primary timeframe only; auxiliary
+frontier ordering is intentionally outside this foundation.
+
+Every normalized row has two UTC facts: `ts` is the canonical bar start and
+`available_at` is the earliest instant at which its final values are safe to
+observe. A provider publication later than the fixed/calendar completion floor
+is preserved. An earlier value is rejected. If Librae cannot establish the
+floor (for example, a calendar-sized extended-hours bar without a provider
+publication time), normalization fails closed rather than inventing one.
 
 IBKR `1d` labels are exchange session dates, not UTC midnight instants. Stock
 daily bars therefore require `calendar_id`: the adapter preserves

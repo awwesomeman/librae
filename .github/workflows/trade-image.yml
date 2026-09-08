@@ -333,9 +333,11 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy_name, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, primary_subscriptions, config_hash,
                        backtest_revision, backtest_cache_key)
-                  VALUES (%s, 'smoke', '["MU"]', 'D1', %s, %s, %s)
+                  VALUES (%s, 'smoke', '["MU"]', 'D1',
+                          '[{"symbol":"MU","timeframe":"D1","calendar_id":"XNYS","session_mode":"extended","data_source":"ibkr","instrument_type":"spot"}]',
+                          %s, %s, %s)
                   """,
                   (run_id, config_hash, revision, cache_key),
               )
@@ -345,9 +347,10 @@ jobs:
               cursor.execute(
                   """
                   INSERT INTO backtest_runs
-                      (run_id, strategy_name, symbols, timeframe, config_hash,
+                      (run_id, strategy_name, symbols, timeframe, primary_subscriptions, config_hash,
                        backtest_revision, backtest_cache_key)
                   VALUES ('cache-run-c', 'smoke', '["MU"]', 'D1',
+                          '[{"symbol":"MU","timeframe":"D1","calendar_id":"XNYS","session_mode":"extended","data_source":"ibkr","instrument_type":"spot"}]',
                           'config-b', 'revision-c', 'cache-a')
                   """
               )

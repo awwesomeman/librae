@@ -119,6 +119,15 @@ def test_us_live_extra_installs_calendar_support() -> None:
         "ib-async",
     }
 
+    assert any(
+        requirement.startswith("exchange-calendars")
+        for requirement in project["project"]["optional-dependencies"]["db"]
+    )
+    assert {dependency["name"] for dependency in locked_project["optional-dependencies"]["db"]} >= {
+        "exchange-calendars",
+        "psycopg2-binary",
+    }
+
 
 def test_trade_image_build_receives_explicit_source_identity() -> None:
     dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
@@ -962,13 +971,23 @@ def test_database_schema_does_not_embed_migrations() -> None:
     assert "DROP INDEX" not in schema
 
 
-def test_market_data_schema_keeps_session_datasets_distinct() -> None:
+def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
     schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
+    assert "primary_subscriptions JSONB NOT NULL" in schema
+    assert "jsonb_typeof(primary_subscriptions) = 'array'" in schema
     assert "data_source_by_symbol JSONB NOT NULL" in schema
     assert "jsonb_typeof(data_source_by_symbol) = 'object'" in schema
-    assert "(ts, symbol, timeframe, data_source, instrument_type, session_mode)" in schema
-    assert "GROUP BY symbol, data_source, timeframe, instrument_type, session_mode" in schema
+    assert (
+        "ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type" in schema
+    )
+    assert "available_at    TIMESTAMPTZ NOT NULL" in schema
+    assert "chk_ohlcv_available_at CHECK (available_at >= ts)" in schema
+    assert (
+        "GROUP BY symbol, data_source, timeframe, instrument_type, calendar_id, session_mode"
+        in schema
+    )
+    assert "NULL::TEXT AS calendar_id" in schema
     assert "NULL::TEXT AS session_mode" in schema
 
 
@@ -980,7 +999,12 @@ def test_backtest_cache_identity_is_separate_from_config_hash() -> None:
     assert "backtest_cache_key VARCHAR(32)" in schema
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_cache_key" in schema
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_runs_config_hash" not in schema
-    assert workflow.count("(run_id, strategy_name, symbols, timeframe, config_hash,") == 2
+    assert (
+        workflow.count(
+            "(run_id, strategy_name, symbols, timeframe, primary_subscriptions, config_hash,"
+        )
+        == 2
+    )
     assert "(run_id, strategy, symbols, timeframe, config_hash," not in workflow
 
 

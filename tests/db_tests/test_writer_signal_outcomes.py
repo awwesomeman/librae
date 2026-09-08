@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 from librae.backtest.cache import build_backtest_cache_key
 from librae.backtest.schema import StrategyMetrics
+from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import RunConfig
 from librae.db.timescale_writer import (
     _claim_backtest_cache_key,
@@ -33,6 +34,39 @@ def _test_cfg(**overrides) -> RunConfig:
     return make_test_cfg(**overrides)
 
 
+def _subscription(
+    *,
+    symbol: str = "BTCUSDT",
+    timeframe: str = "H1",
+    calendar_id: str = "24/7",
+    session_mode: str = "extended",
+    data_source: str = "test",
+    instrument_type: str = "spot",
+) -> MarketDataSubscription:
+    return MarketDataSubscription(
+        symbol=symbol,
+        timeframe=timeframe,
+        calendar_id=calendar_id,
+        session_mode=session_mode,
+        data_source=data_source,
+        instrument_type=instrument_type,
+    )
+
+
+def _config_subscriptions(config: RunConfig) -> tuple[MarketDataSubscription, ...]:
+    from librae.config.symbols import resolve_symbol
+    from librae.core.market_data import subscription_from_instrument
+
+    return tuple(
+        subscription_from_instrument(
+            resolve_symbol(config, symbol),
+            timeframe=config.timeframe,
+            session_mode=config.session_mode,
+        )
+        for symbol in config.symbols
+    )
+
+
 def test_run_metadata_persists_execution_policy_separately_from_params():
     cursor = MagicMock()
 
@@ -45,6 +79,12 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         data_source="run-default",
         data_source_by_symbol={"BTCUSDT": "instrument-source"},
         session_mode="regular",
+        primary_subscriptions=(
+            _subscription(
+                session_mode="regular",
+                data_source="instrument-source",
+            ),
+        ),
         params={"window": 20},
         execution_policy={
             "default_fill_price": "open",
@@ -58,15 +98,36 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
     )
 
     values = cursor.execute.call_args.args[1]
+    sql = cursor.execute.call_args.args[0]
     assert json.loads(values[5]) == {"BTCUSDT": "instrument-source"}
-    assert values[6] == "regular"
-    assert json.loads(values[12]) == {"window": 20}
-    assert json.loads(values[13]) == {
+    assert json.loads(values[6]) == [
+        _subscription(session_mode="regular", data_source="instrument-source").to_dict()
+    ]
+    assert values[7] == "regular"
+    assert json.loads(values[13]) == {"window": 20}
+    assert json.loads(values[14]) == {
         "default_fill_price": "open",
         "max_bar_volume_participation_rate": 0.1,
     }
-    assert json.loads(values[14]) == {"max_drawdown_rate": 0.2}
-    assert values[15:] == ("config-a", "revision-a", "cache-a")
+    assert json.loads(values[15]) == {"max_drawdown_rate": 0.2}
+    assert values[16:] == ("config-a", "revision-a", "cache-a")
+    assert "backtest_runs.primary_subscriptions = EXCLUDED.primary_subscriptions" in sql
+
+
+def test_run_metadata_rejects_existing_different_immutable_identity() -> None:
+    cursor = MagicMock(rowcount=0)
+
+    with pytest.raises(ValueError, match="different immutable identity"):
+        write_run_metadata(
+            "reused-run",
+            "strategy",
+            ["BTCUSDT"],
+            "H1",
+            "backtest",
+            data_source="test",
+            primary_subscriptions=(_subscription(),),
+            cur=cursor,
+        )
 
 
 class TestBacktestCacheKeyClaim:
@@ -276,10 +337,10 @@ def test_write_ohlcv_requires_real_volume() -> None:
     )
 
     with pytest.raises(ValueError, match="volume"):
-        write_ohlcv(frame, "BTCUSDT", "H1", "test")
+        write_ohlcv(frame, _subscription())
 
 
-def test_write_ohlcv_rejects_invalid_instrument_type() -> None:
+def test_write_ohlcv_rejects_partial_scalar_identity() -> None:
     frame = pd.DataFrame(
         {
             "open": [100.0],
@@ -291,13 +352,15 @@ def test_write_ohlcv_rejects_invalid_instrument_type() -> None:
         index=pd.DatetimeIndex([datetime(2024, 6, 1, tzinfo=UTC)], name="ts"),
     )
 
-    with pytest.raises(ValueError, match="instrument_type"):
-        write_ohlcv(frame, "BTCUSDT", "H1", "test", instrument_type="daily")
+    with pytest.raises(TypeError, match="MarketDataSubscription"):
+        write_ohlcv(frame, "BTCUSDT")  # type: ignore[arg-type]
 
 
 @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
 @patch("librae.db.timescale_writer.get_conn")
-def test_write_ohlcv_uses_session_mode_as_row_identity(mock_conn_ctx, mock_exec_values) -> None:
+def test_write_ohlcv_uses_complete_subscription_and_availability(
+    mock_conn_ctx, mock_exec_values
+) -> None:
     mock_cur = MagicMock()
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -310,16 +373,25 @@ def test_write_ohlcv_uses_session_mode_as_row_identity(mock_conn_ctx, mock_exec_
             "low": [99.0],
             "close": [100.0],
             "volume": [10.0],
+            "available_at": [datetime(2024, 6, 3, 15, tzinfo=UTC)],
         },
-        index=pd.DatetimeIndex([datetime(2024, 6, 1, tzinfo=UTC)], name="ts"),
+        index=pd.DatetimeIndex([datetime(2024, 6, 3, 13, 30, tzinfo=UTC)], name="ts"),
+    )
+    subscription = _subscription(
+        symbol="AAPL",
+        calendar_id="XNYS",
+        session_mode="regular",
+        data_source="ibkr",
     )
 
-    write_ohlcv(frame, "AAPL", "H1", "ibkr", session_mode="regular")
+    write_ohlcv(frame, subscription)
 
     sql = mock_exec_values.call_args[0][1]
     row = mock_exec_values.call_args[0][2][0]
-    assert "instrument_type, session_mode" in sql
-    assert row[5] == "regular"
+    assert "calendar_id, session_mode" in sql
+    assert "available_at=GREATEST" in sql
+    assert row[1:7] == tuple(subscription.to_dict().values())
+    assert row[7] == datetime(2024, 6, 3, 15, tzinfo=UTC)
 
 
 class TestWriteSignalEvent:
@@ -408,11 +480,13 @@ class TestPersistBacktest:
     def test_extracts_signals_and_calls_writer(self, mock_write_bt, mock_write_ohlcv):
         df, _symbol = self._make_featured_df()
         mock_output = MagicMock()
+        config = _test_cfg()
+        mock_output.run_metadata.primary_subscriptions = _config_subscriptions(config)
 
         counts = save_strategy_results(
             mock_output,
             df,
-            _test_cfg(),
+            config,
             backtest_revision="revision-a",
         )
 
@@ -442,11 +516,14 @@ class TestPersistBacktest:
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
     def test_force_recompute_replaces_existing_hash(self, mock_write_bt, mock_write_ohlcv):
         df, _symbol = self._make_featured_df()
+        config = _test_cfg()
+        output = MagicMock()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
 
         save_strategy_results(
-            MagicMock(),
+            output,
             df,
-            _test_cfg(),
+            config,
             replace_existing=True,
             backtest_revision="revision-a",
         )
@@ -455,12 +532,15 @@ class TestPersistBacktest:
 
     def test_force_recompute_requires_revision(self):
         df, _symbol = self._make_featured_df()
+        config = _test_cfg()
+        output = MagicMock()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
 
         with pytest.raises(ValueError, match="requires backtest_revision"):
             save_strategy_results(
-                MagicMock(),
+                output,
                 df,
-                _test_cfg(),
+                config,
                 replace_existing=True,
             )
 
@@ -485,7 +565,10 @@ class TestPersistBacktest:
             index=mi,
         )
 
-        save_strategy_results(MagicMock(), df, _test_cfg())
+        config = _test_cfg()
+        output = MagicMock()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
+        save_strategy_results(output, df, config)
 
         signal_series = mock_write_bt.call_args.kwargs["signal_series_by_symbol"]["BTCUSDT"]
         # Should keep: 1.0, -1.0, 1.0, -0.5, 1.0 (5 values, excluding NaN and 0)
@@ -512,25 +595,26 @@ class TestPersistBacktest:
             index=index,
         )
 
-        counts = save_strategy_results(
-            MagicMock(),
-            df,
-            _test_cfg(
-                symbols=["AAA", "BBB"],
-                instrument_overrides={
-                    symbol: {
-                        "instrument_type": "spot",
-                        "currency": "USDT",
-                        "data_adapter": "crypto",
-                    }
-                    for symbol in ("AAA", "BBB")
-                },
-                symbol_cost_overrides={symbol: {"multiplier": 1.0} for symbol in ("AAA", "BBB")},
-            ),
+        config = _test_cfg(
+            symbols=["AAA", "BBB"],
+            instrument_overrides={
+                symbol: {
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                    "data_adapter": "crypto",
+                    "calendar_id": "24/7",
+                }
+                for symbol in ("AAA", "BBB")
+            },
+            symbol_cost_overrides={symbol: {"multiplier": 1.0} for symbol in ("AAA", "BBB")},
         )
+        output = MagicMock()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
+
+        counts = save_strategy_results(output, df, config)
 
         assert mock_write_ohlcv.call_count == 2
-        assert {call.args[1] for call in mock_write_ohlcv.call_args_list} == {
+        assert {call.args[1].symbol for call in mock_write_ohlcv.call_args_list} == {
             "AAA",
             "BBB",
         }
@@ -556,11 +640,15 @@ class TestPersistBacktest:
             },
         )
 
-        save_strategy_results(MagicMock(), df, config)
+        output = MagicMock()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
+
+        save_strategy_results(output, df, config)
 
         assert mock_write_bt.call_args.kwargs["data_source_by_symbol"] == {symbol: "ibkr"}
-        assert mock_write_ohlcv.call_args.kwargs["data_source"] == "ibkr"
-        assert mock_write_ohlcv.call_args.kwargs["instrument_type"] == "spot"
+        subscription = mock_write_ohlcv.call_args.args[1]
+        assert subscription.data_source == "ibkr"
+        assert subscription.instrument_type == "spot"
 
 
 class TestSaveSignalResults:
@@ -648,7 +736,14 @@ class TestSaveSignalResults:
             index=idx,
         )
 
-        counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot")
+        counts = save_signal_results(
+            df,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            primary_subscription=_subscription(data_source="binance_spot"),
+        )
 
         assert counts["signal_events"] == 4  # indices 0,5,10,15
         assert counts["ohlcv"] == 10
@@ -686,7 +781,15 @@ class TestSaveSignalResults:
             index=idx,
         )
 
-        save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot", run_id="run-A")
+        save_signal_results(
+            df,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            run_id="run-A",
+            primary_subscription=_subscription(data_source="binance_spot"),
+        )
 
         delete_call = next(
             c for c in mock_cur.execute.call_args_list if "DELETE FROM signal_events" in c.args[0]
@@ -725,7 +828,14 @@ class TestSaveSignalResults:
             index=mi,
         )
 
-        counts = save_signal_results(df, "BTCUSDT", "H1", "test_strategy", "binance_spot")
+        counts = save_signal_results(
+            df,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            primary_subscription=_subscription(data_source="binance_spot"),
+        )
 
         # 1.0, -1.0, 1.0, 1.0, -0.5 = 5 non-zero non-NaN
         assert counts["signal_events"] == 5

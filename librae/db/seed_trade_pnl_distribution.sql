@@ -18,11 +18,14 @@ DELETE FROM backtest_runs WHERE run_id = 'seed_pnl_dist_run';
 
 INSERT INTO backtest_runs
     (run_id, strategy_name, symbols, timeframe, data_source, data_source_by_symbol,
-     started_at, ended_at, run_at, mode, poll_seconds, params, execution_policy,
+     primary_subscriptions, started_at, ended_at, run_at, mode, poll_seconds, params, execution_policy,
      risk_policy, config_hash)
 VALUES
     ('seed_pnl_dist_run', 'seed_test', '["BTCUSDT", "ETHUSDT", "SOLUSDT"]'::jsonb, 'H1', 'binance_spot',
      '{"BTCUSDT":"binance_spot","ETHUSDT":"binance_spot","SOLUSDT":"binance_spot"}'::jsonb,
+     '[{"symbol":"BTCUSDT","timeframe":"H1","calendar_id":"24/7","session_mode":"extended","data_source":"binance_spot","instrument_type":"spot"},
+       {"symbol":"ETHUSDT","timeframe":"H1","calendar_id":"24/7","session_mode":"extended","data_source":"binance_spot","instrument_type":"spot"},
+       {"symbol":"SOLUSDT","timeframe":"H1","calendar_id":"24/7","session_mode":"extended","data_source":"binance_spot","instrument_type":"spot"}]'::jsonb,
      NOW() - INTERVAL '200 hours', NOW(), NOW(),
      'backtest', NULL, '{}'::jsonb,
      '{"default_fill_price": "open", "max_bar_volume_participation_rate": 0.1, "warmup_periods": 720}'::jsonb,

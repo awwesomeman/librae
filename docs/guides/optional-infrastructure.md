@@ -51,6 +51,15 @@ docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_in
 
 When a revision changes the schema, recreate disposable development data or
 perform an explicit operator-owned migration before running the new revision.
+The subscription-identity schema adds `backtest_runs.primary_subscriptions`,
+`ohlcv.calendar_id`, `ohlcv.available_at`, and the calendar dimension on
+`ohlcv_coverage_ranges`; it also replaces the OHLCV unique/index keys. Those
+columns must be backfilled from auditable source metadata before constraints
+and indexes are changed. Do not infer missing calendar or instrument type from
+the symbol string. Runs whose exact six-field identities cannot be recovered
+must remain legacy records: `load_ohlcv(run_id=...)` rejects them and requires
+recreation or an explicit operator-owned migration instead of reading a mixed
+dataset. Re-running `timescale_init.sql` is not that migration.
 For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
 `POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
@@ -68,6 +77,10 @@ ad hoc SQL. The repository runner skips database writes when
 `timescale_writer`'s `instrument_type` params are validated in Python
 against `librae.config.symbols.ALLOWED_INSTRUMENT_TYPES` before any SQL
 runs — fails fast instead of relying on the `CHECK` constraint at `INSERT`.
+OHLCV read/write and coverage helpers accept a `MarketDataSubscription`
+instead of a collection of optional scalar filters. `load_ohlcv(as_of=...)`
+filters on `available_at`, so a DB-backed warmup cannot observe a bar merely
+because its start label is inside the requested range.
 
 Backtest database reuse is disabled unless the caller supplies
 `backtest_revision` through CLI/YAML orchestration and passes the same value to
