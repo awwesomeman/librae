@@ -346,10 +346,14 @@ CREATE TABLE IF NOT EXISTS symbols (
     security_type    TEXT,
     exchange         TEXT,
     calendar_id      TEXT,
+    quantity_step    DOUBLE PRECISION,
+    min_quantity     DOUBLE PRECISION,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT pk_symbols PRIMARY KEY (symbol, data_source, instrument_type),
     CONSTRAINT chk_symbols_multiplier CHECK (multiplier > 0),
-    CONSTRAINT chk_symbols_tick_size CHECK (tick_size IS NULL OR tick_size > 0)
+    CONSTRAINT chk_symbols_tick_size CHECK (tick_size IS NULL OR tick_size > 0),
+    CONSTRAINT chk_symbols_quantity_step CHECK (quantity_step IS NULL OR quantity_step > 0),
+    CONSTRAINT chk_symbols_min_quantity CHECK (min_quantity IS NULL OR min_quantity > 0)
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_market ON symbols(market, instrument_type);
 CREATE INDEX IF NOT EXISTS idx_symbols_calendar ON symbols(calendar_id);

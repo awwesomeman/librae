@@ -39,6 +39,7 @@ from librae.core.executor import (
     execute_pending_decision_and_stops,
     execute_portfolio_weights,
     merge_pending_decisions,
+    normalize_order_intents,
     order_side_is_tradable,
     partition_pending_decision,
     queue_market_exit_all,
@@ -1586,11 +1587,17 @@ class LiveTrader:
         max_order_notional = (
             self._risk_policy.max_order_notional if apply_entry_risk_limits else None
         )
-        max_position_notional = (
-            self._risk_policy.max_position_weight * self._prev_equity
-            if apply_entry_risk_limits and self._risk_policy.max_position_weight
-            else None
-        )
+        max_position_notional = None
+        if apply_entry_risk_limits and self._risk_policy.max_position_weight:
+            execution_equity, _ = calc_equity(
+                self._cash,
+                self._positions,
+                get_price=lambda symbol, _position: exposure_prices[symbol],
+                get_cost_model=self._get_cost_model,
+            )
+            max_position_notional = self._risk_policy.max_position_weight * max(
+                execution_equity, 0.0
+            )
         volume_limit = self._max_bar_volume_participation_rate if apply_volume_limit else None
         adv_limit = self._max_adv_participation_rate if apply_volume_limit else None
         staged_positions = deepcopy(self._positions)
@@ -1644,6 +1651,7 @@ class LiveTrader:
                 get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                 used_bar_quantity_by_symbol=prepared_bar_quantity_by_symbol,
                 used_adv_quantity_by_symbol=prepared_adv_quantity_by_symbol,
+                get_executable_quantity=self._get_executable_quantity,
             )
             executable_quantity = sum(event.fill_quantity for event in validation_result.events)
             if abs(executable_quantity - prepared.quantity) > EPSILON:
@@ -1693,6 +1701,7 @@ class LiveTrader:
                     get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
                     used_bar_quantity_by_symbol=planned_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
+                    get_executable_quantity=self._get_executable_quantity,
                 )
             except ExecutionPriceUnavailableError as exc:
                 if unavailable_side_symbols:
@@ -1828,6 +1837,15 @@ class LiveTrader:
             )
 
             try:
+                unit_actions, normalization_events = normalize_order_intents(
+                    unit_actions,
+                    ts,
+                    primary_symbol=primary_symbol,
+                    get_executable_quantity=self._get_executable_quantity,
+                )
+                if self._on_runtime_event:
+                    for runtime_event in normalization_events:
+                        self._on_runtime_event(runtime_event)
                 for action in unit_actions:
                     if action.stop_price is not None or action.take_profit_price is not None:
                         raise ValueError(
@@ -1915,6 +1933,7 @@ class LiveTrader:
                         get_lagged_adv=lambda requested_symbol: lagged_adv.get(requested_symbol),
                         used_bar_quantity_by_symbol=unit_bar_quantities,
                         used_adv_quantity_by_symbol=unit_adv_quantities,
+                        get_executable_quantity=self._get_executable_quantity,
                     )
                     if grouped and len(result.events) != 1:
                         reasons = sorted(
@@ -2639,14 +2658,21 @@ class LiveTrader:
                     get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
                     used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                    get_executable_quantity=self._get_executable_quantity,
                 )
                 staged_cash = self._cash + step_result.cash_delta
             else:
-                max_position_notional = (
-                    self._risk_policy.max_position_weight * self._prev_equity
-                    if self._risk_policy.max_position_weight
-                    else None
-                )
+                max_position_notional = None
+                if self._risk_policy.max_position_weight:
+                    execution_equity, _ = calc_equity(
+                        self._cash,
+                        self._positions,
+                        get_price=lambda symbol, _position: exposure_prices[symbol],
+                        get_cost_model=self._get_cost_model,
+                    )
+                    max_position_notional = self._risk_policy.max_position_weight * max(
+                        execution_equity, 0.0
+                    )
                 staged_cash, step_result = execute_pending_decision_and_stops(
                     ts,
                     self._positions,
@@ -2666,6 +2692,7 @@ class LiveTrader:
                     max_gross_exposure=self._risk_policy.max_gross_exposure,
                     max_net_exposure=self._risk_policy.max_net_exposure,
                     exposure_prices=exposure_prices,
+                    get_executable_quantity=self._get_executable_quantity,
                 )
             self._commit_simulated_results(
                 cash=staged_cash,
@@ -2873,6 +2900,10 @@ class LiveTrader:
 
     def _get_cost_model(self, sym: str) -> CostModel:
         return self._executor.get_cost_model(sym)
+
+    def _get_executable_quantity(self, symbol: str, quantity: float) -> float:
+        """Apply the shared instrument quantity contract before broker preparation."""
+        return self._instruments[symbol].normalize_quantity(quantity)
 
     def _apply_financing_cash_flows(
         self,

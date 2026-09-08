@@ -405,6 +405,13 @@ Execution then deliberately diverges:
   the same timestamp. Current prices may size requests but local execution
   facts come only from broker reports.
 
+Quantity feasibility does not diverge. `SymbolInfo.quantity_step` and
+`min_quantity`, when configured, round explicit and target-derived quantities
+toward zero before cash, volume, and risk checks in both modes. Grouped legs
+must preserve their relative scale after rounding. Live adapters remain the
+final authority for current venue-specific precision and minimums, and their
+prepared result is checked again before submission.
+
 OHLCV caches are sorted and deduplicated. Mode-specific backlog handling is
 defined under data staleness below. Both modes advance a durable per-symbol
 watermark only after successful processing. A late symbol at the same

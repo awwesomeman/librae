@@ -12,8 +12,19 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
+from decimal import ROUND_FLOOR, Decimal
+from math import isfinite
 
 import pandas as pd
+
+
+def floor_to_step(value: float, step: float) -> float:
+    """Round a positive quantity down to an executable step exactly."""
+    if not isfinite(value) or value <= 0 or not isfinite(step) or step <= 0:
+        raise ValueError("value and step must be positive and finite")
+    units = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_FLOOR)
+    return float(units * Decimal(str(step)))
+
 
 # ---------------------------------------------------------------------------
 # Run / Trade ID

@@ -452,8 +452,7 @@ class Backtest:
 
         # Resolve from config or explicit args
         if config is not None:
-            for symbol in self._symbols:
-                resolve_symbol(config, symbol)
+            self._instruments = {symbol: resolve_symbol(config, symbol) for symbol in self._symbols}
             self._account_id = config.account_id
             self._currency = config.account.currency
             self._initial_cash = config.account.initial_cash
@@ -461,6 +460,7 @@ class Backtest:
             resolved_name = config.strategy_name
             resolved_cm = CostModel.from_config(config, override=cost_model)
         else:
+            self._instruments = {symbol: registry.get(symbol) for symbol in self._symbols}
             self._account_id = account_id
             self._currency = currency
             self._initial_cash = initial_balance
@@ -533,7 +533,6 @@ class Backtest:
         bars: dict[str, dict[str, float]],
         *,
         primary_symbol: str,
-        last_equity: float,
         halted: bool,
         get_previous_volume: Callable[[str], float | None],
         get_lagged_adv: Callable[[str], float | None],
@@ -552,13 +551,20 @@ class Backtest:
                 get_volume=get_previous_volume,
                 get_lagged_adv=get_lagged_adv,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                get_executable_quantity=self._get_executable_quantity,
             )
             return cash + result.cash_delta, result
-        max_position_notional = (
-            self._risk_policy.max_position_weight * last_equity
-            if self._risk_policy.max_position_weight
-            else None
-        )
+        max_position_notional = None
+        if self._risk_policy.max_position_weight:
+            execution_equity, _ = calc_equity(
+                cash,
+                positions,
+                get_price=lambda symbol, _position: exposure_prices[symbol],
+                get_cost_model=self._get_cost_model,
+            )
+            max_position_notional = self._risk_policy.max_position_weight * max(
+                execution_equity, 0.0
+            )
         return execute_pending_decision_and_stops(
             ts,
             positions,
@@ -580,6 +586,7 @@ class Backtest:
             exposure_prices=exposure_prices,
             rebalance_state=rebalance_state,
             rebalance_residual_policy=self._rebalance_residual_policy,
+            get_executable_quantity=self._get_executable_quantity,
         )
 
     # --- Private helpers ---
@@ -587,6 +594,11 @@ class Backtest:
     def _get_cost_model(self, symbol: str) -> CostModel:
         """Get a symbol override or the constructor-created default model."""
         return self._cost_models.get(symbol, self._cost_models["__default__"])
+
+    def _get_executable_quantity(self, symbol: str, quantity: float) -> float:
+        """Apply configured instrument size rules; unknown direct symbols stay continuous."""
+        instrument = self._instruments.get(symbol)
+        return instrument.normalize_quantity(quantity) if instrument is not None else quantity
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
@@ -633,7 +645,6 @@ class Backtest:
         last_prices: dict[str, float] = {}
         decision_index = 0
         equity_peak = self._initial_cash
-        last_equity = self._initial_cash
         halted = False
         adv_session_by_symbol: dict[str, object] = {}
         used_adv_quantity_by_symbol: dict[str, float] = {}
@@ -696,7 +707,6 @@ class Backtest:
                     decision_to_execute,
                     bars,
                     primary_symbol=primary_symbol,
-                    last_equity=last_equity,
                     halted=halted,
                     get_previous_volume=get_previous_volume,
                     get_lagged_adv=get_lagged_adv,
@@ -743,7 +753,6 @@ class Backtest:
                     [],
                     bars,
                     primary_symbol=primary_symbol,
-                    last_equity=last_equity,
                     halted=halted,
                     get_previous_volume=get_previous_volume,
                     get_lagged_adv=get_lagged_adv,
@@ -836,7 +845,6 @@ class Backtest:
                         active_target_weights,
                     )
                 )
-            last_equity = mtm
             account_snapshot = AccountSnapshot(
                 currency=self._currency,
                 cash=cash,
@@ -966,6 +974,7 @@ class Backtest:
                 get_lagged_adv=lambda symbol: all_lagged_adv.get(last_ts, {}).get(symbol),
                 used_bar_quantity_by_symbol=used_bar_quantity,
                 used_adv_quantity_by_symbol=used_adv_quantity_by_symbol,
+                get_executable_quantity=self._get_executable_quantity,
             )
             trades.extend(close_result.trades)
             all_events.extend(close_result.events)

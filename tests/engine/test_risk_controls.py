@@ -847,6 +847,58 @@ class TestMaxPositionCap:
         # max_position_weight=0.3 against last-known equity (10_000) caps notional at 3_000 -> 30 units.
         assert result.trades[0].quantity == pytest.approx(30.0)
 
+    def test_multi_asset_gap_uses_execution_time_equity(self):
+        timestamps = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
+
+        def frame(symbol: str, opens: list[float]) -> pd.DataFrame:
+            index = pd.MultiIndex.from_arrays(
+                [[symbol] * len(timestamps), timestamps],
+                names=["symbol", "datetime"],
+            )
+            return pd.DataFrame(
+                {
+                    "open": opens,
+                    "high": [price + 1.0 for price in opens],
+                    "low": [price - 1.0 for price in opens],
+                    "close": opens,
+                    "volume": 1_000.0,
+                },
+                index=index,
+            )
+
+        data = pd.concat(
+            [
+                frame("A", [100.0, 100.0, 20.0, 20.0, 20.0]),
+                frame("B", [100.0] * 5),
+            ]
+        ).sort_index(level="datetime")
+
+        class BuyAfterOtherHoldingGaps(Strategy):
+            def on_bar(self, ctx: Context):
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol="A", quantity=50.0)]
+                if ctx.period_index == 1:
+                    return [OrderIntent(action="long", symbol="B", quantity=100.0)]
+                return []
+
+        result = Backtest(
+            data,
+            BuyAfterOtherHoldingGaps(),
+            initial_balance=10_000.0,
+            cost_model=_zero_cost(),
+            risk=RiskPolicy(max_position_weight=0.5),
+        ).run()
+
+        b_open = next(
+            event
+            for event in result.position_events
+            if event.symbol == "B" and event.event_type == "open"
+        )
+        # A gaps from 100 to 20 before B executes: equity is 5,000 cash +
+        # 1,000 marked A = 6,000, so B's 50% cap is 3,000 rather than the
+        # stale prior event's 5,000.
+        assert b_open.fill_quantity == pytest.approx(30.0)
+
 
 class TestMaxVolumeParticipation:
     def test_open_uses_previous_completed_volume(self):
