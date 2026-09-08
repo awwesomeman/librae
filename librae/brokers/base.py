@@ -94,16 +94,19 @@ def drop_incomplete_ohlcv(
     """Drop a final bar-start candle whose interval has not closed yet."""
     if df.empty:
         return df
-    from librae.core.utils import interval_to_timedelta
+    from librae.core.utils import interval_to_timedelta, to_canonical
 
-    last_ts = pd.Timestamp(df["ts"].iloc[-1]).to_pydatetime()
-    interval = interval_to_timedelta(timeframe)
-    if calendar_id is None:
-        close_at = last_ts + interval
+    last_ts = pd.Timestamp(df["ts"].iloc[-1])
+    canonical = to_canonical(timeframe)
+    if calendar_id is not None:
+        from librae.core.trading_calendar import period_close
+
+        close_at = period_close(last_ts, canonical, calendar_id)
+    elif canonical.startswith("MN"):
+        month_count = int(canonical[2:])
+        close_at = last_ts + pd.offsets.MonthBegin(month_count)
     else:
-        from librae.core.trading_calendar import bar_close
-
-        close_at = bar_close(last_ts, int(interval.total_seconds()), calendar_id).to_pydatetime()
+        close_at = last_ts + interval_to_timedelta(canonical)
     if close_at > datetime.now(UTC):
         return df.iloc[:-1]
     return df
