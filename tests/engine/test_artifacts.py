@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
-from librae import build_backtest_artifact, build_market_data_artifact
+from librae import MarketDataSubscription, build_backtest_artifact, build_market_data_artifact
 from librae.backtest.schema import (
     AccountPerformance,
     BacktestOutput,
@@ -43,6 +43,16 @@ def _backtest_output() -> BacktestOutput:
             started_at=now,
             ended_at=now,
             run_at=now,
+            primary_subscriptions=(
+                MarketDataSubscription(
+                    symbol="BTCUSDT",
+                    timeframe="H1",
+                    calendar_id="24/7",
+                    session_mode="extended",
+                    data_source="fixture",
+                    instrument_type="spot",
+                ),
+            ),
         ),
         account=AccountPerformance(
             account_id="main",
@@ -71,6 +81,7 @@ def test_market_data_artifact_preserves_features_and_adds_identity() -> None:
         _market_frame(),
         symbol="BTCUSDT",
         timeframe="1h",
+        calendar_id="24/7",
         data_source="fixture",
         instrument_type="spot",
     )
@@ -79,17 +90,27 @@ def test_market_data_artifact_preserves_features_and_adds_identity() -> None:
     assert artifact.manifest["artifact_kind"] == "market_data"
     assert table["factor_score"].tolist() == [0.2, 0.4]
     assert set(table["symbol"]) == {"BTCUSDT"}
-    assert set(table["timeframe"]) == {"1h"}
+    assert set(table["timeframe"]) == {"H1"}
+    assert set(table["calendar_id"]) == {"24/7"}
     assert set(table["session_mode"]) == {"extended"}
+    assert table["available_at"].tolist() == list(
+        pd.date_range("2026-07-29 01:00", periods=2, freq="1h", tz="UTC")
+    )
     assert artifact.manifest["session_mode"] == "extended"
     assert str(table["ts"].dt.tz) == "UTC"
 
 
 def test_market_data_artifact_distinguishes_regular_session_data() -> None:
+    frame = _market_frame()
+    frame.index = pd.DatetimeIndex(
+        pd.to_datetime(["2026-07-29T13:30:00Z", "2026-07-29T14:30:00Z"]),
+        name="datetime",
+    )
     artifact = build_market_data_artifact(
-        _market_frame(),
+        frame,
         symbol="AAPL",
         timeframe="1h",
+        calendar_id="XNYS",
         data_source="ibkr",
         instrument_type="spot",
         session_mode="regular",
@@ -105,6 +126,7 @@ def test_market_data_artifact_rejects_naive_timestamps() -> None:
             _market_frame(timezone=None),
             symbol="BTCUSDT",
             timeframe="1h",
+            calendar_id="24/7",
             data_source="fixture",
             instrument_type="spot",
         )
@@ -116,6 +138,7 @@ def test_market_data_artifact_rejects_invalid_instrument_type() -> None:
             _market_frame(),
             symbol="BTCUSDT",
             timeframe="1h",
+            calendar_id="24/7",
             data_source="fixture",
             instrument_type="daily",
         )
@@ -130,6 +153,7 @@ def test_market_data_artifact_accepts_backtest_style_multiindex() -> None:
         frame,
         symbol="BTCUSDT",
         timeframe="1h",
+        calendar_id="24/7",
         data_source="fixture",
         instrument_type="spot",
     )
@@ -146,6 +170,7 @@ def test_market_data_artifact_rejects_mismatched_identity_column() -> None:
             frame,
             symbol="BTCUSDT",
             timeframe="1h",
+            calendar_id="24/7",
             data_source="fixture",
             instrument_type="spot",
         )
@@ -157,6 +182,16 @@ def test_backtest_artifact_builds_stable_tables_and_json_manifest() -> None:
     assert artifact.manifest["artifact_kind"] == "backtest_output"
     assert artifact.manifest["config_hash"] == "config-123"
     assert artifact.manifest["run_metadata"]["run_id"] == "demo-20260729t1200-abcdef"
+    assert artifact.manifest["run_metadata"]["primary_subscriptions"] == [
+        {
+            "symbol": "BTCUSDT",
+            "timeframe": "H1",
+            "calendar_id": "24/7",
+            "session_mode": "extended",
+            "data_source": "fixture",
+            "instrument_type": "spot",
+        }
+    ]
     assert set(artifact.tables) == {
         "accounts",
         "equity_curve",

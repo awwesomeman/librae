@@ -81,7 +81,13 @@ from librae.core.financing import (
     calculate_funding_cash_flows,
 )
 from librae.core.liquidity import calculate_lagged_adv
-from librae.core.market_data import validate_ohlcv_values
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    MarketDataSubscription,
+    normalize_bar_times,
+    subscription_from_instrument,
+    validate_ohlcv_values,
+)
 from librae.core.run_config import ExecutionPolicy, MarketDataSessionMode, RiskPolicy
 from librae.core.strategy import (
     AccountSnapshot,
@@ -254,6 +260,59 @@ def _canonicalize_backtest_timestamps(data: pd.DataFrame) -> pd.DataFrame:
         [data.index.get_level_values(0), utc_timestamps],
         names=data.index.names,
     )
+    return normalized
+
+
+def _validate_primary_subscriptions(
+    data: pd.DataFrame,
+    subscriptions: Sequence[MarketDataSubscription],
+) -> pd.DataFrame:
+    """Validate one primary subscription per symbol and normalize availability."""
+    if any(not isinstance(item, MarketDataSubscription) for item in subscriptions):
+        raise TypeError("primary_subscriptions must contain MarketDataSubscription values")
+    subscription_by_symbol = {item.symbol: item for item in subscriptions}
+    if len(subscription_by_symbol) != len(subscriptions):
+        raise ValueError("primary_subscriptions must contain one identity per symbol")
+    data_symbols = tuple(data.index.get_level_values("symbol").unique())
+    if set(subscription_by_symbol) != set(data_symbols):
+        raise ValueError(
+            "primary_subscriptions must exactly cover data symbols; "
+            f"subscriptions={sorted(subscription_by_symbol)}, data={sorted(data_symbols)}"
+        )
+    timeframes = {item.timeframe for item in subscriptions}
+    if len(timeframes) != 1:
+        raise ValueError(
+            f"the current Backtest primary frame requires one timeframe; got {sorted(timeframes)}"
+        )
+
+    normalized = data.copy()
+    normalized_available = pd.Series(
+        pd.NaT,
+        index=normalized.index,
+        dtype="datetime64[ns, UTC]",
+    )
+    if AVAILABLE_AT_COLUMN in normalized:
+        normalized_available = pd.to_datetime(
+            normalized[AVAILABLE_AT_COLUMN],
+            utc=True,
+        )
+    for symbol, subscription in subscription_by_symbol.items():
+        symbol_mask = normalized.index.get_level_values("symbol") == symbol
+        symbol_rows = normalized.loc[symbol_mask]
+        _, available_at = normalize_bar_times(
+            symbol_rows.index.get_level_values("datetime"),
+            (
+                normalized_available.loc[symbol_mask]
+                if normalized_available.loc[symbol_mask].notna().any()
+                else None
+            ),
+            subscription,
+        )
+        normalized_available.loc[symbol_mask] = pd.Series(
+            available_at,
+            index=symbol_rows.index,
+        )
+    normalized[AVAILABLE_AT_COLUMN] = normalized_available
     return normalized
 
 
@@ -642,6 +701,7 @@ class Backtest:
         cost_model: CostModel | None = None,
         data_source: str = "",
         session_mode: MarketDataSessionMode | None = None,
+        primary_subscriptions: Sequence[MarketDataSubscription] | None = None,
         record_position_snapshots: bool = False,
         execution: ExecutionPolicy | None = None,
         risk: RiskPolicy | None = None,
@@ -658,7 +718,14 @@ class Backtest:
             raise ValueError(
                 "session_mode cannot override config.session_mode; use one configuration source"
             )
+        supplied_subscriptions = tuple(primary_subscriptions or ())
+        supplied_session_modes = {item.session_mode for item in supplied_subscriptions}
+        if len(supplied_session_modes) > 1:
+            raise ValueError("primary_subscriptions must use one session_mode")
+        supplied_session_mode = next(iter(supplied_session_modes), None)
         resolved_session_mode = config.session_mode if config is not None else session_mode
+        if resolved_session_mode is None:
+            resolved_session_mode = supplied_session_mode
         if resolved_session_mode is None:
             resolved_session_mode = "extended"
         if resolved_session_mode not in ("regular", "extended"):
@@ -677,7 +744,6 @@ class Backtest:
         if not isinstance(currency, str) or not currency:
             raise ValueError("currency must be a non-empty string")
 
-        self._data = data
         self._strategy = strategy
         self._config = config
         self._session_mode: MarketDataSessionMode = resolved_session_mode
@@ -714,8 +780,43 @@ class Backtest:
             self._data_source = data_source
             resolved_name = None
             resolved_cm = cost_model if cost_model is not None else CostModel.zero()
+        if config is not None:
+            resolved_subscriptions = tuple(
+                subscription_from_instrument(
+                    self._instruments[symbol],
+                    timeframe=config.timeframe,
+                    session_mode=config.session_mode,
+                )
+                for symbol in self._symbols
+            )
+            if supplied_subscriptions and supplied_subscriptions != resolved_subscriptions:
+                raise ValueError(
+                    "primary_subscriptions do not match identities resolved from config"
+                )
+        else:
+            resolved_subscriptions = supplied_subscriptions
+            if resolved_subscriptions and supplied_session_mode != resolved_session_mode:
+                raise ValueError("session_mode does not match the supplied primary subscriptions")
+            if data_source and any(
+                item.data_source != data_source for item in resolved_subscriptions
+            ):
+                raise ValueError("data_source does not match the supplied primary subscriptions")
+            if resolved_subscriptions and not data_source:
+                resolved_sources = {item.data_source for item in resolved_subscriptions}
+                self._data_source = (
+                    next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
+                )
+        self._primary_subscriptions = resolved_subscriptions
+        self._data = data
+        subscription_by_symbol = {item.symbol: item for item in resolved_subscriptions}
         self._calendar_ids = {
-            symbol: instrument.calendar_id if instrument is not None else None
+            symbol: (
+                subscription_by_symbol[symbol].calendar_id
+                if symbol in subscription_by_symbol
+                else instrument.calendar_id
+                if instrument is not None
+                else None
+            )
             for symbol, instrument in self._instruments.items()
         }
 
@@ -759,6 +860,11 @@ class Backtest:
         if self._result is None:
             raise RuntimeError("Call run() before accessing result")
         return self._result
+
+    @property
+    def primary_subscriptions(self) -> tuple[MarketDataSubscription, ...]:
+        """Return exact primary market-data identities, when declared."""
+        return self._primary_subscriptions
 
     @property
     def run_id(self) -> str:
@@ -871,6 +977,17 @@ class Backtest:
             self._config.timeframe if self._config is not None else None,
             self._calendar_ids,
         )
+        if self._primary_subscriptions and any(
+            item.timeframe != self._timeframe for item in self._primary_subscriptions
+        ):
+            raise ValueError(
+                "primary subscription timeframe does not match validated data timeframe"
+            )
+        if self._primary_subscriptions:
+            self._data = _validate_primary_subscriptions(
+                self._data,
+                self._primary_subscriptions,
+            )
         if self._adv_lookback_sessions is not None and self._timeframe != "D1":
             missing_calendars = sorted(
                 symbol for symbol, calendar_id in self._calendar_ids.items() if calendar_id is None
@@ -1399,6 +1516,7 @@ class Backtest:
             ended_at=ended_at,
             run_at=datetime.now(tz=UTC),
             session_mode=self._session_mode,
+            primary_subscriptions=self._primary_subscriptions,
         )
 
         event_records = self._build_event_records(result, run_id)

@@ -7,7 +7,7 @@ import librae
 import numpy as np
 import pandas as pd
 import pytest
-from librae import normalize_bars
+from librae import MarketDataSubscription, normalize_bars
 from librae.backtest.engine import Backtest
 from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
@@ -683,6 +683,100 @@ class TestBacktestDataContract:
         assert backtest._data is normalized
         assert str(backtest._timeline[0].tz) == "UTC"
 
+    def test_config_resolves_exact_primary_subscription_identity(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5)
+        config = make_test_cfg(
+            mode="backtest",
+            data_source="run-default",
+            instrument_overrides={
+                "BTCUSDT": {
+                    "data_source": "instrument-source",
+                    "data_adapter": "crypto",
+                    "calendar_id": "24/7",
+                }
+            },
+        )
+
+        backtest = Backtest(frame, HoldStrategy(), config=config, cost_model=_zero_cost())
+        backtest.run()
+
+        assert backtest.primary_subscriptions == (
+            MarketDataSubscription(
+                symbol="BTCUSDT",
+                timeframe="H1",
+                calendar_id="24/7",
+                session_mode="extended",
+                data_source="instrument-source",
+                instrument_type="spot",
+            ),
+        )
+        assert backtest._data["available_at"].tolist() == list(
+            pd.date_range("2025-01-01 01:00", periods=5, freq="h", tz="UTC")
+        )
+
+    def test_config_rejects_competing_primary_subscription_identity(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5)
+        config = make_test_cfg(mode="backtest")
+        wrong = MarketDataSubscription(
+            symbol="BTCUSDT",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="different-source",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="do not match identities resolved from config"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                config=config,
+                cost_model=_zero_cost(),
+                primary_subscriptions=(wrong,),
+            )
+
+    def test_direct_backtest_accepts_and_validates_primary_subscription(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+            primary_subscriptions=(subscription,),
+        )
+        backtest.run()
+
+        assert backtest.primary_subscriptions == (subscription,)
+        assert backtest.build_output().run_metadata.primary_subscriptions == (subscription,)
+
+    def test_primary_subscription_rejects_early_availability(self) -> None:
+        frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
+        frame["available_at"] = frame.index.get_level_values("datetime")
+        subscription = MarketDataSubscription(
+            symbol="CUSTOM",
+            timeframe="H1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="fixture",
+            instrument_type="spot",
+        )
+
+        with pytest.raises(ValueError, match="earlier than bar completion"):
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                primary_subscriptions=(subscription,),
+            ).run()
+
     @pytest.mark.parametrize(
         "timestamps",
         [
@@ -740,6 +834,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -790,6 +885,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -896,6 +992,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="W1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -924,6 +1021,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="MN1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -959,6 +1057,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=configured_timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -989,6 +1088,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1015,6 +1115,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1044,6 +1145,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1063,6 +1165,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1082,6 +1185,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1101,6 +1205,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="W1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1123,6 +1228,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1156,6 +1262,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe=configured_timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1184,6 +1291,7 @@ class TestBacktestDataContract:
             symbols=["AAA", "BBB"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             calendar_id="XNYS",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
@@ -1225,6 +1333,7 @@ class TestBacktestDataContract:
             symbols=["AAA", "BBB"],
             timeframe="D1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             calendar_id="XNYS",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
@@ -1259,6 +1368,7 @@ class TestBacktestDataContract:
             symbols=["MU"],
             timeframe="MN1",
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
         )
@@ -1332,6 +1442,7 @@ class TestBacktestDataContract:
             symbols=["AAA", "BBB"],
             timeframe=timeframe,
             market="us_equity",
+            session_mode="regular",
             data_source="ibkr",
             calendar_id="XNYS",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),
@@ -1861,6 +1972,7 @@ class TestMultiAsset:
                     "data_adapter": "crypto",
                     "instrument_type": "spot",
                     "currency": "USD",
+                    "calendar_id": "24/7",
                 },
             },
         )
@@ -1891,6 +2003,7 @@ class TestMultiAsset:
                     "instrument_type": "spot",
                     "currency": "USD",
                     "data_adapter": "crypto",
+                    "calendar_id": "24/7",
                 }
             },
         )
