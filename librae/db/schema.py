@@ -37,19 +37,12 @@ _LEGACY_REQUIRED_COLUMNS = {
     "runtime_events": {"ts", "run_id", "event_type"},
 }
 
-# Columns that exist only once the migration keyed here has run.  A revision
-# number can be stamped on a database whose DDL was only partly applied, so
-# "current" verifies the marker rather than trusting the stamp.  ohlcv is
-# marked because its absence breaks the writer's ON CONFLICT rather than
-# startup, which surfaced hours later as a failed write.
-_REVISION_MARKERS: dict[int, dict[str, set[str]]] = {
-    2: {"backtest_runs": {"execution_identity"}},
-    3: {"backtest_runs": {"primary_subscriptions"}, "ohlcv": {"available_at"}},
-}
+# The column the newest migration adds, and the one the first adds.  "current"
+# looks for the newer rather than trusting a stamped number.
+_CURRENT_MARKER = ("ohlcv", "available_at")
+_LEGACY_MARKER = ("backtest_runs", "execution_identity")
 
-_INSPECTED_TABLES = sorted(
-    set(_LEGACY_REQUIRED_COLUMNS) | {t for m in _REVISION_MARKERS.values() for t in m}
-)
+_INSPECTED_TABLES = sorted({*_LEGACY_REQUIRED_COLUMNS, _CURRENT_MARKER[0]})
 
 
 class _Cursor(Protocol):
@@ -100,26 +93,17 @@ def _required_core_columns_are_present(observed: dict[str, set[str]]) -> bool:
     )
 
 
-def _markers_present(observed: dict[str, set[str]], revision: int) -> bool:
-    return all(
-        columns <= observed.get(table, set())
-        for table, columns in _REVISION_MARKERS.get(revision, {}).items()
-    )
+def _has(observed: dict[str, set[str]], marker: tuple[str, str]) -> bool:
+    table, column = marker
+    return column in observed.get(table, set())
 
 
 def _legacy_schema_is_compatible(observed: dict[str, set[str]]) -> bool:
-    return _required_core_columns_are_present(observed) and not _markers_present(observed, 2)
+    return _required_core_columns_are_present(observed) and not _has(observed, _LEGACY_MARKER)
 
 
 def _current_schema_is_compatible(observed: dict[str, set[str]]) -> bool:
-    """Every revision's marker, not just the newest.
-
-    A database can carry a later revision's column while missing an earlier
-    one if a migration was applied by hand or interrupted.
-    """
-    return _required_core_columns_are_present(observed) and all(
-        _markers_present(observed, revision) for revision in _REVISION_MARKERS
-    )
+    return _required_core_columns_are_present(observed) and _has(observed, _CURRENT_MARKER)
 
 
 def inspect_schema(cur: _Cursor) -> SchemaStatus:
@@ -208,6 +192,12 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
     return tuple(applied)
 
 
+_STRANDED_MESSAGE = (
+    "WARNING: {count} ohlcv row(s) have a null calendar_id. Reads filter on that "
+    "column, so those rows are invisible until scripts/backfill_ohlcv_identity.py runs."
+)
+
+
 def unbackfilled_ohlcv_rows(cur: _Cursor) -> int:
     """Rows the reader cannot see because their session identity is null.
 
@@ -241,34 +231,24 @@ def _run_cli(command: str) -> int:
     # the admin connection.
     with admin_conn() as conn:
         cur = conn.cursor()
-        if command == "backfill":
-            from librae.db.backfill import backfill_ohlcv_identity
-
-            report = backfill_ohlcv_identity(conn)
-            print(f"backfilled {report.updated} ohlcv row(s)")
-            for source, count in sorted(report.skipped_sources.items()):
-                print(
-                    f"SKIPPED {count} row(s) from data_source={source!r}: no calendar is "
-                    "registered for it. Register the symbol, or set its calendar in the "
-                    "symbols table, then run this again."
-                )
-            return 0 if report.complete else 1
         if command == "migrate":
             applied = apply_migrations(cur)
             print(
                 f"schema revision {CURRENT_SCHEMA_REVISION} is current"
                 + (f"; applied {list(applied)}" if applied else "; no migrations required")
             )
+            # Said here rather than left to a later preflight: the operator's
+            # next step is to start the engine, and this gap does not announce
+            # itself — reads simply come back short.
+            stranded = unbackfilled_ohlcv_rows(cur)
+            if stranded:
+                print(_STRANDED_MESSAGE.format(count=stranded))
             return 0
         admin_status = inspect_schema(cur)
         _describe("admin", admin_status)
         stranded = unbackfilled_ohlcv_rows(cur)
         if stranded:
-            print(
-                f"WARNING: {stranded} ohlcv row(s) have a null calendar_id. "
-                "Reads filter on that column, so those rows are invisible until "
-                "`librae db backfill` runs."
-            )
+            print(_STRANDED_MESSAGE.format(count=stranded))
 
     # The engine reads the schema as the application role, and
     # information_schema.columns is permission-filtered: a table the owner can
@@ -278,7 +258,7 @@ def _run_cli(command: str) -> int:
     application_dsn = os.getenv("TIMESCALE_DSN")
     if not application_dsn:
         print("TIMESCALE_DSN is not set; the application role's view was not checked")
-        return 0 if admin_status.current else 1
+        return 0 if admin_status.current and not stranded else 1
     with get_conn(application_dsn) as conn:
         application_status = inspect_schema(conn.cursor())
     _describe("application", application_status)

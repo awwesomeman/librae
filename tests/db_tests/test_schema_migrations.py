@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 from librae.db import schema as schema_module
 from librae.db.schema import (
+    _CURRENT_MARKER,
+    _LEGACY_MARKER,
     _LEGACY_REQUIRED_COLUMNS,
-    _REVISION_MARKERS,
     CURRENT_SCHEMA_REVISION,
     apply_migrations,
     inspect_schema,
@@ -48,16 +49,13 @@ class FakeCursor:
                 for column in sorted(columns)
             ]
             applied = self.revision or 0
-            for revision, marker in _REVISION_MARKERS.items():
-                present = (
-                    revision <= applied if self.execution_column is None else self.execution_column
-                )
-                if present:
-                    rows += [
-                        (table, column)
-                        for table, columns in marker.items()
-                        for column in sorted(columns)
-                    ]
+            has_legacy_marker = (
+                applied >= 2 if self.execution_column is None else self.execution_column
+            )
+            if has_legacy_marker:
+                rows.append(_LEGACY_MARKER)
+            if applied >= CURRENT_SCHEMA_REVISION:
+                rows.append(_CURRENT_MARKER)
             if not self.legacy_compatible:
                 # Drop a fingerprint column: an unversioned schema this build
                 # cannot recognize at all.

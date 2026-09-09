@@ -90,6 +90,12 @@ END $$;
 -- ============================================================
 -- ohlcv — session identity and point-in-time availability
 -- ============================================================
+-- session_mode defaults every adopted row to 'extended'. That is the engine's
+-- own default and the only answer available: nothing in an adopted row records
+-- which session it came from. Reads filter on it, so a bar that was in fact
+-- regular-session becomes readable only by an extended subscription. Rows
+-- whose provenance is known can be corrected afterwards; there is nothing to
+-- derive it from here.
 ALTER TABLE ohlcv
     ADD COLUMN IF NOT EXISTS calendar_id TEXT,
     ADD COLUMN IF NOT EXISTS session_mode TEXT NOT NULL DEFAULT 'extended',
@@ -105,6 +111,11 @@ END $$;
 -- carry it before the engine can write at all. Existing rows cannot collide
 -- under the wider key: the narrower index this replaces already made them
 -- unique, and a null calendar_id is distinct from every other value.
+--
+-- This rebuild, not the column adds, is what sets the maintenance window. It
+-- is full-table work under an ACCESS EXCLUSIVE lock, the same order of
+-- magnitude the nullable adds above exist to avoid — unavoidable here,
+-- because the writer cannot use the old key at all.
 DROP INDEX IF EXISTS idx_ohlcv_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique
     ON ohlcv (

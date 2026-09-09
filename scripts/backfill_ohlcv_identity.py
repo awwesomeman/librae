@@ -5,10 +5,11 @@ NOT NULL add would rewrite every chunk of a multi-million-row hypertable
 inside one transaction. Reads filter on calendar_id, so until this runs those
 rows are invisible rather than merely incomplete.
 
-Values are derived, never invented. The calendar comes from the database's own
-`symbols` rows first and librae's builtin registry second; a data source
-neither knows is reported and skipped rather than guessed. Availability comes
-from `bar_close`, the same function that computes it at write time.
+Values are derived, never invented. An operator's own `symbols` registration
+decides the calendar for its data source, and librae's builtin registry is the
+fallback; a source whose registrations disagree with each other, or that
+neither knows, is reported and skipped rather than guessed. Availability comes
+from `period_close`, the same function the writer's completion floor uses.
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from librae.core.trading_calendar import ALWAYS_OPEN_CALENDAR, bar_close
-from librae.core.utils import interval_to_timedelta
+from librae.core.trading_calendar import ALWAYS_OPEN_CALENDAR, period_close
+from librae.core.utils import interval_to_timedelta, to_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,25 @@ def _pending_groups(cur) -> list[tuple[str, str]]:
     return [(str(source), str(timeframe)) for source, timeframe in cur.fetchall()]
 
 
-def _fill_always_open(cur, data_source: str, timeframe: str, calendar_id: str) -> int:
-    """A 24/7 bar closes exactly one interval after it opens, so SQL is exact.
+def fixed_interval_timeframe(timeframe: str) -> bool:
+    """Whether a period is a fixed span rather than a calendar-sized one.
 
-    Doing these row by row in Python would mean millions of round trips for a
-    value the database can compute in place.
+    Mirrors the branch `period_close` takes: minute and hour periods are a
+    constant width, so on a 24/7 calendar the close is exactly one interval
+    on. Day, week and month periods are calendar arithmetic — a month is not
+    30 days — and must go through `period_close` itself.
+    """
+    canonical = to_canonical(timeframe)
+    return canonical.startswith(("M", "H")) and not canonical.startswith("MN")
+
+
+def _fill_always_open(cur, data_source: str, timeframe: str, calendar_id: str) -> int:
+    """Fill a fixed-width 24/7 period in SQL, where the close is exact.
+
+    Row by row in Python would mean millions of round trips for a value the
+    database can compute in place. Only reached when
+    `fixed_interval_timeframe` holds, so the shortcut cannot drift from
+    `period_close`.
     """
     seconds = int(interval_to_timedelta(timeframe).total_seconds())
     cur.execute(
@@ -97,8 +112,13 @@ def _fill_always_open(cur, data_source: str, timeframe: str, calendar_id: str) -
 def _fill_by_session(
     cur, data_source: str, timeframe: str, calendar_id: str, batch_size: int
 ) -> Iterator[int]:
-    """Session-aware calendars need the engine's own bar_close per timestamp."""
-    seconds = int(interval_to_timedelta(timeframe).total_seconds())
+    """Anything the SQL shortcut cannot express, through the engine's own rule.
+
+    `period_close`, not `bar_close`: the writer's completion floor calls the
+    former, and they part company on calendar-sized periods. A close computed
+    early would make a bar readable before it finished — look-ahead, and
+    silent.
+    """
     while True:
         cur.execute(
             """SELECT DISTINCT ts FROM ohlcv
@@ -109,7 +129,9 @@ def _fill_by_session(
         timestamps = [row[0] for row in cur.fetchall()]
         if not timestamps:
             return
-        pairs = [(ts, bar_close(ts, seconds, calendar_id).to_pydatetime()) for ts in timestamps]
+        pairs = [
+            (ts, period_close(ts, timeframe, calendar_id).to_pydatetime()) for ts in timestamps
+        ]
         cur.execute(
             """UPDATE ohlcv AS o
                   SET calendar_id = %s, available_at = v.closed_at
@@ -149,7 +171,7 @@ def backfill_ohlcv_identity(conn, *, batch_size: int = DEFAULT_BATCH_SIZE) -> Ba
             report.skipped_sources[data_source] = int(cur.fetchone()[0])
             continue
 
-        if calendar_id == ALWAYS_OPEN_CALENDAR:
+        if calendar_id == ALWAYS_OPEN_CALENDAR and fixed_interval_timeframe(timeframe):
             filled = _fill_always_open(cur, data_source, timeframe, calendar_id)
             conn.commit()
             report.updated += filled
