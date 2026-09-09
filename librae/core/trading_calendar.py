@@ -270,6 +270,22 @@ def next_session_open(value: date, calendar_id: str) -> pd.Timestamp:
     return _session_segments(calendar_id, next_label)[0][0]
 
 
+def next_session_open_after(value: object, calendar_id: str) -> pd.Timestamp:
+    """Open of the first trading session that begins at or after ``value``.
+
+    Answers "when can the next observation arrive" for an instant that is not
+    inside a session — after a close, before an open, or on a non-session day.
+    A pre-market instant resolves to that same session's open; anything from
+    the open onward resolves to the following session.
+    """
+    timestamp = _timestamp(value)
+    session = _first_session_on_or_after(timestamp.date(), calendar_id)
+    session_open, _ = session_bounds(session, calendar_id)
+    if session_open >= timestamp:
+        return session_open
+    return next_session_open(session, calendar_id)
+
+
 def _segment_containing(
     segments: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
     timestamp: pd.Timestamp,

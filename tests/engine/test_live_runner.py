@@ -3682,7 +3682,10 @@ class TestLiveTrader:
 
         stale_alerts = [kw for m, kw in alerts if m == "send_alert" and "Stale Data" in kw["title"]]
         assert len(stale_alerts) == 2
-        assert runner._stale_alerted.get("BTCUSDT") is True
+        # Keyed per subscription, not per symbol: one symbol can carry several
+        # subscriptions whose freshness is judged independently.
+        subscription = runner._market_data_subscriptions["BTCUSDT"]
+        assert runner._stale_alerted.get(subscription) is True
 
     def test_stop_loss_triggers_and_closes_position(self):
         """Regression test: the live engine never called check_stop_targets,

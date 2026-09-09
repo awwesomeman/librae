@@ -1036,16 +1036,63 @@ fails before broker reconciliation or order submission. Custom durable stores
 provide the equivalent `acquire_lease` / `release_lease` contract for both
 namespaced keys.
 
-## Data staleness detection (live only)
+## Data readiness and staleness (live and sim)
 
 Checked on every poll cycle, including while an order is active, not just at
-startup. `_check_staleness`
-compares the latest completed bar timestamp with the UTC clock. A frame is
-stale after `(STALE_DATA_TOLERANCE_BARS + 1) * timeframe` (three intervals by
-default); the extra interval accounts for the normal age of a completed bar.
-The alert is edge-triggered and re-arms after recovery. Sim keeps processing
-for deterministic shadow/replay workflows, while live fails closed for that
-poll: the stale frame never reaches the strategy or broker.
+startup.
+
+Freshness is judged against the **next observation's expected close** for that
+subscription's own timeframe and calendar, not a fixed wall-clock age. So a
+Friday XNYS daily bar is not late until Monday's session closes, a holiday
+does not make a feed look dead, and DST moves the boundary with the venue.
+`STALE_DATA_TOLERANCE_BARS` is now bounded publication slack applied *after*
+that boundary — wall-clock on purpose, because it models a feed publishing a
+completed bar late rather than extra market time. `librae/core/readiness.py`
+holds the evaluator; it is pure, so backtest and live reach the same verdict
+on the same fixture.
+
+`session_mode` defaults to `extended`, so an observation outside the regular
+session is the common case rather than an edge case. It anchors on the next
+regular session, not on a bare interval — otherwise the weekend behaviour above
+would be lost for the default configuration. The boundary is a deadline, not a
+prediction, so resolving a post-market bar to the next session is deliberately
+lenient: it cannot make a healthy feed look dead.
+
+The boundary is never inferred from an exception, because calendars disagree
+about it: XNYS treats a session close as exclusive, while TAIFEX treats it as
+inclusive and answers with the period that just ended. The invariant that holds
+everywhere is that the next close must be strictly later than the current one;
+when the first candidate is not, the session ended at that boundary. A
+boundary resolving to the observation's own close would make a healthy feed
+look permanently stale.
+
+If the calendar cannot answer at all, freshness degrades to the bare interval
+rather than raising — staleness monitoring exists to catch a dead feed and must
+not itself become a way for a poll cycle to die. That is logged once per
+subscription, because it means weekend and holiday awareness is lost there.
+
+Both live and sim fail closed on a stale frame: it never reaches the strategy
+or the broker. Simulation runs against a live feed too, so an observation past
+its expected close means the same thing there. Backtest is unaffected — it
+replays history, where staleness relative to wall clock has no meaning, and
+never reaches the poll cycle.
+
+`RunConfig.optional_symbols` names the subscriptions a strategy can run
+without. Everything else is required and blocks strategy evaluation until it
+has a usable observation, which is the default and the historical behaviour;
+reconciliation, order monitoring and heartbeat keep running while it is held.
+An optional subscription is stepped over with a diagnostic and cannot hold the
+warmup gate either. It is a run policy rather than instrument or subscription
+identity — the same instrument can be load-bearing for one strategy and a
+nice-to-have for another — and it affects results, so it is part of
+`config_hash` (sorted, since membership has no observable order). The primary
+symbol cannot be optional: it is the default symbol for bare intents and the
+run's cadence anchor. Set it in the strategy config as a top-level
+`optional_symbols:` list, or pass it to `RunConfig` directly.
+
+Both the stale alert and the not-ready alert are edge-triggered: one
+diagnostic when the condition starts and one when it clears, not one per poll
+cycle.
 
 Live also does not replay an outage backlog into the market. If a fetch returns
 multiple bars newer than the durable watermark, only the latest completed bar
