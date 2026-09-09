@@ -226,7 +226,7 @@ of `docker run`.)
    `orders` reflects what was actually resting at the broker.
 6. Confirm no duplicate order was placed for the cycle that was interrupted
    — cross-check the broker's order history against `active_orders` in the
-   restored state and against `order_events` in TimescaleDB.
+   restored state and against `position_events` in TimescaleDB.
 7. Confirm the state-store lease behaves correctly: attempt to start a
    second instance against the same `config_hash` while the first is
    running: `_state_store.acquire_lease` must refuse it (single-process

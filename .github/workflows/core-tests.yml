@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "librae/**"
+      - "examples/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - "librae/**"
+      - "examples/**"
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"

@@ -445,6 +445,7 @@ class TestBuildRun:
                   market: us_equity
                   data_source: ibkr
                   broker: ibkr
+                  calendar_id: XNYS
                   session_mode: regular
                   symbol_cost_overrides:
                     AAPL:
@@ -462,6 +463,7 @@ class TestBuildRun:
 
         assert cfg.symbol_cost_overrides == {"AAPL": {"multiplier": 1.0}}
         assert cfg.broker == "ibkr"
+        assert cfg.calendar_id == "XNYS"
         assert cfg.session_mode == "regular"
         assert cfg.instrument_overrides == {
             "AAPL": {

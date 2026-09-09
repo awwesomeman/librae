@@ -60,12 +60,15 @@ class CompositeBarFetcher:
             raise ValueError(f"factor data missing columns: {sorted(missing)}")
 
         bars["ts"] = pd.to_datetime(bars["ts"], utc=True)
-        factors["available_at"] = pd.to_datetime(factors["available_at"], utc=True)
+        factors["factor_available_at"] = pd.to_datetime(
+            factors.pop("available_at"),
+            utc=True,
+        )
         return pd.merge_asof(
             bars.sort_values("ts"),
-            factors.sort_values("available_at"),
+            factors.sort_values("factor_available_at"),
             left_on="ts",
-            right_on="available_at",
+            right_on="factor_available_at",
             direction="backward",
             tolerance=self.max_factor_age,
         )
@@ -117,10 +120,14 @@ def _demo_factors(_symbol: str) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "available_at": pd.to_datetime(
-                ["2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z"],
+                [
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T02:00:00Z",
+                    "2026-01-01T04:00:00Z",
+                ],
                 utc=True,
             ),
-            "factor_score": [0.25, 0.75],
+            "factor_score": [0.25, 0.75, 0.60],
         }
     )
 
@@ -166,7 +173,7 @@ def main() -> None:
         cost_model=CostModel.zero(),
         notifier=None,
         on_bar=None,
-        on_order_event=None,
+        on_position_event=None,
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,

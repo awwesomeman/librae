@@ -548,7 +548,7 @@ requirements.
 ## Local trade-chart viewer
 
 Use after `pip install -e ".[viz]"`. It renders the OHLCV and
-`order_events` already present in `BacktestOutput`; it does not re-simulate
+`position_events` already present in `BacktestOutput`; it does not re-simulate
 fills or recompute PnL. The plotted markers therefore reflect those event
 records directly, while aggregate metrics remain owned by
 `librae/core/metrics.py`.
@@ -559,7 +559,7 @@ from librae.db.charts import plot_trades_by_run_id
 
 ohlcv = df.xs(symbol, level="symbol")  # a single symbol's OHLCV
 plot_kbars(
-    ohlcv, output.order_events, symbol
+    ohlcv, output.position_events, symbol
 )  # right after a backtest run, output already in hand
 
 plot_trades_by_run_id(
@@ -567,7 +567,7 @@ plot_trades_by_run_id(
 )  # or: skip rerunning the backtest, read a persisted run straight from the DB
 ```
 
-`librae.db.charts.plot_trades_by_run_id` reads persisted `trade_events` and `ohlcv`
+`librae.db.charts.plot_trades_by_run_id` reads persisted `position_events` and `ohlcv`
 rows through `librae.db.timescale_reader`. The database adapter then calls the same
 format-neutral renderer as the in-memory form and does not rerun the strategy.
 
@@ -592,11 +592,11 @@ fact/summary split is:
 
 `split_lifecycle_by_oos_start(completed, entry_outcomes, oos_start)` splits
 already-reconstructed lifecycle/entry-outcome tables by `closed_at`/`anchor_ts`
-into in-sample/out-of-sample — split the computed tables, not `order_events`,
+into in-sample/out-of-sample — split the computed tables, not `position_events`,
 so a lifecycle straddling the cutoff is not misclassified as incomplete.
 Charting or reporting on any of these DataFrames is caller-owned — librae only
 ships `plot_kbars` (the K-line/marker overlay); see `examples/trade_report.py`
-for the compute → chart pattern.
+for the compute → tabular-report pattern.
 
 MFE/MAE are gross, direction-adjusted percentage-point price excursions;
 costs and notional-weighted portfolio risk remain separate metrics. Adds

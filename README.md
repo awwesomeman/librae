@@ -44,7 +44,7 @@ python -m pip install "librae @ git+https://github.com/awwesomeman/librae.git"
 ```
 
 The base install contains the in-memory backtest engine and depends only on
-NumPy and pandas. Reports, exchange calendars, CLI wiring, persistence,
+NumPy and pandas. Chart viewing, exchange calendars, CLI wiring, persistence,
 notifications, UI, and broker integrations are opt-in extras. Librae is not on
 PyPI yet; pin a tag or commit to identify Librae source, and lock the calling
 application's complete dependency set when the environment must be

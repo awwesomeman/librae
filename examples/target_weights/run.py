@@ -10,13 +10,19 @@ import pandas as pd
 from librae import Backtest, RunConfig
 from librae.orchestration.cli import RunOptions, run_dispatch
 
+from examples._synthetic import session_opens
+
 from .strategy import TargetWeightsStrategy
 
 
-def _make_panel(symbols: list[str], periods: int = 180) -> pd.DataFrame:
+def _make_panel(
+    symbols: list[str],
+    calendar_id: str,
+    periods: int = 180,
+) -> pd.DataFrame:
     """Create deterministic synthetic daily OHLCV data."""
     rng = np.random.default_rng(7)
-    timestamps = pd.date_range("2024-01-01", periods=periods, freq="D", tz="UTC")
+    timestamps = session_opens(calendar_id, start="2024-01-01", periods=periods)
     frames: dict[str, pd.DataFrame] = {}
 
     for index, symbol in enumerate(symbols):
@@ -38,7 +44,9 @@ def _make_panel(symbols: list[str], periods: int = 180) -> pd.DataFrame:
 
 
 def run_backtest(config: RunConfig, _options: RunOptions) -> None:
-    data = _make_panel(config.symbols)
+    if config.calendar_id is None:
+        raise ValueError("target-weight example requires calendar_id")
+    data = _make_panel(config.symbols, config.calendar_id)
     timestamps = data.index.get_level_values("datetime").unique()
     target_weights = pd.DataFrame(
         [
