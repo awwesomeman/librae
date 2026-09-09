@@ -240,7 +240,9 @@ starve later assets.
 
 `PortfolioWeights` uses the run's single account as its capital base. A
 cross-account hedge or arbitrage strategy must coordinate explicitly sized
-orders across separate runs; hedge ratios remain strategy-owned.
+orders across separate runs; hedge ratios remain strategy-owned. Why one run
+executes through one venue:
+[ADR 2026-09-09](../decisions/2026-09-09-one-run-owns-one-execution-venue.md).
 
 A symbol is managed by one attribution model at a time. A net position
 carries the `group_id` that opened it through every add, close, trade, and
@@ -815,18 +817,15 @@ on one event, so a leg that outlived it would break the all-or-none contract;
 `"fok"` on an entry leg also needs an explicit quantity, because a cash-sized
 order has no requested amount to fill in full.
 
-Preflight rejects only what this engine cannot express, which keeps a backtest
-broker-neutral. Venue rules stay in the adapters, so a combination accepted
-here can still be refused at submission — Shioaji has no `"gtc"` and rejects
-market+ROD, while IBKR accepts `"day"` market orders. Each adapter maps the
-four values to its own SDK:
-
-| `time_in_force` | Shioaji (`sj.OrderType`) | IBKR (`order.tif`) | Crypto/ccxt (`params["timeInForce"]`) |
-|---|---|---|---|
-| `"day"` | `ROD` (limit only — TAIFEX rejects market+ROD) | `"DAY"` | `"GTC"` (24/7 market, no session end) |
-| `"gtc"` | unsupported — raises | `"GTC"` | `"GTC"` |
-| `"ioc"` | `IOC` | `"IOC"` | `"IOC"` |
-| `"fok"` | `FOK` | `"FOK"` | `"FOK"` |
+Preflight rejects only what this engine cannot express, which keeps a run with
+no configured broker venue-neutral. Set `broker` (or
+`instrument_overrides[symbol]["broker"]`, which wins) and the venue's own
+rules apply from the same preflight, in backtest as well as live: each adapter
+declares its supported `(order_type, time_in_force)` pairs as
+`SUPPORTED_TIME_IN_FORCE` and enforces that same table when it builds the
+order, so what preflight accepts is what the venue call applies. A venue
+librae does not know — a caller-supplied adapter factory — is left to its own
+adapter at submission.
 - `max_position_weight`: ordinary new entries and adds get capped (fills are
   recomputed with commission/slippage/tax after capping). A `fail` target that
   exceeds this structural constraint is atomically rejected. Deferred targets
@@ -1236,7 +1235,7 @@ live capital.
 | Related multi-leg execution | Synchronous `group_id`-tagged OHLCV approximation | Synchronous approximation | Serial per-leg submission; a failed leg cancels its group only, other groups unaffected |
 | Portfolio optimization | Strategy-owned optimizer; configured candidate universe with point-in-time eligibility | Simplified sequential basket | Confirmed-fill replanning; sequential and non-atomic |
 | Asset allocation | Supported within one account/data-event boundary | Simplified | FX, income, corporate actions, and settlement remain unsupported ledger features |
-| Cross-account arbitrage | Separate independent runs; no synchronized engine contract | Same | Strategy-owned external orchestration; no shared funding or atomicity |
+| Cross-account arbitrage | Separate independent runs; no synchronized engine contract ([why](../decisions/2026-09-09-one-run-owns-one-execution-venue.md)) | Same | Strategy-owned external orchestration; no shared funding or atomicity |
 | Dynamic stock universe | Point-in-time selection within a predeclared candidate superset | Same predeclared universe | No runtime symbol add/remove, subscription changes, or automatic warm-up |
 | Short borrow/funding | Timestamped perpetual funding; borrow costs remain upstream | Same funding contract | Broker/account responsibility; no engine borrow/locate ledger |
 

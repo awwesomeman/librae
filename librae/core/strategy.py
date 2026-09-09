@@ -212,9 +212,11 @@ class OrderIntent:
 
             Live sends the value to the broker, which owns the real lifetime;
             the engine does not simulate resting orders there. Venue limits
-            stay in the adapters (Shioaji has no GTC and rejects ROD market
-            orders), so a combination this engine accepts may still be
-            refused at submission.
+            are declared per adapter and checked from preflight once a broker
+            is configured, so an unsupported combination fails on the bar that
+            emitted it, before any order is built, in backtest as well as
+            live; a venue librae does not know is still only checked by its
+            own adapter.
     """
 
     action: OrderAction

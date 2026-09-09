@@ -1844,6 +1844,7 @@ class Backtest:
                     primary_symbol=primary_symbol,
                     bars=strategy_bars,
                     positions=positions,
+                    broker_for=(self._config.broker_for if self._config is not None else None),
                 )
                 new_decision = self._without_halted_account(new_decision, halted)
                 # Fail on the emitting bar, not mid-run: a day limit with no

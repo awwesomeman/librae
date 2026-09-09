@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from librae.db import schema as schema_module
 from librae.db.schema import (
+    _LEGACY_REQUIRED_COLUMNS,
     CURRENT_SCHEMA_REVISION,
     apply_migrations,
     inspect_schema,
@@ -37,14 +38,14 @@ class FakeCursor:
             )
             self._result = [(relation if exists else None,)]
         elif "information_schema.columns" in query:
-            required = {
-                "backtest_runs": ("run_id", "config_hash", "primary_subscriptions"),
-                "execution_runtime_state": ("state_key", "run_id", "config_hash", "state"),
-                "broker_orders": ("state_key", "client_order_id", "run_id", "request"),
-                "position_events": ("event_id", "run_id", "account_id"),
-                "runtime_events": ("event_id", "run_id", "event_type"),
-            }
-            rows = [(table, column) for table, columns in required.items() for column in columns]
+            # Derived, not restated: a fixture with its own column list is how
+            # a required column that no table has passed review — the guard and
+            # the fixture agreed with each other and neither with the schema.
+            rows = [
+                (table, column)
+                for table, columns in _LEGACY_REQUIRED_COLUMNS.items()
+                for column in sorted(columns)
+            ]
             has_execution_column = (
                 self.revision is not None and self.revision >= 2
                 if self.execution_column is None

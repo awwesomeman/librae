@@ -61,7 +61,19 @@ from .base import (
     find_position,
     passive_price,
     validate_order_signal,
+    validate_time_in_force,
 )
+
+# IBKR carries the lifetime on the order itself rather than as a venue
+# parameter. Deliberately permissive: unlike the Shioaji table, which encodes
+# a rejection observed live (op_code 9938), nothing here has been confirmed
+# against a paper gateway — issue #33 owns that certification. Permissive is
+# the safe direction for an unverified table, since it defers to the venue
+# rather than inventing a rejection the engine cannot justify.
+SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
+    "limit": frozenset({"day", "gtc", "ioc", "fok"}),
+    "market": frozenset({"day", "gtc", "ioc", "fok"}),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -880,6 +892,9 @@ class IBKRAdapter:
             currency=signal["currency"],
             continuous_alias=signal.get("continuous_alias", False),
             contract_month=signal.get("contract_month"),
+        )
+        validate_time_in_force(
+            "ibkr", SUPPORTED_TIME_IN_FORCE, signal["order_type"], signal["time_in_force"]
         )
         action = "BUY" if signal["side"] == "buy" else "SELL"
         if signal["order_type"] == "limit":

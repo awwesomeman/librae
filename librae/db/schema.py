@@ -28,7 +28,7 @@ _LEGACY_REQUIRED_COLUMNS = {
     "execution_runtime_state": {"state_key", "run_id", "config_hash", "state"},
     "broker_orders": {"state_key", "client_order_id", "run_id", "request"},
     "position_events": {"event_id", "run_id", "account_id"},
-    "runtime_events": {"event_id", "run_id", "event_type"},
+    "runtime_events": {"ts", "run_id", "event_type"},
 }
 
 
@@ -178,10 +178,21 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
     return tuple(applied)
 
 
-def _run_cli(command: str) -> int:
-    from librae.db import get_conn
+def _describe(role: str, status: SchemaStatus) -> None:
+    print(
+        f"[{role}] schema state={status.state} revision={status.revision} "
+        f"pending={list(status.pending_revisions)}"
+    )
 
-    with get_conn() as conn:
+
+def _run_cli(command: str) -> int:
+    import os
+
+    from librae.db import admin_conn, get_conn
+
+    # Migration needs the role that owns the tables, so both actions start on
+    # the admin connection.
+    with admin_conn() as conn:
         cur = conn.cursor()
         if command == "migrate":
             applied = apply_migrations(cur)
@@ -190,9 +201,19 @@ def _run_cli(command: str) -> int:
                 + (f"; applied {list(applied)}" if applied else "; no migrations required")
             )
             return 0
-        status = inspect_schema(cur)
-        print(
-            f"schema state={status.state} revision={status.revision} "
-            f"pending={list(status.pending_revisions)}"
-        )
-        return 0 if status.current else 1
+        admin_status = inspect_schema(cur)
+        _describe("admin", admin_status)
+
+    # The engine reads the schema as the application role, and
+    # information_schema.columns is permission-filtered: a table the owner can
+    # see every column of shows none to a role that was never granted it. An
+    # owner-only pass would then report "current" while the engine's own
+    # require_current_schema fails closed on the same database.
+    application_dsn = os.getenv("TIMESCALE_DSN")
+    if not application_dsn:
+        print("TIMESCALE_DSN is not set; the application role's view was not checked")
+        return 0 if admin_status.current else 1
+    with get_conn(application_dsn) as conn:
+        application_status = inspect_schema(conn.cursor())
+    _describe("application", application_status)
+    return 0 if admin_status.current and application_status.current else 1

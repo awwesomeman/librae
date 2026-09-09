@@ -59,9 +59,8 @@ def _resolve_live_execution_routes(
     """Resolve and validate the run's single execution-adapter route."""
     routes: dict[str, _ExecutionRoute] = {}
     for symbol, instrument in instruments.items():
-        override = (config.instrument_overrides or {}).get(symbol, {})
-        broker = override.get("broker") or config.broker
-        if not isinstance(broker, str) or not broker:
+        broker = config.broker_for(symbol)
+        if broker is None:
             raise ValueError(
                 f"live execution broker is not configured for {symbol!r}; "
                 "set strategy.broker or instrument_overrides"
@@ -83,7 +82,8 @@ def _resolve_live_execution_routes(
         brokers = {route[0] for route in unique_routes}
         if len(brokers) > 1:
             raise ValueError(
-                "one live run owns one account and requires one execution broker; "
+                "one live run owns one account and requires one execution broker "
+                "(why: docs/decisions/2026-09-09-one-run-owns-one-execution-venue.md); "
                 f"configured brokers: {sorted(brokers)}"
             )
         venues = sorted({route[2] for route in unique_routes})
@@ -606,8 +606,7 @@ def build_live_trader(
                 f"{symbol!r} is a continuous crypto alias and is not directly orderable; "
                 "configure a concrete venue_symbol or inject a custom adapter into LiveTrader"
             )
-        route = (config.instrument_overrides or {}).get(symbol, {})
-        broker = route.get("broker") or config.broker
+        broker = config.broker_for(symbol)
         trading = (
             config.mode == "live"
             and broker is not None

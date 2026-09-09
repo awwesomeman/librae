@@ -722,7 +722,8 @@ class LiveTrader:
                 raise ValueError(f"Missing order adapters for symbols: {sorted(missing)}")
             if len({id(route) for route in order_adapters.values()}) != 1:
                 raise ValueError(
-                    "one live run owns one account and requires one shared order adapter"
+                    "one live run owns one account and requires one shared order "
+                    "adapter (why: docs/decisions/2026-09-09-one-run-owns-one-execution-venue.md)"
                 )
         else:
             order_adapters = {}
@@ -4189,6 +4190,7 @@ class LiveTrader:
             primary_symbol=primary_symbol,
             bars=bars,
             positions=self._positions,
+            broker_for=self._config.broker_for,
         )
         intent = self._without_halted_account(intent)
         self._period_index += 1

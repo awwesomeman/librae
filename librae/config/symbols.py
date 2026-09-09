@@ -868,7 +868,7 @@ def resolve_symbol(
         "min_notional",
         registered.min_notional if registered else None,
     )
-    execution_broker = route.get("broker") or config.broker
+    execution_broker = config.broker_for(symbol)
     if (data_adapter == "ibkr" or execution_broker == "ibkr") and not security_type:
         raise ValueError(
             f"No security_type for IBKR-routed symbol={symbol!r}; set "

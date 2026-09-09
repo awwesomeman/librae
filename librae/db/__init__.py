@@ -22,6 +22,40 @@ def _resolve_dsn(dsn: str | None) -> str:
     return resolved
 
 
+@contextmanager
+def admin_conn() -> Generator[psycopg2.extensions.connection, None, None]:
+    """Yield a one-shot connection for schema inspection and migration.
+
+    Separate from TIMESCALE_DSN on purpose: the application role is granted
+    DML only, so it cannot ALTER a table it does not own or write
+    librae_schema_revision. Falling back to TIMESCALE_DSN would either fail
+    confusingly or, on a deployment that pointed it at the owner, quietly
+    hand the engine schema rights.
+
+    Deliberately not pooled. get_pool caches one pool for the process and
+    ignores the DSN once it exists, so borrowing from it could hand back an
+    application connection under an admin-looking call.
+    """
+    dsn = os.getenv("TIMESCALE_ADMIN_DSN")
+    if not dsn:
+        raise RuntimeError(
+            "TIMESCALE_ADMIN_DSN is not set. Schema commands connect as the role that "
+            "owns the tables, which TIMESCALE_DSN deliberately is not: the application "
+            "role holds no schema rights. Set TIMESCALE_ADMIN_DSN to an owner "
+            "connection — see docs/guides/optional-infrastructure.md."
+        )
+    conn = psycopg2.connect(dsn)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def get_pool(
     dsn: str | None = None, minconn: int = 1, maxconn: int = 5
 ) -> psycopg2.pool.SimpleConnectionPool:

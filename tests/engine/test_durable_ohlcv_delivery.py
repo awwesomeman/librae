@@ -507,3 +507,64 @@ class TestTheReferencePathActuallyRetries:
 
         assert accepted, "the row the failed write dropped must reach the writer"
         assert runner._pending_ohlcv == []
+
+
+class TestTheCheckpointRecordsWhatTheSinkAccepted:
+    """`flush_pending` truncates the queue before it persists.
+
+    Asserted on the queue as `persist` saw it, not on the list afterwards:
+    both orderings leave the same list behind, which is why swapping the two
+    statements leaves the rest of the suite green. Persisting first records
+    rows the sink already took, so a crash before the next checkpoint
+    restarts with them still queued — harmless to redeliver, but they hold
+    headroom against MAX_PENDING_OHLCV, whose overflow now drops rows.
+    """
+
+    @staticmethod
+    def _flush(pending, sink):
+        """Return the queue as the checkpoint saw it, or None if never written."""
+        from librae.live.ohlcv_audit import flush_pending
+
+        checkpointed: list[list[object]] = []
+        flush_pending(
+            pending,
+            on_ohlcv=sink,
+            degraded=False,
+            persist=lambda: checkpointed.append([row.identity for row in pending]),
+        )
+        return checkpointed[-1] if checkpointed else None
+
+    def test_a_full_drain_checkpoints_an_empty_queue(self) -> None:
+        pending = _pending_sequence(3)
+
+        checkpointed = self._flush(pending, lambda *args: None)
+
+        assert checkpointed == []
+
+    def test_a_partial_drain_checkpoints_exactly_the_undelivered_tail(self) -> None:
+        pending = _pending_sequence(3)
+        expected_tail = [row.identity for row in pending[1:]]
+        accepted = 0
+
+        def sink(*args: object) -> None:
+            nonlocal accepted
+            if accepted == 1:
+                raise RuntimeError("sink is down")
+            accepted += 1
+
+        checkpointed = self._flush(pending, sink)
+
+        assert accepted == 1
+        # Order matters: the writer accepts only a strictly later row version,
+        # so replaying a correction before the bar it corrects would drop it.
+        assert checkpointed == expected_tail
+
+    def test_a_sink_that_takes_nothing_writes_no_checkpoint(self) -> None:
+        pending = _pending_sequence(2)
+        untouched = [row.identity for row in pending]
+
+        def sink(*args: object) -> None:
+            raise RuntimeError("sink is down")
+
+        assert self._flush(pending, sink) is None
+        assert [row.identity for row in pending] == untouched

@@ -3471,6 +3471,7 @@ def validate_strategy_decision(
     primary_symbol: str,
     bars: dict[str, dict[str, float]],
     positions: dict[str, PositionState],
+    broker_for: Callable[[str], str | None] | None = None,
 ) -> None:
     """Validate one strategy return value before it enters engine state.
 
@@ -3506,14 +3507,19 @@ def validate_strategy_decision(
             raise ValueError("strategy decision must contain at most one intent per symbol")
         symbols = set(resolved_symbols)
 
-        # WHY: these two rejections are about what this engine can express,
-        # not about what any one venue accepts — a backtest stays broker-
-        # neutral, and venue rules belong in the adapters (Shioaji already
-        # refuses ROD market orders and GTC outright). A market order is
-        # deliberately NOT rejected here: it resolves on its first eligible
-        # event, so every lifetime collapses to the same behavior rather than
-        # being unsupported, and IBKR accepts DAY market orders that TAIFEX
-        # and Binance do not.
+        # WHY: the rejections below are about what this engine can express,
+        # so a run with no configured broker stays venue-neutral. A market
+        # order is deliberately NOT rejected here: it resolves on its first
+        # eligible event, so every lifetime collapses to the same behavior.
+        # Venue rules are layered on top per symbol, via broker_for.
+        check_venue_lifetime = None
+        if broker_for is not None:
+            # Local import: keeps core from loading every broker adapter
+            # module at import time.
+            from librae.brokers.capabilities import validate_broker_time_in_force
+
+            check_venue_lifetime = validate_broker_time_in_force
+
         for intent in decision:
             # WHY: an entry with no quantity sizes from available cash, so
             # there is no requested amount for "all or none" to be measured
@@ -3529,6 +3535,22 @@ def validate_strategy_decision(
                     "explicit quantity on an entry: a cash-sized order has no requested "
                     "amount to fill in full"
                 )
+            # A configured broker adds its own rules on top: the same
+            # combination that a broker-neutral run accepts is refused here
+            # rather than at submission, hours into a live session. Resolved
+            # per symbol, because a run may route one instrument to another
+            # venue — checking the run's broker against a symbol that trades
+            # elsewhere both misses violations and invents them. An unset
+            # time_in_force is left alone: the engine's per-order-type
+            # default is accepted everywhere.
+            if check_venue_lifetime is not None and intent.time_in_force is not None:
+                venue = broker_for(intent.symbol or primary_symbol)
+                if venue is not None:
+                    check_venue_lifetime(
+                        venue,
+                        "limit" if intent.limit_price is not None else "market",
+                        intent.time_in_force,
+                    )
             if intent.time_in_force not in RESTING_TIME_IN_FORCE:
                 continue
             symbol = intent.symbol or primary_symbol
