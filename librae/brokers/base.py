@@ -140,6 +140,26 @@ def validate_order_signal(signal: Mapping[str, Any]) -> None:
             raise ValueError("limit price must be positive and finite")
 
 
+def validate_time_in_force(
+    broker: str,
+    supported: Mapping[str, frozenset[str]],
+    order_type: str,
+    time_in_force: str,
+) -> None:
+    """Reject a lifetime the venue cannot express for this order type.
+
+    Takes the table rather than looking one up, so the adapter enforces the
+    same constant it publishes and the two cannot drift. The lookup by broker
+    name lives in librae.brokers.capabilities.
+    """
+    accepted = supported.get(order_type, frozenset())
+    if time_in_force not in accepted:
+        raise ValueError(
+            f"{broker} does not support time_in_force={time_in_force!r} on a "
+            f"{order_type} order; supported: {sorted(accepted)}"
+        )
+
+
 def passive_price(price: float, tick_size: float, side: str) -> float:
     """Round a limit price without making it more aggressive."""
     if not isfinite(price) or price <= 0:

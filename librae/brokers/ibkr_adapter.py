@@ -61,7 +61,16 @@ from .base import (
     find_position,
     passive_price,
     validate_order_signal,
+    validate_time_in_force,
 )
+
+# IBKR carries the lifetime on the order itself rather than as a venue
+# parameter, and accepts all four on both order types — including DAY on a
+# market order, which TAIFEX and Binance reject.
+SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
+    "limit": frozenset({"day", "gtc", "ioc", "fok"}),
+    "market": frozenset({"day", "gtc", "ioc", "fok"}),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -886,6 +895,9 @@ class IBKRAdapter:
             order = ib_async.LimitOrder(action, signal["quantity"], signal["price"])
         else:
             order = ib_async.MarketOrder(action, signal["quantity"])
+        validate_time_in_force(
+            "ibkr", SUPPORTED_TIME_IN_FORCE, signal["order_type"], signal["time_in_force"]
+        )
         order.tif = {"day": "DAY", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
             signal["time_in_force"]
         ]

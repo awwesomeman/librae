@@ -3471,6 +3471,7 @@ def validate_strategy_decision(
     primary_symbol: str,
     bars: dict[str, dict[str, float]],
     positions: dict[str, PositionState],
+    broker: str | None = None,
 ) -> None:
     """Validate one strategy return value before it enters engine state.
 
@@ -3528,6 +3529,19 @@ def validate_strategy_decision(
                     f"{intent.symbol or primary_symbol} time_in_force='fok' requires an "
                     "explicit quantity on an entry: a cash-sized order has no requested "
                     "amount to fill in full"
+                )
+            # A configured broker adds its own rules on top: the same
+            # combination that a broker-neutral run accepts is refused here
+            # rather than at submission, hours into a live session. None is
+            # left alone — the engine's per-order-type default is accepted
+            # everywhere, so checking it would invent a rejection.
+            if broker is not None and intent.time_in_force is not None:
+                from librae.brokers.capabilities import validate_broker_time_in_force
+
+                validate_broker_time_in_force(
+                    broker,
+                    "limit" if intent.limit_price is not None else "market",
+                    intent.time_in_force,
                 )
             if intent.time_in_force not in RESTING_TIME_IN_FORCE:
                 continue

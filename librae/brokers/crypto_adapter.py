@@ -36,7 +36,16 @@ from .base import (
     drop_incomplete_ohlcv,
     find_position,
     validate_order_signal,
+    validate_time_in_force,
 )
+
+# A MARKET order takes no timeInForce on Binance — the venue rejects the
+# parameter outright, and a market order is filled or cancelled immediately,
+# which is IOC by construction. A LIMIT order accepts all four.
+SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
+    "limit": frozenset({"day", "gtc", "ioc", "fok"}),
+    "market": frozenset({"ioc"}),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -678,13 +687,16 @@ class CryptoAdapter:
         )
         order_type = signal["order_type"]
         price = signal.get("price")
-        params = {
+        validate_time_in_force(
+            "binance", SUPPORTED_TIME_IN_FORCE, order_type, signal["time_in_force"]
+        )
+        params: dict[str, Any] = {}
+        if order_type == "limit":
             # "day" has no ccxt/exchange equivalent on a 24/7 market with no
             # session end, so it maps to GTC (rest until cancelled).
-            "timeInForce": {"day": "GTC", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
+            params["timeInForce"] = {"day": "GTC", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
                 signal["time_in_force"]
-            ],
-        }
+            ]
         if signal.get("client_order_id"):
             params["clientOrderId"] = signal["client_order_id"]
         result = self._exchange.create_order(

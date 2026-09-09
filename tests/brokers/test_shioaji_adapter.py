@@ -604,7 +604,7 @@ class TestPlaceOrder:
         mock_sj = self._mock_shioaji_module()
         with (
             patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj),
-            pytest.raises(ValueError, match="GTC"),
+            pytest.raises(ValueError, match="shioaji does not support"),
         ):
             adapter.place_order(
                 {
@@ -627,7 +627,7 @@ class TestPlaceOrder:
         mock_sj = self._mock_shioaji_module()
         with (
             patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=mock_sj),
-            pytest.raises(ValueError, match="market orders cannot use 'day'"),
+            pytest.raises(ValueError, match="shioaji does not support"),
         ):
             adapter.place_order(
                 {

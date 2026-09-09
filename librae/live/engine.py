@@ -4189,6 +4189,7 @@ class LiveTrader:
             primary_symbol=primary_symbol,
             bars=bars,
             positions=self._positions,
+            broker=self._config.broker,
         )
         intent = self._without_halted_account(intent)
         self._period_index += 1

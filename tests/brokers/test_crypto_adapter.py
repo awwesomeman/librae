@@ -867,7 +867,6 @@ def test_authed_adapter_place_order(authed_adapter, mock_ccxt_exchange):
     result = authed_adapter.place_order(signal)
     assert result["id"] == "ord_1"
     mock_ccxt_exchange.create_order.assert_called_once()
-    assert mock_ccxt_exchange.create_order.call_args.kwargs["params"]["timeInForce"] == "IOC"
 
 
 @pytest.mark.parametrize(
@@ -884,11 +883,48 @@ def test_place_order_maps_time_in_force(
             "symbol": "BTC/USDT",
             "side": "buy",
             "quantity": 0.01,
-            "order_type": "market",
+            "order_type": "limit",
+            "price": 50_000.0,
             "time_in_force": time_in_force,
         }
     )
     assert mock_ccxt_exchange.create_order.call_args.kwargs["params"]["timeInForce"] == expected
+
+
+def test_market_order_sends_no_time_in_force(authed_adapter, mock_ccxt_exchange):
+    """Binance rejects timeInForce on a MARKET order; the order is IOC by
+    construction, so there is nothing to send."""
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
+
+    authed_adapter.place_order(
+        {
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "quantity": 0.01,
+            "order_type": "market",
+            "time_in_force": "ioc",
+        }
+    )
+
+    assert "timeInForce" not in mock_ccxt_exchange.create_order.call_args.kwargs["params"]
+
+
+@pytest.mark.parametrize("time_in_force", ["day", "gtc", "fok"])
+def test_market_order_refuses_a_lifetime_the_venue_cannot_express(
+    authed_adapter, mock_ccxt_exchange, time_in_force
+):
+    with pytest.raises(ValueError, match="binance does not support"):
+        authed_adapter.place_order(
+            {
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "quantity": 0.01,
+                "order_type": "market",
+                "time_in_force": time_in_force,
+            }
+        )
+
+    mock_ccxt_exchange.create_order.assert_not_called()
 
 
 def test_place_order_forwards_client_order_id(authed_adapter, mock_ccxt_exchange):

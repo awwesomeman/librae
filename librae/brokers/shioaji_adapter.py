@@ -50,10 +50,19 @@ from .base import (
     drop_incomplete_ohlcv,
     find_position,
     validate_order_signal,
+    validate_time_in_force,
 )
 from .shioaji_time import shioaji_ts_ns_to_epoch
 
 logger = logging.getLogger(__name__)
+
+# TAIFEX order conditions are ROD, IOC and FOK: there is no multi-day resting
+# order, so "gtc" has no equivalent, and a market order cannot be ROD
+# (rejected as op_code 9938).
+SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
+    "limit": frozenset({"day", "ioc", "fok"}),
+    "market": frozenset({"ioc", "fok"}),
+}
 
 
 def _require_shioaji():
@@ -465,13 +474,15 @@ class ShioajiAdapter:
         # Market orders (MKT) are rejected by TAIFEX/TWSE with ROD (rest-of-day)
         # time-in-force -- confirmed live 2026-07-20, op_code 9938: "市價單不允許
         # 當日有效委託(ROD)". A market order that stays resting all day is a
-        # contradiction in terms; it must be IOC or FOK. TAIFEX has no
-        # multi-day resting order, so "gtc" has no Shioaji equivalent.
+        # contradiction in terms; it must be IOC or FOK. Both rules live in
+        # SUPPORTED_TIME_IN_FORCE, which the run's preflight reads too.
         time_in_force = signal["time_in_force"]
-        if time_in_force == "gtc":
-            raise ValueError("Shioaji has no GTC time-in-force; use 'day', 'ioc', or 'fok'")
-        if not is_limit and time_in_force == "day":
-            raise ValueError("Shioaji market orders cannot use 'day' (ROD); use 'ioc' or 'fok'")
+        validate_time_in_force(
+            "shioaji",
+            SUPPORTED_TIME_IN_FORCE,
+            "limit" if is_limit else "market",
+            time_in_force,
+        )
         order_type = {
             "day": sj.OrderType.ROD,
             "ioc": sj.OrderType.IOC,
