@@ -74,16 +74,22 @@ would bypass ccxt's unified layer and hand-roll one venue's raw endpoints.
 **Server-held behaviour: unknown offline.** Binance's documented model is that
 stop/take-profit orders rest on the venue, and that USD-M's `closePosition`
 flag makes the venue cancel the protective order when the position closes.
-The library exposes the flag; whether testnet honours the auto-cancel, and
-what `workingType` (mark price vs. last price) the account defaults to, cannot
-be observed without a session. `workingType` and `priceProtect` are threaded
-through `ccxt/binance.py` but are not in `exchange.has` at all — they are
-per-call params with no capability flag to read.
+The library exposes the flag, and ccxt's own source warns that its
+`closePositions` is not synonymous with Binance's meaning, so the venue
+semantics here come from Binance's documentation and are unverified in this
+survey. Whether testnet honours the auto-cancel, and what `workingType` (mark
+price vs. last price) the account defaults to, cannot be observed without a
+session. `workingType` and `priceProtect` appear in `ccxt/binance.py` only
+inside commented example payloads — zero non-comment occurrences of either —
+so ccxt does not read, validate or map them; they reach the venue, if at all,
+through the generic unhandled-params passthrough, unvalidated. They are not in
+`exchange.has` either.
 
 **Also unverifiable offline:** whether `editOrder` accepts an amendment to a
-resting trigger order (Binance's USD-M Modify-Order endpoint is documented for
-limit orders), and whether `fetchOpenOrders` returns trigger/algo orders in
-the same page as ordinary ones or needs the separate algo-order endpoints
+resting trigger order (Binance's USD-M Modify-Order endpoint is described for
+limit orders in venue documentation not consulted here), and whether
+`fetchOpenOrders` returns trigger/algo orders in the same page as ordinary
+ones or needs the separate algo-order endpoints
 `fapiPrivateGetOpenAlgoOrders` / `fapiPrivateGetAllAlgoOrders`.
 
 ## IBKR — ib_async 2.1.0
@@ -91,7 +97,7 @@ the same page as ordinary ones or needs the separate algo-order endpoints
 Read from `ib_async.order` and the dataclass fields of `Order`.
 
 Order classes present: `MarketOrder`, `LimitOrder`, `StopOrder` (`STP`,
-stop in `auxPrice`), `StopLimitOrder` (`STP LMT`), `BracketOrder`, and the
+stop in `auxPrice`), `StopLimitOrder` (`STP LMT`), and the
 condition types `PriceCondition`, `TimeCondition`, `MarginCondition`,
 `ExecutionCondition`, `VolumeCondition`, `PercentChangeCondition`.
 
@@ -117,15 +123,17 @@ bracket helper, so a market entry with attached protection means assembling
 `self.client.getReqId()` for each leg, so bracket construction is coupled to a
 connected client's request-id sequence and cannot be built or unit-tested
 detached. Note also that `bracketOrder` sets `parentId` and the
-`transmit=False, False, True` staging but leaves `ocaGroup` empty — sibling
-cancellation is left to IB's server-side bracket handling, which is precisely
-what #34 wants observed rather than assumed.
+`transmit=False, False, True` staging but leaves `ocaGroup` empty. All the
+library shows is that the field is untouched; sibling cancellation is left to
+whatever IB does server-side, unobserved here — precisely what #34 wants
+observed rather than assumed.
 
 **Server-held behaviour: unknown offline.** Whether a bracket survives client
 disconnect depends on TWS/Gateway settings and account type, not on the
-library. `triggerMethod=0` means "default", and which price the default
-resolves to per instrument class is a TWS-side rule. Both are unreadable
-without a session.
+library. `ib_async` declares `triggerMethod` as a bare `int` defaulting to
+`0`; that `0` means "default" is an IB API documentation fact, not something
+the library states, and which price the default resolves to per instrument
+class is a TWS-side rule. Both are unreadable without a session.
 
 Useful for DoD box 4: `OrderStatus` exposes `orderId`, `permId`, `parentId`,
 `clientId`, and `Order` also carries `orderRef` and `parentPermId` — a
@@ -148,9 +156,11 @@ surface has no protective construct of any kind.
   stop price, no trigger price, no parent id, no OCA group.
 - The `Shioaji` client has no method whose name contains stop, trigger,
   condition, or OCO. `place_comboorder` / `cancel_comboorder` /
-  `update_combostatus` are futures *spread* combos (calendar/time spreads),
-  not protective pairs.
-- `update_order(trade, price=None, qty=None)` amends price and quantity only.
+  `update_combostatus` are futures *spread* combos — `ComboType` is
+  PriceSpread, TimeSpread, Straddle, Strangle, ConversionReversal and
+  WeeklyTimeSpread — none of which is a protective pair.
+- `update_order(trade, price=None, qty=None, timeout=30000, cb=None)` amends
+  price and quantity only.
 
 A repo-wide grep of the installed package for `stop_price`, `StopOrder`,
 `trigger`, and `TouchPrice` returns nothing in the order path.
@@ -163,13 +173,18 @@ There is no lifecycle to certify.
 One note on where this surface comes from: shioaji 1.7.0 is a rewrite whose
 core ships as a compiled `_core.abi3.so` with a `.pyi` stub, so the enums and
 signatures above are read from that stub rather than from Python source. It is
-the stock wheel — no local patching — and the issue numbers in its comments
-are upstream's own, not Librae's. Re-read the stub at audit time, since a
+the stock wheel from the registry — no local patching — and the issue numbers
+in its comments are not Librae's (librae #186 and #194 are unrelated merged
+PRs). Which tracker they do belong to cannot be read offline. Re-read the
+stub at audit time, since a
 rewrite's surface can move within a minor version.
 
 Also relevant to DoD box 4: `ShioajiAdapter.broker_client_order_id` truncates
-a SHA-256 to **six** base32 characters, because `custom_field` is a
-six-character field. That is the only durable Librae→broker link. Encoding a
+a SHA-256 to **six** base32 characters, because the adapter treats
+`custom_field` as a six-character field (`shioaji_adapter.py`'s docstring,
+itself uncited). The SDK declares only `Optional[str]` with no length
+constraint, so six is a Librae-side assumption this survey could not confirm
+against the venue. That field is the only durable Librae→broker link. Encoding a
 parent/child protective relationship in a six-character namespace shared with
 ordinary orders is a real design problem, not a formality.
 
