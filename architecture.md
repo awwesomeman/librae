@@ -333,7 +333,12 @@ librae/
 ├── live/                     real-time / sim runtime
 │   ├── engine.py             LiveTrader — data-driven multi-symbol polling events
 │   ├── executor.py           OrderRequest/ExecutionReport + LiveExecutor normalization
-│   └── state.py              restart checkpoint types + LiveStateStore protocol
+│   ├── state.py              restart checkpoint types + LiveStateStore protocol
+│   ├── data_readiness.py     primary-input staleness + absent-input reports (edge-triggered)
+│   ├── auxiliary_cache.py    auxiliary refetch cadence + freshness that never holds the run
+│   ├── ohlcv_audit.py        best-effort vs at-least-once OHLCV audit delivery + its queue
+│   ├── halt_recovery.py      whether a halted run may reset, and the blocking reason
+│   └── resting_orders.py     live intent lifetime — replace, expire, prune (mirrors backtest)
 │
 └── config/                   configuration management
     ├── market_config.py      MarketConfig dataclass + built-in market registry (costs, tick size, margin rates)

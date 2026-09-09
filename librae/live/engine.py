@@ -66,7 +66,6 @@ from librae.core.market_data import (
     validate_feature_frame,
     validate_ohlcv_values,
 )
-from librae.core.readiness import evaluate_observation, next_expected_close
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -79,13 +78,18 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import (
-    require_resting_session_support,
-    resting_session_label,
     session_label,
     session_labels,
     validate_calendar_id,
 )
 
+from . import (
+    auxiliary_cache,
+    data_readiness,
+    halt_recovery,
+    ohlcv_audit,
+    resting_orders,
+)
 from .execution_identity import (
     ExecutionIdentity,
     account_lease_key,
@@ -107,7 +111,6 @@ from .interfaces import (
     WarmupFetcher,
 )
 from .state import (
-    MAX_PENDING_OHLCV,
     HaltResetReadiness,
     LiveRebalance,
     LiveRuntimeState,
@@ -910,11 +913,9 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        """Stamp the event an intent first rested on, once."""
-        if isinstance(decision, PortfolioWeights):
-            return
-        for intent in decision:
-            self._pending_resting_since.setdefault(intent.symbol or primary_symbol, ts)
+        resting_orders.record_resting_since(
+            decision, ts, self._pending_resting_since, primary_symbol=primary_symbol
+        )
 
     def _replace_resting_intents(
         self,
@@ -923,38 +924,14 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        """Let a new decision cancel and replace an order still resting.
-
-        Mirrors the backtest: ``gtc`` commits an order until it fills, so the
-        strategy's next decision for that symbol is its way out. Only an intent
-        that has actually rested is replaceable — one waiting for its symbol's
-        first bar keeps the existing duplicate guard.
-        """
-        if not new_decision or isinstance(self._pending_decision, PortfolioWeights):
-            return
-        replacing = (
-            {intent.symbol or primary_symbol for intent in new_decision}
-            if not isinstance(new_decision, PortfolioWeights)
-            else None  # a whole-book target supersedes every resting order
+        self._pending_decision = resting_orders.replace_resting_intents(
+            self._pending_decision,
+            new_decision,
+            ts,
+            self._pending_resting_since,
+            primary_symbol=primary_symbol,
+            on_runtime_event=self._on_runtime_event,
         )
-        live: list[OrderIntent] = []
-        for intent in self._pending_decision:
-            symbol = intent.symbol or primary_symbol
-            resting = symbol in self._pending_resting_since
-            if resting and (replacing is None or symbol in replacing):
-                self._pending_resting_since.pop(symbol, None)
-                if self._on_runtime_event:
-                    self._on_runtime_event(
-                        RuntimeEvent(
-                            ts=ts,
-                            event_type="decision_skipped",
-                            symbol=symbol,
-                            detail={"reason": "resting_order_replaced"},
-                        )
-                    )
-                continue
-            live.append(intent)
-        self._pending_decision = live
 
     def _validate_resting_sessions(
         self,
@@ -963,47 +940,28 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        """Fail on the emitting event, not mid-run, when a day limit has no
-        session to expire against. This is engine expressibility, not a venue
-        rule, so it belongs with the decision that requested it. Only calendar
-        presence is checked — labelling this event would reject a decision
-        emitted during another instrument's session."""
         del ts
-        if isinstance(decision, PortfolioWeights):
-            return
-        for intent in decision:
-            if intent.time_in_force == "day" and intent.limit_price is not None:
-                symbol = intent.symbol or primary_symbol
-                try:
-                    require_resting_session_support(
-                        calendar_id=self._instruments[symbol].calendar_id,
-                        timeframe=self._config.timeframe,
-                    )
-                except ValueError as exc:
-                    raise ValueError(f"{symbol}: {exc}") from exc
+        resting_orders.validate_resting_sessions(
+            decision,
+            primary_symbol=primary_symbol,
+            instruments=self._instruments,
+            timeframe=self._config.timeframe,
+        )
 
     def _prune_pending_submissions(self, *, primary_symbol: str) -> None:
-        """Forget submissions whose intent is no longer pending."""
-        if isinstance(self._pending_decision, PortfolioWeights):
-            self._pending_resting_since = {}
-            return
-        still_pending = {intent.symbol or primary_symbol for intent in self._pending_decision}
-        self._pending_resting_since = {
-            symbol: submitted_at
-            for symbol, submitted_at in self._pending_resting_since.items()
-            if symbol in still_pending
-        }
+        self._pending_resting_since = resting_orders.prune_pending_submissions(
+            self._pending_decision,
+            self._pending_resting_since,
+            primary_symbol=primary_symbol,
+        )
 
     def _session_of(self, symbol: str, ts: datetime) -> object:
-        """Session label a resting ``day`` order expires against."""
-        try:
-            return resting_session_label(
-                ts,
-                calendar_id=self._instruments[symbol].calendar_id,
-                timeframe=self._config.timeframe,
-            )
-        except ValueError as exc:
-            raise ValueError(f"{symbol}: {exc}") from exc
+        return resting_orders.session_of(
+            symbol,
+            ts,
+            calendar_id=self._instruments[symbol].calendar_id,
+            timeframe=self._config.timeframe,
+        )
 
     def _expire_resting_day_intents(
         self,
@@ -1012,38 +970,15 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        """Drop resting ``day`` limits once their submitting session has ended.
-
-        Mirrors the backtest so a deterministic runtime cannot drift on this
-        sequence. Only a limit order can outlive an event, so a market order
-        never consults the calendar.
-        """
-        if isinstance(self._pending_decision, PortfolioWeights) or not self._pending_decision:
-            return
-        live: list[OrderIntent] = []
-        for intent in self._pending_decision:
-            symbol = intent.symbol or primary_symbol
-            submitted_at = self._pending_resting_since.get(symbol)
-            if (
-                intent.time_in_force == "day"
-                and intent.limit_price is not None
-                and submitted_at is not None
-                and symbol in priced_symbols
-                and self._session_of(symbol, ts) != self._session_of(symbol, submitted_at)
-            ):
-                self._pending_resting_since.pop(symbol, None)
-                if self._on_runtime_event:
-                    self._on_runtime_event(
-                        RuntimeEvent(
-                            ts=ts,
-                            event_type="decision_skipped",
-                            symbol=symbol,
-                            detail={"reason": "day_order_expired"},
-                        )
-                    )
-                continue
-            live.append(intent)
-        self._pending_decision = live
+        self._pending_decision = resting_orders.expire_resting_day_intents(
+            self._pending_decision,
+            ts,
+            priced_symbols,
+            self._pending_resting_since,
+            primary_symbol=primary_symbol,
+            session_of=self._session_of,
+            on_runtime_event=self._on_runtime_event,
+        )
 
     def _without_halted_account(self, decision: StrategyDecision) -> StrategyDecision:
         return [] if self._halted else decision
@@ -1206,367 +1141,81 @@ class LiveTrader:
         self._notify_pool.submit(fn, **kwargs)
 
     def _check_staleness(self, symbol: str, latest_ts: datetime) -> bool:
-        """Alert if the next observation is overdue against its own calendar.
-
-        Catches a feed that stops updating without ever raising an exception
-        (CONSECUTIVE_ERROR_THRESHOLD only covers raised errors). The boundary
-        is the next bar's expected close for this subscription's own timeframe
-        and calendar, so a closed market is not mistaken for a dead feed and a
-        same-symbol H1 input is not judged on a D1 cadence. Edge-triggered:
-        alerts once when crossing into stale and re-arms once fresh data
-        resumes. Returns whether the frame is stale so live fails closed.
-        """
         subscription = self._market_data_subscriptions[symbol]
-        status = evaluate_observation(
+        return data_readiness.check_staleness(
+            symbol,
             latest_ts,
+            subscription=subscription,
             as_of=self._utc_now(),
-            timeframe=subscription.timeframe,
-            calendar_id=subscription.calendar_id,
             grace=self._staleness_grace(subscription),
+            stale_alerted=self._stale_alerted,
+            unanchored_reported=self._unanchored_reported,
+            notify=self._notify,
+            strategy_name=self._executor.strategy_name,
         )
-        if not status.calendar_anchored and subscription not in self._unanchored_reported:
-            self._unanchored_reported.add(subscription)
-            logger.warning(
-                "Freshness for %s is not calendar-anchored: %s has no session in %s, "
-                "so weekend and holiday awareness is lost for this subscription",
-                symbol,
-                latest_ts,
-                subscription.calendar_id,
-            )
-        is_stale = not status.fresh
-        was_stale = self._stale_alerted.get(subscription, False)
-
-        if is_stale and not was_stale:
-            self._stale_alerted[subscription] = True
-            logger.warning(
-                "Stale data: %s latest bar %s, next observation was due %s",
-                symbol,
-                latest_ts,
-                status.due_at,
-            )
-            self._notify(
-                "send_alert",
-                title=f"[{self._executor.strategy_name}] Stale Data: {symbol}",
-                message=(
-                    f"Latest bar is {latest_ts}; the next observation was due "
-                    f"{status.due_at} — feed may have stopped updating."
-                ),
-            )
-        elif not is_stale and was_stale:
-            self._stale_alerted[subscription] = False
-            logger.info("Stale data recovered: %s", symbol)
-        return is_stale
 
     def _report_data_readiness(self, missing: Sequence[str]) -> bool:
-        """Report absent inputs and say whether evaluation must be held.
-
-        Edge-triggered like staleness: one diagnostic when data readiness is
-        lost and one when it returns, not one per poll cycle. Optional
-        subscriptions are reported and stepped over; required ones hold the
-        strategy.
-        """
-        blocking = [symbol for symbol in missing if symbol not in self._optional_symbols]
-        omitted = [symbol for symbol in missing if symbol in self._optional_symbols]
-        if omitted:
-            logger.info("Proceeding without optional market data: %s", ", ".join(omitted))
-        if blocking and not self._data_gap_alerted:
-            self._data_gap_alerted = True
-            logger.warning(
-                "Data not ready; holding strategy evaluation for %s", ", ".join(blocking)
-            )
-            self._notify(
-                "send_alert",
-                title=f"[{self._executor.strategy_name}] Market Data Not Ready",
-                message=(
-                    f"No usable observation for required {', '.join(blocking)}; "
-                    "strategy evaluation is held until the feed recovers."
-                ),
-            )
-        elif not blocking and self._data_gap_alerted:
-            self._data_gap_alerted = False
-            logger.info("Market data ready again; resuming strategy evaluation")
-        return bool(blocking)
+        blocking, self._data_gap_alerted = data_readiness.report_data_readiness(
+            missing,
+            optional_symbols=self._optional_symbols,
+            alerted=self._data_gap_alerted,
+            notify=self._notify,
+            strategy_name=self._executor.strategy_name,
+        )
+        return blocking
 
     def _refresh_auxiliary_cache(self) -> None:
-        """Refresh every auxiliary input through its symbol's own source.
-
-        Auxiliaries produce no execution events, so they carry no durable
-        watermark and no fill dedup: a restart simply refetches them. Nothing
-        here may abort the cycle — the primary still has to execute — so a
-        failed fetch, or a frame that fails normalization, logs and keeps the
-        previous frame. Freshness is still evaluated and alerted; it just never
-        holds the run, because an auxiliary is not an input the run executes on.
-        """
-        now = self._utc_now()
-        for subscription, owner in self._auxiliary_subscriptions.items():
-            if not self._auxiliary_fetch_due(subscription, now):
-                continue
-            try:
-                fetched = self._fetchers[owner](
-                    owner,
-                    subscription.timeframe,
-                    self._feature_history_limit + 1,
-                    drop_incomplete=True,
-                )
-                if fetched is None or fetched.empty:
-                    continue
-                normalized = self._normalize_runtime_rows(owner, fetched, subscription=subscription)
-            except Exception:
-                logger.exception(
-                    "Failed to refresh auxiliary %s %s; keeping the previous frame",
-                    owner,
-                    subscription.timeframe,
-                )
-                continue
-            self._auxiliary_cache[subscription] = normalized
-
-        # Evaluate every declared auxiliary from its cache, whatever the fetch
-        # did. Checking only after a successful fetch inspects the feed exactly
-        # when it is healthy enough to answer and never when it is not, so the
-        # two ordinary ways a feed dies — raising and returning nothing — would
-        # age the cache silently while the strategy still reads it as context.
-        # This also covers a subscription whose refetch was skipped as not due.
-        for subscription, owner in self._auxiliary_subscriptions.items():
-            self._check_auxiliary_freshness(subscription, owner, as_of=now)
-
-    def _auxiliary_fetch_due(
-        self,
-        subscription: MarketDataSubscription,
-        now: datetime,
-    ) -> bool:
-        """Skip a refetch until a new observation could exist.
-
-        A daily auxiliary on an hourly run would otherwise be pulled once per
-        poll for a bar that cannot change. The calendar already knows when the
-        next one is due.
-        """
-        cached = self._auxiliary_cache.get(subscription)
-        if cached is None or cached.empty:
-            return True
-        last_ts = pd.Timestamp(cached["ts"].iloc[-1]).to_pydatetime()
-        try:
-            return now >= next_expected_close(
-                last_ts,
-                timeframe=subscription.timeframe,
-                calendar_id=subscription.calendar_id,
-            )
-        except ValueError:
-            return True
-
-    def _check_auxiliary_freshness(
-        self,
-        subscription: MarketDataSubscription,
-        owner: str,
-        *,
-        as_of: datetime,
-    ) -> None:
-        """Alert on a stalled auxiliary feed without ever holding the run.
-
-        A dead auxiliary that goes on serving yesterday's frame is the silent
-        failure this work exists to close; it just is not grounds to stop
-        executing on the primary.
-
-        A subscription that has never delivered is reported once and not
-        alerted: there is no observation for it to be late relative to, which
-        is the distinction ``ObservationStatus.late`` draws.
-        """
-        frame = self._auxiliary_cache.get(subscription)
-        if frame is None or frame.empty:
-            if subscription not in self._auxiliary_never_delivered:
-                self._auxiliary_never_delivered.add(subscription)
-                logger.warning(
-                    "Auxiliary %s %s has never delivered an observation",
-                    owner,
-                    subscription.timeframe,
-                )
-            return
-        self._auxiliary_never_delivered.discard(subscription)
-        last_ts = pd.Timestamp(frame["ts"].iloc[-1]).to_pydatetime()
-        status = evaluate_observation(
-            last_ts,
-            as_of=as_of,
-            timeframe=subscription.timeframe,
-            calendar_id=subscription.calendar_id,
-            grace=self._staleness_grace(subscription),
+        auxiliary_cache.refresh(
+            self._auxiliary_subscriptions,
+            self._auxiliary_cache,
+            now=self._utc_now(),
+            fetchers=self._fetchers,
+            history_limit=self._feature_history_limit,
+            normalize=self._normalize_runtime_rows,
+            never_delivered=self._auxiliary_never_delivered,
+            stale_alerted=self._stale_alerted,
+            staleness_grace=self._staleness_grace,
+            notify=self._notify,
+            strategy_name=self._executor.strategy_name,
         )
-        was_stale = self._stale_alerted.get(subscription, False)
-        if not status.fresh and not was_stale:
-            self._stale_alerted[subscription] = True
-            logger.warning(
-                "Stale auxiliary data: %s %s latest bar %s, next observation was due %s",
-                owner,
-                subscription.timeframe,
-                last_ts,
-                status.due_at,
-            )
-            self._notify(
-                "send_alert",
-                title=(
-                    f"[{self._executor.strategy_name}] Stale Auxiliary Data: "
-                    f"{owner} {subscription.timeframe}"
-                ),
-                message=(
-                    f"Latest {subscription.timeframe} bar is {last_ts}; the next was due "
-                    f"{status.due_at}. Strategy execution continues on the primary cadence."
-                ),
-            )
-        elif status.fresh and was_stale:
-            self._stale_alerted[subscription] = False
-            logger.info("Auxiliary data recovered: %s %s", owner, subscription.timeframe)
 
     def _deliver_ohlcv(self, audit_bars: Mapping[str, dict[str, object]], ts: datetime) -> None:
-        """Hand one event's audit rows to the OHLCV sink.
-
-        A sink that declares ``durable_ohlcv_delivery`` gets at-least-once
-        semantics: the row is queued in the checkpoint before it is offered,
-        so a failed write or a crash replays it rather than losing it. The
-        writer treats an equal row version as an idempotent no-op, which is
-        what makes a duplicate delivery harmless.
-
-        Any other callback keeps the documented best-effort contract. Queueing
-        its failures would grow the checkpoint for work the engine has no way
-        to acknowledge.
-        """
-        if self._on_ohlcv is None:
-            return
-        if not self._durable_ohlcv_delivery:
-            for symbol, bar in audit_bars.items():
-                try:
-                    self._on_ohlcv(symbol, self._timeframe, bar, ts)
-                except Exception:
-                    logger.exception("Best-effort OHLCV callback failed for %s at %s", symbol, ts)
-            return
-        self._flush_pending_ohlcv()
+        ohlcv_audit.deliver(
+            audit_bars,
+            ts,
+            on_ohlcv=self._on_ohlcv,
+            durable=self._durable_ohlcv_delivery,
+            timeframe=self._timeframe,
+            flush=self._flush_pending_ohlcv,
+        )
 
     def _queue_ohlcv(self, audit_bars: Mapping[str, dict[str, object]], ts: datetime) -> None:
-        """Accept this event's audit rows, before the checkpoint that lands
-        the watermark they belong to.
-
-        Called immediately before that checkpoint rather than after it, so one
-        write carries both. Landing them separately would double the
-        round-trips per bar for no extra guarantee.
-        """
-        if self._on_ohlcv is None or not self._durable_ohlcv_delivery:
-            return
-        for symbol, bar in audit_bars.items():
-            self._enqueue_ohlcv(symbol, bar, ts)
-
-    def _enqueue_ohlcv(self, symbol: str, bar: Mapping[str, object], ts: datetime) -> None:
-        """Record an accepted row before the watermark can forget it."""
-        subscription = self._market_data_subscriptions[symbol]
-        available_at = bar.get(AVAILABLE_AT_COLUMN)
-        pending = PendingOhlcvDelivery(
-            subscription=subscription,
-            ts=ts,
-            available_at=(
-                pd.Timestamp(available_at).to_pydatetime().astimezone(UTC)
-                if available_at is not None
-                else ts
-            ),
-            bar={
-                field: float(bar[field])
-                for field in ("open", "high", "low", "close", "volume")
-                if field in bar
-            },
+        self._ohlcv_audit_degraded = ohlcv_audit.queue(
+            audit_bars,
+            ts,
+            self._pending_ohlcv,
+            on_ohlcv=self._on_ohlcv,
+            durable=self._durable_ohlcv_delivery,
+            subscriptions=self._market_data_subscriptions,
+            degraded=self._ohlcv_audit_degraded,
+            utc_now=self._utc_now,
+            on_runtime_event=self._on_runtime_event,
+            notify=self._notify,
+            strategy_name=self._executor.strategy_name,
         )
-        if len(self._pending_ohlcv) >= MAX_PENDING_OHLCV:
-            self._drop_ohlcv_audit_row(pending)
-            return
-        self._pending_ohlcv.append(pending)
-
-    def _drop_ohlcv_audit_row(self, pending: PendingOhlcvDelivery) -> None:
-        """Drop one audit row loudly, without stopping the book.
-
-        This queue holds OHLCV bars, the most recoverable data in the system:
-        a gap is closed by re-fetching from the source, and nothing in the
-        book depends on it. Halting cancels live orders and stops trading,
-        which has real market cost, to protect data that can be rebuilt.
-
-        Reaching the bound is not an outage either. The checkpoint and these
-        rows share one database, so a database refusing this many OHLCV writes
-        while still accepting checkpoints is a schema or constraint problem.
-        It surfaces as terminal health and a recorded identity, so a backfill
-        knows what to close.
-        """
-        if self._on_runtime_event:
-            self._on_runtime_event(
-                RuntimeEvent(
-                    ts=self._utc_now(),
-                    event_type="decision_skipped",
-                    symbol=pending.subscription.symbol,
-                    detail={
-                        "reason": "ohlcv_audit_delivery_failed",
-                        "timeframe": pending.subscription.timeframe,
-                        "ts": pending.ts.isoformat(),
-                        "available_at": pending.available_at.isoformat(),
-                        "pending_bound": MAX_PENDING_OHLCV,
-                    },
-                )
-            )
-        if not self._ohlcv_audit_degraded:
-            self._ohlcv_audit_degraded = True
-            logger.error(
-                "OHLCV audit backlog reached %d unacknowledged rows; further rows are "
-                "dropped and must be backfilled from the data source",
-                MAX_PENDING_OHLCV,
-            )
-            self._notify(
-                "send_alert",
-                title=f"[{self._executor.strategy_name}] OHLCV Audit Backlog",
-                message=(
-                    f"{MAX_PENDING_OHLCV} unacknowledged audit rows; further rows are "
-                    "dropped and recorded individually. Trading continues — these bars "
-                    "are re-fetchable and the book does not depend on them."
-                ),
-            )
 
     def _flush_pending_ohlcv(self) -> None:
-        """Offer queued rows in order, keeping whatever is not acknowledged.
-
-        Order matters per subscription: the writer accepts only a strictly
-        later row version, so replaying a correction before the bar it
-        corrects would drop it.
-        """
-        if not self._pending_ohlcv or self._on_ohlcv is None:
-            return
-        delivered = 0
-        for pending in list(self._pending_ohlcv):
-            bar = dict(pending.bar)
-            bar[AVAILABLE_AT_COLUMN] = pending.available_at
-            try:
-                self._on_ohlcv(
-                    pending.subscription.symbol,
-                    pending.subscription.timeframe,
-                    bar,
-                    pending.ts,
-                )
-            except Exception:
-                logger.warning(
-                    "OHLCV audit delivery failed for %s %s at %s; %d row(s) still pending",
-                    pending.subscription.symbol,
-                    pending.subscription.timeframe,
-                    pending.ts,
-                    len(self._pending_ohlcv) - delivered,
-                )
-                break
-            delivered += 1
-        if delivered:
-            self._pending_ohlcv = self._pending_ohlcv[delivered:]
-            self._persist_state()
-        if self._ohlcv_audit_degraded and not self._pending_ohlcv:
-            self._ohlcv_audit_degraded = False
-            logger.info("OHLCV audit backlog cleared; delivery has caught up")
+        self._ohlcv_audit_degraded = ohlcv_audit.flush_pending(
+            self._pending_ohlcv,
+            on_ohlcv=self._on_ohlcv,
+            degraded=self._ohlcv_audit_degraded,
+            persist=self._persist_state,
+        )
 
     def _staleness_grace(self, subscription: MarketDataSubscription) -> timedelta:
-        """Bounded publication slack allowed after an expected close.
-
-        Wall-clock on purpose: it models a feed publishing a completed bar
-        late, not extra market time. Sized from the subscription's own
-        interval so a D1 input is not held to an H1 deadline.
-        """
-        from librae.core.utils import interval_to_timedelta
-
-        return self.STALE_DATA_TOLERANCE_BARS * interval_to_timedelta(subscription.timeframe)
+        return data_readiness.staleness_grace(
+            subscription, tolerance_bars=self.STALE_DATA_TOLERANCE_BARS
+        )
 
     def _finish_cycle_diagnostics(
         self,
@@ -2264,55 +1913,15 @@ class LiveTrader:
         per-subscription evaluator the runtime uses for market data (#175), so
         a closed market is not mistaken for a stalled one.
         """
-        if self._active_orders:
-            return HaltResetReadiness(
-                ready=False,
-                reason="unresolved_broker_orders",
-                required_action=("resolve or cancel every tracked broker order, then reset again"),
-            )
-        missing: list[str] = []
-        stale: list[str] = []
-        now = self._utc_now()
-        for symbol in sorted(self._positions):
-            if symbol not in self._last_prices:
-                missing.append(symbol)
-                continue
-            subscription = self._market_data_subscriptions.get(symbol)
-            observed_at = self._last_bar_ts.get(symbol)
-            if subscription is None or observed_at is None:
-                missing.append(symbol)
-                continue
-            status = evaluate_observation(
-                observed_at,
-                as_of=now,
-                timeframe=subscription.timeframe,
-                calendar_id=subscription.calendar_id,
-                grace=self._staleness_grace(subscription),
-            )
-            if not status.fresh:
-                stale.append(symbol)
-        if missing:
-            return HaltResetReadiness(
-                ready=False,
-                reason="missing_valuation_mark",
-                blocking_symbols=tuple(missing),
-                required_action=(
-                    "wait for a completed bar for each listed symbol; the engine "
-                    "establishes the mark itself and no operator input is needed"
-                ),
-            )
-        if stale:
-            return HaltResetReadiness(
-                ready=False,
-                reason="stale_valuation_mark",
-                blocking_symbols=tuple(stale),
-                required_action=(
-                    "restore the market-data feed for each listed symbol; resetting "
-                    "on a stale mark would revalue the book at a price the venue has "
-                    "moved away from"
-                ),
-            )
-        return HaltResetReadiness(ready=True)
+        return halt_recovery.evaluate_reset_readiness(
+            active_orders=self._active_orders,
+            positions=self._positions,
+            last_prices=self._last_prices,
+            last_bar_ts=self._last_bar_ts,
+            subscriptions=self._market_data_subscriptions,
+            now=self._utc_now(),
+            staleness_grace=self._staleness_grace,
+        )
 
     def reset_halt(self) -> None:
         """Start a new risk epoch after operator review.
@@ -2323,24 +1932,10 @@ class LiveTrader:
         """
         readiness = self.halt_reset_readiness()
         if not readiness.ready:
-            if self._on_runtime_event:
-                self._on_runtime_event(
-                    RuntimeEvent(
-                        ts=self._utc_now(),
-                        event_type="decision_skipped",
-                        detail={
-                            "reason": "halt_reset_blocked",
-                            "cause": readiness.reason,
-                            "blocking_symbols": list(readiness.blocking_symbols),
-                            "required_action": readiness.required_action,
-                        },
-                    )
-                )
-            detail = (
-                f" for {list(readiness.blocking_symbols)}" if readiness.blocking_symbols else ""
-            )
-            raise RuntimeError(
-                f"cannot reset halt: {readiness.reason}{detail}. {readiness.required_action}"
+            halt_recovery.refuse_reset(
+                readiness,
+                on_runtime_event=self._on_runtime_event,
+                utc_now=self._utc_now,
             )
         equity, _ = self._calc_account_snapshot()
         self._halted = False
