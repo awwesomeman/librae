@@ -615,3 +615,120 @@ def test_a_malformed_auxiliary_entry_reports_the_key(tmp_path, monkeypatch) -> N
 
     with pytest.raises(ValueError, match="auxiliary_subscriptions"):
         build_run("test_strat", str(tmp_path / "run.py"))
+
+
+class TestAuxiliaryRestartParity:
+    """A restarted run must read the same auxiliary context as the one it
+    replaced.
+
+    Auxiliaries deliberately carry no durable state: they produce no execution
+    events, so there is no watermark or fill dedup to preserve and the schema
+    was not bumped for them. That makes restart parity a claim about the
+    refetch path rather than about persistence, and a claim is worth proving:
+    the declaration has to survive the checkpoint, the identity has to resolve
+    the same way, and the rebuilt view has to hold the same history.
+    """
+
+    @staticmethod
+    def _bars(n: int, freq: str, start: str):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "ts": pd.date_range(start, periods=n, freq=freq, tz="UTC"),
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.0] * n,
+                "volume": [1_000.0] * n,
+            }
+        )
+
+    def _cycle(self, state_store, *, primary_bars: int = 6):
+        """Run one poll cycle on a fresh trader sharing one durable store.
+
+        ``primary_bars`` advances the executing cadence, because a restart
+        that observes no new primary bar evaluates nothing at all — the
+        restored watermark suppresses it, which is correct and would make this
+        test vacuous.
+        """
+        from librae.core.strategy import Strategy
+
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        seen: list[tuple] = []
+
+        class ReadAuxiliary(Strategy):
+            def on_bar(self, ctx):
+                if ctx.market_data is not None:
+                    seen.append(
+                        tuple(
+                            (s.symbol, s.timeframe, len(ctx.market_data.history(s)))
+                            for s in sorted(
+                                ctx.market_data.subscriptions,
+                                key=lambda s: (s.symbol, s.timeframe),
+                            )
+                        )
+                    )
+                return []
+
+        def fetch(_symbol, timeframe, _limit, *, drop_incomplete=False):
+            del drop_incomplete
+            if timeframe == "D1":
+                return self._bars(6, "D", "2024-12-25T00:00Z")
+            return self._bars(primary_bars, "h", "2025-01-01T00:00Z")
+
+        runner = TestLiveTrader()._make_runner(
+            strategy=ReadAuxiliary(),
+            fetcher=fetch,
+            config=_test_cfg(
+                mode="sim",
+                warmup_periods=1,
+                auxiliary_subscriptions=(AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+            ),
+            state_store=state_store,
+        )
+        runner._poll_cycle()
+        return runner, seen
+
+    def test_a_restart_reads_the_same_auxiliary_context(self) -> None:
+        from librae.live.state import MemoryLiveStateStore
+
+        store = MemoryLiveStateStore()
+        _, before = self._cycle(store)
+        second, after = self._cycle(store, primary_bars=7)
+
+        assert second._restored_state, "the second trader must restore the checkpoint"
+        assert before and after, "both runs must have evaluated the strategy"
+
+        def auxiliary_entry(seen):
+            return [entry for entry in seen[-1] if entry[1] == "D1"]
+
+        assert auxiliary_entry(after) == auxiliary_entry(before)
+        assert auxiliary_entry(after), "the auxiliary must be present after a restart"
+
+    def test_the_declaration_survives_the_checkpoint(self) -> None:
+        """The auxiliary identity is rebuilt from config, not from state, so a
+        restart must resolve the identical subscription rather than a similar
+        one — history() is keyed by exact identity."""
+        from librae.live.state import MemoryLiveStateStore
+
+        store = MemoryLiveStateStore()
+        first, _ = self._cycle(store)
+        second, _ = self._cycle(store, primary_bars=7)
+
+        assert set(second._auxiliary_subscriptions) == set(first._auxiliary_subscriptions)
+
+    def test_no_auxiliary_state_is_persisted(self) -> None:
+        """States the design claim outright: nothing auxiliary is written to
+        the checkpoint, which is why no schema bump was needed and why a
+        restart simply refetches."""
+        import json
+
+        from librae.live.state import MemoryLiveStateStore
+
+        store = MemoryLiveStateStore()
+        runner, _ = self._cycle(store)
+        document = json.dumps(store.load(runner._state_key).to_dict())
+
+        assert "auxiliary" not in document
