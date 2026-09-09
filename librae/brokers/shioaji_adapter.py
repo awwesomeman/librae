@@ -161,13 +161,25 @@ class ShioajiAdapter:
         )
 
     def execution_identity(self) -> ExecutionIdentity:
+        # login() returns whichever accounts the api_key owns — futures/options,
+        # stock, or both — and this adapter trades all of them (place_order and
+        # get_position both branch on security_type). Fingerprint every account
+        # the login actually exposed instead of assuming a futures account:
+        # a stock-only login has futopt_account=None and would otherwise be
+        # unable to report an identity at all.
         return ExecutionIdentity(
             broker="shioaji",
             environment=self._execution_environment,
             endpoint="sinopac",
             account_fingerprint=account_fingerprint(
                 "shioaji",
-                str(getattr(self._api.futopt_account, "account_id", "") or ""),
+                *(
+                    str(getattr(account, "account_id", "") or "")
+                    for account in (
+                        getattr(self._api, "futopt_account", None),
+                        getattr(self._api, "stock_account", None),
+                    )
+                ),
             ),
         )
 

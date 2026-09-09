@@ -614,10 +614,14 @@ initialization or schema migration does not transform stored checkpoint JSON.
 
 A configuration, broker environment, endpoint, or authenticated account change
 produces a different `state_key`, making the new runner appear to have no
-matching checkpoint. Startup position/open-order reconciliation remains a
-separate safety check, not a replacement for the operator procedure above.
-The generic CLI will not reset a live checkpoint from `config_hash` alone,
-because that cannot safely select between paper and production state.
+matching checkpoint. On CCXT venues, which expose no portable account
+identifier, the account fingerprint is derived from the API key, so **rotating
+an exchange API key also changes the live `state_key`** even though the account
+is unchanged; rotate only against a flat book, using the same procedure. Startup
+position/open-order reconciliation remains a separate safety check, not a
+replacement for the operator procedure above. `--reset-state` clears simulation
+checkpoints only and refuses live ones outright, because a `config_hash` alone
+cannot select between paper and production state.
 
 For a direct non-container launch, the caller must provide an equivalent
 immutable identity:

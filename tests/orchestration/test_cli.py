@@ -761,8 +761,10 @@ class TestResetRealtimeState:
         with pytest.raises(ValueError, match="applies to sim/live only"):
             reset_realtime_state(_make_cfg(mode="backtest"))
 
-    def test_live_reset_requires_observed_execution_identity(self):
-        with pytest.raises(ValueError, match="paper or production checkpoint"):
+    def test_rejects_live_mode(self):
+        """The live state key includes an execution identity, so a config hash
+        cannot select between a paper and a production checkpoint."""
+        with pytest.raises(ValueError, match="does not clear live checkpoints"):
             reset_realtime_state(_make_cfg(mode="live"))
 
     def test_noop_when_no_checkpoint_exists(self):

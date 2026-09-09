@@ -8,6 +8,11 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal, Protocol, cast
 
+# Two of the three values mean "not production", and which one an adapter
+# reports follows the venue's own vocabulary rather than a librae distinction:
+# CCXT testnets report "sandbox", broker paper accounts (IBKR, Shioaji
+# simulation) report "paper". Test for `!= "production"` when the question is
+# whether real money is at risk; `== "paper"` silently excludes every testnet.
 ExecutionEnvironment = Literal["sandbox", "paper", "production"]
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]+$")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{16,64}$")

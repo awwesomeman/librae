@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from librae.db import schema as schema_module
 from librae.db.schema import (
     CURRENT_SCHEMA_REVISION,
     apply_migrations,
@@ -121,11 +122,39 @@ def test_incompatible_revision_fails_closed(revision: int) -> None:
         require_current_schema(cursor)
 
 
+def test_retired_migration_is_reported_before_it_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retiring an old migration must fail closed at inspection rather than
+    dying on a missing file partway through apply_migrations()."""
+    monkeypatch.setattr(
+        schema_module,
+        "_MIGRATION_FILES",
+        {CURRENT_SCHEMA_REVISION: "0002_bind_execution_identity.sql"},
+    )
+    cursor = FakeCursor(revision=0)
+
+    assert inspect_schema(cursor).state == "unsupported_old"
+    with pytest.raises(RuntimeError, match="no longer upgradable"):
+        apply_migrations(cursor)
+
+
 def test_bootstrap_is_current_and_does_not_embed_upgrade_ddl() -> None:
     schema = Path("librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
     assert "CREATE TABLE IF NOT EXISTS librae_schema_revision" in schema
-    assert f"VALUES (TRUE, {CURRENT_SCHEMA_REVISION})" in schema
     assert "ALTER TABLE" not in schema
     assert "BEGIN;" in schema
     assert schema.rstrip().endswith("COMMIT;")
+
+
+def test_bootstrap_states_one_revision_everywhere_it_is_written() -> None:
+    """The bootstrap stamps, verifies, and names its revision in separate
+    statements; a bump that misses one would refuse every fresh database."""
+    schema = Path("librae/db/timescale_init.sql").read_text(encoding="utf-8")
+    revision = CURRENT_SCHEMA_REVISION
+
+    assert f"VALUES (TRUE, {revision})" in schema
+    assert f"WHERE singleton = TRUE) <> {revision} THEN" in schema
+    assert f"does not match bootstrap revision {revision}" in schema
+    assert f"complete Librae schema revision {revision}" in schema

@@ -118,14 +118,16 @@ def inspect_schema(cur: _Cursor) -> SchemaStatus:
     if 0 <= revision < CURRENT_SCHEMA_REVISION:
         if revision in (0, 1) and not _legacy_schema_is_compatible(observed):
             return SchemaStatus(revision, "unknown")
-        return SchemaStatus(
-            revision,
-            "upgrade_required",
-            tuple(range(revision + 1, CURRENT_SCHEMA_REVISION + 1)),
-        )
+        pending = tuple(range(revision + 1, CURRENT_SCHEMA_REVISION + 1))
+        # A revision whose forward migration has since been retired cannot be
+        # upgraded by this build. Report that up front instead of letting
+        # apply_migrations() fail on a missing file partway through the run.
+        if not all(step in _MIGRATION_FILES for step in pending):
+            return SchemaStatus(revision, "unsupported_old")
+        return SchemaStatus(revision, "upgrade_required", pending)
     if revision > CURRENT_SCHEMA_REVISION:
         return SchemaStatus(revision, "newer")
-    return SchemaStatus(revision, "unsupported_old")
+    return SchemaStatus(revision, "unknown")
 
 
 def _status_error(status: SchemaStatus) -> RuntimeError:
@@ -142,7 +144,10 @@ def _status_error(status: SchemaStatus) -> RuntimeError:
             f"revision {CURRENT_SCHEMA_REVISION}; deploy a compatible Librae build"
         )
     elif status.state == "unsupported_old":
-        detail = f"database revision {status.revision} is no longer supported"
+        detail = (
+            f"database revision {status.revision} is no longer upgradable by this build; "
+            "migrate it with the last Librae build that still shipped its migration"
+        )
     else:
         detail = "database is unversioned or partially applied and does not match a known schema"
     return RuntimeError(f"incompatible Librae database schema: {detail}")
