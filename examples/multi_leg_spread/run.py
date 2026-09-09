@@ -10,15 +10,21 @@ import pandas as pd
 from librae import Backtest, RunConfig
 from librae.orchestration.cli import RunOptions, run_dispatch
 
+from examples._synthetic import session_opens
+
 from .strategy import MultiLegSpreadStrategy, prepare_signals
 
 
-def _make_panel(symbols: list[str], periods: int = 260) -> pd.DataFrame:
+def _make_panel(
+    symbols: list[str],
+    calendar_id: str,
+    periods: int = 260,
+) -> pd.DataFrame:
     """Create deterministic prices with a mean-reverting relative spread."""
     if len(symbols) != 2:
         raise ValueError("multi-leg spread example requires exactly two symbols")
     rng = np.random.default_rng(23)
-    timestamps = pd.date_range("2024-01-01", periods=periods, freq="D", tz="UTC")
+    timestamps = session_opens(calendar_id, start="2024-01-01", periods=periods)
     common = 100 + np.cumsum(rng.normal(0.02, 0.25, periods))
     spread = 3.0 * np.sin(np.arange(periods) / 8.0) + rng.normal(0, 0.20, periods)
     closes = {
@@ -43,9 +49,11 @@ def _make_panel(symbols: list[str], periods: int = 260) -> pd.DataFrame:
 
 def run_backtest(config: RunConfig, _options: RunOptions) -> None:
     params = config.params or {}
+    if config.calendar_id is None:
+        raise ValueError("multi-leg spread example requires calendar_id")
     near_symbol, far_symbol = config.symbols
     data = prepare_signals(
-        _make_panel(config.symbols),
+        _make_panel(config.symbols, config.calendar_id),
         near_symbol,
         far_symbol,
         lookback=int(params.get("lookback", 20)),

@@ -415,7 +415,7 @@ fi
         cwd=ROOT,
         env=env,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
     calls = docker_log.read_text(encoding="utf-8").splitlines() if docker_log.exists() else []
@@ -863,7 +863,7 @@ def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
         ],
         cwd=project,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -1078,7 +1078,7 @@ def _run_cloud_deploy(project: Path) -> subprocess.CompletedProcess[str]:
         ],
         cwd=project,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
 

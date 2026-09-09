@@ -28,9 +28,9 @@ summary = summarize_signal_mae_mfe(
 )
 ```
 
-Charting `summary` (e.g. median/p75 MFE-MAE by horizon) is caller-owned — see
-`examples/trade_report.py` for the compute → chart pattern used elsewhere in
-librae.
+Charting `summary` (e.g. median/p75 MFE-MAE by horizon) is caller-owned. See
+`examples/trade_report.py` for the corresponding compute → tabular-report
+pattern.
 
 ## Interpretation
 

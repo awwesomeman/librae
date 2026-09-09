@@ -13,7 +13,7 @@ patterns live in the [examples index](../examples/README.md).
 - [`uv`](https://docs.astral.sh/uv/) for the repository development workflow
 
 The base install depends only on NumPy and pandas. TimescaleDB, Grafana,
-reporting packages, exchange calendars, CLI wiring, notification clients, and
+chart viewing, exchange calendars, CLI wiring, notification clients, and
 broker SDKs are optional. A direct Python backtest needs none of them.
 
 ## Choose an installation workflow
@@ -64,7 +64,6 @@ Install only the integration you use:
 
 | Extra | Purpose |
 |---|---|
-| `analytics` | Matplotlib trade and signal reports |
 | `calendars` | Exchange-session labeling and resampling |
 | `cli` | Repository YAML/CLI orchestration helpers |
 | `db` | TimescaleDB persistence and durable live state |
@@ -103,7 +102,7 @@ Python version, or selected extras differ. Configure private indexes,
 certificates, proxies, authentication, and caches through normal `pip` or
 organization policy; do not disable TLS verification in project commands.
 
-## Run a package-only backtest
+## Run a package-only research backtest
 
 This example runs from an installed distribution. It does not import the
 repository `examples` package or enable a database, UI, notifier, or broker:
@@ -152,6 +151,12 @@ backtest = Backtest(
 backtest.run()
 print(backtest.build_output().metrics)
 ```
+
+This direct-constructor path is intentionally a minimal in-memory research
+example. Promotion to sim/live requires an explicit `RunConfig`, exact market
+data subscriptions, an adapter, runtime cadence, and durable state. Clone the
+repository and start from the complete runners below when you need that
+promotable wiring; copying only this snippet is not a deployment workflow.
 
 ## Run the examples
 
