@@ -11,11 +11,11 @@ import logging
 import signal
 import types
 from collections import deque
-from collections.abc import Callable, Container, Mapping
+from collections.abc import Callable, Container, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from inspect import getattr_static
 from math import isclose, isfinite
 from threading import Event
@@ -66,6 +66,7 @@ from librae.core.market_data import (
     validate_feature_frame,
     validate_ohlcv_values,
 )
+from librae.core.readiness import evaluate_observation
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -668,6 +669,7 @@ class LiveTrader:
                 for symbol, subscription in snapshot.subscriptions.items()
             },
         )
+        self._optional_symbols = frozenset(config.optional_symbols)
         self._market_data_subscriptions = dict(snapshot.subscriptions)
         self._primary_subscriptions = tuple(
             self._market_data_subscriptions[symbol] for symbol in self._symbols
@@ -769,7 +771,8 @@ class LiveTrader:
         self._last_feature_as_of: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
-        self._stale_alerted: dict[str, bool] = {}
+        self._stale_alerted: dict[MarketDataSubscription, bool] = {}
+        self._data_gap_alerted = False
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
         self._cash = config.account.initial_cash
@@ -1164,32 +1167,88 @@ class LiveTrader:
         self._notify_pool.submit(fn, **kwargs)
 
     def _check_staleness(self, symbol: str, latest_ts: datetime) -> bool:
-        """Alert if the latest fetched bar hasn't advanced in wall-clock
-        time — catches a feed that stops updating without ever raising an
-        exception (CONSECUTIVE_ERROR_THRESHOLD only covers raised errors).
-        Edge-triggered: alerts once when crossing into stale, not every
-        poll cycle, and re-arms once fresh data resumes. Returns whether the
-        frame is stale so live execution can fail closed.
+        """Alert if the next observation is overdue against its own calendar.
+
+        Catches a feed that stops updating without ever raising an exception
+        (CONSECUTIVE_ERROR_THRESHOLD only covers raised errors). The boundary
+        is the next bar's expected close for this subscription's own timeframe
+        and calendar, so a closed market is not mistaken for a dead feed and a
+        same-symbol H1 input is not judged on a D1 cadence. Edge-triggered:
+        alerts once when crossing into stale and re-arms once fresh data
+        resumes. Returns whether the frame is stale so live fails closed.
         """
-        age = self._utc_now() - latest_ts
-        threshold = (self.STALE_DATA_TOLERANCE_BARS + 1) * self._interval_delta
-        is_stale = age > threshold
-        was_stale = self._stale_alerted.get(symbol, False)
+        subscription = self._market_data_subscriptions[symbol]
+        status = evaluate_observation(
+            latest_ts,
+            as_of=self._utc_now(),
+            timeframe=subscription.timeframe,
+            calendar_id=subscription.calendar_id,
+            grace=self._staleness_grace(subscription),
+        )
+        is_stale = not status.fresh
+        was_stale = self._stale_alerted.get(subscription, False)
 
         if is_stale and not was_stale:
-            self._stale_alerted[symbol] = True
+            self._stale_alerted[subscription] = True
             logger.warning(
-                "Stale data: %s latest bar age=%s (threshold=%s)", symbol, age, threshold
+                "Stale data: %s latest bar %s, next observation was due %s",
+                symbol,
+                latest_ts,
+                status.due_at,
             )
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Stale Data: {symbol}",
-                message=f"Latest bar is {age} old (threshold {threshold}) — feed may have stopped updating.",
+                message=(
+                    f"Latest bar is {latest_ts}; the next observation was due "
+                    f"{status.due_at} — feed may have stopped updating."
+                ),
             )
         elif not is_stale and was_stale:
-            self._stale_alerted[symbol] = False
+            self._stale_alerted[subscription] = False
             logger.info("Stale data recovered: %s", symbol)
         return is_stale
+
+    def _report_data_readiness(self, missing: Sequence[str]) -> bool:
+        """Report absent inputs and say whether evaluation must be held.
+
+        Edge-triggered like staleness: one diagnostic when data readiness is
+        lost and one when it returns, not one per poll cycle. Optional
+        subscriptions are reported and stepped over; required ones hold the
+        strategy.
+        """
+        blocking = [symbol for symbol in missing if symbol not in self._optional_symbols]
+        omitted = [symbol for symbol in missing if symbol in self._optional_symbols]
+        if omitted:
+            logger.info("Proceeding without optional market data: %s", ", ".join(omitted))
+        if blocking and not self._data_gap_alerted:
+            self._data_gap_alerted = True
+            logger.warning(
+                "Data not ready; holding strategy evaluation for %s", ", ".join(blocking)
+            )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Market Data Not Ready",
+                message=(
+                    f"No usable observation for required {', '.join(blocking)}; "
+                    "strategy evaluation is held until the feed recovers."
+                ),
+            )
+        elif not blocking and self._data_gap_alerted:
+            self._data_gap_alerted = False
+            logger.info("Market data ready again; resuming strategy evaluation")
+        return bool(blocking)
+
+    def _staleness_grace(self, subscription: MarketDataSubscription) -> timedelta:
+        """Bounded publication slack allowed after an expected close.
+
+        Wall-clock on purpose: it models a feed publishing a completed bar
+        late, not extra market time. Sized from the subscription's own
+        interval so a D1 input is not held to an H1 deadline.
+        """
+        from librae.core.utils import interval_to_timedelta
+
+        return self.STALE_DATA_TOLERANCE_BARS * interval_to_timedelta(subscription.timeframe)
 
     def _finish_cycle_diagnostics(
         self,
@@ -1842,10 +1901,15 @@ class LiveTrader:
 
     @property
     def warmup_ready(self) -> bool:
-        """Whether every configured symbol has enough usable feature history."""
+        """Whether every required symbol has enough usable feature history.
+
+        An optional subscription cannot hold the run at the gate: the strategy
+        declared it can proceed without that input.
+        """
         return not self._replay_backlog_exhausted and all(
             self._warmup_gap(symbol, self._ohlcv_cache.get(symbol)) is None
             for symbol in self._symbols
+            if symbol not in self._optional_symbols
         )
 
     @property
@@ -1923,6 +1987,12 @@ class LiveTrader:
         # order is resting. Strategy evaluation remains serialized behind the
         # active order so a later bar cannot create a conflicting order queue.
         if not self._executor.simulation and (self._active_orders or self._halted):
+            return
+
+        # A required subscription with no usable observation blocks evaluation
+        # rather than letting the strategy silently decide on a partial view.
+        # Reconciliation, order monitoring and heartbeat above stay running.
+        if self._report_data_readiness(sorted(set(self._symbols) - set(frames))):
             return
 
         candidate_symbols_by_timestamp: dict[datetime, set[str]] = {}
