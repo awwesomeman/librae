@@ -866,7 +866,12 @@ four values to its own SDK:
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
-  `reset_halt()` is required after review before new entries resume.
+  `reset_halt()` is required after review before new entries resume. It
+  refuses while a tracked order is unresolved, or while an open position lacks
+  a current valuation mark, naming the cause and the next action;
+  `halt_reset_readiness()` reports the same answer without raising. See the
+  recovery procedure in
+  [the operational runbook](operational-runbook.md).
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 The backtest timeframe is inferred independently for each symbol. Every symbol

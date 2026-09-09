@@ -108,9 +108,24 @@ Procedure it exercises:
    cancels tracked broker orders.
 2. Operator confirms in the Binance UI that no unexpected position/order
    remains (manual step — the script pauses for this).
-3. `trader.reset_halt()` — only after step 2; raises
-   `RuntimeError` if any tracked order is still unresolved, which is the
-   intended guard rail, not a bug.
+3. `trader.reset_halt()` — only after step 2. It refuses while any tracked
+   order is unresolved, while an open position has no valuation mark, or
+   while that mark is stale; the error names the cause and the next action.
+   These are guard rails, not bugs.
+
+`trader.halt_reset_readiness()` answers the same question without raising, so
+an operator or a health check can see what is blocking before attempting a
+reset. It reports one of `unresolved_broker_orders`, `missing_valuation_mark`
+or `stale_valuation_mark`, the symbols responsible, and what to do next. A
+refused reset is also recorded as a `decision_skipped` runtime event with
+reason `halt_reset_blocked`.
+
+A missing mark clears itself: the engine establishes marks from completed
+bars, so a restored non-flat account becomes resettable once its symbols
+produce one, with no operator input. A stale mark does not — it means the feed
+stopped, and freshness is judged per subscription against its own calendar,
+the same rule the runtime uses for market data. A flat account has nothing to
+revalue and can reset immediately.
 
 **Findings from the 2026-08-01 rehearsal**, worth knowing before running this
 again — three were real bugs, all fixed:
@@ -161,14 +176,13 @@ again — three were real bugs, all fixed:
   while broker orders remain unresolved`) — a real, unplanned exercise of
   the readiness checklist's "placement-ambiguity handling" item, and it held
   up correctly.
-- **`reset_halt()` can crash if a position has no cached price yet (still
-  open, narrow).** `_calc_account_snapshot()` needs `_last_prices[symbol]`
-  for the account's open position and has no fallback — raises an unhandled
-  `ValueError` ("no current valuation mark for open position") if
-  `halt()`/`reset_halt()` are called before the engine has processed a
-  single bar. Only reachable in the narrow window between a fresh
-  restored-state deployment starting and its first bar — not fixed here,
-  out of this runbook's scope.
+- **`reset_halt()` used to crash if a position had no mark yet (fixed).**
+  Calling it before the engine had processed a bar raised an unhandled
+  `ValueError` from inside valuation. It now refuses with a named cause and a
+  next action, and `halt_reset_readiness()` reports the same answer without
+  raising, so health tooling can see it. A stale mark blocks reset too: the
+  old check only required a mark to exist, so a dead feed's last price could
+  be used to revalue the book. See the halt-recovery procedure above.
 
 ## DB backup and restore
 

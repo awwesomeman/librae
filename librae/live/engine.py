@@ -107,6 +107,7 @@ from .interfaces import (
     WarmupFetcher,
 )
 from .state import (
+    HaltResetReadiness,
     LiveRebalance,
     LiveRuntimeState,
     LiveStateStore,
@@ -2086,10 +2087,98 @@ class LiveTrader:
             raise ValueError("halt reason must be a non-empty string")
         self._halt_live(title="Manual Halt", message=reason.strip())
 
-    def reset_halt(self) -> None:
-        """Start a new risk epoch after operator review."""
+    def halt_reset_readiness(self) -> HaltResetReadiness:
+        """Whether ``reset_halt`` would be allowed, and why not.
+
+        A query, never a mutation: health tooling and an operator should be
+        able to see the blocking reason without provoking an exception to
+        obtain it. Remaining halted is always safe; being unable to find out
+        why is not.
+
+        Every open position needs a mark that is both present and current.
+        Presence alone was the old bar, which let a reset revalue the book on
+        a price a dead feed last produced days ago; freshness reuses the same
+        per-subscription evaluator the runtime uses for market data (#175), so
+        a closed market is not mistaken for a stalled one.
+        """
         if self._active_orders:
-            raise RuntimeError("cannot reset halt while broker orders remain unresolved")
+            return HaltResetReadiness(
+                ready=False,
+                reason="unresolved_broker_orders",
+                required_action=("resolve or cancel every tracked broker order, then reset again"),
+            )
+        missing: list[str] = []
+        stale: list[str] = []
+        now = self._utc_now()
+        for symbol in sorted(self._positions):
+            if symbol not in self._last_prices:
+                missing.append(symbol)
+                continue
+            subscription = self._market_data_subscriptions.get(symbol)
+            observed_at = self._last_bar_ts.get(symbol)
+            if subscription is None or observed_at is None:
+                missing.append(symbol)
+                continue
+            status = evaluate_observation(
+                observed_at,
+                as_of=now,
+                timeframe=subscription.timeframe,
+                calendar_id=subscription.calendar_id,
+                grace=self._staleness_grace(subscription),
+            )
+            if not status.fresh:
+                stale.append(symbol)
+        if missing:
+            return HaltResetReadiness(
+                ready=False,
+                reason="missing_valuation_mark",
+                blocking_symbols=tuple(missing),
+                required_action=(
+                    "wait for a completed bar for each listed symbol; the engine "
+                    "establishes the mark itself and no operator input is needed"
+                ),
+            )
+        if stale:
+            return HaltResetReadiness(
+                ready=False,
+                reason="stale_valuation_mark",
+                blocking_symbols=tuple(stale),
+                required_action=(
+                    "restore the market-data feed for each listed symbol; resetting "
+                    "on a stale mark would revalue the book at a price the venue has "
+                    "moved away from"
+                ),
+            )
+        return HaltResetReadiness(ready=True)
+
+    def reset_halt(self) -> None:
+        """Start a new risk epoch after operator review.
+
+        Fails closed with the structured reason from ``halt_reset_readiness``
+        rather than an unhandled valuation error, and records the refusal so
+        an operator can see it after the fact.
+        """
+        readiness = self.halt_reset_readiness()
+        if not readiness.ready:
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=self._utc_now(),
+                        event_type="decision_skipped",
+                        detail={
+                            "reason": "halt_reset_blocked",
+                            "cause": readiness.reason,
+                            "blocking_symbols": list(readiness.blocking_symbols),
+                            "required_action": readiness.required_action,
+                        },
+                    )
+                )
+            detail = (
+                f" for {list(readiness.blocking_symbols)}" if readiness.blocking_symbols else ""
+            )
+            raise RuntimeError(
+                f"cannot reset halt: {readiness.reason}{detail}. {readiness.required_action}"
+            )
         equity, _ = self._calc_account_snapshot()
         self._halted = False
         self._equity_peak = equity
