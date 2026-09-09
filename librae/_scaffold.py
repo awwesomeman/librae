@@ -28,8 +28,10 @@ def main() -> None:
         "half-configured key pairs, DSN role and password (with a single .env and no "
         ".env.secrets, the file-placement checks are skipped)",
     )
-    db_parser = subparsers.add_parser("db", help="inspect or migrate the reference database schema")
-    db_parser.add_argument("action", choices=("preflight", "migrate"))
+    db_parser = subparsers.add_parser(
+        "db", help="inspect, migrate, or backfill the reference database schema"
+    )
+    db_parser.add_argument("action", choices=("preflight", "migrate", "backfill"))
 
     args = parser.parse_args()
 

@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 _MIGRATION_FILES = {
     1: "0001_adopt_legacy_schema.sql",
     2: "0002_bind_execution_identity.sql",
+    3: "0003_adopt_subscription_identity.sql",
 }
 CURRENT_SCHEMA_REVISION = max(_MIGRATION_FILES)
 SchemaState = Literal[
@@ -23,13 +24,32 @@ SchemaState = Literal[
 # Revision 0 is the last unversioned schema shipped before the migration
 # contract.  These objects/columns are the durable execution boundary that
 # must be recognizable before it is safe to adopt an existing database.
+#
+# Identity only: a column a later release added is not part of recognizing a
+# database as Librae's.  Requiring one here refused a real production
+# database that predated it, leaving it unmigratable by the very tool meant
+# to adopt it.  Feature columns belong in _REVISION_MARKERS.
 _LEGACY_REQUIRED_COLUMNS = {
-    "backtest_runs": {"run_id", "config_hash", "primary_subscriptions"},
+    "backtest_runs": {"run_id", "config_hash"},
     "execution_runtime_state": {"state_key", "run_id", "config_hash", "state"},
     "broker_orders": {"state_key", "client_order_id", "run_id", "request"},
     "position_events": {"event_id", "run_id", "account_id"},
     "runtime_events": {"ts", "run_id", "event_type"},
 }
+
+# Columns that exist only once the migration keyed here has run.  A revision
+# number can be stamped on a database whose DDL was only partly applied, so
+# "current" verifies the marker rather than trusting the stamp.  ohlcv is
+# marked because its absence breaks the writer's ON CONFLICT rather than
+# startup, which surfaced hours later as a failed write.
+_REVISION_MARKERS: dict[int, dict[str, set[str]]] = {
+    2: {"backtest_runs": {"execution_identity"}},
+    3: {"backtest_runs": {"primary_subscriptions"}, "ohlcv": {"available_at"}},
+}
+
+_INSPECTED_TABLES = sorted(
+    set(_LEGACY_REQUIRED_COLUMNS) | {t for m in _REVISION_MARKERS.values() for t in m}
+)
 
 
 class _Cursor(Protocol):
@@ -65,7 +85,7 @@ def _schema_columns(cur: _Cursor) -> dict[str, set[str]]:
              FROM information_schema.columns
             WHERE table_schema = 'public'
               AND table_name = ANY(%s)""",
-        (list(_LEGACY_REQUIRED_COLUMNS),),
+        (_INSPECTED_TABLES,),
     )
     observed: dict[str, set[str]] = {}
     for table_name, column_name in cur.fetchall():
@@ -80,15 +100,25 @@ def _required_core_columns_are_present(observed: dict[str, set[str]]) -> bool:
     )
 
 
+def _markers_present(observed: dict[str, set[str]], revision: int) -> bool:
+    return all(
+        columns <= observed.get(table, set())
+        for table, columns in _REVISION_MARKERS.get(revision, {}).items()
+    )
+
+
 def _legacy_schema_is_compatible(observed: dict[str, set[str]]) -> bool:
-    return _required_core_columns_are_present(
-        observed
-    ) and "execution_identity" not in observed.get("backtest_runs", set())
+    return _required_core_columns_are_present(observed) and not _markers_present(observed, 2)
 
 
 def _current_schema_is_compatible(observed: dict[str, set[str]]) -> bool:
-    return _required_core_columns_are_present(observed) and "execution_identity" in observed.get(
-        "backtest_runs", set()
+    """Every revision's marker, not just the newest.
+
+    A database can carry a later revision's column while missing an earlier
+    one if a migration was applied by hand or interrupted.
+    """
+    return _required_core_columns_are_present(observed) and all(
+        _markers_present(observed, revision) for revision in _REVISION_MARKERS
     )
 
 
@@ -178,6 +208,23 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
     return tuple(applied)
 
 
+def unbackfilled_ohlcv_rows(cur: _Cursor) -> int:
+    """Rows the reader cannot see because their session identity is null.
+
+    load_ohlcv filters on calendar_id, so a row whose value the expand
+    migration left null is invisible rather than merely incomplete. Reported
+    by preflight because the gap is silent everywhere else: the writer keeps
+    working, the schema reads as current, and only a query comes back short.
+    """
+    cur.execute("SELECT to_regclass('public.ohlcv')")
+    row = cur.fetchone()
+    if not (row and row[0] is not None):
+        return 0
+    cur.execute("SELECT count(*) FROM ohlcv WHERE calendar_id IS NULL")
+    result = cur.fetchone()
+    return int(result[0]) if result else 0
+
+
 def _describe(role: str, status: SchemaStatus) -> None:
     print(
         f"[{role}] schema state={status.state} revision={status.revision} "
@@ -194,6 +241,18 @@ def _run_cli(command: str) -> int:
     # the admin connection.
     with admin_conn() as conn:
         cur = conn.cursor()
+        if command == "backfill":
+            from librae.db.backfill import backfill_ohlcv_identity
+
+            report = backfill_ohlcv_identity(conn)
+            print(f"backfilled {report.updated} ohlcv row(s)")
+            for source, count in sorted(report.skipped_sources.items()):
+                print(
+                    f"SKIPPED {count} row(s) from data_source={source!r}: no calendar is "
+                    "registered for it. Register the symbol, or set its calendar in the "
+                    "symbols table, then run this again."
+                )
+            return 0 if report.complete else 1
         if command == "migrate":
             applied = apply_migrations(cur)
             print(
@@ -203,6 +262,13 @@ def _run_cli(command: str) -> int:
             return 0
         admin_status = inspect_schema(cur)
         _describe("admin", admin_status)
+        stranded = unbackfilled_ohlcv_rows(cur)
+        if stranded:
+            print(
+                f"WARNING: {stranded} ohlcv row(s) have a null calendar_id. "
+                "Reads filter on that column, so those rows are invisible until "
+                "`librae db backfill` runs."
+            )
 
     # The engine reads the schema as the application role, and
     # information_schema.columns is permission-filtered: a table the owner can
@@ -216,4 +282,4 @@ def _run_cli(command: str) -> int:
     with get_conn(application_dsn) as conn:
         application_status = inspect_schema(conn.cursor())
     _describe("application", application_status)
-    return 0 if admin_status.current and application_status.current else 1
+    return 0 if admin_status.current and application_status.current and not stranded else 1

@@ -24,12 +24,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 2)
+VALUES (TRUE, 3)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 2 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 2';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 3 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 3';
     END IF;
 END
 $$;
@@ -622,7 +622,7 @@ BEGIN
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 2';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 3';
     END IF;
 END
 $$;
