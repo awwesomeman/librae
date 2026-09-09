@@ -110,6 +110,7 @@ from librae.core.strategy import (
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
     period_start,
+    require_resting_session_support,
     resting_session_label,
     session_labels,
     session_ordinals,
@@ -1827,10 +1828,19 @@ class Backtest:
                 # Fail on the emitting bar, not mid-run: a day limit with no
                 # session to expire against is engine expressibility, not a
                 # venue rule, so it belongs with the decision that asked for it.
+                # Only calendar presence is checked — labelling this bar would
+                # reject a decision emitted during another instrument's session.
                 if not isinstance(new_decision, PortfolioWeights):
                     for candidate in new_decision:
                         if candidate.time_in_force == "day" and candidate.limit_price is not None:
-                            self._session_of(candidate.symbol or primary_symbol, ts)
+                            symbol = candidate.symbol or primary_symbol
+                            try:
+                                require_resting_session_support(
+                                    calendar_id=self._calendar_ids.get(symbol),
+                                    timeframe=self._timeframe,
+                                )
+                            except ValueError as exc:
+                                raise ValueError(f"{symbol}: {exc}") from exc
                 if pending_rebalance is not None:
                     if isinstance(new_decision, PortfolioWeights):
                         runtime_events.extend(_superseded_rebalance_events(ts, pending_rebalance))
