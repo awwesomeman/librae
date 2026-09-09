@@ -842,7 +842,7 @@ class TestWarmupFetcher:
                 warmup_periods=5,
             )
         )
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         first_strategy = MagicMock()
         first_strategy.on_bar.return_value = []
         first = LiveTrader(

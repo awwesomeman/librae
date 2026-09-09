@@ -182,6 +182,18 @@ Live execution is different: it requires durable runtime state. When
 constructing `LiveTrader` directly, inject your own durable `state_store`; the
 in-memory implementation is intended for deterministic tests only.
 
+That is now enforced rather than advised. A store declares
+`restart_durable: bool` — whether its writes survive the process — and live
+startup refuses anything that does not declare `True`. The persistence methods
+alone cannot express this, since a dictionary satisfies them, so a store that
+declares nothing is treated as not durable: silence is not a claim. The
+reference `TimescaleLiveStateStore` declares it; `MemoryLiveStateStore` does
+not, and takes an explicit `restart_durable_for_tests=True` for suites that
+exercise the live path without a database. Reaching order-capable startup with
+no recovery state fails only after a crash, with the local book gone and the
+broker still holding positions, which is why this fails closed at
+construction.
+
 ## Grafana
 
 Grafana provisioning lives under `librae/app/grafana/provisioning/`. Dashboard JSON

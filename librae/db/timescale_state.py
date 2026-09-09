@@ -15,6 +15,10 @@ from librae.live.state import LiveRuntimeState, TrackedOrder
 class TimescaleLiveStateStore:
     """Persist one atomic runtime checkpoint plus append/update order facts."""
 
+    # Writes land in PostgreSQL, so they survive the process. This is the
+    # capability an order-capable live run requires; see LiveStateStore.
+    restart_durable = True
+
     def __init__(self, dsn: str | None = None) -> None:
         self._dsn = dsn
         self._lease_connections: dict[str, object] = {}
