@@ -47,8 +47,15 @@ Both schema commands connect as the role that owns the tables, which
 `TIMESCALE_DSN` deliberately is not — `quant_app` holds DML only and cannot
 `ALTER` a table or write `librae_schema_revision`. Set `TIMESCALE_ADMIN_DSN`
 in `.env.secrets` on the machine that migrates; without it the commands fail
-rather than falling back. Preflight runs as the same role it precedes, so a
-pass actually proves the migration can run.
+rather than falling back.
+
+Preflight inspects twice, and passes only if both agree: once as the owner,
+which is the role the migration itself will run as, and once through
+`TIMESCALE_DSN` as the application role, which is the role the engine reads
+with. Both halves are needed because `information_schema.columns` is
+permission-filtered — a table the owner sees every column of shows none to a
+role that was never granted it, so an owner-only pass could report `current`
+on a database the engine then refuses at startup.
 
 Before deploying a build against an existing database, run the read-only
 preflight:

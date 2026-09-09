@@ -3514,7 +3514,8 @@ def validate_strategy_decision(
         # Venue rules are layered on top per symbol, via broker_for.
         check_venue_lifetime = None
         if broker_for is not None:
-            # Imported here because librae.brokers imports back into core.
+            # Local import: keeps core from loading every broker adapter
+            # module at import time.
             from librae.brokers.capabilities import validate_broker_time_in_force
 
             check_venue_lifetime = validate_broker_time_in_force

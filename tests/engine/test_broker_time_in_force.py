@@ -1,4 +1,4 @@
-"""A configured broker's order lifetimes are checked before the run, not at submission.
+"""A configured broker's order lifetimes are checked on the emitting bar, not at submission.
 
 The engine's own preflight stays broker-neutral — it rejects only what a
 bar-based simulation cannot express. Venue rules are additional, and they used
@@ -184,3 +184,14 @@ class TestTheResolverIsTheOneRule:
         )
 
         assert config.broker_for("X") is None
+
+
+def test_every_built_in_broker_name_has_a_capability_table() -> None:
+    """Unknown names pass silently, which is right for a caller's own adapter
+    but wrong for a broker librae ships: adding one to orchestration without a
+    table would reopen #216 with no test failing."""
+    from librae.orchestration.live import _DATA_ADAPTER_BY_BROKER
+
+    built_in = set(_DATA_ADAPTER_BY_BROKER) | set(_DATA_ADAPTER_BY_BROKER.values())
+
+    assert built_in == set(BROKER_TIME_IN_FORCE)

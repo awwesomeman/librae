@@ -330,7 +330,15 @@ def doctor(project_root: Path) -> list[Finding]:
                     ),
                 )
             )
-        if password and parts.password != password:
+        if not password:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{name} is set but {password_name} is empty, so it expands to an "
+                    "empty password and fails at authentication, not here",
+                )
+            )
+        elif parts.password != password:
             findings.append(
                 Finding("error", f"{name} carries a password that differs from {password_name}")
             )

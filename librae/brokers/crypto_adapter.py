@@ -42,9 +42,12 @@ from .base import (
 # Binance family only. A MARKET order takes no timeInForce there — the venue
 # rejects the parameter outright, and such an order is filled or cancelled
 # immediately, which is IOC by construction. A LIMIT order accepts all four.
-# This adapter drives any ccxt exchange, so the table is applied only to the
-# venues it describes; another exchange keeps its own rules, the same stance
-# capabilities.py takes for a broker name librae does not know.
+# This adapter drives any ccxt exchange, so both the table and the
+# market-order omission apply only to the venues they describe; another
+# exchange keeps the unconditional forwarding it had, the same stance
+# capabilities.py takes for a broker name librae does not know. Splitting
+# those two would silently turn an all-or-none market order into a
+# partially fillable one on an unvalidated venue.
 SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
     "limit": frozenset({"day", "gtc", "ioc", "fok"}),
     "market": frozenset({"ioc"}),
@@ -696,7 +699,7 @@ class CryptoAdapter:
                 self._exchange_id, SUPPORTED_TIME_IN_FORCE, order_type, signal["time_in_force"]
             )
         params: dict[str, Any] = {}
-        if order_type == "limit":
+        if order_type == "limit" or not self._exchange_id.startswith("binance"):
             # "day" has no ccxt/exchange equivalent on a 24/7 market with no
             # session end, so it maps to GTC (rest until cancelled).
             params["timeInForce"] = {"day": "GTC", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
