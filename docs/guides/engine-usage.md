@@ -240,7 +240,9 @@ starve later assets.
 
 `PortfolioWeights` uses the run's single account as its capital base. A
 cross-account hedge or arbitrage strategy must coordinate explicitly sized
-orders across separate runs; hedge ratios remain strategy-owned.
+orders across separate runs; hedge ratios remain strategy-owned. Why one run
+executes through one venue:
+[ADR 2026-09-09](../decisions/2026-09-09-one-run-owns-one-execution-venue.md).
 
 A symbol is managed by one attribution model at a time. A net position
 carries the `group_id` that opened it through every add, close, trade, and

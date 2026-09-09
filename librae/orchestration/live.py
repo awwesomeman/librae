@@ -83,7 +83,8 @@ def _resolve_live_execution_routes(
         brokers = {route[0] for route in unique_routes}
         if len(brokers) > 1:
             raise ValueError(
-                "one live run owns one account and requires one execution broker; "
+                "one live run owns one account and requires one execution broker "
+                "(why: docs/decisions/2026-09-09-one-run-owns-one-execution-venue.md); "
                 f"configured brokers: {sorted(brokers)}"
             )
         venues = sorted({route[2] for route in unique_routes})

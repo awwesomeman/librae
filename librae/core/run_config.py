@@ -63,8 +63,8 @@ class AccountConfig:
     """The single cash and PnL ledger used by one engine run.
 
     A run owns exactly one account; callers coordinate multiple accounts as
-    separate runs because Librae does not provide FX, transfers, settlement,
-    or cross-account netting.
+    separate runs. Why this is a scope decision rather than a missing
+    feature: docs/decisions/2026-09-09-one-run-owns-one-execution-venue.md
     """
 
     currency: str
