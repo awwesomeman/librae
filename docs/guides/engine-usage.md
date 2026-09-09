@@ -1090,6 +1090,56 @@ symbol cannot be optional: it is the default symbol for bare intents and the
 run's cadence anchor. Set it in the strategy config as a top-level
 `optional_symbols:` list, or pass it to `RunConfig` directly.
 
+## Same-symbol multi-frequency inputs
+
+A run has exactly one **executing** cadence per symbol: two primaries for one
+position would mean two execution cadences for one book, which the backtest
+already refuses. Extra frequencies are therefore **auxiliary** — read-only
+context reached through `ctx.market_data.history(subscription)`, never a source
+of fills.
+
+```yaml
+strategy:
+  symbol: BTCUSDT
+  timeframe: 1h
+  auxiliary_subscriptions:
+    - symbol: BTCUSDT
+      timeframe: 1d
+```
+
+The symbol must already be in the run, so the input reuses its resolved
+instrument, calendar and data route rather than introducing one the run never
+resolved; a different instrument as context is not this feature. An auxiliary
+may not repeat the primary cadence, and it inherits the run's `session_mode` —
+declaring a different one would be a claim the wire cannot keep, since the
+fetcher is bound once per symbol to the run's mode. Auxiliary inputs are part
+of `config_hash`: the strategy sees different data, so it is a different run.
+
+Backtest is handed its auxiliary frames through `auxiliary_data`; live fetches
+them. When a `RunConfig` declares auxiliaries, `auxiliary_data` must supply
+exactly those identities, so the same config cannot mean different things in
+the two modes. Passing frames without declaring them remains supported — that
+is the Python-API mixed-frequency path, which never claimed live parity.
+
+Availability still governs visibility: a daily bar opening this morning is not
+in the view until it completes, exactly as in backtest replay. Auxiliaries
+produce no execution events, so they carry no durable watermark and a restart
+simply refetches them; they also cannot hold the readiness gate, which is about
+the inputs a run executes on.
+
+Nothing about an auxiliary's health may stop the primary from executing. A
+failed fetch, or rows that fail normalization, log and keep the previous frame;
+a declared identity stays visible to the strategy with an empty history rather
+than disappearing from `ctx.market_data`. A stalled auxiliary feed is alerted
+with the same edge-triggered diagnostic as the primary, but never holds the
+run. Freshness is judged from the cached frame once per cycle, whatever the
+fetch did: checking only after a successful fetch would inspect the feed
+exactly when it is healthy enough to answer, so a feed that raises or returns
+nothing — the two ordinary ways one dies — would age silently. A subscription
+that has never delivered at all is logged rather than alerted, since there is
+no observation for it to be late relative to. Refetching is skipped until the calendar says a new observation could
+exist, so a daily auxiliary is not pulled once per hourly poll.
+
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll
 cycle.

@@ -35,6 +35,30 @@ HEARTBEAT_STALE_AFTER_POLLS = 3
 
 
 @dataclass(frozen=True, slots=True)
+class AuxiliarySubscription:
+    """One extra, non-executing market-data input for a configured symbol.
+
+    A run has exactly one executing cadence per symbol — two primaries for one
+    position would mean two execution cadences for one book. Extra frequencies
+    are therefore read-only context, reached through ``ctx.market_data`` and
+    never a source of fills. The symbol must already be in the run, so the
+    input reuses its resolved instrument and data route rather than
+    introducing one the run never resolved.
+    """
+
+    symbol: str
+    timeframe: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("symbol", "timeframe"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"AuxiliarySubscription.{field_name} must be a non-empty string")
+        object.__setattr__(self, "symbol", self.symbol.strip())
+        object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
+
+
+@dataclass(frozen=True, slots=True)
 class AccountConfig:
     """The single cash and PnL ledger used by one engine run.
 
@@ -380,6 +404,11 @@ class RunConfig:
     # subscription: the same instrument can be load-bearing for one strategy
     # and a nice-to-have for another, so this is policy, not identity.
     optional_symbols: tuple[str, ...] = ()
+    # Extra read-only frequencies for symbols already in the run, reached
+    # through ``ctx.market_data``. Live previously had no way to express these,
+    # so a strategy needing daily context while executing hourly had to
+    # resample inside itself and pay warmup for the finer bars.
+    auxiliary_subscriptions: tuple[AuxiliarySubscription, ...] = ()
     calendar_id: str | None = None
     # Run-wide market-data subscription identity. ``extended`` includes all
     # sessions exposed by the source and preserves the historical adapter
@@ -453,6 +482,30 @@ class RunConfig:
             raise ValueError(
                 f"optional_symbols must be configured symbols; got {sorted(unknown_optional)}"
             )
+        object.__setattr__(self, "auxiliary_subscriptions", tuple(self.auxiliary_subscriptions))
+        # Compare against the canonical run timeframe: __post_init__ canonicalizes
+        # self.timeframe further down, and build_run passes the YAML form
+        # verbatim, so a raw "1h" here would silently accept an auxiliary that
+        # duplicates the executing cadence.
+        canonical_timeframe = to_canonical(self.timeframe)
+        seen_auxiliary: set[tuple[str, str]] = set()
+        for auxiliary in self.auxiliary_subscriptions:
+            if not isinstance(auxiliary, AuxiliarySubscription):
+                raise TypeError("auxiliary_subscriptions must contain AuxiliarySubscription values")
+            if auxiliary.symbol not in set(self.symbols):
+                raise ValueError(
+                    f"auxiliary_subscriptions must reference configured symbols; "
+                    f"got {auxiliary.symbol!r}"
+                )
+            identity = (auxiliary.symbol, auxiliary.timeframe)
+            if identity in seen_auxiliary:
+                raise ValueError(f"duplicate auxiliary subscription for {auxiliary.symbol!r}")
+            seen_auxiliary.add(identity)
+            if auxiliary.timeframe == canonical_timeframe:
+                raise ValueError(
+                    f"auxiliary subscription for {auxiliary.symbol!r} repeats the primary "
+                    "cadence; an executing cadence is already subscribed"
+                )
         if self.symbols and self.symbols[0] in optional:
             # symbols[0] is the default symbol for bare intents and the run's
             # cadence anchor, so it cannot be an input the run may proceed
@@ -548,6 +601,20 @@ class RunConfig:
                     **(
                         {"optional_symbols": tuple(sorted(self.optional_symbols))}
                         if self.optional_symbols
+                        else {}
+                    ),
+                    # Sorted for the same reason as optional_symbols:
+                    # declaration order is not observable.
+                    **(
+                        {
+                            "auxiliary_subscriptions": tuple(
+                                sorted(
+                                    (auxiliary.symbol, auxiliary.timeframe)
+                                    for auxiliary in self.auxiliary_subscriptions
+                                )
+                            )
+                        }
+                        if self.auxiliary_subscriptions
                         else {}
                     ),
                     "timeframe": self.timeframe,

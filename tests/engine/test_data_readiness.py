@@ -71,6 +71,26 @@ class TestNextExpectedClose:
 
         assert next_expected_close(last_ts, timeframe=timeframe, calendar_id=calendar_id) > last_ts
 
+    @pytest.mark.parametrize(
+        ("timeframe", "midnight", "expected"),
+        [
+            ("D1", "2025-01-02T00:00Z", "2025-01-02T21:00Z"),
+            ("W1", "2025-01-06T00:00Z", "2025-01-10T21:00Z"),
+        ],
+    )
+    def test_a_midnight_stamp_resolves_one_period_early(
+        self, timeframe: str, midnight: str, expected: str
+    ) -> None:
+        """Pins the timestamp convention the evaluator assumes. Periods are
+        stamped at their session open, which is what librae's adapters
+        produce; a midnight stamp precedes its own open and so resolves to
+        that session's close. Grace absorbs it at these sizes. Documented
+        rather than corrected, because guessing which session an off-convention
+        stamp belongs to would weaken detection for the conforming case."""
+        assert next_expected_close(_ts(midnight), timeframe=timeframe, calendar_id="XNYS") == _ts(
+            expected
+        )
+
     def test_each_subscription_uses_its_own_timeframe(self) -> None:
         """The same symbol on H1 and D1 must not share one boundary."""
         hourly = next_expected_close(_ts("2025-01-03T16:30Z"), timeframe="H1", calendar_id="XNYS")
@@ -239,15 +259,35 @@ class TestOptionalSubscriptionDeclaration:
         so research and live cannot silently share one identity."""
         assert self._config().config_hash != self._config(optional_symbols=["BBB"]).config_hash
 
-    def test_the_strategy_config_file_reaches_run_config(self) -> None:
+    def test_the_strategy_config_file_reaches_run_config(self, tmp_path, monkeypatch) -> None:
         """A documented YAML key that build_run never reads is silently
         dropped: no error, unchanged config_hash, every symbol still required.
         calendar_id had exactly this bug (#210)."""
-        import inspect
+        import sys
+        import textwrap
 
-        from librae.orchestration import cli
+        from librae.orchestration.cli import build_run
 
-        assert "optional_symbols" in inspect.getsource(cli.build_run)
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """                strategy:
+                  symbols: MU,AAPL
+                  timeframe: 1d
+                  market: us_equity
+                  data_source: ibkr
+                  optional_symbols:
+                    - AAPL
+                  account:
+                    currency: USD
+                    initial_cash: 100000
+                """
+            )
+        )
+        monkeypatch.setattr(sys, "argv", ["test"])
+
+        config, _ = build_run("test_strat", str(tmp_path / "run.py"))
+
+        assert config.optional_symbols == ("AAPL",)
 
 
 class TestDataReadinessGate:
