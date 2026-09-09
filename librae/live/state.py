@@ -423,6 +423,21 @@ class LiveRuntimeState:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class HaltResetReadiness:
+    """Whether a halted run may start a new risk epoch, and why not.
+
+    Structured rather than a bare exception so an operator and health tooling
+    read the same answer, and so the blocking cause survives into an audit
+    record instead of only into a traceback.
+    """
+
+    ready: bool
+    reason: str | None = None
+    blocking_symbols: tuple[str, ...] = ()
+    required_action: str = ""
+
+
 class LiveStateStore(Protocol):
     """Minimal persistence boundary used by ``LiveTrader``.
 
