@@ -1132,7 +1132,12 @@ failed fetch, or rows that fail normalization, log and keep the previous frame;
 a declared identity stays visible to the strategy with an empty history rather
 than disappearing from `ctx.market_data`. A stalled auxiliary feed is alerted
 with the same edge-triggered diagnostic as the primary, but never holds the
-run. Refetching is skipped until the calendar says a new observation could
+run. Freshness is judged from the cached frame once per cycle, whatever the
+fetch did: checking only after a successful fetch would inspect the feed
+exactly when it is healthy enough to answer, so a feed that raises or returns
+nothing — the two ordinary ways one dies — would age silently. A subscription
+that has never delivered at all is logged rather than alerted, since there is
+no observation for it to be late relative to. Refetching is skipped until the calendar says a new observation could
 exist, so a daily auxiliary is not pulled once per hourly poll.
 
 Both the stale alert and the not-ready alert are edge-triggered: one

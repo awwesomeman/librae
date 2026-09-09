@@ -786,6 +786,7 @@ class LiveTrader:
         self._last_financing_ts: dict[str, datetime] = {}
         self._stale_alerted: dict[MarketDataSubscription, bool] = {}
         self._data_gap_alerted = False
+        self._auxiliary_never_delivered: set[MarketDataSubscription] = set()
         self._unanchored_reported: set[MarketDataSubscription] = set()
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
@@ -1294,7 +1295,15 @@ class LiveTrader:
                 )
                 continue
             self._auxiliary_cache[subscription] = normalized
-            self._check_auxiliary_freshness(subscription, owner, normalized, as_of=now)
+
+        # Evaluate every declared auxiliary from its cache, whatever the fetch
+        # did. Checking only after a successful fetch inspects the feed exactly
+        # when it is healthy enough to answer and never when it is not, so the
+        # two ordinary ways a feed dies — raising and returning nothing — would
+        # age the cache silently while the strategy still reads it as context.
+        # This also covers a subscription whose refetch was skipped as not due.
+        for subscription, owner in self._auxiliary_subscriptions.items():
+            self._check_auxiliary_freshness(subscription, owner, as_of=now)
 
     def _auxiliary_fetch_due(
         self,
@@ -1324,18 +1333,30 @@ class LiveTrader:
         self,
         subscription: MarketDataSubscription,
         owner: str,
-        frame: pd.DataFrame,
         *,
         as_of: datetime,
     ) -> None:
         """Alert on a stalled auxiliary feed without ever holding the run.
 
-        A dead auxiliary that keeps serving yesterday's frame is the silent
+        A dead auxiliary that goes on serving yesterday's frame is the silent
         failure this work exists to close; it just is not grounds to stop
         executing on the primary.
+
+        A subscription that has never delivered is reported once and not
+        alerted: there is no observation for it to be late relative to, which
+        is the distinction ``ObservationStatus.late`` draws.
         """
-        if frame.empty:
+        frame = self._auxiliary_cache.get(subscription)
+        if frame is None or frame.empty:
+            if subscription not in self._auxiliary_never_delivered:
+                self._auxiliary_never_delivered.add(subscription)
+                logger.warning(
+                    "Auxiliary %s %s has never delivered an observation",
+                    owner,
+                    subscription.timeframe,
+                )
             return
+        self._auxiliary_never_delivered.discard(subscription)
         last_ts = pd.Timestamp(frame["ts"].iloc[-1]).to_pydatetime()
         status = evaluate_observation(
             last_ts,

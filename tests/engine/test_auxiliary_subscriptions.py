@@ -13,6 +13,8 @@ resample inside itself and pay warmup for the finer bars.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from librae.core.run_config import AccountConfig, AuxiliarySubscription, RunConfig
 
@@ -323,3 +325,293 @@ class TestBacktestLiveParity:
         ).set_index("ts")
 
         self._build((), auxiliary_data={subscription: frame})
+
+
+class TestAuxiliaryCannotBreakTheCycle:
+    """An auxiliary is read-only context. Nothing about its health may stop
+    the primary from executing, and its declared identity must stay visible
+    to the strategy whatever the feed does."""
+
+    @staticmethod
+    def _bars(n: int, freq: str, start: str):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "ts": pd.date_range(start, periods=n, freq=freq, tz="UTC"),
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.0] * n,
+                "volume": [1_000.0] * n,
+            }
+        )
+
+    def _run(self, auxiliary_fetch, *, symbols=("BTCUSDT",), optional=()):
+        from librae.core.strategy import Strategy
+
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        seen: list[tuple] = []
+
+        class ReadAuxiliary(Strategy):
+            def on_bar(self, ctx):
+                if ctx.market_data is not None:
+                    seen.append(
+                        tuple(
+                            (s.timeframe, len(ctx.market_data.history(s)))
+                            for s in ctx.market_data.subscriptions
+                        )
+                    )
+                return []
+
+        def fetch(symbol, timeframe, _limit, *, drop_incomplete=False):
+            del drop_incomplete
+            if timeframe == "D1":
+                return auxiliary_fetch()
+            if symbol in optional:
+                # An optional symbol that never delivers: the #218 scenario,
+                # and the one that reached a batch-only precondition.
+                return self._bars(0, "h", "2025-01-01T00:00Z")
+            return self._bars(6, "h", "2025-01-01T00:00Z")
+
+        runner = TestLiveTrader()._make_runner(
+            strategy=ReadAuxiliary(),
+            fetcher=fetch,
+            config=_test_cfg(
+                mode="sim",
+                symbols=list(symbols),
+                warmup_periods=1,
+                optional_symbols=optional,
+                auxiliary_subscriptions=(AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+            ),
+        )
+        runner._poll_cycle()
+        return seen
+
+    def test_a_raising_auxiliary_feed_does_not_stop_the_primary(self) -> None:
+        def explode():
+            raise RuntimeError("auxiliary feed unavailable")
+
+        assert self._run(explode), "the primary cadence must still evaluate"
+
+    def test_unusable_auxiliary_rows_do_not_stop_the_primary(self) -> None:
+        """Normalization runs on auxiliary data too; a duplicate timestamp
+        used to escape the poll cycle and skip the primary's execution."""
+        import pandas as pd
+
+        def duplicated():
+            frame = self._bars(2, "D", "2024-12-25T00:00Z")
+            return pd.concat([frame, frame], ignore_index=True)
+
+        assert self._run(duplicated)
+
+    def test_an_absent_optional_symbol_does_not_import_batch_preconditions(self) -> None:
+        """ctx.market_data is built for plain feature_fn strategies too, but it
+        must not carry batch-only requirements: a symbol with no history is a
+        readiness question the gate already answered, not an error here."""
+        seen = self._run(
+            lambda: self._bars(6, "D", "2024-12-25T00:00Z"),
+            symbols=("BTCUSDT", "ETHUSDT"),
+            optional=("ETHUSDT",),
+        )
+
+        assert seen, "the primary cadence must still evaluate"
+
+    def test_a_declared_identity_stays_visible_when_its_feed_is_down(self) -> None:
+        """ctx.market_data.history() raises KeyError for an unknown identity,
+        so the subscription set must not change shape with feed health."""
+
+        def explode():
+            raise RuntimeError("auxiliary feed unavailable")
+
+        seen = self._run(explode)
+
+        assert any(timeframe == "D1" for entry in seen for timeframe, _ in entry)
+
+
+class TestStalledAuxiliaryIsReported:
+    """A dead auxiliary must be reported however it died.
+
+    Evaluating freshness only after a successful fetch checks the feed exactly
+    when it is healthy enough to answer, and never when it is not, so the two
+    ordinary ways a feed dies -- raising and returning nothing -- stay silent
+    while the cached frame ages and the strategy keeps reading it as context.
+    """
+
+    # Phase 1 sees a healthy, current auxiliary; phase 2 moves the clock past
+    # its due date. The cache only ever goes stale by ageing, never by being
+    # fetched stale -- otherwise the successful fetch would raise the alert and
+    # the test would pass without evaluating anything on the failure path.
+    FRESH_CLOCK = datetime(2025, 1, 4, tzinfo=UTC)
+    LATER_CLOCK = datetime(2025, 1, 10, tzinfo=UTC)
+
+    @staticmethod
+    def _bars(n: int, freq: str, start: str):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "ts": pd.date_range(start, periods=n, freq=freq, tz="UTC"),
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.0] * n,
+                "volume": [1_000.0] * n,
+            }
+        )
+
+    @staticmethod
+    def _bars_ending(n: int, freq: str, end):
+        """Completed bars up to the clock, so the primary stays warm and fresh."""
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "ts": pd.date_range(end=end, periods=n, freq=freq, tz="UTC"),
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.0] * n,
+                "volume": [1_000.0] * n,
+            }
+        )
+
+    def _alerts_after(self, failed_auxiliary_fetch, *, later_cycles: int = 2) -> list[dict]:
+        """Warm the auxiliary cache while healthy, then break the feed."""
+        from librae.core.strategy import Strategy
+
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        clock = {"now": self.FRESH_CLOCK}
+        warmed = {"done": False}
+        evaluated: list[int] = []
+
+        class Hold(Strategy):
+            def on_bar(self, ctx):
+                evaluated.append(1)
+                return []
+
+        def fetch(_symbol, timeframe, _limit, *, drop_incomplete=False):
+            del drop_incomplete
+            if timeframe == "D1":
+                if warmed["done"]:
+                    return failed_auxiliary_fetch()
+                # Current as of FRESH_CLOCK, so no alert can fire here.
+                return self._bars(3, "D", "2025-01-01T00:00Z")
+            return self._bars_ending(6, "h", clock["now"])
+
+        alerts: list[dict] = []
+        runner = TestLiveTrader()._make_runner(
+            strategy=Hold(),
+            fetcher=fetch,
+            config=_test_cfg(
+                mode="sim",
+                warmup_periods=1,
+                auxiliary_subscriptions=(AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+            ),
+            clock=lambda: clock["now"],
+        )
+        runner.STALE_DATA_TOLERANCE_BARS = 2
+        runner._notify = lambda method, **kwargs: alerts.append(kwargs)
+
+        runner._poll_cycle()
+        assert not [a for a in alerts if "Stale Auxiliary" in a.get("title", "")], (
+            "the warm-up cycle must not alert, or the test proves nothing"
+        )
+
+        warmed["done"] = True
+        clock["now"] = self.LATER_CLOCK
+        for _ in range(later_cycles):
+            runner._poll_cycle()
+
+        assert evaluated, "a stalled auxiliary must not hold the primary cadence"
+        return [a for a in alerts if "Stale Auxiliary Data" in a.get("title", "")]
+
+    def test_a_raising_feed_still_reports_the_ageing_cache(self) -> None:
+        """The cache goes on ageing while the strategy reads it as context."""
+
+        def raises():
+            raise RuntimeError("auxiliary feed unavailable")
+
+        assert len(self._alerts_after(raises)) == 1
+
+    def test_an_empty_feed_still_reports_the_ageing_cache(self) -> None:
+        def empty():
+            return self._bars(0, "D", "2025-01-01T00:00Z")
+
+        assert len(self._alerts_after(empty)) == 1
+
+    def test_a_feed_that_keeps_answering_with_stale_rows_is_reported(self) -> None:
+        def stale_rows():
+            return self._bars(3, "D", "2025-01-01T00:00Z")
+
+        assert len(self._alerts_after(stale_rows)) == 1
+
+    def test_the_alert_is_edge_triggered_across_cycles(self) -> None:
+        def raises():
+            raise RuntimeError("auxiliary feed unavailable")
+
+        assert len(self._alerts_after(raises, later_cycles=4)) == 1
+
+    def test_a_feed_that_never_delivered_does_not_alert(self) -> None:
+        """Never-arrived is not arrived-and-stopped: there is no observation to
+        be late relative to, so it is logged rather than alerted."""
+        from librae.core.strategy import Strategy
+
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        class Hold(Strategy):
+            def on_bar(self, ctx):
+                return []
+
+        def fetch(_symbol, timeframe, _limit, *, drop_incomplete=False):
+            del drop_incomplete
+            if timeframe == "D1":
+                raise RuntimeError("auxiliary feed never available")
+            return self._bars(6, "h", "2025-01-09T18:00Z")
+
+        alerts: list[dict] = []
+        runner = TestLiveTrader()._make_runner(
+            strategy=Hold(),
+            fetcher=fetch,
+            config=_test_cfg(
+                mode="sim",
+                warmup_periods=1,
+                auxiliary_subscriptions=(AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+            ),
+            clock=lambda: self.LATER_CLOCK,
+        )
+        runner.STALE_DATA_TOLERANCE_BARS = 2
+        runner._notify = lambda method, **kwargs: alerts.append(kwargs)
+
+        for _ in range(3):
+            runner._poll_cycle()
+
+        assert not [a for a in alerts if "Stale Auxiliary" in a.get("title", "")]
+
+
+def test_a_malformed_auxiliary_entry_reports_the_key(tmp_path, monkeypatch) -> None:
+    """A bare string is the natural mistake, since optional_symbols one line
+    above is a list of plain strings. It used to escape as a TypeError naming
+    neither the key nor the file."""
+    import sys
+    import textwrap
+
+    from librae.orchestration.cli import build_run
+
+    (tmp_path / "config.yaml").write_text(
+        textwrap.dedent(
+            """\
+            strategy:
+              symbol: BTCUSDT
+              timeframe: 1h
+              auxiliary_subscriptions:
+                - BTCUSDT
+            """
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["test"])
+
+    with pytest.raises(ValueError, match="auxiliary_subscriptions"):
+        build_run("test_strat", str(tmp_path / "run.py"))
