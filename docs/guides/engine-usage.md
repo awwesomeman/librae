@@ -1146,6 +1146,40 @@ that has never delivered at all is logged rather than alerted, since there is
 no observation for it to be late relative to. Refetching is skipped until the calendar says a new observation could
 exist, so a daily auxiliary is not pulled once per hourly poll.
 
+## OHLCV audit delivery
+
+The runtime advances its watermark and lands the checkpoint before the audit
+row is written, so a failed write used to be lost outright: the writer treats
+an equal row version as an idempotent no-op, and nothing re-delivered it.
+
+A sink that declares `durable_ohlcv_delivery = True` gets at-least-once
+delivery. The row is queued in the checkpoint before it is offered and removed
+only once the call returns, so a failed write retries on the next cycle and a
+crash between acceptance and acknowledgement replays after restart. Duplicate
+delivery is harmless because the writer accepts only a strictly later row
+version. Queued rows are offered in order, since replaying a correction before
+the bar it corrects would drop it. The first-party TimescaleDB path declares
+this; a retry never re-runs a strategy decision or a broker order, because it
+is a persistence concern only.
+
+Any other callback keeps the documented best-effort contract: it is invoked,
+its failure is logged, and nothing is queued. The engine cannot acknowledge on
+a caller's behalf, and queueing would grow the checkpoint for work it can
+never retire.
+
+A durable sink must let its failure propagate. A sink that declares durability
+and then swallows its own errors returns normally, which the engine reads as
+acknowledgement — the row is dropped and the queue never engages.
+
+The queue is bounded, and reaching the bound drops loudly rather than halting.
+Each dropped row is recorded as a `decision_skipped` runtime event with reason
+`ohlcv_audit_delivery_failed` and its full identity, an alert fires once, and
+`LiveTrader.ohlcv_audit_degraded` reports the condition until delivery catches
+up. Trading continues: these are OHLCV bars, the most recoverable data in the
+system — a gap is closed by re-fetching from the source and nothing in the
+book depends on it, so stopping the book to protect it would cost more than it
+saves.
+
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll
 cycle.

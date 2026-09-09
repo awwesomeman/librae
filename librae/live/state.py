@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from math import isfinite
 from typing import Protocol
 
+from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import LiveMode
 from librae.core.strategy import (
     OrderIntent,
@@ -47,7 +48,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 26
+_STATE_SCHEMA_VERSION = 27
 
 
 def normalize_runtime_revision(
@@ -266,6 +267,10 @@ class LiveRuntimeState:
     # executable on the next. Only set once an intent has actually rested, and
     # it has to survive a restart along with the intent itself.
     pending_resting_since: dict[str, datetime] = field(default_factory=dict)
+    # Audit rows the runtime accepted but the database has not acknowledged.
+    # Lands with the watermark it belongs to, so a crash between the two
+    # replays the row rather than losing it.
+    pending_ohlcv: list[PendingOhlcvDelivery] = field(default_factory=list)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
     equity_peak: float = 0.0
@@ -286,6 +291,12 @@ class LiveRuntimeState:
             self.runtime_revision,
             required=self.mode == "live",
         )
+        if len(self.pending_ohlcv) > MAX_PENDING_OHLCV:
+            raise ValueError(
+                f"pending_ohlcv exceeds the durable bound of {MAX_PENDING_OHLCV}; "
+                "an unavailable database must surface as terminal runtime health "
+                "rather than growing the checkpoint without limit"
+            )
         if self.mode == "live" and self.execution_identity is None:
             raise ValueError("live runtime state requires an execution_identity")
         if self.mode != "live" and self.execution_identity is not None:
@@ -334,6 +345,7 @@ class LiveRuntimeState:
                 for symbol, timestamp in self.last_financing_ts.items()
             },
             "pending_decision": _pending_decision_to_dict(self.pending_decision),
+            "pending_ohlcv": [pending.to_dict() for pending in self.pending_ohlcv],
             "pending_resting_since": {
                 symbol: timestamp.isoformat()
                 for symbol, timestamp in self.pending_resting_since.items()
@@ -406,6 +418,7 @@ class LiveRuntimeState:
                 field="last_financing_ts",
             ),
             pending_decision=_pending_decision_from_dict(raw["pending_decision"]),
+            pending_ohlcv=[PendingOhlcvDelivery.from_dict(item) for item in raw["pending_ohlcv"]],
             pending_resting_since=_timestamps_from_dict(
                 raw["pending_resting_since"], field="pending_resting_since"
             ),
@@ -430,6 +443,64 @@ class LiveRuntimeState:
                 str(symbol): float(quantity)
                 for symbol, quantity in raw["adv_filled_quantities"].items()
             },
+        )
+
+
+# Bounded so an unavailable database cannot grow the checkpoint without limit.
+# Sized to cover a long outage for a realistic universe at intraday cadence
+# while staying small next to the positions and orders in the same document;
+# crossing it is terminal runtime health, not a silent drop.
+MAX_PENDING_OHLCV = 2_000
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOhlcvDelivery:
+    """One audit row accepted by the runtime but not yet acknowledged.
+
+    The runtime advances its watermark and lands the checkpoint before the
+    audit write is attempted, so a failed write used to be lost outright: the
+    writer treats an equal row version as an idempotent no-op, and nothing
+    re-delivers it. Carrying the pending row in the same checkpoint makes the
+    queue land atomically with the watermark it belongs to.
+
+    ``identity`` is the exact subscription, the bar timestamp, and the row
+    version. A correction shares its timestamp with the bar it replaces, so
+    the version is what makes the two distinct.
+    """
+
+    subscription: MarketDataSubscription
+    ts: datetime
+    available_at: datetime
+    bar: dict[str, float]
+
+    @property
+    def identity(self) -> tuple[tuple[str, ...], str, str]:
+        subscription = self.subscription.to_dict()
+        return (
+            tuple(subscription[field] for field in sorted(subscription)),
+            self.ts.isoformat(),
+            self.available_at.isoformat(),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "subscription": self.subscription.to_dict(),
+            "ts": self.ts.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "bar": {key: float(value) for key, value in self.bar.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> PendingOhlcvDelivery:
+        ts = _to_utc(raw["ts"])
+        available_at = _to_utc(raw["available_at"])
+        if ts is None or available_at is None:
+            raise ValueError("pending OHLCV delivery requires ts and available_at")
+        return cls(
+            subscription=MarketDataSubscription.from_dict(raw["subscription"]),
+            ts=ts,
+            available_at=available_at,
+            bar={str(key): float(value) for key, value in raw["bar"].items()},
         )
 
 
