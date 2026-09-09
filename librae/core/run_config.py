@@ -371,7 +371,8 @@ class RunConfig:
     execution: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     risk: RiskPolicy = field(default_factory=RiskPolicy)
     # Explicit live execution route. It is never inferred from market,
-    # data_source, or symbol; instrument_overrides[symbol]["broker"] wins.
+    # data_source, or symbol; instrument_overrides[symbol]["broker"] wins
+    # — resolve it through broker_for(), never by reading this field alone.
     broker: str | None = None
     start: str | None = None
     end: str | None = None
@@ -572,6 +573,17 @@ class RunConfig:
     def symbol(self) -> str:
         """Primary symbol (single-asset convenience)."""
         return self.symbols[0]
+
+    def broker_for(self, symbol: str) -> str | None:
+        """Resolve which venue executes *symbol*: the override wins, else the run's.
+
+        The one place this rule lives. Reading ``broker`` directly answers a
+        different question on any run that routes a symbol elsewhere, which is
+        how a venue check can both miss a real violation and invent one.
+        """
+        override = (self.instrument_overrides or {}).get(symbol, {})
+        resolved = override.get("broker") or self.broker
+        return resolved if isinstance(resolved, str) and resolved else None
 
     @property
     def account_id(self) -> str:

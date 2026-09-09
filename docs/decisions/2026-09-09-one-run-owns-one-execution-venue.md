@@ -40,8 +40,10 @@ cross-account netting, each an explicit non-goal with its own open question
 (see issue #87 for the FX half).
 
 What is supported today: a strategy coordinating several instruments on one
-venue, including multi-leg groups; and cross-venue strategies run as separate
-runs whose sizing the caller owns.
+execution venue, including multi-leg groups; **market data from several
+venues in one run**, routed per symbol, since reading a second venue commits
+no capital and settles no ledger; and cross-venue strategies run as separate
+runs whose sizing the caller owns. The boundary is execution, not data.
 
 ## Alternatives
 

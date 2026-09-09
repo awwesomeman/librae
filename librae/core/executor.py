@@ -3471,7 +3471,7 @@ def validate_strategy_decision(
     primary_symbol: str,
     bars: dict[str, dict[str, float]],
     positions: dict[str, PositionState],
-    broker: str | None = None,
+    broker_for: Callable[[str], str | None] | None = None,
 ) -> None:
     """Validate one strategy return value before it enters engine state.
 
@@ -3532,17 +3532,22 @@ def validate_strategy_decision(
                 )
             # A configured broker adds its own rules on top: the same
             # combination that a broker-neutral run accepts is refused here
-            # rather than at submission, hours into a live session. None is
-            # left alone — the engine's per-order-type default is accepted
-            # everywhere, so checking it would invent a rejection.
-            if broker is not None and intent.time_in_force is not None:
-                from librae.brokers.capabilities import validate_broker_time_in_force
+            # rather than at submission, hours into a live session. Resolved
+            # per symbol, because a run may route one instrument to another
+            # venue — checking the run's broker against a symbol that trades
+            # elsewhere both misses violations and invents them. An unset
+            # time_in_force is left alone: the engine's per-order-type
+            # default is accepted everywhere.
+            if broker_for is not None and intent.time_in_force is not None:
+                venue = broker_for(intent.symbol or primary_symbol)
+                if venue is not None:
+                    from librae.brokers.capabilities import validate_broker_time_in_force
 
-                validate_broker_time_in_force(
-                    broker,
-                    "limit" if intent.limit_price is not None else "market",
-                    intent.time_in_force,
-                )
+                    validate_broker_time_in_force(
+                        venue,
+                        "limit" if intent.limit_price is not None else "market",
+                        intent.time_in_force,
+                    )
             if intent.time_in_force not in RESTING_TIME_IN_FORCE:
                 continue
             symbol = intent.symbol or primary_symbol

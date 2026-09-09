@@ -39,13 +39,17 @@ from .base import (
     validate_time_in_force,
 )
 
-# A MARKET order takes no timeInForce on Binance — the venue rejects the
-# parameter outright, and a market order is filled or cancelled immediately,
-# which is IOC by construction. A LIMIT order accepts all four.
+# Binance family only. A MARKET order takes no timeInForce there — the venue
+# rejects the parameter outright, and such an order is filled or cancelled
+# immediately, which is IOC by construction. A LIMIT order accepts all four.
+# This adapter drives any ccxt exchange, so the table is applied only to the
+# venues it describes; another exchange keeps its own rules, the same stance
+# capabilities.py takes for a broker name librae does not know.
 SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
     "limit": frozenset({"day", "gtc", "ioc", "fok"}),
     "market": frozenset({"ioc"}),
 }
+_TIME_IN_FORCE_VENUES = "binance"
 
 logger = logging.getLogger(__name__)
 
@@ -670,8 +674,9 @@ class CryptoAdapter:
 
         Expected *signal* keys: ``symbol``, ``side``, ``quantity``,
         ``order_type`` (``"market"`` or ``"limit"``), ``time_in_force``
-        (``"day"``/``"gtc"``/``"ioc"``/``"fok"``, forwarded as ccxt's unified
-        ``timeInForce`` param — ``"day"`` maps to ``"GTC"``), optionally
+        (``"day"``/``"gtc"``/``"ioc"``/``"fok"``; forwarded as ccxt's unified
+        ``timeInForce`` param on a limit order only, where ``"day"`` maps to
+        ``"GTC"`` — a market order carries no lifetime parameter), optionally
         ``price`` for limit orders, and optionally ``client_order_id``
         (forwarded as ccxt's unified ``clientOrderId`` param, exchange-side
         dedup/audit).
@@ -687,9 +692,10 @@ class CryptoAdapter:
         )
         order_type = signal["order_type"]
         price = signal.get("price")
-        validate_time_in_force(
-            "binance", SUPPORTED_TIME_IN_FORCE, order_type, signal["time_in_force"]
-        )
+        if self._exchange_id.startswith(_TIME_IN_FORCE_VENUES):
+            validate_time_in_force(
+                self._exchange_id, SUPPORTED_TIME_IN_FORCE, order_type, signal["time_in_force"]
+            )
         params: dict[str, Any] = {}
         if order_type == "limit":
             # "day" has no ccxt/exchange equivalent on a 24/7 market with no

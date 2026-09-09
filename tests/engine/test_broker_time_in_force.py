@@ -14,14 +14,21 @@ from librae.core.executor import validate_strategy_decision
 from librae.core.strategy import OrderIntent
 
 
-def _validate(intent: OrderIntent, *, broker: str | None) -> None:
+def _validate(intent: OrderIntent, *, broker: str | None, routes: dict | None = None) -> None:
+    """Preflight one intent under a run whose venue is *broker*.
+
+    *routes* mirrors instrument_overrides[symbol]["broker"], which wins over
+    the run-level setting.
+    """
+    resolved = dict(routes or {})
+
     validate_strategy_decision(
         [intent],
         {"X"},
         primary_symbol="X",
         bars={"X": {"close": 100.0}},
         positions={},
-        broker=broker,
+        broker_for=lambda symbol: resolved.get(symbol, broker),
     )
 
 
@@ -88,3 +95,62 @@ class TestTheTablesDescribeRealVenues:
         for broker in BROKER_TIME_IN_FORCE:
             validate_broker_time_in_force(broker, "market", "ioc")
             validate_broker_time_in_force(broker, "limit", "day")
+
+
+class TestTheVenueIsResolvedPerSymbol:
+    """instrument_overrides[symbol]["broker"] wins over the run-level broker.
+
+    Checking the run's broker against a symbol routed elsewhere is wrong in
+    both directions: it misses a real violation, and — worse — it rejects a
+    combination the symbol's actual venue accepts, killing a valid run at
+    decision time.
+    """
+
+    def test_the_overriding_venue_is_the_one_enforced(self) -> None:
+        with pytest.raises(ValueError, match="shioaji does not support"):
+            _validate(_resting("gtc"), broker="ibkr", routes={"X": "shioaji"})
+
+    def test_a_symbol_routed_to_a_permissive_venue_is_not_rejected(self) -> None:
+        _validate(_resting("gtc"), broker="shioaji", routes={"X": "ibkr"})
+
+    def test_an_override_applies_with_no_run_level_broker(self) -> None:
+        with pytest.raises(ValueError, match="shioaji does not support"):
+            _validate(_resting("gtc"), broker=None, routes={"X": "shioaji"})
+
+    def test_only_the_intents_own_symbol_decides(self) -> None:
+        _validate(_resting("gtc"), broker="ibkr", routes={"OTHER": "shioaji"})
+
+
+class TestTheResolverIsTheOneRule:
+    def test_run_config_resolves_the_override_over_the_run_broker(self) -> None:
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        config = RunConfig(
+            strategy_name="s",
+            symbols=["X", "Y"],
+            timeframe="1d",
+            market="us_equity",
+            data_source="local",
+            account=AccountConfig(currency="USD", initial_cash=1_000.0),
+            mode="backtest",
+            broker="ibkr",
+            instrument_overrides={"X": {"broker": "shioaji"}},
+        )
+
+        assert config.broker_for("X") == "shioaji"
+        assert config.broker_for("Y") == "ibkr"
+
+    def test_no_broker_anywhere_resolves_to_none(self) -> None:
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        config = RunConfig(
+            strategy_name="s",
+            symbols=["X"],
+            timeframe="1d",
+            market="us_equity",
+            data_source="local",
+            account=AccountConfig(currency="USD", initial_cash=1_000.0),
+            mode="backtest",
+        )
+
+        assert config.broker_for("X") is None
