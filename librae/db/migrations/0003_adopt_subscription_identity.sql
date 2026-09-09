@@ -9,8 +9,9 @@
 -- The ohlcv columns land nullable on purpose. That table is a hypertable with
 -- millions of rows across hundreds of chunks, so a nullable add is a metadata
 -- change while a NOT NULL add would rewrite every chunk inside this
--- transaction. `librae db backfill` fills them in committed batches
--- afterwards, and a later revision enforces NOT NULL once no nulls remain.
+-- transaction. A one-off backfill fills them in committed batches afterwards
+-- (named by the warning `librae db preflight` prints), and a later revision
+-- enforces NOT NULL once no nulls remain.
 -- Expand here, backfill, contract later — one release cannot do all three
 -- without holding a rewrite open across an operator's backfill.
 --
