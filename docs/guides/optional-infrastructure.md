@@ -43,8 +43,15 @@ pip install "librae[db] @ git+https://github.com/awwesomeman/librae.git@<tag-or-
 The reference Compose service initializes an empty database automatically.
 `timescale_init.sql` records the current revision in
 `librae_schema_revision`; it refuses to stamp or migrate an older database.
+Both schema commands connect as the role that owns the tables, which
+`TIMESCALE_DSN` deliberately is not — `quant_app` holds DML only and cannot
+`ALTER` a table or write `librae_schema_revision`. Set `TIMESCALE_ADMIN_DSN`
+in `.env.secrets` on the machine that migrates; without it the commands fail
+rather than falling back. Preflight runs as the same role it precedes, so a
+pass actually proves the migration can run.
+
 Before deploying a build against an existing database, run the read-only
-preflight with the application DSN:
+preflight:
 
 ```bash
 librae db preflight
@@ -52,10 +59,10 @@ librae db preflight
 
 A non-current result prevents run registration and live checkpoint restore.
 For the supported legacy revision, first stop writers, take and verify a
-backup, then run the ordered SQL migration with a database-owner DSN:
+backup, then run the ordered SQL migration:
 
 ```bash
-TIMESCALE_DSN='postgresql://quant:<password>@<host>:<port>/quant' librae db migrate
+librae db migrate
 librae db preflight
 ```
 

@@ -35,11 +35,19 @@ def _columns_by_table() -> dict[str, set[str]]:
     return tables
 
 
-def test_the_parser_sees_the_tables_the_guard_names() -> None:
-    # Guards the regex itself: a parser that silently found nothing would make
-    # every assertion below vacuous.
+def test_the_parser_reads_every_table_in_the_schema() -> None:
+    """Guards the regex itself.
+
+    The body pattern is non-greedy, so one table whose terminator it fails to
+    match is swallowed into the previous table's column set — which would let
+    a required column be satisfied by a different table entirely, with both
+    assertions below still passing. Counting is what catches that; checking
+    only that the named tables appear does not.
+    """
+    sql = INIT_SQL.read_text(encoding="utf-8")
     tables = _columns_by_table()
 
+    assert len(tables) == sql.count("CREATE TABLE")
     assert set(_LEGACY_REQUIRED_COLUMNS) <= set(tables)
     assert "run_id" in tables["backtest_runs"]
 

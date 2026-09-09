@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from functools import lru_cache
 from math import isfinite
 from typing import Literal
 
@@ -3464,6 +3465,18 @@ def execute_portfolio_rebalance_slice(
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=1)
+def _broker_time_in_force_validator():
+    """Resolve the venue capability check on first use.
+
+    Imported lazily because librae.brokers imports back into core; cached
+    because this runs per intent, on every decision, for the life of a run.
+    """
+    from librae.brokers.capabilities import validate_broker_time_in_force
+
+    return validate_broker_time_in_force
+
+
 def validate_strategy_decision(
     decision: StrategyDecision,
     universe: set[str],
@@ -3541,8 +3554,7 @@ def validate_strategy_decision(
             if broker_for is not None and intent.time_in_force is not None:
                 venue = broker_for(intent.symbol or primary_symbol)
                 if venue is not None:
-                    from librae.brokers.capabilities import validate_broker_time_in_force
-
+                    validate_broker_time_in_force = _broker_time_in_force_validator()
                     validate_broker_time_in_force(
                         venue,
                         "limit" if intent.limit_price is not None else "market",

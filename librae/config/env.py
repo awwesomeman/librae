@@ -172,12 +172,12 @@ PAIRED_NAMES: tuple[tuple[str, str], ...] = (
     ("SHIOAJI_API_KEY", "SHIOAJI_SECRET_KEY"),
 )
 
-# DSNs must name the application role and carry its password.
 # Each connection string names one role and carries that role's password.
 # The split is a privilege boundary, not a convention: quant owns the tables,
 # so only it can ALTER them or write librae_schema_revision, and quant_app is
 # granted DML alone. One variable serving both would hand the engine the
 # ability to change the schema it runs against.
+COMPOSE_LAYOUT_MARKER = "POSTGRES_APP_PASSWORD"
 DSN_ROLES: Mapping[str, tuple[str, str]] = {
     "TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
     "TRADE_TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
@@ -236,7 +236,7 @@ def doctor(project_root: Path) -> list[Finding]:
     fail late or leak; warnings are placements worth tidying. Typos, key
     pairs and DSN consistency are always checked; the file-placement rules
     apply only once .env.secrets exists (a `librae init` user keeps one .env),
-    and the quant_app role only in the Compose-managed layout that
+    and the DSN role checks only in the Compose-managed layout that
     POSTGRES_APP_PASSWORD identifies.
     """
     findings: list[Finding] = []
@@ -305,13 +305,18 @@ def doctor(project_root: Path) -> list[Finding]:
                 Finding("error", f"{first} and {second} must be set together or both left empty")
             )
 
-    # These roles exist only in the Compose-managed layout; a pip user's own
-    # database may use any role, so each check waits for its password variable.
-    for name, (role, password_name) in DSN_ROLES.items():
+    # These roles exist only in the Compose-managed layout, which
+    # POSTGRES_APP_PASSWORD identifies — a librae-specific name, unlike the
+    # generic POSTGRES_PASSWORD a pip user may well set for their own database.
+    # Gating each check on its own password instead would let a blank one skip
+    # the role check silently, which is how an admin DSN pointing at the
+    # application role would pass clean.
+    compose_layout = bool(merged.get(COMPOSE_LAYOUT_MARKER))
+    for name, (role, password_name) in DSN_ROLES.items() if compose_layout else ():
         dsn = merged.get(name)
-        password = merged.get(password_name, "")
-        if not dsn or not password:
+        if not dsn:
             continue
+        password = merged.get(password_name, "")
         parts = urlsplit(dsn)
         if parts.username != role:
             findings.append(
@@ -325,7 +330,7 @@ def doctor(project_root: Path) -> list[Finding]:
                     ),
                 )
             )
-        if parts.password != password:
+        if password and parts.password != password:
             findings.append(
                 Finding("error", f"{name} carries a password that differs from {password_name}")
             )
