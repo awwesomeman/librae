@@ -625,15 +625,19 @@ db migrate`. The **checkpoint document version** (`_STATE_SCHEMA_VERSION` in
 **nothing migrates it automatically** — running database initialization or
 `librae db migrate` does not transform stored checkpoint JSON.
 
-The current checkpoint document version is 26. A checkpoint written at 25 or
-lower is rejected outright rather than silently defaulted, so it needs
-explicit external migration or removal before this build can run. Version 25
-added the execution identity and changed the live state key; version 26
-records the bar each pending intent was submitted on, so a restored
-simulation still expires a resting `day` limit against the session that
-submitted it. Stop flat and start a new checkpoint, or externally migrate the
-JSON document and key only after reconciling its positions and active orders
-to the same authenticated broker account.
+Any version other than the one this build writes is rejected outright rather
+than silently defaulted, and the refusal names the versions involved and the
+procedure. That is deliberate, not a missing feature: the document holds
+positions, cash, in-flight orders and the halted flag, so a defaulted field
+would let the local book disagree with the broker. Most changes are not
+safely defaultable — forgetting a cancel intent or a bar's already-filled
+quantity diverges silently, which is the failure this prevents.
+
+The procedure is the same whichever version is stored. Stop flat and start a
+new checkpoint, or externally migrate the JSON document and key only after
+reconciling its positions and active orders to the same authenticated broker
+account. What each version changed is recorded in the commit that bumped it,
+which is why it is not restated here.
 
 A configuration, broker environment, endpoint, or authenticated account change
 produces a different `state_key`, making the new runner appear to have no

@@ -360,7 +360,7 @@ def test_runtime_state_rejects_non_current_schema(version_delta):
     ).to_dict()
     raw["schema_version"] += version_delta
 
-    with pytest.raises(ValueError, match=r"expected \d+, got \d+"):
+    with pytest.raises(ValueError, match=r"this build writes version \d+"):
         LiveRuntimeState.from_dict(raw)
 
 

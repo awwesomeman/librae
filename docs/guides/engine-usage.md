@@ -1025,8 +1025,9 @@ and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
 retried, and local order age survives restart. Analytics callbacks remain
-projections; they are not broker fill truth. The checkpoint key is
-`mode:config_hash`; `runtime_revision` deliberately does not change that key.
+projections; they are not broker fill truth. `runtime_revision` deliberately
+does not form part of the checkpoint key; `architecture.md` is the canonical
+home for what that key contains.
 An existing live checkpoint with a missing or different revision is rejected
 without conversion, discard, or overwrite. Selecting its matching old
 revision is therefore a valid rollback; adopting a new revision requires an

@@ -357,8 +357,18 @@ class LiveRuntimeState:
         schema_version = raw.get("schema_version")
         if schema_version != _STATE_SCHEMA_VERSION:
             raise ValueError(
-                "unsupported live runtime-state schema: "
-                f"expected {_STATE_SCHEMA_VERSION}, got {schema_version!r}"
+                "unsupported live runtime-state checkpoint: this build writes "
+                f"version {_STATE_SCHEMA_VERSION}, the stored document is "
+                f"{schema_version!r}. Checkpoint documents are not migrated "
+                "automatically: this one holds positions, cash, in-flight orders "
+                "and the halted flag, so a defaulted field would let the local "
+                "book disagree with the broker. Stop flat and start a new "
+                "checkpoint, or migrate the stored document externally after "
+                "reconciling it; see the live migration procedure in "
+                "docs/guides/optional-infrastructure.md. This is the checkpoint "
+                "document version, not the database schema revision that "
+                "`librae db migrate` upgrades — that command does not transform "
+                "a stored checkpoint."
             )
         positions = {}
         for symbol, item in raw["positions"].items():
